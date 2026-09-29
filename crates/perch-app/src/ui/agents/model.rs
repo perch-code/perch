@@ -266,10 +266,19 @@ impl AgentRunSummary {
             latest_activity: run
                 .latest_activity
                 .clone()
-                .or_else(|| run.steps.last().map(|step| step.summary.clone())),
+                .or_else(|| {
+                    run.steps
+                        .iter()
+                        .rev()
+                        .find(|step| !step.note)
+                        .map(|step| step.summary.clone())
+                }),
+            // The pane streams the agent's words as its response; the
+            // notes among the steps would say them twice.
             steps: Arc::new(
                 run.steps
                     .iter()
+                    .filter(|step| !step.note)
                     .enumerate()
                     .map(|(sequence, step)| AgentRunStep {
                         sequence: sequence as u64,

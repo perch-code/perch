@@ -1922,21 +1922,38 @@ fn load_event_by_id(
     .transpose()
 }
 
+/// The tool lines in the order they ran, with what the agent said between
+/// them as notes. Its last words are notes too: the view decides whether
+/// they are still narration or the answer.
 fn load_steps_on(conn: &Connection, run_id: &str) -> Result<Vec<RunStep>, CacheError> {
     let mut stmt = conn.prepare(
         "SELECT payload_json FROM run_events
-         WHERE run_id=?1 AND kind IN ('tool_call','tool_result','legacy_step') ORDER BY sequence",
+         WHERE run_id=?1 AND kind IN ('text','tool_call','tool_result','legacy_step')
+         ORDER BY sequence",
     )?;
     let rows = stmt.query_map(params![run_id], |row| row.get::<_, String>(0))?;
     let mut steps = Vec::new();
     let mut tools: HashMap<String, usize> = HashMap::new();
     for payload in rows {
         match serde_json::from_str::<RunEvent>(&payload?)? {
-            RunEvent::LegacyStep { summary, ok } => steps.push(RunStep { summary, ok }),
+            RunEvent::LegacyStep { summary, ok } => steps.push(RunStep {
+                summary,
+                ok,
+                note: false,
+            }),
             RunEvent::ToolCall { id, summary, .. } => {
                 tools.insert(id, steps.len());
-                steps.push(RunStep { summary, ok: true });
+                steps.push(RunStep {
+                    summary,
+                    ok: true,
+                    note: false,
+                });
             }
+            RunEvent::Text { text } if !text.trim().is_empty() => steps.push(RunStep {
+                summary: text.trim().to_string(),
+                ok: true,
+                note: true,
+            }),
             RunEvent::ToolResult { id, ok, summary } => {
                 if let Some(step) = tools.get(&id).and_then(|index| steps.get_mut(*index)) {
                     step.ok = ok;
@@ -2241,7 +2258,8 @@ fn sync_legacy_steps(conn: &Connection, run: &RunRecord) -> Result<(), CacheErro
         params![run.id],
         |row| row.get::<_, i64>(0),
     )? as u64;
-    for (index, step) in run.steps.iter().enumerate() {
+    // Notes come from the run's text events, which stay put.
+    for (index, step) in run.steps.iter().enumerate().filter(|(_, step)| !step.note) {
         sequence += 1;
         insert_event_row(
             conn,
@@ -2260,7 +2278,15 @@ fn sync_legacy_steps(conn: &Connection, run: &RunRecord) -> Result<(), CacheErro
     }
     conn.execute(
         "UPDATE runs SET last_event_sequence=?2, latest_activity=COALESCE(?3, latest_activity) WHERE id=?1",
-        params![run.id, sequence as i64, run.steps.last().map(|step| step.summary.as_str())],
+        params![
+            run.id,
+            sequence as i64,
+            run.steps
+                .iter()
+                .rev()
+                .find(|step| !step.note)
+                .map(|step| step.summary.as_str())
+        ],
     )?;
     Ok(())
 }
@@ -4659,10 +4685,12 @@ mod tests {
                 RunStep {
                     summary: "Read src/x.rs".into(),
                     ok: true,
+                    note: false,
                 },
                 RunStep {
                     summary: "Asked to edit src/x.rs".into(),
                     ok: false,
+                    note: false,
                 },
             ],
             error: None,
@@ -4798,6 +4826,7 @@ mod tests {
         r.steps.push(RunStep {
             summary: "Ran git log".into(),
             ok: true,
+            note: false,
         });
         r.cost_usd = Some(0.05);
         c.update_run(&r).unwrap();
@@ -4914,6 +4943,52 @@ mod tests {
         assert_eq!(stopped.status, RunStatus::Stopped);
         assert_eq!(stopped.terminal_reason, Some(TerminalReason::UserStopped));
         assert_eq!(stopped.session_id.as_deref(), Some("session-late"));
+    }
+
+    #[test]
+    fn text_between_tool_calls_loads_as_notes_in_order() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut running = run("narrated", "thread", RunStatus::Running);
+        running.steps.clear();
+        c.insert_run(&running).unwrap();
+        let events = [
+            RunEvent::Text {
+                text: "Looking at the log first.\n".into(),
+            },
+            RunEvent::ToolCall {
+                id: "t1".into(),
+                name: "Bash".into(),
+                summary: "Ran git log".into(),
+                parent_id: None,
+            },
+            RunEvent::ToolResult {
+                id: "t1".into(),
+                ok: true,
+                summary: String::new(),
+            },
+            RunEvent::Text { text: "  ".into() },
+            RunEvent::Text {
+                text: "It came in last week.".into(),
+            },
+        ];
+        for (i, e) in events.into_iter().enumerate() {
+            c.append_run_event(
+                &running.id,
+                &event(&format!("e{i}"), "2026-09-18T10:00:01Z", e),
+            )
+            .unwrap();
+        }
+
+        let steps = c.load_run(&running.id).unwrap().unwrap().steps;
+        let got: Vec<_> = steps.iter().map(|s| (s.summary.as_str(), s.note)).collect();
+        assert_eq!(
+            got,
+            [
+                ("Looking at the log first.", true),
+                ("Ran git log", false),
+                ("It came in last week.", true),
+            ]
+        );
     }
 
     #[test]
@@ -5817,7 +5892,8 @@ mod tests {
             run.steps,
             vec![RunStep {
                 summary: "Read src/lib.rs".into(),
-                ok: true
+                ok: true,
+                note: false,
             }]
         );
         assert_eq!(cache.load_run_events("run-1", None, 20).unwrap().len(), 1);

@@ -3809,6 +3809,7 @@ mod window {
             steps: vec![RunStep {
                 summary: "Read src/x.rs".into(),
                 ok: true,
+                note: false,
             }],
             error: None,
             started_at: Some("2026-09-18T10:00:00Z".parse().unwrap()),

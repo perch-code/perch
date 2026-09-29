@@ -72,6 +72,7 @@ pub fn apply_run_event(
             run.steps.push(RunStep {
                 summary: summary.clone(),
                 ok: true,
+                note: false,
             });
             LIVE_TOOL_STEPS.with(|tools| {
                 tools
@@ -112,6 +113,7 @@ pub fn apply_run_event(
             run.steps.push(RunStep {
                 summary: summary.clone(),
                 ok: false,
+                note: false,
             });
             run.latest_activity = Some(summary);
         }

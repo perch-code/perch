@@ -14150,6 +14150,7 @@ async fn execute_question(
     run = ctx.runs.load(&run.id).unwrap_or(run);
 
     let mut answer = Vec::new();
+    let mut narration = Vec::new();
     let mut event_index = 0_u64;
     let mut persistence_error = None;
     while let Some(event) = rx.recv().await {
@@ -14222,8 +14223,15 @@ async fn execute_question(
             let Some(stored) = stored else { continue };
             match append_stored_event(ctx, &run.id, &format!("process-{event_index}"), stored) {
                 Ok(updated) => {
-                    if let perch_agent::RunEvent::Text(text) = &event {
-                        answer.push(text.clone());
+                    match &event {
+                        perch_agent::RunEvent::Text(text) => answer.push(text.clone()),
+                        // What it said before a tool call was narration,
+                        // kept among the steps; the answer is what it
+                        // says after the last one.
+                        perch_agent::RunEvent::ToolCall { .. } if !answer.is_empty() => {
+                            narration.append(&mut answer)
+                        }
+                        _ => {}
                     }
                     run = updated;
                     let _ = ctx.events.send(Event::AgentRunUpdated { run: run.clone() });
@@ -14327,7 +14335,13 @@ async fn execute_question(
                 }
             }
         };
-    let final_text = answer.join("\n\n");
+    // A run whose last act was a tool call has no closing words; its
+    // narration is all it said.
+    let final_text = if answer.is_empty() {
+        narration.join("\n\n")
+    } else {
+        answer.join("\n\n")
+    };
     let terminal_event = if status == RunStatus::Completed {
         StoredRunEvent::Completed {
             session_id: session.clone(),
@@ -17760,7 +17774,7 @@ read eof || true
         for thread in thread {
             for run in ctx.with_cache(|c| c.runs_for_discussion(&thread.id).unwrap()).unwrap() {
                 let run = ctx.runs.load(&run.id).unwrap();
-                for step in run.steps {
+                for step in run.steps.into_iter().filter(|step| !step.note) {
                     out.push(format!("{} [{}]", step.summary, if step.ok { "ok" } else { "no" }));
                 }
             }
@@ -17928,6 +17942,67 @@ read eof || true
             "{steps:?}"
         );
         assert!(ctx.with_cache(|c| c.grants_for("a/b").unwrap()).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_answer_is_what_the_agent_says_after_its_last_tool_call() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, _events) = ctx(dir.path(), &nowhere(), &[]);
+        let claude = dir.path().join("claude");
+        std::fs::write(
+            &claude,
+            concat!(
+                "#!/bin/sh\n",
+                "echo '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\",\"model\":\"sonnet\"}'\n",
+                "echo '{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Checking the log.\"}]},\"session_id\":\"s1\"}'\n",
+                "echo '{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Bash\",\"input\":{\"command\":\"git log\"}}]},\"session_id\":\"s1\"}'\n",
+                "echo '{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"ok\"}]},\"session_id\":\"s1\"}'\n",
+                "echo '{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"It landed last week.\"}]},\"session_id\":\"s1\"}'\n",
+                "echo '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"It landed last week.\",\"session_id\":\"s1\"}'\n",
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut config = Config::default();
+        config.agent.binary = claude.to_string_lossy().into_owned();
+        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
+        let item = store_pull(&ctx, 7);
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(worktree.join(".git")).unwrap();
+        open_in_slot_at(&ctx, &item, "h7");
+        ctx.slot.lock().unwrap().as_mut().unwrap().checkout.worktree = worktree;
+        ask(
+            &ctx,
+            item.id.clone(),
+            None,
+            None,
+            "When?".to_string(),
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".into(),
+            perch_agent::Effort::Medium,
+            RunMode::Ask,
+        )
+        .await;
+
+        let thread = ctx
+            .with_cache(|c| c.load_comment_threads(&item.id).unwrap())
+            .unwrap()
+            .into_iter()
+            .find(|t| t.origin == ThreadOrigin::Local)
+            .expect("the question's thread");
+        let reply = thread.messages.last().unwrap();
+        assert_eq!(reply.body, "It landed last week.");
+        let run = ctx.runs.load(&reply.run.as_ref().unwrap().id).unwrap();
+        let steps: Vec<_> = run.steps.iter().map(|s| (s.summary.as_str(), s.note)).collect();
+        assert_eq!(
+            steps,
+            [
+                ("Checking the log.", true),
+                ("Ran git log", false),
+                ("It landed last week.", true),
+            ]
+        );
     }
 
     #[tokio::test]

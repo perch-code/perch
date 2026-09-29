@@ -2678,7 +2678,7 @@ fn local_message_view(
     };
     let content = match message.run.clone() {
         Some(run) if is_agent && finished => Stack::vertical((
-            run_surface(steps_view(state, run.clone())),
+            run_surface(steps_view(state, without_answer(run.clone(), &body))),
             message_body(state, &thread, &body),
             run_footer(backend, run),
         ))
@@ -2968,10 +2968,13 @@ pub fn draft_pill() -> impl IntoView {
 /// works: the steps, folded to one line until it is clicked, and the
 /// footer or the Stop button.
 pub fn run_block(state: ReviewState, backend: Rc<Backend>, run: RunRecord) -> impl IntoView {
-    let partial = run
-        .final_result
-        .clone()
-        .filter(|text| run.status != RunStatus::Completed && !text.trim().is_empty());
+    // The agent's words show as notes among the steps, as it says them;
+    // a run from before notes has only the text.
+    let partial = run.final_result.clone().filter(|text| {
+        run.status != RunStatus::Completed
+            && !text.trim().is_empty()
+            && !run.steps.iter().any(|step| step.note)
+    });
     let response = match partial {
         Some(text) => Container::new(crate::review::markdown::render_linked(&text, state))
             .style(|s| {
@@ -3186,7 +3189,6 @@ fn run_footer(backend: Rc<Backend>, run: RunRecord) -> floem::AnyView {
             .style(|s| s.font_size(theme::TEXT_SECTION).color(theme::FG_SUBTLE))
             .into_any(),
         RunStatus::Completed => Label::derived(move || {
-            let secs = run.duration_ms.unwrap_or(0) as f64 / 1000.0;
             let cost = run
                 .cost_usd
                 .map(|c| format!(" \u{00b7} ${c:.2}"))
@@ -3194,14 +3196,14 @@ fn run_footer(backend: Rc<Backend>, run: RunRecord) -> floem::AnyView {
             let effort = perch_agent::Effort::parse(&run.effort)
                 .map(|e| e.label().to_string())
                 .unwrap_or_else(|| run.effort.clone());
-            // The answer's byline names the model; the run says whether
-            // it worked in the worktree, how hard it thought, how long it
-            // took and what it cost.
+            // The answer's byline names the model and the steps line how
+            // long it took; the run says whether it worked in the
+            // worktree, how hard it thought and what it cost.
             let work = match run.mode {
                 perch_github::RunMode::Work => "Work \u{00b7} ",
                 perch_github::RunMode::Ask => "",
             };
-            format!("{work}{effort} \u{00b7} {secs:.0}s{cost}")
+            format!("{work}{effort}{cost}")
         })
         .style(|s| {
             s.font_size(theme::TEXT_SECTION)
@@ -3234,8 +3236,18 @@ fn run_footer(backend: Rc<Backend>, run: RunRecord) -> floem::AnyView {
     }
 }
 
-/// The step lines, folded to "Read 4 files, ran 2 commands" until the
-/// line is clicked, and open while the run goes.
+/// A finished run's steps less the notes its answer already says: the
+/// closing words, and every word of a run from before notes, whose answer
+/// held all it said.
+fn without_answer(mut run: RunRecord, body: &str) -> RunRecord {
+    run.steps
+        .retain(|step| !(step.note && body.contains(step.summary.as_str())));
+    run
+}
+
+/// The step lines and what the agent said between them, folded to
+/// "Worked for 4m 12s" until the line is clicked, and open while the run
+/// goes.
 fn steps_view(state: ReviewState, run: RunRecord) -> impl IntoView {
     let running = run.status.is_active();
     let run_id = run.id.clone();
@@ -3243,8 +3255,7 @@ fn steps_view(state: ReviewState, run: RunRecord) -> impl IntoView {
     let chevron_id = run.id.clone();
     let expanded_chevron = move || running || state.expanded_runs.with(|e| e.contains(&chevron_id));
     let toggle_id = run.id.clone();
-    let steps = run.steps.clone();
-    let summary = steps_summary(&steps);
+    let summary = run_summary(&run);
 
     Stack::vertical((
         Container::new(
@@ -3264,13 +3275,7 @@ fn steps_view(state: ReviewState, run: RunRecord) -> impl IntoView {
                     || theme::FG_SUBTLE,
                 )
                 .style(|s| s.size(10.0, 10.0).margin_right(5.0)),
-                Label::derived(move || {
-                    if running && steps.is_empty() {
-                        "Working…".to_string()
-                    } else {
-                        summary.clone()
-                    }
-                })
+                Label::derived(move || summary.clone())
                 .style(|s| {
                     s.font_size(theme::TEXT_BADGE)
                         .color(theme::FG_MUTED)
@@ -3296,6 +3301,18 @@ fn steps_view(state: ReviewState, run: RunRecord) -> impl IntoView {
                 move || steps.clone().into_iter().enumerate(),
                 |(i, _)| *i,
                 |(_, step)| {
+                    if step.note {
+                        return Label::derived(move || step.summary.clone())
+                            .style(|s| {
+                                s.font_size(theme::TEXT_META)
+                                    .color(theme::FG_MUTED)
+                                    .text_wrap()
+                                    .min_width(0.0)
+                                    .width_full()
+                                    .padding_vert(3.0)
+                            })
+                            .into_any();
+                    }
                     Label::derived(move || step.summary.clone()).style(move |s| {
                         s.font_size(theme::TEXT_BADGE)
                             .font_family(theme::CODE_FONT_STACK.to_string())
@@ -3307,6 +3324,7 @@ fn steps_view(state: ReviewState, run: RunRecord) -> impl IntoView {
                             .text_ellipsis()
                             .width_full()
                     })
+                    .into_any()
                 },
             )
             // The space above the steps rides on the steps, not a gap
@@ -3325,8 +3343,35 @@ fn steps_view(state: ReviewState, run: RunRecord) -> impl IntoView {
     .style(|s| s.flex_col().width_full())
 }
 
+/// The folded steps line: "Working…" while the run goes, then how long
+/// it worked, or what it did when that is unknown.
+fn run_summary(run: &RunRecord) -> String {
+    if run.status.is_active() {
+        return "Working…".to_string();
+    }
+    let elapsed = run.duration_ms.or_else(|| {
+        let (start, end) = (run.started_at?, run.ended_at?);
+        u64::try_from(end.duration_since(start).as_millis()).ok()
+    });
+    match elapsed {
+        Some(ms) => format!("Worked for {}", worked_for(ms)),
+        None => steps_summary(&run.steps),
+    }
+}
+
+/// "12s", "4m 12s", "1h 3m".
+fn worked_for(ms: u64) -> String {
+    let secs = (ms + 500) / 1000;
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m {}s", secs / 60, secs % 60),
+        _ => format!("{}h {}m", secs / 3600, secs % 3600 / 60),
+    }
+}
+
 /// "Read 3 files, ran 1 command", from the step lines.
 pub fn steps_summary(steps: &[perch_github::RunStep]) -> String {
+    let steps: Vec<_> = steps.iter().filter(|s| !s.note).collect();
     let count = |prefix: &str| {
         steps
             .iter()
@@ -3492,6 +3537,7 @@ mod tests {
         RunStep {
             summary: summary.into(),
             ok,
+            note: false,
         }
     }
 
@@ -3509,6 +3555,56 @@ mod tests {
         );
         assert_eq!(steps_summary(&[]), "No steps");
         assert_eq!(steps_summary(&[step("Read a.rs", true)]), "Read 1 file");
+    }
+
+    fn note(text: &str) -> RunStep {
+        RunStep {
+            summary: text.into(),
+            ok: true,
+            note: true,
+        }
+    }
+
+    #[test]
+    fn notes_are_not_counted_as_steps() {
+        let steps = vec![note("Ran it once already."), step("Ran git log", true)];
+        assert_eq!(steps_summary(&steps), "Ran 1 command");
+        assert_eq!(steps_summary(&[note("Thinking.")]), "No steps");
+    }
+
+    #[test]
+    fn a_run_is_labelled_by_how_long_it_worked() {
+        let mut run = RunRecord {
+            status: RunStatus::Running,
+            ..RunRecord::default()
+        };
+        assert_eq!(run_summary(&run), "Working…");
+        run.status = RunStatus::Completed;
+        run.duration_ms = Some(252_400);
+        assert_eq!(run_summary(&run), "Worked for 4m 12s");
+        run.duration_ms = None;
+        run.started_at = Some("2026-09-19T10:00:00Z".parse().unwrap());
+        run.ended_at = Some("2026-09-19T10:00:09Z".parse().unwrap());
+        assert_eq!(run_summary(&run), "Worked for 9s");
+        run.started_at = None;
+        run.steps = vec![step("Read a.rs", true)];
+        assert_eq!(run_summary(&run), "Read 1 file");
+        assert_eq!(worked_for(3_780_000), "1h 3m");
+    }
+
+    #[test]
+    fn a_finished_run_drops_the_notes_its_answer_says() {
+        let run = RunRecord {
+            steps: vec![
+                note("Checking the log."),
+                step("Ran git log", true),
+                note("It landed last week."),
+            ],
+            ..RunRecord::default()
+        };
+        let kept = without_answer(run, "It landed last week.");
+        let kept: Vec<_> = kept.steps.iter().map(|s| s.summary.as_str()).collect();
+        assert_eq!(kept, ["Checking the log.", "Ran git log"]);
     }
 
     #[test]

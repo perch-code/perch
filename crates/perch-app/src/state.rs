@@ -5223,6 +5223,7 @@ mod tests {
             steps: vec![perch_github::RunStep {
                 summary: "Read src/lib.rs".into(),
                 ok: true,
+                note: false,
             }],
             last_event_sequence: 3,
             ..perch_github::RunRecord::default()

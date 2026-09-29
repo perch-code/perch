@@ -565,10 +565,12 @@ mod tests {
                 RunStep {
                     summary: "Read src/manifest.rs".into(),
                     ok: true,
+                    note: false,
                 },
                 RunStep {
                     summary: "Ran git log".into(),
                     ok: true,
+                    note: false,
                 },
             ],
             error: None,
@@ -1911,7 +1913,7 @@ mod tests {
         names(harness.root_id(), &mut all);
         let text = all.join("\n");
         assert_eq!(
-            text.matches("Read 1 file, ran 1 command").count(),
+            text.matches("Worked for 14s").count(),
             8,
             "each face folds the run's steps to one line"
         );

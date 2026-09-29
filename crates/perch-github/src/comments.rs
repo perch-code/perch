@@ -735,6 +735,10 @@ impl Default for RunRecord {
 pub struct RunStep {
     pub summary: String,
     pub ok: bool,
+    /// What the agent said between its tool calls, rather than a call:
+    /// `summary` holds the words.
+    #[serde(default)]
+    pub note: bool,
 }
 
 /// One durable, ordered observation from a process or the scheduler.
