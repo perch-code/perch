@@ -1145,6 +1145,14 @@ pub struct ReviewState {
     pub opening: RwSignal<bool>,
     pub phase: RwSignal<Phase>,
     pub preparing: RwSignal<Preparing>,
+    /// A pull request shown before its checkout: how making the checkout
+    /// is going, or why it could not be made, which Code shows in place
+    /// of the files. `None` once the files are here, and for every other
+    /// open.
+    pub files_pending: RwSignal<Option<Preparing>>,
+    /// The tabs a pull request shown before its checkout had open last
+    /// time, loaded once the files are here.
+    pub files_reload: RwSignal<Vec<String>>,
     /// The bar's Review popover: the agents' review of the branch and,
     /// on an open pull request, the reader's own review for GitHub. What
     /// to give the keyboard back to when it shuts.
@@ -1656,6 +1664,8 @@ impl ReviewState {
             opening: RwSignal::new(false),
             phase: RwSignal::new(Phase::Preparing),
             preparing: RwSignal::new(Preparing::Idle),
+            files_pending: RwSignal::new(None),
+            files_reload: RwSignal::new(Vec::new()),
             review_open: RwSignal::new(false),
             review_opener: RwSignal::new(None),
             review_agents_expanded: RwSignal::new(false),
@@ -1859,6 +1869,8 @@ impl ReviewState {
     /// for the next time it opens.
     fn reset_checkout(&self) {
         self.remember_pane();
+        self.files_pending.set(None);
+        self.files_reload.set(Vec::new());
         self.pull_request.set(None);
         self.upstream_changed.set(false);
         self.ready.set(false);
@@ -2083,11 +2095,13 @@ impl ReviewState {
         self.tab.set(tab);
     }
 
-    /// Whether the open item has a checkout, and so files to open.
-    /// Tracked.
+    /// Whether the open item has a checkout, and so files to open, or
+    /// is a pull request whose checkout is on its way. Tracked.
     pub fn has_files(&self) -> bool {
-        self.item
-            .with(|i| i.as_ref().is_some_and(|i| i.checkout.is_some()))
+        self.files_pending.with(Option::is_some)
+            || self
+                .item
+                .with(|i| i.as_ref().is_some_and(|i| i.checkout.is_some()))
     }
 
     /// Keep the open item's pane for the next time it opens.

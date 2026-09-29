@@ -21,6 +21,13 @@ pub enum Step {
     ComputingDiff,
 }
 
+/// A pull request fetched before its head was known, for `prepare_after`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Prefetched {
+    /// The head the fetch before it saw.
+    previous: Option<String>,
+}
+
 /// A prepared checkout, on a branch Perch owns.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Checkout {
@@ -251,13 +258,52 @@ impl Preparer {
         head_sha: &str,
         base_ref: &str,
         branch: &str,
+        on_step: impl FnMut(Step) + Send,
+    ) -> Result<Checkout, Error> {
+        self.prepare_after(id, number, head_sha, base_ref, branch, None, on_step)
+            .await
+    }
+
+    /// Clone if needed and fetch a pull request's head and base, before
+    /// its head is known: the number and the base branch are all a fetch
+    /// needs. What it returns goes to `prepare_after`, which then fetches
+    /// again only if the head asked for is not the one fetched here.
+    pub async fn prefetch(
+        &self,
+        id: &RepoId,
+        number: u64,
+        base_ref: &str,
+        mut on_step: impl FnMut(Step) + Send,
+    ) -> Result<Prefetched, Error> {
+        let bare = self.ensure_bare(id, &mut on_step).await?;
+        let previous = self.resolve(&bare, &format!("refs/perch/pull/{number}/head")).await;
+        on_step(Step::Fetching);
+        self.fetch_pull(&bare, "origin", number, base_ref).await?;
+        Ok(Prefetched { previous })
+    }
+
+    /// `prepare`, after a `prefetch` of the same pull request, or with
+    /// `None` when there was none.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn prepare_after(
+        &self,
+        id: &RepoId,
+        number: u64,
+        head_sha: &str,
+        base_ref: &str,
+        branch: &str,
+        prefetched: Option<Prefetched>,
         mut on_step: impl FnMut(Step) + Send,
     ) -> Result<Checkout, Error> {
         let bare = self.ensure_bare(id, &mut on_step).await?;
         // The head the last fetch saw, before this one moves the ref: after
         // a force push it is the only thing that says the commit on disk
-        // came from the pull request rather than from the reader.
-        let previous = self.resolve(&bare, &format!("refs/perch/pull/{number}/head")).await;
+        // came from the pull request rather than from the reader. A
+        // prefetch read it before it fetched.
+        let previous = match prefetched {
+            Some(prefetched) => prefetched.previous,
+            None => self.resolve(&bare, &format!("refs/perch/pull/{number}/head")).await,
+        };
 
         // A fetch is a round trip to GitHub, most of the time an open takes.
         // When the last one already brought this head, of this base, there
@@ -844,7 +890,7 @@ impl Preparer {
     /// Whether the last `fetch_pull` for this pull request saw `head_sha`
     /// as its head and fetched its base from `base_ref`. One local git
     /// call; anything missing or unreadable is a no.
-    async fn has_pull(&self, bare: &Path, number: u64, head_sha: &str, base_ref: &str) -> bool {
+    pub async fn has_pull(&self, bare: &Path, number: u64, head_sha: &str, base_ref: &str) -> bool {
         let Ok(out) = self
             .git
             .run(

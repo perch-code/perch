@@ -15,7 +15,7 @@ pub mod tree;
 
 pub use diff::{file_diff, hunk_context, ChangeStatus, ChangedFile, DeletedRun, FileDiff, Hunk, LineStatus};
 pub use display::{DisplayBuffer, Row};
-pub use prepare::{home_ref, BaseBranch, Checkout, Cut, Preparer, PushError, Step};
+pub use prepare::{home_ref, BaseBranch, Checkout, Cut, Prefetched, Preparer, PushError, Step};
 pub use review_snapshot::{
     map_anchor_between, AnchorMapping, CaptureOutcome, DiffSide, MappedAnchor, MappingCandidate,
     MappingConfidence, MappingDocument, MappingEvidence, MappingMethod, MappingSnapshot, RangeDiff,

@@ -206,12 +206,44 @@ fn item_view(
     // A memo, so the pane is built again when what it shows changes and
     // not on every write to the tab.
     let showing = floem::reactive::Memo::new(move |_| showing_code(state));
+    // Whether Code is waiting on the checkout, and whether that failed.
+    let pending = floem::reactive::Memo::new(move |_| {
+        state.files_pending.with(|pending| match pending {
+            None => None,
+            Some(Preparing::Failed { .. }) => Some(true),
+            Some(_) => Some(false),
+        })
+    });
     let refresh_backend = backend.clone();
     Stack::vertical((
         dyn_container(
-            move || showing.get(),
-            move |code| {
-                if code {
+            move || (showing.get(), pending.get()),
+            move |(code, pending)| {
+                if code && pending == Some(false) {
+                    header::preparing_card(
+                        move || match state.files_pending.get() {
+                            Some(Preparing::Working { message, .. }) => message,
+                            _ => String::new(),
+                        },
+                        move || match state.files_pending.get() {
+                            Some(Preparing::Working { percent, .. }) => percent,
+                            _ => None,
+                        },
+                    )
+                    .debug_name("files preparing")
+                    .into_any()
+                } else if code && pending == Some(true) {
+                    centered_message(
+                        SidebarIcon::Warning,
+                        || "Could not check out the files".to_string(),
+                        move || match state.files_pending.get() {
+                            Some(Preparing::Failed { message }) => message,
+                            _ => String::new(),
+                        },
+                    )
+                    .debug_name("files failed")
+                    .into_any()
+                } else if code {
                     editor::editor_pane(app, state, backend.clone(), open_file.clone()).into_any()
                 } else {
                     conversation::view(

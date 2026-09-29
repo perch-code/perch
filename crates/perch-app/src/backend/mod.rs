@@ -968,6 +968,19 @@ pub enum Event {
         /// True when the pull request could not be fetched and the review
         /// is showing the checkout as it was last left.
         offline: bool,
+        /// The pull request showed before its checkout, on
+        /// `PullRequestReady`, and its conversation is under way: this
+        /// brings the files, and leaves the rest as it is.
+        shown_early: bool,
+    },
+    /// A pull request whose checkout is still being made, shown from what
+    /// is known of it: its header and its conversation, with the files to
+    /// follow on `ReviewReady`. `ReviewProgress` for the same navigation
+    /// is the files' progress from here on.
+    PullRequestReady {
+        navigation_id: u64,
+        item: Arc<Item>,
+        pull_request: Arc<PullRequest>,
     },
     ReviewFailed {
         navigation_id: u64,
@@ -1280,6 +1293,7 @@ impl Event {
             self,
             Event::ReviewProgress { .. }
                 | Event::ReviewReady { .. }
+                | Event::PullRequestReady { .. }
                 | Event::ReviewFailed { .. }
                 | Event::IssueReady { .. }
                 | Event::FileLoaded { .. }
@@ -6822,6 +6836,7 @@ fn show_retained_review_owner(ctx: &Ctx, item: Item, navigation_id: u64) -> bool
                 tree: Arc::new(Vec::new()),
                 stale_head: None,
                 offline: true,
+                shown_early: false,
             });
             true
         })
@@ -6941,7 +6956,7 @@ async fn open_branch_item(ctx: &Ctx, item: Item, navigation_id: u64) -> bool {
         item,
         pull_request,
         git_checkout,
-        false,
+        PullSource::Fetched,
         since,
         navigation_id,
     )
@@ -7097,16 +7112,18 @@ fn branches_in(ctx: &Ctx, repo_full_name: &str) -> Vec<String> {
 /// the tree, the review context, `ReviewReady`, and then, each on its own
 /// task so the code paints first, the threads, what is viewed, the
 /// commits and the dirt for the scope menu, and for a pull request the
-/// discussion and the checks: the cached copy first, then GitHub's.
+/// discussion and the checks, as `source` says.
 async fn finish_open(
     ctx: &Ctx,
     item: Item,
     pull_request: Option<Arc<PullRequest>>,
     checkout: perch_git::Checkout,
-    offline: bool,
+    source: PullSource,
     since: Option<String>,
     navigation_id: u64,
 ) -> bool {
+    let offline = source == PullSource::Offline;
+    let shown_early = source == PullSource::Shown;
     let events = &ctx.events;
     ctx.send_navigation_event(
         navigation_id,
@@ -7155,7 +7172,7 @@ async fn finish_open(
         tree = tree.len(),
         worktree = %worktree.display(),
         stale = stale_head.is_some(),
-        offline,
+        ?source,
         "review ready"
     );
     let installed = ctx
@@ -7164,6 +7181,12 @@ async fn finish_open(
             let Ok(mut guard) = ctx.slot.lock() else {
                 return false;
             };
+            // A pull request shown before its files may have its
+            // description by now.
+            let body = guard
+                .as_ref()
+                .filter(|open| shown_early && open.item_id == item.id)
+                .and_then(|open| open.body.clone());
             *guard = Some(ReviewContext {
                 checkout,
                 files: files.clone(),
@@ -7173,7 +7196,7 @@ async fn finish_open(
                 navigation_id,
                 item_id: item.id.clone(),
                 pull_request: pull_request.clone(),
-                body: None,
+                body,
                 issue: None,
                 review_snapshot_id: None,
                 review_group_id: None,
@@ -7189,6 +7212,7 @@ async fn finish_open(
                 tree: Arc::new(tree),
                 stale_head,
                 offline,
+                shown_early,
             });
             true
         })
@@ -7217,6 +7241,7 @@ async fn finish_open(
         let ctx = ctx.clone();
         let item_id = item.id.clone();
         let head = head.clone();
+        let since = since.clone();
         tokio::spawn(async move {
             send_commits(
                 &ctx,
@@ -7233,57 +7258,155 @@ async fn finish_open(
         });
     }
 
-    if let Some(pr) = pull_request {
-        // The cached discussion and checks paint before GitHub answers,
-        // with the faces the last open left on disk and the description a
-        // question needs. A checkout with no pull request has neither.
-        let cached = ctx
-            .with_cache(|c| c.load_discussion(&item.id).ok().flatten())
-            .flatten();
-        if let Some((_, d)) = cached {
-            if let Ok(mut guard) = ctx.slot.lock() {
-                if let Some(open) = guard.as_mut().filter(|c| c.item_id == item.id) {
-                    open.body = Some(d.body.clone());
-                }
+    if let Some(pr) = pull_request.filter(|_| !shown_early) {
+        show_kept_conversation(ctx, &item.id, &pr);
+        match source {
+            PullSource::Kept => {
+                let (ctx, item_id) = (ctx.clone(), item.id.clone());
+                tokio::spawn(async move {
+                    refetch_opened_pull_request(&ctx, &item_id, pr, since, navigation_id).await
+                });
             }
-            ctx.want_avatars(discussion_avatars(&d));
-            let _ = ctx.events.send(Event::DiscussionReady {
-                item_id: item.id.clone(),
-                discussion: Arc::new(d),
-            });
-        }
-        // The author's face is on the header, whether or not they said
-        // anything in the discussion.
-        ctx.want_avatars(
-            std::iter::once(pr.author_avatar_url.clone())
-                .chain(pr.requested_reviewers.iter().map(|r| r.avatar_url.clone())),
-        );
-        let cached = ctx
-            .with_cache(|c| c.load_checks(&item.id, &pr.head_sha).ok().flatten())
-            .flatten();
-        if let Some(checks) = cached {
-            let _ = ctx.events.send(Event::ChecksReady {
-                item_id: item.id.clone(),
-                repo_full_name: pr.repo_full_name.clone(),
-                number: pr.number,
-                head_sha: pr.head_sha.clone(),
-                status_generation: 0,
-                checks: Arc::new(checks),
-            });
-        }
-        if !offline {
-            let (ctx2, item_id2, pr2) = (ctx.clone(), item.id.clone(), pr.clone());
-            let discussion_generation = ctx2.discussion_requests.begin(&item_id2);
-            tokio::spawn(async move {
-                fetch_discussion(&ctx2, &item_id2, &pr2, discussion_generation).await
-            });
-            let (ctx2, item_id2) = (ctx.clone(), item.id.clone());
-            let status_generation = begin_pull_request_status(&ctx2, &item_id2, &pr);
-            tokio::spawn(async move {
-                fetch_checks(&ctx2, &item_id2, &pr, status_generation).await
-            });
+            PullSource::Fetched => ask_for_conversation(ctx, &item.id, pr),
+            PullSource::Offline | PullSource::Shown => {}
         }
     }
+    true
+}
+
+/// Where an open's pull request came from, which says what is asked of
+/// GitHub around its checkout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PullSource {
+    /// GitHub's answer just now: the discussion and checks are asked for
+    /// once the files show.
+    Fetched,
+    /// The row's snapshot, over a checkout on disk: the pull request is
+    /// asked for again once the files show.
+    Kept,
+    /// The row's snapshot, with no GitHub to ask.
+    Offline,
+    /// Shown before its checkout was ready, with its conversation already
+    /// asked for: the files are all that is left.
+    Shown,
+}
+
+/// The discussion and checks as they were kept, painted before GitHub
+/// answers, with the faces the last open left on disk and the description
+/// a question needs.
+fn show_kept_conversation(ctx: &Ctx, item_id: &str, pr: &PullRequest) {
+    let cached = ctx
+        .with_cache(|c| c.load_discussion(item_id).ok().flatten())
+        .flatten();
+    if let Some((_, d)) = cached {
+        if let Ok(mut guard) = ctx.slot.lock() {
+            if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
+                open.body = Some(d.body.clone());
+            }
+        }
+        ctx.want_avatars(discussion_avatars(&d));
+        let _ = ctx.events.send(Event::DiscussionReady {
+            item_id: item_id.to_string(),
+            discussion: Arc::new(d),
+        });
+    }
+    // The author's face is on the header, whether or not they said
+    // anything in the discussion.
+    ctx.want_avatars(
+        std::iter::once(pr.author_avatar_url.clone())
+            .chain(pr.requested_reviewers.iter().map(|r| r.avatar_url.clone())),
+    );
+    let cached = ctx
+        .with_cache(|c| c.load_checks(item_id, &pr.head_sha).ok().flatten())
+        .flatten();
+    if let Some(checks) = cached {
+        let _ = ctx.events.send(Event::ChecksReady {
+            item_id: item_id.to_string(),
+            repo_full_name: pr.repo_full_name.clone(),
+            number: pr.number,
+            head_sha: pr.head_sha.clone(),
+            status_generation: 0,
+            checks: Arc::new(checks),
+        });
+    }
+}
+
+/// Ask GitHub for a pull request's discussion and checks, each on its
+/// own task.
+fn ask_for_conversation(ctx: &Ctx, item_id: &str, pr: Arc<PullRequest>) {
+    let (ctx2, item_id2, pr2) = (ctx.clone(), item_id.to_string(), pr.clone());
+    let discussion_generation = ctx2.discussion_requests.begin(&item_id2);
+    tokio::spawn(async move {
+        fetch_discussion(&ctx2, &item_id2, &pr2, discussion_generation).await
+    });
+    let (ctx2, item_id2) = (ctx.clone(), item_id.to_string());
+    let status_generation = begin_pull_request_status(&ctx2, &item_id2, &pr);
+    tokio::spawn(async move { fetch_checks(&ctx2, &item_id2, &pr, status_generation).await });
+}
+
+/// Show a pull request whose checkout is still to be made: the review
+/// context holds it with no files, so its conversation can be read and
+/// answered, and the view gets `PullRequestReady`. The kept discussion
+/// and checks paint with it. False when the navigation has moved on.
+fn show_pull_request_early(
+    ctx: &Ctx,
+    item: &Item,
+    pull_request: Arc<PullRequest>,
+    navigation_id: u64,
+) -> bool {
+    // No checkout yet: a directory that does not exist keeps whatever
+    // reads one honest until `ReviewReady` brings the real one.
+    let missing = ctx.preparer.store().root().join("worktrees").join("pending");
+    let checkout = perch_git::Checkout {
+        worktree: missing.clone(),
+        bare: missing,
+        branch: String::new(),
+        head_sha: String::new(),
+        merge_base: String::new(),
+        stale: None,
+    };
+    // Shown with no checkout, so nothing reaches for files that are not
+    // there yet; `ReviewReady` brings the row with the one just made.
+    let item = Arc::new(Item {
+        checkout: None,
+        ..item.clone()
+    });
+    let installed = ctx
+        .navigation_requests
+        .with_current_item(&item.id, navigation_id, || {
+            let Ok(mut guard) = ctx.slot.lock() else {
+                return false;
+            };
+            *guard = Some(ReviewContext {
+                checkout,
+                files: Arc::new(Vec::new()),
+                scope: perch_git::Scope::Branch,
+                since: None,
+                scope_gen: next_scope_gen(),
+                navigation_id,
+                item_id: item.id.clone(),
+                pull_request: Some(pull_request.clone()),
+                body: None,
+                issue: None,
+                review_snapshot_id: None,
+                review_group_id: None,
+                review_request_id: None,
+            });
+            let _ = ctx.events.send(Event::PullRequestReady {
+                navigation_id,
+                item: item.clone(),
+                pull_request: pull_request.clone(),
+            });
+            true
+        })
+        .unwrap_or(false);
+    if !installed {
+        ctx.cancel_committed_archived_navigation(&item.id, navigation_id);
+        return false;
+    }
+    tracing::info!(item = %item.id, number = pull_request.number, "pull request shown before its checkout");
+    show_kept_conversation(ctx, &item.id, &pull_request);
+    ctx.send_threads(&item.id);
     true
 }
 
@@ -11828,6 +11951,14 @@ async fn prepare_issue_home(ctx: &Ctx, repo: &RepoId) {
 /// the reader's own on the head repository attaches to that item rather
 /// than making a second one.
 ///
+/// One read before whose checkout is still on disk opens at once from the
+/// row's snapshot, as an issue does, and GitHub is asked after it shows;
+/// if the head has moved since, it is opened again at the new one. One
+/// read before with no checkout on disk shows from the snapshot too,
+/// while git fetches it and GitHub is asked side by side; the files
+/// follow. One never read waits on GitHub, and then shows while its
+/// checkout is made.
+///
 /// An item that has a checkout keeps it, wherever it is and whatever
 /// branch it is on: a root checkout is read where it stands, a branch
 /// Perch cut for an issue is read as it is, and only the branch Perch cut
@@ -11839,19 +11970,9 @@ async fn open_pull_request(
     number: u64,
     navigation_id: u64,
 ) -> bool {
-    let events = &ctx.events;
     macro_rules! fail {
         ($($arg:tt)*) => {{
-            let message = format!($($arg)*);
-            tracing::warn!(repo = %repo_full_name, number, %message, "could not open pull request");
-            ctx.send_navigation_event(
-                navigation_id,
-                Event::ReviewFailed {
-                    navigation_id,
-                    message,
-                },
-            );
-            return false;
+            return fail_pull_request_open(ctx, &repo_full_name, number, navigation_id, format!($($arg)*));
         }};
     }
 
@@ -11876,39 +11997,23 @@ async fn open_pull_request(
         .as_ref()
         .and_then(|item| item.checkout.as_ref())
         .is_some_and(|checkout| checkout.path.join(".git").exists());
-    let (pull_request, offline) = if let Some(github) = ctx.github() {
-        match github.fetch_pull_request(&repo_full_name, number).await {
-            Ok(pr) => (pr, false),
-            Err(e) => {
-                // No network, or no GitHub. A checkout that is already on disk
-                // opens anyway, as it was last left, from the snapshot.
-                match existing
-                    .as_ref()
-                    .and_then(|item| item.pull_request().cloned())
-                {
-                    Some(snapshot) if on_disk => {
-                        tracing::info!(repo = %repo_full_name, number, error = %e, "opening the checkout offline");
-                        (snapshot, true)
-                    }
-                    _ => fail!("{e}"),
-                }
-            }
+    let kept = existing
+        .as_ref()
+        .and_then(|item| Some((item.clone(), item.pull_request()?.clone())));
+    let (pull_request, source) = match (kept, ctx.github()) {
+        (Some((_, snapshot)), Some(_)) if on_disk => (snapshot, PullSource::Kept),
+        (Some((_, snapshot)), None) if on_disk => {
+            ctx.notice("Offline; opening the checkout as it was last fetched");
+            (snapshot, PullSource::Offline)
         }
-    } else {
-        match existing
-            .as_ref()
-            .and_then(|item| item.pull_request().cloned())
-        {
-            Some(snapshot) if on_disk => {
-                ctx.notice("Offline; opening the checkout as it was last fetched");
-                (snapshot, true)
-            }
-            _ => fail!("A GitHub token is required to fetch that pull request"),
+        (Some((item, snapshot)), Some(github)) => {
+            return open_pull_request_ahead(ctx, item, snapshot, &github, navigation_id).await
         }
-    };
-
-    let Some(repo) = RepoId::parse(&pull_request.repo_full_name) else {
-        fail!("{} is not a repository name", pull_request.repo_full_name)
+        (_, Some(github)) => match github.fetch_pull_request(&repo_full_name, number).await {
+            Ok(pr) => (pr, PullSource::Fetched),
+            Err(e) => fail!("{e}"),
+        },
+        (_, None) => fail!("A GitHub token is required to fetch that pull request"),
     };
 
     // The item: the one for this pull request, else a checkout of the
@@ -11917,6 +12022,169 @@ async fn open_pull_request(
         Some(item) => Some(item),
         None => branch_item_for(ctx, &pull_request),
     };
+    // What the row held until now is this open's "since".
+    let since = existing
+        .as_ref()
+        .and_then(|i| i.checkout.as_ref())
+        .and_then(|c| c.last_seen_head.clone());
+    open_pull_request_at(ctx, existing, pull_request, source, since, None, navigation_id).await
+}
+
+/// A pull request read before whose checkout is not on disk: shown from
+/// the row's snapshot at once, then fetched by git and asked of GitHub
+/// side by side, since a fetch needs only the number and the base branch.
+/// GitHub's answer is the one the checkout is made at.
+async fn open_pull_request_ahead(
+    ctx: &Ctx,
+    item: Item,
+    snapshot: PullRequest,
+    github: &GitHub,
+    navigation_id: u64,
+) -> bool {
+    let number = snapshot.number;
+    let shown = Arc::new(snapshot);
+    if !show_pull_request_early(ctx, &item, shown.clone(), navigation_id) {
+        return false;
+    }
+
+    // Only the checkout `prepare` makes is fetched ahead: Perch's branch
+    // for this pull request, new or coming back from the archive. A
+    // branch cut for something else fetches in its own way.
+    let pr_branch = format!("perch/pr-{number}");
+    let clone = RepoId::parse(&item.repo_full_name)
+        .or_else(|| RepoId::parse(&shown.repo_full_name))
+        .filter(|_| {
+            item.checkout
+                .as_ref()
+                .is_none_or(|c| c.owned && c.branch == pr_branch)
+        });
+    let prefetch = async {
+        let clone = clone.as_ref()?;
+        let on_step = checkout_progress(ctx, clone, navigation_id);
+        Some(ctx.preparer.prefetch(clone, number, &shown.base_ref, on_step).await)
+    };
+    let (fetched, prefetched) = tokio::join!(
+        github.fetch_pull_request(&shown.repo_full_name, number),
+        prefetch
+    );
+    let pull_request = match fetched {
+        Ok(pr) => pr,
+        Err(e) => {
+            return fail_pull_request_open(ctx, &shown.repo_full_name, number, navigation_id, e.to_string())
+        }
+    };
+    // A fetch that failed is tried again by `prepare`, which says why.
+    let prefetched = match prefetched {
+        Some(Ok(prefetched)) => Some(prefetched),
+        Some(Err(e)) => {
+            tracing::info!(item = %item.id, error = %e, "could not fetch the pull request ahead");
+            None
+        }
+        None => None,
+    };
+    // GitHub's answer goes to the row and the header now, not with the
+    // files.
+    let pull_request = if pull_request != *shown {
+        match install_pull_request_snapshot(ctx, &item.id, pull_request.clone(), None) {
+            Some((_, installed)) => (*installed).clone(),
+            None => pull_request,
+        }
+    } else {
+        pull_request
+    };
+    ask_for_conversation(ctx, &item.id, Arc::new(pull_request.clone()));
+    let since = item
+        .checkout
+        .as_ref()
+        .and_then(|c| c.last_seen_head.clone());
+    open_pull_request_at(
+        ctx,
+        Some(item),
+        pull_request,
+        PullSource::Shown,
+        since,
+        prefetched,
+        navigation_id,
+    )
+    .await
+}
+
+/// A checkout's steps, as the open's progress.
+fn checkout_progress(
+    ctx: &Ctx,
+    repo: &RepoId,
+    navigation_id: u64,
+) -> impl FnMut(perch_git::Step) + Send + 'static {
+    let progress = ctx.events.clone();
+    let progress_requests = ctx.navigation_requests.clone();
+    let label = repo.full_name();
+    move |step| {
+        let (message, percent) = match step {
+            perch_git::Step::Cloning { phase, percent } => {
+                (format!("Cloning {label}: {phase}"), percent)
+            }
+            perch_git::Step::Fetching => ("Fetching the pull request".into(), None),
+            perch_git::Step::CreatingWorktree => ("Checking out the files".into(), None),
+            perch_git::Step::ComputingDiff => ("Computing the diff".into(), None),
+        };
+        let _ = progress_requests.with_current(navigation_id, || {
+            let _ = progress.send(Event::ReviewProgress {
+                navigation_id,
+                message,
+                percent,
+            });
+        });
+    }
+}
+
+fn fail_pull_request_open(
+    ctx: &Ctx,
+    repo_full_name: &str,
+    number: u64,
+    navigation_id: u64,
+    message: String,
+) -> bool {
+    tracing::warn!(repo = %repo_full_name, number, %message, "could not open pull request");
+    ctx.send_navigation_event(
+        navigation_id,
+        Event::ReviewFailed {
+            navigation_id,
+            message,
+        },
+    );
+    false
+}
+
+/// Open a pull request whose snapshot is in hand, on `existing`'s
+/// checkout or a new one: the checkout brought to its head, the row
+/// rewritten, and the review shown. One just fetched whose checkout is
+/// not on disk shows before the checkout is made.
+async fn open_pull_request_at(
+    ctx: &Ctx,
+    existing: Option<Item>,
+    pull_request: PullRequest,
+    mut source: PullSource,
+    since: Option<String>,
+    prefetched: Option<perch_git::Prefetched>,
+    navigation_id: u64,
+) -> bool {
+    let number = pull_request.number;
+    macro_rules! fail {
+        ($($arg:tt)*) => {{
+            return fail_pull_request_open(
+                ctx,
+                &pull_request.repo_full_name,
+                number,
+                navigation_id,
+                format!($($arg)*),
+            );
+        }};
+    }
+
+    let Some(repo) = RepoId::parse(&pull_request.repo_full_name) else {
+        fail!("{} is not a repository name", pull_request.repo_full_name)
+    };
+
     let kept = existing.as_ref().and_then(|i| i.checkout.clone());
     // The clone a kept checkout belongs to is its item's repository, which
     // is the fork when the branch was cut there; a fresh checkout is cut
@@ -11931,11 +12199,30 @@ async fn open_pull_request(
         .map(|c| c.branch.clone())
         .unwrap_or_else(|| pr_branch.clone());
 
+    // The row, made now when there is none so a pull request shown before
+    // its checkout has the id it will be kept under. A fresh item's
+    // checkout is of the pull request's own repository, whichever fork the
+    // head is on: that is the clone it is cut in.
+    let is_new = existing.is_none();
+    let item = existing
+        .unwrap_or_else(|| Item::new(&pull_request.repo_full_name, Timestamp::now()));
+    let on_disk = kept
+        .as_ref()
+        .is_some_and(|c| c.path.join(".git").exists());
+    if source == PullSource::Fetched && !on_disk {
+        let shown = Arc::new(pull_request.clone());
+        if !show_pull_request_early(ctx, &item, shown.clone(), navigation_id) {
+            return false;
+        }
+        ask_for_conversation(ctx, &item.id, shown);
+        source = PullSource::Shown;
+    }
+
     let checkout = match &kept {
         Some(own) if !own.owned => {
             open_own_checkout(ctx, &clone, own, &pull_request.base_ref).await
         }
-        _ if offline => {
+        _ if source == PullSource::Offline => {
             let path = kept.as_ref().map(|c| c.path.clone());
             reopen_from_disk(ctx, &clone, number, &branch, path).await
         }
@@ -11955,35 +12242,15 @@ async fn open_pull_request(
             .await
         }
         _ => {
-            let progress = events.clone();
-            let progress_requests = ctx.navigation_requests.clone();
-            let label = repo.full_name();
             ctx.preparer
-                .prepare(
+                .prepare_after(
                     &repo,
                     number,
                     &pull_request.head_sha,
                     &pull_request.base_ref,
                     &branch,
-                    move |step| {
-                        let (message, percent) = match step {
-                            perch_git::Step::Cloning { phase, percent } => {
-                                (format!("Cloning {label}: {phase}"), percent)
-                            }
-                            perch_git::Step::Fetching => ("Fetching the pull request".into(), None),
-                            perch_git::Step::CreatingWorktree => {
-                                ("Checking out the files".into(), None)
-                            }
-                            perch_git::Step::ComputingDiff => ("Computing the diff".into(), None),
-                        };
-                        let _ = progress_requests.with_current(navigation_id, || {
-                            let _ = progress.send(Event::ReviewProgress {
-                                navigation_id,
-                                message,
-                                percent,
-                            });
-                        });
-                    },
+                    prefetched,
+                    checkout_progress(ctx, &repo, navigation_id),
                 )
                 .await
         }
@@ -11999,16 +12266,7 @@ async fn open_pull_request(
     // again first: the network and git took a while, and a poll may have
     // marked it in the meantime.
     let now = Timestamp::now();
-    let is_new = existing.is_none();
-    let mut item = match existing {
-        Some(item) => ctx.item(&item.id).unwrap_or(item),
-        None => {
-            // A fresh item's checkout is of the pull request's own
-            // repository, whichever fork the head is on: that is the clone
-            // it is cut in.
-            Item::new(&pull_request.repo_full_name, now)
-        }
-    };
+    let mut item = ctx.item(&item.id).unwrap_or(item);
     if !ctx
         .navigation_requests
         .is_current_item(&item.id, navigation_id)
@@ -12031,12 +12289,11 @@ async fn open_pull_request(
         on_disk: true,
         churn: kept.as_ref().and_then(|c| c.churn),
         // The head being opened now, which the next open will look back
-        // to. What the row held until now is this open's "since".
+        // to.
         last_seen_head: Some(checkout.head_sha.clone()).filter(|h| !h.is_empty()),
         divergence: None,
         source: None,
     });
-    let since = kept.as_ref().and_then(|c| c.last_seen_head.clone());
     item.archived_at = None;
     item.last_opened_at = now;
     let written = ctx.with_cache(|c| record_open(c, &mut item, is_new));
@@ -12050,11 +12307,86 @@ async fn open_pull_request(
         item,
         Some(Arc::new(pull_request)),
         checkout,
-        offline,
+        source,
         since,
         navigation_id,
     )
     .await
+}
+
+/// A pull request opened from its row's snapshot, asked of GitHub once
+/// it shows. At the same head the answer goes to the row and the view,
+/// and the discussion and checks follow, as the open would have fetched
+/// them. A head that moved in the meantime opens the pull request again,
+/// so the files are the ones on GitHub: the same open a slower network
+/// would have shown, a moment later.
+// Boxed with its type named: the open it can run again is the one that
+// spawned it, and an opaque future would contain itself.
+fn refetch_opened_pull_request<'a>(
+    ctx: &'a Ctx,
+    item_id: &'a str,
+    shown: Arc<PullRequest>,
+    since: Option<String>,
+    navigation_id: u64,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+    Box::pin(async move {
+        let Some(github) = ctx.github() else {
+            return;
+        };
+        let pr = match github
+            .fetch_pull_request(&shown.repo_full_name, shown.number)
+            .await
+        {
+            Ok(fresh) if fresh.head_sha != shown.head_sha => {
+                let _lifecycle = ctx.item_lifecycle.lock().await;
+                if !ctx.is_open(item_id)
+                    || !ctx
+                        .navigation_requests
+                        .is_current_item(item_id, navigation_id)
+                {
+                    return;
+                }
+                let Some(item) = ctx.item(item_id) else {
+                    return;
+                };
+                tracing::info!(
+                    item = item_id,
+                    kept = %shown.head_sha,
+                    head = %fresh.head_sha,
+                    "the pull request moved since it was kept; opening it again"
+                );
+                open_pull_request_at(
+                    ctx,
+                    Some(item),
+                    fresh,
+                    PullSource::Fetched,
+                    since,
+                    None,
+                    navigation_id,
+                )
+                .await;
+                return;
+            }
+            Ok(fresh) if fresh == *shown => shown,
+            Ok(fresh) => match install_pull_request_snapshot(ctx, item_id, fresh, None) {
+                Some((_, pull_request)) => pull_request,
+                None => return,
+            },
+            Err(e) => {
+                tracing::info!(item = item_id, error = %e, "could not fetch the pull request again");
+                shown
+            }
+        };
+        if !ctx.is_open(item_id) {
+            return;
+        }
+        let status_generation = begin_pull_request_status(ctx, item_id, &pr);
+        let discussion_generation = ctx.discussion_requests.begin(item_id);
+        tokio::join!(
+            fetch_discussion(ctx, item_id, &pr, discussion_generation),
+            fetch_checks(ctx, item_id, &pr, status_generation),
+        );
+    })
 }
 
 /// A branch Perch cut, read against a pull request that was opened from
@@ -12078,23 +12410,27 @@ async fn open_owned_branch_for_pull(
     base_ref: &str,
     navigation_id: u64,
 ) -> Result<perch_git::Checkout, perch_git::Error> {
-    ctx.send_navigation_event(
-        navigation_id,
-        Event::ReviewProgress {
-            navigation_id,
-            message: "Fetching the pull request".into(),
-            percent: None,
-        },
-    );
     let bare = ctx.preparer.ensure_bare(clone, |_| {}).await?;
-    let from = if clone == upstream {
-        "origin".to_string()
-    } else {
-        upstream.clone_url()
-    };
-    ctx.preparer
-        .fetch_pull(&bare, &from, number, base_ref)
-        .await?;
+    // The last fetch may have brought this head already, as `prepare`
+    // checks before its own.
+    if !ctx.preparer.has_pull(&bare, number, pr_head_sha, base_ref).await {
+        ctx.send_navigation_event(
+            navigation_id,
+            Event::ReviewProgress {
+                navigation_id,
+                message: "Fetching the pull request".into(),
+                percent: None,
+            },
+        );
+        let from = if clone == upstream {
+            "origin".to_string()
+        } else {
+            upstream.clone_url()
+        };
+        ctx.preparer
+            .fetch_pull(&bare, &from, number, base_ref)
+            .await?;
+    }
     ctx.send_navigation_event(
         navigation_id,
         Event::ReviewProgress {
@@ -21135,6 +21471,236 @@ read eof || true
         let asked = paths.lock().unwrap().clone();
         assert!(asked.iter().any(|p| p.starts_with("/repos/a/b/issues/5/comments")));
         assert!(asked.iter().any(|p| p.starts_with("/repos/a/b/issues/5/timeline")));
+    }
+
+    /// A pull request read before, with its checkout on disk, as a row
+    /// holds it: the reader's own branch, and a snapshot at its head.
+    fn kept_pull(ctx: &Ctx, dir: &Path, number: u64) -> (Item, String) {
+        let (mut item, worktree, _remote) = pushable_branch(ctx, dir);
+        let head = git(&worktree, &["rev-parse", "HEAD"]);
+        let mut pr = pull_request(number);
+        pr.head_sha = head.clone();
+        pr.head_ref = "feature".into();
+        item.subject = Some(ItemSubject::PullRequest(pr));
+        ctx.with_cache(|c| c.update_item(&item)).unwrap().unwrap();
+        (item, head)
+    }
+
+    /// A GitHub whose answer about `a/b#number` waits for the test to let
+    /// it go, and then has the pull request at whatever `head` holds.
+    fn held_pull(number: u64, head: Arc<Mutex<String>>) -> (String, std::sync::mpsc::Sender<()>) {
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let held = Mutex::new(held);
+        let (base, _paths) = serve_by_path(move |path| {
+            if path == format!("/repos/a/b/pulls/{number}") {
+                let _ = held.lock().unwrap().recv_timeout(Duration::from_secs(10));
+                ("200 OK", opened_pull(number, &head.lock().unwrap(), "open"))
+            } else {
+                ("404 Not Found", r#"{"message":"Not Found"}"#.into())
+            }
+        });
+        (base, release)
+    }
+
+    fn review_ready_head(event: Event) -> Option<String> {
+        match event {
+            Event::ReviewReady { pull_request, .. } => Some(pull_request?.head_sha.clone()),
+            _ => None,
+        }
+    }
+
+    /// A pull request read before shows from its snapshot while GitHub is
+    /// still answering, and GitHub's answer follows into the row.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pull_request_read_before_shows_as_kept_then_as_github_has_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let answer = Arc::new(Mutex::new(String::new()));
+        let (base, release) = held_pull(3, answer.clone());
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let (item, head) = kept_pull(&ctx, dir.path(), 3);
+        *answer.lock().unwrap() = head.clone();
+        let navigation_id = ctx.navigation_requests.begin_current();
+
+        let opened = tokio::time::timeout(
+            Duration::from_secs(5),
+            open_pull_request(&ctx, "a/b".into(), 3, navigation_id),
+        )
+        .await
+        .expect("the open did not wait on GitHub");
+        assert!(opened);
+        let shown = received.try_iter().find_map(review_ready_head);
+        assert_eq!(shown.as_deref(), Some(head.as_str()), "as it was kept");
+
+        release.send(()).unwrap();
+        let mut title = String::new();
+        for _ in 0..500 {
+            title = ctx.item(&item.id).unwrap().pull_request().unwrap().title.clone();
+            if title == "two" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(title, "two", "GitHub's answer followed into the row");
+        assert!(
+            received.try_iter().filter_map(review_ready_head).next().is_none(),
+            "the same head does not open again"
+        );
+    }
+
+    /// A pull request whose head moved since it was kept shows as kept,
+    /// then opens again at GitHub's head.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pull_request_that_moved_since_it_was_kept_opens_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let moved = "f".repeat(40);
+        let (base, release) = held_pull(3, Arc::new(Mutex::new(moved.clone())));
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let (_item, head) = kept_pull(&ctx, dir.path(), 3);
+        let navigation_id = ctx.navigation_requests.begin_current();
+
+        assert!(open_pull_request(&ctx, "a/b".into(), 3, navigation_id).await);
+        let shown = received.try_iter().find_map(review_ready_head);
+        assert_eq!(shown.as_deref(), Some(head.as_str()), "as it was kept");
+
+        release.send(()).unwrap();
+        let mut again = None;
+        for _ in 0..500 {
+            again = received.try_iter().find_map(review_ready_head);
+            if again.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(again, Some(moved), "opened again at GitHub's head");
+    }
+
+    /// Perch's clone of a/b, whose origin has pull request 3: two commits
+    /// past `main` on `feature`. The two heads, the older first; the pull
+    /// request is at the newer.
+    fn clone_with_pull(ctx: &Ctx, dir: &Path) -> (String, String) {
+        owned_clone(ctx, dir);
+        let source = dir.join("source");
+        git(&source, &["checkout", "-q", "-b", "feature"]);
+        let mut heads = Vec::new();
+        for name in ["two", "three"] {
+            std::fs::write(source.join(format!("{name}.txt")), format!("{name}\n")).unwrap();
+            git(&source, &["add", "."]);
+            git(&source, &["commit", "-q", "-m", name]);
+            heads.push(git(&source, &["rev-parse", "HEAD"]));
+        }
+        git(&source, &["update-ref", "refs/pull/3/head", &heads[1]]);
+        (heads[0].clone(), heads[1].clone())
+    }
+
+    /// The order an open's events came in, by what each was.
+    fn open_events(received: &Receiver<Event>) -> Vec<Event> {
+        received
+            .try_iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    Event::PullRequestReady { .. } | Event::ReviewReady { .. } | Event::ReviewFailed { .. }
+                )
+            })
+            .collect()
+    }
+
+    /// A pull request read before whose checkout is gone: it shows from the
+    /// snapshot at once, git fetches it while GitHub is still answering,
+    /// and the checkout is made at GitHub's head, which has moved on.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_kept_pull_request_with_no_checkout_is_fetched_while_github_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let answer = Arc::new(Mutex::new(String::new()));
+        let (base, release) = held_pull(3, answer.clone());
+        let (ctx, received) = ctx(dir.path(), &base, &["a/b"]);
+        let (kept, moved) = clone_with_pull(&ctx, dir.path());
+        *answer.lock().unwrap() = moved.clone();
+        let mut item = store_pull(&ctx, 3);
+        let mut snapshot = pull_request(3);
+        snapshot.head_sha = kept.clone();
+        snapshot.head_ref = "feature".into();
+        item.subject = Some(ItemSubject::PullRequest(snapshot));
+        ctx.with_cache(|c| c.update_item(&item)).unwrap().unwrap();
+        let navigation_id = ctx.navigation_requests.begin_current();
+
+        let opening = {
+            let ctx = ctx.clone();
+            tokio::spawn(async move { open_pull_request(&ctx, "a/b".into(), 3, navigation_id).await })
+        };
+
+        let bare = ctx.preparer.store().bare_path(&RepoId::parse("a/b").unwrap());
+        let mut fetched = String::new();
+        for _ in 0..500 {
+            let out = std::process::Command::new("git")
+                .args(["rev-parse", "--verify", "--quiet", "refs/perch/pull/3/head"])
+                .current_dir(&bare)
+                .output()
+                .unwrap();
+            fetched = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !fetched.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(fetched, moved, "git fetched before GitHub answered");
+        let shown = open_events(&received);
+        assert!(
+            matches!(&shown[..], [Event::PullRequestReady { pull_request, .. }] if pull_request.head_sha == kept),
+            "shown as it was kept, with no files yet"
+        );
+
+        release.send(()).unwrap();
+        assert!(opening.await.unwrap());
+        let Some(Event::ReviewReady {
+            pull_request,
+            files,
+            shown_early,
+            ..
+        }) = open_events(&received).pop()
+        else {
+            panic!("the files came");
+        };
+        assert!(shown_early);
+        assert_eq!(pull_request.unwrap().head_sha, moved, "at GitHub's head");
+        assert!(files.iter().any(|f| f.path == "three.txt"));
+        let row = ctx.item(&item.id).unwrap();
+        assert_eq!(row.pull_request().unwrap().head_sha, moved);
+        assert_eq!(row.checkout.unwrap().head_sha, moved);
+    }
+
+    /// A pull request never read shows once GitHub has answered, before
+    /// its checkout is made, and its files follow under the same row.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pull_request_never_read_shows_before_its_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let answer = Arc::new(Mutex::new(String::new()));
+        let (base, release) = held_pull(3, answer.clone());
+        release.send(()).unwrap();
+        let (ctx, received) = ctx(dir.path(), &base, &["a/b"]);
+        let (_, head) = clone_with_pull(&ctx, dir.path());
+        *answer.lock().unwrap() = head.clone();
+        let navigation_id = ctx.navigation_requests.begin_current();
+
+        assert!(open_pull_request(&ctx, "a/b".into(), 3, navigation_id).await);
+
+        let events = open_events(&received);
+        let [Event::PullRequestReady { item: shown, pull_request, .. }, Event::ReviewReady {
+            item,
+            files,
+            shown_early,
+            ..
+        }] = &events[..]
+        else {
+            panic!("shown, then the files: {} events", events.len());
+        };
+        assert_eq!(pull_request.head_sha, head);
+        assert!(shown.checkout.is_none(), "no checkout to reach for yet");
+        assert!(*shown_early);
+        assert_eq!(item.id, shown.id, "the row is the one that showed");
+        assert!(item.checkout.is_some());
+        assert!(files.iter().any(|f| f.path == "two.txt"));
+        assert!(ctx.item(&item.id).is_some(), "kept");
     }
 
     /// Open… asks GitHub what a reference's number is, and says so when

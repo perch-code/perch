@@ -1049,6 +1049,14 @@ impl AppState {
                 if !self.accepts_navigation(navigation_id) {
                     return;
                 }
+                // A pull request already showing: the progress is its
+                // files', in Code, and the conversation stays up.
+                if review.files_pending.with_untracked(Option::is_some) {
+                    review
+                        .files_pending
+                        .set(Some(Preparing::Working { message, percent }));
+                    return;
+                }
                 review
                     .preparing
                     .set(Preparing::Working { message, percent });
@@ -1065,9 +1073,30 @@ impl AppState {
                 tree,
                 stale_head,
                 offline,
+                shown_early,
             } => {
                 if !self.accepts_open_item(navigation_id, &item.id) {
                     tracing::debug!(item = %item.id, "ignored a stale item-open result");
+                    return;
+                }
+                // The files of a pull request that is already showing. The
+                // header, the conversation and the pane are left as they
+                // are; what came with the checkout is filled in.
+                if shown_early && review.is_item(&item.id) {
+                    review.scope_gen.set(Some(scope_gen));
+                    review.scope.set(scope);
+                    review.set_changed_files(files);
+                    review.tree.set(tree);
+                    review.item.set(Some(item));
+                    review.stale_head.set(stale_head);
+                    review.pull_request.set(pull_request);
+                    let paths = review.files_reload.try_update(std::mem::take).unwrap_or_default();
+                    if !paths.is_empty() {
+                        self.reload.update(|reload| reload.extend(paths));
+                    }
+                    // Last, after every field the editor reads as it is
+                    // built in place of the progress.
+                    review.files_pending.set(None);
                     return;
                 }
                 // The item's pane comes back unless it is the one open
@@ -1118,6 +1147,52 @@ impl AppState {
                         review.open_composer(None, None, draft, crate::review::threads::defaults(*self));
                     }
                 }
+            }
+            // A pull request whose checkout is still being made: shown as an
+            // item with no files yet, Code saying how the checkout is going.
+            Event::PullRequestReady {
+                navigation_id,
+                item,
+                pull_request,
+            } => {
+                if !self.accepts_open_item(navigation_id, &item.id) {
+                    tracing::debug!(item = %item.id, "ignored a stale pull-request-open result");
+                    return;
+                }
+                let fresh = !review.is_item(&item.id);
+                review.prepare_ready_for(&item.id);
+                self.open_expectation
+                    .set(OpenExpectation::Item(item.id.clone()));
+                let message = review.preparing.with_untracked(|p| match p {
+                    Preparing::Working { message, .. } => message.clone(),
+                    _ => String::new(),
+                });
+                review.preparing.set(Preparing::Idle);
+                review.files_pending.set(Some(Preparing::Working {
+                    message,
+                    percent: None,
+                }));
+                review.clear_historical_review();
+                review.set_changed_files(Arc::new(Vec::new()));
+                review.tree.set(Arc::new(Vec::new()));
+                self.open_item.set(Some(item.id.clone()));
+                review.item.set(Some(item));
+                review.stale_head.set(None);
+                review.offline.set(false);
+                review.upstream_changed.set(false);
+                review.pull_request_overview_loading.set(pull_request.is_open());
+                review.pull_request.set(Some(pull_request));
+                review.issue.set(None);
+                review.issue_comments.set(Arc::new(Vec::new()));
+                review.issue_events.set(Arc::new(Vec::new()));
+                review.comment_threads.set(Arc::new(Vec::new()));
+                // The tabs open last time come back now, and load once
+                // there is a checkout to load them from.
+                if fresh {
+                    review.files_reload.set(review.restore_pane());
+                }
+                review.ready.set(true);
+                review.set_phase(Phase::Ready);
             }
             Event::IssueReady {
                 navigation_id,
@@ -1514,6 +1589,12 @@ impl AppState {
                 if !self.accepts_navigation(navigation_id) {
                     return;
                 }
+                // The checkout of a pull request already showing: Code says
+                // why, and the conversation can still be read.
+                if review.files_pending.with_untracked(Option::is_some) {
+                    review.files_pending.set(Some(Preparing::Failed { message }));
+                    return;
+                }
                 review.preparing.set(Preparing::Failed { message });
                 review.set_phase(Phase::Failed);
             }
@@ -1784,6 +1865,16 @@ impl AppState {
                 merge_attempt_id,
             } => {
                 if review.is_item(&item_id) {
+                    // The row's checkout is not the view's until the files
+                    // it is waiting on arrive.
+                    let item = if review.files_pending.with_untracked(Option::is_some) {
+                        Arc::new(perch_github::Item {
+                            checkout: None,
+                            ..(*item).clone()
+                        })
+                    } else {
+                        item
+                    };
                     review.item.set(Some(item));
                     review.pull_request.set(Some(pull_request.clone()));
                     review.checks.set(None);
@@ -2408,6 +2499,7 @@ impl AppState {
             | Event::IssueReady { .. } => {}
             Event::ReviewProgress { .. }
             | Event::ReviewReady { .. }
+            | Event::PullRequestReady { .. }
             | Event::ReviewFailed { .. }
             | Event::FileLoaded { .. }
             | Event::FileFailed { .. }
@@ -2961,6 +3053,7 @@ mod tests {
             tree: Arc::new(Vec::new()),
             stale_head: None,
             offline: true,
+            shown_early: false,
         }
     }
 
@@ -3301,6 +3394,85 @@ mod tests {
         review.item.set(Some(issue("org/repo", 7)));
         review.begin("Reading the notification");
         assert!(!app.is_viewing_thread(&thread));
+    }
+
+    /// A pull request shown before its checkout: the review is up with its
+    /// header and conversation, the checkout's progress and failure go to
+    /// Code rather than over the pane, and the files fill in without
+    /// taking the rest down.
+    #[test]
+    fn a_pull_request_shown_before_its_checkout_takes_its_files_in_code() {
+        use crate::review::model::{Phase, Preparing};
+        let app = AppState::new();
+        let review = ReviewState::new();
+        app.begin_item_review(review, "Reading the pull request", "pr", 40);
+        let mut item = Item::new("slatedb/slatedb", "2026-09-18T09:59:00Z".parse().unwrap());
+        item.id = "pr".into();
+        let pull = pull_request(7, "h", "open");
+        app.apply_with_review(
+            Event::PullRequestReady {
+                navigation_id: 40,
+                item: Arc::new(item.clone()),
+                pull_request: Arc::new(pull),
+            },
+            review,
+        );
+        assert_eq!(review.phase.get(), Phase::Ready);
+        assert!(review.ready.get());
+        assert!(review.pull_request.get().is_some());
+        assert!(review.has_files(), "Code is there to show the checkout coming");
+
+        app.apply_with_review(
+            Event::ReviewProgress {
+                navigation_id: 40,
+                message: "Fetching the pull request".into(),
+                percent: None,
+            },
+            review,
+        );
+        assert_eq!(review.phase.get(), Phase::Ready, "the conversation stays up");
+        assert!(matches!(
+            review.files_pending.get(),
+            Some(Preparing::Working { message, .. }) if message == "Fetching the pull request"
+        ));
+
+        let mut ready = review_ready("pr", 40);
+        if let Event::ReviewReady { shown_early, .. } = &mut ready {
+            *shown_early = true;
+        }
+        app.apply_with_review(ready, review);
+        assert_eq!(review.files_pending.get(), None);
+        assert_eq!(review.phase.get(), Phase::Ready);
+        assert!(review.is_item("pr"));
+    }
+
+    /// The checkout of a pull request already showing could not be made:
+    /// Code says why, and the conversation can still be read.
+    #[test]
+    fn a_checkout_failing_under_a_shown_pull_request_leaves_it_up() {
+        use crate::review::model::{Phase, Preparing};
+        let app = AppState::new();
+        let review = ReviewState::new();
+        app.begin_item_review(review, "Reading the pull request", "pr", 41);
+        review.files_pending.set(Some(Preparing::Working {
+            message: String::new(),
+            percent: None,
+        }));
+        review.set_phase(Phase::Ready);
+        app.apply_with_review(
+            Event::ReviewFailed {
+                navigation_id: 41,
+                message: "no such ref".into(),
+            },
+            review,
+        );
+        assert_eq!(review.phase.get(), Phase::Ready);
+        assert_eq!(
+            review.files_pending.get(),
+            Some(Preparing::Failed {
+                message: "no such ref".into()
+            })
+        );
     }
 
     /// A run on another item: the item opens on Conversation, whatever it

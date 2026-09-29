@@ -1175,6 +1175,51 @@ mod tests {
         );
     }
 
+    /// A pull request shown before its checkout: Code draws the
+    /// checkout's progress where the files will be, then the editor once
+    /// they are here, and the full-window card never comes up.
+    #[test]
+    fn code_shows_the_checkout_coming_under_a_shown_pull_request() {
+        use crate::review::model::{ItemTab, Phase, Preparing};
+        use perch_github::Item;
+        use std::sync::Arc;
+
+        let root = TestRoot::new();
+        let state = AppState::new();
+        let review = ReviewState::new();
+        let mut item = Item::new("slatedb/slatedb", "2026-09-18T09:59:00Z".parse().unwrap());
+        item.id = "pr".into();
+        review.item.set(Some(Arc::new(item)));
+        review.files_pending.set(Some(Preparing::Working {
+            message: "Fetching the pull request".into(),
+            percent: None,
+        }));
+        review.ready.set(true);
+        review.set_phase(Phase::Ready);
+        review.tab.set(ItemTab::Code);
+        review.composer_autofocus.set(false);
+        let view = app_view(state, review, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "files preparing").is_some());
+        assert!(named(harness.root_id(), "Label: \"Fetching the pull request\"").is_some());
+
+        review.files_pending.set(Some(Preparing::Failed {
+            message: "no such ref".into(),
+        }));
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "files preparing").is_none());
+        assert!(named(harness.root_id(), "files failed").is_some());
+
+        review.files_pending.set(None);
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "files failed").is_none());
+        assert_eq!(review.phase.get(), Phase::Ready);
+    }
+
     /// The window on Code with one changed file open in the editor.
     fn window_with_a_file_open() -> (HeadlessHarness, ReviewState) {
         use crate::review::model::{ItemTab, Phase};
