@@ -3304,11 +3304,20 @@ fn steps_view(state: ReviewState, run: RunRecord) -> impl IntoView {
                     })
                 },
             )
-            .style(|s| s.flex_col().width_full().gap(2.0).padding_left(15.0))
+            // The space above the steps rides on the steps, not a gap
+            // on the column: taffy gaps an empty child too, which left
+            // the folded line sitting high.
+            .style(|s| {
+                s.flex_col()
+                    .width_full()
+                    .gap(2.0)
+                    .padding_left(15.0)
+                    .padding_top(6.0)
+            })
             .into_any()
         }),
     ))
-    .style(|s| s.flex_col().width_full().gap(6.0))
+    .style(|s| s.flex_col().width_full())
 }
 
 /// "Read 3 files, ran 1 command", from the step lines.
