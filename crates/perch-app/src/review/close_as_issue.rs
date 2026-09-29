@@ -685,6 +685,52 @@ mod tests {
         assert_eq!(draft_of(app, "item-7").comment, "Closing.");
     }
 
+    /// The form's boxes take typing: `a` typed there is an `a`, not the
+    /// window's key that opens a composer and takes the keyboard.
+    #[test]
+    fn the_boxes_keep_the_keys_the_window_would_take() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_on_pull();
+        state.set_phase(crate::review::model::Phase::Ready);
+        unfold(app, state, "item-7");
+        let view = crate::ui::app_view(app, state, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        settle(&mut harness);
+
+        let form = named(harness.root_id(), "close-as-issue").expect("no form");
+        let title = named(form, "close-as-issue-title").expect("no title box");
+        title.scroll_to(None);
+        settle(&mut harness);
+        let rect = title.get_visual_rect_no_clip();
+        harness.click(rect.x1 - 4.0, rect.center().y);
+        settle(&mut harness);
+        let body = find(form, "Editor View").expect("no body box");
+        for text_box in [title, body] {
+            if text_box == body {
+                body.request_focus();
+                settle(&mut harness);
+            }
+            assert!(harness.is_focused(text_box), "{} is not focused", text_box.debug_name());
+            for (ch, code) in [("b", Code::KeyB), ("a", Code::KeyA), ("c", Code::KeyC), ("k", Code::KeyK)] {
+                harness.dispatch_event(floem::event::Event::Key(KeyboardEvent {
+                    state: KeyState::Down,
+                    key: Key::Character(ch.into()),
+                    code,
+                    location: Default::default(),
+                    modifiers: Modifiers::empty(),
+                    repeat: false,
+                    is_composing: false,
+                }));
+                settle(&mut harness);
+            }
+            assert!(state.composer.with(Option::is_none), "`a` opened a composer");
+            assert!(harness.is_focused(text_box), "{} lost the keyboard", text_box.debug_name());
+        }
+        assert_eq!(draft_of(app, "item-7").title, "Fix the crash on empty manifestsback");
+        assert!(draft_of(app, "item-7").body.contains("back"));
+    }
+
     #[test]
     fn the_button_sends_the_form_and_the_answer_settles_it() {
         let root = TestRoot::new();

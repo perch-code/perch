@@ -509,7 +509,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         _ => {}
                     }
                 }
-                let typing = typing || review.find_focused.get();
+                // Any box that takes typing keeps the keys below: `a` typed
+                // in the close-as-issue title is an `a`, not a composer.
+                let typing =
+                    typing || review.find_focused.get() || text_box_focused(cx, root_id);
                 if typing || !review.is_open() {
                     if key.code == Code::KeyW && key.modifiers == OS_MOD {
                         close_item_or_window(state, review, key_backend, root_id);
