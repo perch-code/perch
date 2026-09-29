@@ -2158,6 +2158,39 @@ mod tests {
         assert_eq!(title.get_visual_rect_no_clip().y0, top);
     }
 
+    /// Any text box on the page keeps Cmd-Up and Cmd-Down, not only the
+    /// composer: the close-as-issue form's title and body do too.
+    #[test]
+    fn a_text_box_keeps_cmd_up_and_down() {
+        let (mut harness, app, state) = app_harness();
+        crate::review::close_as_issue::unfold(app, state, "wt");
+        harness.rebuild();
+        harness.paint();
+        let root = harness.root_id();
+        let title = move || find(root, "conversation-title").unwrap();
+        let top = title().get_visual_rect_no_clip().y0;
+        let form = find(root, "close-as-issue").expect("no form");
+        let boxes = [
+            find(form, "TextInput").expect("no title box"),
+            find(form, "Editor View").expect("no body box"),
+        ];
+        for text_box in boxes {
+            text_box.request_focus();
+            harness.rebuild();
+            assert!(harness.is_focused(text_box));
+            harness.dispatch_event(page_key(Paging::End));
+            harness.rebuild();
+            harness.paint();
+            assert_eq!(state.paging.get(), None);
+            assert_eq!(
+                title().get_visual_rect_no_clip().y0,
+                top,
+                "{} gave the page the key",
+                text_box.debug_name()
+            );
+        }
+    }
+
     /// Page Down scrolls a page less a line, and Page Up back; from a
     /// composer as well, as its few lines are not what a reader pages
     /// through.

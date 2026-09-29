@@ -414,8 +414,9 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 // by a page, Cmd-Up and Cmd-Down to its top and its end.
                 // The page keys work from the code, the page or a composer:
                 // a composer is a few lines, and the page is what there is
-                // to page through. A composer keeps Cmd-Up and Cmd-Down,
-                // the start and end of its text. Caught here, as the editors
+                // to page through. A composer, or any text box, keeps
+                // Cmd-Up and Cmd-Down, the start and end of its text.
+                // Caught here, as the editors
                 // would take them for half a screen and for the caret alone.
                 // A file with no editor, a picture or one too big to show,
                 // has nowhere to go.
@@ -431,7 +432,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     _ => None,
                 }
                 .filter(|p| {
-                    matches!(p, Paging::Up | Paging::Down) || !review.composer_focused.get()
+                    matches!(p, Paging::Up | Paging::Down)
+                        || !(review.composer_focused.get() || text_box_focused(cx, root_id))
                 })
                 .filter(|_| !boxed && review.is_open());
                 if let Some(paging) = paging {
@@ -952,6 +954,23 @@ pub(crate) fn focused_descendant(
     root.children()
         .into_iter()
         .find_map(|child| focused_descendant(cx, child))
+}
+
+/// Whether the keyboard is in a box that takes typing: a one-line box, or
+/// an editor other than the code's, which is read-only and sits in a
+/// `tinted editor`. Told apart by floem's names for its views, as every
+/// form, composer and reply box is one of the two.
+fn text_box_focused(cx: &floem::context::EventCx<'_>, root: floem::ViewId) -> bool {
+    let Some(focused) = focused_descendant(cx, root) else {
+        return false;
+    };
+    let name = focused.debug_name();
+    if name.contains("TextInput") {
+        return true;
+    }
+    name.contains("Editor View")
+        && !std::iter::successors(focused.parent(), floem::ViewId::parent)
+            .any(|id| id.debug_name().contains("tinted editor"))
 }
 
 /// What to do when no token resolved, in the main area's empty state. Built
