@@ -776,6 +776,7 @@ mod tests {
             state: SubjectState::PrMerged,
             churn: Some((3, 1)),
             review_requested: true,
+            participants: None,
             at: looked.updated_at,
         });
         state.notifications.set(vec![
@@ -1096,7 +1097,7 @@ mod tests {
         assert_eq!(age.x1, rect.x1 - 13.0, "the age ends at the row's inset");
         assert_eq!(figures.x1, age.x1, "the figures end under the age");
         assert_eq!(avatar.x0, title.x0, "the avatar starts under the title");
-        assert_eq!(avatar.width(), crate::ui::nav_row::AVATAR);
+        assert_eq!(avatar.width(), crate::ui::nav_row::AVATAR, "the author's, until a look finds who acted");
         assert!(find(row, "org/one").is_some(), "the repository");
         assert!(find(row, "#57").is_some(), "then the number");
         assert!(find(row, "fence").is_none(), "never the branch");
@@ -1247,7 +1248,7 @@ mod tests {
 
     #[test]
     fn a_notifications_face_is_whoever_opened_it_and_the_repositorys_until_known() {
-        let (mut harness, _) = harness();
+        let (mut harness, state) = harness();
         click_tab(&mut harness, SidebarTab::Inbox);
 
         // No picture has arrived, so each face is its seed's initial.
@@ -1258,6 +1259,64 @@ mod tests {
         let unlooked = find(harness.root_id(), "notification row:12").unwrap();
         let avatar = find(unlooked, "row avatar").unwrap();
         assert!(find(avatar, "O").is_some(), "org's, which nobody opened");
+
+        // Once a look has found who acted there, they are the faces.
+        state.notifications.update(|threads| {
+            let snapshot = threads.iter_mut().find(|t| t.id == "11").unwrap().subject_snapshot.as_mut().unwrap();
+            snapshot.participants = Some(vec![
+                perch_github::Participant { login: "zed".into(), avatar_url: String::new() },
+                perch_github::Participant { login: "someone".into(), avatar_url: String::new() },
+            ]);
+        });
+        harness.rebuild();
+        harness.paint();
+        let looked = find(harness.root_id(), "notification row:11").unwrap();
+        assert!(find(find(looked, "row face:0").unwrap(), "S").is_some(), "the earlier behind");
+        assert!(find(find(looked, "row face:1").unwrap(), "Z").is_some(), "the most recent in front");
+    }
+
+    /// Once a look has found who acted last, a row stacks them as
+    /// GitHub's inbox does: the most recent at the right and in front,
+    /// each face ringed in the row's own colour, which follows the row's
+    /// hover.
+    #[test]
+    fn a_rows_faces_are_who_acted_last_the_most_recent_in_front() {
+        use floem::peniko::Brush;
+        use floem::style::Background;
+        use perch_github::Participant;
+
+        let (mut harness, state) = harness();
+        let who = |login: &str| Participant { login: login.into(), avatar_url: String::new() };
+        state.apply(crate::backend::Event::Participants(vec![(
+            ("org/one".into(), 57),
+            vec![who("recent"), who("middle"), who("earliest")],
+        )]));
+        harness.rebuild();
+        harness.paint();
+
+        let row = find(harness.root_id(), "item row:pr").unwrap();
+        let faces: Vec<_> = (0..3).map(|i| find(row, &format!("row face:{i}")).unwrap()).collect();
+        assert!(find(faces[0], "E").is_some(), "the earliest at the left");
+        assert!(find(faces[1], "M").is_some());
+        assert!(find(faces[2], "R").is_some(), "the most recent at the right");
+        let rects: Vec<_> = faces.iter().map(|f| f.get_visual_rect_no_clip()).collect();
+        for pair in rects.windows(2) {
+            assert!(pair[0].x0 < pair[1].x0 && pair[1].x0 < pair[0].x1, "the faces overlap: {pair:?}");
+        }
+        let avatar = find(row, "row avatar").unwrap().get_visual_rect_no_clip();
+        let step = crate::ui::nav_row::FACE_STEP;
+        assert_eq!(avatar.width(), crate::ui::nav_row::AVATAR + 2.0 * step);
+
+        let ring = |harness: &HeadlessHarness| {
+            let row = find(harness.root_id(), "item row:pr").unwrap();
+            harness.get_computed_style(find(row, "row face:2").unwrap()).get(Background)
+        };
+        assert_eq!(ring(&harness), Some(Brush::Solid(theme::NAV_CANVAS)));
+        let rect = row.get_visual_rect_no_clip();
+        harness.pointer_move(rect.center().x, rect.center().y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(ring(&harness), Some(Brush::Solid(theme::NAV_HOVER)), "the ring follows the row's wash");
     }
 
     /// The whole window, so the drawer sits where it does in the app: at

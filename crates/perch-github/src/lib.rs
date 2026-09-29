@@ -49,7 +49,7 @@ pub use items::{
 };
 pub use mentions::MentionableUser;
 pub use model::{
-    Reason, Repository, RunSnapshot, Subject, SubjectKind, SubjectSnapshot, SubjectState, Thread,
+    is_app_avatar, Participant, Reason, Repository, RunSnapshot, Subject, SubjectKind, SubjectSnapshot, SubjectState, Thread,
 };
 pub use pulls::{
     CheckStatus, MergeMethod, MergeMethods, MergeResult, MergeState, MergeableState, PullRequest,

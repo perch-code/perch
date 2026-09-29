@@ -3,9 +3,9 @@
 //! A glyph at the left, then two lines. The first is the title, with a
 //! compact age at its right end ("1d", "2w"), which the row's controls
 //! stand in for while the pointer is over it. The second is the byline:
-//! a small avatar, the repository, then the number when the row has one,
-//! each cut short with an ellipsis as the drawer narrows, then a pull
-//! request's chips, and at its right end the churn: "+658 -0" on a pull
+//! a small stack of faces, the repository, then the number when the row
+//! has one, each cut short with an ellipsis as the drawer narrows, then a
+//! pull request's chips, and at its right end the churn: "+658 -0" on a pull
 //! request or a branch.
 //!
 //! Item rows and notification rows share these pieces so the three
@@ -13,7 +13,7 @@
 
 use floem::menu::Menu;
 use floem::prelude::*;
-use floem::reactive::{SignalGet, SignalWith};
+use floem::reactive::{Memo, SignalGet, SignalWith};
 use floem::style::{CursorStyle, Style};
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 use jiff::Timestamp;
@@ -23,13 +23,24 @@ use crate::icons::SidebarIcon;
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
-use crate::ui::widgets::{avatar, clickable, sidebar_glyph};
+use crate::ui::widgets::{avatar, avatar_radius, clickable, sidebar_glyph};
 
 /// The first line is as tall as a control, so the controls that stand in
 /// for the age on hover do not move the byline under them.
 pub const TITLE_LINE_HEIGHT: f64 = 26.0;
-/// The byline's avatar.
+/// A face in the byline's stack.
 pub const AVATAR: f64 = 16.0;
+/// How far each face behind starts from the one in front of it.
+pub const FACE_STEP: f64 = 10.0;
+/// The ring in the row's own colour that cuts a face out of the one
+/// behind it, as GitHub's stacks do.
+const FACE_RING: f64 = 1.5;
+
+floem::style_class!(
+    /// The ring around a face in a byline's stack. The row paints it in
+    /// its own wash, so the ring follows the row's hover and selection.
+    pub FaceRing
+);
 
 /// The row itself: the button the whole row is, at the drawer's inset.
 ///
@@ -37,6 +48,7 @@ pub const AVATAR: f64 = 16.0;
 /// darker; any other row lights only under the pointer.
 pub fn row_style(s: Style, selected: bool) -> Style {
     let base = clickable(s)
+        .class(FaceRing, |s| s.background(theme::NAV_CANVAS))
         .width_full()
         .height(theme::ROW_HEIGHT)
         .items_center()
@@ -45,9 +57,16 @@ pub fn row_style(s: Style, selected: bool) -> Style {
         .border_radius(theme::NAV_ROW_RADIUS);
     if selected {
         base.background(theme::NAV_SELECTED)
-            .hover(|s| s.background(theme::NAV_SELECTED_PRESSED))
+            .class(FaceRing, |s| s.background(theme::NAV_SELECTED))
+            .hover(|s| {
+                s.background(theme::NAV_SELECTED_PRESSED)
+                    .class(FaceRing, |s| s.background(theme::NAV_SELECTED_PRESSED))
+            })
     } else {
-        base.hover(|s| s.background(theme::NAV_HOVER))
+        base.hover(|s| {
+            s.background(theme::NAV_HOVER)
+                .class(FaceRing, |s| s.background(theme::NAV_HOVER))
+        })
     }
 }
 
@@ -139,7 +158,61 @@ pub fn title_label(
     })
 }
 
-/// The second line: the avatar, the repository, the reference, and the
+/// Someone in a byline's stack: where their picture comes from, and the
+/// name whose initial stands in until it arrives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Face {
+    pub url: String,
+    pub seed: String,
+}
+
+impl Face {
+    pub fn new(url: impl Into<String>, seed: impl Into<String>) -> Self {
+        Face {
+            url: url.into(),
+            seed: seed.into(),
+        }
+    }
+}
+
+/// The faces of who acted last, most recent first, as a look found them:
+/// the stack GitHub's inbox draws.
+pub fn participant_faces(participants: &[perch_github::Participant]) -> Vec<Face> {
+    participants
+        .iter()
+        .map(|p| Face::new(p.avatar_url.clone(), p.login.clone()))
+        .collect()
+}
+
+/// The faces, most recent first, overlapped as GitHub's inbox overlaps
+/// them: the most recent at the right and in front, the rest leftward and
+/// behind. Each wears a ring in the row's colour that stands out of the
+/// layout, so the stack's box is the faces alone. Rebuilt only when the
+/// faces change, as a look lands or the viewer arrives.
+fn face_stack(state: AppState, faces: impl Fn() -> Vec<Face> + 'static) -> impl IntoView {
+    let faces = Memo::new(move |_| faces());
+    dyn_container(
+        move || faces.get(),
+        move |faces| {
+            Stack::horizontal_from_iter(faces.into_iter().rev().enumerate().map(move |(i, face)| {
+                let radius = avatar_radius(AVATAR, &face.url) + FACE_RING;
+                let url = face.url;
+                Container::new(avatar(state, move || url.clone(), AVATAR, face.seed))
+                    .debug_name(format!("row face:{i}"))
+                    .class(FaceRing)
+                    .style(move |s| {
+                        s.padding(FACE_RING)
+                            .margin(-FACE_RING)
+                            .border_radius(radius)
+                            .apply_if(i > 0, |s| s.margin_left(FACE_STEP - AVATAR - FACE_RING))
+                    })
+            }))
+            .into_any()
+        },
+    )
+}
+
+/// The second line: the faces, the repository, the reference, and the
 /// figures at the right end.
 ///
 /// The repository and the reference each give way with an ellipsis as
@@ -149,8 +222,7 @@ pub fn title_label(
 /// issue or a row that is neither.
 pub fn byline(
     state: AppState,
-    avatar_url: impl Fn() -> String + 'static,
-    seed: String,
+    faces: impl Fn() -> Vec<Face> + 'static,
     place: String,
     reference: String,
     after: impl IntoView + 'static,
@@ -164,7 +236,7 @@ pub fn byline(
             .flex_shrink(1.0_f32)
     };
     Stack::horizontal((
-        Container::new(avatar(state, avatar_url, AVATAR, seed))
+        Container::new(face_stack(state, faces))
             .debug_name("row avatar")
             .style(|s| s.margin_right(6.0).flex_shrink(0.0_f32)),
         Label::derived(move || place.clone()).style(muted_text),

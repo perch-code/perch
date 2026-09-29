@@ -11,6 +11,10 @@ use floem::peniko::{Blob, Color};
 use floem::text::{FontStyle, FontWeight, FONT_CONTEXT};
 use fontique::FontInfoOverride;
 
+/// How round an app's face is, as a share of its side: GitHub's 4px on
+/// a 16px bot.
+pub const APP_AVATAR_CORNER: f64 = 0.25;
+
 /// Surfaces.
 pub const CANVAS: Color = Color::from_rgb8(0xff, 0xff, 0xff);
 pub const CANVAS_SUBTLE: Color = Color::from_rgb8(0xf7, 0xf7, 0xf5);

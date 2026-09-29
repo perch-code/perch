@@ -85,6 +85,11 @@ pub struct AppState {
     /// Each face as a PNG already cut to its circle (`backend::avatar`),
     /// shared so a clone is a refcount bump.
     pub avatars: RwSignal<HashMap<String, Arc<Vec<u8>>>>,
+    /// Who acted last on each pull request and issue a look has found,
+    /// most recent first, by repository and number: the faces an item's
+    /// or a search hit's row stacks. A notification keeps its own on its
+    /// snapshot.
+    pub participants: RwSignal<HashMap<(String, u64), Vec<perch_github::Participant>>>,
     /// Declared repository identities and display names, also offered by
     /// the sidebar's Repository filter when they have no cached items.
     pub repos: RwSignal<Vec<DeclaredRepo>>,
@@ -279,6 +284,7 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             avatars: RwSignal::new(HashMap::new()),
+            participants: RwSignal::new(HashMap::new()),
             repos: RwSignal::new(Vec::new()),
             github_hosts: RwSignal::new(vec!["github.com".to_string()]),
             open_box: crate::ui::open_box::OpenBox::new(),
@@ -2213,6 +2219,9 @@ impl AppState {
                 self.avatars.update(|m| {
                     m.insert(url, Arc::new(bytes));
                 });
+            }
+            Event::Participants(found) => {
+                self.participants.update(|m| m.extend(found));
             }
             // What was typed went to GitHub, so the form's draft goes.
             Event::PullRequestOpened { item_id, notice, .. } => {

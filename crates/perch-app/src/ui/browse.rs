@@ -399,8 +399,20 @@ fn search_row(state: AppState, backend: Rc<Backend>, hit: SearchHit) -> impl Int
             .style(|s| s.items_center().flex_shrink(0.0_f32)),
             nav_row::byline(
                 state,
-                move || avatar.clone(),
-                hit.author_login.clone(),
+                {
+                    // Who acted last once a look has found them; whoever
+                    // opened it until then.
+                    let author = nav_row::Face::new(avatar, hit.author_login.clone());
+                    let key = (repo.clone(), number);
+                    move || {
+                        state
+                            .participants
+                            .with(|found| {
+                                found.get(&key).filter(|p| !p.is_empty()).map(|p| nav_row::participant_faces(p))
+                            })
+                            .unwrap_or_else(|| vec![author.clone()])
+                    }
+                },
                 repo.clone(),
                 nav_row::reference(Some(number)),
                 nav_row::note(note.map(str::to_string), theme::NAV_MUTED),

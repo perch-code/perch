@@ -6,12 +6,19 @@
 //! repository and number, so a full inbox costs a request or two rather
 //! than one a row. The answer is read back onto the threads by those
 //! aliases.
+//!
+//! The same look answers who acted on each subject last, which the rows
+//! stack as faces, for items and search hits as for notifications.
 
 use std::collections::HashMap;
 
+use jiff::Timestamp;
 use serde::Deserialize;
 
-use crate::model::{SubjectKind, SubjectSnapshot, SubjectState, Thread};
+use crate::model::{Participant, SubjectKind, SubjectSnapshot, SubjectState, Thread};
+
+/// How many faces a row stacks, as GitHub's inbox does.
+const PARTICIPANTS: usize = 3;
 
 /// The subjects of one batch of threads: the query that asks after them,
 /// and what is needed to read the answer back.
@@ -20,7 +27,8 @@ pub(crate) struct SubjectLook {
     repos: Vec<String>,
     /// The threads about each subject, by repository alias index and
     /// number: their ids and `updated_at`s, which stamp the snapshot.
-    threads: HashMap<(usize, u64), Vec<(String, jiff::Timestamp)>>,
+    /// None about a subject asked after for an item or a search hit.
+    threads: HashMap<(usize, u64), Vec<(String, Timestamp)>>,
 }
 
 /// What GitHub says of one subject, in the shape the query asks for it.
@@ -48,6 +56,52 @@ pub(crate) struct SubjectNode {
     deletions: Option<u32>,
     #[serde(default)]
     review_requests: Option<CountNode>,
+    #[serde(default)]
+    created_at: Option<Timestamp>,
+    #[serde(default)]
+    comments: Option<Nodes<ActNode>>,
+    /// A pull request's; an issue has none.
+    #[serde(default)]
+    reviews: Option<Nodes<ActNode>>,
+    #[serde(default)]
+    commits: Option<Nodes<CommitNode>>,
+}
+
+/// A connection's nodes, any of which GitHub may leave null.
+#[derive(Debug, Deserialize)]
+pub(crate) struct Nodes<T> {
+    #[serde(default = "Vec::new")]
+    nodes: Vec<Option<T>>,
+}
+
+/// A comment or a review: who, and when. A review still pending has no
+/// `at`, and counts for nothing.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ActNode {
+    #[serde(default)]
+    author: Option<ActorNode>,
+    #[serde(default)]
+    at: Option<Timestamp>,
+}
+
+/// A commit, whose author is someone on GitHub only when their email is.
+#[derive(Debug, Deserialize)]
+pub(crate) struct CommitNode {
+    commit: CommitInner,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CommitInner {
+    #[serde(default)]
+    at: Option<Timestamp>,
+    #[serde(default)]
+    author: Option<GitActorNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct GitActorNode {
+    #[serde(default)]
+    user: Option<ActorNode>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,16 +128,22 @@ fragment subject on IssueOrPullRequest {
   __typename
   ... on Issue {
     author { login avatar_url: avatarUrl }
+    created_at: createdAt
     issue_state: state
     state_reason: stateReason
+    comments(last: 10) { nodes { author { login avatar_url: avatarUrl } at: createdAt } }
   }
   ... on PullRequest {
     author { login avatar_url: avatarUrl }
+    created_at: createdAt
     pull_state: state
     is_draft: isDraft
     additions
     deletions
     review_requests: reviewRequests { total_count: totalCount }
+    comments(last: 10) { nodes { author { login avatar_url: avatarUrl } at: createdAt } }
+    reviews(last: 10) { nodes { author { login avatar_url: avatarUrl } at: submittedAt } }
+    commits(last: 1) { nodes { commit { at: committedDate author { user { login avatar_url: avatarUrl } } } } }
   }
 }
 "#;
@@ -92,8 +152,7 @@ impl SubjectLook {
     /// The look at the pull requests and the issues among `threads`, or
     /// `None` when there is nothing among them to ask after.
     pub(crate) fn new(threads: &[Thread]) -> Option<Self> {
-        let mut repos: Vec<String> = Vec::new();
-        let mut subjects: HashMap<(usize, u64), Vec<(String, jiff::Timestamp)>> = HashMap::new();
+        let mut look = Self::empty();
         for thread in threads {
             if !matches!(
                 thread.subject.kind,
@@ -104,31 +163,51 @@ impl SubjectLook {
             let Some(number) = thread.number_hint() else {
                 continue;
             };
-            let name = &thread.repository.full_name;
-            if !name.split_once('/').is_some_and(|(owner, repo)| {
-                !owner.is_empty() && !repo.is_empty() && !repo.contains('/')
-            }) {
-                continue;
+            if let Some(stamps) = look.add(&thread.repository.full_name, number) {
+                stamps.push((thread.id.clone(), thread.updated_at));
             }
-            let repo = match repos.iter().position(|r| r == name) {
-                Some(i) => i,
-                None => {
-                    repos.push(name.clone());
-                    repos.len() - 1
-                }
-            };
-            subjects
-                .entry((repo, number))
-                .or_default()
-                .push((thread.id.clone(), thread.updated_at));
         }
-        if subjects.is_empty() {
+        look.or_none()
+    }
+
+    /// The look at pull requests and issues named by repository and
+    /// number, for rows that are not notifications: items and search
+    /// hits. `None` when there is nothing to ask after.
+    pub(crate) fn of_subjects<'a>(subjects: impl IntoIterator<Item = (&'a str, u64)>) -> Option<Self> {
+        let mut look = Self::empty();
+        for (repo, number) in subjects {
+            look.add(repo, number);
+        }
+        look.or_none()
+    }
+
+    fn empty() -> Self {
+        Self {
+            repos: Vec::new(),
+            threads: HashMap::new(),
+        }
+    }
+
+    fn or_none(self) -> Option<Self> {
+        (!self.threads.is_empty()).then_some(self)
+    }
+
+    /// Ask after `number` in `name`, and the threads about it. `None` for
+    /// a name that is not `owner/repo`.
+    fn add(&mut self, name: &str, number: u64) -> Option<&mut Vec<(String, Timestamp)>> {
+        if !name.split_once('/').is_some_and(|(owner, repo)| {
+            !owner.is_empty() && !repo.is_empty() && !repo.contains('/')
+        }) {
             return None;
         }
-        Some(Self {
-            repos,
-            threads: subjects,
-        })
+        let repo = match self.repos.iter().position(|r| r == name) {
+            Some(i) => i,
+            None => {
+                self.repos.push(name.to_string());
+                self.repos.len() - 1
+            }
+        };
+        Some(self.threads.entry((repo, number)).or_default())
     }
 
     /// The GraphQL document: one aliased `repository` per repository, one
@@ -164,10 +243,9 @@ impl SubjectLook {
         query
     }
 
-    /// The snapshots the answer holds, by the id of each thread they are
-    /// for. A subject GitHub left null, or answered in a shape that names
-    /// no state, is passed over.
-    pub(crate) fn read(&self, data: SubjectLookData) -> Vec<(String, SubjectSnapshot)> {
+    /// The subjects the answer holds, by repository alias index and
+    /// number. A subject GitHub left null is passed over.
+    fn nodes(&self, data: SubjectLookData) -> Vec<(usize, u64, SubjectNode)> {
         let mut found = Vec::new();
         for (alias, subjects) in data {
             let Some(repo) = alias
@@ -183,33 +261,95 @@ impl SubjectLook {
                 else {
                     continue;
                 };
-                let Some(node) = node else { continue };
-                let Some(state) = state_of(&node) else {
-                    continue;
-                };
-                let (author_login, author_avatar_url) = node
-                    .author
-                    .map(|actor| (actor.login, actor.avatar_url))
-                    .unwrap_or_default();
-                let churn = node.additions.zip(node.deletions);
-                let review_requested = node.review_requests.is_some_and(|r| r.total_count > 0);
-                for (id, at) in self.threads.get(&(repo, number)).into_iter().flatten() {
-                    found.push((
-                        id.clone(),
-                        SubjectSnapshot {
-                            author_login: author_login.clone(),
-                            author_avatar_url: author_avatar_url.clone(),
-                            state,
-                            churn,
-                            review_requested,
-                            at: *at,
-                        },
-                    ));
+                if let Some(node) = node {
+                    found.push((repo, number, node));
                 }
             }
         }
         found
     }
+
+    /// The snapshots the answer holds, by the id of each thread they are
+    /// for. A subject GitHub left null, or answered in a shape that names
+    /// no state, is passed over.
+    pub(crate) fn read(&self, data: SubjectLookData) -> Vec<(String, SubjectSnapshot)> {
+        let mut found = Vec::new();
+        for (repo, number, node) in self.nodes(data) {
+            let Some(state) = state_of(&node) else {
+                continue;
+            };
+            let participants = participants(&node);
+            let (author_login, author_avatar_url) = node
+                .author
+                .map(|actor| (actor.login, actor.avatar_url))
+                .unwrap_or_default();
+            let churn = node.additions.zip(node.deletions);
+            let review_requested = node.review_requests.is_some_and(|r| r.total_count > 0);
+            for (id, at) in self.threads.get(&(repo, number)).into_iter().flatten() {
+                found.push((
+                    id.clone(),
+                    SubjectSnapshot {
+                        author_login: author_login.clone(),
+                        author_avatar_url: author_avatar_url.clone(),
+                        state,
+                        churn,
+                        review_requested,
+                        participants: Some(participants.clone()),
+                        at: *at,
+                    },
+                ));
+            }
+        }
+        found
+    }
+
+    /// Who acted on each subject the answer holds last, by repository
+    /// and number.
+    pub(crate) fn participants(&self, data: SubjectLookData) -> Vec<((String, u64), Vec<Participant>)> {
+        self.nodes(data)
+            .into_iter()
+            .map(|(repo, number, node)| ((self.repos[repo].clone(), number), participants(&node)))
+            .collect()
+    }
+}
+
+/// Who acted on the subject most recently, most recent first, each once,
+/// at most three: the faces GitHub's inbox stacks on a row. Opening it,
+/// a comment, a review and its latest commit each count, at the time they
+/// happened. A ghost, a pending review, and a commit by an email GitHub
+/// does not know count for nothing.
+fn participants(node: &SubjectNode) -> Vec<Participant> {
+    fn acts(nodes: &Option<Nodes<ActNode>>) -> impl Iterator<Item = (Timestamp, &ActorNode)> {
+        nodes
+            .iter()
+            .flat_map(|nodes| nodes.nodes.iter().flatten())
+            .filter_map(|act| Some((act.at?, act.author.as_ref()?)))
+    }
+    let mut acted: Vec<(Timestamp, &ActorNode)> = Vec::new();
+    acted.extend(node.created_at.zip(node.author.as_ref()));
+    acted.extend(acts(&node.comments));
+    acted.extend(acts(&node.reviews));
+    acted.extend(
+        node.commits
+            .iter()
+            .flat_map(|commits| commits.nodes.iter().flatten())
+            .filter_map(|c| Some((c.commit.at?, c.commit.author.as_ref()?.user.as_ref()?))),
+    );
+    acted.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    let mut found: Vec<Participant> = Vec::new();
+    for (_, actor) in acted {
+        if actor.login.is_empty() || found.iter().any(|p| p.login == actor.login) {
+            continue;
+        }
+        found.push(Participant {
+            login: actor.login.clone(),
+            avatar_url: actor.avatar_url.clone(),
+        });
+        if found.len() == PARTICIPANTS {
+            break;
+        }
+    }
+    found
 }
 
 /// The state a node is in, read the way an item's snapshot reads GitHub's
@@ -300,6 +440,9 @@ mod tests {
             query.contains("review_requests: reviewRequests { total_count: totalCount }"),
             "{query}"
         );
+        assert!(query.contains("comments(last: 10)"), "{query}");
+        assert!(query.contains("reviews(last: 10)"), "{query}");
+        assert!(query.contains("commits(last: 1)"), "{query}");
     }
 
     #[test]
@@ -371,6 +514,7 @@ mod tests {
                         state: SubjectState::PrMerged,
                         churn: Some((2799, 494)),
                         review_requested: false,
+                        participants: Some(vec![]),
                         at,
                     }
                 ),
@@ -382,6 +526,7 @@ mod tests {
                         state: SubjectState::IssueNotPlanned,
                         churn: None,
                         review_requested: false,
+                        participants: Some(vec![]),
                         at,
                     }
                 ),
@@ -393,11 +538,93 @@ mod tests {
                         state: SubjectState::PrDraft,
                         churn: Some((0, 0)),
                         review_requested: true,
+                        participants: Some(vec![]),
                         at,
                     }
                 ),
             ]
         );
+    }
+
+    /// slatedb/slatedb#2084 as GitHub's inbox drew it: geeknarrator,
+    /// who opened it and commented last, then rodesai, then agavra. The
+    /// bot commented before agavra did, and falls off the end; a pending
+    /// review and a commit by an unknown email count for nothing.
+    #[test]
+    fn the_participants_are_the_three_who_acted_last() {
+        let node: SubjectNode = serde_json::from_str(
+            r#"{
+              "__typename": "PullRequest",
+              "pull_state": "OPEN",
+              "author": { "login": "geeknarrator", "avatar_url": "https://avatars/g" },
+              "created_at": "2026-09-08T17:57:14Z",
+              "comments": { "nodes": [
+                { "author": { "login": "geeknarrator", "avatar_url": "https://avatars/g" }, "at": "2026-09-10T14:13:41Z" },
+                { "author": { "login": "dosubot", "avatar_url": "https://avatars/in/1" }, "at": "2026-09-10T18:05:19Z" },
+                { "author": { "login": "agavra", "avatar_url": "https://avatars/a" }, "at": "2026-09-10T21:19:51Z" },
+                { "author": { "login": "rodesai", "avatar_url": "https://avatars/r" }, "at": "2026-09-15T04:51:39Z" },
+                { "author": null, "at": "2026-09-27T00:00:00Z" },
+                { "author": { "login": "geeknarrator", "avatar_url": "https://avatars/g" }, "at": "2026-09-28T17:03:08Z" }
+              ] },
+              "reviews": { "nodes": [
+                { "author": { "login": "rodesai", "avatar_url": "https://avatars/r" }, "at": "2026-09-09T20:43:36Z" },
+                { "author": { "login": "pending", "avatar_url": "https://avatars/p" }, "at": null },
+                null
+              ] },
+              "commits": { "nodes": [
+                { "commit": { "at": "2026-09-28T17:03:36Z", "author": { "user": null } } }
+              ] }
+            }"#,
+        )
+        .unwrap();
+        let logins: Vec<String> = participants(&node).into_iter().map(|p| p.login).collect();
+        assert_eq!(logins, ["geeknarrator", "rodesai", "agavra"]);
+    }
+
+    /// Who opened it counts, at the time they did, and so does whoever
+    /// wrote the latest commit: on a quiet subject that is all there is.
+    #[test]
+    fn opening_it_and_the_latest_commit_count() {
+        let node: SubjectNode = serde_json::from_str(
+            r#"{
+              "__typename": "PullRequest",
+              "author": { "login": "opener", "avatar_url": "" },
+              "created_at": "2026-09-08T00:00:00Z",
+              "commits": { "nodes": [
+                { "commit": { "at": "2026-09-09T00:00:00Z", "author": { "user": { "login": "pusher", "avatar_url": "" } } } }
+              ] }
+            }"#,
+        )
+        .unwrap();
+        let logins: Vec<String> = participants(&node).into_iter().map(|p| p.login).collect();
+        assert_eq!(logins, ["pusher", "opener"]);
+    }
+
+    /// Items and search hits are asked after by repository and number,
+    /// and answered the same way.
+    #[test]
+    fn subjects_are_asked_after_by_repository_and_number() {
+        let look = SubjectLook::of_subjects([("slatedb/slatedb", 2084), ("not-a-repository", 1)]).unwrap();
+        let query = look.query();
+        assert!(query.contains("n2084: issueOrPullRequest(number: 2084)"), "{query}");
+        assert!(!query.contains("number: 1)"), "{query}");
+        let data: SubjectLookData = serde_json::from_str(
+            r#"{ "r0": { "n2084": {
+              "__typename": "Issue",
+              "issue_state": "OPEN",
+              "author": { "login": "someone", "avatar_url": "https://avatars/2" },
+              "created_at": "2026-09-08T00:00:00Z"
+            } } }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            look.participants(data),
+            vec![(
+                ("slatedb/slatedb".to_string(), 2084),
+                vec![Participant { login: "someone".into(), avatar_url: "https://avatars/2".into() }]
+            )]
+        );
+        assert!(SubjectLook::of_subjects([("local", 3)]).is_none());
     }
 
     #[test]

@@ -203,30 +203,36 @@ pub(crate) fn glyph(item: &Item) -> impl IntoView {
     }
 }
 
-/// Whose face the byline carries: the author of the pull request or the
-/// issue, or the reader's own on a branch of their own.
-fn author(state: AppState, item: &Item) -> (impl Fn() -> String + 'static, String) {
-    let own = match &item.subject {
-        Some(ItemSubject::PullRequest(pr)) => Some((pr.author_login.clone(), pr.author_avatar_url.clone())),
-        Some(ItemSubject::Issue(issue)) => Some((issue.author_login.clone(), issue.author_avatar_url.clone())),
-        None => None,
-    };
-    match own {
-        Some((login, url)) => (Box::new(move || url.clone()) as Box<dyn Fn() -> String>, login),
+/// The faces the byline stacks: who acted last on the pull request or
+/// the issue once a look has found them, most recent first; its author
+/// until then; the reader's own on a branch of their own.
+fn faces(state: AppState, item: &Item) -> impl Fn() -> Vec<nav_row::Face> + 'static {
+    let subject = item.subject.as_ref().map(|subject| {
+        let author = match subject {
+            ItemSubject::PullRequest(pr) => nav_row::Face::new(pr.author_avatar_url.clone(), pr.author_login.clone()),
+            ItemSubject::Issue(issue) => nav_row::Face::new(issue.author_avatar_url.clone(), issue.author_login.clone()),
+        };
+        ((subject.repo_full_name().to_string(), subject.number()), author)
+    });
+    move || match &subject {
+        Some((key, author)) => state
+            .participants
+            .with(|found| found.get(key).filter(|p| !p.is_empty()).map(|p| nav_row::participant_faces(p)))
+            .unwrap_or_else(|| vec![author.clone()]),
         // The viewer arrives after the rows do, so the face follows it.
-        None => (
-            Box::new(move || state.viewer.with(|v| v.as_ref().map(|(_, url)| url.clone()).unwrap_or_default()))
-                as Box<dyn Fn() -> String>,
-            state.viewer.with_untracked(|v| v.as_ref().map(|(login, _)| login.clone()).unwrap_or_default()),
-        ),
+        None => state.viewer.with(|v| {
+            v.as_ref()
+                .map(|(login, url)| vec![nav_row::Face::new(url.clone(), login.clone())])
+                .unwrap_or_else(|| vec![nav_row::Face::new("", "")])
+        }),
     }
 }
 
-/// The repository, then the number, then the churn: what Codex's byline
-/// says of a branch. A branch with no pull request or issue has no
-/// number, and its name is already the title.
+/// Who acted last, the repository, then the number, then the churn: what
+/// Codex's byline says of a branch. A branch with no pull request or
+/// issue has no number, and its name is already the title.
 fn byline(state: AppState, item: &Item) -> impl IntoView {
-    let (avatar_url, login) = author(state, item);
+    let faces = faces(state, item);
     // A checkout says how far it has gone from its base once the scan has
     // measured it; a pull request says what GitHub counts until then.
     let churn = item
@@ -247,8 +253,7 @@ fn byline(state: AppState, item: &Item) -> impl IntoView {
     };
     nav_row::byline(
         state,
-        avatar_url,
-        login,
+        faces,
         item.repo_full_name.clone(),
         nav_row::reference(item.subject.as_ref().map(|subject| subject.number())),
         Stack::horizontal((

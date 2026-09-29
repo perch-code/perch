@@ -77,6 +77,7 @@ impl Thread {
         ) && self.number_hint().is_some()
             && self.subject_snapshot.as_ref().is_none_or(|snapshot| {
                 snapshot.at < self.updated_at
+                    || snapshot.participants.is_none()
                     || (self.subject.kind == SubjectKind::PullRequest && snapshot.churn.is_none())
             })
     }
@@ -116,11 +117,23 @@ pub struct SubjectSnapshot {
     /// not yet.
     #[serde(default)]
     pub review_requested: bool,
+    /// Who acted on it most recently, most recent first, at most three.
+    /// `None` on a snapshot taken before this was asked for.
+    #[serde(default)]
+    pub participants: Option<Vec<Participant>>,
     /// The thread's `updated_at` when the look was taken. Activity since
     /// can have changed the state, so a thread newer than this is looked
     /// at again.
     #[serde(with = "ts")]
     pub at: Timestamp,
+}
+
+/// Someone who acted on a pull request or an issue: opened it, commented
+/// on it, reviewed it, or wrote its latest commit.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Participant {
+    pub login: String,
+    pub avatar_url: String,
 }
 
 /// Where a workflow run notification's run is, once a look has found it.
@@ -297,6 +310,12 @@ pub struct Repository {
     pub owner_avatar_url: String,
 }
 
+/// Whether a face is a GitHub App's, which GitHub draws as a rounded
+/// square rather than a circle: a bot's avatar is served from under `/in/`.
+pub fn is_app_avatar(url: &str) -> bool {
+    url.contains("githubusercontent.com/in/")
+}
+
 fn owner_avatar<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
@@ -426,6 +445,7 @@ mod tests {
             state: SubjectState::IssueOpen,
             churn: None,
             review_requested: false,
+            participants: Some(vec![]),
             at: t.updated_at,
         });
         assert!(!t.wants_snapshot());
@@ -452,6 +472,7 @@ mod tests {
             state: SubjectState::PrOpen,
             churn: None,
             review_requested: false,
+            participants: Some(vec![]),
             at: t.updated_at,
         };
         // Taken by a version that did not ask.
@@ -469,6 +490,27 @@ mod tests {
     }
 
     #[test]
+    fn a_snapshot_without_its_participants_is_taken_again() {
+        let mut t = thread_with_url(Some("https://api.github.com/repos/a/b/issues/9"));
+        let mut snapshot = SubjectSnapshot {
+            author_login: "someone".into(),
+            author_avatar_url: "https://avatars/2".into(),
+            state: SubjectState::IssueOpen,
+            churn: None,
+            review_requested: false,
+            participants: None,
+            at: t.updated_at,
+        };
+        // Taken by a version that did not ask.
+        t.subject_snapshot = Some(snapshot.clone());
+        assert!(t.wants_snapshot());
+        // Asked, and nobody there: settled all the same.
+        snapshot.participants = Some(vec![]);
+        t.subject_snapshot = Some(snapshot);
+        assert!(!t.wants_snapshot());
+    }
+
+    #[test]
     fn a_snapshot_round_trips_through_the_cache_and_is_absent_from_the_wire() {
         let mut t = thread_with_url(Some("https://api.github.com/repos/a/b/pulls/9"));
         t.subject_snapshot = Some(SubjectSnapshot {
@@ -477,6 +519,10 @@ mod tests {
             state: SubjectState::PrMerged,
             churn: Some((1192, 36)),
             review_requested: true,
+            participants: Some(vec![Participant {
+                login: "someone".into(),
+                avatar_url: "https://avatars/2".into(),
+            }]),
             at: t.updated_at,
         });
         let json = serde_json::to_string(&t).unwrap();
@@ -489,10 +535,12 @@ mod tests {
         let snapshot = older["subject_snapshot"].as_object_mut().unwrap();
         snapshot.remove("churn");
         snapshot.remove("review_requested");
+        snapshot.remove("participants");
         let older: Thread = serde_json::from_value(older).unwrap();
         let snapshot = older.subject_snapshot.unwrap();
         assert_eq!(snapshot.churn, None);
         assert!(!snapshot.review_requested);
+        assert_eq!(snapshot.participants, None);
 
         // GitHub's payload has no such field, and is not refused for it.
         let mut from_wire: serde_json::Value = serde_json::from_str(&json).unwrap();

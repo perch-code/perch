@@ -695,6 +695,9 @@ pub enum Event {
         url: String,
         bytes: Vec<u8>,
     },
+    /// Who acted last on pull requests and issues, by repository and
+    /// number: the faces on item and Browse rows.
+    Participants(Vec<((String, u64), Vec<perch_github::Participant>)>),
     /// Declared repository identities and display names for filters and
     /// item context. Sent at startup, and again when Add repository adds
     /// one.
@@ -3357,6 +3360,7 @@ async fn run(
         homes_refreshed: Default::default(),
         notifications: Arc::new(std::sync::Mutex::new(initial_notifications.clone())),
         asked_subjects: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        asked_participants: Default::default(),
         approvals: Default::default(),
         approval_timeout: crate::approvals::APPROVAL_TIMEOUT,
         window: NO_WINDOW,
@@ -3377,6 +3381,7 @@ async fn run(
     // The faces on the cached rows, from disk where they are there.
     ctx.want_avatars(author_avatars(&initial_items));
     ctx.want_avatars(notification_avatars(&initial_notifications));
+    ctx.look_at_participants(item_subjects(&initial_items));
 
     // Who the reader is on GitHub, for their own byline: once per launch,
     // kept in meta so the next launch has it before the network does.
@@ -4890,6 +4895,10 @@ struct Ctx {
     /// time, so one it could not resolve is not asked about again at
     /// every poll until the thread moves on.
     asked_subjects: Arc<std::sync::Mutex<std::collections::HashSet<(String, Timestamp)>>>,
+    /// Pull requests and issues whose participants GitHub has been asked
+    /// about for an item or a search hit, by repository, number and when
+    /// each last moved.
+    asked_participants: Arc<std::sync::Mutex<std::collections::HashSet<(String, u64, Timestamp)>>>,
     /// The window whose view `slot`, `language_server` and the request
     /// sequences are, and whose events these
     /// are. `NO_WINDOW` for the worker's own work, whose slot stays empty.
@@ -5209,6 +5218,7 @@ impl Ctx {
             .flatten()
         {
             self.want_avatars(author_avatars(&items));
+            self.look_at_participants(item_subjects(&items));
         }
     }
 
@@ -5219,7 +5229,48 @@ impl Ctx {
             .flatten()
         {
             self.want_avatars(author_avatars(&items));
+            self.look_at_participants(item_subjects(&items));
         }
+    }
+
+    /// Find who acted last on these pull requests and issues, for the
+    /// item and Browse rows' faces, fifty to a request, off the caller.
+    /// Each is asked after once for each time it moves; one GitHub could
+    /// not resolve is not asked after again until then.
+    fn look_at_participants(&self, subjects: Vec<(String, u64, Timestamp)>) {
+        let Some(github) = self.github() else { return };
+        let wanted: Vec<(String, u64)> = {
+            let Ok(mut asked) = self.asked_participants.lock() else {
+                return;
+            };
+            subjects
+                .into_iter()
+                .filter(|subject| asked.insert(subject.clone()))
+                .map(|(repo, number, _)| (repo, number))
+                .collect()
+        };
+        if wanted.is_empty() {
+            return;
+        }
+        let ctx = self.clone();
+        tokio::spawn(async move {
+            for batch in wanted.chunks(SUBJECTS_PER_LOOK) {
+                match github.look_at_participants(batch).await {
+                    Ok(found) => {
+                        ctx.want_avatars(
+                            found
+                                .iter()
+                                .flat_map(|(_, participants)| participants.iter().map(|p| p.avatar_url.clone())),
+                        );
+                        let _ = ctx.events.send(Event::Participants(found));
+                    }
+                    Err(e) => {
+                        tracing::info!(error = %e, "could not look at who acted on the items");
+                        return;
+                    }
+                }
+            }
+        });
     }
 
     fn notifications_last_modified(&self) -> Option<String> {
@@ -5630,7 +5681,7 @@ fn send_items(
 }
 
 /// The avatar of whoever opened each pull request or issue: what the
-/// drawer's bylines show.
+/// drawer's bylines show until a look has found who acted there last.
 fn author_avatars(items: &[Item]) -> impl Iterator<Item = String> + '_ {
     items.iter().filter_map(|item| match &item.subject {
         Some(ItemSubject::PullRequest(pr)) => Some(pr.author_avatar_url.clone()),
@@ -5639,18 +5690,47 @@ fn author_avatars(items: &[Item]) -> impl Iterator<Item = String> + '_ {
     })
 }
 
-/// The faces the notification rows carry: whoever opened the subject
-/// where a look has found them, and the repository's, which stands in
-/// until then and on a subject nobody opened.
+/// The pull requests and issues items are about, by the repository the
+/// subject lives in, with when each last moved: what a look at their
+/// participants asks after.
+fn item_subjects(items: &[Item]) -> Vec<(String, u64, Timestamp)> {
+    items
+        .iter()
+        .filter_map(|item| {
+            let subject = item.subject.as_ref()?;
+            Some((
+                subject.repo_full_name().to_string(),
+                subject.number(),
+                subject.updated_at().unwrap_or(Timestamp::UNIX_EPOCH),
+            ))
+        })
+        .collect()
+}
+
+/// The faces the notification rows carry: who acted last on the subject
+/// and whoever opened it, where a look has found them, and the
+/// repository's, which stands in until then and on a subject nobody
+/// opened.
 fn notification_avatars(threads: &[Thread]) -> impl Iterator<Item = String> + '_ {
     threads.iter().flat_map(|thread| {
         thread
             .subject_snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.author_avatar_url.clone())
-            .into_iter()
+            .iter()
+            .flat_map(snapshot_avatars)
             .chain(std::iter::once(thread.repository.owner_avatar_url.clone()))
     })
+}
+
+/// The faces a look found for one subject: whoever opened it, and who
+/// acted there last.
+fn snapshot_avatars(snapshot: &perch_github::SubjectSnapshot) -> impl Iterator<Item = String> + '_ {
+    std::iter::once(snapshot.author_avatar_url.clone()).chain(
+        snapshot
+            .participants
+            .iter()
+            .flatten()
+            .map(|p| p.avatar_url.clone()),
+    )
 }
 
 fn review_group_summary(
@@ -10419,11 +10499,7 @@ async fn look_at_subjects(ctx: &Ctx) {
         if found.is_empty() {
             continue;
         }
-        ctx.want_avatars(
-            found
-                .iter()
-                .map(|(_, snapshot)| snapshot.author_avatar_url.clone()),
-        );
+        ctx.want_avatars(found.iter().flat_map(|(_, snapshot)| snapshot_avatars(snapshot)));
         ctx.edit_polled_notifications(|threads| {
             for (id, snapshot) in found {
                 if let Some(thread) = threads.iter_mut().find(|thread| thread.id == id) {
@@ -11214,6 +11290,13 @@ async fn browse(ctx: &Ctx, query: &str, page: u32) -> Result<perch_github::Searc
     match github.search_issues(query, page, BROWSE_PAGE).await {
         Ok(found) => {
             ctx.want_avatars(found.hits.iter().map(|hit| hit.author_avatar_url.clone()));
+            ctx.look_at_participants(
+                found
+                    .hits
+                    .iter()
+                    .map(|hit| (hit.repo_full_name.clone(), hit.number, hit.updated_at))
+                    .collect(),
+            );
             Ok(found)
         }
         Err(perch_github::Error::Network(_)) => Err("Offline".into()),
@@ -14929,7 +15012,7 @@ fn spawn_avatar(
         .and_then(|cache| cache.lock().ok()?.load_avatar(&url));
     if let Some(bytes) = kept {
         tracing::debug!(url, bytes = bytes.len(), "avatar from disk");
-        let bytes = avatar::drawn(bytes);
+        let bytes = avatar::drawn(bytes, &url);
         let _ = events.send(Event::Avatar { url, bytes });
         return;
     }
@@ -14948,7 +15031,7 @@ fn spawn_avatar(
                         let _ = guard.store_avatar(&url, &bytes);
                     }
                 }
-                let bytes = avatar::drawn(bytes);
+                let bytes = avatar::drawn(bytes, &url);
                 let _ = events.send(Event::Avatar { url, bytes });
             }
             Err(e) => tracing::debug!(error = %e, url, "avatar fetch failed"),
@@ -15360,6 +15443,7 @@ mod tests {
             homes_refreshed: Default::default(),
             notifications: Default::default(),
             asked_subjects: Default::default(),
+            asked_participants: Default::default(),
             approvals: Default::default(),
             approval_timeout: crate::approvals::APPROVAL_TIMEOUT,
             window: NO_WINDOW,
@@ -18848,6 +18932,54 @@ read eof || true
         assert_eq!(*ctx.notifications.lock().unwrap(), vec![incoming]);
     }
 
+    /// Items and search hits are asked after in one query for who acted
+    /// on them last, once each time they move.
+    #[tokio::test]
+    async fn a_look_finds_who_acted_on_items_once_per_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let answer = r#"{ "data": { "r0": { "n7": {
+          "__typename": "Issue",
+          "issue_state": "OPEN",
+          "author": { "login": "opener", "avatar_url": "" },
+          "created_at": "2026-09-08T00:00:00Z",
+          "comments": { "nodes": [
+            { "author": { "login": "replier", "avatar_url": "" }, "at": "2026-09-09T00:00:00Z" }
+          ] }
+        } } } }"#;
+        let (base, paths) = serve_by_path(move |path| match path {
+            "/graphql" => ("200 OK", answer.to_string()),
+            _ => ("404 Not Found", "{}".to_string()),
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let at: Timestamp = "2026-09-09T00:00:00Z".parse().unwrap();
+        let wanted = vec![("org/one".to_string(), 7, at), ("org/one".to_string(), 7, at)];
+
+        ctx.look_at_participants(wanted.clone());
+        let mut found = None;
+        for _ in 0..500 {
+            if let Some(Event::Participants(told)) = received.try_iter().find(|e| matches!(e, Event::Participants(_))) {
+                found = Some(told);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let logins: Vec<_> = found.expect("no answer")[0].1.iter().map(|p| p.login.clone()).collect();
+        assert_eq!(logins, ["replier", "opener"]);
+
+        // Asked once for that revision; asked again once it moves.
+        ctx.look_at_participants(wanted);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(paths.lock().unwrap().len(), 1);
+        ctx.look_at_participants(vec![("org/one".to_string(), 7, "2026-09-10T00:00:00Z".parse().unwrap())]);
+        for _ in 0..500 {
+            if paths.lock().unwrap().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(paths.lock().unwrap().len(), 2);
+    }
+
     #[tokio::test]
     async fn a_look_gives_the_rows_their_faces_and_states_once_per_revision() {
         let dir = tempfile::tempdir().unwrap();
@@ -18889,6 +19021,7 @@ read eof || true
                 state: perch_github::SubjectState::PrMerged,
                 churn: Some((12, 3)),
                 review_requested: false,
+                participants: Some(vec![]),
                 at: threads[0].updated_at,
             })
         );

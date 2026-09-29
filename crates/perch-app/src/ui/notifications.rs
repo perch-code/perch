@@ -161,26 +161,24 @@ fn notification_glyph(thread: &Thread) -> impl IntoView {
     sidebar_glyph(glyph, color).into_any()
 }
 
-/// The face of whoever opened the subject, the repository, the number,
-/// and on a pull request its review pill and its churn, once a look has
-/// found them: the shape an item's byline has. The repository's face
-/// stands in until a look has found the person, and on a subject nobody
-/// opened: a workflow run, a release.
+/// Who acted last on the subject, the repository, the number, and on a
+/// pull request its review pill and its churn, once a look has found
+/// them: the shape an item's byline has. Until a look has found who acted
+/// there, whoever opened it; the repository's face until a look has found
+/// even that, and on a subject nobody opened: a workflow run, a release.
 fn byline(state: AppState, thread: &Thread) -> impl IntoView {
-    let owner = thread
-        .repository
-        .full_name
-        .split('/')
-        .next()
-        .unwrap_or_default()
-        .to_string();
-    let (avatar_url, seed) = match thread
-        .subject_snapshot
-        .as_ref()
-        .filter(|snapshot| !snapshot.author_login.is_empty())
-    {
-        Some(snapshot) => (snapshot.author_avatar_url.clone(), snapshot.author_login.clone()),
-        None => (thread.repository.owner_avatar_url.clone(), owner),
+    let faces = match thread.subject_snapshot.as_ref() {
+        Some(snapshot) if snapshot.participants.as_ref().is_some_and(|p| !p.is_empty()) => {
+            nav_row::participant_faces(snapshot.participants.as_deref().unwrap_or_default())
+        }
+        Some(snapshot) if !snapshot.author_login.is_empty() => vec![nav_row::Face::new(
+            snapshot.author_avatar_url.clone(),
+            snapshot.author_login.clone(),
+        )],
+        _ => vec![nav_row::Face::new(
+            thread.repository.owner_avatar_url.clone(),
+            thread.repository.full_name.split('/').next().unwrap_or_default(),
+        )],
     };
     let snapshot = thread.subject_snapshot.as_ref();
     let review = snapshot
@@ -188,8 +186,7 @@ fn byline(state: AppState, thread: &Thread) -> impl IntoView {
         .then_some(perch_github::ReviewDecision::ReviewRequested);
     nav_row::byline(
         state,
-        move || avatar_url.clone(),
-        seed,
+        move || faces.clone(),
         thread.repository.full_name.clone(),
         nav_row::reference(number(thread)),
         nav_row::chips(state, None, review),

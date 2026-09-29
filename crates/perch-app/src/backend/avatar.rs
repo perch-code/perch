@@ -1,5 +1,6 @@
 //! A face as the window draws it: cropped square and cut to its circle
-//! here, once, as it arrives, so the view draws the picture as it is.
+//! here, once, as it arrives, so the view draws the picture as it is. An
+//! app's face is cut to a rounded square instead, as GitHub draws a bot.
 //!
 //! The view could clip it round, but vger, the renderer, clips with a hard
 //! edge and rounds all four corners of a clip by the top-left one's
@@ -20,26 +21,29 @@ use std::sync::{LazyLock, Mutex};
 
 use image::{imageops, ImageFormat};
 
-/// Faces already cut, by a hash of what GitHub sent. The rows send every
-/// face again from disk each time they change, and the cut, a decode and
-/// an encode, is most of what that costs: some milliseconds a face in a
-/// debug build.
+/// Faces already cut, by a hash of what GitHub sent and the shape. The
+/// rows send every face again from disk each time they change, and the
+/// cut, a decode and an encode, is most of what that costs: some
+/// milliseconds a face in a debug build.
 static CUT: LazyLock<Mutex<HashMap<u64, Vec<u8>>>> = LazyLock::new(Default::default);
 
 /// The most pixels a side a face keeps: what `GitHub::fetch_avatar` asks
 /// for, and more than the largest face drawn (24 pt) needs at 2x.
 const SIDE: u32 = 64;
 
-/// The face as the window draws it, from what GitHub sent: its `circle`,
-/// or the bytes as they came when they are not a picture.
-pub(crate) fn drawn(bytes: Vec<u8>) -> Vec<u8> {
+/// The face as the window draws it, from what GitHub sent to `url`: its
+/// `cut`, round or, for an app, a rounded square; or the bytes as they
+/// came when they are not a picture.
+pub(crate) fn drawn(bytes: Vec<u8>, url: &str) -> Vec<u8> {
+    let app = perch_github::is_app_avatar(url);
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);
+    app.hash(&mut hasher);
     let key = hasher.finish();
     if let Some(cut) = CUT.lock().ok().and_then(|cut| cut.get(&key).cloned()) {
         return cut;
     }
-    match circle(&bytes) {
+    match cut(&bytes, if app { crate::theme::APP_AVATAR_CORNER as f32 } else { 0.5 }) {
         Some(cut) => {
             if let Ok(mut memo) = CUT.lock() {
                 memo.insert(key, cut.clone());
@@ -51,11 +55,12 @@ pub(crate) fn drawn(bytes: Vec<u8>) -> Vec<u8> {
 }
 
 /// The picture in `bytes` cropped square about its centre, shrunk to
-/// `SIDE` if it is bigger, cut to the circle inside that square, as PNG. Only the alpha changes: the colour
+/// `SIDE` if it is bigger, with its corners rounded by `corner` of its
+/// side, as PNG: a half is a circle. Only the alpha changes: the colour
 /// under the rim stays the picture's, so scaling the picture blends the
 /// rim with its own colours rather than with black. `None` for bytes that
 /// are not a picture.
-fn circle(bytes: &[u8]) -> Option<Vec<u8>> {
+fn cut(bytes: &[u8], corner: f32) -> Option<Vec<u8>> {
     let picture = image::load_from_memory(bytes).ok()?.into_rgba8();
     let side = picture.width().min(picture.height());
     if side == 0 {
@@ -66,10 +71,16 @@ fn circle(bytes: &[u8]) -> Option<Vec<u8>> {
     if side > SIDE {
         square = imageops::resize(&square, SIDE, SIDE, imageops::FilterType::Lanczos3);
     }
-    let radius = square.width() as f32 / 2.0;
+    let half = square.width() as f32 / 2.0;
+    let radius = square.width() as f32 * corner;
     for (px, py, pixel) in square.enumerate_pixels_mut() {
-        // How much of the pixel is inside, over a rim a pixel wide.
-        let (dx, dy) = (px as f32 + 0.5 - radius, py as f32 + 0.5 - radius);
+        // How far past the straight edges toward a corner's centre the
+        // pixel is, and so how much of it is inside, over a rim a pixel
+        // wide.
+        let (dx, dy) = (
+            ((px as f32 + 0.5 - half).abs() - (half - radius)).max(0.0),
+            ((py as f32 + 0.5 - half).abs() - (half - radius)).max(0.0),
+        );
         let inside = (radius - dx.hypot(dy) + 0.5).clamp(0.0, 1.0);
         pixel[3] = (f32::from(pixel[3]) * inside).round() as u8;
     }
@@ -99,7 +110,7 @@ pub(crate) mod tests {
     /// all over.
     #[test]
     fn a_face_is_cropped_square_and_cut_to_a_soft_circle() {
-        let cut = image::load_from_memory(&drawn(picture(40, 32)))
+        let cut = image::load_from_memory(&drawn(picture(40, 32), "https://avatars/u/1"))
             .unwrap()
             .into_rgba8();
         assert_eq!(cut.dimensions(), (32, 32));
@@ -119,7 +130,7 @@ pub(crate) mod tests {
     /// asked for, so it takes no more of vger's atlas than any other face.
     #[test]
     fn a_big_face_is_shrunk_to_the_size_asked_for() {
-        let cut = image::load_from_memory(&drawn(picture(420, 420)))
+        let cut = image::load_from_memory(&drawn(picture(420, 420), "https://avatars/u/1"))
             .unwrap()
             .into_rgba8();
         assert_eq!(cut.dimensions(), (SIDE, SIDE));
@@ -132,19 +143,33 @@ pub(crate) mod tests {
     #[test]
     fn a_face_sent_again_is_not_cut_again() {
         let sent = picture(24, 24);
-        let first = drawn(sent.clone());
+        let first = drawn(sent.clone(), "https://avatars/u/1");
         let mut hasher = DefaultHasher::new();
         sent.hash(&mut hasher);
+        false.hash(&mut hasher);
         let key = hasher.finish();
         assert_eq!(CUT.lock().unwrap().get(&key), Some(&first));
-        assert_eq!(drawn(sent), first);
+        assert_eq!(drawn(sent, "https://avatars/u/1"), first);
     }
 
     /// Bytes that are not a picture go through as they came, for the
     /// view to fail on as it would have.
+    /// An app's face keeps more of its corners than a person's: clear
+    /// only in the rounding, solid where a circle would have cut it.
+    #[test]
+    fn an_apps_face_is_cut_to_a_rounded_square() {
+        let cut = image::load_from_memory(&drawn(picture(32, 32), "https://avatars.githubusercontent.com/in/15368?v=4"))
+            .unwrap()
+            .into_rgba8();
+        let alpha = |x, y| cut.get_pixel(x, y)[3];
+        assert_eq!(alpha(0, 0), 0, "the very corner is rounded off");
+        assert_eq!(alpha(3, 3), 255, "a circle would cut here; the square keeps it");
+        assert_eq!(alpha(16, 0), 255, "the edges are straight");
+    }
+
     #[test]
     fn what_is_not_a_picture_goes_through_as_it_came() {
         let bytes = b"<html>not found</html>".to_vec();
-        assert_eq!(drawn(bytes.clone()), bytes);
+        assert_eq!(drawn(bytes.clone(), "https://avatars/u/1"), bytes);
     }
 }

@@ -1261,6 +1261,33 @@ impl GitHub {
         Ok(look.read(data))
     }
 
+    /// Who acted last on each of these pull requests and issues, named by
+    /// repository and number, in the query `look_at_subjects` sends: fifty
+    /// or so a request. A subject GitHub cannot resolve is passed over.
+    pub async fn look_at_participants(
+        &self,
+        subjects: &[(String, u64)],
+    ) -> Result<Vec<((String, u64), Vec<crate::model::Participant>)>, Error> {
+        let Some(look) =
+            SubjectLook::of_subjects(subjects.iter().map(|(repo, number)| (repo.as_str(), *number)))
+        else {
+            return Ok(Vec::new());
+        };
+        let payload = serde_json::json!({ "query": look.query() });
+        let (data, problems) = self.graphql_partial::<SubjectLookData>(&payload).await?;
+        let Some(data) = data else {
+            return Err(if problems.is_empty() {
+                Error::Decode("GitHub's GraphQL response had no data".into())
+            } else {
+                Error::Graphql(problems.join("; "))
+            });
+        };
+        for problem in problems {
+            tracing::debug!(problem, "a subject's participants could not be looked at");
+        }
+        Ok(look.participants(data))
+    }
+
     /// The pull request whose head is `owner:branch` on `repo_full_name`,
     /// open or closed, with a conditional request: an unchanged answer
     /// costs a 304 and returns `Unchanged`.

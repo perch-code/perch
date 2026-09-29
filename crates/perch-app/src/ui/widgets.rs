@@ -430,14 +430,27 @@ pub fn icon_button(
     })
 }
 
-/// A circular avatar that falls back to a tinted initial until the image
-/// arrives, so a row never reflows when the download lands.
+/// How round a face of `size` is: a circle, or for an app's face the
+/// rounded square GitHub draws a bot with.
+pub fn avatar_radius(size: f64, url: &str) -> f64 {
+    if perch_github::is_app_avatar(url) {
+        size * theme::APP_AVATAR_CORNER
+    } else {
+        size / 2.0
+    }
+}
+
+/// A circular avatar, or an app's rounded square, that falls back to a
+/// tinted initial until the image arrives, so a row never reflows when
+/// the download lands.
 pub fn avatar(state: AppState, url: impl Fn() -> String + 'static, size: f64, seed: String) -> impl IntoView {
-    let radius = size / 2.0;
     dyn_container(
-        move || state.avatar_for(&url()),
-        move |bytes| match bytes {
-            // The picture comes cut to its circle (`backend::avatar`) and is
+        move || {
+            let url = url();
+            (avatar_radius(size, &url), state.avatar_for(&url))
+        },
+        move |(radius, bytes)| match bytes {
+            // The picture comes cut to its shape (`backend::avatar`) and is
             // drawn as it is, filling its square. A clip would round it with
             // a hard edge, and not at all half under the top of a list.
             Some(bytes) => img(move || bytes.as_ref().clone())
@@ -466,7 +479,7 @@ pub fn avatar(state: AppState, url: impl Fn() -> String + 'static, size: f64, se
             }
         },
     )
-    .style(move |s| s.size(size, size).border_radius(radius))
+    .style(move |s| s.size(size, size))
 }
 
 /// A centred message for empty and error states.
