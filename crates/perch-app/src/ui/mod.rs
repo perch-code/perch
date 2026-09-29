@@ -274,6 +274,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         crate::review::go_to::palette(state, review, backend.clone()),
         // Open…'s box, as modal as the palette.
         open_box::overlay(state),
+        // Start work's confirmation, as modal.
+        crate::review::start_work::overlay(state, backend.clone()),
         // Over everything, and only while a drawer's edge is being dragged.
         sidebar::resize_cursor_sheet(state),
         drawer::resize_cursor_sheet(state),
@@ -337,6 +339,9 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 }
                 if state.open_box.open.get() {
                     return open_box::key(state, key_backend, key);
+                }
+                if state.start_work_confirm.with(Option::is_some) {
+                    return crate::review::start_work::key(state, key_backend, key);
                 }
                 // Cmd-N opens the new-work view, from anywhere.
                 if key.code == Code::KeyN && key.modifiers == OS_MOD {
@@ -745,9 +750,12 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         // Window-level shortcuts. Key events bubble from whatever has focus, so
         // a handler on the root view catches them wherever the reader is.
         .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-            // None of these while Cmd-P's palette or Open… is up: they
-            // are modal.
-            if review.go_to.open.get() || state.open_box.open.get() {
+            // None of these while Cmd-P's palette, Open… or Start work's
+            // confirmation is up: they are modal.
+            if review.go_to.open.get()
+                || state.open_box.open.get()
+                || state.start_work_confirm.with(Option::is_some)
+            {
                 return EventPropagation::Continue;
             }
             // Escape puts away whatever the sidebar has open under a row.
@@ -1318,6 +1326,52 @@ mod tests {
         harness.paint();
         assert!(!state.open_box.open.get());
         assert!(named(harness.root_id(), "open-box-panel").is_none());
+    }
+
+    /// Start work asks first: Escape cancels with nothing cut, and Enter
+    /// cuts the branch.
+    #[test]
+    fn start_work_asks_before_cutting_a_worktree() {
+        use crate::backend::Command;
+        use crate::review::start_work::{ask, Pending};
+        let state = AppState::new();
+        let review = ReviewState::new();
+        state.review.set(Some(review));
+        let (backend, mut commands) = Backend::recording();
+        let root = TestRoot::new();
+        let view = app_view(state, review, Rc::new(backend));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+        let settle = |harness: &mut HeadlessHarness| {
+            harness.rebuild();
+            harness.paint();
+        };
+
+        ask(state, Pending::Item("slatedb/slatedb#7".into()));
+        settle(&mut harness);
+        let panel = named(harness.root_id(), "start-work-confirm-panel").expect("no confirmation");
+        assert!(panel.get_visual_rect_no_clip().width() > 0.0);
+        let create = named(harness.root_id(), "start-work-create").unwrap();
+        assert!(harness.is_focused(create), "Create has the keyboard");
+        assert!(commands.try_recv().is_err(), "nothing cut before the answer");
+
+        harness.dispatch_event(key(Code::Escape, Key::Named(NamedKey::Escape), Modifiers::empty()));
+        settle(&mut harness);
+        assert!(state.start_work_confirm.with(Option::is_none));
+        assert!(named(harness.root_id(), "start-work-confirm-panel").is_none());
+        assert!(commands.try_recv().is_err(), "cancelled, nothing cut");
+
+        ask(state, Pending::Item("slatedb/slatedb#7".into()));
+        settle(&mut harness);
+        harness.dispatch_event(key(Code::Enter, Key::Named(NamedKey::Enter), Modifiers::empty()));
+        settle(&mut harness);
+        assert!(state.start_work_confirm.with(Option::is_none));
+        let sent: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+        let cut = sent
+            .iter()
+            .any(|c| matches!(c, Command::StartWork { item_id, .. } if item_id == "slatedb/slatedb#7"));
+        assert!(cut, "Enter cuts the branch: {sent:?}");
     }
 
     /// Cmd-W as the window receives it.

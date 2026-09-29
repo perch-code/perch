@@ -354,11 +354,10 @@ fn notification_menu(state: AppState, backend: Rc<Backend>, thread: &Thread, awa
         let thread = thread.clone();
         menu = menu
             .item("Start Work", move |item| {
-                let backend = backend.clone();
                 let thread = thread.clone();
                 item.icon(SidebarIcon::Branch)
                     .enabled(open)
-                    .action(move || start_work::start_work_on_thread(state, &backend, &thread))
+                    .action(move || start_work::ask(state, start_work::Pending::Thread(thread.clone())))
             })
             .separator();
     }

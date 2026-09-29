@@ -136,7 +136,7 @@ fn trailing(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
         github_button(state),
         crate::ui::usage::button(app, state, backend.clone()),
         crate::ui::agents::dropdown::button(app, state, backend.clone()),
-        crate::review::start_work::button(app, state, backend.clone()),
+        crate::review::start_work::button(app, state),
         review_control(app, state, backend.clone()),
         close_button(app, state, backend),
     ))

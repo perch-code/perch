@@ -239,6 +239,8 @@ pub struct AppState {
     /// An archive or delete the backend stopped before it lost something,
     /// open under its row until the reader answers.
     pub confirm_loss: RwSignal<Option<crate::backend::LossPrompt>>,
+    /// What Start work would cut from, while its confirmation is up.
+    pub start_work_confirm: RwSignal<Option<crate::review::start_work::Pending>>,
     /// The new-work view and what it holds between visits.
     pub new_work: crate::ui::new_work::NewWorkState,
     /// A repository Add repository just put in the config, for the
@@ -347,6 +349,7 @@ impl AppState {
             renaming: RwSignal::new(None),
             confirm_delete: RwSignal::new(None),
             confirm_loss: RwSignal::new(None),
+            start_work_confirm: RwSignal::new(None),
             new_work: crate::ui::new_work::NewWorkState::new(),
             added_repo: RwSignal::new(None),
             search_box: RwSignal::new(None),
