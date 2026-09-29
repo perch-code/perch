@@ -19,6 +19,8 @@ use crate::items::InboxShow;
 use crate::review::start_work;
 use crate::state::AppState;
 use crate::theme;
+use crate::timefmt;
+use crate::snooze;
 use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::nav_row;
 use crate::ui::widgets::{icon_button, open_in_browser, sidebar_glyph, state_glyph};
@@ -26,13 +28,17 @@ use crate::ui::widgets::{icon_button, open_in_browser, sidebar_glyph, state_glyp
 /// The notification list under the current search, repository, and reason
 /// filters. GitHub's ordering is retained.
 pub fn notification_list(state: AppState, backend: Rc<Backend>) -> impl IntoView {
-    let showing_done = move || state.item_filters.with(|f| f.inbox_show == InboxShow::Done);
+    let show = move || state.item_filters.with(|f| f.inbox_show);
     Stack::vertical((
         dyn_container(
-            move || (visible_notifications(state).is_empty(), showing_done()),
-            |(empty, done)| {
+            move || (visible_notifications(state).is_empty(), show()),
+            |(empty, show)| {
                 if empty {
-                    Label::new(if done { "No notifications marked Done" } else { "No matching notifications" })
+                    Label::new(match show {
+                        InboxShow::Done => "No notifications marked Done",
+                        InboxShow::Snoozed => "No snoozed notifications",
+                        InboxShow::All | InboxShow::Unread => "No matching notifications",
+                    })
                         .style(|s| {
                             s.font_size(theme::TEXT_META)
                                 .color(theme::NAV_SUBTLE)
@@ -46,20 +52,21 @@ pub fn notification_list(state: AppState, backend: Rc<Backend>) -> impl IntoView
         ),
         dyn_stack(
             move || {
-                let done = showing_done();
-                visible_notifications(state).into_iter().map(move |thread| (thread, done))
+                let away = show().is_put_away();
+                visible_notifications(state).into_iter().map(move |thread| (thread, away))
             },
-            |(thread, done): &(Thread, bool)| {
+            |(thread, away): &(Thread, bool)| {
                 (
                     thread.id.clone(),
-                    *done,
+                    *away,
                     thread.unread,
                     thread.updated_at.to_string(),
+                    thread.snoozed_until,
                     // The face and the state arrive after the row does.
                     thread.subject_snapshot.clone(),
                 )
             },
-            move |(thread, done)| notification_row(state, backend.clone(), thread, done),
+            move |(thread, away)| notification_row(state, backend.clone(), thread, away),
         )
         .style(|s| s.flex_col().width_full().gap(1.0)),
     ))
@@ -74,9 +81,9 @@ pub fn visible_notifications(state: AppState) -> Vec<Thread> {
     state.visible_inbox()
 }
 
-/// A row of the inbox, or with `done` of Show › Done, where the row's
-/// action moves it back instead.
-fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread, done: bool) -> impl IntoView {
+/// A row of the inbox, or with `away` of Show › Done or Snoozed, where
+/// the row's action moves it back instead.
+fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread, away: bool) -> impl IntoView {
     let hovered = RwSignal::new(false);
     let unread = thread.unread;
     let title = thread.subject.title.clone();
@@ -96,7 +103,7 @@ fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread, done:
         nav_row::glyph_box(notification_glyph(&thread)),
         nav_row::lines(
             nav_row::title_label(title, false, move || unread),
-            notification_trailing(state, hovered, action_backend, action_thread, done)
+            notification_trailing(state, hovered, action_backend, action_thread, away)
                 .style(|s| s.pointer_events_auto()),
             byline(state, &thread),
         ),
@@ -124,7 +131,7 @@ fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread, done:
         })
         .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
         .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
-        .right_click_menu(move || notification_menu(state, menu_backend.clone(), &menu_thread, done))
+        .right_click_menu(move || notification_menu(state, menu_backend.clone(), &menu_thread, away))
         .style(|s| nav_row::row_style(s, false));
     Container::new(row).style(nav_row::row_gutter)
 }
@@ -195,34 +202,39 @@ fn byline(state: AppState, thread: &Thread) -> impl IntoView {
     )
 }
 
-/// The title's right end: the unread dot and the age, or, while the
-/// pointer is over the row, Done (Move to Inbox on a Done row) and the
-/// menu in their place.
+/// The title's right end: the unread dot and the age, or on a snoozed row
+/// when it comes back; while the pointer is over the row, Done, Snooze
+/// and the menu in their place, or on a Done or snoozed row Move to
+/// Inbox and the menu.
 fn notification_trailing(
     state: AppState,
     hovered: RwSignal<bool>,
     backend: Rc<Backend>,
     thread: Thread,
-    done_row: bool,
+    away: bool,
 ) -> impl IntoView {
     let unread = thread.unread;
     let at = thread.updated_at;
+    let snoozed_until = thread.snoozed_until;
     dyn_container(
         move || hovered.get(),
         move |hovered| {
             if !hovered {
-                return Stack::horizontal((
-                    nav_row::unread_dot(move || unread),
-                    nav_row::age(state, at),
-                ))
-                .style(|s| s.items_center().flex_shrink(0.0_f32))
-                .into_any();
+                let when = match snoozed_until {
+                    Some(until) => snoozed_until_label(state, until).into_any(),
+                    None => nav_row::age(state, at).into_any(),
+                };
+                return Stack::horizontal((nav_row::unread_dot(move || unread), when))
+                    .style(|s| s.items_center().flex_shrink(0.0_f32))
+                    .into_any();
             }
             let done_backend = backend.clone();
             let done_thread = thread.clone();
+            let snooze_backend = backend.clone();
+            let snooze_thread = thread.clone();
             let menu_backend = backend.clone();
             let menu_thread = thread.clone();
-            let action = if done_row {
+            let actions = if away {
                 icon_button(
                     || SidebarIcon::Undo,
                     || theme::FG_SUBTLE,
@@ -231,18 +243,24 @@ fn notification_trailing(
                 .debug_name("move to inbox")
                 .into_any()
             } else {
-                icon_button(
-                    || SidebarIcon::Check,
-                    || theme::FG_SUBTLE,
-                    move || done(state, &done_backend, &done_thread),
-                )
-                .debug_name("mark done")
+                Stack::horizontal((
+                    icon_button(
+                        || SidebarIcon::Check,
+                        || theme::FG_SUBTLE,
+                        move || done(state, &done_backend, &done_thread),
+                    )
+                    .debug_name("mark done"),
+                    nav_row::menu_button(SidebarIcon::Clock, "snooze button", move || {
+                        snooze_menu(state, snooze_backend.clone(), &snooze_thread)
+                    }),
+                ))
+                .style(|s| s.items_center())
                 .into_any()
             };
             Stack::horizontal((
-                action,
+                actions,
                 nav_row::more_button(move || {
-                    notification_menu(state, menu_backend.clone(), &menu_thread, done_row)
+                    notification_menu(state, menu_backend.clone(), &menu_thread, away)
                 }),
             ))
             .style(|s| s.items_center().flex_shrink(0.0_f32).margin_left(4.0))
@@ -252,11 +270,39 @@ fn notification_trailing(
     .style(|s| s.flex_shrink(0.0_f32))
 }
 
+/// When a snoozed row comes back, in the age's place: "6:00 PM",
+/// "tomorrow 8:00 AM", "Sat 8:00 AM".
+fn snoozed_until_label(state: AppState, until: jiff::Timestamp) -> impl IntoView {
+    Stack::horizontal((
+        nav_row::mark(SidebarIcon::Clock, theme::NAV_MUTED),
+        Label::derived(move || timefmt::ahead(until, state.now.get()))
+            .debug_name("snoozed until")
+            .style(|s| {
+                s.font_size(theme::TEXT_BADGE)
+                    .color(theme::NAV_MUTED)
+                    .flex_shrink(0.0_f32)
+                    .margin_left(4.0)
+            }),
+    ))
+    .style(|s| s.items_center().flex_shrink(0.0_f32))
+}
+
 /// Mark the thread Done. The reader is finished with it, so if the main
 /// pane has its pull request or issue open, that closes, as going back
 /// to the sidebar would.
 fn done(state: AppState, backend: &Backend, thread: &Thread) {
     backend.done_notification(&thread.id);
+    close_if_viewing(state, backend, thread);
+}
+
+/// Snooze the thread until `until`. The reader has put it off, so its
+/// pull request or issue closes as it would for Done.
+fn snooze(state: AppState, backend: &Backend, thread: &Thread, until: jiff::Timestamp) {
+    backend.snooze_notification(&thread.id, until);
+    close_if_viewing(state, backend, thread);
+}
+
+fn close_if_viewing(state: AppState, backend: &Backend, thread: &Thread) {
     if !state.is_viewing_thread(thread) {
         return;
     }
@@ -266,8 +312,23 @@ fn done(state: AppState, backend: &Backend, thread: &Thread) {
     }
 }
 
-fn notification_menu(state: AppState, backend: Rc<Backend>, thread: &Thread, done_row: bool) -> Menu {
-    if done_row {
+/// Gmail's snooze choices, each with when it ends, as of the moment the
+/// menu opens.
+fn snooze_menu(state: AppState, backend: Rc<Backend>, thread: &Thread) -> Menu {
+    let mut menu = Menu::new();
+    for choice in snooze::choices(jiff::Timestamp::now()) {
+        let backend = backend.clone();
+        let thread = thread.clone();
+        menu = menu.item(choice.label, move |item| {
+            item.detail(choice.when)
+                .action(move || snooze(state, &backend, &thread, choice.until))
+        });
+    }
+    menu
+}
+
+fn notification_menu(state: AppState, backend: Rc<Backend>, thread: &Thread, away: bool) -> Menu {
+    if away {
         let id = thread.id.clone();
         return Menu::new().item("Move to Inbox", move |item| {
             let backend = backend.clone();
@@ -283,6 +344,8 @@ fn notification_menu(state: AppState, backend: Rc<Backend>, thread: &Thread, don
     let done_thread = thread.clone();
     let unsubscribe_backend = backend.clone();
     let unsubscribe_id = thread.id.clone();
+    let snooze_backend = backend.clone();
+    let snooze_thread = thread.clone();
     let mut menu = Menu::new();
     // A pull request's or an issue's row starts work on it, greyed once a
     // look has found it merged or closed. Other kinds have nothing to cut.
@@ -304,6 +367,9 @@ fn notification_menu(state: AppState, backend: Rc<Backend>, thread: &Thread, don
         let thread = done_thread.clone();
         item.icon(SidebarIcon::Check)
             .action(move || done(state, &backend, &thread))
+    })
+    .submenu("Snooze", move |_| {
+        snooze_menu(state, snooze_backend, &snooze_thread).icon(SidebarIcon::Clock)
     })
     .item("Mark Unread", move |item| {
         let backend = unread_backend.clone();
@@ -411,6 +477,7 @@ mod tests {
             },
             subject_snapshot: None,
             run_snapshot: None,
+            snoozed_until: None,
         }
     }
 

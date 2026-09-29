@@ -126,6 +126,15 @@ pub enum Command {
     RestoreNotification {
         thread_id: String,
     },
+    /// Hide a notification in Perch until `until`, or until newer unread
+    /// activity. GitHub has no snooze, so github.com still lists it.
+    SnoozeNotification {
+        thread_id: String,
+        until: Timestamp,
+    },
+    /// Bring back the snoozed notifications whose time has come. Sent by
+    /// the backend's own clock.
+    WakeSnoozed,
     /// A new window, with a view of its own: nothing open, and its own
     /// navigation sequence.
     WindowOpened {
@@ -763,6 +772,9 @@ pub enum Event {
     /// The threads marked Done in Perch that GitHub still lists, newest
     /// first: Inbox's Show › Done.
     DoneNotifications(Vec<Thread>),
+    /// The threads snoozed in Perch that GitHub still lists, soonest back
+    /// first: Inbox's Show › Snoozed.
+    SnoozedNotifications(Vec<Thread>),
     /// GitHub has news about the open item that is not on screen yet.
     /// The view offers to fetch it rather than moving under the reader.
     OpenItemChanged {
@@ -2353,6 +2365,13 @@ impl Backend {
         });
     }
 
+    pub fn snooze_notification(&self, thread_id: &str, until: Timestamp) {
+        let _ = self.commands.send(Command::SnoozeNotification {
+            thread_id: thread_id.to_string(),
+            until,
+        });
+    }
+
     pub fn mark_notification_unread(&self, thread_id: &str) {
         let _ = self.commands.send(Command::MarkNotificationUnread {
             thread_id: thread_id.to_string(),
@@ -3098,6 +3117,9 @@ impl Backend {
     }
 }
 
+/// How often the backend looks for snoozed notifications due back.
+const SNOOZE_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+
 /// How often the agent CLIs are asked for plan usage. Runs report it too,
 /// so this is the most it can lag while nothing runs.
 const USAGE_POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -3262,6 +3284,12 @@ async fn run(
                     let _ = events.send(Event::DoneNotifications(threads));
                 }
                 Err(e) => tracing::warn!(error = %e, "could not load Done notifications"),
+            }
+            match guard.load_snoozed_threads() {
+                Ok(threads) => {
+                    let _ = events.send(Event::SnoozedNotifications(threads));
+                }
+                Err(e) => tracing::warn!(error = %e, "could not load snoozed notifications"),
             }
             for key in UI_META_KEYS {
                 if let Ok(Some(value)) = guard.meta(key) {
@@ -3473,11 +3501,17 @@ async fn run(
     let mut next_auto_poll = tokio::time::Instant::now();
     let mut next_notification_reconcile = next_auto_poll;
     let mut pending_notification_reconcile = false;
+    // Snoozes lapse on the wall clock, which a sleeping Mac keeps and a
+    // long timer would not, so the clock is read often. The first tick,
+    // now, brings back what lapsed while Perch was closed.
+    let mut snooze_clock = tokio::time::interval(SNOOZE_CHECK_INTERVAL);
+    snooze_clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let base = ctx;
     loop {
         let (window, command) = tokio::select! {
             _ = tokio::time::sleep_until(next_auto_poll) => (NO_WINDOW, Command::Refresh),
+            _ = snooze_clock.tick() => (NO_WINDOW, Command::WakeSnoozed),
             cmd = commands.recv() => match cmd {
                 Some(cmd) => cmd,
                 // The UI is gone.
@@ -3496,7 +3530,7 @@ async fn run(
         let checkout = ctx.slot.clone();
         let language_server = ctx.language_server.clone();
 
-        if !matches!(&command, Command::Refresh | Command::Hover { .. }) {
+        if !matches!(&command, Command::Refresh | Command::WakeSnoozed | Command::Hover { .. }) {
             tracing::debug!(command = ?command, "command");
         }
         match command {
@@ -3662,6 +3696,12 @@ async fn run(
             }
             Command::RestoreNotification { thread_id } => {
                 ctx.restore_notification(&thread_id);
+            }
+            Command::SnoozeNotification { thread_id, until } => {
+                ctx.snooze_notification(&thread_id, until);
+            }
+            Command::WakeSnoozed => {
+                ctx.wake_snoozed_notifications(Timestamp::now());
             }
             Command::WindowOpened {
                 navigation_requests,
@@ -5366,7 +5406,7 @@ impl Ctx {
                 Err(e) => tracing::warn!(error = %e, "could not cache notifications"),
             }
         }
-        self.send_done_notifications();
+        self.send_marked_notifications();
         let current_keys: std::collections::HashSet<(String, Timestamp)> = threads
             .iter()
             .map(|thread| (thread.id.clone(), thread.updated_at))
@@ -5464,7 +5504,7 @@ impl Ctx {
         self.edit_notifications(|threads| {
             threads.retain(|thread| thread.id != thread_id);
         });
-        self.send_done_notifications();
+        self.send_marked_notifications();
     }
 
     /// Take the Done mark back and put the thread where GitHub's newest-
@@ -5481,27 +5521,79 @@ impl Ctx {
             None => None,
         };
         if let Some(thread) = restored {
-            self.edit_notifications(|threads| {
-                if threads.iter().any(|shown| shown.id == thread.id) {
-                    return;
-                }
-                let at = threads
-                    .iter()
-                    .position(|shown| shown.updated_at < thread.updated_at)
-                    .unwrap_or(threads.len());
-                threads.insert(at, thread);
-            });
+            self.edit_notifications(|threads| insert_by_activity(threads, thread));
         }
-        self.send_done_notifications();
+        self.send_marked_notifications();
     }
 
-    fn send_done_notifications(&self) {
+    /// Hide the thread until `until`, as Done would until newer activity.
+    /// Nothing goes to GitHub, which has no snooze, so the mark lives only
+    /// in Perch's database, and without one there is no snoozing.
+    fn snooze_notification(&self, thread_id: &str, until: Timestamp) {
+        let thread = self.notifications.lock().ok().and_then(|threads| {
+            threads.iter().find(|thread| thread.id == thread_id).cloned()
+        });
+        let Some(thread) = thread else {
+            return;
+        };
+        match self.with_cache(|cache| cache.snooze_notification(&thread, until)) {
+            Some(Ok(())) => {}
+            Some(Err(error)) => {
+                tracing::warn!(thread = %thread_id, error = %error, "could not snooze notification");
+                self.notice(format!("Could not snooze the notification: {error}"));
+                return;
+            }
+            None => {
+                self.notice("Could not snooze the notification: Perch's database is not open");
+                return;
+            }
+        }
+        self.edit_notifications(|threads| {
+            threads.retain(|thread| thread.id != thread_id);
+        });
+        self.send_marked_notifications();
+    }
+
+    /// Put the threads whose snooze has lapsed by `now` back in the
+    /// inbox. As a poll would, not as the reader would: the list may be
+    /// held still under the pointer.
+    fn wake_snoozed_notifications(&self, now: Timestamp) {
+        let woken = match self.with_cache(|cache| cache.wake_snoozed_notifications(now)) {
+            Some(Ok(woken)) => woken,
+            Some(Err(error)) => {
+                tracing::warn!(error = %error, "could not wake snoozed notifications");
+                return;
+            }
+            None => return,
+        };
+        if woken.is_empty() {
+            return;
+        }
+        self.edit_polled_notifications(|threads| {
+            for thread in woken {
+                insert_by_activity(threads, thread);
+            }
+        });
+        self.send_marked_notifications();
+    }
+
+    /// Show › Done and Show › Snoozed, as the marks now stand.
+    fn send_marked_notifications(&self) {
         match self.with_cache(|cache| cache.load_done_threads()) {
             Some(Ok(threads)) => {
                 let _ = self.events.send(Event::DoneNotifications(threads));
             }
             Some(Err(error)) => {
                 tracing::warn!(error = %error, "could not load Done notifications");
+            }
+            None => {}
+        }
+        match self.with_cache(|cache| cache.load_snoozed_threads()) {
+            Some(Ok(threads)) => {
+                let _ = self.events.send(Event::SnoozedNotifications(threads));
+            }
+            Some(Err(error)) => {
+                tracing::warn!(error = %error, "could not load snoozed notifications");
             }
             None => {}
         }
@@ -10566,6 +10658,19 @@ struct PollAfter {
 enum NotificationPollMode {
     Conditional,
     Reconcile,
+}
+
+/// Put `thread` where GitHub's newest-first order has it, unless it is
+/// already listed.
+fn insert_by_activity(threads: &mut Vec<Thread>, thread: Thread) {
+    if threads.iter().any(|shown| shown.id == thread.id) {
+        return;
+    }
+    let at = threads
+        .iter()
+        .position(|shown| shown.updated_at < thread.updated_at)
+        .unwrap_or(threads.len());
+    threads.insert(at, thread);
 }
 
 fn defer_polls_for_error(error: &perch_github::Error, next_auto_poll: &mut tokio::time::Instant) {
@@ -15838,6 +15943,7 @@ mod tests {
             },
             subject_snapshot: None,
             run_snapshot: None,
+            snoozed_until: None,
         }
     }
 
@@ -16459,6 +16565,43 @@ mod tests {
 
         // GitHub still lists it, now with no mark to hide it.
         let visible = ctx.replace_notifications(inbox.clone(), Some("second"));
+        assert_eq!(visible, inbox);
+    }
+
+    #[tokio::test]
+    async fn a_snoozed_notification_comes_back_when_its_time_is_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let mut newest = thread("6", "six");
+        newest.updated_at = "2026-09-18T12:00:00Z".parse().unwrap();
+        let mut snoozed = thread("7", "seven");
+        snoozed.updated_at = "2026-09-18T11:00:00Z".parse().unwrap();
+        snoozed.unread = false;
+        let inbox = vec![newest.clone(), snoozed.clone()];
+        ctx.replace_notifications(inbox.clone(), Some("first"));
+
+        let until = Timestamp::now() + jiff::SignedDuration::from_hours(3);
+        ctx.snooze_notification(&snoozed.id, until);
+        assert_eq!(*ctx.notifications.lock().unwrap(), vec![newest.clone()]);
+        let listed = ctx.with_cache(|cache| cache.load_snoozed_threads().unwrap()).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].snoozed_until, Some(until));
+        assert!(ctx.with_cache(|cache| cache.load_done_threads().unwrap()).unwrap().is_empty());
+
+        // A poll of the same revision leaves it snoozed.
+        let visible = ctx.replace_notifications(inbox.clone(), Some("second"));
+        assert_eq!(visible, vec![newest.clone()]);
+
+        ctx.wake_snoozed_notifications(Timestamp::now());
+        assert_eq!(*ctx.notifications.lock().unwrap(), vec![newest.clone()], "not yet");
+        ctx.wake_snoozed_notifications(until);
+        let back = ctx.notifications.lock().unwrap().clone();
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[1].id, snoozed.id, "in its place");
+        assert!(!back[1].unread && !back[1].local_unread, "back read, as it went");
+
+        // The next poll of the same revision keeps it listed.
+        let visible = ctx.replace_notifications(inbox.clone(), Some("third"));
         assert_eq!(visible, inbox);
     }
 

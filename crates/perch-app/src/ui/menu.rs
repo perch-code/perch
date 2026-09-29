@@ -56,6 +56,9 @@ pub struct Item {
     checked: Option<bool>,
     enabled: bool,
     shortcut: Option<Shortcut>,
+    /// Words at the row's end in the shortcut's place, such as when a
+    /// snooze ends.
+    detail: Option<String>,
     action: Option<Rc<dyn Fn()>>,
 }
 
@@ -82,6 +85,7 @@ impl Menu {
             checked: None,
             enabled: true,
             shortcut: None,
+            detail: None,
             action: None,
         };
         self.entries.push(Entry::Item(build(item)));
@@ -190,6 +194,12 @@ impl Item {
     /// the row, as a native menu's key equivalents do.
     pub fn accelerator(mut self, shortcut: Shortcut) -> Self {
         self.shortcut = Some(shortcut);
+        self
+    }
+
+    /// Words shown at the row's end, where a shortcut would be.
+    pub fn detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
         self
     }
 
@@ -872,15 +882,16 @@ fn row(
     checks: bool,
     icons: bool,
 ) -> impl IntoView {
-    let (label, icon, checked, shortcut, submenu) = match entry {
+    let (label, icon, checked, shortcut, detail, submenu) = match entry {
         Entry::Item(i) => (
             i.label.clone(),
             i.icon,
             i.checked == Some(true),
             i.shortcut,
+            i.detail.clone(),
             false,
         ),
-        Entry::Submenu { label, menu } => (label.clone(), menu.icon, false, None, true),
+        Entry::Submenu { label, menu } => (label.clone(), menu.icon, false, None, None, true),
         Entry::Separator => unreachable!("a separator is not a row"),
     };
     let enabled = entry.selectable();
@@ -925,6 +936,18 @@ fn row(
                 .selectable(false)
         })
     });
+    let keys = keys.map(|k| k.into_any()).or_else(|| {
+        detail.map(|text| {
+            Label::derived(move || text.clone())
+                .style(|s| {
+                    s.color(theme::FG_SUBTLE)
+                        .margin_left(20.0)
+                        .flex_shrink(0.0_f32)
+                        .selectable(false)
+                })
+                .into_any()
+        })
+    });
     let chevron = submenu.then(|| {
         sidebar_glyph(SidebarIcon::ChevronRight, theme::FG_SUBTLE)
             .style(|s| s.size(12.0, 12.0).margin_left(16.0).flex_shrink(0.0_f32))
@@ -936,8 +959,7 @@ fn row(
             .unwrap_or_else(|| Empty::new().into_any()),
         icon.unwrap_or_else(|| Empty::new().into_any()),
         name,
-        keys.map(|k| k.into_any())
-            .unwrap_or_else(|| Empty::new().into_any()),
+        keys.unwrap_or_else(|| Empty::new().into_any()),
         chevron
             .map(|c| c.into_any())
             .unwrap_or_else(|| Empty::new().into_any()),

@@ -111,6 +111,9 @@ pub struct AppState {
     /// The threads marked Done in Perch that GitHub still lists, newest
     /// first: Inbox's Show › Done.
     pub done_notifications: RwSignal<Vec<Thread>>,
+    /// The threads snoozed in Perch that GitHub still lists, soonest back
+    /// first: Inbox's Show › Snoozed.
+    pub snoozed_notifications: RwSignal<Vec<Thread>>,
     /// A poll's items the drawer is holding back because they would move
     /// its rows, until the reader asks for them or does something that
     /// sends the list again.
@@ -293,6 +296,7 @@ impl AppState {
             items: RwSignal::new(Vec::new()),
             notifications: RwSignal::new(Vec::new()),
             done_notifications: RwSignal::new(Vec::new()),
+            snoozed_notifications: RwSignal::new(Vec::new()),
             pending_items: RwSignal::new(None),
             pending_notifications: RwSignal::new(None),
             notifications_polled: RwSignal::new(false),
@@ -2384,6 +2388,7 @@ impl AppState {
                 self.pending_notifications.set(None);
             }
             Event::DoneNotifications(threads) => self.done_notifications.set(threads),
+            Event::SnoozedNotifications(threads) => self.snoozed_notifications.set(threads),
             Event::NotificationsPolled(notifications) => {
                 let first = !self.notifications_polled.get_untracked();
                 self.notifications_polled.set(true);
@@ -2720,7 +2725,7 @@ impl AppState {
     }
 
     /// GitHub's threads under the drawer's filters: the inbox's, or under
-    /// Show › Done the ones marked Done.
+    /// Show › Done and Show › Snoozed the ones put away so.
     pub fn visible_inbox(&self) -> Vec<Thread> {
         let (show, repository) = self.item_filters.with(|f| (f.inbox_show, f.repository.clone()));
         let reason = self.notification_reason.get();
@@ -2732,19 +2737,19 @@ impl AppState {
 
     /// The list Inbox's Show draws from.
     pub fn inbox_source(&self, show: InboxShow) -> RwSignal<Vec<Thread>> {
-        if show == InboxShow::Done {
-            self.done_notifications
-        } else {
-            self.notifications
+        match show {
+            InboxShow::Done => self.done_notifications,
+            InboxShow::Snoozed => self.snoozed_notifications,
+            InboxShow::All | InboxShow::Unread => self.notifications,
         }
     }
 
     /// The ids of the threads `threads` would give under the drawer's
-    /// filters, in order. None under Show › Done, which a poll of the
-    /// inbox does not move.
+    /// filters, in order. None under Show › Done or Snoozed, which a poll
+    /// of the inbox does not move.
     fn visible_thread_ids(&self, threads: &[Thread]) -> Vec<String> {
         let (show, repository) = self.item_filters.with_untracked(|f| (f.inbox_show, f.repository.clone()));
-        if show == InboxShow::Done {
+        if show.is_put_away() {
             return Vec::new();
         }
         let unread = show == InboxShow::Unread;
@@ -2777,7 +2782,7 @@ impl AppState {
             });
             (held.0.iter().filter(|hit| !shown.contains(&hit_key(hit))).count(), "result")
         } else if self.item_filters.with(|f| f.tab) == SidebarTab::Inbox {
-            if self.item_filters.with(|f| f.inbox_show) == InboxShow::Done {
+            if self.item_filters.with(|f| f.inbox_show).is_put_away() {
                 return None;
             }
             let incoming = self.pending_notifications.get()?;
@@ -3039,6 +3044,7 @@ mod tests {
             },
             subject_snapshot: None,
             run_snapshot: None,
+            snoozed_until: None,
         }
     }
 

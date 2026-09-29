@@ -422,14 +422,19 @@ fn thousands(n: u32) -> String {
 
 /// The `...` button: the row's menu.
 pub fn more_button(menu: impl Fn() -> Menu + 'static) -> impl IntoView {
+    menu_button(SidebarIcon::Ellipsis, "row more", menu)
+}
+
+/// A round button at a row's end that drops `menu` down.
+pub fn menu_button(glyph: SidebarIcon, name: &'static str, menu: impl Fn() -> Menu + 'static) -> impl IntoView {
     Container::new(
-        sidebar_glyph(SidebarIcon::Ellipsis, theme::FG_SUBTLE)
+        sidebar_glyph(glyph, theme::FG_SUBTLE)
             .style(|s| s.pointer_events_none()),
     )
     .dropdown(menu)
     // The row underneath is a button too.
     .on_event_stop(el::Click, |_, _| {})
-    .debug_name("row more")
+    .debug_name(name)
     .style(|s| {
         clickable(s)
             .size(26.0, 26.0)

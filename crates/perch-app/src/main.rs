@@ -16,6 +16,7 @@ mod reference;
 mod repos;
 mod review;
 mod scrollers;
+mod snooze;
 mod state;
 mod theme;
 mod timefmt;

@@ -282,6 +282,11 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M2 8.6 H5.4 L6.4 10.2 H9.6 L10.6 8.6 H14" fill="none" stroke="{c}"
                      stroke-width="1.4" stroke-linejoin="round"/>"#
         ),
+        SidebarIcon::Clock => format!(
+            r#"<circle cx="8" cy="8" r="6.2" fill="none" stroke="{c}" stroke-width="1.4"/>
+               <path d="M8 4.6 V8 L10.4 9.6" fill="none" stroke="{c}" stroke-width="1.4"
+                     stroke-linecap="round" stroke-linejoin="round"/>"#
+        ),
         SidebarIcon::Sort => format!(
             r#"<path d="M5 13 V3 M2.6 5.4 L5 3 L7.4 5.4 M11 3 V13 M8.6 10.6 L11 13 L13.4 10.6"
                      fill="none" stroke="{c}" stroke-width="1.4" stroke-linecap="round"
@@ -632,13 +637,16 @@ pub enum SidebarIcon {
     Inbox,
     /// Arrows up and down: the order.
     Sort,
+    /// A clock face: snooze.
+    Clock,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 66] = [
+    pub const ALL: [SidebarIcon; 67] = [
+        SidebarIcon::Clock,
         SidebarIcon::ArrowUpRight,
         SidebarIcon::Terminal,
         SidebarIcon::Unread,

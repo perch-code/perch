@@ -43,6 +43,11 @@ pub struct Thread {
     /// found it. `None` until then, and for every other kind of subject.
     #[serde(default)]
     pub run_snapshot: Option<RunSnapshot>,
+    /// When a thread snoozed in Perch comes back to the inbox. Set only on
+    /// the threads of Show › Snoozed; the mark itself is kept beside the
+    /// Done marks, not in the thread.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "ts_opt")]
+    pub snoozed_until: Option<Timestamp>,
 }
 
 impl Thread {
@@ -739,6 +744,7 @@ mod tests {
             },
             subject_snapshot: None,
             run_snapshot: None,
+            snoozed_until: None,
         }
     }
 }

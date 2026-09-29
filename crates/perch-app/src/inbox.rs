@@ -97,6 +97,7 @@ mod tests {
             },
             subject_snapshot: None,
             run_snapshot: None,
+            snoozed_until: None,
         }
     }
 

@@ -49,6 +49,14 @@ still GitHub's.
   in Perch that GitHub still lists. **Move to Inbox**, on the row or its menu,
   drops the local mark and puts the thread back. GitHub's public API has no
   way to undo Done, so github.com keeps it under Done.
+- **Snooze**, the clock on a row or the Snooze submenu in its menu, hides the
+  thread until later today (6 PM), tomorrow, later this week, this weekend or
+  next week (8 AM), as Gmail offers them. It comes back sooner if newer
+  activity arrives that GitHub reports unread. When the time comes it
+  returns to its place in the inbox, as read or unread as it was snoozed. **Show › Snoozed** lists the
+  snoozed threads with when each returns, and **Move to Inbox** ends a snooze
+  early. GitHub has no snooze, so the mark lives only in Perch and
+  github.com still lists the thread.
 - Pull requests and issues open inside Perch. Other notification types remain
   first-class inbox rows and open on GitHub.
 

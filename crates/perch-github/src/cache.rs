@@ -37,9 +37,10 @@ mod review_store;
 /// whether the reader may resolve it. Version 24 keeps the instructions a
 /// worktree review was run with. Version 30 keeps the `HEAD` a review of
 /// uncommitted work was captured over. Version 32 keeps the thread a Done
-/// mark hides, for the Inbox's Done list. Schemas 13 through 23 migrate in
-/// place so local conversations and agent history are never discarded.
-pub const SCHEMA_VERSION: u32 = 32;
+/// mark hides, for the Inbox's Done list. Version 33 lets a mark be a
+/// snooze, which lapses at a time. Schemas 13 through 23 migrate in place
+/// so local conversations and agent history are never discarded.
+pub const SCHEMA_VERSION: u32 = 33;
 
 /// Metadata key holding the validator for the cached notifications snapshot.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
@@ -161,6 +162,61 @@ pub struct Cache {
     avatar_dir: Option<PathBuf>,
 }
 
+/// A Done mark or a snooze: the revision of a thread it hides, and for a
+/// snooze when it lapses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NotificationMark {
+    updated_at: Timestamp,
+    snoozed_until: Option<Timestamp>,
+}
+
+impl NotificationMark {
+    /// Whether the mark keeps `thread` out of the inbox at `now`. Done
+    /// holds until newer activity. A snooze holds until its time, or until
+    /// newer activity GitHub reports unread: a read revision is likely the
+    /// reader's own doing elsewhere.
+    fn hides(&self, thread: &Thread, now: Timestamp) -> bool {
+        match self.snoozed_until {
+            None => thread.updated_at <= self.updated_at,
+            Some(until) => {
+                now < until && (thread.updated_at <= self.updated_at || !thread.unread)
+            }
+        }
+    }
+}
+
+fn notification_marks(conn: &Connection) -> Result<HashMap<String, NotificationMark>, CacheError> {
+    let mut stmt =
+        conn.prepare("SELECT thread_id, updated_at, snoozed_until FROM notification_dismissals")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
+    })?;
+    let mut marks = HashMap::new();
+    for row in rows {
+        let (thread_id, updated_at, until) = row?;
+        let mark = NotificationMark {
+            updated_at: parse_mark_time(&thread_id, "updated_at", &updated_at)?,
+            snoozed_until: until
+                .map(|until| parse_mark_time(&thread_id, "snoozed_until", &until))
+                .transpose()?,
+        };
+        marks.insert(thread_id, mark);
+    }
+    Ok(marks)
+}
+
+fn parse_mark_time(thread_id: &str, column: &str, value: &str) -> Result<Timestamp, CacheError> {
+    value.parse::<Timestamp>().map_err(|error| {
+        CacheError::Corrupt(format!(
+            "notification dismissal {thread_id} has invalid {column}: {error}"
+        ))
+    })
+}
+
 const BASE_SCHEMA: &str = r#"
 CREATE TABLE meta (
     key   TEXT PRIMARY KEY,
@@ -173,9 +229,10 @@ CREATE TABLE threads (
     json        TEXT NOT NULL
 );
 CREATE TABLE notification_dismissals (
-    thread_id   TEXT PRIMARY KEY,
-    updated_at  TEXT NOT NULL,
-    json        TEXT
+    thread_id      TEXT PRIMARY KEY,
+    updated_at     TEXT NOT NULL,
+    json           TEXT,
+    snoozed_until  TEXT
 );
 CREATE TABLE items (
     id               TEXT PRIMARY KEY,
@@ -450,6 +507,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             29 => review_store::add_snapshot_worktree_parent(&tx)?,
             30 => fold_saved_into_pinned(&tx)?,
             31 => add_dismissed_thread_column(&tx)?,
+            32 => add_snoozed_until_column(&tx)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -481,6 +539,20 @@ fn add_dismissed_thread_column(tx: &Transaction<'_>) -> Result<(), CacheError> {
         "DELETE FROM meta WHERE key = ?1",
         params![NOTIFICATIONS_LAST_MODIFIED_KEY],
     )?;
+    Ok(())
+}
+
+/// A mark may be a snooze, which lapses at a time. The marks already
+/// made are Done marks, with none.
+fn add_snoozed_until_column(tx: &Transaction<'_>) -> Result<(), CacheError> {
+    let present: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('notification_dismissals') WHERE name='snoozed_until')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !present {
+        tx.execute("ALTER TABLE notification_dismissals ADD COLUMN snoozed_until TEXT", [])?;
+    }
     Ok(())
 }
 
@@ -2532,32 +2604,15 @@ impl Cache {
         snapshot: bool,
     ) -> Result<Vec<Thread>, CacheError> {
         let tx = self.conn.unchecked_transaction()?;
-        let dismissals = {
-            let mut stmt = tx.prepare(
-                "SELECT thread_id, updated_at FROM notification_dismissals",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?;
-            let mut dismissals = HashMap::new();
-            for row in rows {
-                let (thread_id, updated_at) = row?;
-                let updated_at = updated_at.parse::<Timestamp>().map_err(|error| {
-                    CacheError::Corrupt(format!(
-                        "notification dismissal {thread_id} has invalid updated_at: {error}"
-                    ))
-                })?;
-                dismissals.insert(thread_id, updated_at);
-            }
-            dismissals
-        };
+        let marks = notification_marks(&tx)?;
+        let now = Timestamp::now();
         if snapshot {
             tx.execute("UPDATE notification_dismissals SET json = NULL", [])?;
         }
         let mut visible = Vec::with_capacity(threads.len());
         for thread in threads {
-            match dismissals.get(&thread.id) {
-                Some(dismissed_at) if thread.updated_at <= *dismissed_at => {
+            match marks.get(&thread.id) {
+                Some(mark) if mark.hides(thread, now) => {
                     if snapshot {
                         tx.execute(
                             "UPDATE notification_dismissals SET json=?2 WHERE thread_id=?1",
@@ -2611,6 +2666,21 @@ impl Cache {
     /// Perch, and the thread, for the Done list. The mark deliberately
     /// outlives the replaceable thread snapshot.
     pub fn dismiss_notification(&self, thread: &Thread) -> Result<(), CacheError> {
+        self.mark_notification(thread, None)
+    }
+
+    /// Hide this revision of the thread until `until`, as a Done mark
+    /// would, and keep the thread for Show › Snoozed. Newer activity that
+    /// GitHub reports unread lifts the snooze early.
+    pub fn snooze_notification(&self, thread: &Thread, until: Timestamp) -> Result<(), CacheError> {
+        self.mark_notification(thread, Some(until))
+    }
+
+    fn mark_notification(
+        &self,
+        thread: &Thread,
+        snoozed_until: Option<Timestamp>,
+    ) -> Result<(), CacheError> {
         let (thread_id, updated_at) = (thread.id.as_str(), thread.updated_at);
         let tx = self.conn.unchecked_transaction()?;
         let previous = tx
@@ -2631,12 +2701,20 @@ impl Cache {
         let dismissed_at = previous
             .filter(|previous| *previous > updated_at)
             .unwrap_or(updated_at);
+        let mut kept = thread.clone();
+        kept.snoozed_until = None;
         tx.execute(
-            "INSERT INTO notification_dismissals (thread_id, updated_at, json)
-             VALUES (?1, ?2, ?3)
+            "INSERT INTO notification_dismissals (thread_id, updated_at, json, snoozed_until)
+             VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(thread_id) DO UPDATE
-                 SET updated_at=excluded.updated_at, json=excluded.json",
-            params![thread_id, dismissed_at.to_string(), serde_json::to_string(thread)?],
+                 SET updated_at=excluded.updated_at, json=excluded.json,
+                     snoozed_until=excluded.snoozed_until",
+            params![
+                thread_id,
+                dismissed_at.to_string(),
+                serde_json::to_string(&kept)?,
+                snoozed_until.map(|until| until.to_string()),
+            ],
         )?;
         let cached_updated_at = tx
             .query_row(
@@ -2672,11 +2750,12 @@ impl Cache {
         for row in rows {
             threads.push(serde_json::from_str(&row?)?);
         }
-        let dismissals = self.notification_dismissals()?;
+        let marks = self.notification_dismissals()?;
+        let now = Timestamp::now();
         threads.retain(|thread| {
-            dismissals
+            marks
                 .get(&thread.id)
-                .is_none_or(|dismissed_at| thread.updated_at > *dismissed_at)
+                .is_none_or(|mark| !mark.hides(thread, now))
         });
         Ok(threads)
     }
@@ -2684,9 +2763,10 @@ impl Cache {
     /// The threads marked Done that GitHub still lists, newest first, as
     /// its list is.
     pub fn load_done_threads(&self) -> Result<Vec<Thread>, CacheError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT json FROM notification_dismissals WHERE json IS NOT NULL")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT json FROM notification_dismissals
+             WHERE json IS NOT NULL AND snoozed_until IS NULL",
+        )?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut threads: Vec<Thread> = Vec::new();
         for row in rows {
@@ -2717,24 +2797,78 @@ impl Cache {
         Ok(thread)
     }
 
-    fn notification_dismissals(&self) -> Result<HashMap<String, Timestamp>, CacheError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT thread_id, updated_at FROM notification_dismissals")?;
+    /// The snoozed threads GitHub still lists, each with when it comes
+    /// back, soonest first.
+    pub fn load_snoozed_threads(&self) -> Result<Vec<Thread>, CacheError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT thread_id, json, snoozed_until FROM notification_dismissals
+             WHERE json IS NOT NULL AND snoozed_until IS NOT NULL",
+        )?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })?;
-        let mut dismissals = HashMap::new();
+        let mut threads: Vec<Thread> = Vec::new();
         for row in rows {
-            let (thread_id, updated_at) = row?;
-            let updated_at = updated_at.parse::<Timestamp>().map_err(|error| {
-                CacheError::Corrupt(format!(
-                    "notification dismissal {thread_id} has invalid updated_at: {error}"
+            let (thread_id, json, until) = row?;
+            let mut thread: Thread = serde_json::from_str(&json)?;
+            thread.snoozed_until = Some(parse_mark_time(&thread_id, "snoozed_until", &until)?);
+            threads.push(thread);
+        }
+        threads.sort_by(|a, b| {
+            a.snoozed_until
+                .cmp(&b.snoozed_until)
+                .then_with(|| b.updated_at.cmp(&a.updated_at))
+        });
+        Ok(threads)
+    }
+
+    /// Lift the snoozes whose time has come by `now`, returning the
+    /// threads they hid, newest first, as the inbox wants them back. Each
+    /// is as read or unread as it was snoozed: nothing new happened.
+    pub fn wake_snoozed_notifications(&self, now: Timestamp) -> Result<Vec<Thread>, CacheError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let due = {
+            let mut stmt = tx.prepare(
+                "SELECT thread_id, json, snoozed_until FROM notification_dismissals
+                 WHERE snoozed_until IS NOT NULL",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
                 ))
             })?;
-            dismissals.insert(thread_id, updated_at);
+            let mut due = Vec::new();
+            for row in rows {
+                let (thread_id, json, until) = row?;
+                if parse_mark_time(&thread_id, "snoozed_until", &until)? <= now {
+                    due.push((thread_id, json));
+                }
+            }
+            due
+        };
+        let mut threads: Vec<Thread> = Vec::new();
+        for (thread_id, json) in due {
+            tx.execute(
+                "DELETE FROM notification_dismissals WHERE thread_id=?1",
+                params![thread_id],
+            )?;
+            if let Some(json) = json {
+                threads.push(serde_json::from_str(&json)?);
+            }
         }
-        Ok(dismissals)
+        tx.commit()?;
+        threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| b.id.cmp(&a.id)));
+        Ok(threads)
+    }
+
+    fn notification_dismissals(&self) -> Result<HashMap<String, NotificationMark>, CacheError> {
+        notification_marks(&self.conn)
     }
 
     /// The validator paired atomically with [`Self::load_threads`].
@@ -4482,6 +4616,7 @@ mod tests {
             },
             subject_snapshot: None,
             run_snapshot: None,
+            snoozed_until: None,
         }
     }
 
@@ -7714,8 +7849,8 @@ mod tests {
         let stale = notification_thread("1", "2026-09-19T11:00:00Z");
         c.dismiss_notification(&stale).unwrap();
         assert_eq!(
-            c.notification_dismissals().unwrap().get(&dismissed.id),
-            Some(&dismissed.updated_at)
+            c.notification_dismissals().unwrap().get(&dismissed.id).map(|mark| mark.updated_at),
+            Some(dismissed.updated_at)
         );
 
         let newer = notification_thread("1", "2026-09-20T09:00:00Z");
@@ -7747,6 +7882,88 @@ mod tests {
             .store_notification_snapshot(&[newer, older.clone(), other.clone()], None)
             .unwrap();
         assert_eq!(visible, vec![older, other]);
+    }
+
+    #[test]
+    fn a_snooze_hides_the_thread_until_its_time_then_brings_it_back_unread() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut read = notification_thread("1", "2026-09-19T12:00:00Z");
+        read.unread = false;
+        let other = notification_thread("2", "2026-09-19T11:00:00Z");
+        c.store_threads(&[read.clone(), other.clone()], None).unwrap();
+        let until = Timestamp::now() + jiff::SignedDuration::from_hours(3);
+        c.snooze_notification(&read, until).unwrap();
+
+        assert_eq!(c.load_threads().unwrap(), vec![other.clone()]);
+        assert!(c.load_done_threads().unwrap().is_empty(), "a snooze is not Done");
+        let snoozed = c.load_snoozed_threads().unwrap();
+        assert_eq!(snoozed.len(), 1);
+        assert_eq!(snoozed[0].id, read.id);
+        assert_eq!(snoozed[0].snoozed_until, Some(until));
+        let visible = c
+            .store_notification_snapshot(&[read.clone(), other.clone()], None)
+            .unwrap();
+        assert_eq!(visible, vec![other.clone()], "the same revision stays snoozed");
+
+        // Nothing is due yet.
+        assert!(c.wake_snoozed_notifications(Timestamp::now()).unwrap().is_empty());
+        let woken = c.wake_snoozed_notifications(until).unwrap();
+        assert_eq!(woken.len(), 1);
+        assert!(!woken[0].unread && !woken[0].local_unread, "back read, as it went");
+        assert_eq!(woken[0].snoozed_until, None);
+        assert!(c.load_snoozed_threads().unwrap().is_empty());
+        assert!(c.notification_dismissals().unwrap().is_empty());
+    }
+
+    #[test]
+    fn new_unread_activity_lifts_a_snooze_early_and_read_activity_does_not() {
+        let c = Cache::open_in_memory().unwrap();
+        let snoozed = notification_thread("1", "2026-09-19T12:00:00Z");
+        c.snooze_notification(&snoozed, Timestamp::now() + jiff::SignedDuration::from_hours(3))
+            .unwrap();
+
+        let mut read_newer = notification_thread("1", "2026-09-19T13:00:00Z");
+        read_newer.unread = false;
+        let visible = c
+            .store_notification_snapshot(std::slice::from_ref(&read_newer), None)
+            .unwrap();
+        assert!(visible.is_empty());
+
+        let unread_newer = notification_thread("1", "2026-09-19T14:00:00Z");
+        let visible = c
+            .store_notification_snapshot(std::slice::from_ref(&unread_newer), None)
+            .unwrap();
+        assert_eq!(visible, vec![unread_newer]);
+        assert!(c.load_snoozed_threads().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_lapsed_snooze_found_by_a_poll_returns_the_thread() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut thread = notification_thread("1", "2026-09-19T12:00:00Z");
+        thread.unread = false;
+        c.snooze_notification(&thread, Timestamp::now() - jiff::SignedDuration::from_secs(1))
+            .unwrap();
+        let visible = c
+            .store_notification_snapshot(std::slice::from_ref(&thread), None)
+            .unwrap();
+        assert_eq!(visible, vec![thread]);
+    }
+
+    #[test]
+    fn done_replaces_a_snooze_and_restore_takes_either_back() {
+        let c = Cache::open_in_memory().unwrap();
+        let thread = notification_thread("1", "2026-09-19T12:00:00Z");
+        c.snooze_notification(&thread, Timestamp::now() + jiff::SignedDuration::from_hours(3))
+            .unwrap();
+        c.dismiss_notification(&thread).unwrap();
+        assert!(c.load_snoozed_threads().unwrap().is_empty());
+        assert_eq!(c.load_done_threads().unwrap(), vec![thread.clone()]);
+
+        c.snooze_notification(&thread, Timestamp::now() + jiff::SignedDuration::from_hours(3))
+            .unwrap();
+        assert_eq!(c.restore_notification(&thread.id).unwrap(), Some(thread));
+        assert!(c.load_snoozed_threads().unwrap().is_empty());
     }
 
     #[test]

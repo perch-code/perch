@@ -79,14 +79,15 @@ impl std::fmt::Display for SidebarTab {
     }
 }
 
-/// Inbox's Show: every thread, the unread ones, or the ones marked Done,
-/// to move back.
+/// Inbox's Show: every thread, the unread ones, or the ones marked Done
+/// or snoozed, to move back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InboxShow {
     #[default]
     All,
     Unread,
     Done,
+    Snoozed,
 }
 
 impl InboxShow {
@@ -95,11 +96,20 @@ impl InboxShow {
             InboxShow::All => "all",
             InboxShow::Unread => "unread",
             InboxShow::Done => "done",
+            InboxShow::Snoozed => "snoozed",
         }
     }
 
     fn from_key(s: &str) -> Option<Self> {
-        [InboxShow::All, InboxShow::Unread, InboxShow::Done].into_iter().find(|v| v.key() == s)
+        [InboxShow::All, InboxShow::Unread, InboxShow::Done, InboxShow::Snoozed]
+            .into_iter()
+            .find(|v| v.key() == s)
+    }
+
+    /// Whether Show lists threads put out of the inbox, Done or snoozed,
+    /// rather than the inbox itself.
+    pub fn is_put_away(self) -> bool {
+        matches!(self, InboxShow::Done | InboxShow::Snoozed)
     }
 }
 
@@ -932,6 +942,7 @@ mod tests {
         assert_eq!(ItemFilters::parse("repository=").unwrap().repository, None);
         assert_eq!(ItemFilters::parse("unread=1").unwrap().inbox_show, InboxShow::Unread, "as saved before Done");
         assert_eq!(ItemFilters::parse("unread=0").unwrap().inbox_show, InboxShow::All);
+        assert_eq!(ItemFilters::parse("inbox=snoozed").unwrap().inbox_show, InboxShow::Snoozed);
         for gone in [";group=", ";show_empty=", ";status=", ";kinds=", ";saved=", ";scope="] {
             assert!(!meta.contains(gone), "{gone}");
         }

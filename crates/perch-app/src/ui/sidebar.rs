@@ -408,7 +408,12 @@ fn notification_filter_menu(state: AppState) -> Menu {
         let set = set.clone();
         move |mut sub| {
             sub = sub.icon(SidebarIcon::Inbox);
-            for (label, show) in [("Unread", InboxShow::Unread), ("All", InboxShow::All), ("Done", InboxShow::Done)] {
+            for (label, show) in [
+                ("Unread", InboxShow::Unread),
+                ("All", InboxShow::All),
+                ("Snoozed", InboxShow::Snoozed),
+                ("Done", InboxShow::Done),
+            ] {
                 let set = set.clone();
                 sub = sub.item(label, move |item| {
                     item.checked(current_show == show).action(move || set(Box::new(move |f| f.inbox_show = show)))
@@ -756,6 +761,7 @@ mod tests {
             repository: Repository { full_name: repo.into(), owner_avatar_url: String::new() },
             subject_snapshot: None,
             run_snapshot: None,
+            snoozed_until: None,
         }
     }
 
@@ -904,6 +910,44 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert!(find(harness.root_id(), "No notifications marked Done").is_some());
+    }
+
+    /// An inbox row offers Snooze on hover, and Show › Snoozed lists the
+    /// snoozed with when each comes back and a way to move it back.
+    #[test]
+    fn inbox_rows_snooze_and_show_snoozed_lists_them() {
+        let (mut harness, state) = harness();
+        click_tab(&mut harness, SidebarTab::Inbox);
+        let row = find(harness.root_id(), "notification row:").expect("no inbox row");
+        let rect = row.get_visual_rect_no_clip();
+        harness.pointer_move(rect.center().x, rect.center().y);
+        harness.rebuild();
+        harness.paint();
+        let row = find(harness.root_id(), "notification row:").unwrap();
+        assert!(find(row, "snooze button").is_some(), "no Snooze on hover");
+        harness.pointer_move(0.0, 0.0);
+
+        let mut snoozed = notification("30", "org/one", "Put off thread", SubjectKind::Issue, false);
+        snoozed.snoozed_until = Some(jiff::Timestamp::now() + jiff::SignedDuration::from_hours(20));
+        state.snoozed_notifications.set(vec![snoozed]);
+        set_filters(state, |f| f.inbox_show = InboxShow::Snoozed);
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "Read discussion").is_none());
+        let row = find(harness.root_id(), "notification row:30").expect("no snoozed row");
+        assert!(find(row, "snoozed until").is_some());
+        let rect = row.get_visual_rect_no_clip();
+        harness.pointer_move(rect.center().x, rect.center().y);
+        harness.rebuild();
+        harness.paint();
+        let row = find(harness.root_id(), "notification row:30").unwrap();
+        assert!(find(row, "move to inbox").is_some());
+        assert!(find(row, "snooze button").is_none());
+
+        state.snoozed_notifications.set(Vec::new());
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "No snoozed notifications").is_some());
     }
 
     /// A worktree whose directory goes leaves Worktrees and stays in
