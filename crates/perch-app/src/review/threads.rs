@@ -517,9 +517,12 @@ pub fn composer_view(
     // the view is in the box tree, where it is invisible and dropped.
     //
     // A composer laid in place on Conversation also leaves its box where
-    // `a` can find it and scrolls the page to itself: it sits at the end of
-    // the conversation, or under a thread, and may have opened off screen.
+    // `a` can find it and scrolls the page to the whole of itself, Send
+    // included: it sits at the end of the conversation, or under a thread,
+    // and may have opened off screen or only its top on it.
     let inner = editor.editor().editor_view_id;
+    let whole = std::rc::Rc::new(std::cell::Cell::new(None::<floem::ViewId>));
+    let whole_set = whole.clone();
     let asked = std::rc::Rc::new(std::cell::Cell::new(false));
     let registered = std::rc::Rc::new(std::cell::Cell::new(None));
     let unregister = registered.clone();
@@ -537,7 +540,7 @@ pub fn composer_view(
             if face == ThreadFace::Card {
                 registered.set(Some(id));
                 state.composer_box.set(Some(id));
-                id.scroll_to(None);
+                whole.get().unwrap_or(id).scroll_to(None);
             }
             if state.composer_autofocus.get_untracked() {
                 id.request_focus();
@@ -552,7 +555,7 @@ pub fn composer_view(
             }
         });
 
-    Stack::vertical((
+    let whole_box = Stack::vertical((
         Stack::horizontal((
             sidebar_glyph(SidebarIcon::Thread, theme::ACCENT)
                 .style(|s| s.size(13.0, 13.0).margin_right(6.0)),
@@ -616,7 +619,9 @@ pub fn composer_view(
                 .border_color(theme::BORDER)
                 .border_radius(theme::RADIUS)
         })
-    })
+    });
+    whole_set.set(Some(floem::View::id(&whole_box)));
+    whole_box
 }
 
 /// A box the reader drags taller or shorter by the grip along the

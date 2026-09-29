@@ -2158,6 +2158,34 @@ mod tests {
         assert_eq!(title.get_visual_rect_no_clip().y0, top);
     }
 
+    /// The ask box at the foot of the page opens into a composer taller
+    /// than itself, and the page follows it down: the whole composer,
+    /// Send and all, is on screen, not only its first lines.
+    #[test]
+    fn the_composer_opened_at_the_foot_of_the_page_is_all_on_screen() {
+        let (mut harness, _, state) = app_harness();
+        let scroll = find(harness.root_id(), "conversation").unwrap();
+        let viewport = scroll.get_visual_rect_no_clip();
+        harness.click(700.0, 500.0);
+        harness.rebuild();
+        harness.dispatch_event(page_key(Paging::End));
+        harness.rebuild();
+        harness.paint();
+
+        let foot = find(harness.root_id(), "composer").unwrap();
+        click_on(&mut harness, foot);
+        harness.rebuild();
+        harness.paint();
+        assert!(state.composer.get().is_some(), "the composer opened");
+        let composer = find(harness.root_id(), "composer-box")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        assert!(
+            composer.y0 >= viewport.y0 && composer.y1 <= viewport.y1,
+            "the composer at {composer:?} is not all in the page {viewport:?}"
+        );
+    }
+
     /// Any text box on the page keeps Cmd-Up and Cmd-Down, not only the
     /// composer: the close-as-issue form's title and body do too.
     #[test]
