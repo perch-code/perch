@@ -1051,7 +1051,7 @@ fn github_data(app: AppState, state: ReviewState) -> GitHubData {
 /// The issue numbers a description says it closes: `closes #12`, `Fixes
 /// #3`, `resolved #7`, in any case, anywhere in the text. Only this
 /// repository's; `owner/repo#N` names another and is left alone.
-fn closes(body: &str) -> Vec<u64> {
+pub(crate) fn closes(body: &str) -> Vec<u64> {
     const WORDS: [&str; 9] = [
         "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
     ];

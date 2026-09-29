@@ -2,9 +2,8 @@
 //!
 //! The bar is the window's title bar. It holds what is open, the switch
 //! between Conversation and Code, and the things a reader reaches for from
-//! anywhere in an item: GitHub, plan usage, an agent's review of the
-//! branch, every item's agents, the item's one action (Submit review, or
-//! Start work on an issue), and closing the item.
+//! anywhere in an item: GitHub, plan usage, every item's agents, Start
+//! work, Review on anything with files, and closing the item.
 //! Everything else about the item, its state and number, branches, checks
 //! and worktree, and what GitHub says about it, is `review::summary`,
 //! under Conversation's title.
@@ -131,13 +130,14 @@ fn state_glyph(state: ReviewState) -> impl IntoView {
 }
 
 /// What is reached for from anywhere in an item: GitHub, plan usage,
-/// every item's agents, the item's one action, and closing it.
+/// every item's agents, Start work, Review, and closing it.
 fn trailing(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     Stack::horizontal((
         github_button(state),
         crate::ui::usage::button(app, state, backend.clone()),
         crate::ui::agents::dropdown::button(app, state, backend.clone()),
-        primary_action(app, state, backend.clone()),
+        crate::review::start_work::button(app, state, backend.clone()),
+        review_control(app, state, backend.clone()),
         close_button(app, state, backend),
     ))
     .style(move |s| {
@@ -172,17 +172,17 @@ fn github_button(state: ReviewState) -> impl IntoView {
 }
 
 /// Review for anything with files: a pull request, or a branch of the
-/// reader's own. Start work for an issue, which has none until it starts.
-fn primary_action(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+/// reader's own. An issue has none until work starts on it.
+fn review_control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let is_issue = move || state.phase.get() == Phase::Issue;
     dyn_container(is_issue, move |is_issue| {
         if is_issue {
-            crate::review::issue::start_work_button(app, state, backend.clone()).into_any()
+            Empty::new().into_any()
         } else {
             crate::review::review_menu::control(app, state, backend.clone()).into_any()
         }
     })
-    .style(control)
+    .style(move |s| control(s).apply_if(is_issue(), |s| s.hide()))
 }
 
 /// Close the item, as Cmd-[ does, and leave the main area empty.
@@ -415,11 +415,12 @@ pub(crate) mod tests {
         assert_eq!(bar.y0, 0.0, "and at the window's top: it is the title bar");
 
         // Left to right: the title, the switch, then GitHub, Agents,
-        // Review, and close against the right edge.
+        // Start work, Review, and close against the right edge.
         let title = rect(&harness, "item title");
         let switch = rect(&harness, "item switch");
         let github = rect(&harness, "github button");
         let agents = rect(&harness, "agents-button");
+        let start = rect(&harness, "start work button");
         let review = rect(&harness, "review-control");
         let close = rect(&harness, "close button");
         for (name, r) in [
@@ -427,6 +428,7 @@ pub(crate) mod tests {
             ("switch", switch),
             ("github", github),
             ("agents", agents),
+            ("start work", start),
             ("review", review),
             ("close", close),
         ] {
@@ -436,7 +438,8 @@ pub(crate) mod tests {
         assert!(title.x1 <= switch.x0);
         assert!(switch.x1 <= github.x0);
         assert!(github.x1 <= agents.x0);
-        assert!(agents.x1 <= review.x0);
+        assert!(agents.x1 <= start.x0);
+        assert!(start.x1 <= review.x0);
         assert!(review.x1 <= close.x0);
         assert_eq!(
             close.x1,

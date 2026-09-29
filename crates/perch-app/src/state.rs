@@ -2507,7 +2507,7 @@ impl AppState {
     }
 
     /// The progress card, over the open review or the empty main area, for
-    /// an act that ends in another item being opened: Start work, Fork.
+    /// an act that ends in another item being opened: Start work.
     pub fn begin_open(&self, message: &str, navigation_id: u64) {
         self.expected_navigation_id.set(Some(navigation_id));
         self.pending_agent_navigation.set(None);

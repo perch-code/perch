@@ -66,7 +66,10 @@ pub(super) async fn readiness(
     let ready = perch_git::branch_readiness(git, &checkout.path, &base_ref)
         .await
         .map_err(|e| e.to_string())?;
-    let (title, body) = fills(&item, &checkout.path, &ready.commits);
+    let (title, mut body) = fills(&item, &checkout.path, &ready.commits);
+    if let Some(number) = closes_subject(ctx, &item) {
+        body = with_closes(&body, number);
+    }
     Ok(PullRequestReadiness {
         branch: checkout.branch.clone(),
         base,
@@ -296,7 +299,12 @@ pub(super) async fn describe(
     model: &str,
     effort: perch_agent::Effort,
 ) {
-    let outcome = describe_inner(ctx, item_id, base, backend, model, effort).await;
+    let mut outcome = describe_inner(ctx, item_id, base, backend, model, effort).await;
+    if let DescriptionOutcome::Written { body, .. } = &mut outcome {
+        if let Some(number) = ctx.item(item_id).and_then(|item| closes_subject(ctx, &item)) {
+            *body = with_closes(body, number);
+        }
+    }
     let _ = ctx.events.send(Event::PullRequestDescription {
         item_id: item_id.to_string(),
         outcome,
@@ -574,6 +582,37 @@ fn fills(item: &Item, worktree: &Path, commits: &[(String, String)]) -> (String,
     (title, body)
 }
 
+/// The issue or pull request a pull request from the branch closes: the
+/// one Start work cut it from. A branch cut from a branch has no number,
+/// and its base is the head it was cut at.
+fn closes_subject(ctx: &Ctx, item: &Item) -> Option<u64> {
+    let checkout = item.checkout.as_ref()?;
+    if checkout.base_ref.is_empty() || is_sha(&checkout.base_ref) {
+        return None;
+    }
+    let source = ctx.item(item.from_item_id.as_deref()?)?;
+    if !source.repo_full_name.eq_ignore_ascii_case(&item.repo_full_name) {
+        return None;
+    }
+    match source.subject.as_ref()? {
+        perch_github::ItemSubject::PullRequest(pr) => Some(pr.number),
+        perch_github::ItemSubject::Issue(issue) => Some(issue.number),
+    }
+}
+
+/// `body` with `Closes #n` at its end, unless it closes `n` already.
+fn with_closes(body: &str, number: u64) -> String {
+    if crate::review::summary::closes(body).contains(&number) {
+        return body.to_string();
+    }
+    let body = body.trim_end();
+    if body.is_empty() {
+        format!("Closes #{number}")
+    } else {
+        format!("{body}\n\nCloses #{number}")
+    }
+}
+
 /// The pull request template, looked for where GitHub looks: `.github/`,
 /// the root, then `docs/`, whatever the file name's case.
 fn template(worktree: &Path) -> Option<String> {
@@ -783,6 +822,14 @@ mod tests {
             Some(("Add the gate".into(), String::new()))
         );
         assert_eq!(split_description("  \n "), None);
+    }
+
+    #[test]
+    fn a_description_ends_by_closing_what_the_branch_replaces_once() {
+        assert_eq!(with_closes("", 7), "Closes #7");
+        assert_eq!(with_closes("Fence the manifest.\n\n", 7), "Fence the manifest.\n\nCloses #7");
+        assert_eq!(with_closes("Fixes #7 at last.", 7), "Fixes #7 at last.", "said already");
+        assert_eq!(with_closes("See #7.", 7), "See #7.\n\nCloses #7", "a mention closes nothing");
     }
 
     #[test]

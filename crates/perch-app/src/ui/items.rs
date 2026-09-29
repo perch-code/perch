@@ -344,8 +344,6 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
     let path = item.checkout.as_ref().map(|c| c.path.clone());
     let github_url = github_url(&item);
     let pinned = item.is_pinned();
-    let archived = item.is_archived();
-    let is_issue = item.issue().is_some();
 
     let mut menu = Menu::new().submenu("Open in", {
         let path = path.clone();
@@ -423,25 +421,6 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
             m.accelerator(key(KeyCode::KeyR)).action(move || {
                 state.confirm_delete.set(None);
                 state.renaming.set(Some(i.clone()));
-            })
-        });
-    }
-    {
-        // Start work cuts from the default branch; Fork from the item's
-        // head. Neither applies to an archived item or one with nothing
-        // to cut from.
-        let label = if is_issue { "Start Work" } else { "Fork" };
-        let can = !archived && (is_issue || item.checkout.is_some());
-        let (b, i) = (backend.clone(), id.clone());
-        menu = menu.item(label, move |m| {
-            let (b, i) = (b.clone(), i.clone());
-            m.enabled(can).accelerator(key(KeyCode::KeyF)).action(move || {
-                let navigation_id = if is_issue {
-                    b.start_work(&i)
-                } else {
-                    b.fork_item(&i)
-                };
-                state.begin_open("Cutting a branch", navigation_id);
             })
         });
     }

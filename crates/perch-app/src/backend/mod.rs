@@ -420,15 +420,11 @@ pub enum Command {
         work: NewWork,
         navigation_id: u64,
     },
-    /// Cut `perch/issue-<n>` from the default branch and make a
-    /// checkout-only item pointing back at the issue.
+    /// Cut a branch from the item into a checkout-only item pointing back
+    /// at it: from the default branch for an issue, from the head for a
+    /// pull request or a branch. See `start_work`.
     StartWork {
-        issue_item_id: String,
-        navigation_id: u64,
-    },
-    /// Cut a branch from the item's head into a new checkout-only item.
-    ForkItem {
-        id: String,
+        item_id: String,
         navigation_id: u64,
     },
     /// Remember a setting across launches.
@@ -2686,11 +2682,11 @@ impl Backend {
         });
     }
 
-    pub fn start_work(&self, issue_item_id: &str) -> u64 {
-        let navigation_id = self.navigation_requests.begin_item(issue_item_id);
+    pub fn start_work(&self, item_id: &str) -> u64 {
+        let navigation_id = self.navigation_requests.begin_item(item_id);
         self.scope_requests.clear();
         let _ = self.commands.send(Command::StartWork {
-            issue_item_id: issue_item_id.to_string(),
+            item_id: item_id.to_string(),
             navigation_id,
         });
         navigation_id
@@ -2739,16 +2735,6 @@ impl Backend {
         self.scope_requests.clear();
         let _ = self.commands.send(Command::CreateWorktree {
             work,
-            navigation_id,
-        });
-        navigation_id
-    }
-
-    pub fn fork_item(&self, id: &str) -> u64 {
-        let navigation_id = self.navigation_requests.begin_item(id);
-        self.scope_requests.clear();
-        let _ = self.commands.send(Command::ForkItem {
-            id: id.to_string(),
             navigation_id,
         });
         navigation_id
@@ -3945,13 +3931,13 @@ async fn run(
                 });
             }
             Command::StartWork {
-                issue_item_id,
+                item_id,
                 navigation_id,
             } => {
                 ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    match start_work(&ctx, &issue_item_id, navigation_id).await {
+                    match start_work(&ctx, &item_id, navigation_id).await {
                         Ok(id) => {
                             if open_item(&ctx, &id, navigation_id).await {
                                 start_language_server(
@@ -4058,35 +4044,6 @@ async fn run(
                                         .await;
                                     });
                                 }
-                                start_language_server(
-                                    ctx.slot,
-                                    ctx.language_server,
-                                    ctx.events,
-                                    ctx.navigation_requests,
-                                    navigation_id,
-                                )
-                                .await;
-                            }
-                        }
-                        Err(message) => {
-                            ctx.send_navigation_event(
-                                navigation_id,
-                                Event::ReviewFailed {
-                                    navigation_id,
-                                    message,
-                                },
-                            );
-                        }
-                    }
-                });
-            }
-            Command::ForkItem { id, navigation_id } => {
-                ctx.clear_notice();
-                let ctx = ctx.clone();
-                tokio::spawn(async move {
-                    match fork_item(&ctx, &id).await {
-                        Ok(id) => {
-                            if open_item(&ctx, &id, navigation_id).await {
                                 start_language_server(
                                     ctx.slot,
                                     ctx.language_server,
@@ -9634,9 +9591,28 @@ fn no_root_for_local(ctx: &Ctx, repo_full_name: &str) -> Option<String> {
     })
 }
 
+/// Cut a branch from an item and make the item for it, or find the one
+/// that already has that branch. An issue's is cut from the default
+/// branch; a pull request's from its head, diffed against its base; a
+/// branch's from its head. A pull request from the new branch closes the
+/// issue or the pull request, as `open_pull` fills in its description.
+async fn start_work(ctx: &Ctx, item_id: &str, navigation_id: u64) -> Result<String, String> {
+    let Some(item) = ctx.item(item_id) else {
+        return Err("That item is gone".into());
+    };
+    if item.is_archived() {
+        return Err("Restore the item before starting work from it".into());
+    }
+    match &item.subject {
+        Some(ItemSubject::Issue(_)) => start_work_on_issue(ctx, item_id, navigation_id).await,
+        Some(ItemSubject::PullRequest(_)) => start_work_on_pull(ctx, item_id, navigation_id).await,
+        None => fork_item(ctx, item_id).await,
+    }
+}
+
 /// Cut `perch/issue-<n>` from the default branch and make the item for it,
 /// or find the one that already has that branch.
-async fn start_work(ctx: &Ctx, issue_item_id: &str, navigation_id: u64) -> Result<String, String> {
+async fn start_work_on_issue(ctx: &Ctx, issue_item_id: &str, navigation_id: u64) -> Result<String, String> {
     let Some(issue_item) = ctx.item(issue_item_id) else {
         return Err("That item is gone".into());
     };
@@ -10063,7 +10039,8 @@ async fn create_worktree(ctx: &Ctx, work: &NewWork, navigation_id: u64) -> Resul
     Ok(item.id)
 }
 
-/// Cut a new branch from an item's head into a new checkout-only item.
+/// Cut a new branch from a branch item's head into a new checkout-only
+/// item: Start work on a branch.
 ///
 /// The cut is made where the source's commits are. A checkout Perch cut
 /// from a root is cut again in that root, and so is any checkout of a
@@ -10075,10 +10052,10 @@ async fn fork_item(ctx: &Ctx, id: &str) -> Result<String, String> {
         return Err("That item is gone".into());
     };
     if source.is_archived() {
-        return Err("Restore the item before forking it".into());
+        return Err("Restore the item before starting work from it".into());
     }
     let Some(checkout) = source.checkout.as_ref() else {
-        return Err("Fork needs a checkout; open the pull request first".into());
+        return Err("The branch has no checkout".into());
     };
     let Some(repo) = RepoId::parse(&source.repo_full_name) else {
         return Err(format!(
@@ -10193,6 +10170,167 @@ async fn fork_item(ctx: &Ctx, id: &str) -> Result<String, String> {
         divergence: None,
         source: root,
     });
+    item.from_item_id = Some(source.id.clone());
+    ctx.with_cache(|c| c.insert_item(&item))
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    ctx.send_items();
+    Ok(item.id)
+}
+
+/// Cut `perch/pr-<n>-work` from a pull request's head in the store's clone
+/// and make the item for it, or find the one an earlier press made.
+/// `perch/pr-<n>` is the pull request's own checkout, where it is read.
+///
+/// The head is the one Code shows: the pull request's checkout when it has
+/// one on disk, commits not pushed yet and all, else GitHub's. The branch
+/// is diffed against the pull request's base rather than its head, so
+/// what it shows, and what a pull request from it opens with, is the whole
+/// change: the other's commits and whatever is added on top. The item
+/// points back at the pull request, and the pull request opened from it
+/// says it closes that one.
+async fn start_work_on_pull(ctx: &Ctx, id: &str, navigation_id: u64) -> Result<String, String> {
+    let Some(source) = ctx.item(id) else {
+        return Err("That item is gone".into());
+    };
+    let Some(pr) = source.pull_request().cloned() else {
+        return Err("That item has no pull request".into());
+    };
+    if pr.merged {
+        return Err(format!("#{} is merged already", pr.number));
+    }
+    let Some(repo) = RepoId::parse(&source.repo_full_name) else {
+        return Err(format!(
+            "{} is not a repository name",
+            source.repo_full_name
+        ));
+    };
+    if perch_github::is_local(&source.repo_full_name) {
+        return Err(format!(
+            "{} is not on GitHub, so it has no pull requests to start work from",
+            ctx.config().display_name(&source.repo_full_name)
+        ));
+    }
+    let wanted = format!("perch/pr-{}-work", pr.number);
+    let earlier = ctx
+        .with_cache(|c| c.load_items().ok())
+        .flatten()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|item| {
+            item.from_item_id.as_deref() == Some(id)
+                && !item.is_archived()
+                && item.checkout.as_ref().is_some_and(|c| c.on_disk)
+        });
+    if let Some(earlier) = earlier {
+        return Ok(earlier.id);
+    }
+
+    ctx.send_navigation_event(
+        navigation_id,
+        Event::ReviewProgress {
+            navigation_id,
+            message: format!("Fetching #{}", pr.number),
+            percent: None,
+        },
+    );
+    let progress = ctx.events.clone();
+    let progress_requests = ctx.navigation_requests.clone();
+    let label = repo.full_name();
+    let bare = ctx
+        .preparer
+        .ensure_bare(&repo, move |step| {
+            if let perch_git::Step::Cloning { phase, percent } = step {
+                let _ = progress_requests.with_current(navigation_id, || {
+                    let _ = progress.send(Event::ReviewProgress {
+                        navigation_id,
+                        message: format!("Cloning {label}: {phase}"),
+                        percent,
+                    });
+                });
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    let git = ctx.preparer.git();
+    let kept = source
+        .checkout
+        .as_ref()
+        .filter(|c| c.on_disk && c.path.join(".git").exists());
+    let start = match kept {
+        // The checkout's head, fetched by commit from wherever it is: a
+        // root of the reader's, or another of Perch's clones.
+        Some(checkout) => {
+            let head = git
+                .run(Some(&checkout.path), ["rev-parse", "HEAD"], Duration::from_secs(30))
+                .await
+                .map_err(|e| e.to_string())?
+                .trim()
+                .to_string();
+            let from = checkout.path.to_string_lossy().into_owned();
+            git.run(
+                Some(&bare),
+                ["fetch", "--no-tags", &from, &head],
+                Duration::from_secs(120),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            head
+        }
+        // The head from the base repository, where GitHub keeps it
+        // whoever's fork it is on.
+        None => {
+            ctx.preparer
+                .fetch_pull(&bare, "origin", pr.number, &pr.base_ref)
+                .await
+                .map_err(|e| e.to_string())?;
+            format!("refs/perch/pull/{}/head", pr.number)
+        }
+    };
+    // The base, where the branch's diff and its pull request's form look
+    // for it.
+    ctx.preparer
+        .fetch_home_ref(&bare, &pr.base_ref)
+        .await
+        .map_err(|e| e.to_string())?;
+    let cut = ctx
+        .preparer
+        .cut_branch(
+            &bare,
+            &repo,
+            &wanted,
+            &start,
+            &branches_in(ctx, &source.repo_full_name),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let head_sha = ctx
+        .preparer
+        .git()
+        .run(
+            Some(&cut.worktree),
+            ["rev-parse", "HEAD"],
+            Duration::from_secs(30),
+        )
+        .await
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    let mut item = Item::new(&source.repo_full_name, Timestamp::now());
+    item.checkout = Some(ItemCheckout {
+        branch: cut.branch,
+        base_ref: pr.base_ref.clone(),
+        head_sha,
+        path: cut.worktree,
+        owned: true,
+        on_disk: true,
+        churn: None,
+        last_seen_head: None,
+        divergence: None,
+        source: None,
+    });
+    // The pull request's title, which its successor's form starts from.
+    item.name = Some(pr.title.clone()).filter(|t| !t.trim().is_empty());
     item.from_item_id = Some(source.id.clone());
     ctx.with_cache(|c| c.insert_item(&item))
         .transpose()
@@ -19879,7 +20017,7 @@ read eof || true
         assert!(scan_roots(&ctx).await);
         let source = ctx.with_cache(|c| c.load_items().unwrap()).unwrap().remove(0);
 
-        let id = fork_item(&ctx, &source.id).await.expect("a local branch forks");
+        let id = start_work(&ctx, &source.id, 0).await.expect("work starts from a local branch");
 
         let fork = ctx.item(&id).unwrap();
         let checkout = fork.checkout.clone().unwrap();
@@ -20508,6 +20646,106 @@ read eof || true
     /// A root on `main` with a bare `origin` that has `main`, and a
     /// worktree of it on `feature` one commit past, as a branch row of
     /// `a/b`. The remote is a directory, so the push is real and local.
+    /// GitHub's side of `a/b#7`, with the store's clone of it made: `main`,
+    /// and the contributor's commit, kept by the base repository under
+    /// `refs/pull/7/head` though no branch of it has the commit. The
+    /// commit's sha.
+    fn pull_seven_on_github(ctx: &Ctx, dir: &Path) -> String {
+        let repo = RepoId::parse("a/b").unwrap();
+        let source = dir.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        git(&source, &["init", "-q", "-b", "main"]);
+        std::fs::write(source.join("one.txt"), "one\n").unwrap();
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-q", "-m", "one"]);
+        let remote = dir.join("remote.git");
+        git(&source, &["clone", "-q", "--bare", ".", remote.to_str().unwrap()]);
+        let bare = ctx.preparer.store().bare_path(&repo);
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(&remote, &["clone", "-q", "--bare", ".", bare.to_str().unwrap()]);
+        git(&source, &["checkout", "-q", "-b", "theirs"]);
+        std::fs::write(source.join("two.txt"), "two\n").unwrap();
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-q", "-m", "two"]);
+        git(&source, &["push", "-q", remote.to_str().unwrap(), "HEAD:refs/pull/7/head"]);
+        git(&source, &["rev-parse", "HEAD"])
+    }
+
+    #[tokio::test]
+    async fn start_work_on_a_pull_request_takes_the_head_code_shows_with_its_unpushed_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let repo = RepoId::parse("a/b").unwrap();
+        pull_seven_on_github(&ctx, dir.path());
+        // The pull request as Perch reads it, in `perch/pr-7`, with a
+        // commit of the reader's that GitHub hasn't seen.
+        let bare = ctx.preparer.store().bare_path(&repo);
+        git(&bare, &["fetch", "-q", "origin", "+refs/pull/7/head:refs/perch/pull/7/head"]);
+        let worktree = ctx.preparer.store().worktree_path(&repo, "perch/pr-7");
+        std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        git(
+            &bare,
+            &["worktree", "add", "-q", "-b", "perch/pr-7", worktree.to_str().unwrap(), "refs/perch/pull/7/head"],
+        );
+        std::fs::write(worktree.join("three.txt"), "three\n").unwrap();
+        git(&worktree, &["add", "."]);
+        git(&worktree, &["commit", "-q", "-m", "three"]);
+        let unpushed = git(&worktree, &["rev-parse", "HEAD"]);
+        let mut pr = store_pull(&ctx, 7);
+        pr.checkout = Some(ItemCheckout {
+            branch: "perch/pr-7".into(),
+            base_ref: "main".into(),
+            head_sha: unpushed.clone(),
+            path: worktree,
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            divergence: None,
+            source: None,
+        });
+        ctx.with_cache(|c| c.update_item(&pr)).unwrap().unwrap();
+
+        let id = start_work(&ctx, &pr.id, 0).await.expect("work starts from the pull request");
+
+        let checkout = ctx.item(&id).unwrap().checkout.unwrap();
+        assert_ne!(id, pr.id, "a branch of its own, not the pull request's checkout");
+        assert_eq!(checkout.branch, "perch/pr-7-work");
+        assert_eq!(checkout.head_sha, unpushed, "the commit Code shows, not GitHub's head");
+        assert_eq!(open_pull::readiness(&ctx, &id, None).await.unwrap().ahead, 2);
+    }
+
+    #[tokio::test]
+    async fn start_work_on_a_pull_request_cuts_its_head_against_its_base_and_its_successor_closes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let theirs = pull_seven_on_github(&ctx, dir.path());
+
+        let pr = store_pull(&ctx, 7);
+        let id = start_work(&ctx, &pr.id, 0).await.expect("work starts from the pull request");
+
+        let item = ctx.item(&id).unwrap();
+        let checkout = item.checkout.clone().unwrap();
+        assert_eq!(checkout.branch, "perch/pr-7-work", "perch/pr-7 is the pull request's own checkout");
+        assert_eq!(checkout.base_ref, "main", "diffed against the base, not the head");
+        assert_eq!(checkout.head_sha, theirs, "the contributor's commits are the branch's");
+        assert!(checkout.owned && checkout.source.is_none(), "Perch's clone, which pushes with Perch's token");
+        assert_eq!(item.from_item_id.as_deref(), Some(pr.id.as_str()));
+        assert_eq!(item.title(), "pull 7");
+        assert!(item.subject.is_none(), "no pull request until the reader opens one");
+
+        let ready = open_pull::readiness(&ctx, &id, None).await.unwrap();
+        assert_eq!(ready.base, "main");
+        assert_eq!(ready.ahead, 1);
+        assert_eq!(ready.body, "Closes #7", "its successor closes it");
+
+        assert_eq!(
+            start_work(&ctx, &pr.id, 0).await.unwrap(),
+            id,
+            "a second press opens the branch it made"
+        );
+    }
+
     fn pushable_branch(ctx: &Ctx, dir: &Path) -> (Item, std::path::PathBuf, std::path::PathBuf) {
         let root = dir.join("widgets");
         let worktree = root_with_branch(&root, "feature").canonicalize().unwrap();

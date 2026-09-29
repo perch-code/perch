@@ -340,8 +340,28 @@ a push of the branch and the upstream it then tracks. The fetch uses your own cr
 never Perch's token, and cannot prompt: a key that wants a passphrase fails it,
 and the cut goes ahead from what the clone had, with a notice saying how old
 that is. A GitHub repository with no root is cut in Perch's own clone, as
-**Start Work** on an issue is. **Fork** of a branch in a local repository cuts
-in that repository.
+**Start work** on an issue or a pull request is. Start work on a branch in a
+local repository cuts in that repository.
+
+### Start work from an item
+
+The branch glyph in an item's bar, beside the agents, is **Start work**. It
+cuts a branch of your own from the item and opens it:
+
+- From an **issue**, `perch/issue-<n>` from the default branch.
+- From a **pull request**, anyone's and from any fork, `perch/pr-<n>-work`
+  from the head Code shows: the pull request's worktree when it has one,
+  commits not pushed yet and all, else its head on GitHub. The branch is
+  diffed against the pull request's base, so it shows the whole change, and
+  a pull request opened from it takes it over.
+- From a **branch**, a new branch from its head, named for it with `-2`.
+
+An issue or a pull request leaves a prompt to work on it in the new
+branch's composer, and a second press opens the branch the first made. The
+new branch is listed under **In Perch** on the item it came from. A pull
+request opened from it says `Closes #<n>`, so merging it closes the issue or
+the pull request it came from. A merged pull request, and anything
+archived, has no Start work.
 
 ### Keeping work safe
 
@@ -380,7 +400,9 @@ into a form:
 - **Description**, a composer's box going to GitHub, so `@` offers people and
   files as code spans. Filled in from the repository's pull request template
   (`.github/`, the root, then `docs/`), else the one commit's body, else the
-  commits' subjects as a list.
+  commits' subjects as a list. A branch Start work cut from an issue or a
+  pull request ends it with `Closes #<n>`, as does a description the agent
+  writes.
 - **Base**, the branch it goes into: the one the branch was cut from, or any
   branch the repository has on GitHub.
 - **Draft**, off.
