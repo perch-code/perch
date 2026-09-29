@@ -245,6 +245,48 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <circle cx="8" cy="8" r="1.3" fill="{c}"/>
                <circle cx="12.5" cy="8" r="1.3" fill="{c}"/>"#
         ),
+        SidebarIcon::ArrowUpRight => format!(
+            r#"<path d="M4.5 11.5 L11.5 4.5 M5.8 4.5 H11.5 V10.2" fill="none" stroke="{c}"
+                     stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>"#
+        ),
+        SidebarIcon::Terminal => format!(
+            r#"<rect x="2" y="2.8" width="12" height="10.4" rx="2" fill="none" stroke="{c}"
+                     stroke-width="1.4"/>
+               <path d="M4.8 6.2 L6.8 8 L4.8 9.8 M8.2 10 H11" fill="none" stroke="{c}"
+                     stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>"#
+        ),
+        SidebarIcon::Unread => format!(
+            r#"<path d="M1.6 8 C3 5.2 5.3 3.7 8 3.7 S13 5.2 14.4 8 C13 10.8 10.7 12.3 8 12.3
+                       S3 10.8 1.6 8 Z" fill="none" stroke="{c}" stroke-width="1.4"
+                     stroke-linejoin="round"/>
+               <circle cx="8" cy="8" r="2" fill="none" stroke="{c}" stroke-width="1.4"/>"#
+        ),
+        SidebarIcon::Archive => format!(
+            r#"<rect x="2" y="2.8" width="12" height="3.2" rx="1" fill="none" stroke="{c}"
+                     stroke-width="1.4"/>
+               <path d="M3.2 6 V12 a1.2 1.2 0 0 0 1.2 1.2 H11.6 a1.2 1.2 0 0 0 1.2 -1.2 V6
+                       M6.5 8.6 H9.5" fill="none" stroke="{c}" stroke-width="1.4"
+                     stroke-linecap="round" stroke-linejoin="round"/>"#
+        ),
+        SidebarIcon::BellOff => format!(
+            r#"<path d="M4.2 10.8 V7.2 a3.8 3.8 0 0 1 6.4 -2.8 M11.8 7.2 V10.8 L12.8 11.8 H5"
+                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linecap="round"
+                     stroke-linejoin="round"/>
+               <path d="M6.6 13.6 H9.4 M2.5 13.5 L13.5 2.5" fill="none" stroke="{c}"
+                     stroke-width="1.4" stroke-linecap="round"/>"#
+        ),
+        SidebarIcon::Inbox => format!(
+            r#"<path d="M2 8.6 L3.8 3.6 a1 1 0 0 1 0.9 -0.6 H11.3 a1 1 0 0 1 0.9 0.6 L14 8.6 V12
+                       a1 1 0 0 1 -1 1 H3 a1 1 0 0 1 -1 -1 Z" fill="none" stroke="{c}"
+                     stroke-width="1.4" stroke-linejoin="round"/>
+               <path d="M2 8.6 H5.4 L6.4 10.2 H9.6 L10.6 8.6 H14" fill="none" stroke="{c}"
+                     stroke-width="1.4" stroke-linejoin="round"/>"#
+        ),
+        SidebarIcon::Sort => format!(
+            r#"<path d="M5 13 V3 M2.6 5.4 L5 3 L7.4 5.4 M11 3 V13 M8.6 10.6 L11 13 L13.4 10.6"
+                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linecap="round"
+                     stroke-linejoin="round"/>"#
+        ),
         SidebarIcon::Folder => format!(
             r#"<path d="M2 4.2 a1 1 0 0 1 1 -1 H6.2 L7.6 4.8 H13 a1 1 0 0 1 1 1 V12 a1 1 0 0 1 -1 1
                        H3 a1 1 0 0 1 -1 -1 Z" fill="none" stroke="{c}" stroke-width="1.4"
@@ -576,13 +618,34 @@ pub enum SidebarIcon {
     TaskList,
     /// A page with a plus over a minus: suggest a change.
     Suggest,
+    /// An arrow up and to the right: open somewhere else.
+    ArrowUpRight,
+    /// A prompt and a cursor in a window: a terminal.
+    Terminal,
+    /// An eye: mark unread, to look at again.
+    Unread,
+    /// A box with a lid: put a worktree away.
+    Archive,
+    /// A bell struck through: stop hearing about it.
+    BellOff,
+    /// A tray: the inbox.
+    Inbox,
+    /// Arrows up and down: the order.
+    Sort,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 59] = [
+    pub const ALL: [SidebarIcon; 66] = [
+        SidebarIcon::ArrowUpRight,
+        SidebarIcon::Terminal,
+        SidebarIcon::Unread,
+        SidebarIcon::Archive,
+        SidebarIcon::BellOff,
+        SidebarIcon::Inbox,
+        SidebarIcon::Sort,
         SidebarIcon::Suggest,
         SidebarIcon::Heading,
         SidebarIcon::Bold,

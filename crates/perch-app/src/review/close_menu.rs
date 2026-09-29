@@ -47,7 +47,7 @@ pub struct CloseMenu {
 
 const WIDTH: f64 = 300.0;
 const ROW_HEIGHT: f64 = 50.0;
-const PADDING: f64 = 6.0;
+const PADDING: f64 = crate::ui::menu::GUTTER;
 /// The room kept between the menu and the window's edges.
 const GUTTER: f64 = 8.0;
 /// The issues the duplicate search shows before it scrolls.
@@ -295,13 +295,7 @@ pub fn popup(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl In
             .height(height)
             .z_index(95)
             .padding(PADDING)
-            .background(theme::CANVAS)
-            .border(1.0)
-            .border_color(theme::BORDER)
-            .border_radius(theme::RADIUS_LG)
-            .box_shadow_blur(16.0)
-            .box_shadow_v_offset(5.0)
-            .box_shadow_color(theme::SHADOW)
+            .apply(crate::ui::menu::surface(floem::style::Style::new()))
     })
     .debug_name("close-ways");
     Stack::new((sheet, menu))
@@ -334,7 +328,8 @@ fn reasons(app: AppState, state: ReviewState) -> impl IntoView {
             s.height(1.0)
                 .width_full()
                 .flex_shrink(0.0_f32)
-                .background(theme::BORDER_MUTED)
+                .margin_horiz(8.0)
+                .background(theme::MENU_SEPARATOR)
         })
     };
     let reason = move || state.composer_close_reason.get();
@@ -476,8 +471,8 @@ fn row(
             .flex_shrink(0.0_f32)
             .items_center()
             .padding_right(10.0)
-            .border_radius(theme::RADIUS)
-            .hover(|s| s.background(theme::CANVAS_HOVER))
+            .border_radius(crate::ui::menu::ROW_RADIUS)
+            .hover(|s| s.background(theme::MENU_HOVER))
     })
 }
 
@@ -535,7 +530,7 @@ fn duplicate(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                 .background(theme::CANVAS)
                 .border(1.0)
                 .border_color(theme::BORDER)
-                .border_radius(theme::RADIUS)
+                .border_radius(crate::ui::menu::ROW_RADIUS)
                 .focus(|s| s.border_color(theme::ACCENT_RING))
                 .class(PlaceholderTextClass, |s| s.color(theme::FG_SUBTLE))
         });
@@ -617,11 +612,11 @@ fn duplicate_row(
             .size_full()
             .items_center()
             .padding_horiz(8.0)
-            .border_radius(theme::RADIUS);
+            .border_radius(crate::ui::menu::ROW_RADIUS);
         if selected.get() == index {
-            s.background(theme::ACCENT_SUBTLE)
+            s.background(theme::MENU_HOVER)
         } else {
-            s.hover(|s| s.background(theme::CANVAS_HOVER))
+            s.hover(|s| s.background(theme::MENU_POINTED))
         }
     }))
     .on_event_stop(el::Click, move |_, _| pick(index))

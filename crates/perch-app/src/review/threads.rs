@@ -30,6 +30,7 @@ use crate::icons::SidebarIcon;
 use crate::review::cards;
 use crate::review::doc::CardId;
 use crate::review::model::{AgentChoice, Composer, Destination, ReviewState};
+use crate::ui::menu::MenuExt;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{
@@ -1185,7 +1186,7 @@ pub fn subject_word(state: ReviewState) -> &'static str {
 /// edited stays a draft: the models are greyed out, since sending would
 /// replace its body, not ask.
 fn destination_picker(app: AppState, state: ReviewState) -> impl IntoView {
-    use floem::menu::Menu;
+    use crate::ui::menu::Menu;
 
     let current = move || {
         state.composer.with(|c| {
@@ -1234,12 +1235,15 @@ fn destination_picker(app: AppState, state: ReviewState) -> impl IntoView {
             }
         }
         let github_offered = state.github_offered(&composer);
-        menu.separator().item("GitHub", move |item| {
-            item.checked(composer.destination.is_github())
-                .enabled(github_offered)
-                .action(move || state.set_destination(Destination::GitHub))
-        })
+        menu.separator()
+            .item("GitHub", move |item| {
+                item.checked(composer.destination.is_github())
+                    .enabled(github_offered)
+                    .action(move || state.set_destination(Destination::GitHub))
+            })
+            .return_focus(state.composer_box.get_untracked())
     })
+    .debug_name("composer-destination")
 }
 
 /// The picker's face: `Claude · Opus`, `Codex · gpt-5.5`, or `GitHub`.
@@ -1292,7 +1296,7 @@ pub(crate) fn nearest_effort(
 /// The effort to run with. A level the chosen model does not take, by
 /// Codex's own catalog, is shown but cannot be picked.
 fn effort_picker(app: AppState, state: ReviewState) -> impl IntoView {
-    use floem::menu::Menu;
+    use crate::ui::menu::Menu;
 
     let choice = move || {
         state
@@ -1329,14 +1333,15 @@ fn effort_picker(app: AppState, state: ReviewState) -> impl IntoView {
                     })
             });
         }
-        menu
+        menu.return_focus(state.composer_box.get_untracked())
     })
+    .debug_name("composer-effort")
 }
 
 /// A small pop-up button, like the toolbar's, sized for the composer.
 fn menu_button(
     label: impl Fn() -> String + 'static,
-    menu: impl Fn() -> floem::menu::Menu + 'static,
+    menu: impl Fn() -> crate::ui::menu::Menu + 'static,
 ) -> impl IntoView {
     Stack::horizontal((
         Label::derived(label).style(|s| {
@@ -1349,7 +1354,7 @@ fn menu_button(
         sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE)
             .style(|s| s.size(10.0, 10.0).pointer_events_none()),
     ))
-    .popout_menu(menu)
+    .dropdown(menu)
     .style(|s| {
         s.items_center()
             .height(26.0)
@@ -2014,7 +2019,7 @@ pub fn delete_confirmation(
 /// it, and only while there are any; with none, there is no menu at all,
 /// since nothing here may touch what is on GitHub.
 pub fn thread_menu(state: ReviewState, thread: &CommentThread, size: f64) -> impl IntoView {
-    use floem::menu::Menu;
+    use crate::ui::menu::Menu;
 
     let github_bound = thread.is_github_bound();
     if github_bound && !thread.messages.iter().any(|m| m.is_private()) {
@@ -2024,7 +2029,7 @@ pub fn thread_menu(state: ReviewState, thread: &CommentThread, size: f64) -> imp
     Container::new(
         sidebar_glyph(SidebarIcon::Ellipsis, theme::FG_SUBTLE).style(|s| s.pointer_events_none()),
     )
-    .popout_menu(move || {
+    .dropdown(move || {
         let id = thread_id.clone();
         let label = if github_bound {
             "Delete Perch's Messages\u{2026}"
@@ -2035,7 +2040,8 @@ pub fn thread_menu(state: ReviewState, thread: &CommentThread, size: f64) -> imp
         // showing; the confirmation is the one thing that deletes.
         Menu::new().item(label, move |item| {
             let id = id.clone();
-            item.action(move || state.confirm_thread.set(Some(id.clone())))
+            item.icon(SidebarIcon::Trash)
+                .action(move || state.confirm_thread.set(Some(id.clone())))
         })
     })
     .style(move |s| {
@@ -3554,6 +3560,59 @@ mod tests {
             other => panic!("Cmd-Enter did not send: {other:?}"),
         }
         assert!(state.composer.get().is_none(), "sending closes the composer");
+    }
+
+    /// Picking a model from the chip under the box gives the keyboard back
+    /// to the box, to go on typing, as the native menu never took it.
+    #[test]
+    fn picking_from_the_model_menu_gives_the_box_the_keyboard_back() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = ReviewState::new();
+        let mut item =
+            perch_github::Item::new("acme/repo", "2026-09-20T09:00:00Z".parse().unwrap());
+        item.id = "item-1".into();
+        state.item.set(Some(Arc::new(item)));
+        state.open_composer(
+            None,
+            None,
+            "why?".into(),
+            (
+                perch_agent::Backend::ClaudeCode,
+                "sonnet".into(),
+                perch_agent::Effort::Medium,
+            ),
+        );
+        let composer = state.composer.get().unwrap();
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Card);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        let text_box = state.composer_box.get().expect("the box registered itself");
+        assert!(harness.is_focused(text_box));
+
+        let chip = find(harness.root_id(), "composer-effort")
+            .unwrap()
+            .get_visual_rect_no_clip()
+            .center();
+        harness.pointer_down(chip.x, chip.y);
+        harness.rebuild();
+        harness.paint();
+        assert!(crate::ui::menu::is_open());
+        let high = find(harness.root_id(), "menu-row:High")
+            .unwrap()
+            .get_visual_rect_no_clip()
+            .center();
+        harness.click(high.x, high.y);
+        harness.rebuild();
+        harness.paint();
+        assert!(!crate::ui::menu::is_open());
+        assert_eq!(
+            state.composer.get().and_then(|c| c.destination.agent_choice()).map(|(_, _, e)| e),
+            Some(perch_agent::Effort::High)
+        );
+        assert!(harness.is_focused(text_box), "the box has the keyboard back");
     }
 
     /// The first view whose debug name contains `text`.

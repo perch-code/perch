@@ -200,20 +200,25 @@ pub(crate) fn copied() -> Vec<String> {
 pub fn worktree_menu(
     path: std::path::PathBuf,
     on_archive: Option<std::rc::Rc<dyn Fn()>>,
-) -> floem::menu::Menu {
-    use floem::menu::Menu;
+) -> crate::ui::menu::Menu {
+    use crate::ui::menu::Menu;
 
     let (reveal, terminal, copy) = (path.clone(), path.clone(), path);
     let mut menu = Menu::new()
-        .item("Reveal in Finder", move |item| item.action(move || reveal_in_finder(&reveal)))
-        .item("Open in Terminal", move |item| item.action(move || open_in_terminal(&terminal)))
+        .item("Reveal in Finder", move |item| {
+            item.icon(SidebarIcon::Folder).action(move || reveal_in_finder(&reveal))
+        })
+        .item("Open in Terminal", move |item| {
+            item.icon(SidebarIcon::Terminal).action(move || open_in_terminal(&terminal))
+        })
         .item("Copy Path", move |item| {
-            item.action(move || copy_to_clipboard(copy.to_string_lossy().into_owned()))
+            item.icon(SidebarIcon::Copy)
+                .action(move || copy_to_clipboard(copy.to_string_lossy().into_owned()))
         });
     if let Some(archive) = on_archive {
-        menu = menu
-            .separator()
-            .item("Remove Worktree", move |item| item.action(move || archive()));
+        menu = menu.separator().item("Remove Worktree", move |item| {
+            item.icon(SidebarIcon::Archive).action(move || archive())
+        });
     }
     menu
 }

@@ -11,7 +11,6 @@
 //! Item rows and notification rows share these pieces so the three
 //! scopes read as one list.
 
-use floem::menu::Menu;
 use floem::prelude::*;
 use floem::reactive::{Memo, SignalGet, SignalWith};
 use floem::style::{CursorStyle, Style};
@@ -23,6 +22,7 @@ use crate::icons::SidebarIcon;
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
+use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::widgets::{avatar, avatar_radius, clickable, sidebar_glyph};
 
 /// The first line is as tall as a control, so the controls that stand in
@@ -424,13 +424,12 @@ fn thousands(n: u32) -> String {
 pub fn more_button(menu: impl Fn() -> Menu + 'static) -> impl IntoView {
     Container::new(
         sidebar_glyph(SidebarIcon::Ellipsis, theme::FG_SUBTLE)
-            // The menu looks only at the deepest view under the pointer, so
-            // the glyph must not be it.
             .style(|s| s.pointer_events_none()),
     )
-    .popout_menu(menu)
+    .dropdown(menu)
     // The row underneath is a button too.
     .on_event_stop(el::Click, |_, _| {})
+    .debug_name("row more")
     .style(|s| {
         clickable(s)
             .size(26.0, 26.0)

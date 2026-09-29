@@ -359,13 +359,7 @@ fn popover(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
     .style(|s| {
         s.width(theme::AGENTS_DROPDOWN_WIDTH)
             .flex_col()
-            .background(theme::CANVAS)
-            .border(1.0)
-            .border_color(theme::BORDER)
-            .border_radius(10.0)
-            .box_shadow_blur(22.0)
-            .box_shadow_v_offset(7.0)
-            .box_shadow_color(theme::SHADOW)
+            .apply(crate::ui::menu::panel_surface(floem::style::Style::new()))
     })
     .debug_name("agents-dropdown")
 }

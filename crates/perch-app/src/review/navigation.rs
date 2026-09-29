@@ -122,22 +122,28 @@ pub fn navigable(
             }
         });
 
-    // The menu is on the editor's content view: floem looks for one on
-    // the view under the pointer alone. Its closure gets no position, so
-    // it reads the symbol the pointer tracking last saw, which at the
-    // moment of the click is the one clicked.
-    if let Some(content) = ed.editor_view_id.get_untracked() {
-        let menu_backend = backend.clone();
-        let menu_ed = ed.clone();
-        content.update_context_menu(move || {
-            symbol_menu(
-                state,
-                &menu_backend,
-                &menu_ed,
-                state.pointer_symbol.get_untracked(),
-            )
-        });
-    }
+    // A right-click opens the menu at the pointer, for the symbol the
+    // pointer tracking last saw, which at the moment of the click is the
+    // one clicked. Caught on the way down, so the editor keeps its
+    // selection for Copy.
+    let menu_backend = backend.clone();
+    let menu_ed = ed.clone();
+    let editor = editor.on_event_with_config(
+        el::PointerDown,
+        floem::context::EventCallbackConfig {
+            phases: floem::context::Phases::CAPTURE,
+        },
+        move |cx, e: &PointerButtonEvent| {
+            if e.button != Some(PointerButton::Secondary) {
+                return EventPropagation::Continue;
+            }
+            let at = cx.world_transform.inverse() * e.state.logical_point();
+            let symbol = state.pointer_symbol.get_untracked();
+            let menu = symbol_menu(state, &menu_backend, &menu_ed, symbol);
+            crate::ui::menu::open_at(cx, editor_id, at, menu);
+            EventPropagation::Stop
+        },
+    );
 
     tooltip(editor, move || {
         // Read each time the tip is drawn, and again when the answer lands:
@@ -396,8 +402,8 @@ fn symbol_menu(
     backend: &Rc<Backend>,
     ed: &Editor,
     symbol: Option<Symbol>,
-) -> floem::Menu {
-    let mut menu = floem::Menu::new();
+) -> crate::ui::menu::Menu {
+    let mut menu = crate::ui::menu::Menu::new();
     for entry in Entry::for_symbol(symbol.as_ref()) {
         if entry == Entry::Copy && symbol.is_some() {
             menu = menu.separator();
@@ -407,7 +413,8 @@ fn symbol_menu(
         let ed = ed.clone();
         let symbol = symbol.clone();
         menu = menu.item(label, move |item| {
-            let item = match entry.accelerator().and_then(|keys| keys.parse().ok()) {
+            let keys = entry.accelerator().and_then(crate::ui::menu::Shortcut::parse);
+            let item = match keys {
                 Some(accelerator) => item.accelerator(accelerator),
                 None => item,
             };
@@ -1244,8 +1251,7 @@ mod tests {
         );
         for keys in entries.iter().filter_map(|e| e.accelerator()) {
             assert!(
-                keys.parse::<floem::muda::accelerator::Accelerator>()
-                    .is_ok(),
+                crate::ui::menu::Shortcut::parse(keys).is_some(),
                 "{keys}"
             );
         }

@@ -298,13 +298,7 @@ fn panel(state: AppState) -> impl IntoView {
                 .width(width)
                 .flex_col()
                 .padding(theme::GO_TO_PADDING)
-                .background(theme::CANVAS)
-                .border(1.0)
-                .border_color(theme::BORDER)
-                .border_radius(theme::RADIUS_LG)
-                .box_shadow_blur(22.0)
-                .box_shadow_v_offset(7.0)
-                .box_shadow_color(theme::SHADOW)
+                .apply(crate::ui::menu::surface(floem::style::Style::new()))
         })
 }
 
@@ -321,7 +315,7 @@ fn text_box(state: AppState) -> impl IntoView {
                 .hover(|s| s.background(theme::CANVAS))
                 .border(1.0)
                 .border_color(theme::BORDER)
-                .border_radius(theme::RADIUS)
+                .border_radius(crate::ui::menu::ROW_RADIUS)
                 .focus(|s| s.border_color(theme::ACCENT))
                 .cursor_color(theme::FG)
                 .set(SelectionColor, Brush::Solid(theme::SELECTION_BG))

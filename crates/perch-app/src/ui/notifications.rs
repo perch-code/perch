@@ -6,7 +6,6 @@
 
 use std::rc::Rc;
 
-use floem::menu::Menu;
 use floem::prelude::*;
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate};
 use floem::views::{
@@ -19,6 +18,7 @@ use crate::icons::{self, SidebarIcon};
 use crate::items::InboxShow;
 use crate::state::AppState;
 use crate::theme;
+use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::nav_row;
 use crate::ui::widgets::{icon_button, open_in_browser, sidebar_glyph, state_glyph};
 
@@ -123,7 +123,7 @@ fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread, done:
         })
         .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
         .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
-        .context_menu(move || notification_menu(state, menu_backend.clone(), &menu_thread, done))
+        .right_click_menu(move || notification_menu(state, menu_backend.clone(), &menu_thread, done))
         .style(|s| nav_row::row_style(s, false));
     Container::new(row).style(nav_row::row_gutter)
 }
@@ -271,7 +271,8 @@ fn notification_menu(state: AppState, backend: Rc<Backend>, thread: &Thread, don
         return Menu::new().item("Move to Inbox", move |item| {
             let backend = backend.clone();
             let id = id.clone();
-            item.action(move || backend.restore_notification(&id))
+            item.icon(SidebarIcon::Inbox)
+                .action(move || backend.restore_notification(&id))
         });
     }
     let unread_backend = backend.clone();
@@ -285,18 +286,21 @@ fn notification_menu(state: AppState, backend: Rc<Backend>, thread: &Thread, don
         .item("Done", move |item| {
             let backend = done_backend.clone();
             let thread = done_thread.clone();
-            item.action(move || done(state, &backend, &thread))
+            item.icon(SidebarIcon::Check)
+                .action(move || done(state, &backend, &thread))
         })
         .item("Mark Unread", move |item| {
             let backend = unread_backend.clone();
             let id = unread_id.clone();
-            item.enabled(!unread)
+            item.icon(SidebarIcon::Unread)
+                .enabled(!unread)
                 .action(move || backend.mark_notification_unread(&id))
         })
         .item("Unsubscribe", move |item| {
             let backend = unsubscribe_backend.clone();
             let id = unsubscribe_id.clone();
-            item.action(move || backend.unsubscribe_notification(&id))
+            item.icon(SidebarIcon::BellOff)
+                .action(move || backend.unsubscribe_notification(&id))
         })
 }
 

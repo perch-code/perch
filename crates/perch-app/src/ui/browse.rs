@@ -8,7 +8,6 @@
 
 use std::rc::Rc;
 
-use floem::menu::Menu;
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, SignalGet, SignalWith};
 use floem::views::{
@@ -22,6 +21,7 @@ use crate::items::BrowseView;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::items::OpenItem;
+use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::nav_row;
 use crate::ui::sidebar::{local_item_list, set_filters};
 use crate::ui::widgets::{open_in_browser, sidebar_glyph, state_glyph};
@@ -108,7 +108,7 @@ fn chip(
         sidebar_glyph(SidebarIcon::ChevronDown, theme::NAV_MUTED)
             .style(|s| s.size(9.0, 9.0).flex_shrink(0.0_f32).pointer_events_none()),
     ))
-    .popout_menu(menu)
+    .dropdown(menu)
     .debug_name(name)
     .style(|s| {
         crate::ui::widgets::clickable(s)
@@ -439,11 +439,11 @@ fn search_row(state: AppState, backend: Rc<Backend>, hit: SearchHit) -> impl Int
                 navigation_id,
             );
         })
-        .context_menu(move || {
+        .right_click_menu(move || {
             let url = url.clone();
             Menu::new().item("Open on GitHub", move |m| {
                 let url = url.clone();
-                m.action(move || open_in_browser(&url))
+                m.icon(SidebarIcon::External).action(move || open_in_browser(&url))
             })
         })
         .style(|s| nav_row::row_style(s, false));

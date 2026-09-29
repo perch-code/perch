@@ -13,8 +13,6 @@
 
 use std::rc::Rc;
 
-use floem::menu::Menu;
-use floem::muda::accelerator::{Accelerator, Code as KeyCode};
 use floem::prelude::*;
 use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::views::{Container, Decorators, Empty, Label, Stack, TextInput, dyn_container};
@@ -24,6 +22,7 @@ use crate::backend::{Backend, LossPrompt};
 use crate::icons::{self, SidebarIcon};
 use crate::state::AppState;
 use crate::theme;
+use crate::ui::menu::{Menu, MenuExt, Shortcut};
 use crate::ui::nav_row;
 use crate::ui::widgets::{
     copy_to_clipboard, icon_button, open_in_browser, open_in_terminal, reveal_in_finder, sidebar_glyph,
@@ -109,7 +108,7 @@ pub fn item_row(
                 }
             })
         })
-        .context_menu(move || item_menu(state, menu_backend.clone(), menu_item.clone()))
+        .right_click_menu(move || item_menu(state, menu_backend.clone(), menu_item.clone()))
         .style(move |s| nav_row::row_style(s, selected()));
     let row = Container::new(row).style(nav_row::row_gutter);
 
@@ -315,8 +314,8 @@ fn row_trailing(
     .style(|s| s.flex_shrink(0.0_f32))
 }
 
-fn key(code: KeyCode) -> Accelerator {
-    Accelerator::new(None, code)
+fn key(code: Code) -> Shortcut {
+    Shortcut::key(code)
 }
 
 /// The pull request's or the issue's page on github.com. A worktree of the
@@ -350,11 +349,11 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
         let github_url = github_url.clone();
         move |sub| {
             let (reveal, terminal, copy) = (path.clone(), path.clone(), path.clone());
-            sub.item("GitHub", {
+            sub.icon(SidebarIcon::ArrowUpRight).item("GitHub", {
                 let url = github_url.clone();
                 move |i| {
                     let url = url.clone();
-                    i.enabled(has_subject).action(move || {
+                    i.icon(SidebarIcon::External).enabled(has_subject).action(move || {
                         if let Some(url) = &url {
                             open_in_browser(url)
                         }
@@ -363,7 +362,7 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
             })
             .item("Finder", move |i| {
                 let p = reveal.clone();
-                i.enabled(on_disk).action(move || {
+                i.icon(SidebarIcon::Folder).enabled(on_disk).action(move || {
                     if let Some(p) = &p {
                         reveal_in_finder(p)
                     }
@@ -371,7 +370,7 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
             })
             .item("Terminal", move |i| {
                 let p = terminal.clone();
-                i.enabled(on_disk).action(move || {
+                i.icon(SidebarIcon::Terminal).enabled(on_disk).action(move || {
                     if let Some(p) = &p {
                         open_in_terminal(p)
                     }
@@ -379,7 +378,7 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
             })
             .item("Copy Path", move |i| {
                 let p = copy.clone();
-                i.enabled(on_disk).action(move || {
+                i.icon(SidebarIcon::Copy).enabled(on_disk).action(move || {
                     if let Some(p) = &p {
                         copy_to_clipboard(p.to_string_lossy().into_owned())
                     }
@@ -393,7 +392,9 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
         let (b, i) = (backend.clone(), id.clone());
         menu = menu.item(if pinned { "Unpin" } else { "Pin" }, move |m| {
             let (b, i) = (b.clone(), i.clone());
-            m.accelerator(key(KeyCode::KeyP)).action(move || b.pin_item(&i, !pinned))
+            m.icon(SidebarIcon::Pin)
+                .accelerator(key(Code::KeyP))
+                .action(move || b.pin_item(&i, !pinned))
         });
     }
     {
@@ -405,8 +406,9 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
         let b = backend.clone();
         menu = menu.item("Mark Unread", move |m| {
             let (b, read) = (b.clone(), read.clone());
-            m.enabled(!read.is_empty())
-                .accelerator(key(KeyCode::KeyU))
+            m.icon(SidebarIcon::Unread)
+                .enabled(!read.is_empty())
+                .accelerator(key(Code::KeyU))
                 .action(move || {
                     for thread_id in &read {
                         b.mark_notification_unread(thread_id);
@@ -418,7 +420,7 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
         let i = id.clone();
         menu = menu.item("Rename", move |m| {
             let i = i.clone();
-            m.accelerator(key(KeyCode::KeyR)).action(move || {
+            m.icon(SidebarIcon::Pencil).accelerator(key(Code::KeyR)).action(move || {
                 state.confirm_delete.set(None);
                 state.renaming.set(Some(i.clone()));
             })
@@ -435,7 +437,8 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
         let owned = item.checkout.as_ref().is_some_and(|c| c.owned);
         menu = menu.item(if on_disk { "Remove Worktree" } else { "Restore Worktree" }, move |m| {
             let (b, i) = (b.clone(), i.clone());
-            m.enabled(owned).accelerator(key(KeyCode::KeyA)).action(move || {
+            let icon = if on_disk { SidebarIcon::Archive } else { SidebarIcon::Undo };
+            m.icon(icon).enabled(owned).accelerator(key(Code::KeyA)).action(move || {
                 if !on_disk {
                     let navigation_id = b.restore_item(&i);
                     if let Some(review) = state.review.get_untracked() {
@@ -459,7 +462,7 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
         let i = id.clone();
         menu = menu.item("Delete", move |m| {
             let i = i.clone();
-            m.accelerator(key(KeyCode::KeyD)).action(move || {
+            m.icon(SidebarIcon::Trash).accelerator(key(Code::KeyD)).action(move || {
                 state.renaming.set(None);
                 state.confirm_loss.set(None);
                 state.confirm_delete.set(Some(i.clone()));

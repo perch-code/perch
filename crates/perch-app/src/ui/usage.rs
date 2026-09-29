@@ -268,13 +268,7 @@ fn popover(app: AppState) -> impl IntoView {
     .style(|s| {
         s.width(theme::USAGE_POPOVER_WIDTH)
             .flex_col()
-            .background(theme::CANVAS)
-            .border(1.0)
-            .border_color(theme::BORDER)
-            .border_radius(10.0)
-            .box_shadow_blur(22.0)
-            .box_shadow_v_offset(7.0)
-            .box_shadow_color(theme::SHADOW)
+            .apply(crate::ui::menu::panel_surface(floem::style::Style::new()))
     })
     .debug_name("usage-popover")
 }

@@ -23,6 +23,7 @@ use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
 use crate::ui::items::OpenItem;
+use crate::ui::menu::MenuExt;
 use crate::ui::widgets::{
     avatar, badge_box, badge_text, clickable, name_label, open_in_browser, sidebar_glyph,
     worktree_menu, Name,
@@ -617,7 +618,7 @@ fn directory(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                         .pointer_events_none()
                 }),
             ))
-            .popout_menu(move || worktree_menu(path.clone(), archive.clone()))
+            .dropdown(move || worktree_menu(path.clone(), archive.clone()))
             .debug_name("worktree menu")
             .style(|s| {
                 s.items_center()

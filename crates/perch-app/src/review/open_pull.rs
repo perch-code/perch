@@ -11,7 +11,6 @@
 use std::rc::Rc;
 
 use floem::event::EventPropagation;
-use floem::menu::Menu;
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
@@ -25,6 +24,7 @@ use crate::review::model::ReviewState;
 use crate::review::threads::{resizable_editor_box, resize_cursor_sheet, Grip};
 use crate::state::{AppState, Checked};
 use crate::theme;
+use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::widgets::{checkbox, clickable, lay_out_every_line, sidebar_glyph};
 
 /// What the reader has put into one branch's form.
@@ -588,7 +588,6 @@ fn offer(app: AppState, state: ReviewState, item_id: String) -> impl IntoView {
 fn base_chip(app: AppState, state: ReviewState, item_id: String) -> impl IntoView {
     let label_id = item_id.clone();
     let menu = move || base_menu(app, state, item_id.clone());
-    let key_menu = menu.clone();
     Stack::horizontal((
         Label::derived(move || {
             base_of(app, state, &label_id)
@@ -605,15 +604,7 @@ fn base_chip(app: AppState, state: ReviewState, item_id: String) -> impl IntoVie
         sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE)
             .style(|s| s.size(9.0, 9.0).pointer_events_none()),
     ))
-    .popout_menu(menu)
-    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if matches!(key.code, Code::Enter | Code::Space) {
-            floem::action::show_context_menu(key_menu(), None);
-            EventPropagation::Stop
-        } else {
-            EventPropagation::Continue
-        }
-    })
+    .dropdown(menu)
     .style(|s| {
         clickable(s)
             .items_center()

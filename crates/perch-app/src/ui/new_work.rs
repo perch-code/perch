@@ -9,7 +9,6 @@
 use std::rc::Rc;
 
 use floem::event::EventPropagation;
-use floem::menu::Menu;
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::views::{
@@ -24,6 +23,7 @@ use crate::review::model::{AgentChoice, Destination};
 use crate::review::review_launch::{action_button, menu_button};
 use crate::state::AppState;
 use crate::theme;
+use crate::ui::menu::Menu;
 use crate::ui::widgets::{editor_box, icon_button, lay_out_every_line, sidebar_glyph};
 
 /// The branches of the chosen repository, as far as they are known.

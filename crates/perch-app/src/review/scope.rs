@@ -9,7 +9,6 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use floem::menu::{HasCheck, ItemBuilder, Menu};
 use floem::prelude::*;
 use floem::reactive::{SignalGet, SignalWith};
 use floem::style::CursorStyle;
@@ -22,6 +21,7 @@ use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
 use crate::theme;
 use crate::timefmt;
+use crate::ui::menu::{Item, Menu, MenuExt};
 use crate::ui::widgets::sidebar_glyph;
 
 /// One row of the menu.
@@ -238,7 +238,7 @@ pub fn menu(state: ReviewState, backend: Rc<Backend>, item_id: String) -> Menu {
 }
 
 /// One row's properties: its check, its greying, and what picking it does.
-fn row(e: &Entry, pick: &Rc<dyn Fn(Scope)>) -> impl FnOnce(ItemBuilder) -> ItemBuilder<HasCheck> {
+fn row(e: &Entry, pick: &Rc<dyn Fn(Scope)>) -> impl FnOnce(Item) -> Item {
     let (pick, scope, checked, enabled) = (pick.clone(), e.scope.clone(), e.checked, e.enabled);
     move |m| m.checked(checked).enabled(enabled).action(move || pick(scope.clone()))
 }
@@ -309,7 +309,7 @@ pub fn button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
             }
         }
     })
-    .popout_menu(move || match item_id() {
+    .dropdown(move || match item_id() {
         Some(id) => menu(state, backend.clone(), id),
         None => Menu::new(),
     })

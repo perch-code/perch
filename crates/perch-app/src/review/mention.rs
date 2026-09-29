@@ -1013,13 +1013,7 @@ pub fn popup(app: AppState, state: ReviewState) -> impl IntoView {
             .width(width)
             .z_index(90)
             .padding(theme::GO_TO_PADDING)
-            .background(theme::CANVAS)
-            .border(1.0)
-            .border_color(theme::BORDER)
-            .border_radius(theme::RADIUS_LG)
-            .box_shadow_blur(16.0)
-            .box_shadow_v_offset(5.0)
-            .box_shadow_color(theme::SHADOW)
+            .apply(crate::ui::menu::surface(floem::style::Style::new()))
     })
 }
 
@@ -1063,11 +1057,11 @@ fn row(app: AppState, state: ReviewState, index: usize, suggestion: &Suggestion)
             .size_full()
             .items_center()
             .padding_horiz(8.0)
-            .border_radius(theme::RADIUS);
+            .border_radius(crate::ui::menu::ROW_RADIUS);
         if selected() {
-            s.background(theme::ACCENT_SUBTLE)
+            s.background(theme::MENU_HOVER)
         } else {
-            s.hover(|s| s.background(theme::CANVAS_HOVER))
+            s.hover(|s| s.background(theme::MENU_POINTED))
         }
     }))
     // On the press, not the click: the press takes the keyboard from the

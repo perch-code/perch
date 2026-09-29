@@ -7,7 +7,6 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use floem::event::EventPropagation;
-use floem::menu::Menu;
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
@@ -23,6 +22,7 @@ use crate::review::model::{
 };
 use crate::state::AppState;
 use crate::theme;
+use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::widgets::{clickable, editor_box, lay_out_every_line, sidebar_glyph};
 
 /// Keep the open item's reviews loaded, and the launcher's choices in step
@@ -1459,7 +1459,7 @@ pub(crate) fn menu_button(
         sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE)
             .style(|s| s.size(9.0, 9.0).pointer_events_none()),
     ))
-    .popout_menu(menu)
+    .dropdown(menu)
     .style(|s| {
         clickable(s)
             .items_center()

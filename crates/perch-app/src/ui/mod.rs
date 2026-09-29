@@ -4,6 +4,7 @@ pub mod agents;
 pub mod browse;
 pub mod drawer;
 pub mod items;
+pub mod menu;
 pub mod nav_row;
 pub mod new_work;
 pub mod notifications;

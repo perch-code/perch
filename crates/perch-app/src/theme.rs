@@ -107,6 +107,19 @@ pub const NEWS_FG: Color = Color::from_rgb8(0x09, 0x69, 0xda);
 pub const NEWS_BUTTON_HOVER: Color = Color::from_rgb8(0xb6, 0xe3, 0xff);
 pub const SHADOW: Color = Color::from_rgba8(0x20, 0x20, 0x1e, 0x12);
 
+/// Menus, as Codex draws its dropdowns: a white panel in a faint ring
+/// with a soft shadow under it, a grey wash on the row under the pointer
+/// or the keyboard, and hairlines between groups.
+pub const MENU_BG: Color = Color::from_rgb8(0xff, 0xff, 0xff);
+pub const MENU_RING: Color = Color::from_rgba8(0x00, 0x00, 0x00, 0x17);
+pub const MENU_SHADOW: Color = Color::from_rgba8(0x00, 0x00, 0x00, 0x1f);
+/// A panel's deeper shadow, Codex's `shadow-2xl`.
+pub const PANEL_SHADOW: Color = Color::from_rgba8(0x00, 0x00, 0x00, 0x30);
+/// A list row under the pointer, lighter than the one the keyboard is on.
+pub const MENU_POINTED: Color = Color::from_rgb8(0xf7, 0xf7, 0xf7);
+pub const MENU_HOVER: Color = Color::from_rgb8(0xf2, 0xf2, 0xf2);
+pub const MENU_SEPARATOR: Color = Color::from_rgb8(0xed, 0xed, 0xed);
+
 /// Avatar placeholders, cycled by name so a row is stable between launches.
 pub const AVATAR_TINTS: [Color; 6] = [
     Color::from_rgb8(0xdd, 0xf4, 0xff),
@@ -630,7 +643,7 @@ pub const FIND_BAR_INSET: f64 = 28.0;
 /// scrolls, sixteen rows.
 pub const GO_TO_WIDTH: f64 = 600.0;
 pub const GO_TO_TOP: f64 = TITLEBAR_HEIGHT + 6.0;
-pub const GO_TO_PADDING: f64 = 6.0;
+pub const GO_TO_PADDING: f64 = crate::ui::menu::GUTTER;
 pub const GO_TO_BOX_HEIGHT: f64 = 30.0;
 pub const GO_TO_ROW_HEIGHT: f64 = 26.0;
 pub const GO_TO_LIST_HEIGHT: f64 = 16.0 * GO_TO_ROW_HEIGHT;

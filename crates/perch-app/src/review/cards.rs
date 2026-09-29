@@ -538,13 +538,7 @@ fn picker(
                 .items_center()
                 .gap(PICK_GAP)
                 .padding(PICK_GAP)
-                .background(theme::CANVAS)
-                .border(1.0)
-                .border_color(theme::BORDER)
-                .border_radius(theme::RADIUS)
-                .box_shadow_blur(22.0)
-                .box_shadow_v_offset(7.0)
-                .box_shadow_color(theme::SHADOW);
+                .apply(crate::ui::menu::surface(floem::style::Style::new()));
             let s = if placement.above {
                 s.inset_bottom(face + PICKER_OFFSET)
             } else {

@@ -8,7 +8,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use floem::event::EventPropagation;
-use floem::menu::Menu;
 use floem::peniko::Color;
 use floem::prelude::*;
 use floem::reactive::{Effect, RwSignal, SignalGet, SignalUpdate, SignalWith};
@@ -25,6 +24,7 @@ use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
 use crate::state::Checked;
 use crate::theme;
+use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::widgets::{checkbox, clickable, open_in_browser, sidebar_glyph};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -896,18 +896,7 @@ fn merge_method_button(
         sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE)
             .style(|s| s.size(9.0, 9.0).pointer_events_none()),
     ))
-    .popout_menu(move || merge_method_menu(methods, selected_method, confirmation))
-    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if matches!(key.code, Code::Enter | Code::Space) {
-            floem::action::show_context_menu(
-                merge_method_menu(methods, selected_method, confirmation),
-                None,
-            );
-            EventPropagation::Stop
-        } else {
-            EventPropagation::Continue
-        }
-    })
+    .dropdown(move || merge_method_menu(methods, selected_method, confirmation))
     .style(|s| {
         clickable(s)
             .items_center()

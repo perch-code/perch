@@ -6,7 +6,6 @@
 use std::rc::Rc;
 
 use floem::event::EventPropagation;
-use floem::menu::Menu;
 use floem::prelude::*;
 use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
 use floem::views::{
@@ -19,6 +18,7 @@ use crate::items::{Direction, InboxShow, ItemSort, SidebarTab};
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::items::{item_row, OpenItem};
+use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::titlebar::title_bar;
 use crate::ui::widgets::sidebar_glyph;
 use perch_github::Item;
@@ -276,7 +276,7 @@ fn filter_button(state: AppState) -> impl IntoView {
         })
         .style(|s| s.pointer_events_none()),
     )
-    .popout_menu(move || {
+    .dropdown(move || {
         if state.item_filters.with(|f| f.tab == SidebarTab::Inbox) {
             notification_filter_menu(state)
         } else {
@@ -323,6 +323,7 @@ fn item_filter_menu(state: AppState) -> Menu {
             }
         }
         move |mut sub| {
+            sub = sub.icon(SidebarIcon::Repository);
             let all = set.clone();
             let all_selected = current.is_none();
             sub = sub.item("All repositories", move |m| {
@@ -350,6 +351,7 @@ fn item_filter_menu(state: AppState) -> Menu {
         let current = f.sort;
         let direction = f.direction;
         move |mut sub| {
+            sub = sub.icon(SidebarIcon::Sort);
             for sort in ItemSort::ALL {
                 let set = set.clone();
                 sub = sub.item(sort.label(), move |m| {
@@ -374,7 +376,8 @@ fn item_filter_menu(state: AppState) -> Menu {
         let set = set.clone();
         menu = menu.item("Show PR Status", move |m| {
             let set = set.clone();
-            m.checked(f.show_pr_status)
+            m.icon(SidebarIcon::PullRequest)
+                .checked(f.show_pr_status)
                 .action(move || set(Box::new(|f| f.show_pr_status = !f.show_pr_status)))
         });
     }
@@ -404,6 +407,7 @@ fn notification_filter_menu(state: AppState) -> Menu {
     let mut menu = Menu::new().submenu("Show", {
         let set = set.clone();
         move |mut sub| {
+            sub = sub.icon(SidebarIcon::Inbox);
             for (label, show) in [("Unread", InboxShow::Unread), ("All", InboxShow::All), ("Done", InboxShow::Done)] {
                 let set = set.clone();
                 sub = sub.item(label, move |item| {
@@ -417,6 +421,7 @@ fn notification_filter_menu(state: AppState) -> Menu {
     menu = menu.submenu("Repository", {
         let set = set.clone();
         move |mut sub| {
+            sub = sub.icon(SidebarIcon::Repository);
             let all = set.clone();
             let all_selected = current_repo.is_none();
             sub = sub.item("All repositories", move |item| {
@@ -447,6 +452,7 @@ fn notification_filter_menu(state: AppState) -> Menu {
     }
     menu = menu.submenu("Reason", {
         move |mut sub| {
+            sub = sub.icon(SidebarIcon::Tag);
             let all_selected = current_reason.is_none();
             sub = sub.item("Any", move |item| {
                 item.checked(all_selected).action(move || state.notification_reason.set(None))
@@ -1024,6 +1030,58 @@ mod tests {
         let row = find(harness.root_id(), "item row:quiet").unwrap();
         let pin = find(row, "row pin").expect("no pin on hover");
         assert!(pin.get_visual_rect_no_clip().width() > 0.0);
+    }
+
+    /// A right-click on a row opens its menu at the pointer, drawn by
+    /// Perch, and a row's letter works while it is up, as the native
+    /// menu's accelerators did.
+    #[test]
+    fn a_right_click_opens_the_rows_menu_and_its_letters_work() {
+        let (mut harness, state) = harness();
+        let row = find(harness.root_id(), "item row:pr").unwrap().get_visual_rect_no_clip();
+        let at = row.center();
+        harness.secondary_pointer_down(at.x, at.y);
+        harness.rebuild();
+        harness.paint();
+        assert!(crate::ui::menu::is_open());
+        let panel = find(harness.root_id(), "menu-panel:0").unwrap().get_visual_rect_no_clip();
+        // At the pointer's height, and inside the narrow drawer's window.
+        assert_eq!(panel.y0, at.y);
+        assert!(panel.x0 >= 0.0 && panel.x1 <= theme::SIDEBAR_MIN_WIDTH, "{panel:?}");
+        for name in ["menu-row:Open in", "menu-row:Pin", "menu-row:Rename", "menu-row:Delete"] {
+            assert!(find(harness.root_id(), name).is_some(), "no {name}");
+        }
+
+        harness.dispatch_event(floem::event::Event::Key(KeyboardEvent {
+            state: KeyState::Down,
+            key: Key::Character("r".into()),
+            code: Code::KeyR,
+            location: Default::default(),
+            modifiers: Modifiers::empty(),
+            repeat: false,
+            is_composing: false,
+        }));
+        harness.rebuild();
+        harness.paint();
+        assert!(!crate::ui::menu::is_open());
+        assert_eq!(state.renaming.get().as_deref(), Some("pr"));
+    }
+
+    /// The `...` on a hovered row opens the same menu, under it.
+    #[test]
+    fn a_rows_more_button_opens_its_menu_under_it() {
+        let (mut harness, state) = harness();
+        state.hovered_item.set(Some("quiet".into()));
+        harness.rebuild();
+        harness.paint();
+        let row = find(harness.root_id(), "item row:quiet").unwrap();
+        let more = find(row, "row more").unwrap().get_visual_rect_no_clip();
+        harness.pointer_down(more.center().x, more.center().y);
+        harness.rebuild();
+        harness.paint();
+        let panel = find(harness.root_id(), "menu-panel:0").unwrap().get_visual_rect_no_clip();
+        assert!(panel.y0 >= more.y1, "{panel:?} under {more:?}");
+        crate::ui::menu::close();
     }
 
     /// The pointer crossing rows rebuilds only the two rows it crosses,

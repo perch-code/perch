@@ -1234,13 +1234,7 @@ fn panel(app: AppState, state: ReviewState, open_file: OpenFile) -> impl IntoVie
                 .width(width)
                 .flex_col()
                 .padding(theme::GO_TO_PADDING)
-                .background(theme::CANVAS)
-                .border(1.0)
-                .border_color(theme::BORDER)
-                .border_radius(theme::RADIUS_LG)
-                .box_shadow_blur(22.0)
-                .box_shadow_v_offset(7.0)
-                .box_shadow_color(theme::SHADOW)
+                .apply(crate::ui::menu::surface(floem::style::Style::new()))
         })
 }
 
@@ -1257,7 +1251,7 @@ fn query_box(state: ReviewState) -> impl IntoView {
                 .hover(|s| s.background(theme::CANVAS))
                 .border(1.0)
                 .border_color(theme::BORDER)
-                .border_radius(theme::RADIUS)
+                .border_radius(crate::ui::menu::ROW_RADIUS)
                 .focus(|s| s.border_color(theme::ACCENT))
                 .cursor_color(theme::FG)
                 .set(SelectionColor, Brush::Solid(theme::SELECTION_BG))
@@ -1397,11 +1391,11 @@ fn row_view(state: ReviewState, open_file: OpenFile, row: Row) -> impl IntoView 
             .size_full()
             .items_center()
             .padding_horiz(8.0)
-            .border_radius(theme::RADIUS);
+            .border_radius(crate::ui::menu::ROW_RADIUS);
         if selected() {
-            s.background(theme::ACCENT_SUBTLE)
+            s.background(theme::MENU_HOVER)
         } else {
-            s.hover(|s| s.background(theme::CANVAS_HOVER))
+            s.hover(|s| s.background(theme::MENU_POINTED))
         }
     }))
     .on_event_stop(el::Click, move |_, _| accept(state, &open_file, index))
