@@ -5482,7 +5482,7 @@ mod tests {
                 "2026-09-18T09:59:00Z".parse().unwrap(),
             );
             item.id = id.into();
-            state.begin("Reading the branch");
+            state.begin("Reading the worktree");
             state.item.set(Some(Arc::new(item)));
             state.restore_pane();
         };
@@ -5534,7 +5534,7 @@ mod tests {
                 "2026-09-18T09:59:00Z".parse().unwrap(),
             );
             item.id = id.into();
-            state.begin("Reading the branch");
+            state.begin("Reading the worktree");
             state.item.set(Some(Arc::new(item)));
             state.restore_pane()
         };
@@ -5590,7 +5590,7 @@ mod tests {
                 "2026-09-18T09:59:00Z".parse().unwrap(),
             );
             item.id = id.into();
-            state.begin("Reading the branch");
+            state.begin("Reading the worktree");
             state.item.set(Some(Arc::new(item)));
             state.restore_pane()
         };
@@ -5622,7 +5622,7 @@ mod tests {
                 "2026-09-18T09:59:00Z".parse().unwrap(),
             );
             item.id = id.into();
-            state.begin("Reading the branch");
+            state.begin("Reading the worktree");
             state.item.set(Some(Arc::new(item)));
             state.restore_pane()
         };

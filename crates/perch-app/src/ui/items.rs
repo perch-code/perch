@@ -1,4 +1,4 @@
-//! Item rows: a pull request, an issue, or a branch of the reader's own,
+//! Item rows: a pull request, an issue, or a worktree of the reader's own,
 //! in the sidebar's flat list.
 //!
 //! One row draws every shape an item can have, in the shape `nav_row`
@@ -205,7 +205,7 @@ pub(crate) fn glyph(item: &Item) -> impl IntoView {
 
 /// The faces the byline stacks: who acted last on the pull request or
 /// the issue once a look has found them, most recent first; its author
-/// until then; the reader's own on a branch of their own.
+/// until then; the reader's own on a worktree of their own.
 fn faces(state: AppState, item: &Item) -> impl Fn() -> Vec<nav_row::Face> + 'static {
     let subject = item.subject.as_ref().map(|subject| {
         let author = match subject {
@@ -319,7 +319,7 @@ fn key(code: KeyCode) -> Accelerator {
     Accelerator::new(None, code)
 }
 
-/// The pull request's or the issue's page on github.com. A branch of the
+/// The pull request's or the issue's page on github.com. A worktree of the
 /// reader's own has none.
 pub fn github_url(item: &Item) -> Option<String> {
     match &item.subject {

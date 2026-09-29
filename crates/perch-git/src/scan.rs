@@ -3,7 +3,7 @@
 //! A root is a directory the user declared in config under a repository: a
 //! clone of it, or a worktree of one. Asking it `git worktree
 //! list` gives every worktree of that repository, the root itself included,
-//! and each one on a branch other than the base is a branch of the
+//! and each one on a branch other than the base is a worktree of the
 //! reader's own. Its remotes say which repository it is: a GitHub remote,
 //! `upstream` before `origin` before any other, names it `owner/repo`, and a
 //! root with none is local to this machine. Nothing here writes or fetches:

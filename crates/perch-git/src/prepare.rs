@@ -586,40 +586,6 @@ impl Preparer {
             || self.store.worktree_path(id, branch).join(".git").exists()
     }
 
-    /// Check out `branch` in the store's clone at `commitish`, a ref just
-    /// fetched from GitHub, moving the clone's own copy of the branch
-    /// there. For a repository with no root, where the clone's branches
-    /// are whatever it saw when it was made and nothing else of the
-    /// reader's.
-    pub async fn check_out_fetched(&self, bare: &Path, id: &RepoId, branch: &str, commitish: &str) -> Result<Cut, Error> {
-        let worktree = self.add_worktree(bare, id, branch, &["-B", branch], commitish).await?;
-        Ok(Cut { branch: branch.to_string(), worktree })
-    }
-
-    /// Check out a branch that already exists, rather than cutting a new
-    /// one: `branch` itself when `repo` has it, else a new local branch of
-    /// that name tracking `tracking`, a remote-tracking ref such as
-    /// `origin/fix`. Git refuses a branch another worktree has checked
-    /// out, and that refusal is the error.
-    pub async fn check_out_branch(
-        &self,
-        repo: &Path,
-        id: &RepoId,
-        branch: &str,
-        tracking: Option<&str>,
-    ) -> Result<Cut, Error> {
-        let worktree = if self.branch_exists(repo, branch).await {
-            self.add_worktree(repo, id, branch, &[], branch).await?
-        } else {
-            let Some(tracking) = tracking else {
-                return Err(Error::Io(format!("there is no branch {branch} to check out")));
-            };
-            self.add_worktree(repo, id, branch, &["--track", "-b", branch], tracking)
-                .await?
-        };
-        Ok(Cut { branch: branch.to_string(), worktree })
-    }
-
     /// The branches of one of the reader's clones that new work can start
     /// from: its local branches and `remote`'s, newest first, `base`
     /// first of all. No network.

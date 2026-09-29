@@ -115,7 +115,7 @@ pub fn view(
             crate::review::merge::surface(state, backend.clone()),
             crate::review::open_pull::surface(app, state, backend.clone()),
             crate::review::close_as_issue::surface(app, state, backend.clone()),
-            Label::derived(|| "Nothing here yet. Ask about the branch below.".to_string()).style(
+            Label::derived(|| "Nothing here yet. Ask about the worktree below.".to_string()).style(
                 move |s| {
                     // Hidden rather than absent, so it takes no share of the
                     // column's gap while there is something here.
@@ -1621,7 +1621,7 @@ mod tests {
         harness.paint();
         assert!(cards_in_order(&harness).is_empty());
         assert!(shown(&harness, "Nothing here yet"));
-        assert!(shown(&harness, "Ask about this branch"));
+        assert!(shown(&harness, "Ask about this worktree"));
     }
 
     #[test]

@@ -532,7 +532,7 @@ pub fn search_hits(hits: &[SearchHit], query: &str) -> Vec<SearchHit> {
         .collect()
 }
 
-/// Whether a Work run may be sent on an item: a branch of the reader's
+/// Whether a Work run may be sent on an item: a worktree of the reader's
 /// own, or a pull request the reader opened, with its checkout on disk.
 /// Someone else's pull request, an issue, and anything archived are
 /// Ask-only: their text and code are other people's.

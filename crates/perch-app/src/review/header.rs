@@ -26,7 +26,7 @@ use crate::ui::titlebar::title_bar;
 use crate::ui::widgets::{icon_button, open_in_browser, sidebar_glyph};
 
 /// The bar, the same for every kind of item: a pull request, an issue, or
-/// a branch of the reader's own.
+/// a worktree of the reader's own.
 pub fn header(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     // The bar is the window's title bar, so a press on anything in it that
     // is not a control drags the window. Its three parts let the pointer
@@ -96,7 +96,7 @@ fn leading(app: AppState, state: ReviewState) -> impl IntoView {
     })
 }
 
-/// The pull request's or the issue's title. A branch of the reader's own
+/// The pull request's or the issue's title. A worktree of the reader's own
 /// has no title but its name.
 fn title(state: ReviewState) -> String {
     state
@@ -149,7 +149,7 @@ fn trailing(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
     })
 }
 
-/// Open the pull request or the issue on github.com. A branch of the
+/// Open the pull request or the issue on github.com. A worktree of the
 /// reader's own is nowhere on GitHub, and has no button.
 fn github_button(state: ReviewState) -> impl IntoView {
     let url = move || state.item.with(|i| i.as_deref().and_then(github_url));
@@ -171,7 +171,7 @@ fn github_button(state: ReviewState) -> impl IntoView {
     .style(move |s| control(s).apply_if(url().is_none(), |s| s.hide()))
 }
 
-/// Review for anything with files: a pull request, or a branch of the
+/// Review for anything with files: a pull request, or a worktree of the
 /// reader's own. An issue has none until work starts on it.
 fn review_control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let is_issue = move || state.phase.get() == Phase::Issue;

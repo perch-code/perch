@@ -1,7 +1,7 @@
-//! Start work: cut a branch of the reader's own from the item, and open
+//! Start work: cut a worktree of the reader's own from the item, and open
 //! it. An issue's branch starts from the default branch; a pull request's
 //! from its head, with the whole change to show against its base; a
-//! branch's from its head. A pull request opened from the new branch
+//! worktree's from its head. A pull request opened from the new branch
 //! closes the issue or the pull request it came from.
 
 use std::rc::Rc;
@@ -21,7 +21,7 @@ use crate::theme;
 use crate::ui::widgets::icon_button;
 
 /// Whether there is anything to cut from: an issue or a pull request on
-/// GitHub that isn't merged, or a branch with a checkout.
+/// GitHub that isn't merged, or a worktree with a checkout.
 pub fn can_start_work(item: &Item) -> bool {
     if item.is_archived() {
         return false;

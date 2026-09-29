@@ -276,7 +276,7 @@ fn dyn_row<T: Clone + PartialEq + 'static, V: IntoView + 'static>(
 }
 
 /// Open, Draft, Merged, Closed as the pill, then the repository and
-/// number as the sidebar's rows say them. A branch of the reader's own
+/// number as the sidebar's rows say them. A worktree of the reader's own
 /// has no state, and its row is its repository alone; one with no GitHub
 /// remote has no row.
 fn status_row(state: ReviewState) -> impl IntoView {
@@ -332,7 +332,7 @@ fn status_row(state: ReviewState) -> impl IntoView {
     .style(|s| s.width_full())
 }
 
-/// The repository and number, as the sidebar's rows say them. A branch of
+/// The repository and number, as the sidebar's rows say them. A worktree of
 /// the reader's own is its repository alone, and one with no GitHub
 /// remote has no slug worth a word: the sidebar's heading already says
 /// which repository it is.

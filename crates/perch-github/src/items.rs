@@ -3,7 +3,7 @@
 //! An item is one record with three optional parts: a GitHub subject, a
 //! checkout, and attention. Which parts are present decides what it looks
 //! like and what opens when it is clicked. Nothing is stored as "a PR item"
-//! or "an issue item": a branch of your own becomes a pull request when
+//! or "an issue item": a worktree of your own becomes a pull request when
 //! GitHub opens one on it, and it is the same row before and after.
 
 use std::path::PathBuf;

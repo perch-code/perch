@@ -1039,7 +1039,7 @@ pub(crate) fn pull_request_close_offered(app: AppState, state: ReviewState) -> b
 /// What the send does, on its button: `Send` to an agent, `Add to
 /// review` for a draft, `Comment` for an issue comment that posts at
 /// once. Tracked over the composer.
-/// Whether the open item takes Work runs: a branch of the reader's own,
+/// Whether the open item takes Work runs: a worktree of the reader's own,
 /// or a pull request they opened, on disk.
 fn work_offered(app: AppState, state: ReviewState) -> bool {
     let viewer = app.viewer.with(|v| v.as_ref().map(|(login, _)| login.clone()));
@@ -1163,14 +1163,14 @@ fn send_button(label: impl Fn() -> String + 'static, on_click: Rc<dyn Fn()>) -> 
 }
 
 /// What the item is, for a placeholder: "pull request", "issue" or
-/// "branch".
+/// "worktree".
 pub fn subject_word(state: ReviewState) -> &'static str {
     if state.pull_request.with(Option::is_some) {
         "pull request"
     } else if state.issue.with(Option::is_some) {
         "issue"
     } else {
-        "branch"
+        "worktree"
     }
 }
 

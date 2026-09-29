@@ -2,8 +2,8 @@
 //! repository, the branch to start from, and the new branch's name.
 //!
 //! `+` at the top of the sidebar and `Cmd-N` open it in the main pane,
-//! under a bar titled New worktree whose X shuts it. Start makes the
-//! worktree and opens it as a branch item. What was typed is kept when the
+//! under a bar titled New worktree whose X shuts it. Start cuts the new
+//! branch into a worktree and opens it. What was typed is kept when the
 //! view is left without starting, until Perch quits.
 
 use std::rc::Rc;
@@ -22,9 +22,9 @@ use crate::icons::SidebarIcon;
 use crate::review::cards::tip;
 use crate::review::model::{AgentChoice, Destination};
 use crate::review::review_launch::{action_button, menu_button};
-use crate::state::{AppState, Checked};
+use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::{checkbox, editor_box, icon_button, lay_out_every_line, sidebar_glyph};
+use crate::ui::widgets::{editor_box, icon_button, lay_out_every_line, sidebar_glyph};
 
 /// The branches of the chosen repository, as far as they are known.
 #[derive(Debug, Clone, PartialEq)]
@@ -52,8 +52,7 @@ pub struct NewWorkState {
     pub repo: RwSignal<Option<String>>,
     pub bases: RwSignal<BaseList>,
     pub base: RwSignal<Option<BaseBranch>>,
-    /// Cut a new branch; unticked, check out the base itself.
-    pub new_branch: RwSignal<bool>,
+    /// The new branch's name.
     pub name: RwSignal<String>,
     /// The reader has typed in the name box, so it is no longer filled
     /// in from the message.
@@ -76,7 +75,6 @@ impl NewWorkState {
             repo: RwSignal::new(None),
             bases: RwSignal::new(BaseList::Unasked),
             base: RwSignal::new(None),
-            new_branch: RwSignal::new(true),
             name: RwSignal::new(String::new()),
             name_typed: RwSignal::new(false),
             text: RwSignal::new(String::new()),
@@ -200,18 +198,13 @@ fn request(state: AppState) -> Result<NewWork, String> {
             _ => "Choose a branch to start from".to_string(),
         })
     })?;
-    let branch = if nw.new_branch.get() {
-        let name = nw.name.get().trim().to_string();
-        if name.is_empty() {
-            return Err("Name the new branch".to_string());
-        }
-        if name.contains(char::is_whitespace) {
-            return Err("A branch name has no spaces".to_string());
-        }
-        Some(name)
-    } else {
-        None
-    };
+    let branch = nw.name.get().trim().to_string();
+    if branch.is_empty() {
+        return Err("Name the new branch".to_string());
+    }
+    if branch.contains(char::is_whitespace) {
+        return Err("A branch name has no spaces".to_string());
+    }
     let text = nw.text.get();
     let run = (!text.trim().is_empty()).then(|| {
         let (backend, model, effort) = chosen_agent(state);
@@ -605,11 +598,16 @@ fn base_chip(state: AppState) -> impl IntoView {
     )
 }
 
-/// New branch, ticked, with its name; unticked, the base is checked out
-/// as it is.
+/// The new branch's name.
 fn branch_chip(state: AppState) -> impl IntoView {
     let nw = state.new_work;
-    let name = move || {
+    Stack::horizontal((
+        Label::derived(|| "New branch".to_string()).style(|s| {
+            s.font_size(theme::TEXT_BADGE)
+                .color(theme::FG)
+                .selectable(false)
+                .margin_right(8.0)
+        }),
         TextInput::new(nw.name)
             .placeholder("branch name")
             .debug_name("new-work-branch")
@@ -626,36 +624,7 @@ fn branch_chip(state: AppState) -> impl IntoView {
                     .border_color(theme::BORDER)
                     .border_radius(theme::RADIUS)
                     .focus(|s| s.border_color(theme::ACCENT))
-            })
-    };
-    Stack::horizontal((
-        checkbox(
-            move || {
-                if nw.new_branch.get() {
-                    Checked::Full
-                } else {
-                    Checked::Empty
-                }
-            },
-            move || nw.new_branch.update(|on| *on = !*on),
-        ),
-        Label::derived(|| "New branch".to_string()).style(|s| {
-            s.font_size(theme::TEXT_BADGE)
-                .color(theme::FG)
-                .selectable(false)
-                .margin_left(6.0)
-                .margin_right(8.0)
-        }),
-        dyn_container(
-            move || nw.new_branch.get(),
-            move |on| {
-                if on {
-                    name().into_any()
-                } else {
-                    Empty::new().into_any()
-                }
-            },
-        ),
+            }),
     ))
     .style(|s| s.items_center())
 }
@@ -715,12 +684,9 @@ mod tests {
         let work = request(app).unwrap();
         assert_eq!(work.repo, "local/notes");
         assert_eq!(work.base, BaseBranch::local("main"));
-        assert_eq!(work.branch.as_deref(), Some("chris/readme"));
+        assert_eq!(work.branch, "chris/readme");
         assert!(!work.typed);
 
-        app.new_work.new_branch.set(false);
-        assert_eq!(request(app).unwrap().branch, None, "the base itself");
-        app.new_work.new_branch.set(true);
         app.new_work.name.set("two words".into());
         assert_eq!(request(app).unwrap_err(), "A branch name has no spaces");
     }
@@ -755,12 +721,6 @@ mod tests {
         app.new_work.text.set("Add a README".into());
         harness.rebuild();
         assert_eq!(app.new_work.name.get_untracked(), "chris/add-a-readme");
-
-        // Unticked, there is no name to give.
-        app.new_work.new_branch.set(false);
-        harness.rebuild();
-        harness.paint();
-        assert!(named(harness.root_id(), "new-work-branch").is_none());
     }
 
     #[test]

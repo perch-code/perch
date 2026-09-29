@@ -712,7 +712,7 @@ mod tests {
         item
     }
 
-    /// A branch of the reader's own, checked out, with no pull request.
+    /// A worktree of the reader's own, checked out, with no pull request.
     fn branch(id: &str, repo: &str) -> Item {
         let mut item = Item::new(repo, "2026-09-19T12:00:00Z".parse().unwrap());
         item.id = id.into();

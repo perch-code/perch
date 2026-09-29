@@ -1,4 +1,4 @@
-//! Opening a pull request from a branch of the reader's own, at the foot
+//! Opening a pull request from a worktree of the reader's own, at the foot
 //! of Conversation, where a pull request has Checks and Merge.
 //!
 //! Folded, one line: how many commits the branch has past its base, and

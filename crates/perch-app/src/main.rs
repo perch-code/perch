@@ -139,7 +139,7 @@ fn main() {
                                     let navigation_id = backend.open_item(&id);
                                     state.begin_item_review(
                                         review,
-                                        "Reading the branch",
+                                        "Reading the worktree",
                                         &id,
                                         navigation_id,
                                     );

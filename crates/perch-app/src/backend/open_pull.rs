@@ -1,4 +1,4 @@
-//! Opening a pull request from a branch of the reader's own, and pushing
+//! Opening a pull request from a worktree of the reader's own, and pushing
 //! the commits a pull request of theirs doesn't have yet.
 //!
 //! Perch pushes, never an agent, and never with force. A worktree of one

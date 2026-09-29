@@ -264,7 +264,7 @@ roots = ["~/Code/slatedb"]
 
 `name` is only the sidebar label. `roots` lets Perch discover existing local
 branches and worktrees. Neither setting causes a repository-wide GitHub crawl.
-A branch with no pull request is yours, so it is in **Authored**, whether Perch
+A worktree with no pull request is yours, so it is in **Authored**, whether Perch
 made it or found it under a root; the base branch never becomes a row. Once
 someone else's pull request attaches to it, the row goes by that author.
 A repository with roots and no GitHub remote is `local/<name>`: it has no pull
@@ -318,14 +318,12 @@ under it three chips.
   root's local branches and its remote's, with no network; for a GitHub
   repository without one, GitHub's. It opens on the repository's base
   branch.
-- **New branch**: ticked, the name of the branch to cut, filled in from the
-  message (`branch_prefix`, then its first five words) until you type in it.
-  A name you typed that is taken is an error; one Perch filled in gets `-2`.
-  Unticked, the base branch itself is checked out, and a branch that is
-  already a row opens that row.
+- **New branch**: the name of the branch to cut, filled in from the message
+  (`branch_prefix`, then its first five words) until you type in it. A name
+  you typed that is taken is an error; one Perch filled in gets `-2`.
 
-With a message, **Start** makes the worktree, opens it as a branch item named
-for the message's first line, and sends the message to the agent picked beside
+With a message, **Start** makes the worktree, opens it named for the
+message's first line, and sends the message to the agent picked beside
 it as the item's first Work run.
 Without one, **Create worktree** makes the worktree alone. `Escape`, `Cmd-[`,
 or the bar's X leaves the view and keeps what was typed until Perch quits.
@@ -340,13 +338,13 @@ a push of the branch and the upstream it then tracks. The fetch uses your own cr
 never Perch's token, and cannot prompt: a key that wants a passphrase fails it,
 and the cut goes ahead from what the clone had, with a notice saying how old
 that is. A GitHub repository with no root is cut in Perch's own clone, as
-**Start work** on an issue or a pull request is. Start work on a branch in a
+**Start work** on an issue or a pull request is. Start work on a worktree in a
 local repository cuts in that repository.
 
 ### Start work from an item
 
 The branch glyph in an item's bar, beside the agents, is **Start work**. It
-cuts a branch of your own from the item and opens it:
+cuts a new branch from the item into a worktree of your own and opens it:
 
 - From an **issue**, `perch/issue-<n>` from the default branch.
 - From a **pull request**, anyone's and from any fork, `perch/pr-<n>-work`
@@ -354,11 +352,11 @@ cuts a branch of your own from the item and opens it:
   commits not pushed yet and all, else its head on GitHub. The branch is
   diffed against the pull request's base, so it shows the whole change, and
   a pull request opened from it takes it over.
-- From a **branch**, a new branch from its head, named for it with `-2`.
+- From a **worktree**, a new branch from its head, named for it with `-2`.
 
 An issue or a pull request leaves a prompt to work on it in the new
-branch's composer, and a second press opens the branch the first made. The
-new branch is listed under **In Perch** on the item it came from. A pull
+worktree's composer, and a second press opens the worktree the first made.
+The new worktree is listed under **In Perch** on the item it came from. A pull
 request opened from it says `Closes #<n>`, so merging it closes the issue or
 the pull request it came from. A merged pull request, and anything
 archived, has no Start work.
@@ -371,11 +369,11 @@ A worktree made for work can hold the only copy of it.
   other branch, tag, remote-tracking branch or ref of Perch's holds. A branch
   pushed from Perch's own clone is not seen as pushed until a pull request
   brings its head back.
-- **Archive** of a branch asks first when the directory holds files git
+- **Archive** of a worktree asks first when the directory holds files git
   ignores, such as a `.env`, and names them: archiving removes the
   directory, and git keeps no copy of those. The branch and its commits stay.
-  Branches are never archived for age; pull request checkouts still are,
-  after 14 days unopened.
+  Worktrees with no pull request are never archived for age; pull request
+  checkouts still are, after 14 days unopened.
 - A pull request's worktree follows its head when the head moves only if
   the commit on disk is one the pull request had. A commit you made there
   and have not pushed keeps the worktree where it is, reported stale, as
@@ -390,7 +388,7 @@ A worktree made for work can hold the only copy of it.
 
 ## Opening a pull request
 
-A branch of your own with commits past its base has a **Pull request** line at
+A worktree of your own with commits past its base has a **Pull request** line at
 the foot of Conversation, where a pull request has its checks and Merge:
 `Pull request · 3 commits ahead of main`. **Open pull request…** unfolds it
 into a form:
@@ -577,11 +575,11 @@ it reads can reach you only through its answer.
 
 ### Work
 
-A composer on your own work, a branch with its checkout on disk or a pull
+A composer on your own work, a worktree with no pull request or a pull
 request you opened, has an **Ask / Work** switch before the model. Anything
 else, someone else's pull request, an issue, a review's snapshot, is Ask-only,
 and the backend refuses Work there whatever the switch says. A new question
-starts on what you last picked on the item, else Work on a branch Perch made
+starts on what you last picked on the item, else Work on a worktree Perch made
 and Ask elsewhere; a follow-up starts on its thread's last run. A session is
 resumed only by a run of its own kind: a switch starts over with the thread
 folded in, as a switch of agent does.
@@ -697,7 +695,7 @@ agents: on a pull request, one line naming the reviewers the next run starts,
 with **Run**, and **Settings** to choose them, their models and efforts, the
 base and the instructions. Under them is your own review for GitHub: the
 drafts, a summary, and a verdict to send them with. Unfolding the settings folds
-your review to a line, and **Open** brings it back. A branch without a pull
+your review to a line, and **Open** brings it back. A worktree without a pull
 request has only the agents, their settings showing. The button is dark while
 there is a pull request to review, counts your drafts, and says how far a
 running review has got.
@@ -735,7 +733,7 @@ same shape a question gets it, and tells each reviewer, ahead of the requester's
 instructions, where it is and what to do with it: not to report a problem a
 reviewer already raised in an unresolved thread, and to report a change a
 reviewer asked for that the range does not make, naming who asked. A review of
-a branch with no pull request has no discussion to read.
+a worktree with no pull request has no discussion to read.
 
 Every review uses a clean, read-only, immutable snapshot in Perch-owned
 storage. Perch retains its exact diff, manifest, commits, and anchored blobs so
@@ -765,7 +763,7 @@ or linking it as a duplicate deletes the draft. GitHub takes a review comment
 only on a line its diff shows, a changed line or one of the three around it,
 so this needs the review to be of what GitHub has: the pull request's head,
 diffed from the same merge base. Any other finding stays in Perch as the
-reviewer's message, as does every finding on a branch without an open pull
+reviewer's message, as does every finding on a worktree without an open pull
 request.
 
 Follow-ups stay local to Perch unless you post one yourself. Reviews do not

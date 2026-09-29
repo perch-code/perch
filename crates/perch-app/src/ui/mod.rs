@@ -54,7 +54,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 _ if item.is_archived() => "Checking out the files",
                 Some(perch_github::ItemSubject::Issue(_)) => "Reading the issue",
                 Some(perch_github::ItemSubject::PullRequest(_)) => "Reading the pull request",
-                None => "Reading the branch",
+                None => "Reading the worktree",
             };
             let navigation_id = if item.is_archived() {
                 backend.restore_item(&item.id)
@@ -208,7 +208,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     widgets::centered_message(
                         SidebarIcon::Branch,
                         || "Nothing open".to_string(),
-                        || "Pick a pull request, an issue, or a branch from the sidebar.".to_string(),
+                        || "Pick a pull request, an issue, or a worktree from the sidebar.".to_string(),
                     ),
                 )
                 .into_any()
