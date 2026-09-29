@@ -14,7 +14,7 @@ use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
 use crate::state::{AppState, ToastKind, Tone};
 use crate::theme;
-use crate::ui::agents;
+use crate::ui::{agents, widgets};
 
 pub fn toast(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     dyn_container(
@@ -30,32 +30,47 @@ pub fn toast(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
                 return Empty::new().into_any();
             };
             let token = toast.token;
-            let body = match toast.kind {
+            // What clicking anywhere on the card does, for a toast that
+            // goes somewhere. Its own close button stops the click.
+            let (body, open) = match toast.kind {
                 ToastKind::AgentRun(id) => match state.agent_run(&id) {
                     Some(run) => {
-                        agents::completion_toast(state, review, backend.clone(), token, run)
-                            .into_any()
+                        let (body, open) =
+                            agents::completion_toast(state, review, backend.clone(), token, run);
+                        (body.into_any(), Some(open))
                     }
                     None => return Empty::new().into_any(),
                 },
-                ToastKind::Message { text, tone } => message(state, token, text, tone).into_any(),
+                ToastKind::Message { text, tone } => {
+                    (message(state, token, text, tone).into_any(), None)
+                }
             };
-            Container::new(body)
-                .style(|s| {
-                    s.width(328.0)
-                        .max_width_full()
-                        .padding_left(13.0)
-                        .padding_right(7.0)
-                        .padding_vert(9.0)
-                        .background(theme::CANVAS)
-                        .border(1.0)
-                        .border_color(theme::BORDER)
-                        .border_radius(8.0)
-                        .box_shadow_blur(18.0)
-                        .box_shadow_v_offset(5.0)
-                        .box_shadow_color(theme::SHADOW)
-                })
-                .into_any()
+            let clickable = open.is_some();
+            let mut card = Container::new(body);
+            if let Some(open) = open {
+                card = card.on_event_stop(el::Click, move |_, _| open());
+            }
+            card.style(move |s| {
+                let s = s
+                    .width(328.0)
+                    .max_width_full()
+                    .padding_left(13.0)
+                    .padding_right(7.0)
+                    .padding_vert(9.0)
+                    .background(theme::CANVAS)
+                    .border(1.0)
+                    .border_color(theme::BORDER)
+                    .border_radius(8.0)
+                    .box_shadow_blur(18.0)
+                    .box_shadow_v_offset(5.0)
+                    .box_shadow_color(theme::SHADOW);
+                if clickable {
+                    widgets::clickable(s).hover(|s| s.background(theme::CANVAS_SUBTLE))
+                } else {
+                    s
+                }
+            })
+            .into_any()
         },
     )
     .style(|s| {

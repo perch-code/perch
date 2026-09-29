@@ -188,14 +188,15 @@ fn tick_clock(state: AppState) {
 }
 
 /// A terminal transition stays lightweight in the popup: enough context to
-/// identify it, plus a path into the durable detail.
+/// identify it, and the action that goes to the durable detail, which the
+/// whole card runs when clicked.
 pub(crate) fn completion_toast(
     state: AppState,
     review: ReviewState,
     backend: Rc<Backend>,
     token: u64,
     run: AgentRunSummary,
-) -> impl IntoView {
+) -> (impl IntoView, Rc<dyn Fn()>) {
     let color = status_color(run.status);
     let title = format!(
         "{} {}",
@@ -210,18 +211,14 @@ pub(crate) fn completion_toast(
             format!("{} · {group}", run.purpose.label())
         }
     };
-    let view = text_action(
-        || "View".to_string(),
-        true,
-        move || {
-            state.dismiss_toast(token);
-            dropdown::go_to_run(state, review, &backend, &run);
-        },
-    );
+    let open: Rc<dyn Fn()> = Rc::new(move || {
+        state.dismiss_toast(token);
+        dropdown::go_to_run(state, review, &backend, &run);
+    });
     let dismiss = icon_action(SidebarIcon::Close, "Dismiss agent completion", move || {
         state.dismiss_toast(token)
     });
-    Stack::horizontal((
+    let body = Stack::horizontal((
         crate::ui::toast::dot(color),
         Stack::vertical((
             Label::derived(move || title.clone()).style(|s| {
@@ -239,10 +236,10 @@ pub(crate) fn completion_toast(
             }),
         ))
         .style(|s| s.flex_col().gap(3.0).min_width(0.0).flex_grow(1.0_f32)),
-        view,
         dismiss,
     ))
-    .style(|s| s.items_center().width_full().gap(9.0))
+    .style(|s| s.items_center().width_full().gap(9.0));
+    (body, open)
 }
 
 #[cfg(test)]

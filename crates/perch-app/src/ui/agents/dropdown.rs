@@ -724,7 +724,8 @@ mod tests {
         assert!(!review.review_open.get());
     }
 
-    /// The toast a run leaves as it finishes goes to it as a row does.
+    /// The toast a run leaves as it finishes goes to it as a row does,
+    /// from a click anywhere on the card but its close button.
     #[test]
     fn a_finished_runs_toast_goes_to_it() {
         let (mut harness, app, review) = window();
@@ -732,12 +733,32 @@ mod tests {
         app.update_agent_run(&record("c", "pr", perch_github::RunStatus::Completed, 2));
         settle(&mut harness);
         let toast = named(harness.root_id(), "toast").expect("no toast");
-        let view = named(toast, "\"View\"").expect("no View on the toast");
-        let at = view.get_visual_rect_no_clip().center();
-        harness.click(at.x, at.y);
+        assert!(named(toast, "\"View\"").is_none(), "a View button");
+        let close = named(toast, "Dismiss agent completion").expect("no close button");
+        let card = toast.get_visual_rect_no_clip();
+        let close = close.get_visual_rect_no_clip();
+        // The blank strip between the text and the close button.
+        harness.click(close.x0 - 6.0, card.center().y);
         settle(&mut harness);
         assert_eq!(review.tab.get(), ItemTab::Conversation);
         assert!(review.agents_open_runs.with(|open| open.contains("c")));
+        assert!(app.current_toast().is_none());
+    }
+
+    /// Closing a run's toast takes it down and goes nowhere.
+    #[test]
+    fn closing_a_finished_runs_toast_stays_put() {
+        let (mut harness, app, review) = window();
+        review.show_tab(ItemTab::Code);
+        app.update_agent_run(&record("c", "pr", perch_github::RunStatus::Completed, 2));
+        settle(&mut harness);
+        let toast = named(harness.root_id(), "toast").expect("no toast");
+        let close = named(toast, "Dismiss agent completion").expect("no close button");
+        let at = close.get_visual_rect_no_clip().center();
+        harness.click(at.x, at.y);
+        settle(&mut harness);
+        assert!(app.current_toast().is_none());
+        assert_eq!(review.tab.get(), ItemTab::Code);
     }
 
     /// A run whose item is gone says so and goes nowhere.
