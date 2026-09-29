@@ -126,11 +126,16 @@ codegen-units = 4
 # measures a text several times a pass, and each measure of an
 # ellipsised label shaped the "..." and the cut text from scratch, so a
 # relayout of the sidebar's rows spent most of its time in the shaper,
-# the more with San Francisco's variation deltas. Last, one that centres
+# the more with San Francisco's variation deltas. Then one that centres
 # a label on its capitals: it centred the span from the ascent to the
 # baseline, and San Francisco's ascent reaches 0.26em above its caps, so
 # every label drew about 0.13em low in its box, beside the avatar in a
-# comment's byline and the glyph in a pill. Drop a
+# comment's byline and the glyph in a pill. Last, one that zooms a macOS
+# window from the main queue once the event handler has returned.
+# `-[NSWindow zoom:]` does not return until its animation ends, and
+# called from inside the handler it held back every resize and redraw of
+# the animation, so a double click on the title bar stretched the last
+# frame to the new size and relaid out only at the end. Drop a
 # patch from the branch once upstream merges it; `cargo update -p floem`
 # takes the branch's new head. `floem_renderer` is patched too so that
 # perch-app's own dependency on it resolves to the checkout floem's does,
