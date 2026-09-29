@@ -2,7 +2,8 @@
 //! styles and bare addresses linked, headings by level, lists that nest
 //! and carry task boxes, quotes and alerts, tables, fenced code, rules,
 //! and footnotes. An issue or pull request written as `#12` or
-//! `owner/repo#12` links to it on GitHub, as GitHub links one.
+//! `owner/repo#12` links to it on GitHub, as GitHub links one, and so
+//! does a person written as `@login` or a team as `@org/team`.
 //!
 //! pulldown-cmark does the parsing, with the extensions GitHub turns on.
 //! Its events become a tree of blocks, which the column then draws.
@@ -399,8 +400,8 @@ impl<'a> Builder<'a> {
         self.inline(event, spans, style);
     }
 
-    /// The gathered text, with any bare address or issue reference in it
-    /// linked, as GitHub links one and the parser does not. Inside a link
+    /// The gathered text, with any bare address, issue reference or
+    /// mention in it linked, as GitHub links one and the parser does not. Inside a link
     /// they are the link's own text.
     fn flush_text(&mut self, spans: &mut Vec<Span>, style: &Marks) {
         if self.text.is_empty() {
@@ -417,7 +418,13 @@ impl<'a> Builder<'a> {
         for (run, address) in autolink(&text) {
             if !address {
                 for (piece, link) in issue_refs(run, self.repo) {
-                    push_text(spans, &Span { link, ..style.span() }, piece);
+                    if link.is_some() || self.repo.is_none() {
+                        push_text(spans, &Span { link, ..style.span() }, piece);
+                        continue;
+                    }
+                    for (piece, link) in mentions(piece) {
+                        push_text(spans, &Span { link, ..style.span() }, piece);
+                    }
                 }
                 continue;
             }
@@ -957,6 +964,67 @@ fn issue_refs<'t>(text: &'t str, repo: Option<&str>) -> Vec<(&'t str, Option<Str
             out.push((&text[from..start], None));
         }
         out.push((&text[start..end], Some(url)));
+        from = end;
+    }
+    if from < text.len() {
+        out.push((&text[from..], None));
+    }
+    out
+}
+
+/// Split `text` into runs, with the people and teams GitHub would link
+/// given their profile: `@login` and `@org/team`. As GitHub reads one, a
+/// mention follows no word character, so an email address is left alone,
+/// and it ends at a character a login can't hold, or at dots with no word
+/// after them: `@a_b` and `@a.b` are left as written, `@a.` is linked.
+fn mentions(text: &str) -> Vec<(&str, Option<String>)> {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let name = |s: &str, extra: &[char]| {
+        let mut chars = s.char_indices();
+        match chars.next() {
+            Some((_, c)) if c.is_ascii_alphanumeric() => {}
+            _ => return 0,
+        }
+        chars
+            .find(|&(_, c)| !(c.is_ascii_alphanumeric() || c == '-' || extra.contains(&c)))
+            .map_or(s.len(), |(i, _)| i)
+    };
+    // What may come after a mention: nothing, a character no name holds,
+    // or dots with no word character after them.
+    let ends = |rest: &str| {
+        let after_dots = rest.trim_start_matches('.');
+        match (rest.len() == after_dots.len(), after_dots.chars().next()) {
+            (_, None) => true,
+            (true, Some(c)) => !word(c) && c != '/',
+            (false, Some(c)) => !word(c),
+        }
+    };
+    let mut out = Vec::new();
+    let mut from = 0;
+    for (at, _) in text.match_indices('@') {
+        if at < from || text[..at].chars().next_back().is_some_and(word) {
+            continue;
+        }
+        let login = at + 1 + name(&text[at + 1..], &[]);
+        if login == at + 1 {
+            continue;
+        }
+        let (end, url) = match text[login..].strip_prefix('/') {
+            Some(rest) => {
+                let team = login + 1 + name(rest, &['_']);
+                if team == login + 1 || !ends(&text[team..]) {
+                    continue;
+                }
+                let url = format!("https://github.com/orgs/{}/teams/{}", &text[at + 1..login], &text[login + 1..team]);
+                (team, url)
+            }
+            None if ends(&text[login..]) => (login, format!("https://github.com/{}", &text[at + 1..login])),
+            None => continue,
+        };
+        if at > from {
+            out.push((&text[from..at], None));
+        }
+        out.push((&text[at..end], Some(url)));
         from = end;
     }
     if from < text.len() {
@@ -1880,6 +1948,40 @@ mod tests {
                 Span { text: "#2".into(), code: true, ..Default::default() },
                 plain(" "),
                 Span { text: "https://x.y/#3".into(), link: Some("https://x.y/#3".into()), ..Default::default() },
+            ])]
+        );
+    }
+
+    #[test]
+    fn mentions_link_to_the_person_as_github_links_them() {
+        let person = |text: &str, url: &str| Span { text: text.into(), link: Some(url.into()), ..Default::default() };
+        assert_eq!(
+            parse_in("@Barre @rodesai WDYT? cc @slatedb/core.", Some("slatedb/slatedb")),
+            vec![Block::Paragraph(vec![
+                person("@Barre", "https://github.com/Barre"),
+                plain(" "),
+                person("@rodesai", "https://github.com/rodesai"),
+                plain(" WDYT? cc "),
+                person("@slatedb/core", "https://github.com/orgs/slatedb/teams/core"),
+                plain("."),
+            ])]
+        );
+        // Only where GitHub would read it: an agent's `@path` is a file.
+        for repo in [None, Some("local/perch")] {
+            assert_eq!(parse_in("@a", repo), vec![Block::Paragraph(vec![plain("@a")])]);
+        }
+        let linked = |text: &str| -> Vec<String> {
+            mentions(text).into_iter().filter(|(_, l)| l.is_some()).map(|(t, _)| t.to_string()).collect()
+        };
+        assert_eq!(linked("@a, (@b-c) \"@d\" @e... @f!"), vec!["@a", "@b-c", "@d", "@e", "@f"]);
+        assert!(linked("a@b.com @a_b @a.b @-a @ @_a x@a @a/ @a/_b @a/b.c").is_empty());
+        // Not inside a link or a code span.
+        assert_eq!(
+            parse_in("[@a](https://x.y) `@b`", Some("o/r")),
+            vec![Block::Paragraph(vec![
+                Span { text: "@a".into(), link: Some("https://x.y".into()), ..Default::default() },
+                plain(" "),
+                Span { text: "@b".into(), code: true, ..Default::default() },
             ])]
         );
     }
