@@ -70,6 +70,6 @@ pub use reviews::{
 };
 pub use timeline::{PullEvent, PullEventKind, Reference};
 pub use workflow_runs::{
-    announced_verdict, worst, Check, CheckKind, CheckRunState, CheckState, Checks,
+    announced_verdict, Check, CheckKind, CheckRunState, CheckState, Checks,
     WorkflowRunPayload, WorkflowRunQuery,
 };

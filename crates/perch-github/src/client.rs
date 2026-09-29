@@ -669,24 +669,6 @@ impl GitHub {
         Ok(payload.into_issue(repo_full_name))
     }
 
-    /// The workflow runs for one commit, newest first. What the checks
-    /// pill is set from. One page: a head with more than a hundred runs is
-    /// not a head anyone is reviewing.
-    pub async fn list_workflow_runs_for_sha(
-        &self,
-        repo_full_name: &str,
-        head_sha: &str,
-    ) -> Result<Vec<WorkflowRunPayload>, Error> {
-        let body = self
-            .get_text(&format!(
-                "/repos/{repo_full_name}/actions/runs?head_sha={head_sha}&per_page=100"
-            ))
-            .await?;
-        let payload: WorkflowRunsPayload =
-            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
-        Ok(payload.workflow_runs)
-    }
-
     /// The repository's newest hundred workflow runs, on any branch.
     ///
     /// No filter, so no search: GitHub answers a filtered listing from a

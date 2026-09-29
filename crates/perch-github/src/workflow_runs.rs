@@ -1,5 +1,5 @@
-//! Workflow runs: the checks pill on an item's header, and the branch a
-//! CI notification is about.
+//! Workflow runs: the checks pill on an item's header, and the run a CI
+//! notification is about.
 //!
 //! A `CheckSuite` notification carries a title and nothing else: no URL, no
 //! run id, no check suite id. The workflow's name and the branch are read
@@ -7,7 +7,8 @@
 //! about the open pull request's branch and its checks want asking after,
 //! and to find the run itself among the branch's runs.
 //!
-//! The pill reads the runs for one commit and shows the worst of them.
+//! The pill's [`Checks`] are read from the pull request's status-check
+//! rollup, in `pulls.rs`, not from these listings.
 
 use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -132,7 +133,7 @@ fn parse_title(title: &str) -> Option<(String, String, String)> {
     Some((workflow.to_string(), verdict.to_string(), branch.to_string()))
 }
 
-/// The checks pill: the worst of one commit's runs.
+/// The checks pill: the head's status-check rollup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckState {
@@ -142,7 +143,7 @@ pub enum CheckState {
         workflow: String,
     },
     Running,
-    /// No runs, or none that finished with a verdict.
+    /// No rollup, or a state this build does not know.
     Unknown,
 }
 
@@ -150,7 +151,8 @@ pub enum CheckState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Checks {
     pub state: CheckState,
-    /// The failing run's page, else the newest run's. `None` with no runs.
+    /// The failing check's page, else a pending one's, else the first
+    /// with a page. `None` when no check has one.
     pub url: Option<String>,
     /// Each check or legacy commit status in GitHub's rollup. Older cached
     /// rows only held the aggregate fields above, so this must stay defaulted.
@@ -227,82 +229,6 @@ impl CheckRunState {
     }
 }
 
-impl Checks {
-    /// The pill for these runs, and the run it opens: the one that failed
-    /// when one did, since that is what the reader wants to see, else the
-    /// newest.
-    pub fn of(runs: &[WorkflowRunPayload]) -> Self {
-        let run = failing(runs).or_else(|| runs.iter().max_by_key(|r| r.created_at));
-        Checks {
-            state: worst(runs),
-            url: run.map(|r| r.html_url.clone()),
-            runs: runs.iter().map(Check::from).collect(),
-        }
-    }
-}
-
-impl From<&WorkflowRunPayload> for Check {
-    fn from(run: &WorkflowRunPayload) -> Self {
-        let state = if run.is_failing() {
-            match run.conclusion.as_deref() {
-                Some("cancelled") => CheckRunState::Cancelled,
-                Some("timed_out") => CheckRunState::TimedOut,
-                Some("action_required") => CheckRunState::ActionRequired,
-                Some("startup_failure") => CheckRunState::StartupFailure,
-                _ => CheckRunState::Failure,
-            }
-        } else if run.is_running() {
-            CheckRunState::Pending
-        } else {
-            match run.conclusion.as_deref() {
-                Some("success") => CheckRunState::Success,
-                Some("neutral") => CheckRunState::Neutral,
-                Some("skipped") => CheckRunState::Skipped,
-                Some("stale") => CheckRunState::Stale,
-                _ => CheckRunState::Unknown,
-            }
-        };
-        Self {
-            name: run.name.clone(),
-            workflow: Some(run.name.clone()),
-            event: None,
-            state,
-            description: None,
-            url: (!run.html_url.is_empty()).then(|| run.html_url.clone()),
-            started_at: Some(run.created_at),
-            completed_at: (run.status == "completed").then_some(run.updated_at),
-            kind: CheckKind::CheckRun,
-        }
-    }
-}
-
-/// The state the pill shows for these runs.
-///
-/// Red beats yellow beats green: one failure among many passes is a
-/// failure, and one run still going among passes is still going. Cancelled
-/// and action-required count as failing here, unlike in a notification's
-/// detail, because the pill has three colours and a run that stopped short
-/// of green is not green.
-pub fn worst(runs: &[WorkflowRunPayload]) -> CheckState {
-    if let Some(run) = failing(runs) {
-        return CheckState::Failing {
-            workflow: run.name.clone(),
-        };
-    }
-    if runs.iter().any(WorkflowRunPayload::is_running) {
-        return CheckState::Running;
-    }
-    if runs.iter().any(WorkflowRunPayload::is_passing) {
-        return CheckState::Passing;
-    }
-    CheckState::Unknown
-}
-
-/// The first run that failed, which is the one the pill names and opens.
-fn failing(runs: &[WorkflowRunPayload]) -> Option<&WorkflowRunPayload> {
-    runs.iter().find(|r| r.is_failing())
-}
-
 /// `GET /repos/{owner}/{repo}/actions/runs`.
 #[derive(Debug, Deserialize)]
 pub(crate) struct WorkflowRunsPayload {
@@ -310,7 +236,7 @@ pub(crate) struct WorkflowRunsPayload {
     pub workflow_runs: Vec<WorkflowRunPayload>,
 }
 
-/// One workflow run, as GitHub lists it and as the checks are kept.
+/// One workflow run, as GitHub lists it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowRunPayload {
     #[serde(default)]
@@ -330,30 +256,6 @@ pub struct WorkflowRunPayload {
     pub updated_at: Timestamp,
     #[serde(default)]
     pub actor: Option<UserPayload>,
-}
-
-impl WorkflowRunPayload {
-    fn is_failing(&self) -> bool {
-        matches!(
-            self.conclusion.as_deref(),
-            Some("failure" | "timed_out" | "cancelled" | "action_required" | "startup_failure")
-        )
-    }
-
-    fn is_running(&self) -> bool {
-        matches!(
-            self.status.as_str(),
-            "queued" | "in_progress" | "waiting" | "pending" | "requested"
-        )
-    }
-
-    fn is_passing(&self) -> bool {
-        self.status == "completed"
-            && matches!(
-                self.conclusion.as_deref(),
-                Some("success" | "neutral" | "skipped")
-            )
-    }
 }
 
 #[cfg(test)]
@@ -595,112 +497,6 @@ mod tests {
         assert_eq!(
             run.actor.as_ref().map(|a| a.login.as_str()),
             Some("criccomini")
-        );
-    }
-
-    /// A run with the given status and conclusion, created `number`
-    /// minutes into the hour so the newest is the highest number.
-    fn run_in(
-        name: &str,
-        number: u64,
-        status: &str,
-        conclusion: Option<&str>,
-    ) -> WorkflowRunPayload {
-        let mut r = run(
-            name,
-            number,
-            "2026-09-15T23:00:00Z",
-            "2026-09-15T23:45:08Z",
-            "",
-        );
-        r.created_at = format!("2026-09-15T23:{number:02}:00Z").parse().unwrap();
-        r.status = status.into();
-        r.conclusion = conclusion.map(str::to_string);
-        r
-    }
-
-    #[test]
-    fn every_conclusion_and_status_has_a_pill_state() {
-        let one =
-            |status: &str, conclusion: Option<&str>| worst(&[run_in("CI", 1, status, conclusion)]);
-        let failing = CheckState::Failing {
-            workflow: "CI".into(),
-        };
-        for c in [
-            "failure",
-            "timed_out",
-            "cancelled",
-            "action_required",
-            "startup_failure",
-        ] {
-            assert_eq!(one("completed", Some(c)), failing, "{c}");
-        }
-        for s in ["queued", "in_progress", "waiting", "pending", "requested"] {
-            assert_eq!(one(s, None), CheckState::Running, "{s}");
-        }
-        for c in ["success", "neutral", "skipped"] {
-            assert_eq!(one("completed", Some(c)), CheckState::Passing, "{c}");
-        }
-        // Stale, or a conclusion this build has never heard of, is neither
-        // red nor green. Nor is a completed run with no conclusion at all.
-        assert_eq!(one("completed", Some("stale")), CheckState::Unknown);
-        assert_eq!(one("completed", None), CheckState::Unknown);
-        assert_eq!(worst(&[]), CheckState::Unknown);
-    }
-
-    #[test]
-    fn a_failure_beats_a_run_in_progress_beats_a_pass() {
-        let pass = run_in("Build", 1, "completed", Some("success"));
-        let going = run_in("Lint", 2, "in_progress", None);
-        let fail = run_in("Test", 3, "completed", Some("failure"));
-        let fail_too = run_in("DST", 4, "completed", Some("timed_out"));
-
-        assert_eq!(worst(&[pass.clone(), going.clone()]), CheckState::Running);
-        assert_eq!(worst(&[pass.clone(), pass.clone()]), CheckState::Passing);
-        assert_eq!(
-            worst(&[pass.clone(), going.clone(), fail.clone(), fail_too.clone()]),
-            CheckState::Failing {
-                workflow: "Test".into()
-            },
-            "the first failing run in the list is the one named"
-        );
-        // Unknown runs alongside real ones do not drag the pill down.
-        let stale = run_in("Old", 5, "completed", Some("stale"));
-        assert_eq!(worst(&[stale.clone(), pass.clone()]), CheckState::Passing);
-        assert_eq!(worst(&[stale, going]), CheckState::Running);
-    }
-
-    #[test]
-    fn the_pill_opens_the_failing_run_else_the_newest() {
-        let older_pass = run_in("Build", 1, "completed", Some("success"));
-        let newer_pass = run_in("Lint", 5, "completed", Some("success"));
-        let fail = run_in("Test", 3, "completed", Some("failure"));
-
-        let green = Checks::of(&[newer_pass.clone(), older_pass.clone()]);
-        assert_eq!(green.state, CheckState::Passing);
-        assert_eq!(green.url.as_deref(), Some(newer_pass.html_url.as_str()));
-
-        let red = Checks::of(&[newer_pass, fail.clone(), older_pass]);
-        assert_eq!(
-            red.state,
-            CheckState::Failing {
-                workflow: "Test".into()
-            }
-        );
-        assert_eq!(
-            red.url.as_deref(),
-            Some(fail.html_url.as_str()),
-            "not the newest: the one that failed"
-        );
-
-        let none = Checks::of(&[]);
-        assert_eq!(
-            none,
-            Checks {
-                state: CheckState::Unknown,
-                url: None,
-                runs: Vec::new()
-            }
         );
     }
 

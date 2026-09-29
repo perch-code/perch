@@ -86,14 +86,14 @@ async fn an_unchanged_read_is_answered_from_the_body_its_tag_came_with() {
     ]);
     let gh = GitHub::with_base_uri("t", &base).unwrap();
 
-    let first = gh.list_workflow_runs_for_sha("a/b", "abc").await.unwrap();
-    let second = gh.list_workflow_runs_for_sha("a/b", "abc").await.unwrap();
+    let first = gh.list_recent_workflow_runs("a/b").await.unwrap();
+    let second = gh.list_recent_workflow_runs("a/b").await.unwrap();
     assert_eq!(first[0].status, "in_progress");
     assert_eq!(second[0].status, "in_progress");
 
-    let third = gh.list_workflow_runs_for_sha("a/b", "abc").await.unwrap();
+    let third = gh.list_recent_workflow_runs("a/b").await.unwrap();
     assert_eq!(third[0].status, "completed");
-    let fourth = gh.list_workflow_runs_for_sha("a/b", "abc").await.unwrap();
+    let fourth = gh.list_recent_workflow_runs("a/b").await.unwrap();
     assert_eq!(fourth[0].conclusion.as_deref(), Some("success"));
 
     let requests = requests.lock().unwrap();
@@ -139,8 +139,8 @@ async fn a_read_that_came_without_a_tag_is_asked_for_whole_next_time() {
     let (base, requests) = spawn(vec![("200 OK", None, RUNS), ("200 OK", None, RUNS)]);
     let gh = GitHub::with_base_uri("t", &base).unwrap();
 
-    gh.list_workflow_runs_for_sha("a/b", "abc").await.unwrap();
-    gh.list_workflow_runs_for_sha("a/b", "abc").await.unwrap();
+    gh.list_recent_workflow_runs("a/b").await.unwrap();
+    gh.list_recent_workflow_runs("a/b").await.unwrap();
 
     let requests = requests.lock().unwrap();
     assert!(requests.iter().all(|r| r.if_none_match.is_none()));

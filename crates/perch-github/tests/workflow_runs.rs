@@ -1,10 +1,10 @@
-//! The workflow runs for a head against a local server, to pin the request.
+//! The workflow run listings against a local server, to pin the requests.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 
-use perch_github::{CheckState, Checks, GitHub};
+use perch_github::GitHub;
 
 fn read_path(stream: &mut TcpStream) -> Option<String> {
     let mut reader = BufReader::new(stream.try_clone().ok()?);
@@ -58,24 +58,6 @@ const RUNS: &str = r#"{"total_count":2,"workflow_runs":[
    "created_at":"2026-09-15T20:01:11Z","updated_at":"2026-09-15T20:14:21Z",
    "actor":{"login":"criccomini","avatar_url":"https://avatars/1"}}
 ]}"#;
-
-#[tokio::test]
-async fn the_runs_for_a_head_are_asked_for_by_sha_and_read_whole() {
-    let (base, paths) = spawn(RUNS);
-    let gh = GitHub::with_base_uri("t", &base).unwrap();
-
-    let runs = gh.list_workflow_runs_for_sha("slatedb/slatedb", "abc123").await.unwrap();
-    assert_eq!(runs.len(), 2);
-    assert_eq!(runs[0].name, "Hourly DST");
-    assert_eq!(perch_github::worst(&runs), CheckState::Failing { workflow: "Hourly DST".into() });
-    assert_eq!(
-        Checks::of(&runs).url.as_deref(),
-        Some("https://github.com/slatedb/slatedb/actions/runs/35035566266")
-    );
-
-    let paths = paths.lock().unwrap();
-    assert_eq!(paths.as_slice(), ["/repos/slatedb/slatedb/actions/runs?head_sha=abc123&per_page=100"]);
-}
 
 #[tokio::test]
 async fn the_runs_for_a_branch_are_asked_for_by_branch_and_days() {
