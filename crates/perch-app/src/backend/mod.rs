@@ -7653,6 +7653,12 @@ async fn follow_last_run(ctx: &Ctx, run: &RunRecord) {
             set_scope(ctx, &item_id, now, request_id, navigation_id).await;
         }
     }
+    // The run wrote to the worktree, so a scope that reads it is read
+    // again, not only the commits and the dirt.
+    if let Some(scope_revision) = ctx.scope_requests.stable_revision() {
+        refresh_scope(ctx, &item_id, navigation_id, scope_revision).await;
+        return;
+    }
     let Some((checkout, since, scope_gen)) = ctx.slot.lock().ok().and_then(|g| {
         g.as_ref()
             .filter(|open| live(open) && open.navigation_id == navigation_id)
@@ -7764,8 +7770,11 @@ async fn send_commits(
 
 /// Look at the checkout again. The head may have moved under a terminal
 /// commit: then the review context follows it and the changed list is
-/// recomputed under the scope that is set; the commits and the dirt are
-/// read again either way.
+/// recomputed under the scope that is set. Under a scope that reads the
+/// working tree or the index the list is read again whatever the head
+/// did, since an agent or another editor may have written to the files,
+/// and sent only when it differs: a new list reloads every loaded file.
+/// The commits and the dirt are read again either way.
 async fn refresh_scope(ctx: &Ctx, item_id: &str, navigation_id: u64, scope_revision: u64) {
     if !ctx.navigation_requests.is_current(navigation_id)
         || ctx.scope_requests.stable_revision() != Some(scope_revision)
@@ -7787,10 +7796,11 @@ async fn refresh_scope(ctx: &Ctx, item_id: &str, navigation_id: u64, scope_revis
                     c.scope.clone(),
                     c.since.clone(),
                     c.scope_gen,
+                    c.files.clone(),
                 )
             })
     });
-    let Some((mut checkout, scope, since, gen)) = open else {
+    let Some((mut checkout, scope, since, mut gen, held)) = open else {
         return;
     };
     if !checkout.worktree.join(".git").exists() {
@@ -7809,22 +7819,30 @@ async fn refresh_scope(ctx: &Ctx, item_id: &str, navigation_id: u64, scope_revis
     // A head that moved is a commit the reader made: the branch grew, or
     // was rebased, so the base is found again too. A pull request checkout
     // left stale by a dirty tree is not this.
-    if !head.is_empty() && head != checkout.head_sha && checkout.stale.is_none() {
-        checkout.head_sha = head.clone();
-        if let Some(item) = ctx.item(item_id) {
-            for base in base_revs_for(ctx, &item).await {
-                if let Ok(mb) = git
-                    .run(
-                        Some(&checkout.worktree),
-                        ["merge-base", &base, &head],
-                        Duration::from_secs(30),
-                    )
-                    .await
-                {
-                    let mb = mb.trim().to_string();
-                    if !mb.is_empty() {
-                        checkout.merge_base = mb;
-                        break;
+    let moved = !head.is_empty() && head != checkout.head_sha && checkout.stale.is_none();
+    let on_disk = checkout.stale.is_none()
+        && matches!(
+            scope,
+            perch_git::Scope::Uncommitted | perch_git::Scope::Unstaged | perch_git::Scope::Staged
+        );
+    if moved || on_disk {
+        if moved {
+            checkout.head_sha = head.clone();
+            if let Some(item) = ctx.item(item_id) {
+                for base in base_revs_for(ctx, &item).await {
+                    if let Ok(mb) = git
+                        .run(
+                            Some(&checkout.worktree),
+                            ["merge-base", &base, &head],
+                            Duration::from_secs(30),
+                        )
+                        .await
+                    {
+                        let mb = mb.trim().to_string();
+                        if !mb.is_empty() {
+                            checkout.merge_base = mb;
+                            break;
+                        }
                     }
                 }
             }
@@ -7836,68 +7854,62 @@ async fn refresh_scope(ctx: &Ctx, item_id: &str, navigation_id: u64, scope_revis
                 return;
             }
         };
-        // The reader may have picked a scope while this looked; theirs
-        // wins, and the next look reads under it.
-        let committed_gen = ctx
-            .navigation_requests
-            .with_current(navigation_id, || {
-                ctx.scope_requests.with_revision(scope_revision, || {
-                    let Ok(mut guard) = ctx.slot.lock() else {
-                        return 0;
-                    };
-                    let Some(open) = guard.as_mut().filter(|open| {
-                        open.item_id == item_id
-                            && open.navigation_id == navigation_id
-                            && open.scope_gen == gen
-                            && open.review_snapshot_id.is_none()
-                            && open.review_group_id.is_none()
-                            && open.review_request_id.is_none()
-                    }) else {
-                        return 0;
-                    };
-                    open.checkout.head_sha = head.clone();
-                    open.checkout.merge_base = checkout.merge_base.clone();
-                    open.files = files.clone();
-                    let committed_gen = next_scope_gen();
-                    open.scope_gen = committed_gen;
-                    let _ = ctx.events.send(Event::ScopeReady {
-                        navigation_id,
-                        scope_gen: committed_gen,
-                        item_id: item_id.to_string(),
-                        scope: scope.clone(),
-                        files: files.clone(),
-                    });
-                    committed_gen
+        // The same list again is not sent: it would reload every loaded
+        // file for nothing.
+        if moved || files != held {
+            // The reader may have picked a scope while this looked; theirs
+            // wins, and the next look reads under it.
+            let committed_gen = ctx
+                .navigation_requests
+                .with_current(navigation_id, || {
+                    ctx.scope_requests.with_revision(scope_revision, || {
+                        let Ok(mut guard) = ctx.slot.lock() else {
+                            return 0;
+                        };
+                        let Some(open) = guard.as_mut().filter(|open| {
+                            open.item_id == item_id
+                                && open.navigation_id == navigation_id
+                                && open.scope_gen == gen
+                                && open.review_snapshot_id.is_none()
+                                && open.review_group_id.is_none()
+                                && open.review_request_id.is_none()
+                        }) else {
+                            return 0;
+                        };
+                        open.checkout.head_sha = checkout.head_sha.clone();
+                        open.checkout.merge_base = checkout.merge_base.clone();
+                        open.files = files.clone();
+                        let committed_gen = next_scope_gen();
+                        open.scope_gen = committed_gen;
+                        let _ = ctx.events.send(Event::ScopeReady {
+                            navigation_id,
+                            scope_gen: committed_gen,
+                            item_id: item_id.to_string(),
+                            scope: scope.clone(),
+                            files: files.clone(),
+                        });
+                        committed_gen
+                    })
                 })
-            })
-            .flatten()
-            .filter(|generation| *generation != 0);
-        let Some(committed_gen) = committed_gen else {
-            return;
-        };
+                .flatten()
+                .filter(|generation| *generation != 0);
+            let Some(committed_gen) = committed_gen else {
+                return;
+            };
+            gen = committed_gen;
+        }
         // The row's head is what the view derives anchors and the menu
         // from, so it follows too.
-        if let Some(mut item) = ctx.item(item_id) {
-            if let Some(c) = item.checkout.as_mut() {
-                c.head_sha = head.clone();
+        if moved {
+            if let Some(mut item) = ctx.item(item_id) {
+                if let Some(c) = item.checkout.as_mut() {
+                    c.head_sha = head.clone();
+                }
+                count_divergence(ctx.preparer.git(), &mut item).await;
+                ctx.with_cache(|c| c.update_item(&item));
+                ctx.send_items();
             }
-            count_divergence(ctx.preparer.git(), &mut item).await;
-            ctx.with_cache(|c| c.update_item(&item));
-            ctx.send_items();
         }
-        send_commits(
-            ctx,
-            item_id,
-            &checkout.worktree,
-            &checkout.merge_base,
-            &checkout.head_sha,
-            since,
-            navigation_id,
-            committed_gen,
-            Some(scope_revision),
-        )
-        .await;
-        return;
     }
     send_commits(
         ctx,
@@ -14149,6 +14161,26 @@ async fn execute_question(
     ctx.runs.attach(&lease, handle.clone());
     run = ctx.runs.load(&run.id).unwrap_or(run);
 
+    // A Work run's edits show as it makes them: each step it finishes
+    // asks for a look at the checkout, and the asks that land while one
+    // look is under way make one more after it.
+    let steps = Arc::new(tokio::sync::Notify::new());
+    let follow = (run.mode == RunMode::Work).then(|| {
+        let (ctx, item_id, steps) = (ctx.clone(), item_id.clone(), steps.clone());
+        tokio::spawn(async move {
+            loop {
+                steps.notified().await;
+                let view = ctx.view_for(&item_id);
+                if let (Some(navigation_id), Some(scope_revision)) = (
+                    view.navigation_requests.current_id(),
+                    view.scope_requests.stable_revision(),
+                ) {
+                    refresh_scope(&view, &item_id, navigation_id, scope_revision).await;
+                }
+            }
+        })
+    });
+
     let mut answer = Vec::new();
     let mut narration = Vec::new();
     let mut event_index = 0_u64;
@@ -14233,6 +14265,9 @@ async fn execute_question(
                         }
                         _ => {}
                     }
+                    if matches!(event, perch_agent::RunEvent::ToolResult { .. }) {
+                        steps.notify_one();
+                    }
                     run = updated;
                     let _ = ctx.events.send(Event::AgentRunUpdated { run: run.clone() });
                     let _ = ctx.events.send(Event::AgentStep {
@@ -14252,6 +14287,10 @@ async fn execute_question(
     }
 
     let outcome = handle.wait().await;
+    // The run's end has its own look, in `follow_last_run`.
+    if let Some(follow) = follow {
+        follow.abort();
+    }
     // A request still waiting has nobody left to answer.
     let waiting: Vec<String> = ctx
         .approvals
@@ -17698,6 +17737,56 @@ mod tests {
         let third = work("printf 'again\\n' >> made.txt").await;
         follow_last_run(&ctx, &third).await;
         assert_eq!(ctx.slot.lock().unwrap().as_ref().unwrap().scope, perch_git::Scope::Branch);
+    }
+
+    /// Under Uncommitted a look at the checkout reads the list again with
+    /// the head where it was, so an agent's edit shows. A look that finds
+    /// the same list sends none: a new one reloads every open file.
+    #[tokio::test]
+    async fn a_look_rereads_uncommitted_work_and_sends_only_a_changed_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("notes");
+        let worktree = root_with_branch(&root, "feature").canonicalize().unwrap();
+        let mut entry = rooted(None, &root);
+        entry.resolve(None);
+        let (ctx, received) = ctx_declaring(dir.path(), &nowhere(), vec![entry.clone()]);
+        assert!(scan_roots(&ctx).await);
+        let item = ctx.with_cache(|c| c.load_items().unwrap()).unwrap().remove(0);
+        open_in_slot(&ctx, &item);
+        let navigation_id = ctx.navigation_requests.begin_item(&item.id);
+        {
+            let mut slot = ctx.slot.lock().unwrap();
+            let open = slot.as_mut().unwrap();
+            open.checkout.worktree = worktree.clone();
+            open.checkout.head_sha = git(&worktree, &["rev-parse", "HEAD"]);
+            open.navigation_id = navigation_id;
+            open.scope = perch_git::Scope::Uncommitted;
+        }
+        let look = || async {
+            let revision = ctx.scope_requests.stable_revision().unwrap();
+            refresh_scope(&ctx, &item.id, navigation_id, revision).await;
+            received
+                .try_iter()
+                .filter(|e| matches!(e, Event::ScopeReady { .. }))
+                .count()
+        };
+        let blob = || {
+            let slot = ctx.slot.lock().unwrap();
+            let files = &slot.as_ref().unwrap().files;
+            files
+                .iter()
+                .find(|f| f.path == "made.txt")
+                .and_then(|f| f.head_blob.clone())
+        };
+
+        std::fs::write(worktree.join("made.txt"), "made\n").unwrap();
+        assert_eq!(look().await, 1);
+        assert_eq!(blob().unwrap(), git(&worktree, &["hash-object", "made.txt"]));
+        assert_eq!(look().await, 0);
+
+        std::fs::write(worktree.join("made.txt"), "made\nedited\n").unwrap();
+        assert_eq!(look().await, 1);
+        assert_eq!(blob().unwrap(), git(&worktree, &["hash-object", "made.txt"]));
     }
 
     /// A Claude Code that asks its host about `$PERCH_ASK` (a

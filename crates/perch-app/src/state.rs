@@ -2154,9 +2154,12 @@ impl AppState {
             } => {
                 if self.accepts_navigation(navigation_id) && review.is_item(&item_id) {
                     review.scope_gen.set(Some(scope_gen));
-                    for path in review.change_scope(scope, files) {
-                        self.reload.update(|r| r.push(path));
-                    }
+                    let paths = if review.scope.with_untracked(|held| *held == scope) {
+                        review.reread_scope(files)
+                    } else {
+                        review.change_scope(scope, files)
+                    };
+                    self.reload.update(|r| r.extend(paths));
                 }
             }
             Event::ViewedReady {
@@ -3771,6 +3774,59 @@ mod tests {
         assert!(!review
             .loading
             .with(|loading| loading.contains_key("src/failed.rs")));
+    }
+
+    /// A new list under the scope held, as a look after an agent's edit
+    /// sends, asks for the loaded files again and leaves them showing until
+    /// their new sides arrive. Another scope forgets them at once.
+    #[test]
+    fn a_reread_scope_keeps_its_files_showing_while_they_reload() {
+        let app = AppState::new();
+        let review = ReviewState::new();
+
+        app.begin_item_review(review, "Open", "same", 81);
+        app.apply_with_review(review_ready_at_scope("same", 81, 810), review);
+        let loaded = |text: &str| {
+            Arc::new(crate::backend::build_loaded_file(
+                "src/x.rs".into(),
+                text.into(),
+                "old\n".into(),
+                Some(perch_git::ChangeStatus::Modified),
+                false,
+                perch_git::Scope::Branch,
+                String::new(),
+            ))
+        };
+        review.finish_load("src/x.rs", loaded("before\n"));
+        let _ = app.reload.try_update(std::mem::take);
+        let ready = |scope_gen, scope| Event::ScopeReady {
+            navigation_id: 81,
+            scope_gen,
+            item_id: "same".into(),
+            scope,
+            files: Arc::new(Vec::new()),
+        };
+
+        app.apply_with_review(ready(811, perch_git::Scope::Branch), review);
+        assert_eq!(app.reload.get(), ["src/x.rs"]);
+        assert!(review.is_loading("src/x.rs"));
+        assert!(review.file("src/x.rs").is_some());
+
+        app.apply_with_review(
+            Event::FileLoaded {
+                navigation_id: 81,
+                scope_gen: 811,
+                item_id: "same".into(),
+                path: "src/x.rs".into(),
+                file: loaded("after\n"),
+            },
+            review,
+        );
+        assert!(!review.is_loading("src/x.rs"));
+        assert!(review.file("src/x.rs").unwrap().buffer.text.contains("after"));
+
+        app.apply_with_review(ready(812, perch_git::Scope::Uncommitted), review);
+        assert!(review.file("src/x.rs").is_none());
     }
 
     #[test]

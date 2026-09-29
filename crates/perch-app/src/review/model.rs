@@ -3039,12 +3039,28 @@ impl ReviewState {
     pub fn change_scope(&self, scope: Scope, files: Arc<Vec<ChangedFile>>) -> Vec<String> {
         self.scope.set(scope);
         self.set_changed_files(files);
-        // Every loaded file, not only the tabs: a thread card on
-        // Conversation shows lines from a file no tab has, and would go
-        // blank until something loaded it again.
-        let mut paths: Vec<String> = self.files.with(|m| m.keys().cloned().collect());
+        let paths = self.reload_loaded();
         self.files.set(HashMap::new());
-        self.loading.set(HashMap::new());
+        self.editor_epoch.update(|e| *e += 1);
+        paths
+    }
+
+    /// The scope read again with a new list under it: the working tree
+    /// was written to, or the head moved. Every loaded file is asked for
+    /// again as `change_scope` does, but stays on screen until its new
+    /// sides arrive, so each edit of an agent at work does not flash the
+    /// open file to its loading view.
+    pub fn reread_scope(&self, files: Arc<Vec<ChangedFile>>) -> Vec<String> {
+        self.set_changed_files(files);
+        self.reload_loaded()
+    }
+
+    /// Every loaded file, not only the tabs: a thread card on
+    /// Conversation shows lines from a file no tab has, and would go
+    /// blank until something loaded it again. Then every tab, the active
+    /// one first; all marked loading.
+    fn reload_loaded(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self.files.with(|m| m.keys().cloned().collect());
         for tab in self
             .tabs
             .with(|t| t.iter().map(|t| t.path.clone()).collect::<Vec<_>>())
@@ -3057,12 +3073,8 @@ impl ReviewState {
             paths.retain(|p| *p != active);
             paths.insert(0, active);
         }
-        self.loading.update(|m| {
-            for p in &paths {
-                m.insert(p.clone(), ());
-            }
-        });
-        self.editor_epoch.update(|e| *e += 1);
+        self.loading
+            .set(paths.iter().map(|p| (p.clone(), ())).collect());
         paths
     }
 
