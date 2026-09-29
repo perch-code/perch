@@ -1,19 +1,17 @@
 //! The new-work view: a box for what the work is, and under it the
-//! repository, the branch to start from, and the new branch's name.
+//! repository, the branch to start from, and who the message goes to.
 //!
 //! `+` at the top of the sidebar and `Cmd-N` open it in the main pane,
-//! under a bar titled New worktree whose X shuts it. Start cuts the new
-//! branch into a worktree and opens it. What was typed is kept when the
+//! under a bar titled New worktree whose X shuts it. Start cuts a new
+//! branch, named from the message, into a worktree and opens it. What was typed is kept when the
 //! view is left without starting, until Perch quits.
 
 use std::rc::Rc;
 
 use floem::event::EventPropagation;
 use floem::prelude::*;
-use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::views::{
-    dyn_container, text_editor, Container, Decorators, Empty, Label, Stack, TextInput,
-};
+use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
+use floem::views::{dyn_container, text_editor, Container, Decorators, Empty, Label, Stack};
 use perch_git::BaseBranch;
 
 use crate::backend::{Backend, FirstRun, NewWork};
@@ -52,11 +50,6 @@ pub struct NewWorkState {
     pub repo: RwSignal<Option<String>>,
     pub bases: RwSignal<BaseList>,
     pub base: RwSignal<Option<BaseBranch>>,
-    /// The new branch's name.
-    pub name: RwSignal<String>,
-    /// The reader has typed in the name box, so it is no longer filled
-    /// in from the message.
-    pub name_typed: RwSignal<bool>,
     /// What the work is.
     pub text: RwSignal<String>,
     /// `[work] branch_prefix`.
@@ -75,8 +68,6 @@ impl NewWorkState {
             repo: RwSignal::new(None),
             bases: RwSignal::new(BaseList::Unasked),
             base: RwSignal::new(None),
-            name: RwSignal::new(String::new()),
-            name_typed: RwSignal::new(false),
             text: RwSignal::new(String::new()),
             prefix: RwSignal::new(String::new()),
             error: RwSignal::new(None),
@@ -161,27 +152,83 @@ pub fn choose_repo(state: AppState, backend: &Backend, repo: &str) {
     backend.list_bases(repo);
 }
 
-/// The new branch's name as the message suggests it: the prefix, then
-/// the first five words, lower case, joined by hyphens, with anything
-/// git would object to left out. `work` when there are no words.
+/// Words that say nothing in a branch name.
+const FILLER: &[&str] = &["a", "an", "the", "please"];
+
+/// The new branch's name, from the message: the prefix, then its first
+/// five words that say something, lower case, joined by hyphens, with
+/// anything git would object to left out. A link stands for what it
+/// points at, so `Fix https://github.com/o/r/pull/12` is `fix-pr-12`.
+/// `work` when there are no words.
 pub fn suggested_branch(prefix: &str, text: &str) -> String {
-    let words: Vec<String> = text
+    const MAX_WORDS: usize = 5;
+    const MAX_LEN: usize = 48;
+    let words = text
         .split_whitespace()
-        .map(|word| {
-            word.chars()
-                .filter(|c| c.is_ascii_alphanumeric())
-                .map(|c| c.to_ascii_lowercase())
-                .collect::<String>()
+        .flat_map(|word| {
+            if word.starts_with("http://") || word.starts_with("https://") {
+                link_words(word)
+            } else {
+                slug_words(&word.replace(['\'', '\u{2019}', '`', '"'], ""))
+            }
         })
-        .filter(|word| !word.is_empty())
-        .take(5)
-        .collect();
-    let slug = if words.is_empty() {
-        "work".to_string()
-    } else {
-        words.join("-")
-    };
+        .filter(|word| !FILLER.contains(&word.as_str()));
+    let mut slug = String::new();
+    for word in words.take(MAX_WORDS) {
+        if !slug.is_empty() && slug.len() + 1 + word.len() > MAX_LEN {
+            break;
+        }
+        if !slug.is_empty() {
+            slug.push('-');
+        }
+        slug.push_str(&word);
+    }
+    slug.truncate(MAX_LEN);
+    if slug.is_empty() {
+        slug.push_str("work");
+    }
     format!("{prefix}{slug}")
+}
+
+/// A word's ASCII letters and digits, lower case, in the runs anything
+/// else splits them into.
+fn slug_words(word: &str) -> Vec<String> {
+    word.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+/// What a link points at, in a few words: a GitHub pull request, issue,
+/// commit or Actions run by its kind and number, anything else by the
+/// last part of its path, or its host when it has none.
+fn link_words(url: &str) -> Vec<String> {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    let mut parts = rest.split('/').filter(|part| !part.is_empty());
+    let host = parts.next().unwrap_or_default().to_ascii_lowercase();
+    let path: Vec<&str> = parts.collect();
+    if host == "github.com" || host == "www.github.com" {
+        let named = match path.as_slice() {
+            [_, _, "pull", n, ..] => Some(format!("pr {n}")),
+            [_, _, "issues", n, ..] => Some(format!("issue {n}")),
+            [_, _, "commit", sha, ..] => Some(format!(
+                "commit {}",
+                sha.chars().take(7).collect::<String>()
+            )),
+            [_, _, "actions", "runs", n, ..] => Some(format!("ci {n}")),
+            [_, repo, ..] => Some(repo.to_string()),
+            _ => None,
+        };
+        if let Some(named) = named {
+            return slug_words(&named);
+        }
+    }
+    let site = host.trim_start_matches("www.");
+    match path.last() {
+        Some(last) => slug_words(last.rsplit_once('.').map_or(last, |(stem, _)| stem)),
+        None => slug_words(site.split('.').next().unwrap_or_default()),
+    }
 }
 
 /// What Start would send, or why it cannot.
@@ -198,14 +245,8 @@ fn request(state: AppState) -> Result<NewWork, String> {
             _ => "Choose a branch to start from".to_string(),
         })
     })?;
-    let branch = nw.name.get().trim().to_string();
-    if branch.is_empty() {
-        return Err("Name the new branch".to_string());
-    }
-    if branch.contains(char::is_whitespace) {
-        return Err("A branch name has no spaces".to_string());
-    }
     let text = nw.text.get();
+    let branch = suggested_branch(&nw.prefix.get(), &text);
     let run = (!text.trim().is_empty()).then(|| {
         let (backend, model, effort) = chosen_agent(state);
         FirstRun {
@@ -219,7 +260,6 @@ fn request(state: AppState) -> Result<NewWork, String> {
         repo,
         base,
         branch,
-        typed: nw.name_typed.get(),
         run,
     })
 }
@@ -300,22 +340,12 @@ fn start(state: AppState, backend: &Backend) {
     nw.error.set(None);
     let navigation_id = backend.create_worktree(work);
     nw.text.set(String::new());
-    nw.name_typed.set(false);
     state.begin_open("Adding the worktree", navigation_id);
 }
 
 /// The view, in the main pane.
 pub fn new_work_view(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     let nw = state.new_work;
-
-    // The name follows the message until the reader types in it.
-    Effect::new(move |_| {
-        let text = nw.text.get();
-        let prefix = nw.prefix.get();
-        if !nw.name_typed.get_untracked() {
-            nw.name.set(suggested_branch(&prefix, &text));
-        }
-    });
 
     let start_backend = backend.clone();
     let start: Rc<dyn Fn()> = Rc::new(move || start(state, &start_backend));
@@ -329,15 +359,6 @@ pub fn new_work_view(state: AppState, backend: Rc<Backend>) -> impl IntoView {
         Stack::horizontal((
             repo_chip(state, backend.clone()),
             base_chip(state),
-            branch_chip(state),
-        ))
-        .style(|s| {
-            s.items_center()
-                .gap(8.0)
-                .width_full()
-                .flex_wrap(floem::style::FlexWrap::Wrap)
-        }),
-        Stack::horizontal((
             dyn_container(
                 move || empty.get(),
                 move |empty| {
@@ -348,6 +369,14 @@ pub fn new_work_view(state: AppState, backend: Rc<Backend>) -> impl IntoView {
                     }
                 },
             ),
+        ))
+        .style(|s| {
+            s.items_center()
+                .gap(8.0)
+                .width_full()
+                .flex_wrap(floem::style::FlexWrap::Wrap)
+        }),
+        Stack::horizontal((
             dyn_container(
                 move || nw.error.get(),
                 |error| match error {
@@ -598,37 +627,6 @@ fn base_chip(state: AppState) -> impl IntoView {
     )
 }
 
-/// The new branch's name.
-fn branch_chip(state: AppState) -> impl IntoView {
-    let nw = state.new_work;
-    Stack::horizontal((
-        Label::derived(|| "New branch".to_string()).style(|s| {
-            s.font_size(theme::TEXT_BADGE)
-                .color(theme::FG)
-                .selectable(false)
-                .margin_right(8.0)
-        }),
-        TextInput::new(nw.name)
-            .placeholder("branch name")
-            .debug_name("new-work-branch")
-            .on_event_cont(el::KeyDown, move |_, _| nw.name_typed.set(true))
-            .on_event_cont(el::FocusGained, move |_, _| state.search_focused.set(true))
-            .on_event_cont(el::FocusLost, move |_, _| state.search_focused.set(false))
-            .style(|s| {
-                s.width(220.0)
-                    .height(26.0)
-                    .font_size(theme::TEXT_BADGE)
-                    .padding_horiz(6.0)
-                    .background(theme::CANVAS)
-                    .border(1.0)
-                    .border_color(theme::BORDER)
-                    .border_radius(theme::RADIUS)
-                    .focus(|s| s.border_color(theme::ACCENT))
-            }),
-    ))
-    .style(|s| s.items_center())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,15 +678,12 @@ mod tests {
             "local/notes".into(),
             Ok(vec![BaseBranch::local("main"), BaseBranch::local("feature")]),
         );
-        app.new_work.name.set("chris/readme".into());
+        app.new_work.prefix.set("chris/".into());
+        app.new_work.text.set("Add a README".into());
         let work = request(app).unwrap();
         assert_eq!(work.repo, "local/notes");
         assert_eq!(work.base, BaseBranch::local("main"));
-        assert_eq!(work.branch, "chris/readme");
-        assert!(!work.typed);
-
-        app.new_work.name.set("two words".into());
-        assert_eq!(request(app).unwrap_err(), "A branch name has no spaces");
+        assert_eq!(work.branch, "chris/add-readme");
     }
 
     #[test]
@@ -703,37 +698,70 @@ mod tests {
         harness.rebuild();
         harness.paint();
 
+        let root = harness.root_id();
         let rect = |name: &str| {
-            named(harness.root_id(), name)
+            named(root, name)
                 .unwrap_or_else(|| panic!("{name} is drawn"))
                 .get_visual_rect_no_clip()
         };
         let message = rect("new-work-message");
         let repo = rect("new-work-repo");
-        let branch = rect("new-work-branch");
         let start = rect("new-work-start");
         assert!(repo.y0 >= message.y1, "the chips are under the box");
         assert!(start.y0 >= repo.y1, "Start is under the chips");
-        assert!(branch.x1 <= 1100.0 && start.x1 <= 1100.0, "{branch:?} {start:?}");
+        assert!(start.x1 <= 1100.0, "{start:?}");
         assert!(message.width() <= theme::CONVERSATION_WIDTH + 1.0);
+        assert!(named(root, "new-work-agent").is_none(), "no agent without a message");
 
-        // The name follows the message until it is typed in.
+        // With a message, who it goes to sits beside the repository.
         app.new_work.text.set("Add a README".into());
         harness.rebuild();
-        assert_eq!(app.new_work.name.get_untracked(), "chris/add-a-readme");
+        harness.paint();
+        let agent = rect("new-work-agent");
+        let effort = rect("new-work-effort");
+        assert!((agent.y0 - repo.y0).abs() < 1.0, "{agent:?} {repo:?}");
+        assert!((effort.y0 - repo.y0).abs() < 1.0, "{effort:?} {repo:?}");
+        assert!(effort.x1 <= 1100.0, "{effort:?}");
     }
 
     #[test]
     fn a_branch_name_is_the_prefix_and_the_first_five_words() {
         assert_eq!(
             suggested_branch("chris/", "Add a README with a one-line description"),
-            "chris/add-a-readme-with-a"
+            "chris/add-readme-with-one-line"
         );
         assert_eq!(
             suggested_branch("", "Fix `slugify`'s edge-case: émoji!"),
-            "fix-slugifys-edgecase-moji"
+            "fix-slugifys-edge-case-moji"
         );
         assert_eq!(suggested_branch("chris/", "   "), "chris/work");
         assert_eq!(suggested_branch("", "-- !!"), "work");
+        let long = "internationalization ".repeat(5);
+        assert_eq!(suggested_branch("", &long), "internationalization-internationalization");
+    }
+
+    #[test]
+    fn a_link_in_the_message_names_what_it_points_at() {
+        assert_eq!(
+            suggested_branch("", "Fix https://github.com/slatedb/slatedb/actions/runs/36595615717/job/109499634151"),
+            "fix-ci-36595615717"
+        );
+        assert_eq!(
+            suggested_branch("", "Review https://github.com/acme/widgets/pull/12#discussion_r1"),
+            "review-pr-12"
+        );
+        assert_eq!(
+            suggested_branch("", "Do https://github.com/acme/widgets/issues/7"),
+            "do-issue-7"
+        );
+        assert_eq!(
+            suggested_branch("", "Revert https://github.com/acme/widgets/commit/0123456789abcdef"),
+            "revert-commit-0123456"
+        );
+        assert_eq!(
+            suggested_branch("", "Read https://docs.rs/tokio/latest/tokio/fn.spawn.html please"),
+            "read-fn-spawn"
+        );
+        assert_eq!(suggested_branch("", "See https://example.com/"), "see-example");
     }
 }
