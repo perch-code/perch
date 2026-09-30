@@ -86,6 +86,7 @@ fn message(state: AppState, token: u64, text: String, tone: Tone) -> impl IntoVi
     let color = match tone {
         Tone::Error => theme::CLOSED,
         Tone::Warning => theme::DRAFT,
+        Tone::Success => theme::OPEN,
     };
     let dismiss = agents::icon_action(SidebarIcon::Close, "Dismiss message", move || {
         state.dismiss_toast(token)

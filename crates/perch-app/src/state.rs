@@ -78,6 +78,7 @@ pub enum ToastKind {
 pub enum Tone {
     Error,
     Warning,
+    Success,
 }
 
 #[derive(Clone, Copy)]
@@ -2514,6 +2515,7 @@ impl AppState {
             // An empty notice is the backend saying the last one has been
             // read: the reader has moved on to something else.
             Event::Notice(message) => self.complain(message),
+            Event::Done(message) => self.notify(message, Tone::Success),
             Event::Bases { repo, bases } => self.new_work.take_bases(repo, bases),
             Event::WorkDefaults(work) => self.new_work.prefix.set(work.branch_prefix),
             Event::RepositoryAdded(identity) => self.added_repo.set(Some(identity)),
@@ -5405,6 +5407,21 @@ mod tests {
         assert_eq!(
             app.current_toast().map(|toast| toast.kind),
             Some(ToastKind::AgentRun("run".into()))
+        );
+    }
+
+    /// A merge that went through is news, not a complaint.
+    #[test]
+    fn a_done_line_is_a_success_not_an_error() {
+        let _root = floem::headless::TestRoot::new();
+        let app = AppState::new();
+        app.apply(Event::Done("Merged a/b#1 (squash)".into()));
+        assert_eq!(
+            app.current_toast().map(|toast| toast.kind),
+            Some(ToastKind::Message {
+                text: "Merged a/b#1 (squash)".into(),
+                tone: Tone::Success,
+            })
         );
     }
 

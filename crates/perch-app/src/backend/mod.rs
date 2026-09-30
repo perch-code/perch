@@ -837,6 +837,9 @@ pub enum Event {
     },
     /// Something worth a line in the popup and nothing more.
     Notice(String),
+    /// Something the reader asked for that went through, for a line in
+    /// the popup that does not read as a complaint.
+    Done(String),
     /// What config.toml says about the agent, for the pickers.
     AgentConfig(perch_github::AgentConfig),
     /// How much of each CLI's plan limits is used, whenever that changes.
@@ -1418,6 +1421,7 @@ impl Event {
                 | Event::MentionableUsers { .. }
                 | Event::IssueReferences { .. }
                 | Event::Notice(_)
+                | Event::Done(_)
                 | Event::ConfirmLoss(_)
                 | Event::RepositoryAdded(_)
                 | Event::OpenReferenceResolved { .. }
@@ -5895,6 +5899,10 @@ impl Ctx {
         let _ = self.events.send(Event::Notice(message.into()));
     }
 
+    fn done(&self, message: impl Into<String>) {
+        let _ = self.events.send(Event::Done(message.into()));
+    }
+
     fn send_navigation_event(&self, navigation_id: u64, event: Event) {
         let _ = self.navigation_requests.with_current(navigation_id, || {
             let _ = self.events.send(event);
@@ -8520,7 +8528,7 @@ async fn merge_open_pull_request(
     }
 
     let installed = install_pull_request_snapshot(ctx, item_id, merged, Some(attempt_id));
-    ctx.notice(format!(
+    ctx.done(format!(
         "Merged {repo_full_name}#{number} ({})",
         method.as_str()
     ));
@@ -9596,7 +9604,7 @@ async fn close_pull_request(ctx: &Ctx, item_id: &str, token: u64, body: &str) {
     let body = body.trim();
     match comment_and_close(ctx, item_id, &pull_request, body).await {
         Ok(installed) => {
-            ctx.notice(format!(
+            ctx.done(format!(
                 "Closed {}#{}",
                 pull_request.repo_full_name, pull_request.number
             ));
@@ -9656,7 +9664,7 @@ async fn close_issue(
     match github.close_issue(repo_full_name, number, reason).await {
         Ok(closed) => {
             install_issue_snapshot(ctx, item_id, closed);
-            ctx.notice(format!("Closed {repo_full_name}#{number}"));
+            ctx.done(format!("Closed {repo_full_name}#{number}"));
             answer(Ok(()));
             refresh_open_item(ctx, item_id).await;
         }
@@ -9776,7 +9784,7 @@ async fn close_as_issue(ctx: &Ctx, item_id: &str, title: &str, body: &str, comme
     let comment = comment.trim().replace("{issue}", &format!("#{number}"));
     match comment_and_close(ctx, item_id, &pull_request, &comment).await {
         Ok(installed) => {
-            ctx.notice(format!(
+            ctx.done(format!(
                 "Opened {repo_full_name}#{number} and closed #{}",
                 pull_request.number
             ));
@@ -16289,7 +16297,7 @@ fn open_cache_for_app(events: &EventSender<Event>) -> (SharedCache, bool) {
     match Cache::open_with_outcome(&path, avatars) {
         Ok((cache, outcome)) => {
             if let CacheOpen::Migrated { from, to } = outcome {
-                let _ = events.send(Event::Notice(format!(
+                let _ = events.send(Event::Done(format!(
                     "Updated the local database from schema {from} to {to}; discussions and agent history were preserved"
                 )));
             }
@@ -19859,7 +19867,7 @@ read eof || true
         assert!(updated < answered, "the closed pull request is in before the answer");
         assert!(events
             .iter()
-            .any(|e| matches!(e, Event::Notice(m) if m == "Closed a/b#7")));
+            .any(|e| matches!(e, Event::Done(m) if m == "Closed a/b#7")));
         let kept = ctx.item(&item.id).unwrap();
         assert_eq!(kept.pull_request().unwrap().state, "closed");
     }
@@ -19983,7 +19991,7 @@ read eof || true
         assert!(updated < answered, "the closed pull request is in before the answer");
         assert!(events
             .iter()
-            .any(|e| matches!(e, Event::Notice(m) if m == "Opened a/b#58 and closed #7")));
+            .any(|e| matches!(e, Event::Done(m) if m == "Opened a/b#58 and closed #7")));
         assert_eq!(ctx.item(&item.id).unwrap().pull_request().unwrap().state, "closed");
     }
 
@@ -20245,7 +20253,7 @@ read eof || true
         assert!(updated < answered, "the closed issue is in before the answer");
         assert!(events
             .iter()
-            .any(|e| matches!(e, Event::Notice(m) if m == "Closed a/b#8")));
+            .any(|e| matches!(e, Event::Done(m) if m == "Closed a/b#8")));
         let kept = ctx.item(&issue.id).unwrap();
         assert_eq!(
             kept.issue().unwrap().state_reason.as_deref(),
