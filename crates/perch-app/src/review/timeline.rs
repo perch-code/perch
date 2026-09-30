@@ -10,6 +10,7 @@
 //! with no body, and that empty review is the noise that gets dropped.
 
 use jiff::Timestamp;
+use perch_git::Commit;
 use perch_github::{
     CommentThread, Discussion, Issue, IssueComment, Label, PullEvent, PullEventKind, PullRequest,
     Reference, Review,
@@ -237,12 +238,14 @@ fn cut(line: &str) -> String {
 /// The cards for one item, sorted. A pull request's description comes
 /// from the discussion when there is one, else from the pull request alone
 /// with no body; an issue's from the issue, with its comments and the
-/// events GitHub's timeline gave it. A bare branch has neither and its
-/// timeline is its threads.
+/// events GitHub's timeline gave it. A bare branch has neither, and its
+/// timeline is its commits over the base, as a pull request's would be,
+/// and its threads.
 pub fn timeline(
     pull: Option<&PullRequest>,
     discussion: Option<&Discussion>,
     issue: Option<(&Issue, &[IssueComment], &[PullEvent])>,
+    branch_commits: &[Commit],
     threads: &[CommentThread],
 ) -> Vec<Card> {
     let mut cards = Vec::new();
@@ -269,6 +272,19 @@ pub fn timeline(
     if let Some((_, comments, events)) = issue {
         cards.extend(comments.iter().cloned().map(Card::Comment));
         cards.extend(events.iter().cloned().map(Card::Event));
+    }
+    if pull.is_none() && issue.is_none() {
+        cards.extend(branch_commits.iter().map(|commit| {
+            Card::Event(PullEvent::new(
+                PullEventKind::Committed {
+                    sha: commit.sha.clone(),
+                    author: commit.author.clone(),
+                    subject: commit.subject.clone(),
+                },
+                commit.authored_at,
+                "",
+            ))
+        }));
     }
     cards.extend(threads.iter().cloned().map(Card::Thread));
 
@@ -472,7 +488,7 @@ pub(crate) mod tests {
             ],
         );
         d.comments.push(comment(1, "2026-09-16T12:00:00Z", "Thanks"));
-        let cards = timeline(Some(&pull()), Some(&d), None, &[]);
+        let cards = timeline(Some(&pull()), Some(&d), None, &[], &[]);
         assert_eq!(kinds(&cards), ["description", "review", "comment"]);
         assert_eq!(lines(&cards), ["The description.", "approved  Looks right.", "Thanks"]);
         let Card::Review { review } = &cards[1] else { panic!("{cards:?}") };
@@ -491,7 +507,7 @@ pub(crate) mod tests {
         t.messages[0].origin = ThreadOrigin::GitHub;
         t.messages[0].author = Author::GitHubUser("rohan".into());
         t.messages[0].github_id = Some(31);
-        let cards = timeline(Some(&pull()), Some(&d), None, &[t]);
+        let cards = timeline(Some(&pull()), Some(&d), None, &[], &[t]);
         assert_eq!(kinds(&cards), ["description", "comment", "thread", "comment"], "the empty review is noise");
         assert_eq!(cards[2].first_line(), "epoch");
     }
@@ -502,7 +518,7 @@ pub(crate) mod tests {
         d.comments.push(comment(1, "2026-09-16T10:00:00Z", "first"));
         d.comments.push(comment(2, "2026-09-16T12:00:00Z", "second"));
         let t = thread("t1", "2026-09-16T09:30:00Z", "2026-09-16T11:00:00Z", "why the fence?");
-        let cards = timeline(Some(&pull()), Some(&d), None, &[t]);
+        let cards = timeline(Some(&pull()), Some(&d), None, &[], &[t]);
         assert_eq!(kinds(&cards), ["description", "comment", "thread", "comment"]);
         assert_eq!(cards[2].first_line(), "why the fence?");
         assert_eq!(cards[2].at(), Some(at("2026-09-16T11:00:00Z")), "the question, not the row");
@@ -517,7 +533,7 @@ pub(crate) mod tests {
             event(PullEventKind::Opened, "2026-09-14T14:02:00Z"),
             event(PullEventKind::Merged, "2026-09-17T15:00:00Z"),
         ];
-        let cards = timeline(Some(&pull()), Some(&d), None, &[]);
+        let cards = timeline(Some(&pull()), Some(&d), None, &[], &[]);
         assert_eq!(kinds(&cards), ["description", "event", "comment", "event", "comment"]);
         assert_eq!(lines(&cards)[1], "opened");
         assert_eq!(lines(&cards)[3], "merged", "an event wins a tie");
@@ -536,12 +552,13 @@ pub(crate) mod tests {
             None,
             None,
             Some((&issue, &comments, &[labelled])),
+            &[],
             std::slice::from_ref(&t),
         );
         assert_eq!(kinds(&cards), ["description", "event", "comment", "thread"]);
         assert_eq!(lines(&cards)[1], "added bug");
 
-        let cards = timeline(None, None, Some((&issue, &comments, &[])), &[t]);
+        let cards = timeline(None, None, Some((&issue, &comments, &[])), &[], &[t]);
         assert_eq!(kinds(&cards), ["description", "comment", "thread"]);
         let Card::Description { at: opened, body, .. } = &cards[0] else { panic!("{cards:?}") };
         assert_eq!(*opened, Some(at("2026-09-14T14:02:00Z")));
@@ -552,18 +569,45 @@ pub(crate) mod tests {
     fn the_description_is_first_even_when_a_thread_predates_it() {
         let d = discussion(vec![], vec![]);
         let t = [thread("t1", "2026-09-01T09:00:00Z", "2026-09-01T09:00:00Z", "early")];
-        let cards = timeline(Some(&pull()), Some(&d), None, &t);
+        let cards = timeline(Some(&pull()), Some(&d), None, &[], &t);
         assert_eq!(kinds(&cards), ["description", "thread"]);
 
         // Without a discussion the description is the pull request alone.
-        let cards = timeline(Some(&pull()), None, None, &t);
+        let cards = timeline(Some(&pull()), None, None, &[], &t);
         assert_eq!(kinds(&cards), ["description", "thread"]);
         assert_eq!(cards[0].at(), None);
         assert_eq!(cards[0].first_line(), "No description.");
 
         // A bare branch has no description at all.
-        let cards = timeline(None, None, None, &t);
+        let cards = timeline(None, None, None, &[], &t);
         assert_eq!(kinds(&cards), ["thread"]);
+    }
+
+    #[test]
+    fn a_bare_branch_shows_its_commits_among_its_threads() {
+        let commit = |sha: &str, when: &str, subject: &str| Commit {
+            sha: sha.into(),
+            subject: subject.into(),
+            body: "Why.".into(),
+            author: "Chris".into(),
+            authored_at: at(when),
+        };
+        // Newest first, as git lists them.
+        let commits = [
+            commit("bbbbbbbbbb", "2026-09-16T12:00:00Z", "Mirror the manifest"),
+            commit("aaaaaaaaaa", "2026-09-16T10:00:00Z", "Fence the manifest"),
+        ];
+        let t = [thread("t1", "2026-09-16T11:00:00Z", "2026-09-16T11:00:00Z", "why fence?")];
+        let cards = timeline(None, None, None, &commits, &t);
+        assert_eq!(kinds(&cards), ["event", "thread", "event"]);
+        assert_eq!(
+            lines(&cards),
+            ["committed aaaaaaa Fence the manifest", "why fence?", "committed bbbbbbb Mirror the manifest"]
+        );
+
+        // A pull request's commits come from GitHub's timeline instead.
+        let cards = timeline(Some(&pull()), None, None, &commits, &t);
+        assert_eq!(kinds(&cards), ["description", "thread"]);
     }
 
     #[test]
@@ -581,7 +625,7 @@ pub(crate) mod tests {
                 line(32, Some(3), None, "2026-09-16T11:09:00Z", "one line comment keeps the review"),
             ],
         );
-        let cards = timeline(Some(&pull()), Some(&d), None, &[]);
+        let cards = timeline(Some(&pull()), Some(&d), None, &[], &[]);
         assert_eq!(kinds(&cards), ["description", "review"], "a line comment no longer keeps its empty review");
         assert_eq!(lines(&cards)[1..], ["dismissed"]);
         let Card::Review { review } = &cards[1] else { panic!("{cards:?}") };
@@ -591,7 +635,7 @@ pub(crate) mod tests {
     #[test]
     fn a_line_comment_with_no_review_in_the_list_is_not_a_card() {
         let d = discussion(vec![], vec![line(31, Some(77), None, "2026-09-16T11:38:00Z", "epoch")]);
-        let cards = timeline(Some(&pull()), Some(&d), None, &[]);
+        let cards = timeline(Some(&pull()), Some(&d), None, &[], &[]);
         assert_eq!(kinds(&cards), ["description"]);
     }
 
@@ -600,7 +644,7 @@ pub(crate) mod tests {
         let mut d = discussion(vec![review(9, "APPROVED", "", None)], vec![]);
         d.comments.push(comment(1, "2026-09-16T11:00:00Z", "before"));
         d.comments.push(comment(2, "2026-09-16T12:00:00Z", "after"));
-        let cards = timeline(Some(&pull()), Some(&d), None, &[]);
+        let cards = timeline(Some(&pull()), Some(&d), None, &[], &[]);
         assert_eq!(lines(&cards), ["The description.", "approved", "before", "after"]);
     }
 

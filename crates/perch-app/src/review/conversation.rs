@@ -56,11 +56,18 @@ pub fn view(
                 .cloned()
                 .collect::<Vec<_>>()
         });
+        // Only a bare branch's own commits: an item about a pull request
+        // or an issue has GitHub's timeline, which may not have landed yet.
+        let bare = state
+            .item
+            .with(|item| item.as_ref().is_some_and(|item| item.subject.is_none()));
+        let commits = if bare { state.commits.get() } else { Default::default() };
         let cards = timeline(
             pull.as_deref(),
             discussion.as_deref(),
             issue.as_deref()
                 .map(|i| (i, comments.as_slice(), issue_events.as_slice())),
+            &commits,
             &threads,
         );
         let mut rows = Vec::with_capacity(cards.len());
@@ -82,6 +89,7 @@ pub fn view(
         // Only a bare branch has nothing: a pull request or an issue has a
         // description whatever else it has.
         state.comment_threads.with(|t| t.is_empty())
+            && state.commits.with(|c| c.is_empty())
             && state.pull_request.with(Option::is_none)
             && state.issue.with(Option::is_none)
             && state
@@ -1704,6 +1712,30 @@ mod tests {
         assert!(cards_in_order(&harness).is_empty());
         assert!(shown(&harness, "Nothing here yet"));
         assert!(shown(&harness, "Ask about this worktree"));
+    }
+
+    #[test]
+    fn a_bare_branch_lists_its_commits() {
+        let (mut harness, _, state) = app_harness();
+        state.item.update(|item| {
+            if let Some(item) = item {
+                Arc::make_mut(item).subject = None;
+            }
+        });
+        state.pull_request.set(None);
+        state.discussion.set(None);
+        state.comment_threads.set(Arc::new(vec![]));
+        state.commits.set(Arc::new(vec![perch_git::Commit {
+            sha: "abcdef1234".into(),
+            subject: "Mirror the manifest".into(),
+            body: String::new(),
+            author: "Chris".into(),
+            authored_at: at("2026-09-18T09:00:00Z"),
+        }]));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(cards_in_order(&harness).len(), 1, "{:?}", cards_in_order(&harness));
+        assert!(!shown(&harness, "Nothing here yet"));
     }
 
     #[test]

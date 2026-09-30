@@ -4,7 +4,8 @@
 //! time and first line, and a thread's anchor and the messages after its
 //! first indented under it. From the cache the app uses, so the interleave
 //! can be read without a window. An issue's comments are fetched on open and
-//! not kept, so an issue prints without them and says so.
+//! not kept, so an issue prints without them and says so. A bare branch's
+//! commits are read from git on open, not cached, and are left out too.
 
 use perch_github::Cache;
 
@@ -56,7 +57,7 @@ fn print(id: &str) -> Result<bool, String> {
         .issue()
         .map(|i| (i, comments.as_slice(), events.as_slice()));
     let pull = item.pull_request();
-    let cards = timeline(pull, if pull.is_some() { discussion.as_ref() } else { None }, issue, &threads);
+    let cards = timeline(pull, if pull.is_some() { discussion.as_ref() } else { None }, issue, &[], &threads);
     let mut out = String::new();
     render(&mut out, &cards);
     print!("{out}");
