@@ -1734,7 +1734,7 @@ fn thread_header(
             })
             .into_any(),
     };
-    let (chevron_id, toggle_id) = (thread.id.clone(), thread.id.clone());
+    let (chevron_id, toggle_id, open_id) = (thread.id.clone(), thread.id.clone(), thread.id.clone());
     Stack::horizontal((
         threads::chevron_button(
             move || !folded.get(),
@@ -1754,8 +1754,12 @@ fn thread_header(
             ThreadFace::Card,
             move || state.toggle_fold(&toggle_id),
         ),
-        threads::thread_menu(state, thread, theme::THREAD_MENU)
-            .style(|s| s.margin_left(4.0)),
+        threads::thread_menu(state, thread, theme::THREAD_MENU, move || {
+            if state.is_folded(&open_id) {
+                state.toggle_fold(&open_id);
+            }
+        })
+        .style(|s| s.margin_left(4.0)),
     ))
     .debug_name("thread-header")
     .style(move |s| {

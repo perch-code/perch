@@ -1520,7 +1520,7 @@ fn open_inline_card(
     backend: Rc<Backend>,
     thread: CommentThread,
 ) -> impl IntoView {
-    let menu = thread_menu(state, &thread, theme::THREAD_MENU).into_any();
+    let menu = thread_menu(state, &thread, theme::THREAD_MENU, || {}).into_any();
     let messages = messages_view(
         app,
         state,
@@ -1711,6 +1711,7 @@ pub(crate) fn resolved_toggle(
 fn resolved_row(app: AppState, state: ReviewState, thread: CommentThread) -> impl IntoView {
     let card_id = CardId::Thread(thread.id.clone());
     let toggle_id = card_id.clone();
+    let open_id = card_id.clone();
     Stack::horizontal((
         chevron(state, card_id, false),
         lines_heading(app, state, &thread),
@@ -1724,8 +1725,10 @@ fn resolved_row(app: AppState, state: ReviewState, thread: CommentThread) -> imp
             ThreadFace::Inline,
             move || state.toggle_card(&toggle_id),
         ),
-        thread_menu(state, &thread, theme::COLLAPSED_CARD_MENU)
-            .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP)),
+        thread_menu(state, &thread, theme::COLLAPSED_CARD_MENU, move || {
+            state.expand_card(&open_id)
+        })
+        .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP)),
     ))
     .debug_name("resolved-row")
     .style(|s| {
@@ -1746,10 +1749,13 @@ fn collapsed_row(app: AppState, state: ReviewState, thread: CommentThread) -> im
         .map(|m| crate::review::timeline::first_line(&m.body))
         .unwrap_or_default();
     let card_id = CardId::Thread(thread.id.clone());
+    let open_id = card_id.clone();
     // Set off from the pill before it as the pills are from what is
     // before them: the pill's fill and the menu's hover fill are one
     // colour, and would touch.
-    let trailing = thread_menu(state, &thread, theme::COLLAPSED_CARD_MENU)
+    let trailing = thread_menu(state, &thread, theme::COLLAPSED_CARD_MENU, move || {
+        state.expand_card(&open_id)
+    })
         .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP).flex_shrink(0.0_f32))
         .into_any();
     let avatar = author_avatar(app, state, &author, theme::COLLAPSED_CARD_AVATAR);
@@ -2053,8 +2059,15 @@ pub fn delete_confirmation(
 /// in a round button `size` across. A thread of the reader's own offers
 /// Delete Thread. One of GitHub's offers to delete Perch's messages under
 /// it, and only while there are any; with none, there is no menu at all,
-/// since nothing here may touch what is on GitHub.
-pub fn thread_menu(state: ReviewState, thread: &CommentThread, size: f64) -> impl IntoView {
+/// since nothing here may touch what is on GitHub. The confirmation
+/// shows inside the card, so the menu calls `open` first: a card drawn
+/// as one row opens to show it.
+pub fn thread_menu(
+    state: ReviewState,
+    thread: &CommentThread,
+    size: f64,
+    open: impl Fn() + 'static,
+) -> impl IntoView {
     use crate::ui::menu::Menu;
 
     let github_bound = thread.is_github_bound();
@@ -2062,6 +2075,7 @@ pub fn thread_menu(state: ReviewState, thread: &CommentThread, size: f64) -> imp
         return Empty::new().into_any();
     }
     let thread_id = thread.id.clone();
+    let open = Rc::new(open);
     Container::new(
         sidebar_glyph(SidebarIcon::Ellipsis, theme::FG_SUBTLE).style(|s| s.pointer_events_none()),
     )
@@ -2074,12 +2088,17 @@ pub fn thread_menu(state: ReviewState, thread: &CommentThread, size: f64) -> imp
         };
         // Delete asks first, under the byline, wherever the thread is
         // showing; the confirmation is the one thing that deletes.
+        let open = open.clone();
         Menu::new().item(label, move |item| {
             let id = id.clone();
-            item.icon(SidebarIcon::Trash)
-                .action(move || state.confirm_thread.set(Some(id.clone())))
+            let open = open.clone();
+            item.icon(SidebarIcon::Trash).action(move || {
+                open();
+                state.confirm_thread.set(Some(id.clone()));
+            })
         })
     })
+    .debug_name("thread-menu")
     .style(move |s| {
         clickable(s)
             .size(size, size)
@@ -3999,15 +4018,58 @@ mod tests {
 
     /// The menu is offered on a thread of GitHub's only while Perch has
     /// put something under it; with nothing of Perch's there, there is
+    /// Delete Thread on a card collapsed to its row opens the card, where
+    /// the confirmation shows; left shut, the ask would not be seen.
+    #[test]
+    fn delete_on_a_collapsed_row_opens_the_card_to_ask() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_item();
+        let thread = finding_thread("Look here");
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let card = CardId::Thread(thread.id.clone());
+        state.toggle_card(&card);
+        assert!(state.is_collapsed(&card));
+        let view = collapsed_row(app, state, thread.clone())
+            .style(|s| s.width(600.0).height(theme::COLLAPSED_CARD_MENU + 8.0));
+        let view = floem::views::Stack::new((view,)).style(|s| s.size_full());
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        let settle = |harness: &mut HeadlessHarness| {
+            for _ in 0..3 {
+                harness.rebuild();
+                harness.paint();
+            }
+        };
+        settle(&mut harness);
+        let center = |harness: &HeadlessHarness, name: &str| {
+            find(harness.root_id(), name)
+                .unwrap_or_else(|| panic!("no {name}"))
+                .get_visual_rect_no_clip()
+                .center()
+        };
+        let dots = center(&harness, "thread-menu");
+        harness.pointer_down(dots.x, dots.y);
+        settle(&mut harness);
+        harness.pointer_up(1.0, 1.0);
+        settle(&mut harness);
+        let delete = center(&harness, "menu-row:Delete Thread");
+        harness.click(delete.x, delete.y);
+        settle(&mut harness);
+        assert!(!state.is_collapsed(&card), "the card opens to ask");
+        assert_eq!(state.confirm_thread.get(), Some(thread.id.clone()));
+    }
+
+    /// The menu is offered on a thread of GitHub's only while Perch has
+    /// put something under it; with nothing of Perch's there, there is
     /// nothing it could delete.
     #[test]
     fn a_github_thread_has_a_menu_only_while_perch_has_messages_under_it() {
         let root = TestRoot::new();
         let state = ReviewState::new();
         let mut thread = github_thread_with_private_messages();
-        let with = thread_menu(state, &thread, theme::THREAD_MENU);
+        let with = thread_menu(state, &thread, theme::THREAD_MENU, || {});
         thread.messages.truncate(1);
-        let without = thread_menu(state, &thread, theme::THREAD_MENU);
+        let without = thread_menu(state, &thread, theme::THREAD_MENU, || {});
         let view = floem::views::Stack::vertical((
             with.debug_name("menu-with"),
             without.debug_name("menu-without"),
