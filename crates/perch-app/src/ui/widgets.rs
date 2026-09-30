@@ -538,13 +538,13 @@ pub fn badge_box(s: Style, fill: Color, rule: Option<Color>) -> Style {
     }
 }
 
-/// A badge's text, lifted so its capitals sit in the middle of the box.
+/// A badge's text. floem centres a label on its capitals, so the box
+/// centres it.
 pub fn badge_text(s: Style, ink: Color) -> Style {
     s.font_size(theme::TEXT_BADGE)
         .font_weight(theme::weight_emphasis())
         .color(ink)
         .selectable(false)
-        .margin_bottom(theme::CHIP_TEXT_LIFT)
 }
 
 /// A badge of text that goes nowhere: Author, Outdated, Local.

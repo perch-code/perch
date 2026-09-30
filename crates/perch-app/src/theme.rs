@@ -485,11 +485,6 @@ pub const SUMMARY_AVATAR: f64 = 16.0;
 /// side line up. See `widgets::badge`.
 pub const CHIP_HEIGHT: f64 = 18.0;
 pub const CHIP_PADDING: f64 = 7.0;
-/// Room under a badge's text, in its centred box. floem centres a label's
-/// ascent, not its capitals, so San Francisco's capitals sit 0.13em
-/// (1.6px at 12) below the middle of the box; a margin this deep under
-/// the label lifts them back by half of it.
-pub const CHIP_TEXT_LIFT: f64 = 3.0;
 
 /// How wide the reading column is. Prose past this is hard to follow.
 pub const CONVERSATION_WIDTH: f64 = 845.0;
