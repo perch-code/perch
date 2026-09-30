@@ -1940,23 +1940,32 @@ fn load_steps_on(conn: &Connection, run_id: &str) -> Result<Vec<RunStep>, CacheE
                 summary,
                 ok,
                 note: false,
+                pending: false,
             }),
-            RunEvent::ToolCall { id, summary, .. } => {
+            // A call is pending until its result comes. A run that ended
+            // without one leaves it pending, and the view shows it as done.
+            RunEvent::ToolCall { id, summary, parent_id, .. } => {
                 tools.insert(id, steps.len());
                 steps.push(RunStep {
-                    summary,
+                    summary: match parent_id {
+                        Some(_) => format!("↳ {summary}"),
+                        None => summary,
+                    },
                     ok: true,
                     note: false,
+                    pending: true,
                 });
             }
             RunEvent::Text { text } if !text.trim().is_empty() => steps.push(RunStep {
                 summary: text.trim().to_string(),
                 ok: true,
                 note: true,
+                pending: false,
             }),
             RunEvent::ToolResult { id, ok, summary } => {
                 if let Some(step) = tools.get(&id).and_then(|index| steps.get_mut(*index)) {
                     step.ok = ok;
+                    step.pending = false;
                     if !ok && !summary.is_empty() {
                         step.summary = format!("{}: {summary}", step.summary);
                     }
@@ -4686,11 +4695,13 @@ mod tests {
                     summary: "Read src/x.rs".into(),
                     ok: true,
                     note: false,
+                    pending: false,
                 },
                 RunStep {
                     summary: "Asked to edit src/x.rs".into(),
                     ok: false,
                     note: false,
+                    pending: false,
                 },
             ],
             error: None,
@@ -4827,6 +4838,7 @@ mod tests {
             summary: "Ran git log".into(),
             ok: true,
             note: false,
+            pending: false,
         });
         r.cost_usd = Some(0.05);
         c.update_run(&r).unwrap();
@@ -5894,6 +5906,7 @@ mod tests {
                 summary: "Read src/lib.rs".into(),
                 ok: true,
                 note: false,
+                pending: false,
             }]
         );
         assert_eq!(cache.load_run_events("run-1", None, 20).unwrap().len(), 1);

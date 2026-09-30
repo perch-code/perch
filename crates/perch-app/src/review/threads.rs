@@ -1557,6 +1557,7 @@ fn inline_header(
         lines_heading(app, state, thread),
         outdated_pill(thread.outdated),
         local_chip(!thread.is_github_bound()),
+        crate::review::run_view::running_mark(state, thread.id.clone()),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
         resolved_toggle(
             state,
@@ -1753,11 +1754,15 @@ fn collapsed_row(app: AppState, state: ReviewState, thread: CommentThread) -> im
     // Set off from the pill before it as the pills are from what is
     // before them: the pill's fill and the menu's hover fill are one
     // colour, and would touch.
-    let trailing = thread_menu(state, &thread, theme::COLLAPSED_CARD_MENU, move || {
-        state.expand_card(&open_id)
-    })
-        .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP).flex_shrink(0.0_f32))
-        .into_any();
+    let trailing = Stack::horizontal((
+        crate::review::run_view::running_mark(state, thread.id.clone()),
+        thread_menu(state, &thread, theme::COLLAPSED_CARD_MENU, move || {
+            state.expand_card(&open_id)
+        })
+        .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP).flex_shrink(0.0_f32)),
+    ))
+    .style(|s| s.items_center().flex_shrink(0.0_f32))
+    .into_any();
     let avatar = author_avatar(app, state, &author, theme::COLLAPSED_CARD_AVATAR);
     collapsed_card_row(
         state,
@@ -2732,16 +2737,13 @@ fn local_message_view(
     };
     let content = match message.run.clone() {
         Some(run) if is_agent && finished => Stack::vertical((
-            run_surface(steps_view(state, &run, {
-                let steps = without_answer(run.clone(), &body).steps;
-                move || steps.clone()
-            })),
+            crate::review::run_view::run_fold(state, &run, without_answer(run.clone(), &body).steps),
             text,
             run_footer(backend, run),
         ))
         .style(|s| s.flex_col().width_full().gap(8.0))
         .into_any(),
-        Some(run) => Stack::vertical((text, run_block(state, backend, run)))
+        Some(run) => Stack::vertical((text, run_block(app, state, backend, run)))
             .style(|s| s.flex_col().width_full().gap(8.0))
             .into_any(),
         None => text,
@@ -3060,16 +3062,25 @@ pub fn draft_pill() -> impl IntoView {
     )
 }
 
-/// What the agent did, under its answer or under the question while it
-/// works: the steps, folded to one line until it is clicked, and the
-/// footer or the Stop button.
-pub fn run_block(state: ReviewState, backend: Rc<Backend>, run: RunRecord) -> impl IntoView {
+/// A run under the question while it works, or when it stopped or
+/// failed. While it goes: the line saying what it is doing, with Stop,
+/// then its words and calls as they come. Once it is over: the fold, and
+/// the error with Retry. Either way what it asks the reader, the words of
+/// a run from before notes, and what a Work run changed.
+pub fn run_block(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    run: RunRecord,
+) -> impl IntoView {
+    use crate::review::run_view::{run_fold, run_header, timeline};
+
     // Its steps and words as they arrive, read from the thread list: the
     // row holding the block is kept through the run, and a step's result
     // comes after the step, with nothing else to build the block again.
     let live = live_run(state, run.clone());
-    // The agent's words show as notes among the steps, as it says them;
-    // a run from before notes has only the text.
+    let active = Memo::new(move |_| live.with(|run| run.status.is_active()));
+    // A run from before notes has only the text.
     let partial = Memo::new(move |_| {
         live.with(|run| {
             run.final_result.clone().filter(|text| {
@@ -3083,12 +3094,7 @@ pub fn run_block(state: ReviewState, backend: Rc<Backend>, run: RunRecord) -> im
         move || partial.get(),
         move |partial| match partial {
             Some(text) => Container::new(crate::review::markdown::render_linked(&text, state))
-                .style(|s| {
-                    s.width_full()
-                        .padding_top(7.0)
-                        .border_top(1.0)
-                        .border_color(theme::BORDER_MUTED)
-                })
+                .style(|s| s.width_full().margin_top(8.0))
                 .into_any(),
             None => Empty::new().into_any(),
         },
@@ -3096,16 +3102,34 @@ pub fn run_block(state: ReviewState, backend: Rc<Backend>, run: RunRecord) -> im
     .style(|s| s.width_full());
     let changes = work_changes(state, backend.clone(), &run);
     let asks = approval_cards(state, backend.clone(), run.id.clone());
-    run_surface(
-        Stack::vertical((
-            steps_view(state, &run, move || live.with(|run| run.steps.clone())),
-            asks,
-            response,
-            changes,
-            run_footer(backend, run),
-        ))
-        .style(|s| s.flex_col().width_full().gap(6.0)),
+    let body = dyn_container(
+        move || active.get(),
+        move |active| {
+            if active {
+                let steps = Memo::new(move |_| live.with(|run| run.steps.clone()));
+                Stack::vertical((
+                    run_header(app, backend.clone(), live),
+                    timeline(state, move || steps.get(), || true),
+                ))
+                .style(|s| s.flex_col().width_full().gap(4.0))
+                .into_any()
+            } else {
+                let run = live.get_untracked();
+                Stack::vertical((
+                    run_fold(state, &run, run.steps.clone()),
+                    run_footer(backend.clone(), run),
+                ))
+                .style(|s| s.flex_col().width_full().gap(6.0))
+                .into_any()
+            }
+        },
     )
+    .style(|s| s.width_full());
+    // No gap: each part below the body sets itself off while it shows,
+    // since taffy gaps an empty child too.
+    Stack::vertical((body, asks, response, changes))
+        .debug_name("run-block")
+        .style(|s| s.flex_col().width_full())
 }
 
 /// A run as the thread list has it now, or as it was handed over when
@@ -3141,7 +3165,14 @@ fn approval_cards(state: ReviewState, backend: Rc<Backend>, run_id: String) -> i
         |view| view.id.clone(),
         move |view| approval_card(state, backend.clone(), view),
     )
-    .style(|s| s.flex_col().gap(8.0).width_full())
+    // Set off from what is above only while there is a card: the run's
+    // column has no gap, which taffy would leave around an empty stack.
+    .style(move |s| {
+        s.flex_col()
+            .gap(8.0)
+            .width_full()
+            .apply_if(!pending.with(Vec::is_empty), |s| s.margin_top(8.0))
+    })
 }
 
 fn approval_card(
@@ -3271,6 +3302,7 @@ fn work_changes(state: ReviewState, backend: Rc<Backend>, run: &RunRecord) -> fl
                 .debug_name("run-changes")
                 .style(|s| {
                     clickable(s)
+                        .margin_top(8.0)
                         .font_size(theme::TEXT_BADGE)
                         .color(theme::ACCENT)
                         .hover(|s| s.color(theme::FG))
@@ -3281,37 +3313,13 @@ fn work_changes(state: ReviewState, backend: Rc<Backend>, run: &RunRecord) -> fl
     .into_any()
 }
 
-/// The box a run's lines sit in. Tool activity is an inset neutral surface,
-/// separate from the prose without becoming a second heavy card.
-fn run_surface(inner: impl IntoView + 'static) -> impl IntoView {
-    Container::new(inner).style(|s| {
-        s.width_full()
-            .padding(10.0)
-            .border_radius(theme::RADIUS)
-            .background(theme::CANVAS_SUBTLE)
-    })
-}
-
-/// The footer under a run: Stop while it goes, cost and time once it is
-/// done, the error and Retry when it is not.
+/// The footer under a run: cost and time once it is done, the error and
+/// Retry when it is not. A run still going has its Stop on its header.
 fn run_footer(backend: Rc<Backend>, run: RunRecord) -> floem::AnyView {
-    let cancel_id = run.id.clone();
     match run.status {
-        RunStatus::Queued => text_button(
-            || "Cancel".to_string(),
-            SidebarIcon::Stop,
-            move || backend.cancel_run(&cancel_id),
-        )
-        .into_any(),
-        RunStatus::Starting | RunStatus::Running => text_button(
-            || "Stop".to_string(),
-            SidebarIcon::Stop,
-            move || backend.cancel_run(&cancel_id),
-        )
-        .into_any(),
-        RunStatus::Stopping => Label::new("Stopping…")
-            .style(|s| s.font_size(theme::TEXT_SECTION).color(theme::FG_SUBTLE))
-            .into_any(),
+        RunStatus::Queued | RunStatus::Starting | RunStatus::Running | RunStatus::Stopping => {
+            Empty::new().into_any()
+        }
         RunStatus::Completed => Label::derived(move || {
             let cost = run
                 .cost_usd
@@ -3369,114 +3377,9 @@ fn without_answer(mut run: RunRecord, body: &str) -> RunRecord {
     run
 }
 
-/// The step lines and what the agent said between them, folded to
-/// "Worked for 4m 12s" until the line is clicked, and open while the run
-/// goes.
-fn steps_view(
-    state: ReviewState,
-    run: &RunRecord,
-    steps: impl Fn() -> Vec<perch_github::RunStep> + 'static,
-) -> impl IntoView {
-    let running = run.status.is_active();
-    let run_id = run.id.clone();
-    let expanded = move || running || state.expanded_runs.with(|e| e.contains(&run_id));
-    let chevron_id = run.id.clone();
-    let expanded_chevron = move || running || state.expanded_runs.with(|e| e.contains(&chevron_id));
-    let toggle_id = run.id.clone();
-    let summary = run_summary(run);
-    let steps = Rc::new(steps);
-
-    Stack::vertical((
-        Container::new(
-            Stack::horizontal((
-                // The glyph for the way it points, not a turned one: vger
-                // draws an SVG square to the screen, and a turn would only
-                // move it.
-                crate::ui::widgets::icon_in(
-                    move || {
-                        let icon = if expanded_chevron() {
-                            SidebarIcon::ChevronDown
-                        } else {
-                            SidebarIcon::ChevronRight
-                        };
-                        crate::icons::sidebar_icon(icon, theme::FG_SUBTLE)
-                    },
-                    || theme::FG_SUBTLE,
-                )
-                .style(|s| s.size(10.0, 10.0).margin_right(5.0)),
-                Label::derived(move || summary.clone())
-                .style(|s| {
-                    s.font_size(theme::TEXT_BADGE)
-                        .color(theme::FG_MUTED)
-                        .selectable(false)
-                }),
-            ))
-            .style(|s| s.items_center()),
-        )
-        .on_event_stop(el::Click, move |_, _| {
-            state.expanded_runs.update(|e| {
-                if !e.remove(&toggle_id) {
-                    e.insert(toggle_id.clone());
-                }
-            })
-        })
-        .style(|s| clickable(s).width_full()),
-        dyn_container(expanded, move |open| {
-            if !open {
-                return Empty::new().into_any();
-            }
-            // Keyed on what a line shows as well as where it is: a step's
-            // result turns it red, and adds what went wrong to it.
-            let steps = steps.clone();
-            dyn_stack(
-                move || steps().into_iter().enumerate(),
-                |(i, step)| (*i, step.summary.clone(), step.ok, step.note),
-                |(_, step)| {
-                    if step.note {
-                        return Label::derived(move || step.summary.clone())
-                            .style(|s| {
-                                s.font_size(theme::TEXT_META)
-                                    .color(theme::FG_MUTED)
-                                    .text_wrap()
-                                    .min_width(0.0)
-                                    .width_full()
-                                    .padding_vert(3.0)
-                            })
-                            .into_any();
-                    }
-                    Label::derived(move || step.summary.clone()).style(move |s| {
-                        s.font_size(theme::TEXT_BADGE)
-                            .font_family(theme::CODE_FONT_STACK.to_string())
-                            .color(if step.ok {
-                                theme::FG_MUTED
-                            } else {
-                                theme::CLOSED
-                            })
-                            .text_ellipsis()
-                            .width_full()
-                    })
-                    .into_any()
-                },
-            )
-            // The space above the steps rides on the steps, not a gap
-            // on the column: taffy gaps an empty child too, which left
-            // the folded line sitting high.
-            .style(|s| {
-                s.flex_col()
-                    .width_full()
-                    .gap(2.0)
-                    .padding_left(15.0)
-                    .padding_top(6.0)
-            })
-            .into_any()
-        }),
-    ))
-    .style(|s| s.flex_col().width_full())
-}
-
 /// The folded steps line: "Working…" while the run goes, then how long
 /// it worked, or what it did when that is unknown.
-fn run_summary(run: &RunRecord) -> String {
+pub(crate) fn run_summary(run: &RunRecord) -> String {
     if run.status.is_active() {
         return "Working…".to_string();
     }
@@ -3491,7 +3394,7 @@ fn run_summary(run: &RunRecord) -> String {
 }
 
 /// "12s", "4m 12s", "1h 3m".
-fn worked_for(ms: u64) -> String {
+pub(crate) fn worked_for(ms: u64) -> String {
     let secs = (ms + 500) / 1000;
     match secs {
         0..60 => format!("{secs}s"),
@@ -3500,7 +3403,7 @@ fn worked_for(ms: u64) -> String {
     }
 }
 
-/// "Read 3 files, ran 1 command", from the step lines.
+/// "Read 3 files, ran 1 command, edited 1 file", from the step lines.
 pub fn steps_summary(steps: &[perch_github::RunStep]) -> String {
     let steps: Vec<_> = steps.iter().filter(|s| !s.note).collect();
     let count = |prefix: &str| {
@@ -3513,6 +3416,10 @@ pub fn steps_summary(steps: &[perch_github::RunStep]) -> String {
     let reads = count("Read ");
     let runs = count("Ran ");
     let searches = count("Searched ") + count("Listed ");
+    let edits = steps
+        .iter()
+        .filter(|s| s.ok && (s.summary.starts_with("Asked to edit ") || s.summary.starts_with("Edited ")))
+        .count();
     let denied = steps.iter().filter(|s| !s.ok).count();
     if reads > 0 {
         parts.push(format!(
@@ -3530,6 +3437,12 @@ pub fn steps_summary(steps: &[perch_github::RunStep]) -> String {
         parts.push(format!(
             "{searches} {}",
             if searches == 1 { "search" } else { "searches" }
+        ));
+    }
+    if edits > 0 {
+        parts.push(format!(
+            "edited {edits} {}",
+            if edits == 1 { "file" } else { "files" }
         ));
     }
     if denied > 0 {
@@ -3626,7 +3539,7 @@ mod tests {
         };
         let (backend, mut commands) = Backend::recording();
         let root = TestRoot::new();
-        let view = run_block(state, Rc::new(backend), run);
+        let view = run_block(AppState::new(), state, Rc::new(backend), run);
         let mut harness = HeadlessHarness::new_with_size(root, view, 700.0, 400.0);
         harness.rebuild();
         harness.paint();
@@ -3669,6 +3582,7 @@ mod tests {
             summary: summary.into(),
             ok,
             note: false,
+            pending: false,
         }
     }
 
@@ -3693,6 +3607,7 @@ mod tests {
             summary: text.into(),
             ok: true,
             note: true,
+            pending: false,
         }
     }
 
@@ -3951,10 +3866,11 @@ mod tests {
             harness.paint();
         };
         settle(&mut harness);
-        // The folded line's label, which a message built again would
-        // have anew.
-        let working = |harness: &HeadlessHarness| find(harness.root_id(), "Working…").unwrap();
-        let before = working(&harness);
+        // The line over the run, which a message built again would have
+        // anew; it says what the run is doing now.
+        let header = |harness: &HeadlessHarness| find(harness.root_id(), "run-header").unwrap();
+        let before = header(&harness);
+        assert!(find(harness.root_id(), "Label: \"Thinking\"").is_some());
 
         state.apply_run_event(
             "run-1",
@@ -3966,7 +3882,9 @@ mod tests {
             },
         );
         settle(&mut harness);
-        assert!(find(harness.root_id(), "Label: \"Ran cargo test\"").is_some());
+        assert!(find(harness.root_id(), "Label: \"Running\"").is_some(), "the step goes");
+        assert!(find(harness.root_id(), "Label: \"cargo test\"").is_some());
+        assert!(find(harness.root_id(), "spinner").is_some());
 
         state.apply_run_event(
             "run-1",
@@ -3975,11 +3893,12 @@ mod tests {
         state.apply_run_event("run-1", &perch_agent::RunEvent::Text("It failed to build.".into()));
         settle(&mut harness);
         assert!(
-            find(harness.root_id(), "Label: \"Ran cargo test: exit 101\"").is_some(),
+            find(harness.root_id(), "Label: \"cargo test: exit 101\"").is_some(),
             "the result reached the line"
         );
+        assert!(find(harness.root_id(), "Label: \"Ran\"").is_some());
         assert!(find(harness.root_id(), "It failed to build.").is_some(), "the words show");
-        assert_eq!(working(&harness), before, "the message was built again");
+        assert_eq!(header(&harness), before, "the message was built again");
     }
 
     /// The delete under a thread of GitHub's takes Perch's messages and

@@ -731,7 +731,7 @@ impl Default for RunRecord {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RunStep {
     pub summary: String,
     pub ok: bool,
@@ -739,6 +739,10 @@ pub struct RunStep {
     /// `summary` holds the words.
     #[serde(default)]
     pub note: bool,
+    /// A tool call whose result has not come back: what the agent is
+    /// doing now, while its run goes.
+    #[serde(default)]
+    pub pending: bool,
 }
 
 /// One durable, ordered observation from a process or the scheduler.

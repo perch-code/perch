@@ -252,12 +252,15 @@ pub fn summarize_tool_call(name: &str, input: &Value) -> String {
             }
         }
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
-            format!(
-                "Asked to edit {}",
-                field("file_path")
-                    .map(|p| short_path(&p))
-                    .unwrap_or_default()
-            )
+            let path = field("file_path")
+                .map(|p| short_path(&p))
+                .unwrap_or_default();
+            match edit_counts(name, input) {
+                Some((added, removed)) => {
+                    format!("Asked to edit {path} {}", counts_suffix(added, removed))
+                }
+                None => format!("Asked to edit {path}"),
+            }
         }
         "Agent" | "Task" => match field("description") {
             Some(d) => format!("Delegated: {d}"),
@@ -284,6 +287,61 @@ pub fn summarize_tool_call(name: &str, input: &Value) -> String {
         },
     };
     one_line(&summary, 120)
+}
+
+/// The lines an edit adds and removes, from what it replaces and what it
+/// replaces it with: the lines both share at the start and the end are
+/// left out, so a one-line change in a long `old_string` counts as one.
+/// A whole file written counts every line as added.
+fn edit_counts(name: &str, input: &Value) -> Option<(usize, usize)> {
+    let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+    match name {
+        "Edit" => Some(changed_lines(&text(input, "old_string")?, &text(input, "new_string")?)),
+        "MultiEdit" => {
+            let edits = input.get("edits")?.as_array()?;
+            Some(edits.iter().fold((0, 0), |(added, removed), edit| {
+                let (a, r) = changed_lines(
+                    &text(edit, "old_string").unwrap_or_default(),
+                    &text(edit, "new_string").unwrap_or_default(),
+                );
+                (added + a, removed + r)
+            }))
+        }
+        "Write" => Some((text(input, "content")?.lines().count(), 0)),
+        _ => None,
+    }
+}
+
+fn changed_lines(old: &str, new: &str) -> (usize, usize) {
+    let old: Vec<&str> = old.lines().collect();
+    let new: Vec<&str> = new.lines().collect();
+    let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let tail = old[head..]
+        .iter()
+        .rev()
+        .zip(new[head..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    (new.len() - head - tail, old.len() - head - tail)
+}
+
+/// The lines a unified diff adds and removes, less its file headers.
+pub(crate) fn diff_counts(diff: &str) -> (usize, usize) {
+    diff.lines().fold((0, 0), |(added, removed), line| {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            (added + 1, removed)
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            (added, removed + 1)
+        } else {
+            (added, removed)
+        }
+    })
+}
+
+/// How an edit step ends, `(+12 −3)`, which the thread reads back to show
+/// the counts in their colours.
+pub fn counts_suffix(added: usize, removed: usize) -> String {
+    format!("(+{added} \u{2212}{removed})")
 }
 
 /// Drop a leading `cd <dir> &&`: the agent prefixes one to every command
@@ -323,6 +381,25 @@ pub(crate) fn one_line(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_edit_says_the_lines_it_adds_and_removes() {
+        let edit = serde_json::json!({
+            "file_path": "/wt/src/db.rs",
+            "old_string": "fn a() {\n    1\n}",
+            "new_string": "fn a() {\n    2\n    3\n}",
+        });
+        assert_eq!(summarize_tool_call("Edit", &edit), "Asked to edit wt/src/db.rs (+2 \u{2212}1)");
+        let many = serde_json::json!({
+            "file_path": "a.rs",
+            "edits": [{"old_string": "x", "new_string": "y"}, {"old_string": "", "new_string": "z"}],
+        });
+        assert_eq!(summarize_tool_call("MultiEdit", &many), "Asked to edit a.rs (+2 \u{2212}1)");
+        let write = serde_json::json!({"file_path": "a.rs", "content": "one\ntwo\n"});
+        assert_eq!(summarize_tool_call("Write", &write), "Asked to edit a.rs (+2 \u{2212}0)");
+        let notebook = serde_json::json!({"file_path": "n.ipynb"});
+        assert_eq!(summarize_tool_call("NotebookEdit", &notebook), "Asked to edit n.ipynb");
+    }
 
     #[test]
     fn a_command_let_out_or_given_hosts_says_so() {

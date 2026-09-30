@@ -1746,6 +1746,7 @@ fn thread_header(
         location,
         threads::outdated_pill(thread.outdated),
         threads::local_chip(!thread.is_github_bound()),
+        crate::review::run_view::running_mark(state, thread.id.clone()),
         Empty::new().style(|s| s.flex_grow(1.0_f32).min_width(12.0)),
         threads::resolved_toggle(
             state,

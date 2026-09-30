@@ -292,6 +292,12 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                      fill="none" stroke="{c}" stroke-width="1.4" stroke-linecap="round"
                      stroke-linejoin="round"/>"#
         ),
+        SidebarIcon::File => format!(
+            r#"<path d="M4.2 2 H9.4 L12.6 5.2 V13 a1 1 0 0 1 -1 1 H4.2 a1 1 0 0 1 -1 -1 V3 a1 1 0 0 1 1 -1 Z"
+                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
+               <path d="M9.2 2.2 V5.4 H12.4" fill="none" stroke="{c}" stroke-width="1.4"
+                     stroke-linejoin="round"/>"#
+        ),
         SidebarIcon::Folder => format!(
             r#"<path d="M2 4.2 a1 1 0 0 1 1 -1 H6.2 L7.6 4.8 H13 a1 1 0 0 1 1 1 V12 a1 1 0 0 1 -1 1
                        H3 a1 1 0 0 1 -1 -1 Z" fill="none" stroke="{c}" stroke-width="1.4"
@@ -639,13 +645,16 @@ pub enum SidebarIcon {
     Sort,
     /// A clock face: snooze.
     Clock,
+    /// A page with its corner turned down: a file an agent read.
+    File,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 67] = [
+    pub const ALL: [SidebarIcon; 68] = [
+        SidebarIcon::File,
         SidebarIcon::Clock,
         SidebarIcon::ArrowUpRight,
         SidebarIcon::Terminal,

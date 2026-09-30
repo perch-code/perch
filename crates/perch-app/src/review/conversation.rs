@@ -574,11 +574,13 @@ mod tests {
                     summary: "Read src/manifest.rs".into(),
                     ok: true,
                     note: false,
+                    pending: false,
                 },
                 RunStep {
                     summary: "Ran git log".into(),
                     ok: true,
                     note: false,
+                    pending: false,
                 },
             ],
             error: None,

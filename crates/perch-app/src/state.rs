@@ -5420,6 +5420,7 @@ mod tests {
                 summary: "Read src/lib.rs".into(),
                 ok: true,
                 note: false,
+                pending: false,
             }],
             last_event_sequence: 3,
             ..perch_github::RunRecord::default()

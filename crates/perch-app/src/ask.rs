@@ -47,6 +47,16 @@ pub fn apply_run_event(
             run.started_at.get_or_insert_with(jiff::Timestamp::now);
         }
         RunEvent::Text(text) => {
+            // A note among the steps as well, where it was said, as the
+            // stored run has it when it is read back.
+            if !text.trim().is_empty() {
+                run.steps.push(RunStep {
+                    summary: text.trim().to_string(),
+                    ok: true,
+                    note: true,
+                    pending: false,
+                });
+            }
             run.final_result = Some(match run.final_result.take() {
                 Some(mut prior) if !prior.is_empty() => {
                     prior.push_str("\n\n");
@@ -73,6 +83,7 @@ pub fn apply_run_event(
                 summary: summary.clone(),
                 ok: true,
                 note: false,
+                pending: true,
             });
             LIVE_TOOL_STEPS.with(|tools| {
                 tools
@@ -100,6 +111,7 @@ pub fn apply_run_event(
             });
             if let Some(step) = index.and_then(|index| run.steps.get_mut(index)) {
                 step.ok = *ok;
+                step.pending = false;
                 if !ok && !summary.is_empty() {
                     step.summary = format!("{}: {summary}", step.summary);
                 }
@@ -114,6 +126,7 @@ pub fn apply_run_event(
                 summary: summary.clone(),
                 ok: false,
                 note: false,
+                pending: false,
             });
             run.latest_activity = Some(summary);
         }

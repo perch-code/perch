@@ -598,11 +598,41 @@ impl CodexServer {
                     .map(|p| p.rsplit('/').next().unwrap_or(p))
                     .collect();
                 let ok = str_of(item, "status") != "failed";
+                // The step ends with what the changes add and remove
+                // between them. A change's `diff` is the whole file for an
+                // add or a delete, and a unified diff for an update.
+                let counts: Vec<(usize, usize)> = item
+                    .get("changes")
+                    .and_then(Value::as_array)
+                    .map(|changes| {
+                        changes
+                            .iter()
+                            .filter_map(|c| {
+                                let diff = c.get("diff")?.as_str()?;
+                                Some(match c.pointer("/kind/type").and_then(Value::as_str) {
+                                    Some("add") => (diff.lines().count(), 0),
+                                    Some("delete") => (0, diff.lines().count()),
+                                    _ => crate::parse::diff_counts(diff),
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let counts = (!counts.is_empty()).then(|| {
+                    let (added, removed) = counts
+                        .iter()
+                        .fold((0, 0), |(a, r), (da, dr)| (a + da, r + dr));
+                    format!(" {}", crate::parse::counts_suffix(added, removed))
+                });
                 vec![
                     RunEvent::ToolCall {
                         id: id.clone(),
                         name: "file_change".into(),
-                        summary: one_line(&format!("Edited {}", names.join(", ")), 120),
+                        summary: format!(
+                            "{}{}",
+                            one_line(&format!("Edited {}", names.join(", ")), 100),
+                            counts.unwrap_or_default()
+                        ),
                         parent_id: None,
                     },
                     RunEvent::ToolResult {
@@ -861,6 +891,15 @@ mod tests {
             r#"{"method":"item/completed","params":{"item":{"type":"fileChange","id":"f1","changes":[{"path":"/wt/notes.md"}],"status":"completed"}}}"#,
         ));
         assert!(matches!(&edit.events[0], RunEvent::ToolCall { summary, .. } if summary == "Edited notes.md"));
+        // With diffs, the step ends with what they add and remove: all of
+        // an added file, and an update's own lines.
+        let counted = server.after_line(&line(
+            r#"{"method":"item/completed","params":{"item":{"type":"fileChange","id":"f2","changes":[{"path":"/wt/a.md","kind":{"type":"add"},"diff":"one\ntwo\n"},{"path":"/wt/b.rs","kind":{"type":"update"},"diff":"--- a/b.rs\n+++ b/b.rs\n@@ -1 +1 @@\n-old\n+new\n"}],"status":"completed"}}}"#,
+        ));
+        assert!(matches!(
+            &counted.events[0],
+            RunEvent::ToolCall { summary, .. } if summary == "Edited a.md, b.rs (+3 \u{2212}1)"
+        ));
         let said = server.after_line(&line(
             r#"{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"m1","text":"Done."}}}"#,
         ));
