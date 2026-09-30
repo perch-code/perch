@@ -8,7 +8,10 @@
 //! line of its symbol's name, as VS Code's sticky scroll has it, and ends
 //! on its range's last line. The server knows the file on disk, so an
 //! outline is taken only while the head the editor shows is that text: a
-//! commit's head pins nothing, and nor does the base side of a split.
+//! commit's head pins nothing, and nor does the base side of a split. A
+//! deleted file has no head and nothing on disk, so it pins its removed
+//! lines instead, which are its base whole: the server is handed their
+//! text under the file's path for as long as it takes to outline it.
 //!
 //! The layer places the blocks against the document the editor is laying
 //! out, so a
@@ -35,6 +38,7 @@ use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalWith};
 use floem::style::Position;
 use floem::text::{Attrs, AttrsList, FamilyOwned, LineHeightValue, TextLayout};
 use floem::views::{dyn_stack, rich_text, ClipExt, Container, Decorators, Empty, Label, Stack};
+use perch_git::ChangeStatus;
 
 use crate::backend::Backend;
 use crate::review::doc::Doc;
@@ -148,14 +152,24 @@ pub(crate) fn lines_hash<'a>(lines: impl Iterator<Item = &'a str>) -> u64 {
     hasher.finish()
 }
 
-/// The head's lines as the file loaded them: the buffer's, less the
-/// removed lines spliced in among them.
-fn head_lines(file: &LoadedFile) -> impl Iterator<Item = &str> {
+/// Whether a file pins its base's blocks rather than its head's: a
+/// deleted file, whose head is empty. Its removed lines are the base in
+/// order, so a base line is the display line it is on, in the stacked
+/// document and on the left of a split both.
+pub(crate) fn pins_base(file: &LoadedFile) -> bool {
+    file.status == Some(ChangeStatus::Deleted)
+}
+
+/// The lines the file's outline is counted in, as the file loaded them:
+/// the buffer's head lines, or for a file that pins its base, its removed
+/// lines.
+fn outline_lines(file: &LoadedFile) -> impl Iterator<Item = &str> {
+    let base = pins_base(file);
     file.buffer
         .text
         .lines()
         .zip(&file.buffer.rows)
-        .filter(|(_, row)| row.head_line().is_some())
+        .filter(move |(_, row)| row.is_deleted() == base)
         .map(|(line, _)| line)
 }
 
@@ -165,15 +179,18 @@ fn max_for(height: f64, line_height: f64) -> usize {
     ((height / line_height / 3.0).floor().max(0.0) as usize).min(MAX_PINNED)
 }
 
-/// The layer of pinned lines over the head's editor and its gutter:
-/// the stacked layout's, or the right of a split. `viewport` is that
-/// editor's, for the scroll down the file and the text's slide sideways;
-/// `scroll_delta` is what a wheel over a pinned line moves, and
-/// `scroll_to` scrolls the editor to a height.
+/// The layer of pinned lines over an editor and its gutter: the stacked
+/// layout's, or the right of a split, or its left for a deleted file.
+/// `viewport` is that editor's, for the scroll down the file and the
+/// text's slide sideways; `scroll_delta` is what a wheel over a pinned
+/// line moves, down the file and across unless `across` takes the
+/// sideways part, and `scroll_to` scrolls the file to a height.
 ///
 /// Opening a file asks the server for its outline once it has the file.
 /// A file open before the server came up had nobody to ask, so the layer
-/// asks when the server does come up.
+/// asks when the server does come up. A deleted file is not on disk for
+/// the opening to announce, so the layer asks for its removed lines'
+/// outline itself, unless it has it.
 ///
 /// The file is read live: a reload is edited into the editor in place,
 /// and the new head is the text the new outline is taken against and the
@@ -187,25 +204,48 @@ pub(crate) fn layer(
     viewport: RwSignal<Rect>,
     gutter_width: f64,
     scroll_delta: RwSignal<Vec2>,
+    across: Option<RwSignal<Vec2>>,
     scroll_to: Rc<dyn Fn(f64)>,
 ) -> impl IntoView {
     let line_height = theme::CODE_LINE_HEIGHT as f64;
     let path = live_file.with_untracked(|f| f.path.clone());
+    // Fixed for the editor's life: a reload that deletes the file, or
+    // brings it back, builds another.
+    let base = live_file.with_untracked(|f| pins_base(f));
+    // The outline's hash and how many lines it is counted in.
+    let counted = Memo::new(move |_| {
+        live_file.with(|f| (lines_hash(outline_lines(f)), outline_lines(f).count()))
+    });
     {
         let path = path.clone();
         Effect::new(move |was: Option<bool>| {
             let usable = state.lsp_status.with(|s| s.is_usable());
-            if usable && was == Some(false) {
-                backend.document_symbols(&path);
+            if !usable {
+                return false;
             }
-            usable
+            if !base {
+                if was == Some(false) {
+                    backend.document_symbols(&path);
+                }
+                return true;
+            }
+            let (hash, _) = counted.get_untracked();
+            let known = state
+                .symbols
+                .with_untracked(|s| s.get(&path).is_some_and(|o| o.lines == hash));
+            if was != Some(true) && !known {
+                let text = live_file.with_untracked(|f| {
+                    let mut text = outline_lines(f).collect::<Vec<_>>().join("\n");
+                    text.push('\n');
+                    text
+                });
+                backend.removed_symbols(&path, text);
+            }
+            true
         });
     }
-    // The head's hash and how many lines it has.
-    let head =
-        Memo::new(move |_| live_file.with(|f| (lines_hash(head_lines(f)), head_lines(f).count())));
     let outline = Memo::new(move |_| {
-        let (hash, _) = head.get();
+        let (hash, _) = counted.get();
         state.symbols.with(|symbols| {
             symbols
                 .get(&path)
@@ -215,9 +255,18 @@ pub(crate) fn layer(
         })
     });
     let placed = Memo::new(move |_| {
-        let (_, lines) = head.get();
-        outline
-            .with(|blocks| doc.with(|d| place(blocks, d.len(), lines, |line| d.row_of_head(line))))
+        let (_, lines) = counted.get();
+        outline.with(|blocks| {
+            doc.with(|d| {
+                place(blocks, d.len(), lines, |line| {
+                    if base {
+                        d.row_of_display(line)
+                    } else {
+                        d.row_of_head(line)
+                    }
+                })
+            })
+        })
     });
     let pins = Memo::new(move |_| {
         let vp = viewport.get();
@@ -245,6 +294,7 @@ pub(crate) fn layer(
                 viewport,
                 gutter_width,
                 scroll_delta,
+                across,
                 scroll_to.clone(),
             )
         },
@@ -289,6 +339,7 @@ fn pinned_row(
     viewport: RwSignal<Rect>,
     gutter_width: f64,
     scroll_delta: RwSignal<Vec2>,
+    across: Option<RwSignal<Vec2>>,
     scroll_to: Rc<dyn Fn(f64)>,
 ) -> impl IntoView {
     let line_height = theme::CODE_LINE_HEIGHT as f64;
@@ -359,7 +410,7 @@ fn pinned_row(
                 scroll_to(pin.start_row.saturating_sub(pin.slot) as f64 * line_height);
             }
         });
-    passes_wheel(row, viewport, scroll_delta, None).style(move |s| {
+    passes_wheel(row, viewport, scroll_delta, across).style(move |s| {
         let y = pins.with(|p| p.iter().find(|p| p.line == line).map_or(0.0, |p| p.y));
         clickable(s)
             .absolute()
@@ -374,11 +425,15 @@ fn pinned_row(
     })
 }
 
-/// A head line's text and its colours, as the code draws it. A tab is
-/// four spaces, as the editor sets it.
+/// A line of the outline's text and its colours, as the code draws it.
+/// A tab is four spaces, as the editor sets it.
 fn line_layout(file: &LoadedFile, line: usize) -> (String, AttrsList) {
-    let raw = head_lines(file).nth(line).unwrap_or("");
-    let spans = file.head_spans.line(line);
+    let raw = outline_lines(file).nth(line).unwrap_or("");
+    let spans = if pins_base(file) {
+        file.base_spans.line(line)
+    } else {
+        file.head_spans.line(line)
+    };
     let (text, map) = expand_tabs(raw);
     let families: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect();
     let default = Attrs::new()

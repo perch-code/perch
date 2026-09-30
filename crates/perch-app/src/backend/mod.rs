@@ -347,6 +347,12 @@ pub enum Command {
     DocumentSymbols {
         path: String,
     },
+    /// The outline of a deleted file's removed lines, `text`, which is on
+    /// no disk for the server to read.
+    RemovedSymbols {
+        path: String,
+        text: String,
+    },
     /// The function at a position, as the server names it for a call
     /// hierarchy, or nothing when the position is not on one.
     PrepareCallHierarchy {
@@ -2698,6 +2704,13 @@ impl Backend {
         });
     }
 
+    pub fn removed_symbols(&self, path: &str, text: String) {
+        let _ = self.commands.send(Command::RemovedSymbols {
+            path: path.to_string(),
+            text,
+        });
+    }
+
     pub fn prepare_call_hierarchy(&self, token: u64, path: &str, line: u32, character: u32) {
         let _ = self.commands.send(Command::PrepareCallHierarchy {
             token,
@@ -4635,6 +4648,28 @@ async fn run(
                         return;
                     };
                     send_outline(&client, &full, &text, path, &events).await;
+                });
+            }
+            Command::RemovedSymbols { path, text } => {
+                let checkout = checkout.clone();
+                let language_server = language_server.clone();
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let Some((client, full)) = resolve(&checkout, &language_server, &path).await
+                    else {
+                        return;
+                    };
+                    // A file on disk under the path, as a commit's deletion
+                    // may have, is the one the server knows, and giving it
+                    // this text would take that one away from it.
+                    if tokio::fs::try_exists(&full).await.unwrap_or(true) {
+                        return;
+                    }
+                    // Given for as long as the outline takes, so the server
+                    // is not left thinking the file is there.
+                    client.did_open(&full, &text).await;
+                    send_outline(&client, &full, &text, path, &events).await;
+                    client.did_close(&full).await;
                 });
             }
             Command::PrepareCallHierarchy {

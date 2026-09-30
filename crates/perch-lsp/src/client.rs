@@ -10,7 +10,7 @@ use std::time::Duration;
 use lsp_types::{
     CallHierarchyClientCapabilities, CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams,
     CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams,
-    CallHierarchyPrepareParams, ClientCapabilities, DocumentHighlight,
+    CallHierarchyPrepareParams, ClientCapabilities, DidCloseTextDocumentParams, DocumentHighlight,
     DocumentSymbol, DocumentSymbolClientCapabilities, DocumentSymbolParams, DocumentSymbolResponse,
     DocumentHighlightClientCapabilities, DocumentHighlightParams, GeneralClientCapabilities,
     GotoCapability, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverClientCapabilities,
@@ -220,6 +220,20 @@ impl Client {
         };
         self.notify(
             "textDocument/didOpen",
+            serde_json::to_value(params).unwrap_or(Value::Null),
+        )
+        .await;
+    }
+
+    /// Tell the server a file it was given is gone: the text of a deleted
+    /// file, handed over only to be outlined.
+    pub async fn did_close(&self, path: &Path) {
+        let Some(uri) = path_to_uri(path) else { return };
+        let params = DidCloseTextDocumentParams {
+            text_document: TextDocumentIdentifier { uri },
+        };
+        self.notify(
+            "textDocument/didClose",
             serde_json::to_value(params).unwrap_or(Value::Null),
         )
         .await;

@@ -314,13 +314,16 @@ fn code_view(
 /// Whether `new`, a reload of the file `old` under the same scope, can be
 /// edited into the editor showing `old` rather than building another: the
 /// same kind of view over it, stacked or split, code or picture, and a
-/// gutter of the same width, which the layers are placed by.
+/// gutter of the same width, which the layers are placed by. A file
+/// deleted or brought back pins the other side's lines, so is built
+/// again.
 pub(crate) fn edits_in_place(old: &LoadedFile, new: &LoadedFile) -> bool {
     old.scope == new.scope
         && old.origin == new.origin
         && old.picture.is_none()
         && new.picture.is_none()
         && splits(old) == splits(new)
+        && sticky::pins_base(old) == sticky::pins_base(new)
         && gutter::width_of(old) == gutter::width_of(new)
 }
 
@@ -421,6 +424,7 @@ fn stacked_view(
         viewport,
         gutter::width_of(&file),
         scroll_delta,
+        None,
         Rc::new(move |y| scroll_to.set(Some(Vec2::new(viewport.get_untracked().x0, y)))),
     );
     // A file outside the worktree is a place to read: numbers beside it,
@@ -1460,15 +1464,19 @@ fn split_view(
     #[cfg(test)]
     SPLIT_VIEWPORTS.with(|v| v.set(Some((left_viewport, right_viewport))));
 
-    // The head pins its blocks; the base is no file the server has.
-    let right_sticky = sticky::layer(
+    // The head pins its blocks; the base is no file the server has,
+    // except for a deleted file, which has no head and pins the base.
+    // The right owns the scroll down the file either way.
+    let pins_base = sticky::pins_base(&file);
+    let side_sticky = sticky::layer(
         state,
         backend.clone(),
         live_file,
-        right_doc,
-        right_viewport,
+        if pins_base { left_doc } else { right_doc },
+        if pins_base { left_viewport } else { right_viewport },
         gutter::width_of(&file),
         right_delta,
+        pins_base.then_some(left_delta),
         Rc::new(move |y| right_scroll_to.set(Some(Vec2::new(right_viewport.get_untracked().x0, y)))),
     );
 
@@ -1521,19 +1529,19 @@ fn split_view(
             .height_full()
     });
 
-    // The pinned lines, over the dividers and the cards, over the right
-    // half of the outer stack: past the left and the rule.
-    let sticky = Stack::horizontal((
-        Empty::new().style(|s| s.flex_basis(0.0).flex_grow(1.0_f32).min_width(0.0)),
-        Empty::new().style(|s| s.width(1.0).height_full().flex_shrink(0.0_f32)),
-        Container::new(right_sticky).style(|s| {
-            s.flex_basis(0.0)
-                .flex_grow(1.0_f32)
-                .min_width(0.0)
-                .height_full()
-                .position(Position::Relative)
-        }),
-    ))
+    // The pinned lines, over the dividers and the cards, over the half
+    // of the outer stack whose lines they are: the right, past the left
+    // and the rule, or the left for a deleted file.
+    let half = |s: floem::style::Style| s.flex_basis(0.0).flex_grow(1.0_f32).min_width(0.0);
+    let pinned = Container::new(side_sticky)
+        .style(move |s| half(s).height_full().position(Position::Relative));
+    let other = Empty::new().style(half);
+    let rule = Empty::new().style(|s| s.width(1.0).height_full().flex_shrink(0.0_f32));
+    let sticky = if pins_base {
+        Stack::horizontal((pinned.into_any(), rule, other.into_any()))
+    } else {
+        Stack::horizontal((other.into_any(), rule, pinned.into_any()))
+    }
     .style(|s| s.absolute().inset(0.0).size_full().pointer_events_none());
 
     // The layers are placed against the outer stack, so it takes the
@@ -2199,6 +2207,16 @@ mod window {
         base: String,
         backend: crate::backend::Backend,
     ) -> (HeadlessHarness, ReviewState) {
+        harness_as(head, base, perch_git::ChangeStatus::Modified, backend)
+    }
+
+    /// The same, with the file's status given.
+    fn harness_as(
+        head: String,
+        base: String,
+        status: perch_git::ChangeStatus,
+        backend: crate::backend::Backend,
+    ) -> (HeadlessHarness, ReviewState) {
         let root = TestRoot::new();
         let app = AppState::new();
         let state = ReviewState::new();
@@ -2228,7 +2246,7 @@ mod window {
             "src/x.rs".into(),
             head,
             base,
-            Some(perch_git::ChangeStatus::Modified),
+            Some(status),
             false,
             perch_git::Scope::Branch,
             String::new(),
@@ -2494,6 +2512,79 @@ mod window {
         let pinned = rect_of(root, "sticky:0");
         let middle = left + (1400.0 - left - 1.0) / 2.0;
         assert!(pinned.x0 > middle, "over the head side: {pinned:?}");
+    }
+
+    /// A deleted file has no head, so it pins its removed lines' blocks:
+    /// their outline is asked for with their text, since the file is on no
+    /// disk, and the pinned lines are drawn from the base. Split, they are
+    /// over the base side.
+    #[test]
+    fn a_deleted_file_pins_the_blocks_of_its_removed_lines() {
+        use crate::review::model::Outline;
+        use crate::review::sticky::lines_hash;
+
+        let body: String = (0..120).map(|i| format!("        let x{i} = 0;\n")).collect();
+        let base = format!("impl Default for Options {{\n    fn default() -> Self {{\n{body}    }}\n}}\n");
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let (mut harness, state) = harness_as(
+            String::new(),
+            base.clone(),
+            perch_git::ChangeStatus::Deleted,
+            backend,
+        );
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let (left, top) = pane_origin();
+
+        let mut asked = || {
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .filter_map(|c| match c {
+                    crate::backend::Command::RemovedSymbols { path, text } if path == "src/x.rs" => {
+                        Some(text)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(asked().is_empty(), "nothing is asked of a server that is not there");
+        state.lsp_status.set(perch_lsp::Status::Ready);
+        harness.rebuild();
+        assert_eq!(asked(), vec![base.clone()], "the removed lines are handed over");
+
+        let mut symbols = std::collections::HashMap::new();
+        symbols.insert(
+            "src/x.rs".to_string(),
+            Arc::new(Outline { lines: lines_hash(base.lines()), blocks: vec![(0, 123), (1, 122)] }),
+        );
+        state.symbols.set(symbols);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(count(harness.root_id(), "sticky:"), 0, "nothing is pinned at the top");
+
+        harness.scroll_down(800.0, 500.0, 20.0 * line_height);
+        harness.rebuild();
+        harness.paint();
+        let root = harness.root_id();
+        let (outer, inner) = (rect_of(root, "sticky:0"), rect_of(root, "sticky:1"));
+        assert_eq!((outer.x0, outer.y0, outer.height()), (left, top, line_height));
+        assert_eq!((inner.x0, inner.y0), (left, top + line_height));
+        assert!(find(root, "impl Default for Options {").is_some());
+        assert!(find(root, "fn default() -> Self {").is_some());
+
+        // Rebuilt, with the outline in hand, it is not asked for again.
+        state.layout.set(Layout::Split);
+        harness.rebuild();
+        harness.paint();
+        assert!(asked().is_empty());
+        let (_, x_right, y) = pane_centers();
+        harness.scroll_down(x_right, y, 20.0 * line_height);
+        harness.rebuild();
+        harness.paint();
+        let root = harness.root_id();
+        assert_eq!(count(root, "sticky:"), 2);
+        let pinned = rect_of(root, "sticky:0");
+        let middle = left + (1400.0 - left - 1.0) / 2.0;
+        assert_eq!(pinned.x0, left, "over the base side: {pinned:?}");
+        assert!(pinned.x1 < middle + 1.0, "over the base side: {pinned:?}");
     }
 
     /// The left takes no pointer events, so a click there moves no cursor

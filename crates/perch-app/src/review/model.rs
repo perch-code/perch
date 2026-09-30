@@ -115,7 +115,8 @@ impl std::fmt::Debug for LoadedFile {
 
 /// A file's outline from the language server: its blocks, each the line
 /// of its name and its last line, and a hash of the lines they are
-/// counted in, which is the file on disk when the server was asked.
+/// counted in, which is the file on disk when the server was asked, or
+/// a deleted file's removed lines.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outline {
     pub lines: u64,
