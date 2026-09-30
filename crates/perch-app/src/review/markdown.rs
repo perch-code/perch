@@ -2677,6 +2677,68 @@ mod tests {
             assert!(copied[0].starts_with("one\ntwo\n\nlet x = 1;"), "{copied:?}");
         }
 
+        /// A drag on from a double click grows by words into the next
+        /// paragraph, and one from a triple click by whole paragraphs, as
+        /// in a browser. A press soon after a double click is a triple.
+        #[test]
+        fn a_drag_from_a_double_or_triple_click_grows_by_words_or_paragraphs() {
+            use crate::review::linked_text;
+            use floem::event::Event;
+            use floem::kurbo::Point;
+            use floem::ui_events::pointer::{
+                PointerButton, PointerButtonEvent, PointerEvent, PointerId, PointerInfo,
+                PointerState, PointerType,
+            };
+            let press = |h: &mut HeadlessHarness, at: Point, count: u8| {
+                let mut state = PointerState { count, ..PointerState::default() };
+                state.position.x = at.x;
+                state.position.y = at.y;
+                h.dispatch_event(Event::Pointer(PointerEvent::Down(PointerButtonEvent {
+                    state,
+                    button: Some(PointerButton::Primary),
+                    pointer: PointerInfo {
+                        pointer_id: Some(PointerId::PRIMARY),
+                        persistent_device_id: None,
+                        pointer_type: PointerType::Mouse,
+                    },
+                })));
+            };
+            let text = "First words here.\n\nSecond words here.\n\nLast words end.";
+            let mut h = harness(text);
+            crate::ui::widgets::copied();
+            let mut runs = Vec::new();
+            find_all(h.root_id(), "LinkedText", &mut runs);
+            assert_eq!(runs.len(), 3);
+            // The middle of "words" in a run, in the window.
+            let words = |run: ViewId| {
+                let at = run.get_visual_rect_no_clip().origin().to_vec2();
+                let start = linked_text::with_text(run, |t| t.find("words").unwrap()).unwrap();
+                linked_text::range_rect(run, start..start + 5).unwrap().center() + at
+            };
+            let (from, to) = (words(runs[0]), words(runs[1]));
+
+            press(&mut h, from, 2);
+            h.pointer_move(from.x, from.y);
+            h.pointer_move(from.x, from.y + 30.0);
+            h.pointer_move(to.x, to.y);
+            h.pointer_up(to.x, to.y);
+            assert_eq!(copy(&mut h), vec!["words here.\n\nSecond words".to_string()]);
+            // Back up from the second paragraph's word, the same.
+            press(&mut h, to, 2);
+            h.pointer_move(to.x, to.y);
+            h.pointer_move(from.x, from.y);
+            h.pointer_up(from.x, from.y);
+            assert_eq!(copy(&mut h), vec!["words here.\n\nSecond words".to_string()]);
+
+            press(&mut h, from, 3);
+            h.pointer_move(from.x, from.y);
+            h.pointer_move(from.x + 20.0, from.y);
+            assert_eq!(copy(&mut h), vec!["First words here.".to_string()], "whole while in it");
+            h.pointer_move(to.x, to.y);
+            h.pointer_up(to.x, to.y);
+            assert_eq!(copy(&mut h), vec!["First words here.\n\nSecond words here.".to_string()]);
+        }
+
         #[test]
         fn a_name_links_when_its_answer_lands_and_opens_its_definition() {
             use crate::review::code_refs::{located, NameAsk};

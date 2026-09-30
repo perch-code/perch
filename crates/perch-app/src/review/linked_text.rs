@@ -24,9 +24,10 @@
 //! which the pointer has been dragged to, and a selection runs between
 //! them while the button is held, then stays until a click or the focus
 //! leaving clears it, for Cmd-C to copy. A double click takes the word
-//! under the pointer and a triple the whole run; a drag from a word grows
-//! by words. The selection is painted from the shadow, under the glyphs
-//! as a browser paints one.
+//! under the pointer and a triple the whole run; a drag on from a word
+//! grows by words, and from a whole run by whole runs, into the rest of
+//! a passage too. The selection is painted from the shadow, under the
+//! glyphs as a browser paints one.
 //!
 //! The views of one [`passage`], a comment's body, select together as a
 //! browser's paragraphs do: a drag that leaves the view it began in for
@@ -141,6 +142,15 @@ enum Selecting {
     Dragging(TextSelection),
     /// The button is up and the selection stays.
     Done(TextSelection),
+}
+
+/// What a drag grows by, as in a browser: glyphs from a press, words
+/// from a double click, and whole texts from a triple.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Unit {
+    Glyph,
+    Word,
+    Whole,
 }
 
 /// What a view shares with the rest of its passage: its text, the layout
@@ -307,6 +317,8 @@ pub struct LinkedText {
     /// word or the whole text a double or triple click took. A drag into
     /// another view keeps them.
     origin: Range<usize>,
+    /// What the press has the drag grow by.
+    unit: Unit,
     /// The views a drag from here into others of the passage has taken
     /// from, this one among them, in the order they read. Empty while
     /// the selection, if any, is this view's alone.
@@ -359,6 +371,7 @@ pub fn linked_text(
         tip: tip.clone(),
         selecting: Selecting::None,
         origin: 0..0,
+        unit: Unit::Glyph,
         spread: Vec::new(),
         props: SelectProps::default(),
     };
@@ -417,10 +430,16 @@ impl Leaf {
         layout_at(&self.text, self.attrs.clone(), width)
     }
 
-    /// The byte of the text at `at`, a point in the window: its start
-    /// above the text, its end below, and otherwise the nearest glyph
-    /// edge.
-    fn index_at(&self, at: Point) -> Option<usize> {
+    /// The byte of the text a drag from another view reaches with the
+    /// pointer at `at`, a point in the window, growing by `unit` the way
+    /// it runs: the start above the text, the end below, and otherwise
+    /// the nearest glyph edge, the far side of the word there, or the
+    /// far end of the whole.
+    fn reached(&self, at: Point, unit: Unit, forward: bool) -> Option<usize> {
+        let len = self.text.len();
+        if unit == Unit::Whole {
+            return Some(if forward { len } else { 0 });
+        }
         let local = self.id.get_visual_transform().inverse() * at;
         self.with_shadow(|layout, child| {
             let at = local - child.to_vec2();
@@ -428,10 +447,19 @@ impl Leaf {
                 return Some(0);
             }
             if at.y >= layout.size().height {
-                return Some(self.text.len());
+                return Some(len);
             }
-            let cursor = layout.hit_test(at)?;
-            Some(byte_of(layout, cursor))
+            let index = byte_of(layout, layout.hit_test(at)?);
+            if unit == Unit::Glyph {
+                return Some(index);
+            }
+            let word = Selection::word_from_point(layout.parley_layout(), at.x as f32, at.y as f32);
+            let word = layout.selection_text_range(&wrap(layout, word));
+            Some(if forward {
+                word.end.max(index)
+            } else {
+                word.start.min(index)
+            })
         })
         .flatten()
     }
@@ -633,8 +661,8 @@ impl LinkedText {
         if target == me {
             return None;
         }
-        let index = leaves[target].index_at(at)?;
         let forward = target > me;
+        let index = leaves[target].reached(at, self.unit, forward)?;
         let (lo, hi) = (me.min(target), me.max(target));
         Some(
             leaves
@@ -675,7 +703,8 @@ impl LinkedText {
 
     /// The primary button down at `point`, off any link, for the `count`th
     /// click in a row: one arms a drag from the nearest glyph edge, two
-    /// takes the word there, and three or more the whole text. Whatever
+    /// takes the word there, and three or more the whole text, and a drag
+    /// on grows by glyphs, words or whole texts to match. Whatever
     /// it begins, the pointer is captured so the drag and the release
     /// reach here wherever they land.
     fn press(&mut self, point: Point, count: u8, pointer: Option<PointerId>) {
@@ -690,7 +719,7 @@ impl LinkedText {
                             origin: point,
                             from,
                         };
-                        (armed, byte..byte)
+                        (armed, byte..byte, Unit::Glyph)
                     }),
                     2 => {
                         TextLayout::clear_selection_geometry_cache();
@@ -703,21 +732,22 @@ impl LinkedText {
                             ),
                         );
                         let bytes = layout.selection_text_range(&word);
-                        Some((Selecting::Dragging(word), bytes))
+                        Some((Selecting::Dragging(word), bytes, Unit::Word))
                     }
                     _ => {
                         TextLayout::clear_selection_geometry_cache();
                         let all = layout.selection_from_byte_range(0, len);
-                        Some((Selecting::Done(all), 0..len))
+                        Some((Selecting::Dragging(all), 0..len, Unit::Whole))
                     }
                 }
             })
             .flatten();
-        let Some((next, origin)) = next else {
+        let Some((next, origin, unit)) = next else {
             return;
         };
         self.selecting = next;
         self.origin = origin;
+        self.unit = unit;
         if let Some(pointer) = pointer {
             self.id.set_pointer_capture(pointer);
         }
@@ -766,6 +796,8 @@ impl LinkedText {
                 })
                 .flatten()
             }
+            // The whole text stays whole wherever in it the pointer goes.
+            Selecting::Dragging(selection) if self.unit == Unit::Whole => Some(selection),
             Selecting::Dragging(selection) => self.with_shadow(|layout, child| {
                 let at = point - child.to_vec2();
                 wrap(
