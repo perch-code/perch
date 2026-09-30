@@ -2132,7 +2132,10 @@ impl ReviewState {
             self.code_seen.set(true);
             self.tree_wanted.set(true);
         }
-        self.tab.set(tab);
+        // A write of the same value would still rebuild the pane.
+        if self.tab.get_untracked() != tab {
+            self.tab.set(tab);
+        }
     }
 
     /// Whether the open item has a checkout, and so files to open, or

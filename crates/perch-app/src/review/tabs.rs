@@ -183,8 +183,14 @@ fn on_disk(state: ReviewState, path: &str) -> String {
 
 /// Show a file's tab, from Conversation too, in one rebuild of the pane
 /// rather than one for each write. Its content is asked for when it is
-/// not here.
+/// not here. Nothing for the file already showing: opening it again
+/// would rebuild the editor, which flickered and lost the scroll a beat.
 fn show_file(state: ReviewState, backend: &Backend, path: &str) {
+    let showing = state.tab.get_untracked() == ItemTab::Code
+        && state.active.with_untracked(|a| a.as_deref() == Some(path));
+    if showing && (state.file(path).is_some() || state.is_loading(path)) {
+        return;
+    }
     let load = floem::reactive::Effect::batch(|| {
         state.show_tab(ItemTab::Code);
         state.open_tab(path)
@@ -712,6 +718,25 @@ mod tests {
         assert_eq!(rule.x0, file.x1);
         assert!(rule.width() > 0.0);
         assert_eq!(rule.y1, strip.y1);
+    }
+
+    /// A click on the tab already showing does nothing: no rebuild of the
+    /// editor, and the caret stays.
+    #[test]
+    fn a_click_on_the_showing_tab_does_nothing() {
+        let (mut harness, _, state) = pull_request_harness();
+        state.open_tab("src/x.rs");
+        state.show_tab(ItemTab::Code);
+        harness.rebuild();
+        harness.paint();
+        state.cursor_line.set(7);
+        let epoch = state.editor_epoch.get_untracked();
+
+        let tab = rect(&harness, "file tab:src/x.rs");
+        harness.click(tab.center().x, tab.center().y);
+        harness.rebuild();
+        assert_eq!(state.editor_epoch.get_untracked(), epoch);
+        assert_eq!(state.cursor_line.get_untracked(), 7);
     }
 
     #[test]
