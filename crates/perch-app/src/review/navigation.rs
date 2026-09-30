@@ -1157,6 +1157,58 @@ mod tests {
         assert_eq!(state.jump_to_line.get(), Some(2));
     }
 
+    /// A link in an answer, clicked beside the composer it is answering
+    /// in, goes to its line on Code. The composer waits in its file, and
+    /// `Ctrl--` goes back to it.
+    #[test]
+    fn a_line_named_beside_a_composer_in_the_code_stays_on_code() {
+        let (mut harness, state, _) = recording_harness();
+        let anchor = perch_github::Anchor {
+            path: "src/x.rs".into(),
+            start_line: 2,
+            line: 2,
+            side: perch_github::Side::Right,
+            commit_sha: "h".into(),
+        };
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
+        state.open_composer(None, Some(anchor), "why?".into(), choice);
+        harness.rebuild();
+        assert!(state.composer_in_code());
+
+        // Clicked, as a link is: the jump is taken after the click.
+        floem::reactive::Effect::batch(|| state.go_to_file("src/y.rs", Some((2, 0))));
+        harness.rebuild();
+        assert_eq!(state.tab.get(), ItemTab::Code);
+        assert_eq!(state.active.get().as_deref(), Some("src/y.rs"));
+        state.finish_load(
+            "src/y.rs",
+            Arc::new(crate::backend::build_loaded_file(
+                "src/y.rs".into(),
+                HEAD.into(),
+                BASE.into(),
+                Some(perch_git::ChangeStatus::Modified),
+                false,
+                perch_git::Scope::Branch,
+                String::new(),
+            )),
+        );
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.jump_to_line.get(), None, "the editor took the jump");
+        assert_eq!(state.last_position.get(), Some((2, 0)));
+        assert_eq!(state.composer_draft.get(), "why?");
+
+        state.go_back();
+        harness.rebuild();
+        assert_eq!(state.active.get().as_deref(), Some("src/x.rs"));
+        assert!(state.composer_in_code());
+        assert_eq!(state.tab.get(), ItemTab::Code);
+    }
+
     #[test]
     fn the_keys_type_nothing_and_open_nothing_while_a_composer_has_the_keyboard() {
         let (mut harness, state, mut commands) = recording_harness();

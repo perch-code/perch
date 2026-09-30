@@ -91,7 +91,7 @@ pub fn editor_pane(
             if let Some((path, line, column)) = state.pending_jump.get() {
                 state.pending_jump.set(None);
                 if state.active.with_untracked(|a| a.as_deref() != Some(path.as_str())) {
-                    open_file(&path);
+                    state.open_for_jump(|| open_file(&path));
                 }
                 state.jump_caret.set(Some((line, column)));
                 state.jump_to_line.set(Some(line));
@@ -106,7 +106,7 @@ pub fn editor_pane(
             if let Some(path) = state.pending_open.get() {
                 state.pending_open.set(None);
                 if state.active.with_untracked(|a| a.as_deref() != Some(path.as_str())) {
-                    open_file(&path);
+                    state.open_for_jump(|| open_file(&path));
                 } else {
                     state.show_in_tree(&path);
                 }

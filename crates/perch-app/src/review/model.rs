@@ -1636,6 +1636,9 @@ pub struct ReviewState {
     /// A file to open with no line to go to, as a link that names only the
     /// file opens it. Taken by the same view as `pending_jump`.
     pub pending_open: RwSignal<Option<String>>,
+    /// Whether the file being opened is a jump's or a link's, which name
+    /// a place in the code: see `open_for_jump`.
+    opening_for_jump: RwSignal<bool>,
     /// What rust-analyzer's workspace search made of each name written in
     /// a comment or an answer, by the name as written, for the item's life.
     pub names: RwSignal<HashMap<String, Named>>,
@@ -1856,6 +1859,7 @@ impl ReviewState {
             recent_files: RwSignal::new(HashMap::new()),
             pending_jump: RwSignal::new(None),
             pending_open: RwSignal::new(None),
+            opening_for_jump: RwSignal::new(false),
             names: RwSignal::new(HashMap::new()),
             pending_names: RwSignal::new(Vec::new()),
             pending_notice: RwSignal::new(None),
@@ -2891,11 +2895,26 @@ impl ReviewState {
     /// always have a home. One that was not, a question about the item as
     /// a whole say, or a card in a file other than the open one, is not
     /// hidden by the change: the reader chose Files over it, and keeps it.
+    ///
+    /// A jump or a link opening the file is the exception: the reader
+    /// asked for a place in the code, so Code stays, and the composer
+    /// waits in its file, a card again when they come back to it.
     fn keep_composer_in_view(&self, was_in_code: bool) {
+        if self.opening_for_jump.get_untracked() {
+            return;
+        }
         let hidden = was_in_code && !self.composer_in_code_untracked();
         if hidden && self.tab.get_untracked() != ItemTab::Conversation {
             self.show_tab(ItemTab::Conversation);
         }
+    }
+
+    /// Open a file, through `open`, for a jump or a link: Code stays up
+    /// over a composer drawn in the file it leaves.
+    pub fn open_for_jump(&self, open: impl FnOnce()) {
+        self.opening_for_jump.set(true);
+        open();
+        self.opening_for_jump.set(false);
     }
 
     /// `composer_in_code` for a caller that may be an effect, which is not
