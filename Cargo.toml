@@ -37,6 +37,12 @@ toml = "0.9"
 debug = "line-tables-only"
 split-debuginfo = "packed"
 
+# Dependencies (floem, vger, swash, taffy) do the layout, shaping and
+# rasterizing, and unoptimized they made a debug Perch crawl. Optimize them
+# and leave the workspace crates at opt-level 0, so a rebuild stays quick.
+[profile.dev.package."*"]
+opt-level = 2
+
 [profile.release]
 opt-level = 3
 lto = "thin"
