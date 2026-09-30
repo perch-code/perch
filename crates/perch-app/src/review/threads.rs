@@ -2147,6 +2147,9 @@ pub fn messages_view(
         // the composer, a draft added to a thread that was wholly private
         // labels the rest of it Perch only, and a message answered is no
         // longer the last, under which the line down the avatars stops.
+        // A run's status and error, but not its steps or words: the run
+        // block reads those live, and a row built again for each would
+        // throw the whole message away and draw it again.
         |(m, editing, lane, place)| {
             (
                 m.id.clone(),
@@ -2155,7 +2158,7 @@ pub fn messages_view(
                 cards::body_hash(&m.body),
                 m.run
                     .as_ref()
-                    .map(|r| (r.status.name(), r.steps.len(), r.error.clone())),
+                    .map(|r| (r.status.name(), r.error.clone())),
                 *editing,
                 *lane,
                 *place,
@@ -2710,7 +2713,10 @@ fn local_message_view(
     };
     let content = match message.run.clone() {
         Some(run) if is_agent && finished => Stack::vertical((
-            run_surface(steps_view(state, without_answer(run.clone(), &body))),
+            run_surface(steps_view(state, &run, {
+                let steps = without_answer(run.clone(), &body).steps;
+                move || steps.clone()
+            })),
             text,
             run_footer(backend, run),
         ))
@@ -3039,29 +3045,41 @@ pub fn draft_pill() -> impl IntoView {
 /// works: the steps, folded to one line until it is clicked, and the
 /// footer or the Stop button.
 pub fn run_block(state: ReviewState, backend: Rc<Backend>, run: RunRecord) -> impl IntoView {
+    // Its steps and words as they arrive, read from the thread list: the
+    // row holding the block is kept through the run, and a step's result
+    // comes after the step, with nothing else to build the block again.
+    let live = live_run(state, run.clone());
     // The agent's words show as notes among the steps, as it says them;
     // a run from before notes has only the text.
-    let partial = run.final_result.clone().filter(|text| {
-        run.status != RunStatus::Completed
-            && !text.trim().is_empty()
-            && !run.steps.iter().any(|step| step.note)
-    });
-    let response = match partial {
-        Some(text) => Container::new(crate::review::markdown::render_linked(&text, state))
-            .style(|s| {
-                s.width_full()
-                    .padding_top(7.0)
-                    .border_top(1.0)
-                    .border_color(theme::BORDER_MUTED)
+    let partial = Memo::new(move |_| {
+        live.with(|run| {
+            run.final_result.clone().filter(|text| {
+                run.status != RunStatus::Completed
+                    && !text.trim().is_empty()
+                    && !run.steps.iter().any(|step| step.note)
             })
-            .into_any(),
-        None => Empty::new().into_any(),
-    };
+        })
+    });
+    let response = dyn_container(
+        move || partial.get(),
+        move |partial| match partial {
+            Some(text) => Container::new(crate::review::markdown::render_linked(&text, state))
+                .style(|s| {
+                    s.width_full()
+                        .padding_top(7.0)
+                        .border_top(1.0)
+                        .border_color(theme::BORDER_MUTED)
+                })
+                .into_any(),
+            None => Empty::new().into_any(),
+        },
+    )
+    .style(|s| s.width_full());
     let changes = work_changes(state, backend.clone(), &run);
     let asks = approval_cards(state, backend.clone(), run.id.clone());
     run_surface(
         Stack::vertical((
-            steps_view(state, run.clone()),
+            steps_view(state, &run, move || live.with(|run| run.steps.clone())),
             asks,
             response,
             changes,
@@ -3069,6 +3087,22 @@ pub fn run_block(state: ReviewState, backend: Rc<Backend>, run: RunRecord) -> im
         ))
         .style(|s| s.flex_col().width_full().gap(6.0)),
     )
+}
+
+/// A run as the thread list has it now, or as it was handed over when
+/// the list no longer has it.
+fn live_run(state: ReviewState, initial: RunRecord) -> Memo<RunRecord> {
+    Memo::new(move |_| {
+        state
+            .comment_threads
+            .with(|threads| {
+                threads
+                    .iter()
+                    .flat_map(|t| &t.messages)
+                    .find_map(|m| m.run.as_ref().filter(|r| r.id == initial.id).cloned())
+            })
+            .unwrap_or_else(|| initial.clone())
+    })
 }
 
 /// What a Work run is waiting on the reader for, a card each, with the
@@ -3319,14 +3353,19 @@ fn without_answer(mut run: RunRecord, body: &str) -> RunRecord {
 /// The step lines and what the agent said between them, folded to
 /// "Worked for 4m 12s" until the line is clicked, and open while the run
 /// goes.
-fn steps_view(state: ReviewState, run: RunRecord) -> impl IntoView {
+fn steps_view(
+    state: ReviewState,
+    run: &RunRecord,
+    steps: impl Fn() -> Vec<perch_github::RunStep> + 'static,
+) -> impl IntoView {
     let running = run.status.is_active();
     let run_id = run.id.clone();
     let expanded = move || running || state.expanded_runs.with(|e| e.contains(&run_id));
     let chevron_id = run.id.clone();
     let expanded_chevron = move || running || state.expanded_runs.with(|e| e.contains(&chevron_id));
     let toggle_id = run.id.clone();
-    let summary = run_summary(&run);
+    let summary = run_summary(run);
+    let steps = Rc::new(steps);
 
     Stack::vertical((
         Container::new(
@@ -3367,10 +3406,12 @@ fn steps_view(state: ReviewState, run: RunRecord) -> impl IntoView {
             if !open {
                 return Empty::new().into_any();
             }
-            let steps = run.steps.clone();
+            // Keyed on what a line shows as well as where it is: a step's
+            // result turns it red, and adds what went wrong to it.
+            let steps = steps.clone();
             dyn_stack(
-                move || steps.clone().into_iter().enumerate(),
-                |(i, _)| *i,
+                move || steps().into_iter().enumerate(),
+                |(i, step)| (*i, step.summary.clone(), step.ok, step.note),
                 |(_, step)| {
                     if step.note {
                         return Label::derived(move || step.summary.clone())
@@ -3863,6 +3904,63 @@ mod tests {
                 ),
             ],
         }
+    }
+
+    /// A running run's lines follow the thread list: a step's result
+    /// turns its line red, and the agent's words show, as they arrive and
+    /// not with the next step; and the message holding them is kept, not
+    /// built again for each.
+    #[test]
+    fn a_running_run_s_lines_follow_each_event_in_the_message_they_are_in() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_item();
+        let mut thread = github_thread_with_private_messages();
+        thread.messages[2].body = String::new();
+        thread.messages[2].run = Some(RunRecord {
+            id: "run-1".into(),
+            status: RunStatus::Running,
+            ..RunRecord::default()
+        });
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = messages_view(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
+            .style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+        let settle = |harness: &mut HeadlessHarness| {
+            harness.rebuild();
+            harness.paint();
+        };
+        settle(&mut harness);
+        // The folded line's label, which a message built again would
+        // have anew.
+        let working = |harness: &HeadlessHarness| find(harness.root_id(), "Working…").unwrap();
+        let before = working(&harness);
+
+        state.apply_run_event(
+            "run-1",
+            &perch_agent::RunEvent::ToolCall {
+                id: "c1".into(),
+                name: "Bash".into(),
+                summary: "Ran cargo test".into(),
+                parent_id: None,
+            },
+        );
+        settle(&mut harness);
+        assert!(find(harness.root_id(), "Label: \"Ran cargo test\"").is_some());
+
+        state.apply_run_event(
+            "run-1",
+            &perch_agent::RunEvent::ToolResult { id: "c1".into(), ok: false, summary: "exit 101".into() },
+        );
+        state.apply_run_event("run-1", &perch_agent::RunEvent::Text("It failed to build.".into()));
+        settle(&mut harness);
+        assert!(
+            find(harness.root_id(), "Label: \"Ran cargo test: exit 101\"").is_some(),
+            "the result reached the line"
+        );
+        assert!(find(harness.root_id(), "It failed to build.").is_some(), "the words show");
+        assert_eq!(working(&harness), before, "the message was built again");
     }
 
     /// The delete under a thread of GitHub's takes Perch's messages and
