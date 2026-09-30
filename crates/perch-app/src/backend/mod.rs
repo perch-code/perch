@@ -478,6 +478,10 @@ pub enum Command {
     CancelRun {
         run_id: String,
     },
+    SteerRun {
+        run_id: String,
+        text: String,
+    },
     RetryRun {
         run_id: String,
     },
@@ -846,6 +850,9 @@ pub enum Event {
         thread_id: String,
         event: perch_agent::RunEvent,
     },
+    /// The reader told a running agent something. It waits at the end of
+    /// the run's steps until an `AgentStep` says the agent read it.
+    AgentSteer { run_id: String, text: String },
     /// App-wide run summaries. Every active run is included; terminal
     /// history is the requested newest-first prefix.
     AgentRuns {
@@ -2903,6 +2910,15 @@ impl Backend {
         });
     }
 
+    /// Tell a running agent something more. It reads it once its current
+    /// step is done; a run that ends first takes it as a follow-up.
+    pub fn steer_run(&self, run_id: &str, text: &str) {
+        let _ = self.commands.send(Command::SteerRun {
+            run_id: run_id.to_string(),
+            text: text.to_string(),
+        });
+    }
+
     pub fn retry_run(&self, run_id: &str) {
         let _ = self.commands.send(Command::RetryRun {
             run_id: run_id.to_string(),
@@ -4251,6 +4267,7 @@ async fn run(
             Command::CancelRun { run_id } => {
                 ctx.runs.cancel(&run_id);
             }
+            Command::SteerRun { run_id, text } => steer_run(&ctx, &run_id, text),
             Command::RetryRun { run_id } => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move { retry_run(&ctx, &run_id).await });
@@ -14410,6 +14427,9 @@ async fn execute_question(
                 model: Some(model.clone()),
             }),
             perch_agent::RunEvent::Text(text) => Some(StoredRunEvent::Text { text: text.clone() }),
+            perch_agent::RunEvent::Steered(text) => {
+                Some(StoredRunEvent::SteerLanded { text: text.clone() })
+            }
             perch_agent::RunEvent::ToolCall {
                 id,
                 name,
@@ -14462,10 +14482,12 @@ async fn execute_question(
                 Ok(updated) => {
                     match &event {
                         perch_agent::RunEvent::Text(text) => answer.push(text.clone()),
-                        // What it said before a tool call was narration,
-                        // kept among the steps; the answer is what it
-                        // says after the last one.
-                        perch_agent::RunEvent::ToolCall { .. } if !answer.is_empty() => {
+                        // What it said before a tool call, or before the
+                        // reader's steer, was narration, kept among the
+                        // steps; the answer is what it says after the last.
+                        perch_agent::RunEvent::ToolCall { .. } | perch_agent::RunEvent::Steered(_)
+                            if !answer.is_empty() =>
+                        {
                             narration.append(&mut answer)
                         }
                         _ => {}
@@ -14672,6 +14694,18 @@ async fn execute_question(
     ctx.runs.finish(lease);
     tracing::info!(thread = %thread.id, run = %final_run.id, status = final_run.status.name(), steps = final_run.steps.len(), "run ended");
     ctx.send_threads(&item_id);
+    // What the reader said that the agent finished without reading is
+    // the next question. A run that failed or was stopped keeps it, for
+    // the reader to see it went unread.
+    let unread: Vec<&str> = final_run
+        .steps
+        .iter()
+        .filter(|step| step.user && step.pending)
+        .map(|step| step.summary.as_str())
+        .collect();
+    if final_run.status == RunStatus::Completed && !unread.is_empty() {
+        follow_up_run(ctx, &final_run, unread.join("\n\n"));
+    }
     // Finding threads start with the reviewer's report, then use the ordinary
     // discussion flow for follow-ups. Keep the review archive in step with
     // those later replies without creating archives for ordinary questions.
@@ -14682,6 +14716,54 @@ async fn execute_question(
         reviews::export_item(ctx, &item_id);
     }
     send_agent_runs(ctx, 50);
+}
+
+/// Give a run the reader's message while it works. It is stored first,
+/// so it shows at once, and the store refuses it once the run has ended,
+/// which makes it a follow-up instead. Stored, it is read by the agent or
+/// comes back unread in the run's end.
+fn steer_run(ctx: &Ctx, run_id: &str, text: String) {
+    let stored = append_stored_event(
+        ctx,
+        run_id,
+        &format!("steer-{}", perch_github::comments::new_id()),
+        StoredRunEvent::Steer { text: text.clone() },
+    );
+    match stored {
+        Ok(run) => {
+            let _ = ctx.events.send(Event::AgentSteer {
+                run_id: run_id.to_string(),
+                text: text.clone(),
+            });
+            let _ = ctx.events.send(Event::AgentRunUpdated { run });
+            ctx.runs.steer(run_id, &text);
+        }
+        Err(error) => match ctx.runs.load(run_id) {
+            Some(run) if run.status.is_terminal() => follow_up_run(ctx, &run, text),
+            _ => ctx.notice(format!("Could not give the agent that: {error}")),
+        },
+    }
+}
+
+/// Ask `text` in the discussion `run` answered, with the same agent.
+fn follow_up_run(ctx: &Ctx, run: &RunRecord, text: String) {
+    let RunOwner::Discussion {
+        item_id, thread_id, ..
+    } = run.owner.clone()
+    else {
+        return;
+    };
+    let (Some(backend), Some(effort)) = (
+        perch_agent::Backend::parse(&run.backend),
+        perch_agent::Effort::parse(&run.requested_effort),
+    ) else {
+        ctx.notice("The agent finished before reading that, and it cannot be asked again");
+        return;
+    };
+    let (ctx, model, mode) = (ctx.clone(), run.requested_model.clone(), run.mode);
+    tokio::spawn(async move {
+        ask(&ctx, item_id, Some(thread_id), None, text, backend, model, effort, mode).await;
+    });
 }
 
 fn run_labels(item: &Item) -> RunLabels {
@@ -22158,7 +22240,7 @@ read eof || true
         std::fs::write(
             &path,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{args}'\n{nap}printf '%s\\n' '{init}' '{message}' '{result}'\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{args}'\nhead -n 2 >> '{args}'\n{nap}printf '%s\\n' '{init}' '{message}' '{result}'\n",
                 args = dir.join("args").display(),
                 nap = if sleep { "sleep 30\n" } else { "" },
                 init = r#"{"type":"system","subtype":"init","session_id":"s1","model":"sonnet"}"#,

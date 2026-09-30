@@ -1790,6 +1790,7 @@ fn stored_process_event(event: &perch_agent::RunEvent) -> Option<StoredRunEvent>
             model: Some(model.clone()),
         }),
         perch_agent::RunEvent::Text(text) => Some(StoredRunEvent::Text { text: text.clone() }),
+        perch_agent::RunEvent::Steered(text) => Some(StoredRunEvent::SteerLanded { text: text.clone() }),
         perch_agent::RunEvent::ToolCall {
             id,
             name,

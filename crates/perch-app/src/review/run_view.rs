@@ -180,7 +180,7 @@ pub fn doing_now(run: &RunRecord) -> (String, String, bool) {
         RunStatus::Queued => word("Queued"),
         RunStatus::Starting => word("Starting"),
         RunStatus::Stopping => word("Stopping"),
-        _ => match run.steps.iter().rev().find(|s| s.pending && !s.note) {
+        _ => match run.steps.iter().rev().find(|s| s.pending && !s.note && !s.user) {
             Some(step) => {
                 let line = step_line(&step.summary);
                 (line.doing, line.arg, is_code(line.kind))
@@ -410,14 +410,18 @@ pub fn run_header(app: AppState, backend: Rc<Backend>, live: Memo<RunRecord>) ->
 enum Segment {
     Note(String),
     Tools(Vec<RunStep>),
+    /// What the reader said while it worked, and whether it is unread.
+    Steer(String, bool),
 }
 
-/// The steps as the agent went: each thing it said, and each run of
-/// calls between.
+/// The steps as the agent went: each thing it said, each run of calls
+/// between, and what the reader told it.
 fn segments(steps: &[RunStep]) -> Vec<Segment> {
     let mut out: Vec<Segment> = Vec::new();
     for step in steps {
-        if step.note {
+        if step.user {
+            out.push(Segment::Steer(step.summary.clone(), step.pending));
+        } else if step.note {
             out.push(Segment::Note(step.summary.clone()));
         } else if let Some(Segment::Tools(calls)) = out.last_mut() {
             calls.push(step.clone());
@@ -472,6 +476,7 @@ pub fn timeline(
         |item| item.clone(),
         move |(i, segment, place)| match segment {
             Segment::Note(text) => note_view(state, &text),
+            Segment::Steer(text, unread) => steer_view(state, &text, unread, place),
             Segment::Tools(calls) => match place {
                 Place::Live => live_box(state, calls, whole),
                 Place::Past => folded_box(state, i, calls, opened),
@@ -488,6 +493,49 @@ fn note_view(state: ReviewState, text: &str) -> floem::AnyView {
         .debug_name("run-note")
         .style(|s| s.width_full().min_width(0.0))
         .into_any()
+}
+
+/// What the reader told the agent, set off by a rule at its left. One
+/// not yet read says so: waiting while the run goes, never once it is
+/// over.
+fn steer_view(state: ReviewState, text: &str, unread: bool, place: Place) -> floem::AnyView {
+    let caption = match (unread, place) {
+        (false, _) => None,
+        (true, Place::Done) => Some("The agent ended without reading this"),
+        (true, _) => Some("The agent reads this after its current step"),
+    };
+    Stack::vertical((
+        Label::derived(|| "You".to_string()).style(|s| {
+            s.font_size(theme::TEXT_META)
+                .font_weight(theme::weight_emphasis())
+                .color(theme::FG_MUTED)
+                .selectable(false)
+        }),
+        Container::new(crate::review::markdown::render_linked(text, state))
+            .style(|s| s.width_full().min_width(0.0)),
+        match caption {
+            Some(caption) => Label::derived(move || caption.to_string())
+                .debug_name("run-steer-unread")
+                .style(|s| {
+                    s.font_size(theme::TEXT_META)
+                        .color(theme::FG_SUBTLE)
+                        .selectable(false)
+                })
+                .into_any(),
+            None => Empty::new().into_any(),
+        },
+    ))
+    .debug_name("run-steer")
+    .style(|s| {
+        s.flex_col()
+            .width_full()
+            .min_width(0.0)
+            .gap(2.0)
+            .padding_left(10.0)
+            .border_left(2.0)
+            .border_color(theme::BORDER)
+    })
+    .into_any()
 }
 
 /// The inset a run of calls sits in.
@@ -746,7 +794,12 @@ fn path_chip(state: ReviewState, path: String) -> floem::AnyView {
 
 /// The line over a run that is over, "Worked for 4m 12s · read 11 files,
 /// ran 4 commands", which opens its words and calls beneath it.
-pub fn run_fold(state: ReviewState, run: &RunRecord, steps: Vec<RunStep>) -> impl IntoView {
+pub fn run_fold(state: ReviewState, run: &RunRecord, mut steps: Vec<RunStep>) -> impl IntoView {
+    // A run that finished with the reader's words unread asked them as
+    // the next question, which the thread shows.
+    if run.status == RunStatus::Completed {
+        steps.retain(|step| !(step.user && step.pending));
+    }
     let run_id = run.id.clone();
     let open = Memo::new(move |_| state.expanded_runs.with(|e| e.contains(&run_id)));
     let (main, detail) = fold_words(run, &steps);
@@ -890,6 +943,7 @@ mod tests {
             ok: true,
             note: false,
             pending,
+            user: false,
         }
     }
 
@@ -918,6 +972,7 @@ mod tests {
             ok: true,
             note: true,
             pending: false,
+            user: false,
         };
         let steps = vec![
             note("Looking."),

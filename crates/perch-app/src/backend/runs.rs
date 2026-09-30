@@ -59,6 +59,9 @@ struct Entry {
     cancel: Notify,
     done: watch::Sender<bool>,
     process: Mutex<Option<perch_agent::Run>>,
+    /// What the reader said before the process came up, for `attach` to
+    /// give it. Guarded by `process`'s lock, which is taken first.
+    steers: Mutex<Vec<String>>,
     stop_reason: Mutex<TerminalReason>,
     pending_terminal: Mutex<Option<PendingTerminal>>,
 }
@@ -199,6 +202,7 @@ impl RunManager {
             cancel: Notify::new(),
             done,
             process: Mutex::new(None),
+            steers: Mutex::new(Vec::new()),
             stop_reason: Mutex::new(TerminalReason::UserStopped),
             pending_terminal: Mutex::new(None),
         });
@@ -364,12 +368,40 @@ impl RunManager {
     pub(crate) fn attach(&self, lease: &RunLease, process: perch_agent::Run) {
         if let Ok(mut slot) = lease.entry.process.lock() {
             *slot = Some(process.clone());
+            if let Ok(mut steers) = lease.entry.steers.lock() {
+                for text in steers.drain(..) {
+                    process.steer(&text);
+                }
+            }
         }
         if lease.entry.cancelled.load(Ordering::Acquire) {
             self.transition(&lease.entry.id, RunStatus::Stopping, None, None);
             process.cancel();
         } else {
             self.transition(&lease.entry.id, RunStatus::Running, None, None);
+        }
+    }
+
+    /// Give a live run the reader's message: now, or as its process comes
+    /// up. One the run never reads is its caller's to deal with.
+    pub(crate) fn steer(&self, id: &str, text: &str) {
+        let entry = self
+            .inner
+            .entries
+            .lock()
+            .ok()
+            .and_then(|entries| entries.get(id).cloned());
+        let Some(entry) = entry else { return };
+        let Ok(slot) = entry.process.lock() else { return };
+        match slot.as_ref() {
+            Some(process) => {
+                process.steer(text);
+            }
+            None => {
+                if let Ok(mut steers) = entry.steers.lock() {
+                    steers.push(text.to_string());
+                }
+            }
         }
     }
 

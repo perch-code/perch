@@ -1,7 +1,8 @@
 //! Run a coding agent as a child process and read what it does.
 //!
 //! Two agents: Claude Code, driven as `claude -p`, and Codex, driven as
-//! `codex exec`, each with JSON events on stdout. No SDK and no library:
+//! `codex app-server` or, for a review, `codex exec`, each with JSON
+//! events on stdout. No SDK and no library:
 //! the binary on `PATH`, a child process, one JSON object per line. Perch
 //! works with whatever version of the CLI the user has, and the parsers
 //! are the whole contract with them.
@@ -611,15 +612,17 @@ impl RunSpec {
             "stream-json".into(),
             "--verbose".into(),
         ];
-        // A Work run can ask: its prompt and Perch's answers go on stdin,
-        // and anything its permissions would prompt for comes to Perch.
+        // The prompt and anything the reader says while the run goes go
+        // on stdin, and each message comes back as the agent reads it. A
+        // Work run can also ask: anything its permissions would prompt
+        // for comes to Perch.
+        args.extend([
+            "--input-format".into(),
+            "stream-json".into(),
+            "--replay-user-messages".into(),
+        ]);
         if work {
-            args.extend([
-                "--input-format".into(),
-                "stream-json".into(),
-                "--permission-prompt-tool".into(),
-                "stdio".into(),
-            ]);
+            args.extend(["--permission-prompt-tool".into(), "stdio".into()]);
         }
         args.extend([
             "--model".into(),
@@ -669,34 +672,27 @@ impl RunSpec {
         }
         args.push("--disallowedTools".into());
         args.extend(denied);
-        if !work {
-            args.push("--".into());
-            args.push(self.prompt.clone());
-        }
         args
     }
 
-    /// The conversation a run that can ask holds with its CLI, or `None`
-    /// for one in print mode.
-    pub(crate) fn conversation(&self) -> Option<Conversation> {
-        let Mode::Work(grant) = &self.mode else {
-            return None;
-        };
-        Some(match self.backend {
+    /// The conversation the run holds with its CLI over stdin.
+    pub(crate) fn conversation(&self) -> Conversation {
+        match self.backend {
             Backend::ClaudeCode => Conversation::Claude(ClaudeHost::new(self.prompt.clone())),
-            Backend::Codex => Conversation::Codex(Box::new(CodexServer::new(self.codex_thread(grant)))),
-        })
+            Backend::Codex => Conversation::Codex(Box::new(CodexServer::new(self.codex_thread()))),
+        }
     }
 
-    /// What a Codex Work thread starts with: the directory, the model and
-    /// effort, the Work profile, the worktree's trust, and the user's MCP
-    /// servers turned off.
-    fn codex_thread(&self, grant: &WorkGrant) -> CodexThread {
-        let filesystem: serde_json::Map<String, serde_json::Value> = codex_work_entries(&self.cwd, grant)
-            .into_iter()
-            .map(|(path, access)| (path, serde_json::json!(access)))
-            .collect();
-        let trust = if grant.trust { "trusted" } else { "untrusted" };
+    /// What a Codex thread starts with: the directory, the model and
+    /// effort, the worktree's trust, and the user's MCP servers turned
+    /// off. A Work thread has the Work profile and asks; a question's is
+    /// read-only and never asks.
+    fn codex_thread(&self) -> CodexThread {
+        let grant = match &self.mode {
+            Mode::Work(grant) => Some(grant),
+            Mode::Ask => None,
+        };
+        let trust = if grant.is_some_and(|g| g.trust) { "trusted" } else { "untrusted" };
         let mut projects = serde_json::Map::new();
         projects.insert(self.cwd.to_string_lossy().into_owned(), serde_json::json!({"trust_level": trust}));
         projects.insert(real_path(&self.cwd).to_string_lossy().into_owned(), serde_json::json!({"trust_level": trust}));
@@ -704,6 +700,19 @@ impl RunSpec {
             .into_iter()
             .map(|name| (name, serde_json::json!({"enabled": false})))
             .collect();
+        let mut config = serde_json::json!({
+            "projects": projects,
+            "model_reasoning_effort": self.effort.name(),
+            "mcp_servers": mcp,
+        });
+        if let Some(grant) = grant {
+            let filesystem: serde_json::Map<String, serde_json::Value> = codex_work_entries(&self.cwd, grant)
+                .into_iter()
+                .map(|(path, access)| (path, serde_json::json!(access)))
+                .collect();
+            config["default_permissions"] = serde_json::json!(CODEX_WORK_PROFILE);
+            config["permissions"] = serde_json::json!({CODEX_WORK_PROFILE: {"filesystem": filesystem}});
+        }
         CodexThread {
             cwd: self.cwd.to_string_lossy().into_owned(),
             model: self.model.clone(),
@@ -711,21 +720,18 @@ impl RunSpec {
             prompt: self.prompt.clone(),
             developer_instructions: self.system.clone(),
             resume: self.resume.clone(),
-            reviewer: if grant.auto_review { "auto_review" } else { "user" }.to_string(),
-            config: serde_json::json!({
-                "default_permissions": CODEX_WORK_PROFILE,
-                "permissions": {CODEX_WORK_PROFILE: {"filesystem": filesystem}},
-                "projects": projects,
-                "model_reasoning_effort": self.effort.name(),
-                "mcp_servers": mcp,
-            }),
+            approval_policy: if grant.is_some() { "on-request" } else { "never" }.to_string(),
+            reviewer: grant.map(|g| if g.auto_review { "auto_review" } else { "user" }.to_string()),
+            sandbox: grant.is_none().then(|| "read-only".to_string()),
+            config,
         }
     }
 
-    /// `codex app-server` for a Work run: no plugins, hooks or apps, and
-    /// each of the user's MCP servers off, by name, where the name can be
-    /// a `-c` key; the thread's config turns them all off as well.
-    fn codex_server_args(&self) -> Vec<String> {
+    /// `codex app-server`: no plugins, hooks or apps, and each of the
+    /// user's MCP servers off, by name, where the name can be a `-c` key;
+    /// the thread's config turns them all off as well. The MCP servers
+    /// would run outside the sandbox, and a prompt could call them.
+    fn codex_args(&self) -> Vec<String> {
         let mut args: Vec<String> = ["app-server", "--disable", "plugins", "--disable", "hooks", "--disable", "apps"]
             .iter()
             .map(|a| a.to_string())
@@ -735,61 +741,6 @@ impl RunSpec {
                 args.extend(["-c".into(), format!("mcp_servers.{name}.enabled=false")]);
             }
         }
-        args
-    }
-
-    /// `codex exec --json`. A new thread takes `-s` and `-C`; `resume`
-    /// rejects both, so the sandbox goes in as config and the directory is
-    /// the thread's own. The model is repeated on resume because Codex
-    /// otherwise falls back to its config default. Either way the worktree
-    /// is marked untrusted so its `.codex/` directory is not read, and the
-    /// user's own config, plugins and hooks stay out too: the MCP servers
-    /// in it run outside the read-only sandbox, and a prompt can call them.
-    fn codex_args(&self) -> Vec<String> {
-        if matches!(self.mode, Mode::Work(_)) {
-            return self.codex_server_args();
-        }
-        let mut args = vec!["exec".to_string(), "--json".into()];
-        let ask = matches!(self.mode, Mode::Ask);
-        match &self.resume {
-            None => {
-                // Work's sandbox is a permission profile, which Codex will
-                // not take beside a sandbox mode.
-                if ask {
-                    args.extend(["-s".into(), "read-only".into()]);
-                }
-                args.extend(["-C".into(), self.cwd.to_string_lossy().into_owned()]);
-            }
-            Some(thread) => {
-                args.extend(["resume".into(), thread.clone()]);
-            }
-        }
-        // Accepted by `exec` and by `exec resume` alike, after the
-        // subcommand.
-        args.extend([
-            "--ignore-user-config".into(),
-            "--disable".into(),
-            "plugins".into(),
-            "--disable".into(),
-            "hooks".into(),
-        ]);
-        args.extend(["-m".into(), self.model.clone()]);
-        if ask && self.resume.is_some() {
-            args.extend(["-c".into(), "sandbox_mode=\"read-only\"".into()]);
-        }
-        args.extend(["-c".into(), codex_untrusted_project_override(&self.cwd)]);
-        args.extend([
-            "-c".into(),
-            format!("model_reasoning_effort={}", self.effort.name()),
-        ]);
-        if let Some(system) = &self.system {
-            args.extend([
-                "-c".into(),
-                format!("developer_instructions={}", toml_string(system)),
-            ]);
-        }
-        args.push("--".into());
-        args.push(self.prompt.clone());
         args
     }
 }
@@ -868,12 +819,15 @@ struct Parser {
     kind: ParserKind,
     /// Every stdout line, copied before it is parsed, when asked for.
     transcript: Option<LineLog>,
-    /// For a run that can ask: what to write back, and when to stop.
+    /// For a run on stdin: what to write back, and when to stop.
     conversation: Option<Conversation>,
     /// Lines the conversation wants written, drained by the pump.
     outbox: Vec<String>,
     /// The conversation is over: close stdin.
     close: bool,
+    /// A `Started` has gone out. Claude Code starts each turn afresh, and
+    /// a steer can make more than one, but the run starts once.
+    started: bool,
 }
 
 impl Parser {
@@ -891,10 +845,19 @@ impl Parser {
             conversation: None,
             outbox: Vec::new(),
             close: false,
+            started: false,
         }
     }
 
     fn parse_line(&mut self, line: &str) -> Result<Vec<RunEvent>, String> {
+        let mut events = self.parse_turn_line(line)?;
+        let started = self.started;
+        events.retain(|event| !(started && matches!(event, RunEvent::Started { .. })));
+        self.started |= events.iter().any(|e| matches!(e, RunEvent::Started { .. }));
+        Ok(events)
+    }
+
+    fn parse_turn_line(&mut self, line: &str) -> Result<Vec<RunEvent>, String> {
         if let Some(transcript) = &mut self.transcript {
             transcript.line(line);
         }
@@ -911,20 +874,33 @@ impl Parser {
             if conversation.parses_everything() {
                 return Ok(reply.events);
             }
-            let mut events = self.parse_print_line(line, &value);
+            let mut events = self.parse_print_line(line, &value, reply.more);
             events.extend(reply.events);
             return Ok(events);
         }
-        Ok(self.parse_print_line(line, &value))
+        Ok(self.parse_print_line(line, &value, false))
     }
 
-    fn parse_print_line(&mut self, line: &str, value: &serde_json::Value) -> Vec<RunEvent> {
+    /// Queue what gives the agent the reader's message, for a run on
+    /// stdin.
+    fn steer(&mut self, text: &str) {
+        if let Some(conversation) = self.conversation.as_mut() {
+            self.outbox.extend(conversation.steer(text));
+        }
+    }
+
+    /// `more`: the line ends a turn and another follows, so a result in
+    /// it is not the run's.
+    fn parse_print_line(&mut self, line: &str, value: &serde_json::Value, more: bool) -> Vec<RunEvent> {
         match &mut self.kind {
             ParserKind::Claude {
                 pending_permission_denial,
                 terminal_permission_denial,
             } => {
-                let events = parse_line(line);
+                let mut events = parse_line(line);
+                if more {
+                    events.retain(|event| !matches!(event, RunEvent::Finished { .. }));
+                }
                 if terminal_permission_denial.is_none() {
                     if parse::is_explicit_permission_denial(line) {
                         *pending_permission_denial = true;
@@ -983,6 +959,10 @@ pub enum RunEvent {
     },
     /// Something the agent said. One per message, not per token.
     Text(String),
+    /// The agent read a message the reader sent while it worked, by
+    /// `Run::steer`, as it was sent. It comes where the message landed
+    /// among the steps.
+    Steered(String),
     ToolCall {
         id: String,
         name: String,
@@ -1331,8 +1311,16 @@ unsafe fn watchdog_fork_child(
 pub struct Run {
     cancel: Arc<Cancellation>,
     outcome: watch::Receiver<Option<RunOutcome>>,
-    /// Where answers to approval requests go, for a run that can ask.
-    answers: Option<UnboundedSender<(String, Decision)>>,
+    /// Where answers to approval requests and the reader's steers go,
+    /// for a run on stdin.
+    inputs: Option<UnboundedSender<Input>>,
+}
+
+/// What the reader gives a run on stdin while it goes.
+#[derive(Debug)]
+enum Input {
+    Answer(String, Decision),
+    Steer(String),
 }
 
 impl Run {
@@ -1342,15 +1330,28 @@ impl Run {
     /// `Failed`, and `Stopped` is the last event sent.
     pub fn spawn(spec: RunSpec, events: UnboundedSender<RunEvent>) -> Result<Run, Error> {
         let args = spec.args();
-        let conversation = spec.conversation();
+        let conversation = Some(spec.conversation());
         Self::spawn_process(spec.backend, spec.binary, spec.cwd, args, None, conversation, events)
     }
 
     /// Answer approval request `id`. False when the run cannot ask, or
     /// has already ended.
     pub fn answer(&self, id: &str, decision: Decision) -> bool {
-        match &self.answers {
-            Some(answers) => answers.send((id.to_string(), decision)).is_ok(),
+        self.send(Input::Answer(id.to_string(), decision))
+    }
+
+    /// Tell the agent something more while it works. It reads it once its
+    /// current step is done, and a `RunEvent::Steered` says where. False
+    /// when the run has stopped taking input: it is a review, or its
+    /// last turn has ended. A steer that goes in just as the run ends
+    /// may still never be read; no `Steered` comes for it.
+    pub fn steer(&self, text: &str) -> bool {
+        self.send(Input::Steer(text.to_string()))
+    }
+
+    fn send(&self, input: Input) -> bool {
+        match &self.inputs {
+            Some(inputs) => inputs.send(input).is_ok(),
             None => false,
         }
     }
@@ -1407,8 +1408,8 @@ impl Run {
         command
             .args(args)
             .current_dir(&cwd)
-            // A run that can ask is answered on stdin; one that cannot
-            // gets nothing there.
+            // A run with a conversation holds it on stdin; a review gets
+            // nothing there.
             .stdin(if conversation.is_some() {
                 std::process::Stdio::piped()
             } else {
@@ -1447,16 +1448,16 @@ impl Run {
             wake: Notify::new(),
         });
         let (outcome_tx, outcome) = watch::channel(None);
-        let (answers_tx, answers_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (inputs_tx, inputs_rx) = tokio::sync::mpsc::unbounded_channel();
         let opening = conversation.as_mut().map(Conversation::opening).unwrap_or_default();
         let mut io = Io {
             stdin: child.stdin.take(),
-            answers: conversation.is_some().then_some(answers_rx),
+            inputs: conversation.is_some().then_some(inputs_rx),
         };
         let run = Run {
             cancel: cancel.clone(),
             outcome,
-            answers: conversation.is_some().then_some(answers_tx),
+            inputs: conversation.is_some().then_some(inputs_tx),
         };
 
         let stdout = child.stdout.take().expect("piped stdout");
@@ -1578,18 +1579,18 @@ impl From<LineFailure> for Exit {
     }
 }
 
-/// A run's stdin and the answers waiting to be written to it. Both are
-/// `None` for a run that cannot ask.
+/// A run's stdin and the reader's inputs waiting to be written to it.
+/// Both are `None` for a run without a conversation.
 struct Io {
     stdin: Option<tokio::process::ChildStdin>,
-    answers: Option<UnboundedReceiver<(String, Decision)>>,
+    inputs: Option<UnboundedReceiver<Input>>,
 }
 
 impl Io {
-    /// The next answer, or never for a run with none to wait for.
-    async fn next_answer(&mut self) -> Option<(String, Decision)> {
-        match self.answers.as_mut() {
-            Some(answers) => answers.recv().await,
+    /// The next input, or never for a run with none to wait for.
+    async fn next_input(&mut self) -> Option<Input> {
+        match self.inputs.as_mut() {
+            Some(inputs) => inputs.recv().await,
             None => std::future::pending().await,
         }
     }
@@ -1615,7 +1616,7 @@ impl Io {
         }
         if parser.close {
             self.stdin = None;
-            self.answers = None;
+            self.inputs = None;
         }
     }
 }
@@ -1647,14 +1648,18 @@ async fn drive_until_exit(
                 cleanup_survivors(process_group).await;
                 return Exit::Process { status, terminal, permission_denied: parser.permission_denied() };
             }
-            answer = io.next_answer() => match answer {
-                Some((id, decision)) => {
+            input = io.next_input() => match input {
+                Some(Input::Answer(id, decision)) => {
                     if let Some(line) = parser.conversation.as_mut().and_then(|c| c.answer(&id, &decision)) {
                         parser.outbox.push(line);
                     }
                     io.flush(parser).await;
                 }
-                None => io.answers = None,
+                Some(Input::Steer(text)) => {
+                    parser.steer(&text);
+                    io.flush(parser).await;
+                }
+                None => io.inputs = None,
             },
             line = lines.next_line() => match line {
                 Ok(Some(line)) => {
@@ -1999,7 +2004,10 @@ mod tests {
         };
         let args = spec.args();
         assert_eq!(args[0], "-p");
-        assert_eq!(&args[args.len() - 2..], ["--", "why?"]);
+        assert!(!args.contains(&"why?".to_string()), "the prompt goes on stdin");
+        assert!(args.windows(2).any(|w| w == ["--input-format", "stream-json"]));
+        assert!(args.contains(&"--replay-user-messages".to_string()));
+        assert!(!args.contains(&"--permission-prompt-tool".to_string()), "a question never asks");
         assert!(args.windows(2).any(|w| w == ["--effort", "high"]));
         assert!(args
             .windows(2)
@@ -2020,10 +2028,9 @@ mod tests {
     fn the_network_tools_are_denied_whatever_the_user_allows() {
         let args = claude(Effort::Medium).args();
         let denied = args.iter().position(|a| a == "--disallowedTools").unwrap();
-        let end = args.iter().position(|a| a == "--").unwrap();
         for tool in ["WebFetch", "WebSearch", "Edit", "Write"] {
             let at = args.iter().position(|a| a == tool).unwrap();
-            assert!(denied < at && at < end, "{tool} is in the denied list");
+            assert!(denied < at, "{tool} is in the denied list");
         }
     }
 
@@ -2148,7 +2155,7 @@ mod tests {
                 assert!(args.windows(2).any(|w| w == ["--permission-prompt-tool", "stdio"]));
                 assert!(!args.contains(&"do it".to_string()), "the prompt goes on stdin");
                 assert!(!args.contains(&"--".to_string()));
-                assert!(spec.conversation().is_some());
+                assert!(matches!(spec.conversation(), Conversation::Claude(_)));
                 let allowed = args.iter().position(|a| a == "--allowedTools").unwrap();
                 let denied = args.iter().position(|a| a == "--disallowedTools").unwrap();
                 let allowed = &args[allowed + 1..denied];
@@ -2177,8 +2184,8 @@ mod tests {
             }
         }
         let ask = RunSpec { mode: Mode::Ask, ..work(Backend::ClaudeCode, WorkGrant::default(), None) };
-        assert!(ask.conversation().is_none(), "a question stays in print mode");
-        assert!(!ask.args().contains(&"--input-format".to_string()));
+        assert!(matches!(ask.conversation(), Conversation::Claude(_)), "a question can be steered too");
+        assert!(!ask.args().contains(&"--permission-prompt-tool".to_string()));
     }
 
     #[test]
@@ -2192,14 +2199,14 @@ mod tests {
         let ask = RunSpec { mode: Mode::Ask, ..work(Backend::ClaudeCode, WorkGrant::default(), None) }.args();
         assert!(ask.windows(2).any(|w| w == ["--permission-mode", "default"]), "a question never is");
 
-        let Some(Conversation::Codex(server)) = work(Backend::Codex, auto, None).conversation() else {
+        let Conversation::Codex(server) = work(Backend::Codex, auto, None).conversation() else {
             unreachable!()
         };
-        assert_eq!(server_thread(&server).reviewer, "auto_review");
-        let Some(Conversation::Codex(server)) = work(Backend::Codex, WorkGrant::default(), None).conversation() else {
+        assert_eq!(server_thread(&server).reviewer.as_deref(), Some("auto_review"));
+        let Conversation::Codex(server) = work(Backend::Codex, WorkGrant::default(), None).conversation() else {
             unreachable!()
         };
-        assert_eq!(server_thread(&server).reviewer, "user");
+        assert_eq!(server_thread(&server).reviewer.as_deref(), Some("user"));
     }
 
     #[test]
@@ -2226,7 +2233,7 @@ mod tests {
         let args = spec.args();
         assert_nothing_bypassed(&args);
         assert_eq!(&args[..7], ["app-server", "--disable", "plugins", "--disable", "hooks", "--disable", "apps"]);
-        let Some(Conversation::Codex(server)) = spec.conversation() else {
+        let Conversation::Codex(server) = spec.conversation() else {
             panic!("a Codex Work run talks to an app-server");
         };
         let config = &server_thread(&server).config;
@@ -2242,13 +2249,32 @@ mod tests {
         assert_eq!(config["projects"][root.as_str()]["trust_level"], "untrusted");
 
         let trusted = work(Backend::Codex, WorkGrant { trust: true, ..WorkGrant::default() }, Some("th-1"));
-        let Some(Conversation::Codex(server)) = trusted.conversation() else { unreachable!() };
+        let Conversation::Codex(server) = trusted.conversation() else { unreachable!() };
         assert_eq!(server_thread(&server).config["projects"][root.as_str()]["trust_level"], "trusted");
         assert_eq!(server_thread(&server).resume.as_deref(), Some("th-1"));
 
-        let ask = RunSpec { mode: Mode::Ask, ..work(Backend::Codex, WorkGrant::default(), None) }.args();
-        assert_eq!(ask[0], "exec", "a question stays on exec");
-        assert!(ask.windows(2).any(|w| w == ["-s", "read-only"]));
+    }
+
+    #[test]
+    fn a_codex_question_is_a_read_only_app_server_thread_that_never_asks() {
+        let real = std::fs::canonicalize("/tmp").unwrap();
+        let root = real.to_string_lossy().to_string();
+        for resume in [None, Some("th-1")] {
+            let spec = RunSpec { mode: Mode::Ask, ..work(Backend::Codex, full_grant(), resume) };
+            let args = spec.args();
+            assert_nothing_bypassed(&args);
+            assert_eq!(&args[..7], ["app-server", "--disable", "plugins", "--disable", "hooks", "--disable", "apps"]);
+            let Conversation::Codex(server) = spec.conversation() else { unreachable!() };
+            let thread = server_thread(&server);
+            assert_eq!(thread.sandbox.as_deref(), Some("read-only"));
+            assert_eq!(thread.approval_policy, "never");
+            assert_eq!(thread.reviewer, None);
+            assert_eq!(thread.resume.as_deref(), resume);
+            assert!(thread.config.get("default_permissions").is_none(), "no Work profile");
+            assert!(thread.config.get("permissions").is_none());
+            assert_eq!(thread.config["projects"][root.as_str()]["trust_level"], "untrusted", "never trusted");
+            assert_eq!(thread.config["model_reasoning_effort"], "high");
+        }
     }
 
     #[test]
@@ -2546,102 +2572,23 @@ mod tests {
     }
 
     #[test]
-    fn a_new_codex_run_is_sandboxed_in_its_directory() {
-        let args = codex(None).args();
-        assert_eq!(&args[..2], ["exec", "--json"]);
-        assert!(args.windows(2).any(|w| w == ["-s", "read-only"]));
-        assert!(args.windows(2).any(|w| w == ["-C", "/tmp/w t"]));
-        assert!(args.windows(2).any(|w| w == ["-m", "gpt-5.6-sol"]));
-        assert!(args
-            .windows(2)
-            .any(|w| w == ["-c", "model_reasoning_effort=high"]));
-        assert!(args
-            .windows(2)
-            .any(|w| w == ["-c", "developer_instructions=\"be \\\"brief\\\"\\nplease\""]));
-        assert_eq!(&args[args.len() - 2..], ["--", "why?"]);
-        assert!(!args.contains(&"resume".to_string()));
-        assert!(!args.iter().any(|a| a.starts_with("sandbox_mode")));
-        assert!(args.windows(2).any(|w| w
-            == [
-                "-c",
-                &codex_untrusted_project_override(std::path::Path::new("/tmp/w t"))
-            ]));
-        assert!(args.iter().any(|a| a.contains("trust_level=\"untrusted\"")));
-        assert!(!args.iter().any(|a| a.contains("ephemeral")
-            || a.contains("dangerously")
-            || a.contains("approve")));
-        assert!(
-            !args.iter().any(|a| a.starts_with("Bash(")),
-            "the tool list is Claude's"
-        );
-        assert_codex_without_user_config(&args);
-    }
-
-    /// The user's `~/.codex/config.toml`, and the MCP servers, plugins and
-    /// hooks it names, stay out of every Codex run, first or resumed.
-    fn assert_codex_without_user_config(args: &[String]) {
-        assert!(args.contains(&"--ignore-user-config".to_string()));
-        assert!(args.windows(2).any(|w| w == ["--disable", "plugins"]));
-        assert!(args.windows(2).any(|w| w == ["--disable", "hooks"]));
-    }
-
-    #[test]
-    fn a_codex_resume_repeats_the_model_and_sandboxes_by_config() {
-        let args = codex(Some("01a0b584-d485-7d52-84b0-231e5b9b82d4")).args();
-        assert_eq!(
-            &args[..4],
-            [
-                "exec",
-                "--json",
-                "resume",
-                "01a0b584-d485-7d52-84b0-231e5b9b82d4"
-            ]
-        );
-        assert!(args.windows(2).any(|w| w == ["-m", "gpt-5.6-sol"]));
-        assert!(args
-            .windows(2)
-            .any(|w| w == ["-c", "sandbox_mode=\"read-only\""]));
-        assert!(args
-            .windows(2)
-            .any(|w| w == ["-c", "model_reasoning_effort=high"]));
-        assert_eq!(&args[args.len() - 2..], ["--", "why?"]);
-        assert!(!args.contains(&"-s".to_string()));
-        assert!(!args.contains(&"-C".to_string()));
-        assert!(
-            args.windows(2).any(|w| w
-                == [
-                    "-c",
-                    &codex_untrusted_project_override(std::path::Path::new("/tmp/w t"))
-                ]),
-            "the resumed thread's directory stays untrusted"
-        );
-        assert_codex_without_user_config(&args);
-    }
-
-    #[test]
     fn codex_efforts_pass_by_their_own_name() {
         let mut spec = codex(None);
         spec.effort = Effort::Ultra;
-        assert!(spec
-            .args()
-            .windows(2)
-            .any(|w| w == ["-c", "model_reasoning_effort=ultra"]));
+        let Conversation::Codex(server) = spec.conversation() else { unreachable!() };
+        let thread = server_thread(&server);
+        assert_eq!(thread.effort, "ultra");
+        assert_eq!(thread.config["model_reasoning_effort"], "ultra");
         assert!(!spec.args().iter().any(|a| a.contains("ultracode")));
     }
 
     #[test]
-    fn a_question_that_starts_with_a_dash_is_still_the_prompt() {
+    fn a_question_that_starts_with_a_dash_is_never_an_option() {
         for backend in Backend::ALL {
             let mut spec = claude(Effort::Low);
             spec.backend = backend;
             spec.prompt = "-1 comes back here. Why?".into();
-            let args = spec.args();
-            assert_eq!(
-                &args[args.len() - 2..],
-                ["--", "-1 comes back here. Why?"],
-                "{}",
-                backend.name()
-            );
+            assert!(!spec.args().contains(&spec.prompt), "{}: the prompt goes on stdin", backend.name());
         }
     }
 

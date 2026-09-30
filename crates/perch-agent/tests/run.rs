@@ -433,11 +433,16 @@ async fn valid_unknown_json_is_ignored_without_failing_the_stream() {
 #[tokio::test]
 async fn a_codex_run_ends_with_its_thread_and_the_time_it_took() {
     let tmp = tempfile::tempdir().unwrap();
-    let thread = r#"{"type":"thread.started","thread_id":"01a0b584-d485-7d52-84b0-231e5b9b82d4"}"#;
-    let done = r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#;
     let bin = fake_agent(
         tmp.path(),
-        &format!("echo '{thread}'\nsleep 0.2\necho '{done}'"),
+        r#"read l; echo '{"id":1,"result":{}}'
+read l
+read l; echo '{"id":2,"result":{"thread":{"id":"01a0b584-d485-7d52-84b0-231e5b9b82d4"}}}'
+read l; echo '{"id":3,"result":{"turn":{"id":"tu-1"}}}'
+echo '{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"inputTokens":1,"outputTokens":1}}}}'
+sleep 0.2
+echo '{"method":"turn/completed","params":{"turn":{"id":"tu-1","status":"completed"}}}'
+read eof || true"#,
     );
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let mut spec = spec(bin, tmp.path().to_path_buf());
@@ -629,4 +634,149 @@ sleep 30
         .expect("the stop went through");
     assert!(matches!(outcome, RunOutcome::Stopped { .. }), "{outcome:?}");
     assert!(!run.answer("r1", perch_agent::Decision::Allow), "nothing to answer now");
+}
+
+/// Collect events until one matches `at`, steer with `text`, and collect
+/// the rest.
+async fn steer_at(
+    run: &Run,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<RunEvent>,
+    at: impl Fn(&RunEvent) -> bool,
+    text: &str,
+) -> Vec<RunEvent> {
+    let mut events = Vec::new();
+    let mut steered = false;
+    while let Some(event) = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("the run went quiet")
+    {
+        if !steered && at(&event) {
+            steered = true;
+            assert!(run.steer(text));
+        }
+        events.push(event);
+    }
+    assert!(steered, "{events:?}");
+    events
+}
+
+fn steered_at(events: &[RunEvent]) -> usize {
+    events
+        .iter()
+        .position(|e| matches!(e, RunEvent::Steered(t) if t == "Skip the tests"))
+        .unwrap_or_else(|| panic!("never steered: {events:?}"))
+}
+
+#[tokio::test]
+async fn a_claude_question_is_steered_between_its_steps() {
+    let dir = tempfile::tempdir().unwrap();
+    let record = dir.path().join("wrote");
+    let body = format!(
+        r#"read init
+read user
+echo '{{"type":"system","subtype":"init","session_id":"s1","model":"m"}}'
+echo '{{"type":"user","message":{{"role":"user","content":"hi"}},"parent_tool_use_id":null,"isReplay":true}}'
+echo '{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"t1","name":"Bash","input":{{"command":"cargo test"}}}}]}},"parent_tool_use_id":null}}'
+read steer
+printf '%s\n' "$steer" > {record}
+echo '{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"t1","content":"ok"}}]}},"parent_tool_use_id":null}}'
+echo '{{"type":"user","message":{{"role":"user","content":"Skip the tests"}},"parent_tool_use_id":null,"isReplay":true}}'
+echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Skipped."}}]}},"parent_tool_use_id":null}}'
+echo '{{"type":"result","subtype":"success","result":"Skipped.","session_id":"s1"}}'
+read eof || true
+"#,
+        record = record.display()
+    );
+    let binary = fake_agent(dir.path(), &body);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let run = Run::spawn(spec(binary, dir.path().to_path_buf()), tx).unwrap();
+
+    let events = steer_at(&run, &mut rx, |e| matches!(e, RunEvent::ToolCall { .. }), "Skip the tests").await;
+    let at = steered_at(&events);
+    assert!(matches!(events[at - 1], RunEvent::ToolResult { .. }), "it lands after the step: {events:?}");
+    assert!(matches!(events[at + 1], RunEvent::Text(ref t) if t == "Skipped."), "{events:?}");
+    assert_eq!(events.iter().filter(|e| matches!(e, RunEvent::Steered(_))).count(), 1, "not the prompt");
+    assert!(matches!(events.last(), Some(RunEvent::Finished { .. })));
+    let wrote: serde_json::Value = serde_json::from_str(std::fs::read_to_string(&record).unwrap().trim()).unwrap();
+    assert_eq!(wrote["type"], "user");
+    assert_eq!(wrote["message"]["content"], "Skip the tests");
+    assert!(!run.steer("more"), "a finished run takes nothing");
+}
+
+#[tokio::test]
+async fn a_claude_steer_the_turn_ended_before_reading_is_another_turn_of_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    // The first result comes after the steer was written but before it
+    // was read. Stdin must stay open for the turn that reads it, or the
+    // CLI would exit on EOF before it.
+    let body = r#"read init
+read user
+echo '{"type":"system","subtype":"init","session_id":"s1","model":"m"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]},"parent_tool_use_id":null}'
+read steer
+echo '{"type":"result","subtype":"success","result":"Done.","session_id":"s1"}'
+echo '{"type":"system","subtype":"init","session_id":"s1","model":"m"}'
+echo '{"type":"user","message":{"role":"user","content":"Skip the tests"},"parent_tool_use_id":null,"isReplay":true}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Skipped."}]},"parent_tool_use_id":null}'
+echo '{"type":"result","subtype":"success","result":"Skipped.","session_id":"s1"}'
+read eof || true
+"#;
+    let binary = fake_agent(dir.path(), body);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let run = Run::spawn(spec(binary, dir.path().to_path_buf()), tx).unwrap();
+    let events = steer_at(&run, &mut rx, |e| matches!(e, RunEvent::Text(_)), "Skip the tests").await;
+
+    let at = steered_at(&events);
+    assert!(matches!(events[at + 1], RunEvent::Text(ref t) if t == "Skipped."), "{events:?}");
+    assert_eq!(events.iter().filter(|e| matches!(e, RunEvent::Started { .. })).count(), 1, "the run starts once: {events:?}");
+    assert_eq!(
+        events.iter().filter(|e| matches!(e, RunEvent::Finished { .. })).count(),
+        1,
+        "the first turn's result is not the run's: {events:?}"
+    );
+    assert!(matches!(events.last(), Some(RunEvent::Finished { .. })));
+    assert!(matches!(run.wait().await, RunOutcome::Finished { .. }));
+}
+
+#[tokio::test]
+async fn a_codex_steer_goes_to_its_turn_or_starts_the_next() {
+    let dir = tempfile::tempdir().unwrap();
+    let record = dir.path().join("wrote");
+    let body = format!(
+        r#"read l; echo '{{"id":1,"result":{{}}}}'
+read l
+read l; echo '{{"id":2,"result":{{"thread":{{"id":"th-1"}}}}}}'
+read l; echo '{{"id":3,"result":{{"turn":{{"id":"tu-1"}}}}}}'
+echo '{{"method":"item/started","params":{{"item":{{"type":"commandExecution","id":"c1","command":"cargo test"}}}}}}'
+read steer; printf '%s\n' "$steer" > {record}
+echo '{{"method":"item/completed","params":{{"item":{{"type":"commandExecution","id":"c1","command":"cargo test","exitCode":0}}}}}}'
+echo '{{"method":"turn/completed","params":{{"turn":{{"id":"tu-1","status":"completed"}}}}}}'
+echo '{{"id":100,"error":{{"code":-32600,"message":"no active turn to steer"}}}}'
+read next; printf '%s\n' "$next" >> {record}
+echo '{{"id":101,"result":{{"turn":{{"id":"tu-2"}}}}}}'
+echo '{{"method":"item/completed","params":{{"item":{{"type":"userMessage","id":"u2","content":[{{"type":"text","text":"Skip the tests"}}]}}}}}}'
+echo '{{"method":"item/completed","params":{{"item":{{"type":"agentMessage","id":"m2","text":"Skipped."}}}}}}'
+echo '{{"method":"turn/completed","params":{{"turn":{{"id":"tu-2","status":"completed"}}}}}}'
+read eof || true
+"#,
+        record = record.display()
+    );
+    let binary = fake_agent(dir.path(), &body);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut spec = spec(binary, dir.path().to_path_buf());
+    spec.backend = Backend::Codex;
+    let run = Run::spawn(spec, tx).unwrap();
+
+    let events = steer_at(&run, &mut rx, |e| matches!(e, RunEvent::ToolCall { .. }), "Skip the tests").await;
+    let at = steered_at(&events);
+    assert!(matches!(events[at + 1], RunEvent::Text(ref t) if t == "Skipped."), "{events:?}");
+    assert_eq!(events.iter().filter(|e| matches!(e, RunEvent::Finished { .. })).count(), 1, "{events:?}");
+    assert!(matches!(events.last(), Some(RunEvent::Finished { .. })));
+    let wrote = std::fs::read_to_string(&record).unwrap();
+    let lines: Vec<serde_json::Value> = wrote.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines[0]["method"], "turn/steer");
+    assert_eq!(lines[0]["params"]["expectedTurnId"], "tu-1");
+    assert_eq!(lines[0]["params"]["input"][0]["text"], "Skip the tests");
+    assert_eq!(lines[1]["method"], "turn/start", "the steer missed its turn: {wrote}");
+    assert_eq!(lines[1]["params"]["input"][0]["text"], "Skip the tests");
 }

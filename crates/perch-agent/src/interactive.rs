@@ -1,7 +1,8 @@
-//! Conversations with a CLI over its stdin, for runs that can ask.
+//! Conversations with a CLI over its stdin, for every run but a review.
 //!
 //! A Work run started in print mode can only be refused at its sandbox's
-//! edge. Started this way it asks, and Perch answers. Claude Code is
+//! edge. Started this way it asks, and Perch answers. A question never
+//! asks, but is held the same way so that it can be steered. Claude Code is
 //! driven by its host permission protocol: stream-json in and out, with
 //! `can_use_tool` control requests for anything its permissions would
 //! otherwise prompt for. Codex is driven through `codex app-server`, a
@@ -11,8 +12,14 @@
 //! A conversation is told each line the CLI prints. It says what to write
 //! back, which events the line makes, and when stdin should close, which
 //! is how both CLIs are told there is nothing more to do.
+//!
+//! The reader can also steer a run: say something more while it works.
+//! Claude Code reads a user message that comes mid-turn once its current
+//! tool call returns; Codex takes one by `turn/steer`. Each CLI says where
+//! the message landed, and stdin stays open until every one has. One the
+//! turn ended before reading starts another turn in the same run.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use serde_json::{json, Value};
 
@@ -71,6 +78,9 @@ pub(crate) struct Reply {
     pub events: Vec<RunEvent>,
     /// Close stdin: the CLI is done and exits on EOF.
     pub close: bool,
+    /// The line ends a turn but not the run: a steer the turn ended
+    /// before reading makes another. Its `Finished` is not the run's.
+    pub more: bool,
 }
 
 pub(crate) enum Conversation {
@@ -103,6 +113,15 @@ impl Conversation {
         }
     }
 
+    /// The lines that give the agent a message from the reader while it
+    /// works. It lands as a `RunEvent::Steered` when the agent reads it.
+    pub fn steer(&mut self, text: &str) -> Vec<String> {
+        match self {
+            Conversation::Claude(c) => c.steer(text),
+            Conversation::Codex(c) => c.steer(text),
+        }
+    }
+
     /// Whether this conversation's lines are parsed by it alone, rather
     /// than by the backend's print-mode parser first.
     pub fn parses_everything(&self) -> bool {
@@ -115,15 +134,19 @@ impl Conversation {
 // ---------------------------------------------------------------------
 
 /// Claude Code with `--input-format stream-json` and
-/// `--permission-prompt-tool stdio`. Its output is the same stream-json
-/// the print parser reads; this adds the control requests, and closes
-/// stdin after the result so the process exits.
+/// `--replay-user-messages`, and for Work `--permission-prompt-tool
+/// stdio`. Its output is the same stream-json the print parser reads;
+/// this adds the control requests and the reader's steers, and closes
+/// stdin after the last result so the process exits.
 pub(crate) struct ClaudeHost {
     prompt: String,
     /// Each pending request's input, sent back as `updatedInput` when
     /// it is allowed, since the CLI takes the input to run from the
     /// answer.
     pending: HashMap<String, Value>,
+    /// The reader's messages the agent has not read yet, oldest first.
+    /// Claude Code replays each as it reads it.
+    steers: VecDeque<String>,
 }
 
 impl ClaudeHost {
@@ -131,7 +154,13 @@ impl ClaudeHost {
         Self {
             prompt,
             pending: HashMap::new(),
+            steers: VecDeque::new(),
         }
+    }
+
+    fn steer(&mut self, text: &str) -> Vec<String> {
+        self.steers.push_back(text.to_string());
+        vec![claude_user(text)]
     }
 
     fn opening(&mut self) -> Vec<String> {
@@ -142,11 +171,7 @@ impl ClaudeHost {
                 "request": {"subtype": "initialize"},
             })
             .to_string(),
-            json!({
-                "type": "user",
-                "message": {"role": "user", "content": self.prompt},
-            })
-            .to_string(),
+            claude_user(&self.prompt),
         ]
     }
 
@@ -182,10 +207,42 @@ impl ClaudeHost {
                     ..Reply::default()
                 }
             }
-            Some("result") => Reply {
-                close: true,
-                ..Reply::default()
-            },
+            // A replayed message is one the agent has just read.
+            // Subagents' prompts and tool results are not replays.
+            Some("user")
+                if v.get("isReplay").and_then(Value::as_bool) == Some(true)
+                    && v.get("parent_tool_use_id").is_none_or(Value::is_null) =>
+            {
+                let content = v.pointer("/message/content").and_then(Value::as_str);
+                match (content, self.steers.front()) {
+                    (Some(content), Some(front)) if content == front => {
+                        let text = self.steers.pop_front().unwrap_or_default();
+                        Reply {
+                            events: vec![RunEvent::Steered(text)],
+                            ..Reply::default()
+                        }
+                    }
+                    _ => Reply::default(),
+                }
+            }
+            // A steer the turn ended before reading is the next turn's
+            // prompt: Claude Code starts it on its own, and it ends in a
+            // result of its own. A failed turn ends the run regardless.
+            Some("result") => {
+                let failed = v.get("is_error").and_then(Value::as_bool) == Some(true)
+                    || v.get("subtype").and_then(Value::as_str).is_some_and(|s| s != "success");
+                if self.steers.is_empty() || failed {
+                    Reply {
+                        close: true,
+                        ..Reply::default()
+                    }
+                } else {
+                    Reply {
+                        more: true,
+                        ..Reply::default()
+                    }
+                }
+            }
             _ => Reply::default(),
         }
     }
@@ -204,6 +261,14 @@ impl ClaudeHost {
             .to_string(),
         )
     }
+}
+
+fn claude_user(text: &str) -> String {
+    json!({
+        "type": "user",
+        "message": {"role": "user", "content": text},
+    })
+    .to_string()
 }
 
 /// A `can_use_tool` request as Perch shows it.
@@ -266,22 +331,40 @@ pub(crate) struct CodexThread {
     pub resume: Option<String>,
     /// Config for the thread: the Work profile, trust, and the like.
     pub config: Value,
+    /// `on-request` for Work, which asks; `never` for a question, which
+    /// is refused at its read-only sandbox's edge instead.
+    pub approval_policy: String,
     /// Who approval requests go to: `user`, which is Perch, or Codex's
-    /// own `auto_review`.
-    pub reviewer: String,
+    /// own `auto_review`. `None` for a thread that never asks.
+    pub reviewer: Option<String>,
+    /// The sandbox mode, for a question: `read-only`. Work's sandbox is
+    /// its permission profile, which Codex will not take beside a mode.
+    pub sandbox: Option<String>,
 }
 
 const INITIALIZE: u64 = 1;
 const THREAD: u64 = 2;
 const TURN: u64 = 3;
+/// Perch's later requests count up from here: steers, and the turns that
+/// carry a steer the last turn ended before reading.
+const LATER: u64 = 100;
 
 /// `codex app-server` over stdio. Perch starts or resumes one thread,
-/// starts one turn in it, turns the item notifications into the steps
-/// `codex exec` gave, and closes stdin when the turn completes, which
-/// ends the server.
+/// starts a turn in it, turns the item notifications into the steps
+/// `codex exec` gave, and closes stdin when the last turn completes,
+/// which ends the server.
 pub(crate) struct CodexServer {
     thread: CodexThread,
     thread_id: String,
+    /// The turn going now, once Codex has named it. A steer names it.
+    turn: Option<String>,
+    /// The reader's messages the agent has not read yet, oldest first.
+    steers: VecDeque<String>,
+    /// How many of `steers`, from the front, have gone to Codex.
+    sent: usize,
+    next_id: u64,
+    /// The ids of the later `turn/start` requests.
+    later_turns: std::collections::HashSet<u64>,
     /// Commands that have begun, so a completion never marks the wrong
     /// step, as in `CodexParser`.
     started: std::collections::HashSet<String>,
@@ -297,10 +380,79 @@ impl CodexServer {
         Self {
             thread,
             thread_id: String::new(),
+            turn: None,
+            steers: VecDeque::new(),
+            sent: 0,
+            next_id: LATER,
+            later_turns: Default::default(),
             started: Default::default(),
             pending: HashMap::new(),
             errors: 0,
             done: false,
+        }
+    }
+
+    fn later_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    fn steer(&mut self, text: &str) -> Vec<String> {
+        if self.done {
+            return Vec::new();
+        }
+        self.steers.push_back(text.to_string());
+        // Before Codex names the turn, the steer waits for it.
+        self.send_steers()
+    }
+
+    /// `turn/steer` for each steer not yet sent, when a turn is going.
+    fn send_steers(&mut self) -> Vec<String> {
+        let Some(turn) = self.turn.clone() else {
+            return Vec::new();
+        };
+        let unsent: Vec<String> = self.steers.iter().skip(self.sent).cloned().collect();
+        self.sent = self.steers.len();
+        unsent
+            .into_iter()
+            .map(|text| {
+                let id = self.later_id();
+                request(
+                    id,
+                    "turn/steer",
+                    json!({
+                        "threadId": self.thread_id,
+                        "expectedTurnId": turn,
+                        "input": [{"type": "text", "text": text}],
+                    }),
+                )
+            })
+            .collect()
+    }
+
+    fn start_turn(&mut self, id: u64, text: &str) -> String {
+        request(
+            id,
+            "turn/start",
+            json!({
+                "threadId": self.thread_id,
+                "input": [{"type": "text", "text": text}],
+                "effort": self.thread.effort,
+            }),
+        )
+    }
+
+    fn finish(&mut self) -> Reply {
+        self.done = true;
+        Reply {
+            events: vec![RunEvent::Finished {
+                session_id: self.thread_id.clone(),
+                cost_usd: None,
+                duration_ms: 0,
+            }],
+            close: true,
+            ..Reply::default()
         }
     }
 
@@ -321,10 +473,15 @@ impl CodexServer {
         let mut params = json!({
             "cwd": self.thread.cwd,
             "model": self.thread.model,
-            "approvalPolicy": "on-request",
-            "approvalsReviewer": self.thread.reviewer,
+            "approvalPolicy": self.thread.approval_policy,
             "config": self.thread.config,
         });
+        if let Some(reviewer) = &self.thread.reviewer {
+            params["approvalsReviewer"] = json!(reviewer);
+        }
+        if let Some(sandbox) = &self.thread.sandbox {
+            params["sandbox"] = json!(sandbox);
+        }
         if let Some(instructions) = &self.thread.developer_instructions {
             params["developerInstructions"] = json!(instructions);
         }
@@ -341,6 +498,16 @@ impl CodexServer {
         // A response to one of Perch's requests.
         if let Some(id) = v.get("id").and_then(Value::as_u64).filter(|_| v.get("method").is_none()) {
             if let Some(error) = v.get("error") {
+                if id >= LATER {
+                    // A steer that missed its turn goes in the next one,
+                    // which the turn's completion starts. A later turn
+                    // Codex will not start leaves nothing going.
+                    return if self.later_turns.contains(&id) {
+                        self.finish()
+                    } else {
+                        Reply::default()
+                    };
+                }
                 let message = error
                     .get("message")
                     .and_then(Value::as_str)
@@ -371,20 +538,20 @@ impl CodexServer {
                         .map(str::to_string)
                         .or_else(|| self.thread.resume.clone())
                         .unwrap_or_default();
+                    let prompt = self.thread.prompt.clone();
                     Reply {
-                        writes: vec![request(
-                            TURN,
-                            "turn/start",
-                            json!({
-                                "threadId": self.thread_id,
-                                "input": [{"type": "text", "text": self.thread.prompt}],
-                                "effort": self.thread.effort,
-                            }),
-                        )],
+                        writes: vec![self.start_turn(TURN, &prompt)],
                         events: vec![RunEvent::Started {
                             session_id: self.thread_id.clone(),
                             model: self.thread.model.clone(),
                         }],
+                        ..Reply::default()
+                    }
+                }
+                id if id == TURN || self.later_turns.contains(&id) => {
+                    self.turn = result.pointer("/turn/id").and_then(Value::as_str).map(str::to_string);
+                    Reply {
+                        writes: self.send_steers(),
                         ..Reply::default()
                     }
                 }
@@ -398,6 +565,15 @@ impl CodexServer {
             return self.server_request(id, method, params);
         }
         match method {
+            "turn/started" => {
+                if let Some(turn) = params.pointer("/turn/id").and_then(Value::as_str) {
+                    self.turn = Some(turn.to_string());
+                }
+                Reply {
+                    writes: self.send_steers(),
+                    ..Reply::default()
+                }
+            }
             "item/started" => self.item_started(params.get("item").unwrap_or(&Value::Null)),
             "item/completed" => self.item_completed(params.get("item").unwrap_or(&Value::Null)),
             "thread/tokenUsage/updated" => {
@@ -428,6 +604,7 @@ impl CodexServer {
                 ..Reply::default()
             },
             "turn/completed" => {
+                self.turn = None;
                 let turn = params.get("turn").cloned().unwrap_or(Value::Null);
                 if turn.get("status").and_then(Value::as_str) == Some("failed") {
                     let raw = turn
@@ -441,16 +618,18 @@ impl CodexServer {
                         message
                     });
                 }
-                self.done = true;
-                Reply {
-                    events: vec![RunEvent::Finished {
-                        session_id: self.thread_id.clone(),
-                        cost_usd: None,
-                        duration_ms: 0,
-                    }],
-                    close: true,
-                    ..Reply::default()
+                // A steer the turn ended before reading starts the next
+                // one; any others follow it by `turn/steer`.
+                if let Some(text) = self.steers.front().cloned() {
+                    let id = self.later_id();
+                    self.later_turns.insert(id);
+                    self.sent = 1;
+                    return Reply {
+                        writes: vec![self.start_turn(id, &text)],
+                        ..Reply::default()
+                    };
                 }
+                self.finish()
             }
             _ => Reply::default(),
         }
@@ -650,6 +829,20 @@ impl CodexServer {
                     vec![RunEvent::Text(text)]
                 }
             }
+            // The prompt and each steer come back as the turn reads them.
+            "userMessage" => {
+                let text: Vec<String> = item
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .map(|parts| parts.iter().map(|p| str_of(p, "text")).collect())
+                    .unwrap_or_default();
+                if self.steers.front() == Some(&text.join("")) {
+                    self.sent = self.sent.saturating_sub(1);
+                    self.steers.pop_front().map(RunEvent::Steered).into_iter().collect()
+                } else {
+                    Vec::new()
+                }
+            }
             _ => Vec::new(),
         };
         Reply {
@@ -837,7 +1030,9 @@ mod tests {
             developer_instructions: Some("Work here.".into()),
             resume: resume.map(str::to_string),
             config: json!({"default_permissions": "perch_work"}),
-            reviewer: "user".into(),
+            approval_policy: "on-request".into(),
+            reviewer: Some("user".into()),
+            sandbox: None,
         }
     }
 
@@ -957,7 +1152,7 @@ mod tests {
     #[test]
     fn codex_s_automatic_reviewer_leaves_a_step_for_each_decision() {
         let mut server = CodexServer::new(CodexThread {
-            reviewer: "auto_review".into(),
+            reviewer: Some("auto_review".into()),
             ..thread(None)
         });
         server.opening();
@@ -981,6 +1176,54 @@ mod tests {
             [RunEvent::ToolCall { summary, .. }, RunEvent::ToolResult { ok: false, .. }]
                 if summary == "Refused automatically: rm -rf ~ (risk: high). Deletes the home directory."
         ), "{:?}", refused.events);
+    }
+
+    #[test]
+    fn claude_steers_land_as_replayed_and_hold_the_result_until_they_do() {
+        let mut host = ClaudeHost::new("Do it".into());
+        host.opening();
+        let prompt = host.after_line(&line(
+            r#"{"type":"user","message":{"role":"user","content":"Do it"},"parent_tool_use_id":null,"isReplay":true}"#,
+        ));
+        assert!(prompt.events.is_empty(), "the prompt is not a steer");
+        let wrote: Value = serde_json::from_str(&host.steer("And the docs")[0]).unwrap();
+        assert_eq!(wrote["message"]["content"], "And the docs");
+        let held = host.after_line(&line(r#"{"type":"result","subtype":"success"}"#));
+        assert!(held.more && !held.close, "a steer not yet read keeps stdin open");
+        let subagent = host.after_line(&line(
+            r#"{"type":"user","message":{"role":"user","content":"And the docs"},"parent_tool_use_id":"t1","isReplay":true}"#,
+        ));
+        assert!(subagent.events.is_empty(), "a subagent's prompt is not the reader's");
+        let landed = host.after_line(&line(
+            r#"{"type":"user","message":{"role":"user","content":"And the docs"},"parent_tool_use_id":null,"isReplay":true}"#,
+        ));
+        assert_eq!(landed.events, vec![RunEvent::Steered("And the docs".into())]);
+        let end = host.after_line(&line(r#"{"type":"result","subtype":"success"}"#));
+        assert!(end.close && !end.more);
+    }
+
+    #[test]
+    fn a_codex_steer_waits_for_its_turn_and_a_refused_later_turn_ends_the_run() {
+        let mut server = CodexServer::new(thread(None));
+        server.after_line(&line(r#"{"id":2,"result":{"thread":{"id":"th-1"}}}"#));
+        assert!(server.steer("And the docs").is_empty(), "no turn to name yet");
+        let turn = server.after_line(&line(r#"{"id":3,"result":{"turn":{"id":"tu-1"}}}"#));
+        let steer: Value = serde_json::from_str(&turn.writes[0]).unwrap();
+        assert_eq!(steer["method"], "turn/steer");
+        assert_eq!(steer["params"]["expectedTurnId"], "tu-1");
+        let missed = server.after_line(&line(r#"{"id":steer_id,"error":{"message":"no active turn to steer"}}"#
+            .replace("steer_id", &steer["id"].to_string())
+            .as_str()));
+        assert_eq!(missed, Reply::default(), "the turn's end resends it");
+        let next = server.after_line(&line(r#"{"method":"turn/completed","params":{"turn":{"status":"completed"}}}"#));
+        assert!(!next.close && next.events.is_empty());
+        let start: Value = serde_json::from_str(&next.writes[0]).unwrap();
+        assert_eq!(start["method"], "turn/start");
+        let refused = server.after_line(&line(
+            &format!(r#"{{"id":{},"error":{{"message":"busy"}}}}"#, start["id"]),
+        ));
+        assert!(refused.close);
+        assert!(matches!(&refused.events[..], [RunEvent::Finished { .. }]), "{:?}", refused.events);
     }
 
     #[test]

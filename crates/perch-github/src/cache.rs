@@ -1928,12 +1928,14 @@ fn load_event_by_id(
 fn load_steps_on(conn: &Connection, run_id: &str) -> Result<Vec<RunStep>, CacheError> {
     let mut stmt = conn.prepare(
         "SELECT payload_json FROM run_events
-         WHERE run_id=?1 AND kind IN ('text','tool_call','tool_result','legacy_step')
+         WHERE run_id=?1 AND kind IN ('text','tool_call','tool_result','legacy_step','steer','steer_landed')
          ORDER BY sequence",
     )?;
     let rows = stmt.query_map(params![run_id], |row| row.get::<_, String>(0))?;
     let mut steps = Vec::new();
     let mut tools: HashMap<String, usize> = HashMap::new();
+    // Steers the agent has not read, oldest first. They go at the end.
+    let mut unread: Vec<String> = Vec::new();
     for payload in rows {
         match serde_json::from_str::<RunEvent>(&payload?)? {
             RunEvent::LegacyStep { summary, ok } => steps.push(RunStep {
@@ -1941,7 +1943,21 @@ fn load_steps_on(conn: &Connection, run_id: &str) -> Result<Vec<RunStep>, CacheE
                 ok,
                 note: false,
                 pending: false,
+                user: false,
             }),
+            RunEvent::Steer { text } => unread.push(text),
+            RunEvent::SteerLanded { text } => {
+                if let Some(at) = unread.iter().position(|t| *t == text) {
+                    unread.remove(at);
+                }
+                steps.push(RunStep {
+                    summary: text,
+                    ok: true,
+                    note: false,
+                    pending: false,
+                    user: true,
+                });
+            }
             // A call is pending until its result comes. A run that ended
             // without one leaves it pending, and the view shows it as done.
             RunEvent::ToolCall { id, summary, parent_id, .. } => {
@@ -1954,6 +1970,7 @@ fn load_steps_on(conn: &Connection, run_id: &str) -> Result<Vec<RunStep>, CacheE
                     ok: true,
                     note: false,
                     pending: true,
+                    user: false,
                 });
             }
             RunEvent::Text { text } if !text.trim().is_empty() => steps.push(RunStep {
@@ -1961,6 +1978,7 @@ fn load_steps_on(conn: &Connection, run_id: &str) -> Result<Vec<RunStep>, CacheE
                 ok: true,
                 note: true,
                 pending: false,
+                user: false,
             }),
             RunEvent::ToolResult { id, ok, summary } => {
                 if let Some(step) = tools.get(&id).and_then(|index| steps.get_mut(*index)) {
@@ -1974,6 +1992,13 @@ fn load_steps_on(conn: &Connection, run_id: &str) -> Result<Vec<RunStep>, CacheE
             _ => {}
         }
     }
+    steps.extend(unread.into_iter().map(|text| RunStep {
+        summary: text,
+        ok: true,
+        note: false,
+        pending: true,
+        user: true,
+    }));
     Ok(steps)
 }
 
@@ -2038,6 +2063,8 @@ fn apply_event_to_run(
             run.latest_activity = Some("Responding".into());
         }
         RunEvent::ToolCall { summary, .. } => run.latest_activity = Some(summary.clone()),
+        // What the reader said is theirs, not what the agent is doing.
+        RunEvent::Steer { .. } | RunEvent::SteerLanded { .. } => {}
         RunEvent::ToolResult { summary, .. } if !summary.is_empty() => {
             run.latest_activity = Some(summary.clone())
         }
@@ -2219,7 +2246,9 @@ fn truncate_event_strings(event: &mut RunEvent, max: usize) {
                 truncate_string(model, max);
             }
         }
-        RunEvent::Text { text } => truncate_string(text, max),
+        RunEvent::Text { text }
+        | RunEvent::Steer { text }
+        | RunEvent::SteerLanded { text } => truncate_string(text, max),
         RunEvent::ToolCall {
             id,
             name,
@@ -4696,12 +4725,14 @@ mod tests {
                     ok: true,
                     note: false,
                     pending: false,
+                    user: false,
                 },
                 RunStep {
                     summary: "Asked to edit src/x.rs".into(),
                     ok: false,
                     note: false,
                     pending: false,
+                    user: false,
                 },
             ],
             error: None,
@@ -4839,6 +4870,7 @@ mod tests {
             ok: true,
             note: false,
             pending: false,
+            user: false,
         });
         r.cost_usd = Some(0.05);
         c.update_run(&r).unwrap();
@@ -5001,6 +5033,60 @@ mod tests {
                 ("It came in last week.", true),
             ]
         );
+    }
+
+    #[test]
+    fn a_steer_waits_at_the_end_until_read_and_then_stays_where_it_landed() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut running = run("steered", "thread", RunStatus::Running);
+        running.steps.clear();
+        c.insert_run(&running).unwrap();
+        let call = |id: &str| RunEvent::ToolCall {
+            id: id.into(),
+            name: "Bash".into(),
+            summary: format!("Ran {id}"),
+            parent_id: None,
+        };
+        let steer = |text: &str| RunEvent::Steer { text: text.into() };
+        let landed = |text: &str| RunEvent::SteerLanded { text: text.into() };
+        let steps = |c: &Cache| -> Vec<(String, bool, bool)> {
+            c.load_run("steered")
+                .unwrap()
+                .unwrap()
+                .steps
+                .into_iter()
+                .map(|s| (s.summary, s.user, s.pending))
+                .collect()
+        };
+        let step = |summary: &str, user: bool, pending: bool| (summary.to_string(), user, pending);
+        let events = [call("a"), steer("Skip the tests"), steer("And the docs"), call("b")];
+        for (i, e) in events.into_iter().enumerate() {
+            c.append_run_event("steered", &event(&format!("e{i}"), "2026-09-18T10:00:01Z", e))
+                .unwrap();
+        }
+        assert_eq!(
+            steps(&c),
+            [
+                step("Ran a", false, true),
+                step("Ran b", false, true),
+                step("Skip the tests", true, true),
+                step("And the docs", true, true),
+            ]
+        );
+        c.append_run_event("steered", &event("e4", "2026-09-18T10:00:02Z", landed("Skip the tests")))
+            .unwrap();
+        c.append_run_event("steered", &event("e5", "2026-09-18T10:00:02Z", call("c"))).unwrap();
+        assert_eq!(
+            steps(&c),
+            [
+                step("Ran a", false, true),
+                step("Ran b", false, true),
+                step("Skip the tests", true, false),
+                step("Ran c", false, true),
+                step("And the docs", true, true),
+            ]
+        );
+        assert_eq!(c.load_run("steered").unwrap().unwrap().latest_activity.as_deref(), Some("Ran c"));
     }
 
     #[test]
@@ -5907,6 +5993,7 @@ mod tests {
                 ok: true,
                 note: false,
                 pending: false,
+                user: false,
             }]
         );
         assert_eq!(cache.load_run_events("run-1", None, 20).unwrap().len(), 1);

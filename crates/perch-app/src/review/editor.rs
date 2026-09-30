@@ -4217,6 +4217,7 @@ mod window {
                 ok: true,
                 note: false,
                 pending: false,
+                user: false,
             }],
             error: None,
             started_at: Some("2026-09-18T10:00:00Z".parse().unwrap()),

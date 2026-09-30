@@ -3694,6 +3694,21 @@ impl ReviewState {
         });
     }
 
+    /// The reader told run `run_id` something while it worked.
+    pub fn apply_steer(&self, run_id: &str, text: &str) {
+        self.comment_threads.update(|threads| {
+            let mut all: Vec<CommentThread> = threads.as_ref().clone();
+            for thread in &mut all {
+                for message in &mut thread.messages {
+                    if let Some(run) = message.run.as_mut().filter(|r| r.id == run_id) {
+                        crate::ask::apply_steer(run, text);
+                    }
+                }
+            }
+            *threads = Arc::new(all);
+        });
+    }
+
     /// The pointer came onto `row`, on the element `by`.
     pub fn enter_row(&self, by: floem::ElementId, row: usize) {
         self.hovered_line.set(Some(row));

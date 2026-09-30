@@ -352,10 +352,13 @@ fn activity_rows(run: &AgentRunSummary, events: &[RunEventRecord]) -> Vec<Activi
                         .unwrap_or_else(|| message.clone()),
                     false,
                 ),
+                RunEvent::Steer { text } => (format!("You: {}", text.lines().next().unwrap_or_default()), true),
                 RunEvent::Completed { .. } => ("Completed".into(), true),
                 RunEvent::Terminated { message, .. } => (message.clone(), false),
                 RunEvent::LegacyStep { summary, ok } => (summary.clone(), *ok),
-                RunEvent::Text { .. } | RunEvent::Usage { .. } => return None,
+                RunEvent::Text { .. } | RunEvent::SteerLanded { .. } | RunEvent::Usage { .. } => {
+                    return None
+                }
             };
             Some(ActivityRow {
                 sequence: record.sequence,

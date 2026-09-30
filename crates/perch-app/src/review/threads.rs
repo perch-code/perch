@@ -242,7 +242,21 @@ pub fn composer_view(
         })
         .unwrap_or(false);
     let follow_up = composer.thread_id.is_some();
-    let placeholder = if follow_up {
+    // Under a thread whose agent is at work, what is typed goes to that
+    // run, which reads it after its current step. The box is built again
+    // when the run ends, as a follow-up's.
+    let steering_run = composer.thread_id.as_ref().and_then(|id| {
+        state.comment_threads.with_untracked(|threads| {
+            threads
+                .iter()
+                .find(|t| &t.id == id)
+                .and_then(|t| t.running_run().map(|run| run.id.clone()))
+        })
+    });
+    let steering = steering_run.is_some();
+    let placeholder = if steering {
+        "Steer…".to_string()
+    } else if follow_up {
         "Follow up…".to_string()
     } else if composer.anchor.is_some() {
         "Ask about these lines…".to_string()
@@ -322,6 +336,14 @@ pub fn composer_view(
             let closing = state.composer_confirming.get_untracked()
                 && state.composer_closing.get_untracked();
             if question.trim().is_empty() && !closing {
+                return;
+            }
+            // A run that has ended since takes it as a follow-up.
+            if let Some(run_id) = &steering_run {
+                if !question.trim().is_empty() {
+                    backend.steer_run(run_id, question.trim());
+                    state.composer_sent();
+                }
                 return;
             }
             let Some(composer) = state.composer.get() else {
@@ -599,7 +621,7 @@ pub fn composer_view(
             theme::COMPOSER_MAX_HEIGHT,
         ),
         composer_error_line(state),
-        composer_footer(app, state, send, posting_here),
+        composer_footer(app, state, send, posting_here, steering),
         resize_cursor_sheet(Grip::composer(state)),
     ))
     .debug_name("composer-box")
@@ -853,7 +875,28 @@ fn composer_footer(
     state: ReviewState,
     send: Rc<dyn Fn()>,
     posting: impl Fn() -> bool + Copy + 'static,
+    steering: bool,
 ) -> impl IntoView {
+    // A steer goes to the agent at work, whatever the pickers say, so it
+    // has none: only when the agent reads it.
+    if steering {
+        return Stack::horizontal((
+            Label::derived(|| "The agent reads this after its current step".to_string()).style(
+                |s| {
+                    s.font_size(theme::TEXT_META)
+                        .color(theme::FG_SUBTLE)
+                        .text_ellipsis()
+                        .min_width(0.0)
+                        .selectable(false)
+                },
+            ),
+            Empty::new().style(|s| s.flex_grow(1.0_f32)),
+            send_button(|| "Send".to_string(), send).debug_name("composer-send"),
+        ))
+        .debug_name("composer-steer-footer")
+        .style(|s| s.items_center().width_full().gap(6.0).margin_top(8.0))
+        .into_any();
+    }
     let mode = move || {
         if posting() {
             FooterMode::Posting
@@ -983,6 +1026,7 @@ fn composer_footer(
         .style(|s| s.items_center().width_full().height(30.0).margin_top(8.0))
         .into_any(),
     })
+    .into_any()
 }
 
 /// Whether the open composer offers to close its pull request or issue.
@@ -2275,14 +2319,16 @@ pub fn follow_up(
     let composer_thread = thread_id.clone();
     let running_thread = thread_id.clone();
     let reply_thread = thread_id.clone();
-    // Keyed on whether a run is going as well as on the composer: the box
-    // is absent while the agent works and has to appear when it is done,
+    // Keyed on whether a run is going, and whether it is stopping, as well
+    // as on the composer: while the agent works the box steers it, when
+    // it is done the box follows up, and while it stops there is none,
     // which only the thread list says.
     let running = Memo::new(move |_| {
         state.comment_threads.with(|t| {
             t.iter()
                 .find(|t| t.id == running_thread)
-                .is_some_and(|t| t.running_run().is_some())
+                .and_then(|t| t.running_run())
+                .map(|run| run.status == RunStatus::Stopping)
         })
     });
     // Keyed on what the composer is about and which opening it is, not on
@@ -2304,12 +2350,12 @@ pub fn follow_up(
     // The composer's box takes the foot; a draft edited up among the
     // messages leaves the box here, and Resolve under it.
     let composing = Memo::new(move |_| matches!(composer.get(), Some((_, _, None))));
-    // Nothing in the box's place: an agent at work with no composer open,
-    // or a draft being edited up among the comments.
+    // Nothing in the box's place: an agent stopping with no composer
+    // open, or a draft being edited up among the comments.
     let empty = Memo::new(move |_| match composer.get() {
         Some((_, _, Some(_))) => true,
         Some(_) => false,
-        None => running.get(),
+        None => running.get() == Some(true),
     });
     let offered = resolve_offered(app, state, thread_id.clone());
     let foot_hidden = Memo::new(move |_| !offered.get() || composing.get());
@@ -3405,7 +3451,7 @@ pub(crate) fn worked_for(ms: u64) -> String {
 
 /// "Read 3 files, ran 1 command, edited 1 file", from the step lines.
 pub fn steps_summary(steps: &[perch_github::RunStep]) -> String {
-    let steps: Vec<_> = steps.iter().filter(|s| !s.note).collect();
+    let steps: Vec<_> = steps.iter().filter(|s| !s.note && !s.user).collect();
     let count = |prefix: &str| {
         steps
             .iter()
@@ -3463,20 +3509,22 @@ pub fn steps_summary(steps: &[perch_github::RunStep]) -> String {
 }
 
 /// The Follow up box at the foot of a thread, where GitHub has Reply: a
-/// click opens the composer in its place.
+/// click opens the composer in its place. While the thread's agent works
+/// it is Steer, and while the agent stops there is none.
 pub fn reply_line(
     app: AppState,
     state: ReviewState,
     thread: CommentThread,
     face: ThreadFace,
 ) -> impl IntoView {
-    let running = thread.running_run().is_some();
-    if running {
-        return Empty::new().into_any();
-    }
+    let steering = match thread.running_run() {
+        Some(run) if run.status == RunStatus::Stopping => return Empty::new().into_any(),
+        Some(_) => true,
+        None => false,
+    };
     let id = thread.id.clone();
     let anchor = thread.anchor.clone();
-    Label::derived(|| "Follow up…".to_string())
+    Label::derived(move || if steering { "Steer…" } else { "Follow up…" }.to_string())
         .on_event_stop(el::Click, move |_, _| {
             let already = state.composer.with_untracked(|c| {
                 c.as_ref()
@@ -3583,6 +3631,7 @@ mod tests {
             ok,
             note: false,
             pending: false,
+            user: false,
         }
     }
 
@@ -3608,6 +3657,7 @@ mod tests {
             ok: true,
             note: true,
             pending: false,
+            user: false,
         }
     }
 
@@ -3899,6 +3949,93 @@ mod tests {
         assert!(find(harness.root_id(), "Label: \"Ran\"").is_some());
         assert!(find(harness.root_id(), "It failed to build.").is_some(), "the words show");
         assert_eq!(header(&harness), before, "the message was built again");
+    }
+
+    /// While the thread's agent works its foot is Steer, whose box has no
+    /// pickers and sends to the run. What is sent waits at the end of the
+    /// steps until the agent reads it, and stays where it did. While the
+    /// run stops there is no box; once it is over, Follow up is back.
+    #[test]
+    fn a_running_agent_is_steered_from_its_thread_s_foot() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_pull_request();
+        let mut thread = github_thread_with_private_messages();
+        thread.messages[2].body = String::new();
+        thread.messages[2].run = Some(RunRecord {
+            id: "run-1".into(),
+            status: RunStatus::Running,
+            ..RunRecord::default()
+        });
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let backend = Rc::new(backend);
+        let view = Stack::vertical((
+            messages_view(app, state, backend.clone(), thread.id.clone(), ThreadFace::Card),
+            follow_up(app, state, backend, thread.id.clone(), ThreadFace::Card),
+        ))
+        .style(|s| s.flex_col().width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 800.0);
+        let settle = |harness: &mut HeadlessHarness| {
+            harness.rebuild();
+            harness.paint();
+        };
+        settle(&mut harness);
+        assert!(shown(&harness, "Steer"));
+        assert!(!shown(&harness, "Follow up"));
+
+        state.open_composer(Some(thread.id.clone()), thread.anchor.clone(), "Skip the tests".into(), sonnet_medium());
+        settle(&mut harness);
+        assert!(shown(&harness, "composer-steer-footer"), "no pickers: it goes to the run");
+        click(&mut harness, "composer-send");
+        match commands.try_recv() {
+            Ok(Command::SteerRun { run_id, text }) => {
+                assert_eq!((run_id.as_str(), text.as_str()), ("run-1", "Skip the tests"));
+            }
+            other => panic!("Send did not steer: {other:?}"),
+        }
+        assert!(state.composer.get_untracked().is_none(), "sent, the box goes");
+
+        state.apply_steer("run-1", "Skip the tests");
+        state.apply_run_event(
+            "run-1",
+            &perch_agent::RunEvent::ToolCall {
+                id: "c1".into(),
+                name: "Bash".into(),
+                summary: "Ran cargo build".into(),
+                parent_id: None,
+            },
+        );
+        settle(&mut harness);
+        let steer = find(harness.root_id(), "run-steer").expect("the reader's words are among the steps");
+        let step = find(harness.root_id(), "Label: \"cargo build\"").unwrap();
+        assert!(
+            steer.get_visual_rect_no_clip().y0 > step.get_visual_rect_no_clip().y1,
+            "unread, it waits after what the agent does"
+        );
+        assert!(shown(&harness, "run-steer-unread"));
+
+        state.apply_run_event("run-1", &perch_agent::RunEvent::Steered("Skip the tests".into()));
+        state.apply_run_event("run-1", &perch_agent::RunEvent::Text("Skipping them.".into()));
+        settle(&mut harness);
+        assert!(find(harness.root_id(), "run-steer-unread").is_none(), "read");
+        let steer = find(harness.root_id(), "run-steer").unwrap().get_visual_rect_no_clip();
+        let words = find(harness.root_id(), "Skipping them.").unwrap().get_visual_rect_no_clip();
+        assert!(words.y0 > steer.y1, "what it says after reading comes after: {steer:?} {words:?}");
+
+        let set_status = |status: RunStatus| {
+            state.comment_threads.update(|threads| {
+                let mut all = threads.as_ref().clone();
+                all[0].messages[2].run.as_mut().unwrap().status = status;
+                *threads = Arc::new(all);
+            });
+        };
+        set_status(RunStatus::Stopping);
+        settle(&mut harness);
+        assert!(!shown(&harness, "Steer"), "nothing to steer while it stops");
+        set_status(RunStatus::Stopped);
+        settle(&mut harness);
+        assert!(shown(&harness, "Follow up"));
     }
 
     /// The delete under a thread of GitHub's takes Perch's messages and

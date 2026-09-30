@@ -821,15 +821,6 @@ impl AppState {
     /// committed before AgentStep was published; its authoritative sequence
     /// comes from AgentRunUpdated.
     fn append_open_agent_event(&self, run_id: &str, event: &perch_agent::RunEvent) {
-        if !self
-            .agent_run_events
-            .with_untracked(|events| events.contains_key(run_id))
-        {
-            return;
-        }
-        let Some(sequence) = self.agent_run(run_id).map(|run| run.last_event_sequence) else {
-            return;
-        };
         let event = match event {
             perch_agent::RunEvent::Started { session_id, model } => {
                 perch_github::RunEvent::Started {
@@ -839,6 +830,9 @@ impl AppState {
             }
             perch_agent::RunEvent::Text(text) => {
                 perch_github::RunEvent::Text { text: text.clone() }
+            }
+            perch_agent::RunEvent::Steered(text) => {
+                perch_github::RunEvent::SteerLanded { text: text.clone() }
             }
             perch_agent::RunEvent::ToolCall {
                 id,
@@ -882,6 +876,21 @@ impl AppState {
             | perch_agent::RunEvent::Finished { .. }
             | perch_agent::RunEvent::Failed { .. }
             | perch_agent::RunEvent::Stopped { .. } => return,
+        };
+        self.append_open_agent_record(run_id, event);
+    }
+
+    /// Add `event` to the open detail of run `run_id`, if it is open, at
+    /// the sequence its summary has reached.
+    fn append_open_agent_record(&self, run_id: &str, event: perch_github::RunEvent) {
+        if !self
+            .agent_run_events
+            .with_untracked(|events| events.contains_key(run_id))
+        {
+            return;
+        }
+        let Some(sequence) = self.agent_run(run_id).map(|run| run.last_event_sequence) else {
+            return;
         };
         let record = perch_github::RunEventRecord {
             run_id: run_id.to_string(),
@@ -1315,6 +1324,10 @@ impl AppState {
                 tracing::debug!(run_id, thread_id, ?event, "run event");
                 self.append_open_agent_event(&run_id, &event);
                 review.apply_run_event(&run_id, &event);
+            }
+            Event::AgentSteer { run_id, text } => {
+                self.append_open_agent_record(&run_id, perch_github::RunEvent::Steer { text: text.clone() });
+                review.apply_steer(&run_id, &text);
             }
             Event::AgentRuns { runs, has_more } => self.merge_agent_runs(runs, has_more),
             Event::ItemRuns {
@@ -2528,6 +2541,7 @@ impl AppState {
             Event::Usage(board) => self.usage.set(board),
             Event::CommentThreads { .. }
             | Event::AgentStep { .. }
+            | Event::AgentSteer { .. }
             | Event::AgentRuns { .. }
             | Event::ItemRuns { .. }
             | Event::AgentRunUpdated { .. }
@@ -5421,6 +5435,7 @@ mod tests {
                 ok: true,
                 note: false,
                 pending: false,
+                user: false,
             }],
             last_event_sequence: 3,
             ..perch_github::RunRecord::default()

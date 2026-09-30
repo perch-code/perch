@@ -740,9 +740,15 @@ pub struct RunStep {
     #[serde(default)]
     pub note: bool,
     /// A tool call whose result has not come back: what the agent is
-    /// doing now, while its run goes.
+    /// doing now, while its run goes. For a `user` step, a message the
+    /// agent has not read yet.
     #[serde(default)]
     pub pending: bool,
+    /// What the reader told the agent while it worked, rather than
+    /// something the agent did: `summary` holds the words. One not yet
+    /// read waits at the end of the steps; one read sits where it landed.
+    #[serde(default)]
+    pub user: bool,
 }
 
 /// One durable, ordered observation from a process or the scheduler.
@@ -757,6 +763,14 @@ pub enum RunEvent {
         model: Option<String>,
     },
     Text {
+        text: String,
+    },
+    /// The reader told the agent something while it worked.
+    Steer {
+        text: String,
+    },
+    /// The agent read the oldest unread steer with this text.
+    SteerLanded {
         text: String,
     },
     ToolCall {
@@ -808,6 +822,8 @@ impl RunEvent {
             Self::State { .. } => "state",
             Self::Started { .. } => "started",
             Self::Text { .. } => "text",
+            Self::Steer { .. } => "steer",
+            Self::SteerLanded { .. } => "steer_landed",
             Self::ToolCall { .. } => "tool_call",
             Self::ToolResult { .. } => "tool_result",
             Self::PermissionDenied { .. } => "permission_denied",

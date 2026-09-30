@@ -50,11 +50,12 @@ pub fn apply_run_event(
             // A note among the steps as well, where it was said, as the
             // stored run has it when it is read back.
             if !text.trim().is_empty() {
-                run.steps.push(RunStep {
+                add_step(run, RunStep {
                     summary: text.trim().to_string(),
                     ok: true,
                     note: true,
                     pending: false,
+                    user: false,
                 });
             }
             run.final_result = Some(match run.final_result.take() {
@@ -78,13 +79,16 @@ pub fn apply_run_event(
             } else {
                 summary.clone()
             };
-            let index = run.steps.len();
-            run.steps.push(RunStep {
-                summary: summary.clone(),
-                ok: true,
-                note: false,
-                pending: true,
-            });
+            let index = add_step(
+                run,
+                RunStep {
+                    summary: summary.clone(),
+                    ok: true,
+                    note: false,
+                    pending: true,
+                    user: false,
+                },
+            );
             LIVE_TOOL_STEPS.with(|tools| {
                 tools
                     .borrow_mut()
@@ -122,11 +126,12 @@ pub fn apply_run_event(
                 .as_deref()
                 .map(|tool| format!("{tool}: {message}"))
                 .unwrap_or_else(|| message.clone());
-            run.steps.push(RunStep {
+            add_step(run, RunStep {
                 summary: summary.clone(),
                 ok: false,
                 note: false,
                 pending: false,
+                user: false,
             });
             run.latest_activity = Some(summary);
         }
@@ -165,6 +170,16 @@ pub fn apply_run_event(
             run.error = Some("Stopped by the reader".into());
             run.ended_at = Some(jiff::Timestamp::now());
         }
+        // The oldest unread steer is first in the tail; it stays where it
+        // is, now read, and the tail starts after it.
+        RunEvent::Steered(text) => {
+            let tail = unread_start(run);
+            if let Some(at) = run.steps[tail..].iter().position(|s| s.summary == *text) {
+                let mut step = run.steps.remove(tail + at);
+                step.pending = false;
+                run.steps.insert(tail, step);
+            }
+        }
         // The tool call that carried it is already a step.
         RunEvent::Report { .. } | RunEvent::Approval { .. } => {}
     }
@@ -174,6 +189,37 @@ pub fn apply_run_event(
         });
     }
     None
+}
+
+/// Something the reader told the agent while it worked, at the end of the
+/// steps until the agent reads it, as the stored run has it.
+pub fn apply_steer(run: &mut perch_github::RunRecord, text: &str) {
+    run.steps.push(perch_github::RunStep {
+        summary: text.to_string(),
+        ok: true,
+        note: false,
+        pending: true,
+        user: true,
+    });
+}
+
+/// Where the steers the agent has not read begin: they end the steps.
+fn unread_start(run: &perch_github::RunRecord) -> usize {
+    run.steps.len()
+        - run
+            .steps
+            .iter()
+            .rev()
+            .take_while(|s| s.user && s.pending)
+            .count()
+}
+
+/// Add what the agent did before the steers it has not read, and say
+/// where. Nothing before them moves, so a tool call's index holds.
+fn add_step(run: &mut perch_github::RunRecord, step: perch_github::RunStep) -> usize {
+    let at = unread_start(run);
+    run.steps.insert(at, step);
+    at
 }
 
 /// Which backend runs a model, as config decides it. Config speaks in
@@ -537,6 +583,7 @@ async fn ask(
         match event {
             perch_agent::RunEvent::Text(t) => answer.push(t),
             perch_agent::RunEvent::Started { .. }
+            | perch_agent::RunEvent::Steered(_)
             | perch_agent::RunEvent::ToolCall { .. }
             | perch_agent::RunEvent::ToolResult { .. }
             | perch_agent::RunEvent::PermissionDenied { .. }
@@ -1527,11 +1574,9 @@ mod tests {
             Some(FRAMING),
             "the framing goes as developer instructions"
         );
-        let args = codex.args();
-        assert_eq!(&args[..4], ["exec", "--json", "resume", "t-1"]);
-        assert!(args
-            .windows(2)
-            .any(|w| w == ["-c", "model_reasoning_effort=ultra"]));
+        assert_eq!(codex.args()[0], "app-server");
+        assert_eq!(codex.resume.as_deref(), Some("t-1"));
+        assert_eq!(codex.effort, perch_agent::Effort::Ultra);
     }
 
     fn fake(dir: &std::path::Path, name: &str, script: &str) -> String {
