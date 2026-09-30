@@ -17,15 +17,16 @@ use floem::AnyView;
 use perch_github::{
     Check, CheckRunState, CheckState, Checks, Item, MergeMethod, MergeMethods, MergeState,
     MergeableState, PullRequest, PullRequestOverview, RepositoryPermission, ReviewDecision,
+    SubjectState,
 };
 
 use crate::backend::Backend;
-use crate::icons::SidebarIcon;
+use crate::icons::{state_color, SidebarIcon};
 use crate::review::model::ReviewState;
 use crate::state::Checked;
 use crate::theme;
 use crate::ui::menu::{Menu, MenuExt};
-use crate::ui::widgets::{checkbox, clickable, open_in_browser, sidebar_glyph};
+use crate::ui::widgets::{checkbox, clickable, open_in_browser, sidebar_glyph, state_glyph};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MergeConfirmation {
@@ -555,6 +556,18 @@ fn merge_content(
     let (Some(pull), Some(item)) = (snapshot.pull.as_ref(), snapshot.item.as_ref()) else {
         return Empty::new().into_any();
     };
+    // Nothing is left to decide once it is merged or closed: it says so,
+    // with no button that can never be pressed.
+    if let Some((state, title, detail)) = finished_copy(pull) {
+        return status_row(state_glyph(state, state_color(state)), title, detail)
+            .style(|s| {
+                s.padding(16.0)
+                    .border_top(1.0)
+                    .border_color(theme::BORDER)
+            })
+            .debug_name("merge-finished")
+            .into_any();
+    }
     let decision = merge_decision(&snapshot, pull, item);
     let status = merge_status(decision, snapshot.overview.as_deref(), item.divergence());
     let controls = merge_controls(
@@ -622,8 +635,31 @@ fn merge_status(
         }
     };
 
+    status_row(sidebar_glyph(icon, color), title, detail)
+}
+
+/// What a merged or closed pull request's box says, or None while it is
+/// open.
+fn finished_copy(pull: &PullRequest) -> Option<(SubjectState, String, String)> {
+    if pull.merged {
+        let detail = match pull.merged_by.as_deref().filter(|by| !by.is_empty()) {
+            Some(by) => format!("{by} merged this into {}.", pull.base_ref),
+            None => format!("This was merged into {}.", pull.base_ref),
+        };
+        return Some((SubjectState::PrMerged, "Merged".to_string(), detail));
+    }
+    (!pull.is_open()).then(|| {
+        (
+            SubjectState::PrClosed,
+            "Closed".to_string(),
+            "This pull request was closed without merging.".to_string(),
+        )
+    })
+}
+
+fn status_row(icon: impl IntoView + 'static, title: String, detail: String) -> Stack {
     Stack::horizontal((
-        Container::new(sidebar_glyph(icon, color).style(|s| s.size(16.0, 16.0))).style(|s| {
+        Container::new(icon.style(|s| s.size(16.0, 16.0))).style(|s| {
             s.size(30.0, 30.0)
                 .items_center()
                 .justify_center()
@@ -1572,5 +1608,40 @@ mod tests {
         harness.paint();
 
         assert!(named(harness.root_id(), "merge-action:Confirm-bypass-and-merge").is_some());
+    }
+
+    /// Merged elsewhere while GitHub's last word on the rules still says
+    /// blocked: the box says merged, not blocked, and offers no merge.
+    #[test]
+    fn a_merged_pull_request_says_merged_and_offers_no_merge() {
+        let root = TestRoot::new();
+        let state = review_state(MergeState::Blocked, false);
+        let mut merged = (*pull_request("head-42")).clone();
+        merged.state = "closed".into();
+        merged.merged = true;
+        merged.merged_by = Some("criccomini".into());
+        state.pull_request.set(Some(Arc::new(merged.clone())));
+        let view = surface(state, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+
+        assert!(named(harness.root_id(), "merge-finished").is_some());
+        assert!(named(harness.root_id(), "merge-action:Merge-unavailable").is_none());
+        assert_eq!(
+            finished_copy(&merged),
+            Some((
+                SubjectState::PrMerged,
+                "Merged".to_string(),
+                "criccomini merged this into main.".to_string()
+            ))
+        );
+
+        merged.merged = false;
+        assert_eq!(
+            finished_copy(&merged).map(|(state, title, _)| (state, title)),
+            Some((SubjectState::PrClosed, "Closed".to_string()))
+        );
+        assert_eq!(finished_copy(&pull_request("head-42")), None);
     }
 }

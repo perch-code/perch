@@ -6744,6 +6744,44 @@ async fn refresh_checkout_pulls(ctx: &Ctx) {
     }
 }
 
+/// Ask GitHub again after the open pull request in each window, at every
+/// sweep. The reader's own merge or close moves no notification thread,
+/// and the checkouts' sweep leaves open items to their views, so without
+/// this the review kept offering a merge that had happened. Conditional,
+/// so one that hasn't moved costs a 304. One found merged or closed is
+/// fetched again whole, so the header, the timeline and the merge box all
+/// say so.
+async fn recheck_open_pulls(ctx: &Ctx) {
+    let Some(github) = ctx.github() else {
+        return;
+    };
+    for view in ctx.views() {
+        let open = view.slot.lock().ok().and_then(|slot| {
+            slot.as_ref().and_then(|open| {
+                open.pull_request
+                    .clone()
+                    .filter(|pr| pr.is_open())
+                    .map(|pr| (open.item_id.clone(), pr))
+            })
+        });
+        let Some((item_id, pr)) = open else {
+            continue;
+        };
+        match github.fetch_pull_request(&pr.repo_full_name, pr.number).await {
+            Ok(fresh) if !fresh.is_open() => {
+                refresh_open_item(&view, &item_id).await;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::debug!(item = %item_id, error = %e, "could not ask after the open pull request");
+                if matches!(e, perch_github::Error::RateLimited { .. }) {
+                    break;
+                }
+            }
+        }
+    }
+}
+
 /// How often the sweep asks after the checkouts' pull requests. Each is
 /// a request, even a 304, and they queue behind the reader's own.
 const CHECKOUT_PULL_REFRESH: Duration = Duration::from_secs(5 * 60);
@@ -6766,6 +6804,7 @@ fn spawn_sweep(ctx: &Ctx) {
     });
     let ctx = ctx.clone();
     tokio::spawn(async move {
+        recheck_open_pulls(&ctx).await;
         if refresh {
             refresh_checkout_pulls(&ctx).await;
         }
@@ -23307,5 +23346,40 @@ read eof || true
         assert!(ctx.item(&item.id).unwrap().is_closed());
         assert_eq!(paths.lock().unwrap().len(), 1, "only the checkout's pull request was asked after");
         assert!(sweep_due(&ctx.item(&item.id).unwrap(), Timestamp::now() - jiff::SignedDuration::from_hours(24 * 14)));
+    }
+
+    /// Merging on github.com moves no thread and the checkouts' sweep
+    /// leaves the open item alone, so the sweep asks after the pull
+    /// request on screen, and one found merged reaches the window.
+    #[tokio::test]
+    async fn the_open_pull_request_merged_elsewhere_reaches_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let merged = PULL_7.replace(
+            r#""state":"open""#,
+            r#""state":"closed","merged":true,"merged_at":"2026-09-20T10:00:00Z""#,
+        );
+        let merged: &'static str = Box::leak(merged.into_boxed_str());
+        let (base, _paths) = serve_by_path(move |path| {
+            if path.starts_with("/repos/a/b/pulls/7") {
+                ("200 OK", merged.to_string())
+            } else {
+                ("404 Not Found", r#"{"message":"Not Found"}"#.into())
+            }
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &["a/b"]);
+        let item = store_pull(&ctx, 7);
+        open_in_slot(&ctx, &item);
+
+        recheck_open_pulls(&ctx).await;
+
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Event::PullRequestUpdated { pull_request, .. } if pull_request.merged
+            )),
+            "{events:?}"
+        );
+        assert!(ctx.item(&item.id).unwrap().is_closed());
     }
 }
