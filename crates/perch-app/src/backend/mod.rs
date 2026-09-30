@@ -1288,25 +1288,32 @@ pub enum Event {
         navigation_id: u64,
         status: perch_lsp::Status,
     },
+    /// The language server says something is wrong that leaves it usable,
+    /// once per message.
+    LspWarning {
+        navigation_id: u64,
+        message: String,
+    },
     /// What rust-analyzer says about a symbol, as markdown.
     LspHover {
         token: u64,
         markdown: String,
     },
-    /// Every location a definition names, with each line's text. The app
-    /// opens one and lists several; the backend does not decide. The type
-    /// definition and the implementations answer the same way.
+    /// Every location a definition names, with each line's text, or why
+    /// the server named none. The app opens one and lists several; the
+    /// backend does not decide. The type definition and the
+    /// implementations answer the same way.
     LspDefinition {
         token: u64,
-        locations: Vec<crate::review::model::Located>,
+        locations: Result<Vec<crate::review::model::Located>, String>,
     },
     LspTypeDefinition {
         token: u64,
-        locations: Vec<crate::review::model::Located>,
+        locations: Result<Vec<crate::review::model::Located>, String>,
     },
     LspImplementation {
         token: u64,
-        locations: Vec<crate::review::model::Located>,
+        locations: Result<Vec<crate::review::model::Located>, String>,
     },
     /// Every use of a symbol, with the line's text, those outside the
     /// worktree among them.
@@ -1369,6 +1376,7 @@ impl Event {
                 | Event::HistoricalReviewReady { .. }
                 | Event::HistoricalReviewFailed { .. }
                 | Event::LspStatus { .. }
+                | Event::LspWarning { .. }
                 | Event::LspHover { .. }
                 | Event::LspDefinition { .. }
                 | Event::LspTypeDefinition { .. }
@@ -4789,7 +4797,8 @@ enum Goto {
 }
 
 /// Ask a goto about a position and answer with every location it names,
-/// each with its line's text, by the event of the goto's name.
+/// each with its line's text, or with the server's error, by the event of
+/// the goto's name.
 #[allow(clippy::too_many_arguments)]
 fn spawn_goto(
     goto: Goto,
@@ -4802,7 +4811,14 @@ fn spawn_goto(
     events: EventSender<Event>,
 ) {
     tokio::spawn(async move {
+        let answer = |locations| match goto {
+            Goto::Definition => Event::LspDefinition { token, locations },
+            Goto::TypeDefinition => Event::LspTypeDefinition { token, locations },
+            Goto::Implementation => Event::LspImplementation { token, locations },
+        };
+        // Answered even with no server, so the ask is not left waiting.
         let Some((client, full)) = resolve(&checkout, &language_server, &path).await else {
+            let _ = events.send(answer(Err(perch_lsp::Error::Exited.to_string())));
             return;
         };
         let worktree = checkout
@@ -4815,12 +4831,11 @@ fn spawn_goto(
             Goto::TypeDefinition => client.type_definition(&full, line, character).await,
             Goto::Implementation => client.implementation(&full, line, character).await,
         };
-        let locations = read_locations(&worktree, &locations).await;
-        let _ = events.send(match goto {
-            Goto::Definition => Event::LspDefinition { token, locations },
-            Goto::TypeDefinition => Event::LspTypeDefinition { token, locations },
-            Goto::Implementation => Event::LspImplementation { token, locations },
-        });
+        let locations = match locations {
+            Ok(locations) => Ok(read_locations(&worktree, &locations).await),
+            Err(e) => Err(e.to_string()),
+        };
+        let _ = events.send(answer(locations));
     });
 }
 
@@ -15574,6 +15589,19 @@ async fn start_language_server(
                     }
                     // Diagnostics are collected but not yet drawn; the editor
                     // needs a decoration pass this milestone does not have.
+                    perch_lsp::client::ServerEvent::Warning { message } => {
+                        tracing::warn!(%message, "language server");
+                        send_if_current(
+                            &navigation_requests,
+                            &checkout,
+                            &events,
+                            navigation_id,
+                            Event::LspWarning {
+                                navigation_id,
+                                message,
+                            },
+                        );
+                    }
                     perch_lsp::client::ServerEvent::Diagnostics { .. } => {}
                 }
             }
@@ -15625,6 +15653,26 @@ fn send_lsp_status_if_current(
     navigation_id: u64,
     status: perch_lsp::Status,
 ) {
+    send_if_current(
+        navigation_requests,
+        checkout,
+        events,
+        navigation_id,
+        Event::LspStatus {
+            navigation_id,
+            status,
+        },
+    );
+}
+
+/// Send what the server said while the checkout it serves is the one open.
+fn send_if_current(
+    navigation_requests: &NavigationRequests,
+    checkout: &std::sync::Mutex<Option<ReviewContext>>,
+    events: &EventSender<Event>,
+    navigation_id: u64,
+    event: Event,
+) {
     let _ = navigation_requests.with_current(navigation_id, || {
         let current = checkout.lock().ok().is_some_and(|guard| {
             guard
@@ -15632,10 +15680,7 @@ fn send_lsp_status_if_current(
                 .is_some_and(|context| context.navigation_id == navigation_id)
         });
         if current {
-            let _ = events.send(Event::LspStatus {
-                navigation_id,
-                status,
-            });
+            let _ = events.send(event);
         }
     });
 }

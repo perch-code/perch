@@ -72,6 +72,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         while let Some(event) = rx.recv().await {
             match event {
                 ServerEvent::Status(Status::Ready) => return true,
+                ServerEvent::Status(s @ Status::Unhealthy { .. }) => {
+                    eprintln!("\n  {}", s.describe());
+                    return false;
+                }
+                ServerEvent::Warning { message } => eprintln!("\n  warning: {message}"),
                 ServerEvent::Status(s) => eprint!("\r  {}          ", s.describe()),
                 ServerEvent::Diagnostics { uri, diagnostics } => {
                     if !diagnostics.is_empty() {
@@ -86,6 +91,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .unwrap_or(false);
 
     eprintln!("\nready: {ready} after {:.1}s", started.elapsed().as_secs_f32());
+    // The first "ready" comes before the server says whether it loaded the
+    // workspace, so what it says after is printed as it comes.
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            match event {
+                ServerEvent::Status(s @ Status::Unhealthy { .. }) => {
+                    eprintln!("  {}", s.describe())
+                }
+                ServerEvent::Warning { message } => eprintln!("  warning: {message}"),
+                _ => {}
+            }
+        }
+    });
 
     match mode {
         Request::Hover => {
@@ -95,7 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => eprintln!("\nno hover at {line}:{col}"),
             }
 
-            let definitions = client.definition(&file, line, col).await;
+            let definitions = client.definition(&file, line, col).await.unwrap_or_default();
             eprintln!("\ndefinitions: {}", definitions.len());
             for d in definitions.iter().take(3) {
                 eprintln!(
@@ -106,15 +124,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Request::Definition => {
-            let found = poll(|| nonempty(client.definition(&file, line, col))).await;
+            let found = poll(|| answered(client.definition(&file, line, col))).await;
             print_locations(&root, &found.unwrap_or_default());
         }
         Request::TypeDefinition => {
-            let found = poll(|| nonempty(client.type_definition(&file, line, col))).await;
+            let found = poll(|| answered(client.type_definition(&file, line, col))).await;
             print_locations(&root, &found.unwrap_or_default());
         }
         Request::Implementation => {
-            let found = poll(|| nonempty(client.implementation(&file, line, col))).await;
+            let found = poll(|| answered(client.implementation(&file, line, col))).await;
             print_locations(&root, &found.unwrap_or_default());
         }
         Request::References => {
@@ -223,6 +241,19 @@ where
 async fn nonempty<T>(ask: impl Future<Output = Vec<T>>) -> Option<Vec<T>> {
     let found = ask.await;
     (!found.is_empty()).then_some(found)
+}
+
+/// A goto's answer for `poll`: an error is printed, and no answer yet.
+async fn answered<T>(
+    ask: impl Future<Output = Result<Vec<T>, perch_lsp::Error>>,
+) -> Option<Vec<T>> {
+    match ask.await {
+        Ok(found) => (!found.is_empty()).then_some(found),
+        Err(e) => {
+            eprintln!("  {e}");
+            None
+        }
+    }
 }
 
 fn describe(item: &CallHierarchyItem) -> String {

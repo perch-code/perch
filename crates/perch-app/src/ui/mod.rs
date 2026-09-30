@@ -112,6 +112,14 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             }
         });
     }
+    // What the review has to tell the reader goes up in the popup from
+    // here, which is where the app state is.
+    floem::reactive::Effect::new(move |_| {
+        if let Some(text) = review.pending_notice.get() {
+            review.pending_notice.set(None);
+            state.notify(text, crate::state::Tone::Warning);
+        }
+    });
     // And the runs the reader opened out of a fold, or folded again, go
     // to the store from here too. The item is read as the write is sent:
     // the effect runs on the write, before anything else can open another.

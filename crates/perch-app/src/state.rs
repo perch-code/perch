@@ -1615,12 +1615,28 @@ impl AppState {
                     if status == perch_lsp::Status::Ready {
                         review.forget_missing_names();
                     }
-                    if let perch_lsp::Status::Failed { .. } = &status {
+                    // Said once as it starts: the backend tells a status
+                    // only when it changes, and a server that failed to
+                    // load its workspace would otherwise look ready.
+                    if let perch_lsp::Status::Failed { .. } | perch_lsp::Status::Unhealthy { .. } =
+                        &status
+                    {
                         if review.lsp_status.get_untracked() != status {
                             self.complain(status.describe());
                         }
                     }
                     review.lsp_status.set(status);
+                }
+            }
+            Event::LspWarning {
+                navigation_id,
+                message,
+            } => {
+                if self.accepts_navigation(navigation_id) {
+                    // Its first line: rust-analyzer puts the tool output it
+                    // failed on under it, which the log keeps.
+                    let first = message.lines().next().unwrap_or(&message);
+                    self.notify(format!("rust-analyzer: {first}"), Tone::Warning);
                 }
             }
             Event::LspHover { token, markdown } => {
@@ -2536,6 +2552,7 @@ impl AppState {
             | Event::FileLoaded { .. }
             | Event::FileFailed { .. }
             | Event::LspStatus { .. }
+            | Event::LspWarning { .. }
             | Event::LspHover { .. }
             | Event::LspDefinition { .. }
             | Event::LspTypeDefinition { .. }
@@ -3713,6 +3730,63 @@ mod tests {
         app.apply_with_review(review_ready("same", 42), review);
 
         assert_eq!(review.lsp_status.get(), perch_lsp::Status::Absent);
+    }
+
+    #[test]
+    fn a_server_that_cannot_load_its_workspace_says_so_once() {
+        let _root = floem::headless::TestRoot::new();
+        let app = AppState::new();
+        let review = ReviewState::new();
+        app.begin_item_review(review, "Open", "a", 81);
+        app.apply_with_review(review_ready("a", 81), review);
+        let status = |status| Event::LspStatus {
+            navigation_id: 81,
+            status,
+        };
+        let unhealthy = perch_lsp::Status::Unhealthy {
+            message: "Failed to load workspaces\nUsage: cargo metadata".into(),
+        };
+
+        app.apply_with_review(status(perch_lsp::Status::Ready), review);
+        assert_eq!(app.notice(), None);
+        app.apply_with_review(status(unhealthy.clone()), review);
+        assert_eq!(
+            app.notice().as_deref(),
+            Some("rust-analyzer: Failed to load workspaces")
+        );
+        assert!(!review.lsp_status.get().is_usable());
+
+        // The same again is no news.
+        app.notify("", Tone::Error);
+        app.apply_with_review(status(unhealthy), review);
+        assert_eq!(app.notice(), None);
+
+        // A warning leaves the server usable and says its first line.
+        app.apply_with_review(status(perch_lsp::Status::Ready), review);
+        app.apply_with_review(
+            Event::LspWarning {
+                navigation_id: 81,
+                message: "Failed to read Cargo metadata: unexpected argument\n\nUsage: cargo"
+                    .into(),
+            },
+            review,
+        );
+        assert_eq!(
+            app.notice().as_deref(),
+            Some("rust-analyzer: Failed to read Cargo metadata: unexpected argument")
+        );
+        assert!(review.lsp_status.get().is_usable());
+
+        // One from a checkout since left says nothing.
+        app.notify("", Tone::Error);
+        app.apply_with_review(
+            Event::LspWarning {
+                navigation_id: 80,
+                message: "stale".into(),
+            },
+            review,
+        );
+        assert_eq!(app.notice(), None);
     }
 
     #[test]

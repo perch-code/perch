@@ -261,10 +261,10 @@ pub fn cmd_click(
 }
 
 /// Ask where a symbol is defined. The answer opens one location, lists
-/// several as "Definitions of", and does nothing for none. Nothing while
-/// the server is not there.
+/// several as "Definitions of", and says so for none. While the server is
+/// not there, a notice says why and nothing is asked.
 pub fn go_to_definition(state: ReviewState, backend: &Backend, symbol: &Symbol) {
-    if !state.lsp_status.with_untracked(|s| s.is_usable()) {
+    if !server_ready(state, "definition", symbol) {
         return;
     }
     let token = state.next_token();
@@ -272,6 +272,7 @@ pub fn go_to_definition(state: ReviewState, backend: &Backend, symbol: &Symbol) 
         token,
         symbol: symbol.text.clone(),
         kind: Locations::Definitions,
+        noun: "definition",
     }));
     backend.definition(
         token,
@@ -279,6 +280,24 @@ pub fn go_to_definition(state: ReviewState, backend: &Backend, symbol: &Symbol) 
         symbol.line as u32,
         symbol.column as u32,
     );
+}
+
+/// Whether the server can be asked for a goto. When it cannot, a notice
+/// says why: the hand shows over a symbol whatever the server's state,
+/// and a click under it that did nothing would read as a miss.
+fn server_ready(state: ReviewState, noun: &str, symbol: &Symbol) -> bool {
+    let why = state
+        .lsp_status
+        .with_untracked(|s| (!s.is_usable()).then(|| s.describe()));
+    match why {
+        Some(why) => {
+            state
+                .pending_notice
+                .set(Some(format!("No {noun} found for `{}` ({why})", symbol.text)));
+            false
+        }
+        None => true,
+    }
 }
 
 /// `F12`: the definition of the symbol at the caret.
@@ -292,7 +311,7 @@ pub fn definition_at_cursor(state: ReviewState, backend: &Backend) {
 /// struct behind a `Self`. It nearly always has one answer, which opens;
 /// several list as definitions.
 pub fn go_to_type_definition(state: ReviewState, backend: &Backend, symbol: &Symbol) {
-    if !state.lsp_status.with_untracked(|s| s.is_usable()) {
+    if !server_ready(state, "type definition", symbol) {
         return;
     }
     let token = state.next_token();
@@ -300,6 +319,7 @@ pub fn go_to_type_definition(state: ReviewState, backend: &Backend, symbol: &Sym
         token,
         symbol: symbol.text.clone(),
         kind: Locations::Definitions,
+        noun: "type definition",
     }));
     backend.type_definition(
         token,
@@ -312,7 +332,7 @@ pub fn go_to_type_definition(state: ReviewState, backend: &Backend, symbol: &Sym
 /// Ask for the impls of a trait, or of a trait method. One opens; several
 /// open the panel as "Implementations of".
 pub fn go_to_implementations(state: ReviewState, backend: &Backend, symbol: &Symbol) {
-    if !state.lsp_status.with_untracked(|s| s.is_usable()) {
+    if !server_ready(state, "implementations", symbol) {
         return;
     }
     let token = state.next_token();
@@ -320,6 +340,7 @@ pub fn go_to_implementations(state: ReviewState, backend: &Backend, symbol: &Sym
         token,
         symbol: symbol.text.clone(),
         kind: Locations::Implementations,
+        noun: "implementations",
     }));
     backend.implementation(
         token,
@@ -534,6 +555,18 @@ mod tests {
 
     /// The same, with the commands the window sends kept for the test.
     fn recording_harness() -> (HeadlessHarness, ReviewState, UnboundedReceiver<Command>) {
+        let (harness, _, state, commands) = app_harness();
+        (harness, state, commands)
+    }
+
+    /// The same, with the app state, whose popup says what a goto could
+    /// not do.
+    fn app_harness() -> (
+        HeadlessHarness,
+        AppState,
+        ReviewState,
+        UnboundedReceiver<Command>,
+    ) {
         let root = TestRoot::new();
         let app = AppState::new();
         let state = ReviewState::new();
@@ -576,7 +609,7 @@ mod tests {
         let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
         harness.rebuild();
         harness.paint();
-        (harness, state, commands)
+        (harness, app, state, commands)
     }
 
     fn editor() -> Editor {
@@ -863,6 +896,67 @@ mod tests {
     }
 
     #[test]
+    fn a_cmd_click_the_server_cannot_answer_says_why() {
+        let (mut harness, app, state, mut commands) = app_harness();
+        let doc = stacked_doc(state);
+
+        // rust-analyzer whose workspace did not load: the hand still shows,
+        // so the click says why nothing opens.
+        state.lsp_status.set(perch_lsp::Status::Unhealthy {
+            message: "Failed to load workspaces".into(),
+        });
+        let (x, y) = point_of(doc.offset_of_row(3) + 6);
+        cmd_click_at(&mut harness, x, y);
+        harness.rebuild();
+        harness.paint();
+        assert!(definitions_asked(&mut commands).is_empty());
+        assert_eq!(
+            app.notice().as_deref(),
+            Some("No definition found for `alpha` (rust-analyzer: Failed to load workspaces)")
+        );
+        assert_eq!(state.pending_notice.get(), None, "the popup took it");
+
+        // Ready, the click asks; an answer with nothing in it says so.
+        app.notify("", crate::state::Tone::Error);
+        state.lsp_status.set(perch_lsp::Status::Ready);
+        cmd_click_at(&mut harness, x, y);
+        harness.rebuild();
+        assert_eq!(
+            definitions_asked(&mut commands),
+            vec![("src/x.rs".into(), 2, 4)]
+        );
+        let ask = state.goto.get().expect("a definition is on its way");
+        state.finish_goto(ask.token, Ok(Vec::new()));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.pending_jump.get(), None);
+        assert_eq!(
+            app.notice().as_deref(),
+            Some("No definition found for `alpha`")
+        );
+
+        // F12 whose answer is the server's error says the error.
+        app.notify("", crate::state::Tone::Error);
+        harness.dispatch_event(key(
+            Code::F12,
+            Key::Named(NamedKey::F12),
+            Modifiers::empty(),
+        ));
+        harness.rebuild();
+        assert_eq!(definitions_asked(&mut commands).len(), 1);
+        let ask = state.goto.get().expect("a definition is on its way");
+        state.finish_goto(
+            ask.token,
+            Err("the language server reported: content modified".into()),
+        );
+        harness.rebuild();
+        assert_eq!(
+            app.notice().as_deref(),
+            Some("No definition found for `alpha` (the language server reported: content modified)")
+        );
+    }
+
+    #[test]
     fn f12_asks_for_the_definition_of_the_symbol_at_the_caret() {
         let (mut harness, state, mut commands) = recording_harness();
         let doc = stacked_doc(state);
@@ -921,16 +1015,17 @@ mod tests {
             token: 1,
             symbol: "alpha".into(),
             kind: Locations::Definitions,
+            noun: "definition",
         }));
         state.finish_goto(
             1,
-            vec![crate::review::model::Located {
+            Ok(vec![crate::review::model::Located {
                 path: "src/x.rs".into(),
                 outside: None,
                 line: 1,
                 character: 3,
                 text: "fn alpha() {}".into(),
-            }],
+            }]),
         );
         harness.rebuild();
         harness.paint();
@@ -1130,7 +1225,7 @@ mod tests {
         };
         state.finish_goto(
             ask.token,
-            vec![located("src/x.rs", 1), located("src/y.rs", 4)],
+            Ok(vec![located("src/x.rs", 1), located("src/y.rs", 4)]),
         );
         let panel = state.references.get().expect("the panel opened");
         assert_eq!(panel.kind, Locations::Implementations);
@@ -1203,13 +1298,13 @@ mod tests {
         assert_eq!(ask.kind, Locations::Definitions);
         state.finish_goto(
             ask.token,
-            vec![crate::review::model::Located {
+            Ok(vec![crate::review::model::Located {
                 path: "src/y.rs".into(),
                 outside: None,
                 line: 10,
                 character: 11,
                 text: "pub struct Db".into(),
-            }],
+            }]),
         );
         assert_eq!(state.pending_jump.get(), Some(("src/y.rs".into(), 9, 11)));
     }

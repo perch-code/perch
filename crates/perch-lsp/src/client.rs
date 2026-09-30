@@ -21,7 +21,7 @@ use lsp_types::{
     WorkDoneProgressParams, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -46,6 +46,10 @@ const LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone)]
 pub enum ServerEvent {
     Status(Status),
+    /// The server says something is wrong that leaves it usable: some
+    /// build scripts failed, say. Sent once per message, not on each
+    /// repeat.
+    Warning { message: String },
     Diagnostics { uri: String, diagnostics: Vec<lsp_types::Diagnostic> },
 }
 
@@ -109,7 +113,7 @@ impl Client {
             .env_remove("CARGO")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .map_err(|source| Error::Spawn {
@@ -119,6 +123,21 @@ impl Client {
 
         let stdin = child.stdin.take().ok_or(Error::Exited)?;
         let stdout = child.stdout.take().ok_or(Error::Exited)?;
+        // What the server logs goes to Perch's log: a server that fails to
+        // load a workspace says why there, and nowhere else says as much.
+        if let Some(stderr) = child.stderr.take() {
+            let server = spec
+                .binary
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::warn!(server = %server, "{line}");
+                }
+            });
+        }
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
 
         let client = Arc::new(Self {
@@ -158,47 +177,7 @@ impl Client {
         let params = InitializeParams {
             root_uri: Some(uri.clone()),
             initialization_options: Some(self.spec.options.clone()).filter(|o| !o.is_null()),
-            capabilities: ClientCapabilities {
-                text_document: Some(TextDocumentClientCapabilities {
-                    hover: Some(HoverClientCapabilities {
-                        // Markdown first: the tooltip renders it, with the
-                        // signature's fenced block in the code font. Plain
-                        // text second for a server that has no markdown.
-                        content_format: Some(vec![MarkupKind::Markdown, MarkupKind::PlainText]),
-                        ..Default::default()
-                    }),
-                    // Every goto answers with plain `Location`s: a link's
-                    // origin range is nothing the caller draws.
-                    definition: Some(plain_goto()),
-                    type_definition: Some(plain_goto()),
-                    implementation: Some(plain_goto()),
-                    call_hierarchy: Some(CallHierarchyClientCapabilities::default()),
-                    document_highlight: Some(DocumentHighlightClientCapabilities::default()),
-                    // Nested symbols, so a function's range and its name's
-                    // line come with it, inside its impl's.
-                    document_symbol: Some(DocumentSymbolClientCapabilities {
-                        hierarchical_document_symbol_support: Some(true),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
-                window: Some(WindowClientCapabilities {
-                    work_done_progress: Some(true),
-                    ..Default::default()
-                }),
-                // Columns are byte offsets on both sides here: the caller
-                // counts bytes, and so does what it reads back. The protocol
-                // defaults to UTF-16 code units, which agree only on ASCII,
-                // so UTF-8 is asked for first. rust-analyzer grants it.
-                general: Some(GeneralClientCapabilities {
-                    position_encodings: Some(vec![
-                        PositionEncodingKind::UTF8,
-                        PositionEncodingKind::UTF16,
-                    ]),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
+            capabilities: client_capabilities(),
             ..Default::default()
         };
 
@@ -258,27 +237,44 @@ impl Client {
         decode_result(value)
     }
 
-    pub async fn definition(&self, path: &Path, line: u32, character: u32) -> Vec<Location> {
+    pub async fn definition(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<Location>, Error> {
         self.goto("textDocument/definition", path, line, character, QUICK_TIMEOUT)
             .await
     }
 
     /// The type of the thing at a position: a binding's type, the struct
     /// behind a `Self`.
-    pub async fn type_definition(&self, path: &Path, line: u32, character: u32) -> Vec<Location> {
+    pub async fn type_definition(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<Location>, Error> {
         self.goto("textDocument/typeDefinition", path, line, character, QUICK_TIMEOUT)
             .await
     }
 
     /// The impls of the trait, or of the trait method, at a position. A
     /// search of the workspace, like references, so it waits as long.
-    pub async fn implementation(&self, path: &Path, line: u32, character: u32) -> Vec<Location> {
+    pub async fn implementation(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<Location>, Error> {
         self.goto("textDocument/implementation", path, line, character, PANEL_TIMEOUT)
             .await
     }
 
     /// The three gotos are one request with three names: a position in,
-    /// locations out, and a null reply is none.
+    /// locations out, and a null reply is none. A reply that is an error,
+    /// or none in time, is the error: the reader is told why nothing
+    /// opened, where a hover that fails just does not show.
     async fn goto(
         &self,
         method: &str,
@@ -286,22 +282,18 @@ impl Client {
         line: u32,
         character: u32,
         timeout: Duration,
-    ) -> Vec<Location> {
+    ) -> Result<Vec<Location>, Error> {
         let Some(position) = self.position(path, line, character) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let params = GotoDefinitionParams {
             text_document_position_params: position,
             work_done_progress_params: WorkDoneProgressParams::default(),
             partial_result_params: Default::default(),
         };
-        let Ok(params) = serde_json::to_value(params) else {
-            return Vec::new();
-        };
-        let Ok(value) = self.request(method, params, timeout).await else {
-            return Vec::new();
-        };
-        goto_locations(value)
+        let params = serde_json::to_value(params).unwrap_or(Value::Null);
+        let value = self.request(method, params, timeout).await?;
+        Ok(goto_locations(value))
     }
 
     /// Every use of the symbol under the cursor, its declaration among them.
@@ -529,6 +521,7 @@ async fn read_loop(
 ) {
     let mut reader = BufReader::new(stdout);
     let mut headers = Vec::new();
+    let mut reported = Reported::default();
 
     loop {
         headers.clear();
@@ -566,7 +559,9 @@ async fn read_loop(
                 }
             }
             Incoming::Notification { method, params } => {
-                handle_notification(&method, params, &events);
+                for event in handle_notification(&method, params, &mut reported) {
+                    let _ = events.send(event);
+                }
             }
             Incoming::Request { id, method } => {
                 // rust-analyzer waits on these; an unanswered one stalls it.
@@ -581,22 +576,160 @@ async fn read_loop(
     }
 }
 
-fn handle_notification(method: &str, params: Value, events: &mpsc::UnboundedSender<ServerEvent>) {
+/// What a notification tells the caller, if anything.
+fn handle_notification(method: &str, params: Value, reported: &mut Reported) -> Vec<ServerEvent> {
     match method {
         "textDocument/publishDiagnostics" => {
-            if let Ok(p) = serde_json::from_value::<PublishDiagnosticsParams>(params) {
-                let _ = events.send(ServerEvent::Diagnostics {
+            serde_json::from_value::<PublishDiagnosticsParams>(params)
+                .map(|p| ServerEvent::Diagnostics {
                     uri: p.uri.to_string(),
                     diagnostics: p.diagnostics,
-                });
-            }
+                })
+                .into_iter()
+                .collect()
         }
-        "$/progress" => {
-            if let Some(status) = progress_status(&params) {
-                let _ = events.send(ServerEvent::Status(status));
+        "$/progress" => match progress_status(&params) {
+            Some(status) => reported.progress(status).into_iter().collect(),
+            None => Vec::new(),
+        },
+        "experimental/serverStatus" => match server_health(&params) {
+            Some(health) => reported.health(health),
+            None => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// How rust-analyzer says it is, in `experimental/serverStatus`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Health {
+    Ok,
+    Warning(String),
+    Error(String),
+}
+
+/// Read an `experimental/serverStatus` notification. Its message can run
+/// to several lines, each problem on its own; they are kept as they are.
+fn server_health(params: &Value) -> Option<Health> {
+    let message = params
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|m| !m.is_empty());
+    match params.get("health").and_then(Value::as_str)? {
+        "ok" => Some(Health::Ok),
+        "warning" => Some(Health::Warning(
+            message.unwrap_or("the language server reported a problem").to_string(),
+        )),
+        "error" => Some(Health::Error(
+            message.unwrap_or("the language server reported an error").to_string(),
+        )),
+        _ => None,
+    }
+}
+
+/// The status told so far, put together from two sources: `$/progress`
+/// says whether the server is indexing, and rust-analyzer's server status
+/// whether it is well. A server whose workspace failed to load ends its
+/// progress all the same, so an error outranks the progress until a
+/// later status clears it. Each status and each warning is told once,
+/// not on every repeat: rust-analyzer sends its status again whenever it
+/// goes quiet or busy.
+#[derive(Debug, Default)]
+struct Reported {
+    progress: Option<Status>,
+    health: Option<Health>,
+    told: Option<Status>,
+    warned: Option<String>,
+}
+
+impl Reported {
+    fn progress(&mut self, status: Status) -> Option<ServerEvent> {
+        self.progress = Some(status);
+        self.tell()
+    }
+
+    fn health(&mut self, health: Health) -> Vec<ServerEvent> {
+        let warning = match &health {
+            Health::Warning(message) if self.warned.as_ref() != Some(message) => {
+                self.warned = Some(message.clone());
+                Some(ServerEvent::Warning {
+                    message: message.clone(),
+                })
             }
+            Health::Warning(_) => None,
+            // Well again, or failing outright: a warning that comes back
+            // later is news again.
+            Health::Ok | Health::Error(_) => {
+                self.warned = None;
+                None
+            }
+        };
+        self.health = Some(health);
+        self.tell().into_iter().chain(warning).collect()
+    }
+
+    fn tell(&mut self) -> Option<ServerEvent> {
+        let status = match &self.health {
+            Some(Health::Error(message)) => Status::Unhealthy {
+                message: message.clone(),
+            },
+            _ => self.progress.clone()?,
+        };
+        if self.told.as_ref() == Some(&status) {
+            return None;
         }
-        _ => {}
+        self.told = Some(status.clone());
+        Some(ServerEvent::Status(status))
+    }
+}
+
+/// What the client can take, sent with `initialize`.
+fn client_capabilities() -> ClientCapabilities {
+    ClientCapabilities {
+        text_document: Some(TextDocumentClientCapabilities {
+            hover: Some(HoverClientCapabilities {
+                // Markdown first: the tooltip renders it, with the
+                // signature's fenced block in the code font. Plain
+                // text second for a server that has no markdown.
+                content_format: Some(vec![MarkupKind::Markdown, MarkupKind::PlainText]),
+                ..Default::default()
+            }),
+            // Every goto answers with plain `Location`s: a link's
+            // origin range is nothing the caller draws.
+            definition: Some(plain_goto()),
+            type_definition: Some(plain_goto()),
+            implementation: Some(plain_goto()),
+            call_hierarchy: Some(CallHierarchyClientCapabilities::default()),
+            document_highlight: Some(DocumentHighlightClientCapabilities::default()),
+            // Nested symbols, so a function's range and its name's
+            // line come with it, inside its impl's.
+            document_symbol: Some(DocumentSymbolClientCapabilities {
+                hierarchical_document_symbol_support: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        window: Some(WindowClientCapabilities {
+            work_done_progress: Some(true),
+            ..Default::default()
+        }),
+        // Columns are byte offsets on both sides here: the caller
+        // counts bytes, and so does what it reads back. The protocol
+        // defaults to UTF-16 code units, which agree only on ASCII,
+        // so UTF-8 is asked for first. rust-analyzer grants it.
+        general: Some(GeneralClientCapabilities {
+            position_encodings: Some(vec![
+                PositionEncodingKind::UTF8,
+                PositionEncodingKind::UTF16,
+            ]),
+            ..Default::default()
+        }),
+        // rust-analyzer's own `experimental/serverStatus`, which says
+        // whether it could load the workspace. Its progress reports
+        // end the same either way.
+        experimental: Some(json!({"serverStatusNotification": true})),
+        ..Default::default()
     }
 }
 
@@ -838,6 +971,117 @@ mod tests {
     fn an_unrecognised_progress_shape_is_ignored() {
         assert_eq!(progress_status(&json!({})), None);
         assert_eq!(progress_status(&json!({"value":{"kind":"other"}})), None);
+    }
+
+    #[test]
+    fn the_server_status_notification_is_asked_for() {
+        let experimental = client_capabilities().experimental.unwrap_or_default();
+        assert_eq!(experimental["serverStatusNotification"], json!(true));
+    }
+
+    #[test]
+    fn a_server_status_is_read_with_its_message() {
+        let failed = json!({
+            "health":"error","quiescent":true,
+            "message":"Failed to load workspaces.\n\nFailed to read Cargo metadata\n"
+        });
+        assert_eq!(
+            server_health(&failed),
+            Some(Health::Error(
+                "Failed to load workspaces.\n\nFailed to read Cargo metadata".into()
+            ))
+        );
+        assert_eq!(
+            server_health(&json!({"health":"warning","quiescent":true})),
+            Some(Health::Warning("the language server reported a problem".into()))
+        );
+        assert_eq!(
+            server_health(&json!({"health":"ok","quiescent":false})),
+            Some(Health::Ok)
+        );
+        assert_eq!(server_health(&json!({"quiescent":true})), None);
+    }
+
+    /// The statuses a run of notifications tells, in order.
+    fn told(reported: &mut Reported, notifications: &[(&str, Value)]) -> Vec<String> {
+        notifications
+            .iter()
+            .flat_map(|(method, params)| handle_notification(method, params.clone(), reported))
+            .map(|event| match event {
+                ServerEvent::Status(status) => status.describe(),
+                ServerEvent::Warning { message } => format!("warning: {message}"),
+                ServerEvent::Diagnostics { .. } => "diagnostics".into(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_workspace_that_failed_to_load_is_unhealthy_however_its_progress_ends() {
+        // rust-analyzer 2025-08-25 under cargo 1.97: the fetch ends, and the
+        // status says the metadata could not be read.
+        let error = json!({
+            "health":"error","quiescent":true,"message":"Failed to read Cargo metadata"
+        });
+        let mut reported = Reported::default();
+        let events = told(
+            &mut reported,
+            &[
+                ("$/progress", json!({"value":{"kind":"begin"}})),
+                ("experimental/serverStatus", json!({"health":"ok","quiescent":false})),
+                ("$/progress", json!({"value":{"kind":"end"}})),
+                ("experimental/serverStatus", error.clone()),
+                // Told again whenever it goes quiet or busy, and a progress
+                // that ends after it: none of it is news.
+                ("experimental/serverStatus", error.clone()),
+                ("$/progress", json!({"value":{"kind":"end"}})),
+                ("experimental/serverStatus", error),
+            ],
+        );
+        assert_eq!(
+            events,
+            vec![
+                "rust-analyzer indexing",
+                "rust-analyzer ready",
+                "rust-analyzer: Failed to read Cargo metadata",
+            ]
+        );
+
+        // Loaded after all: the progress speaks again.
+        let events = told(
+            &mut reported,
+            &[("experimental/serverStatus", json!({"health":"ok","quiescent":true}))],
+        );
+        assert_eq!(events, vec!["rust-analyzer ready"]);
+    }
+
+    #[test]
+    fn a_warning_is_told_once_and_leaves_the_status_alone() {
+        let warning = json!({
+            "health":"warning","quiescent":true,"message":"Failed to run build scripts"
+        });
+        let mut reported = Reported::default();
+        let events = told(
+            &mut reported,
+            &[
+                ("$/progress", json!({"value":{"kind":"end"}})),
+                ("experimental/serverStatus", warning.clone()),
+                ("experimental/serverStatus", warning.clone()),
+            ],
+        );
+        assert_eq!(
+            events,
+            vec!["rust-analyzer ready", "warning: Failed to run build scripts"]
+        );
+
+        // Well, then the same warning again: news again.
+        let events = told(
+            &mut reported,
+            &[
+                ("experimental/serverStatus", json!({"health":"ok","quiescent":true})),
+                ("experimental/serverStatus", warning),
+            ],
+        );
+        assert_eq!(events, vec!["warning: Failed to run build scripts"]);
     }
 
     #[test]

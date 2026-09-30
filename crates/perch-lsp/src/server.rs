@@ -21,6 +21,9 @@ pub enum Status {
     Starting,
     Indexing { percent: Option<u8> },
     Ready,
+    /// Running, but it says it cannot do its work: rust-analyzer whose
+    /// workspace failed to load answers every ask with nothing.
+    Unhealthy { message: String },
     Failed { reason: String },
 }
 
@@ -32,6 +35,11 @@ impl Status {
             Status::Indexing { percent: Some(p) } => format!("rust-analyzer indexing {p}%"),
             Status::Indexing { percent: None } => "rust-analyzer indexing".into(),
             Status::Ready => "rust-analyzer ready".into(),
+            // Its first line: rust-analyzer puts the tool output it failed
+            // on under it, a usage text and all.
+            Status::Unhealthy { message } => {
+                format!("rust-analyzer: {}", message.lines().next().unwrap_or(message))
+            }
             Status::Failed { reason } => format!("rust-analyzer failed: {reason}"),
         }
     }
@@ -118,6 +126,13 @@ mod tests {
             "rust-analyzer indexing 42%"
         );
         assert!(Status::Failed { reason: "boom".into() }.describe().contains("boom"));
+        assert_eq!(
+            Status::Unhealthy {
+                message: "Failed to load workspaces\n\nUsage: cargo metadata".into()
+            }
+            .describe(),
+            "rust-analyzer: Failed to load workspaces"
+        );
     }
 
     #[test]
@@ -127,5 +142,6 @@ mod tests {
         assert!(Status::Ready.is_usable());
         assert!(!Status::Starting.is_usable());
         assert!(!Status::Absent.is_usable());
+        assert!(!Status::Unhealthy { message: "no workspace".into() }.is_usable());
     }
 }

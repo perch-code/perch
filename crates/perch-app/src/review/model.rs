@@ -558,12 +558,15 @@ pub struct HierarchyAsk {
 
 /// A goto in flight: a definition, a type definition or an implementation
 /// asked for and not yet answered. One answer opens; several list under
-/// `kind`; none does nothing visible.
+/// `kind`; none says so in a notice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GotoAsk {
     pub token: u64,
     pub symbol: String,
     pub kind: Locations,
+    /// What was asked for, as the notice names it: "definition", "type
+    /// definition", "implementations".
+    pub noun: &'static str,
 }
 
 /// Somewhere the reader was: a file and a head line, for the jump keys.
@@ -1634,6 +1637,9 @@ pub struct ReviewState {
     /// Names asked about and not yet sent, with each ask's token, drained
     /// by the root view, which holds the backend handle.
     pub pending_names: RwSignal<Vec<(u64, Vec<NameAsk>)>>,
+    /// A notice for the popup, drained by the root view, which holds the
+    /// app state: why a goto opened nothing, for one.
+    pub pending_notice: RwSignal<Option<String>>,
     /// A head line to scroll to once the file it belongs to is loaded.
     pub jump_to_line: RwSignal<Option<usize>>,
     /// Where the caret lands after `jump_to_line`, as the head line and a
@@ -1846,6 +1852,7 @@ impl ReviewState {
             pending_open: RwSignal::new(None),
             names: RwSignal::new(HashMap::new()),
             pending_names: RwSignal::new(Vec::new()),
+            pending_notice: RwSignal::new(None),
             jump_to_line: RwSignal::new(None),
             jump_caret: RwSignal::new(None),
             paging: RwSignal::new(None),
@@ -2622,13 +2629,27 @@ impl ReviewState {
     }
 
     /// A goto's answer landed. One location opens; several open the panel
-    /// under the ask's kind, and the reader picks; none does nothing, since
-    /// a symbol without a definition is an ordinary thing to click on.
-    pub fn finish_goto(&self, token: u64, locations: Vec<Located>) {
+    /// under the ask's kind, and the reader picks. None, or the server's
+    /// error, says so in a notice: a click that opens nothing and says
+    /// nothing reads as a click that missed.
+    pub fn finish_goto(&self, token: u64, answer: Result<Vec<Located>, String>) {
         let ask = self.goto.try_update(|g| g.take_if(|g| g.token == token)).flatten();
         let Some(ask) = ask else { return };
+        let locations = match answer {
+            Ok(locations) => locations,
+            Err(error) => {
+                self.pending_notice.set(Some(format!(
+                    "No {} found for `{}` ({error})",
+                    ask.noun, ask.symbol
+                )));
+                return;
+            }
+        };
         match locations.as_slice() {
-            [] => {}
+            [] => self.pending_notice.set(Some(format!(
+                "No {} found for `{}`",
+                ask.noun, ask.symbol
+            ))),
             [one] => self.open_located(one),
             _ => self.open_references(References {
                 kind: ask.kind,
@@ -6207,20 +6228,26 @@ mod tests {
             character: 4,
             text: "x".into(),
         };
-        state.goto.set(Some(GotoAsk { token: 7, symbol: "x".into(), kind: Locations::Definitions }));
+        let ask = |token| GotoAsk {
+            token,
+            symbol: "x".into(),
+            kind: Locations::Definitions,
+            noun: "definition",
+        };
+        state.goto.set(Some(ask(7)));
 
         // A stale token answers nothing and leaves the ask waiting.
-        state.finish_goto(6, vec![located("src/a.rs", 3)]);
+        state.finish_goto(6, Ok(vec![located("src/a.rs", 3)]));
         assert_eq!(state.pending_jump.get(), None);
         assert!(state.goto.get().is_some());
 
-        state.finish_goto(7, vec![located("src/a.rs", 3)]);
+        state.finish_goto(7, Ok(vec![located("src/a.rs", 3)]));
         assert_eq!(state.pending_jump.get(), Some(("src/a.rs".into(), 2, 4)));
         assert!(state.goto.get().is_none(), "the ask is answered");
 
         state.pending_jump.set(None);
-        state.goto.set(Some(GotoAsk { token: 8, symbol: "x".into(), kind: Locations::Definitions }));
-        state.finish_goto(8, vec![located("src/a.rs", 3), located("src/b.rs", 9)]);
+        state.goto.set(Some(ask(8)));
+        state.finish_goto(8, Ok(vec![located("src/a.rs", 3), located("src/b.rs", 9)]));
         assert_eq!(state.pending_jump.get(), None, "several open the panel, not a file");
         let panel = state.references.get().expect("the panel opened");
         assert_eq!(panel.kind, Locations::Definitions);
@@ -6228,9 +6255,49 @@ mod tests {
         assert_eq!(panel.locations.len(), 2);
         assert!(!panel.pending);
 
-        state.goto.set(Some(GotoAsk { token: 9, symbol: "x".into(), kind: Locations::Definitions }));
-        state.finish_goto(9, vec![]);
-        assert_eq!(state.pending_jump.get(), None, "none does nothing");
+        assert_eq!(state.pending_notice.get(), None, "an answer is no news");
+    }
+
+    #[test]
+    fn a_goto_that_finds_nothing_or_fails_says_so() {
+        let state = ReviewState::new();
+        let ask = |token, noun| GotoAsk {
+            token,
+            symbol: "alpha".into(),
+            kind: Locations::Definitions,
+            noun,
+        };
+
+        state.goto.set(Some(ask(9, "definition")));
+        state.finish_goto(9, Ok(vec![]));
+        assert_eq!(state.pending_jump.get(), None, "none opens nothing");
+        assert!(state.references.get().is_none());
+        assert_eq!(
+            state.pending_notice.get().as_deref(),
+            Some("No definition found for `alpha`")
+        );
+
+        // rust-analyzer with no workspace loaded answers "content modified".
+        state.pending_notice.set(None);
+        state.goto.set(Some(ask(10, "type definition")));
+        state.finish_goto(
+            10,
+            Err("the language server reported: content modified".into()),
+        );
+        assert_eq!(state.pending_jump.get(), None);
+        assert_eq!(
+            state.pending_notice.get().as_deref(),
+            Some(
+                "No type definition found for `alpha` \
+                 (the language server reported: content modified)"
+            )
+        );
+
+        // An answer to an ask since replaced says nothing.
+        state.pending_notice.set(None);
+        state.goto.set(Some(ask(12, "definition")));
+        state.finish_goto(11, Ok(vec![]));
+        assert_eq!(state.pending_notice.get(), None);
     }
 
     #[test]
