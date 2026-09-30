@@ -32,6 +32,19 @@ mod scope_cli;
 mod timeline_cli;
 
 fn main() {
+    // Perch started by `cargo run` inherits rustup's pin to Perch's own
+    // toolchain and the path to that toolchain's cargo, and would hand both
+    // to everything it starts in a checkout: agents, git and its hooks, the
+    // language server. rustup ranks the pin above the checkout's
+    // rust-toolchain.toml, so a `cargo build` there would use Perch's
+    // compiler, which the checkout may not build with, and leave a second
+    // build in its target dir. RUSTUP_TOOLCHAIN_SOURCE only says where the
+    // pin came from. Removed before any thread starts, since nothing may
+    // read the environment while it changes. CARGO_HOME and RUSTUP_HOME
+    // stay: they say where the user's installs are.
+    for name in ["RUSTUP_TOOLCHAIN", "RUSTUP_TOOLCHAIN_SOURCE", "CARGO"] {
+        std::env::remove_var(name);
+    }
     // A debugging mode that renders a file the way the editor would, without
     // a window. The screen has to be unlocked to look at the real thing, and
     // this checks everything up to the pixels.
