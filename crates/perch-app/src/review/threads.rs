@@ -2752,7 +2752,7 @@ fn perch_only_label() -> impl IntoView {
 /// marking it Perch only. A finished run sits on the answer, and reads in
 /// the order it went: what the agent did, then what it said, then what
 /// it cost. While it runs, or when it failed, the run sits under the
-/// question whole. An answer that is done, or a finding, which has no run
+/// question, in a comment of the agent's own. An answer that is done, or a finding, which has no run
 /// of its own, has Post to GitHub and Copy at the end of its byline.
 #[allow(clippy::too_many_arguments)]
 fn local_message_view(
@@ -2781,18 +2781,27 @@ fn local_message_view(
     } else {
         Empty::new().into_any()
     };
-    let content = match message.run.clone() {
-        Some(run) if is_agent && finished => Stack::vertical((
-            crate::review::run_view::run_fold(state, &run, without_answer(run.clone(), &body).steps),
-            text,
-            run_footer(backend, run),
-        ))
-        .style(|s| s.flex_col().width_full().gap(8.0))
-        .into_any(),
-        Some(run) => Stack::vertical((text, run_block(app, state, backend, run)))
+    // A run on the reader's question is the answer on its way: it takes a
+    // comment of its own under the question, as the answer will.
+    let (content, pending) = match message.run.clone() {
+        Some(run) if is_agent && finished => (
+            Stack::vertical((
+                crate::review::run_view::run_fold(state, &run, without_answer(run.clone(), &body).steps),
+                text,
+                run_footer(backend.clone(), run),
+            ))
             .style(|s| s.flex_col().width_full().gap(8.0))
             .into_any(),
-        None => text,
+            None,
+        ),
+        Some(run) if is_agent => (
+            Stack::vertical((text, run_block(app, state, backend.clone(), run)))
+                .style(|s| s.flex_col().width_full().gap(8.0))
+                .into_any(),
+            None,
+        ),
+        Some(run) => (text, Some(run)),
+        None => (text, None),
     };
     let author = message.author.clone();
     let mut after = vec![when_label(app, message.created_at, face, "comment-when").into_any()];
@@ -2805,7 +2814,66 @@ fn local_message_view(
         after,
         actions,
     );
-    cards::track_hover(comment_frame(face, place, avatar, byline, content), hovered).into_any()
+    let Some(run) = pending else {
+        return cards::track_hover(comment_frame(face, place, avatar, byline, content), hovered)
+            .into_any();
+    };
+    let question = Place {
+        first: place.first,
+        last: false,
+    };
+    let answer = Place {
+        first: false,
+        last: place.last,
+    };
+    Stack::vertical((
+        comment_frame(face, question, avatar, byline, content),
+        pending_answer_view(app, state, backend, run, face, answer, private),
+    ))
+    .style(|s| s.flex_col().width_full())
+    .into_any()
+}
+
+/// The agent's comment while its answer is on the way, or when it never
+/// came: its mark and model over the run, as the answer will have them.
+fn pending_answer_view(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    run: RunRecord,
+    face: ThreadFace,
+    place: Place,
+    private: bool,
+) -> floem::AnyView {
+    let at = run.started_at.unwrap_or(run.queued_at);
+    // The model the CLI reports can land after the run starts.
+    let live = live_run(state, run.clone());
+    let model = move || {
+        live.with(|run| {
+            let model = if run.model.is_empty() {
+                &run.requested_model
+            } else {
+                &run.model
+            };
+            Name::Plain(model_label(model))
+        })
+    };
+    let mut after = vec![when_label(app, at, face, "comment-when").into_any()];
+    if private {
+        after.push(perch_only_label().into_any());
+    }
+    let byline = byline_row(
+        name_label(model, move |s| name_style(s, face)),
+        after,
+        Empty::new().into_any(),
+    );
+    comment_frame(
+        face,
+        place,
+        agent_avatar(face.avatar()).into_any(),
+        byline,
+        run_block(app, state, backend, run).into_any(),
+    )
 }
 
 /// Quote reply, Post to GitHub, while the thread has somewhere on GitHub
@@ -3963,6 +4031,49 @@ mod tests {
         assert!(find(harness.root_id(), "Label: \"Ran\"").is_some());
         assert!(find(harness.root_id(), "It failed to build.").is_some(), "the words show");
         assert_eq!(header(&harness), before, "the message was built again");
+    }
+
+    /// A run on the reader's question draws as the agent's comment under
+    /// it, with the agent's mark and the model, as its answer will.
+    #[test]
+    fn a_running_run_is_the_agents_comment_under_the_question() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_item();
+        let mut thread = github_thread_with_private_messages();
+        thread.messages.truncate(2);
+        thread.messages[1].run = Some(RunRecord {
+            id: "run-1".into(),
+            status: RunStatus::Running,
+            requested_model: "opus".into(),
+            ..RunRecord::default()
+        });
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = messages_view(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
+            .style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(find_all(harness.root_id(), "agent-avatar").len(), 1);
+        assert!(find(harness.root_id(), "Label: \"Opus\"").is_some(), "the requested model");
+        assert_eq!(
+            find_all(harness.root_id(), "perch-only").len(),
+            2,
+            "the question and the answer on its way are both Perch's"
+        );
+        assert_eq!(find_all(harness.root_id(), "comment-rail").len(), 3, "rohan, the reader and the agent");
+
+        state.comment_threads.update(|threads| {
+            let run = Arc::make_mut(threads)[0].messages[1].run.as_mut().unwrap();
+            run.model = "claude-opus-5-5".into();
+        });
+        harness.rebuild();
+        harness.paint();
+        assert!(
+            find(harness.root_id(), "Label: \"claude-opus-5-5\"").is_some(),
+            "the model the CLI reported"
+        );
     }
 
     /// While the thread's agent works its foot is Steer, whose box has no
