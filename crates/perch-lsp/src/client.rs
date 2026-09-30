@@ -98,6 +98,15 @@ impl Client {
         let mut child = Command::new(&spec.binary)
             .args(&spec.args)
             .current_dir(root)
+            // `cargo run` pins its own toolchain with RUSTUP_TOOLCHAIN and
+            // CARGO, and rustup ranks the pin above the checkout's
+            // rust-toolchain.toml: a server that inherited it would run the
+            // checkout's cargo with a compiler its release may not know,
+            // `cargo metadata` would fail, and every ask would be answered
+            // with nothing. Perch's `main` drops both; this covers whatever
+            // else starts a server, such as the hover example.
+            .env_remove("RUSTUP_TOOLCHAIN")
+            .env_remove("CARGO")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
