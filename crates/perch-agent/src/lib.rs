@@ -308,6 +308,20 @@ pub fn linked_git_dirs(worktree: &std::path::Path) -> Vec<PathBuf> {
     dirs
 }
 
+/// What in a git directory steers git rather than holding the history,
+/// which a run that may commit still may not write.
+const GIT_CONTROL: [&str; 4] = ["config", "config.worktree", "commondir", "hooks"];
+
+/// The git directories a commit in the worktree writes: a linked
+/// worktree's two (see [`linked_git_dirs`]), or its own `.git`, the
+/// repository's last.
+fn git_dirs(worktree: &std::path::Path) -> Vec<PathBuf> {
+    match linked_git_dirs(worktree) {
+        dirs if !dirs.is_empty() => dirs,
+        _ => vec![worktree.join(".git")],
+    }
+}
+
 /// Where a commit writes, and what in there must stay read-only, for a
 /// worktree whose repository the reader lets Work commit in: the
 /// worktree's git directories, and each one's config and hooks, and its
@@ -323,13 +337,10 @@ pub fn linked_git_dirs(worktree: &std::path::Path) -> Vec<PathBuf> {
 /// carved out of a denied `worktrees/`; the others are named one by one,
 /// and the globs cover a worktree added while the run is going.
 fn commit_paths(worktree: &std::path::Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
-    let dirs = match linked_git_dirs(worktree) {
-        dirs if !dirs.is_empty() => dirs,
-        _ => vec![worktree.join(".git")],
-    };
+    let dirs = git_dirs(worktree);
     let mut guarded: Vec<PathBuf> = dirs
         .iter()
-        .flat_map(|dir| ["config", "config.worktree", "commondir", "hooks"].map(|name| dir.join(name)))
+        .flat_map(|dir| GIT_CONTROL.map(|name| dir.join(name)))
         .collect();
     let common = dirs.last().expect("one git directory at least");
     let worktrees = common.join("worktrees");
@@ -412,8 +423,16 @@ pub const CODEX_WORK_PROFILE: &str = "perch_work";
 /// Codex takes a glob only as `deny`, which stops reads as well as
 /// writes; its `**/` matches no directory too, so without the `*/` the
 /// glob would hide the top-level `.git` from git itself. The deny holds
-/// against a bare `git init` or `git clone`, which Codex otherwise lets
-/// past the profile the way it does `git commit`.
+/// against a bare `git init` or `git clone`, which Codex 0.156 let past
+/// the profile the way it did `git commit`.
+///
+/// Codex 0.159 holds a bare `git commit` to the profile, and runs a
+/// command it was let run outside the sandbox inside it all the same,
+/// so the commit grant is the only way a Codex run commits: it opens the
+/// git directories, as [`commit_paths`] does for Claude Code. Here the
+/// more specific path wins, so `worktrees/` is read-only and the run's
+/// own directory in it is not, which also keeps a worktree added later
+/// read-only without a glob.
 pub fn codex_work_entries(cwd: &std::path::Path, grant: &WorkGrant) -> Vec<(String, &'static str)> {
     let real = real_path(cwd);
     let mut entries = vec![
@@ -424,11 +443,23 @@ pub fn codex_work_entries(cwd: &std::path::Path, grant: &WorkGrant) -> Vec<(Stri
     for path in &grant.write {
         entries.push((real_path(path).to_string_lossy().into_owned(), "write"));
     }
-    for name in WORK_PROTECTED {
+    let git_is_dir = real.join(".git").is_dir();
+    for name in WORK_PROTECTED.iter().filter(|name| !(grant.commit && git_is_dir && **name == ".git")) {
         entries.push((real.join(name).to_string_lossy().into_owned(), "read"));
     }
-    for dir in linked_git_dirs(&real) {
-        entries.push((dir.to_string_lossy().into_owned(), "read"));
+    if grant.commit {
+        let dirs = git_dirs(&real);
+        let common = dirs.last().expect("one git directory at least");
+        let guarded = dirs
+            .iter()
+            .flat_map(|dir| GIT_CONTROL.map(|name| dir.join(name)))
+            .chain([common.join("worktrees"), common.join("modules")]);
+        entries.extend(dirs.iter().map(|dir| (dir.to_string_lossy().into_owned(), "write")));
+        entries.extend(guarded.map(|path| (path.to_string_lossy().into_owned(), "read")));
+    } else {
+        for dir in linked_git_dirs(&real) {
+            entries.push((dir.to_string_lossy().into_owned(), "read"));
+        }
     }
     entries.push((nested_git(&real).to_string_lossy().into_owned(), "deny"));
     entries
@@ -2348,6 +2379,51 @@ mod tests {
             assert!(has(deny, &guarded), "{} in {deny:?}", guarded.display());
         }
         assert!(!has(deny, &common.join("worktrees")), "denying it would deny the run's own: {deny:?}");
+    }
+
+    #[test]
+    fn the_commit_grant_opens_codex_s_git_directories_but_not_their_config_or_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().canonicalize().unwrap();
+        let common = real.join("repo/.git");
+        let own = common.join("worktrees/wt");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(own.join("commondir"), "../..\n").unwrap();
+        let worktree = real.join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(worktree.join(".git"), format!("gitdir: {}\n", own.display())).unwrap();
+
+        let grant = WorkGrant { commit: true, ..WorkGrant::default() };
+        let entries = codex_work_entries(&worktree, &grant);
+        let access = |path: &std::path::Path| entries.iter().find(|(p, _)| *p == path.to_string_lossy()).map(|(_, a)| *a);
+        assert_eq!(access(&common), Some("write"), "{entries:?}");
+        assert_eq!(access(&own), Some("write"), "{entries:?}");
+        // The run's own directory is more specific than `worktrees/`, so
+        // it stays writable while every other worktree's, now or later,
+        // does not.
+        for guarded in [
+            common.join("config"),
+            common.join("hooks"),
+            common.join("worktrees"),
+            common.join("modules"),
+            own.join("config.worktree"),
+            own.join("commondir"),
+            worktree.join(".git"),
+        ] {
+            assert_eq!(access(&guarded), Some("read"), "{} in {entries:?}", guarded.display());
+        }
+        let denied: Vec<_> = entries.iter().filter(|(_, a)| *a == "deny").collect();
+        assert_eq!(denied.len(), 1, "a glob deny stops reads too: {denied:?}");
+
+        let main = real.join("main");
+        let git = main.join(".git");
+        std::fs::create_dir_all(git.join("worktrees/elsewhere")).unwrap();
+        let entries = codex_work_entries(&main, &grant);
+        let access = |path: &std::path::Path| entries.iter().find(|(p, _)| *p == path.to_string_lossy()).map(|(_, a)| *a);
+        assert_eq!(access(&git), Some("write"), "{entries:?}");
+        for guarded in [git.join("config"), git.join("hooks"), git.join("worktrees"), git.join("modules")] {
+            assert_eq!(access(&guarded), Some("read"), "{} in {entries:?}", guarded.display());
+        }
     }
 
     #[test]
