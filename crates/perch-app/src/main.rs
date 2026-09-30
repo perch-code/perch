@@ -84,6 +84,7 @@ fn main() {
         .init();
     tracing::info!("perch starting");
     theme::install_code_font();
+    theme::install_symbol_fallbacks();
 
     let (backend, events) = backend::spawn();
     let mut started = Some((backend, events));

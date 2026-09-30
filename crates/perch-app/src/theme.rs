@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use floem::peniko::{Blob, Color};
 use floem::text::{FontStyle, FontWeight, FONT_CONTEXT};
-use fontique::FontInfoOverride;
+use fontique::{FallbackKey, FamilyId, FontInfoOverride, Script};
 
 /// How round an app's face is, as a share of its side: GitHub's 4px on
 /// a 16px bot.
@@ -383,6 +383,46 @@ pub fn install_code_font() {
         );
     }
 }
+
+/// Where a symbol neither SF Pro nor SF Mono has is drawn from, in the
+/// order macOS's own cascade list names them: Apple Symbols for set and
+/// logic signs (∪, ∀, ⊢), Menlo for letterlike ones (ℕ), and STIX for
+/// the rest of mathematics.
+const SYMBOL_FONTS: [&str; 3] = ["Apple Symbols", "Menlo", "STIX Two Math"];
+
+/// The scripts whose text gets `SYMBOL_FONTS`: Latin, which a line of
+/// symbols alone falls back as too, and the two whose letters stand in
+/// formulas beside Latin ones. Each costs a CoreText lookup at startup,
+/// about 3ms, so not all 161 fontique knows.
+const SYMBOL_SCRIPTS: [[u8; 4]; 3] = [*b"Latn", *b"Grek", *b"Cyrl"];
+
+/// Adds `SYMBOL_FONTS` to the end of `SYMBOL_SCRIPTS`' fallback families.
+/// Called once, before any text is laid out.
+///
+/// parley falls back by script, not by character: a character the text's
+/// fonts lack goes to the one family the system picks for the script's
+/// sample letters, which for Latin is Helvetica. A symbol has no script of
+/// its own and takes its neighbours', so ∪ in English went to Helvetica,
+/// which lacks it too, and drew as SF's .notdef, a stack of bars. The
+/// system's own family stays first, so nothing it drew changes.
+pub fn install_symbol_fallbacks() {
+    let mut fonts = FONT_CONTEXT.lock();
+    let collection = &mut fonts.collection;
+    let symbols: Vec<FamilyId> = SYMBOL_FONTS
+        .iter()
+        .filter_map(|name| collection.family_id(name))
+        .collect();
+    for script in SYMBOL_SCRIPTS {
+        let key = FallbackKey::new(Script(script), None);
+        let mut families: Vec<FamilyId> = collection.fallback_families(key).collect();
+        for &family in &symbols {
+            if !families.contains(&family) {
+                families.push(family);
+            }
+        }
+        collection.set_fallbacks(key, families.into_iter());
+    }
+}
 /// The line-number gutter, left to right: the room before the slot a
 /// thread's mark or the `+` sits in, the slot, the room between the slot
 /// and the widest number, the room after the numbers, and the change bar.
@@ -663,7 +703,12 @@ mod tests {
 
     /// Every glyph `text` shapes to in the code font at the body weight.
     fn code_glyphs(text: &str) -> Vec<u32> {
-        let family: Vec<FamilyOwned> = FamilyOwned::parse_list(CODE_FONT_STACK).collect();
+        glyphs(CODE_FONT_STACK, text)
+    }
+
+    /// Every glyph `text` shapes to in `stack` at the body weight.
+    fn glyphs(stack: &str, text: &str) -> Vec<u32> {
+        let family: Vec<FamilyOwned> = FamilyOwned::parse_list(stack).collect();
         let attrs = Attrs::new()
             .font_size(TEXT_BADGE)
             .family(&family)
@@ -688,5 +733,20 @@ mod tests {
         let ids = code_glyphs("main \u{2190} topic");
         assert_eq!(ids.len(), 12, "one glyph a character: {ids:?}");
         assert!(ids.iter().all(|&id| id != 0), "a .notdef among {ids:?}");
+    }
+
+    /// Neither SF face has ∪, and the system's fallback for Latin text,
+    /// Helvetica, has none either.
+    #[test]
+    fn symbols_neither_sf_face_has_are_drawn() {
+        install_code_font();
+        install_symbol_fallbacks();
+        for stack in [FONT_STACK, CODE_FONT_STACK] {
+            let ids = glyphs(stack, "A \u{222a} B, \u{2200}x \u{2115}");
+            assert_eq!(ids.len(), 11, "{stack}: one glyph a character: {ids:?}");
+            assert!(ids.iter().all(|&id| id != 0), "{stack}: a .notdef among {ids:?}");
+        }
+        let ids = glyphs(FONT_STACK, "\u{3b1} \u{222a} \u{3b2}");
+        assert!(ids.iter().all(|&id| id != 0), "Greek: a .notdef among {ids:?}");
     }
 }
