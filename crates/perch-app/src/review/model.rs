@@ -705,6 +705,8 @@ pub struct Posting {
     pub opening: u64,
     pub body: String,
     pub closing: bool,
+    /// A suggestion going into the worktree's file, not to GitHub.
+    pub applying: bool,
 }
 
 /// Where a composer opens on, by the rules of the follow-up. Editing a
@@ -3900,17 +3902,23 @@ impl ReviewState {
     /// conversation as an issue comment. That composer stays open and
     /// still until `settle_issue_comment` says how it went.
     pub fn start_posting(&self, token: u64, body: String) {
-        self.start_sending(token, body, false);
+        self.start_sending(token, body, false, false);
+    }
+
+    /// The open composer's suggestion is going into the worktree's file,
+    /// settled by `settle_issue_comment` as a comment is.
+    pub fn start_applying(&self, token: u64, body: String) {
+        self.start_sending(token, body, false, true);
     }
 
     /// The pull request is being closed from the open composer, with
     /// its text as a comment first when there is any. The composer is
     /// still until `settle_issue_comment`, as for a comment.
     pub fn start_closing(&self, token: u64, body: String) {
-        self.start_sending(token, body, true);
+        self.start_sending(token, body, true, false);
     }
 
-    fn start_sending(&self, token: u64, body: String, closing: bool) {
+    fn start_sending(&self, token: u64, body: String, closing: bool, applying: bool) {
         let opening = self
             .composer
             .with_untracked(|c| c.as_ref().map(|c| c.opening))
@@ -3922,6 +3930,7 @@ impl ReviewState {
             opening,
             body,
             closing,
+            applying,
         }));
     }
 

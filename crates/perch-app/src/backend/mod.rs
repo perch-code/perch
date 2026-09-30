@@ -557,6 +557,20 @@ pub enum Command {
         token: u64,
         body: String,
     },
+    /// Make `original`'s lines of `path`, in the open item's worktree,
+    /// read `lines`: a suggestion on a worktree GitHub has no pull request
+    /// for, taken as it is sent. `token` is `PostIssueComment`'s; the
+    /// checkout is looked at after, under the navigation and scope it was
+    /// sent in.
+    ApplySuggestion {
+        item_id: String,
+        token: u64,
+        path: String,
+        original: crate::review::suggestion::Original,
+        lines: Vec<String>,
+        navigation_id: u64,
+        scope_revision: Option<u64>,
+    },
     /// Close the item's pull request without merging it, posting `body`
     /// as an issue comment first when it says anything. `token` is the
     /// same kind as `PostIssueComment`'s.
@@ -1179,6 +1193,12 @@ pub enum Event {
         item_id: String,
         token: u64,
         result: Result<Arc<perch_github::IssueComment>, String>,
+    },
+    /// The suggestion is in the file, or why not.
+    SuggestionApplied {
+        item_id: String,
+        token: u64,
+        result: Result<(), String>,
     },
     /// The pull request was closed, or why nothing happened. A comment
     /// that posted before a close GitHub refused is not a refusal: the
@@ -2992,6 +3012,28 @@ impl Backend {
         token
     }
 
+    /// Put a suggestion into the open worktree's file. The token comes
+    /// back on `SuggestionApplied`.
+    pub fn apply_suggestion(
+        &self,
+        item_id: &str,
+        path: &str,
+        original: crate::review::suggestion::Original,
+        lines: Vec<String>,
+    ) -> u64 {
+        let token = next_posting_token();
+        let _ = self.commands.send(Command::ApplySuggestion {
+            item_id: item_id.to_string(),
+            token,
+            path: path.to_string(),
+            original,
+            lines,
+            navigation_id: self.navigation_requests.current_id().unwrap_or(0),
+            scope_revision: self.scope_requests.stable_revision(),
+        });
+        token
+    }
+
     pub fn close_as_issue(&self, item_id: &str, title: &str, body: &str, comment: &str) {
         let _ = self.commands.send(Command::CloseAsIssue {
             item_id: item_id.to_string(),
@@ -4265,6 +4307,32 @@ async fn run(
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     post_issue_comment(&ctx, &item_id, token, &body).await;
+                });
+            }
+            Command::ApplySuggestion {
+                item_id,
+                token,
+                path,
+                original,
+                lines,
+                navigation_id,
+                scope_revision,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let result = apply_suggestion(&ctx, &item_id, &path, &original, &lines).await;
+                    if let Err(message) = &result {
+                        tracing::info!(item = item_id, %message, "suggestion not applied");
+                    }
+                    let applied = result.is_ok();
+                    let _ = ctx.events.send(Event::SuggestionApplied {
+                        item_id: item_id.clone(),
+                        token,
+                        result,
+                    });
+                    if let (true, Some(revision)) = (applied, scope_revision) {
+                        refresh_scope(&ctx, &item_id, navigation_id, revision).await;
+                    }
                 });
             }
             Command::ClosePullRequest {
@@ -9107,6 +9175,49 @@ async fn post_issue_comment(ctx: &Ctx, item_id: &str, token: u64, body: &str) {
         None => show_posted_issue_comment(ctx, item_id, &comment).await,
     }
     answer(Ok(Arc::new(comment)));
+}
+
+/// Write a suggestion into `path` in the open item's worktree, over the
+/// lines it was written against. Not for a pull request's checkout: a
+/// suggestion there is GitHub's to take.
+async fn apply_suggestion(
+    ctx: &Ctx,
+    item_id: &str,
+    path: &str,
+    original: &crate::review::suggestion::Original,
+    lines: &[String],
+) -> Result<(), String> {
+    let worktree = ctx
+        .slot
+        .lock()
+        .ok()
+        .and_then(|g| {
+            g.as_ref()
+                .filter(|c| {
+                    c.item_id == item_id
+                        && c.pull_request.is_none()
+                        && c.review_snapshot_id.is_none()
+                        && c.review_group_id.is_none()
+                        && c.review_request_id.is_none()
+                })
+                .map(|c| c.checkout.worktree.clone())
+        })
+        .ok_or_else(|| "The worktree is no longer open".to_string())?;
+    let relative = std::path::Path::new(path);
+    if !relative
+        .components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err(format!("{path} is not a file in the worktree"));
+    }
+    let file = worktree.join(relative);
+    let text = tokio::fs::read_to_string(&file)
+        .await
+        .map_err(|e| format!("Perch could not read {path}: {e}"))?;
+    let applied = crate::review::suggestion::apply(&text, original, lines)?;
+    tokio::fs::write(&file, applied)
+        .await
+        .map_err(|e| format!("Perch could not write {path}: {e}"))
 }
 
 /// Put a comment GitHub just took on an issue in its kept comments, the

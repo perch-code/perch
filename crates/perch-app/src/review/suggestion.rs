@@ -124,6 +124,74 @@ pub fn insert(text: &str, (start, end): (usize, usize), lines: &[String]) -> (St
     (out, start + open.len() + body.len())
 }
 
+/// The lines a message suggests when it is one suggestion and nothing
+/// else, as the Suggest button leaves it. An empty fence suggests none,
+/// taking the lines out; a fence holding one blank line suggests that.
+pub fn only_suggestion(text: &str) -> Option<Vec<String>> {
+    use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
+    let mut events = Parser::new(text);
+    match events.next()? {
+        Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info)))
+            if info.split_whitespace().next() == Some("suggestion") => {}
+        _ => return None,
+    }
+    let mut body = String::new();
+    for event in events.by_ref() {
+        match event {
+            Event::Text(t) => body.push_str(&t),
+            Event::End(TagEnd::CodeBlock) => break,
+            _ => return None,
+        }
+    }
+    if events.next().is_some() {
+        return None;
+    }
+    if body.is_empty() {
+        return Some(Vec::new());
+    }
+    let body = body.strip_suffix('\n').unwrap_or(&body);
+    Some(body.split('\n').map(str::to_string).collect())
+}
+
+/// `file` with `original`'s lines made `lines`, as Commit suggestion
+/// does on github.com. The file must still read `original` there, so a
+/// change made since the suggestion was written is not overwritten. The
+/// new lines end as the old ones did, `\r\n` or `\n`.
+pub fn apply(file: &str, original: &Original, lines: &[String]) -> Result<String, String> {
+    let changed = || "The lines this suggestion replaces have changed".to_string();
+    let first = (original.first as usize).checked_sub(1).ok_or_else(changed)?;
+    let last = first + original.lines.len();
+    let mut rows: Vec<&str> = file.split_inclusive('\n').collect();
+    if last > rows.len() || original.lines.is_empty() {
+        return Err(changed());
+    }
+    let unended = |row: &str| row.trim_end_matches('\n').trim_end_matches('\r').to_string();
+    if rows[first..last].iter().map(|r| unended(r)).ne(original.lines.iter().cloned()) {
+        return Err(changed());
+    }
+    let ending = if rows[first].ends_with("\r\n") { "\r\n" } else { "\n" };
+    // The file's last line may have no ending; the new last line has none
+    // either then.
+    let open_end = last == rows.len() && !rows[last - 1].ends_with('\n');
+    let mut new = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        new.push_str(line);
+        if !(open_end && i + 1 == lines.len()) {
+            new.push_str(ending);
+        }
+    }
+    if open_end && lines.is_empty() && first > 0 {
+        // The last lines taken out: the one above them ends the file.
+        let above = rows[first - 1];
+        rows[first - 1] = above.trim_end_matches('\n').trim_end_matches('\r');
+    }
+    let mut out = String::with_capacity(file.len() + new.len());
+    rows[..first].iter().for_each(|r| out.push_str(r));
+    out.push_str(&new);
+    rows[last..].iter().for_each(|r| out.push_str(r));
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,5 +277,39 @@ mod tests {
     fn an_empty_line_is_suggested_as_an_empty_line() {
         let (out, _) = insert("", (0, 0), &lines(&[""]));
         assert_eq!(out, "```suggestion\n\n```");
+    }
+
+    #[test]
+    fn a_message_of_one_suggestion_gives_its_lines() {
+        assert_eq!(
+            only_suggestion("```suggestion\n    a,\n    b,\n```"),
+            Some(lines(&["    a,", "    b,"]))
+        );
+        assert_eq!(only_suggestion("```suggestion\n```"), Some(vec![]), "taken out");
+        assert_eq!(only_suggestion("```suggestion\n\n```"), Some(lines(&[""])), "one blank line");
+        assert_eq!(only_suggestion("\n```suggestion\nx\n```\n\n"), Some(lines(&["x"])));
+        assert_eq!(only_suggestion("why:\n```suggestion\nx\n```"), None, "words beside it");
+        assert_eq!(only_suggestion("```suggestion\nx\n```\nsee?"), None);
+        assert_eq!(only_suggestion("```rust\nx\n```"), None);
+        assert_eq!(only_suggestion("```suggestion\nx\n```\n```suggestion\ny\n```"), None);
+    }
+
+    #[test]
+    fn a_suggestion_applies_over_the_lines_it_was_written_against() {
+        let original = Original { first: 2, lines: lines(&["b", "c"]) };
+        assert_eq!(apply("a\nb\nc\nd\n", &original, &lines(&["B"])), Ok("a\nB\nd\n".into()));
+        assert_eq!(apply("a\nb\nc\nd\n", &original, &[]), Ok("a\nd\n".into()));
+        assert_eq!(
+            apply("a\r\nb\r\nc\r\n", &original, &lines(&["x", "y", "z"])),
+            Ok("a\r\nx\r\ny\r\nz\r\n".into())
+        );
+        assert_eq!(
+            apply("a\nb\nc", &original, &lines(&["x", "y"])),
+            Ok("a\nx\ny".into()),
+            "no ending at the end"
+        );
+        assert_eq!(apply("a\nb\nc", &original, &[]), Ok("a".into()));
+        assert!(apply("a\nb2\nc\n", &original, &[]).is_err(), "changed since");
+        assert!(apply("a\nb\n", &original, &[]).is_err(), "shorter now");
     }
 }

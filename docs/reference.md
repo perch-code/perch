@@ -175,6 +175,15 @@ comment on the head that is not inside one hunk of the diff, first line and
 last, is kept out of the review: the rest posts, and it stays a draft, named
 by its lines on the form.
 
+A composer on lines has **Suggest**, which puts a `suggestion` fence in the
+box holding the lines as they are, to edit into what they should read. On a
+worktree with no pull request there is no one on GitHub to accept it, so a
+message that is a suggestion and nothing else goes straight into the file
+instead of to the agent, as Commit suggestion does on github.com. It goes in
+only while the file still reads those lines; otherwise the composer says they
+changed and keeps the text. A suggestion with words beside it goes to the
+agent as any message does.
+
 At the foot of Conversation, a message to GitHub is an issue comment and
 posts at once, after one confirmation naming the pull request. Beside
 **Comment**, **Close with comment** posts it and closes the pull request, or

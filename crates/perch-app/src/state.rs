@@ -2085,6 +2085,15 @@ impl AppState {
                     review.settle_issue_comment(token, result);
                 }
             }
+            Event::SuggestionApplied {
+                item_id,
+                token,
+                result,
+            } => {
+                if review.is_item(&item_id) {
+                    review.settle_issue_comment(token, result);
+                }
+            }
             // The closed issue came in an `IssueUpdated` before this.
             Event::IssueClosed {
                 item_id,
@@ -2549,6 +2558,7 @@ impl AppState {
             | Event::IssueCommentPosted { .. }
             | Event::PullRequestClosed { .. }
             | Event::IssueClosed { .. }
+            | Event::SuggestionApplied { .. }
             | Event::IssueUpdated { .. }
             | Event::IssueClosable { .. }
             | Event::CommitsReady { .. }

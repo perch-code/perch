@@ -357,6 +357,24 @@ pub fn composer_view(
                 state.start_posting(token, body);
                 return;
             }
+            // On a worktree GitHub has no pull request for, a suggestion
+            // is the reader's own edit: it goes into the file at once,
+            // as Commit suggestion puts it there on github.com.
+            if composer.anchor.is_some() && state.pull_request.with_untracked(Option::is_none) {
+                if let Some(lines) = crate::review::suggestion::only_suggestion(&question) {
+                    match Effect::untrack(|| composer_original(state)) {
+                        Some((anchor, original)) => {
+                            let token =
+                                backend.apply_suggestion(&item_id, &anchor.path, original, lines);
+                            state.start_applying(token, question);
+                        }
+                        None => state.composer_error.set(Some(
+                            "Perch could not read the lines this suggestion replaces".into(),
+                        )),
+                    }
+                    return;
+                }
+            }
             match &composer.destination {
                 Destination::Agent {
                     backend: agent,
@@ -399,21 +417,7 @@ pub fn composer_view(
     // A composer on lines has Suggest, on its thread's lines where it is
     // a follow-up, since those are the ones GitHub's hunk has.
     let tabs = crate::review::markdown_toolbar::Tabs::new(editor.editor(), posting_here)
-        .suggesting(move || {
-            let (thread_id, anchor) = state
-                .composer
-                .with(|c| c.as_ref().map(|c| (c.thread_id.clone(), c.anchor.clone())))?;
-            let anchor = anchor?;
-            let thread = thread_id.and_then(|id| {
-                state
-                    .comment_threads
-                    .with(|t| t.iter().find(|t| t.id == id).cloned())
-            });
-            match thread {
-                Some(thread) => crate::review::suggestion::original_of(state, &thread),
-                None => crate::review::suggestion::original(state, &anchor, false, None),
-            }
-        });
+        .suggesting(move || composer_original(state).map(|(_, original)| original));
     let key_tabs = tabs.clone();
     let editor = editor
         // Cmd-Enter sends, before the editor can take it for a line. While
@@ -957,8 +961,13 @@ fn composer_footer(
         .into_any(),
         FooterMode::Posting => Stack::horizontal((
             Label::derived(move || {
-                if state.posting.with(|p| p.as_ref().is_some_and(|p| p.closing)) {
+                let (closing, applying) = state.posting.with(|p| {
+                    p.as_ref().map_or((false, false), |p| (p.closing, p.applying))
+                });
+                if closing {
                     "Closing\u{2026}".to_string()
+                } else if applying {
+                    "Applying\u{2026}".to_string()
                 } else {
                     "Posting\u{2026}".to_string()
                 }
@@ -1249,6 +1258,28 @@ fn destination_picker(app: AppState, state: ReviewState) -> impl IntoView {
             .return_focus(state.composer_box.get_untracked())
     })
     .debug_name("composer-destination")
+}
+
+/// The open composer's anchor and the lines under it, as a suggestion
+/// replaces them: on its thread's lines where it is a follow-up, since
+/// those are the ones GitHub's hunk has. Tracked.
+fn composer_original(
+    state: ReviewState,
+) -> Option<(perch_github::Anchor, crate::review::suggestion::Original)> {
+    let (thread_id, anchor) = state
+        .composer
+        .with(|c| c.as_ref().map(|c| (c.thread_id.clone(), c.anchor.clone())))?;
+    let anchor = anchor?;
+    let thread = thread_id.and_then(|id| {
+        state
+            .comment_threads
+            .with(|t| t.iter().find(|t| t.id == id).cloned())
+    });
+    let original = match thread {
+        Some(thread) => crate::review::suggestion::original_of(state, &thread),
+        None => crate::review::suggestion::original(state, &anchor, false, None),
+    }?;
+    Some((anchor, original))
 }
 
 /// The picker's face: `Claude · Opus`, `Codex · gpt-5.5`, or `GitHub`.
@@ -4473,6 +4504,85 @@ mod tests {
             !state.github_offered(&state.composer.get().unwrap()),
             "nor a reply on its thread"
         );
+    }
+
+    /// On a branch with no pull request, a message that is only a
+    /// suggestion goes into the file rather than to the agent, over the
+    /// lines the composer is on, and the composer is still until the
+    /// backend answers. Words beside it send it to the agent as before.
+    #[test]
+    fn a_suggestion_on_a_branch_applies_to_the_file() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_item();
+        let file = crate::backend::build_loaded_file(
+            "src/x.rs".into(),
+            "a\nb\nc\n".into(),
+            "a\nb\nc\n".into(),
+            Some(perch_git::ChangeStatus::Modified),
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        );
+        state.files.update(|m| {
+            m.insert("src/x.rs".into(), Arc::new(file));
+        });
+        let anchor = perch_github::Anchor {
+            path: "src/x.rs".into(),
+            start_line: 2,
+            line: 2,
+            side: perch_github::Side::Right,
+            commit_sha: "h".into(),
+        };
+        let suggestion = "```suggestion\nB\n```";
+        state.open_composer(None, Some(anchor.clone()), suggestion.into(), sonnet_medium());
+        let composer = state.composer.get().unwrap();
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Card);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        harness.dispatch_event(enter(Modifiers::META));
+        harness.rebuild();
+        let token = match commands.try_recv() {
+            Ok(Command::ApplySuggestion {
+                item_id,
+                token,
+                path,
+                original,
+                lines,
+                ..
+            }) => {
+                assert_eq!(item_id, "item-1");
+                assert_eq!(path, "src/x.rs");
+                assert_eq!(
+                    original,
+                    crate::review::suggestion::Original {
+                        first: 2,
+                        lines: vec!["b".into()]
+                    }
+                );
+                assert_eq!(lines, vec!["B".to_string()]);
+                token
+            }
+            other => panic!("the suggestion was not applied: {other:?}"),
+        };
+        assert!(state.composer.get().is_some(), "still until the answer");
+        harness.paint();
+        assert!(find(harness.root_id(), "Label: \"Applying\u{2026}\"").is_some());
+        state.settle_issue_comment(token, Ok(()));
+        assert!(state.composer.get().is_none(), "applied, the composer goes");
+
+        let root = TestRoot::new();
+        state.open_composer(None, Some(anchor), format!("why not?\n{suggestion}"), sonnet_medium());
+        let composer = state.composer.get().unwrap();
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Card);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        harness.dispatch_event(enter(Modifiers::META));
+        assert!(matches!(commands.try_recv(), Ok(Command::Ask { .. })));
     }
 
     /// A draft under GitHub's thread: the reader's byline with the Draft
