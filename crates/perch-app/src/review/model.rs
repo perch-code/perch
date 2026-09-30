@@ -1053,6 +1053,12 @@ pub struct LiveDoc {
     pub content: Option<floem::ViewId>,
 }
 
+/// The file an editor shows. A reload of it under the same scope is set
+/// in here and edited into the editor where it stands, rather than
+/// building the editor again; see `editor::edits_in_place`. Read it when
+/// it is used, never keep what it held.
+pub type LiveFile = RwSignal<Arc<LoadedFile>>;
+
 /// The documents the open editors hold, for the epoch they were built in.
 /// A reader checks the epoch against `editor_epoch` first: an entry from an
 /// editor since rebuilt is stale.
@@ -2991,10 +2997,18 @@ impl ReviewState {
         if self.scope.with(|s| *s != file.scope) {
             return;
         }
+        // New sides of a file already loaded, as an agent's edit brings,
+        // are edited into its editor in place when they can be: a new
+        // editor draws a frame at the top of the file before the reader's
+        // place is put back.
+        let in_place = self.files.with_untracked(|m| {
+            m.get(path)
+                .is_some_and(|old| crate::review::editor::edits_in_place(old, &file))
+        });
         self.files.update(|m| {
             m.insert(path.to_string(), file);
         });
-        if self.active.with(|a| a.as_deref() == Some(path)) {
+        if !in_place && self.active.with(|a| a.as_deref() == Some(path)) {
             self.editor_epoch.update(|e| *e += 1);
         }
     }

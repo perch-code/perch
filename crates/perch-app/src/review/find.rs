@@ -252,10 +252,11 @@ pub fn nearest(matches: &[Match], from: (usize, usize), forward: bool) -> Option
 
 /// What the matches were last made from, for telling a change of query
 /// from a change of file. The file is known by its path and the editor's
-/// epoch, which every load of it bumps, and by whether there is an
-/// editor over it at all, which a picture flipped to its markup changes
-/// without an epoch.
-#[derive(PartialEq, Eq)]
+/// epoch, which a load of it into a new editor bumps, and by whether
+/// there is an editor over it at all, which a picture flipped to its
+/// markup changes without an epoch. `loaded` is the load itself, which
+/// changes alone when a reload is edited into the editor in place.
+#[derive(Clone, PartialEq, Eq)]
 struct Made {
     open: bool,
     query: String,
@@ -264,6 +265,7 @@ struct Made {
     epoch: u64,
     path: Option<String>,
     code: bool,
+    loaded: usize,
 }
 
 /// What the last run left behind besides the matches: what they were
@@ -308,6 +310,7 @@ pub fn wire(state: ReviewState) {
             epoch,
             path: state.active.get(),
             code: file.is_some(),
+            loaded: file.as_ref().map_or(0, |f| Arc::as_ptr(f) as usize),
         };
         if before.as_ref().is_some_and(|b| b.made == made) {
             return Run {
@@ -320,6 +323,12 @@ pub fn wire(state: ReviewState) {
             b.epoch == epoch && b.layout == layout && b.path == made.path && b.code == made.code
         });
         let was_open = before.as_ref().is_some_and(|b| b.made.open);
+        // The same editor with new text edited in: the matches are made
+        // again, the one the bar was on kept where it still is, and the
+        // view stays where the reader has it.
+        let reloaded = before
+            .as_ref()
+            .is_some_and(|b| Made { loaded: made.loaded, ..b.made.clone() } == made);
         // The anchor stands while the caret is where the bar put it, on
         // the match it is on; anywhere else, the reader moved it there.
         let caret = caret(state, false);
@@ -362,7 +371,9 @@ pub fn wire(state: ReviewState) {
         if state.find_matches.with_untracked(|m| **m != *found) {
             state.find_matches.set(found.clone());
         }
-        let current = if same_editor && was_open && open {
+        let current = if reloaded {
+            placed.and_then(|from| found.iter().position(|m| (m.display, m.start) == from))
+        } else if same_editor && was_open && open {
             let index = anchor.and_then(|from| nearest(&found, from, true));
             if let Some(i) = index {
                 go_to(state, found[i]);

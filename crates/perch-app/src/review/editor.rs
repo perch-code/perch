@@ -60,7 +60,8 @@ use crate::review::gutter::{
 use crate::review::hierarchy;
 use crate::review::hover;
 use crate::review::model::{
-    Composer, FilePlace, Layout, LiveDoc, LiveDocs, LiveLayout, LoadedFile, Paging, ReviewState,
+    Composer, FilePlace, Layout, LiveDoc, LiveDocs, LiveFile, LiveLayout, LoadedFile, Paging,
+    ReviewState,
 };
 use crate::review::navigation;
 use crate::review::picture;
@@ -286,21 +287,52 @@ fn code_view(
         }
         Layout::Stacked => None,
     });
+    // New sides of the file that fit this editor are set in here, and
+    // the effects below edit them into its documents; others built a new
+    // editor, in `finish_load`, and this one is on its way out.
+    let live = RwSignal::new(file.clone());
+    let path = file.path.clone();
+    Effect::new(move |_| {
+        let Some(new) = state.files.with(|m| m.get(&path).cloned()) else {
+            return;
+        };
+        if state.editor_epoch.get_untracked() != epoch {
+            return;
+        }
+        let old = live.get_untracked();
+        if !Arc::ptr_eq(&old, &new) && edits_in_place(&old, &new) {
+            live.set(new);
+        }
+    });
     match split {
-        Some(split) => split_view(app, state, file, memos, split, epoch, backend).into_any(),
-        None => stacked_view(app, state, file, memos, epoch, backend).into_any(),
+        Some(split) => split_view(app, state, live, memos, split, epoch, backend).into_any(),
+        None => stacked_view(app, state, live, memos, epoch, backend).into_any(),
     }
+}
+
+/// Whether `new`, a reload of the file `old` under the same scope, can be
+/// edited into the editor showing `old` rather than building another: the
+/// same kind of view over it, stacked or split, code or picture, and a
+/// gutter of the same width, which the layers are placed by.
+pub(crate) fn edits_in_place(old: &LoadedFile, new: &LoadedFile) -> bool {
+    old.scope == new.scope
+        && old.origin == new.origin
+        && old.picture.is_none()
+        && new.picture.is_none()
+        && splits(old) == splits(new)
+        && gutter::width_of(old) == gutter::width_of(new)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn stacked_view(
     app: AppState,
     state: ReviewState,
-    file: Arc<LoadedFile>,
+    live_file: LiveFile,
     memos: Memos,
     epoch: u64,
     backend: Rc<Backend>,
 ) -> impl IntoView {
+    let file = live_file.get_untracked();
     let built = Effect::untrack(|| {
         let inputs = memos.inputs(state, &file);
         stacked_doc(
@@ -316,7 +348,7 @@ fn stacked_view(
     let editor = code_editor(
         text,
         PerchStyling::new(
-            file.clone(),
+            live_file,
             doc,
             state.highlights,
             state.find_matches,
@@ -352,18 +384,17 @@ fn stacked_view(
     // The folds are wired before the jump: a jump into a fold reveals it,
     // and the reveal has to reach the editor before the jump looks for the
     // row to scroll to.
-    wire_highlights(state, &live);
-    wire_folds(state, file.clone(), memos, epoch, {
-        let file = file.clone();
-        move |inputs: &Inputs| {
+    wire_highlights(state, &live, live_file);
+    wire_folds(state, live_file, memos, epoch, {
+        move |file: &LoadedFile, inputs: &Inputs, reloaded: bool| {
             let new = stacked_doc(
-                &file,
+                file,
                 inputs.folded,
                 &inputs.anchors,
                 &inputs.reveals,
                 &inputs.cards,
             );
-            apply(&live, new, viewport, scroll_to, cursor, shifted)
+            apply(&live, new, viewport, scroll_to, cursor, shifted, reloaded)
         }
     });
     wire_cursor(state, backend.clone(), file.clone(), doc, cursor, shifted);
@@ -376,18 +407,17 @@ fn stacked_view(
         cursor,
         epoch,
     );
-    wire_jump(state, file.clone(), doc, scroll_to, cursor, epoch);
+    wire_jump(state, live_file, doc, scroll_to, cursor, epoch);
     wire_page(state, doc, viewport, scroll_delta, cursor, epoch);
     let editor = navigation::navigable(editor, state, backend.clone(), file.clone(), doc);
 
     let path = file.path.clone();
-    let divider_file = file.clone();
     // A file outside the worktree is a place to read: numbers beside it,
     // and no diff gutter, since there is no diff.
     let gutter = if file.origin.is_outside() {
-        plain_gutter(state, app, file, doc, viewport, scroll_delta).into_any()
+        plain_gutter(state, app, live_file, doc, viewport, scroll_delta).into_any()
     } else {
-        diff_gutter(state, app, file, doc, viewport, scroll_delta).into_any()
+        diff_gutter(state, app, live_file, doc, viewport, scroll_delta).into_any()
     };
     Stack::horizontal((
         gutter,
@@ -396,7 +426,7 @@ fn stacked_view(
         // dividers, since a card is never in a divider.
         Stack::vertical((
             over_tints(editor, doc, viewport),
-            divider_layer(state, divider_file, doc, viewport, scroll_delta, Bars::Editor),
+            divider_layer(state, live_file, doc, viewport, scroll_delta, Bars::Editor),
             card_layer(
                 app,
                 state,
@@ -489,29 +519,31 @@ pub(crate) fn split_doc(
 }
 
 /// Runs `rebuild` whenever what a document is built from changes, so it
-/// can build the new document and edit the editor to match. The inputs
-/// are read tracked, so the effect runs on each of them: Show whole, the
-/// file's reveals, and the anchors and the cards, which are memos so that
+/// can build the new document and edit the editor to match, told whether
+/// the file is a new one. The inputs are read tracked, so the effect runs
+/// on each of them: the file, when a reload is set in its place, Show
+/// whole, the file's reveals, and the anchors and the cards, which are memos so that
 /// a thread's messages changing under them, as they do every line of a
 /// streaming answer, do not rebuild a document that would be the same.
 fn wire_folds(
     state: ReviewState,
-    file: Arc<LoadedFile>,
+    file: LiveFile,
     memos: Memos,
     epoch: u64,
-    rebuild: impl Fn(&Inputs) + 'static,
+    rebuild: impl Fn(&LoadedFile, &Inputs, bool) + 'static,
 ) {
-    Effect::new(move |first: Option<bool>| {
+    Effect::new(move |before: Option<Arc<LoadedFile>>| {
+        let file = file.get();
         let inputs = memos.inputs(state, &file);
         // The editor was just built from these; nothing to do but subscribe.
-        if first.is_none() {
-            return true;
-        }
+        let Some(before) = before else {
+            return file;
+        };
         if state.editor_epoch.get_untracked() != epoch {
-            return true;
+            return file;
         }
-        rebuild(&inputs);
-        true
+        rebuild(&file, &inputs, !Arc::ptr_eq(&before, &file));
+        file
     });
 }
 
@@ -530,6 +562,12 @@ fn wire_folds(
 /// bytes the edit added or took away, and the offset it lands on is left
 /// in `shifted` for the cursor's effect, so that it does not take the move
 /// for a click.
+///
+/// A new document over a reloaded file is another buffer, whose display
+/// lines are counted afresh, so a line is not found again by its number:
+/// a region wholly above the view moves the offset by the rows it added
+/// or took away, and one reaching into the view leaves it where it is.
+#[allow(clippy::too_many_arguments)]
 fn apply(
     live: &LiveDoc,
     new: Doc,
@@ -537,9 +575,14 @@ fn apply(
     scroll_to: RwSignal<Option<Vec2>>,
     cursor: RwSignal<Cursor>,
     shifted: RwSignal<Option<usize>>,
+    reloaded: bool,
 ) {
     let old = live.doc.get_untracked();
-    let region = doc::changed_region(&old, &new);
+    let region = if reloaded {
+        doc::changed_region_renumbered(&old, &new)
+    } else {
+        doc::changed_region(&old, &new)
+    };
     if *old != new {
         live.doc.set(Arc::new(new.clone()));
     }
@@ -576,7 +619,13 @@ fn apply(
     let line_height = theme::CODE_LINE_HEIGHT as f64;
     let vp = viewport.get_untracked();
     let first_visible = (vp.y0 / line_height).floor() as usize;
-    let y = if region.old_rows.start < first_visible {
+    let y = if reloaded {
+        if region.old_rows.end <= first_visible {
+            vp.y0 + region.row_delta() as f64 * line_height
+        } else {
+            vp.y0
+        }
+    } else if region.old_rows.start < first_visible {
         // The first line in view that the new document still shows keeps
         // its place; a region that spans the viewport, as Show whole's
         // does, adds and takes away below it too, and that is not counted.
@@ -742,18 +791,19 @@ enum Bars {
 /// for each bar as it scrolls into view or each time a card's rows do.
 fn divider_layer(
     state: ReviewState,
-    file: Arc<LoadedFile>,
+    file: LiveFile,
     doc: RwSignal<Arc<Doc>>,
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
     bars: Bars,
 ) -> impl IntoView {
     let line_height = theme::CODE_LINE_HEIGHT as f64;
-    let labels_file = file.clone();
     let folds = Memo::new(move |_| doc.with(|d| d.folds.clone()));
     let labels = Memo::new(move |_| {
-        let base = labels_file.base_buffer.as_ref().map(|b| b.text.as_str());
-        folds.with(|folds| doc::hunk_labels(&labels_file.buffer, base, folds))
+        file.with(|file| {
+            let base = file.base_buffer.as_ref().map(|b| b.text.as_str());
+            folds.with(|folds| doc::hunk_labels(&file.buffer, base, folds))
+        })
     });
     // Each divider in view once, by its rows, however many of them are.
     let visible = move || {
@@ -775,7 +825,7 @@ fn divider_layer(
         visible,
         |(span, run)| (span.clone(), *run),
         move |(span, _)| {
-            divider_bar(state, file.clone(), doc, labels, span, viewport, scroll_delta, bars)
+            divider_bar(state, file, doc, labels, span, viewport, scroll_delta, bars)
         },
     )
     .style(|s| s.size_full());
@@ -804,7 +854,7 @@ fn divider_layer(
 #[allow(clippy::too_many_arguments)]
 fn divider_bar(
     state: ReviewState,
-    file: Arc<LoadedFile>,
+    file: LiveFile,
     doc: RwSignal<Arc<Doc>>,
     labels: Memo<Vec<Option<String>>>,
     span: std::ops::Range<usize>,
@@ -814,7 +864,7 @@ fn divider_bar(
 ) -> impl IntoView {
     let line_height = theme::CODE_LINE_HEIGHT as f64;
     let (start, height) = (span.start, span.len() as f64 * line_height);
-    let gutter = gutter::width_of(&file);
+    let gutter = file.with_untracked(|file| gutter::width_of(file));
     let header = divider_header(state, file, doc, labels, start);
 
     let bar = match bars {
@@ -888,7 +938,7 @@ fn passes_wheel(
 /// was built: a reveal below it grows the hunk the header counts.
 fn divider_header(
     state: ReviewState,
-    file: Arc<LoadedFile>,
+    file: LiveFile,
     doc: RwSignal<Arc<Doc>>,
     labels: Memo<Vec<Option<String>>>,
     start: usize,
@@ -909,11 +959,11 @@ fn divider_header(
             .color(theme::DIFF_DIVIDER_FG)
             .text_ellipsis()
     });
-    let reset_file = file.clone();
     let reset = dyn_container(
         move || {
             let hovered = state.hovered_line.get() == Some(start);
             let run = doc.with(|d| d.run_of(start)).filter(|_| hovered)?;
+            let reset_file = file.get();
             let defaults = doc::runs(&reset_file.buffer, &state.anchors_in(&reset_file.path));
             let ranges = doc.with(|d| doc::reset_ranges(&d.folds, &defaults, run));
             let reveals = state.reveals_for(&reset_file.path, &reset_file.blob);
@@ -923,7 +973,7 @@ fn divider_header(
                 .then_some(ranges)
         },
         move |ranges| match ranges {
-            Some(ranges) => fold_again(state, file.clone(), ranges).into_any(),
+            Some(ranges) => fold_again(state, file, ranges).into_any(),
             None => Empty::new().into_any(),
         },
     );
@@ -942,7 +992,7 @@ fn divider_header(
 /// folds have them by default, back.
 fn fold_again(
     state: ReviewState,
-    file: Arc<LoadedFile>,
+    file: LiveFile,
     ranges: Vec<(usize, usize)>,
 ) -> impl IntoView {
     let hovered = RwSignal::new(false);
@@ -959,7 +1009,9 @@ fn fold_again(
                 .style(|s| s.size(theme::CHEVRON_GLYPH, theme::CHEVRON_GLYPH)),
         )
         .debug_name("fold again")
-        .on_event_stop(el::Click, move |_, _| state.reset(&file.path, &file.blob, &ranges))
+        .on_event_stop(el::Click, move |_, _| {
+            file.with_untracked(|file| state.reset(&file.path, &file.blob, &ranges))
+        })
         .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
         .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
         .style(|s| {
@@ -1255,12 +1307,13 @@ fn scroll_for_card(vp: Rect, top: f64, bottom: f64, line_height: f64) -> Option<
 fn split_view(
     app: AppState,
     state: ReviewState,
-    file: Arc<LoadedFile>,
+    live_file: LiveFile,
     memos: Memos,
     split: (Doc, Doc),
     epoch: u64,
     backend: Rc<Backend>,
 ) -> impl IntoView {
+    let file = live_file.get_untracked();
     let (left_text, right_text) = (split.0.text.clone(), split.1.text.clone());
     let (left_doc, right_doc) = (
         RwSignal::new(Arc::new(split.0)),
@@ -1272,7 +1325,7 @@ fn split_view(
     let left = code_editor(
         left_text,
         PerchStyling::side(
-            file.clone(),
+            live_file,
             Side::Base,
             left_doc,
             state.highlights,
@@ -1288,7 +1341,7 @@ fn split_view(
     let right = code_editor(
         right_text,
         PerchStyling::side(
-            file.clone(),
+            live_file,
             Side::Head,
             right_doc,
             state.highlights,
@@ -1335,12 +1388,12 @@ fn split_view(
 
     // The folds are wired before the jump, as in the stacked layout. The
     // right is edited first: it owns the scroll, and the left follows.
-    wire_highlights(state, &right_live);
-    wire_folds(state, file.clone(), memos, epoch, {
-        let file = file.clone();
-        move |inputs: &Inputs| {
+    wire_highlights(state, &right_live, live_file);
+    wire_highlights(state, &left_live, live_file);
+    wire_folds(state, live_file, memos, epoch, {
+        move |file: &LoadedFile, inputs: &Inputs, reloaded: bool| {
             let Some((new_left, new_right)) = split_doc(
-                &file,
+                file,
                 inputs.folded,
                 &inputs.anchors,
                 &inputs.reveals,
@@ -1355,6 +1408,7 @@ fn split_view(
                 right_scroll_to,
                 right_cursor,
                 right_shifted,
+                reloaded,
             );
             apply(
                 &left_live,
@@ -1363,6 +1417,7 @@ fn split_view(
                 left_scroll_to,
                 left_cursor,
                 left_shifted,
+                reloaded,
             );
         }
     });
@@ -1376,7 +1431,7 @@ fn split_view(
         right_cursor,
         epoch,
     );
-    wire_jump(state, file.clone(), right_doc, right_scroll_to, right_cursor, epoch);
+    wire_jump(state, live_file, right_doc, right_scroll_to, right_cursor, epoch);
     wire_page(state, right_doc, right_viewport, right_delta, right_cursor, epoch);
     let right = navigation::navigable(right, state, backend.clone(), file.clone(), right_doc);
 
@@ -1396,7 +1451,7 @@ fn split_view(
         side_gutter(
             state,
             app,
-            file.clone(),
+            live_file,
             Side::Base,
             left_doc,
             left_viewport,
@@ -1421,13 +1476,12 @@ fn split_view(
     });
 
     let path = file.path.clone();
-    let layer_file = file.clone();
     let gutter_width = gutter::width_of(&file);
     let right_pane = Stack::horizontal((
         side_gutter(
             state,
             app,
-            file,
+            live_file,
             Side::Head,
             right_doc,
             right_viewport,
@@ -1457,7 +1511,7 @@ fn split_view(
         right_pane,
         divider_layer(
             state,
-            layer_file,
+            live_file,
             right_doc,
             right_viewport,
             right_delta,
@@ -1629,12 +1683,14 @@ fn wire_cursor(
 }
 
 /// The editor lays its lines out through the styling, and caches them;
-/// when the tint changes, the symbol's or the find bar's, the cached
-/// layouts are stale, and are dropped so the lines in view are laid out
-/// again with the tint, or without it.
-fn wire_highlights(state: ReviewState, live: &LiveDoc) {
+/// when the tint changes, the symbol's or the find bar's, or a reload of
+/// the file is set in place with its colours, the cached layouts are
+/// stale, and are dropped so the lines in view are laid out again.
+fn wire_highlights(state: ReviewState, live: &LiveDoc, file: LiveFile) {
     let handle = live.handle.clone();
     Effect::new(move |before: Option<()>| {
+        // A reload set in place may colour the same text anew.
+        file.track();
         state.highlights.track();
         state.find_matches.track();
         state.find_current.track();
@@ -1739,7 +1795,7 @@ fn restore_place(
 /// remembers leaving from there.
 fn wire_jump(
     state: ReviewState,
-    file: Arc<LoadedFile>,
+    file: LiveFile,
     doc: RwSignal<Arc<Doc>>,
     scroll_to: RwSignal<Option<Vec2>>,
     cursor: RwSignal<Cursor>,
@@ -1759,7 +1815,7 @@ fn wire_jump(
         state.jump_to_line.set(None);
         let mut row = doc.with_untracked(|d| d.row_of_head(head_line));
         if row.is_none() {
-            state.reveal_around(&file, head_line);
+            state.reveal_around(&file.get_untracked(), head_line);
             row = doc.with_untracked(|d| d.row_of_head(head_line));
         }
         // A line the file does not have lands at the end of it.
@@ -3164,6 +3220,89 @@ mod window {
             .request_style(floem::style::recalc::StyleReason::full_recalc());
         rebuilt(&mut harness);
         assert_eq!(viewport.get().y0, scrolled, "the restyle moved the code");
+    }
+
+    /// A reload of the open file under the same scope, as an agent's edit
+    /// brings, is edited into the editor showing it rather than building
+    /// another, which would draw a frame at the top of the file before the
+    /// place came back: the same editor, the new text laid out, and the
+    /// lines in view where they were, stacked and split. A line added
+    /// above the view moves the scroll by a line, so the same code stays
+    /// on screen.
+    #[test]
+    fn a_reload_of_the_open_file_is_edited_into_its_editor_where_it_stands() {
+        let base = "fn a() {}\nfn old() {}\nfn c() {}\n".repeat(30);
+        let head = "fn a() {}\nfn b() {}\nfn c() {}\n".repeat(30);
+        let (mut harness, state) = harness_with(head.clone(), base.clone());
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let reload = |state: ReviewState, head: String| {
+            state.finish_load(
+                "src/x.rs",
+                Arc::new(crate::backend::build_loaded_file(
+                    "src/x.rs".into(),
+                    head,
+                    base.clone(),
+                    Some(perch_git::ChangeStatus::Modified),
+                    false,
+                    perch_git::Scope::Branch,
+                    String::new(),
+                )),
+            )
+        };
+        let stacked_y = || super::STACKED_VIEWPORT.with(|v| v.get()).unwrap().get().y0;
+        scroll_rows(&mut harness, 20);
+        let (epoch, scrolled) = (state.editor_epoch.get(), stacked_y());
+        assert!(scrolled > 0.0);
+
+        // Below the view: nothing on screen moves.
+        let edited = head.replacen("fn c() {}\n", "fn c() {}\nfn added() {}\n", 29);
+        reload(state, edited.clone());
+        rebuilt(&mut harness);
+        assert_eq!(state.editor_epoch.get(), epoch, "the editor was built again");
+        let live = stacked(state);
+        assert!(live.doc.get().text.contains("fn added()"));
+        assert_eq!(laid_out_text(&live), state.active_file().unwrap().buffer.text);
+        assert_eq!(stacked_y(), scrolled);
+
+        // Above it: the scroll follows the code down by the line added.
+        let above = format!("// new\n{edited}");
+        reload(state, above.clone());
+        rebuilt(&mut harness);
+        assert_eq!(state.editor_epoch.get(), epoch);
+        assert!(laid_out_text(&stacked(state)).starts_with("// new\n"));
+        assert_eq!(stacked_y(), scrolled + line_height);
+
+        // The split takes one the same way, both sides edited.
+        state.layout.set(Layout::Split);
+        rebuilt(&mut harness);
+        let (_, right) = super::SPLIT_VIEWPORTS.with(|v| v.get()).unwrap();
+        let (epoch, at) = (state.editor_epoch.get(), right.get().y0);
+        reload(state, format!("{above}fn tail() {{}}\n"));
+        rebuilt(&mut harness);
+        assert_eq!(state.editor_epoch.get(), epoch, "the split was built again");
+        let (left, right_live) = sides(state);
+        assert!(laid_out_text(&right_live).contains("fn tail()"));
+        assert_eq!(laid_out_text(&left), left.doc.get().text);
+        assert_eq!(right.get().y0, at);
+
+        // The find bar's matches follow the new text, and the view stays
+        // where the bar last put it.
+        state.find_open.set(true);
+        state.find_query.set("fn tail".into());
+        rebuilt(&mut harness);
+        assert_eq!(state.find_matches.get().len(), 1);
+        let at = right.get().y0;
+        reload(state, format!("{above}fn tail() {{}}\nfn tail() {{}}\n"));
+        rebuilt(&mut harness);
+        assert_eq!(state.editor_epoch.get(), epoch);
+        assert_eq!(state.find_matches.get().len(), 2);
+        assert_eq!(right.get().y0, at, "the reload moved the view");
+        state.find_open.set(false);
+
+        // A file whose gutter would widen is another editor.
+        reload(state, "fn a() {}\n".repeat(1200));
+        rebuilt(&mut harness);
+        assert_ne!(state.editor_epoch.get(), epoch);
     }
 
     /// Each file's tab shows where the reader left it: scrolled as it was,

@@ -253,6 +253,23 @@ impl Doc {
         }
     }
 
+    /// Whether a row reads and is as another does, in a document over
+    /// another buffer, whose lines are numbered afresh: a line by its tint,
+    /// a divider by how many lines it hides.
+    fn same_row_renumbered(&self, row: usize, other: &Doc, other_row: usize) -> bool {
+        if self.line(row) != other.line(other_row) {
+            return false;
+        }
+        match (&self.rows[row], &other.rows[other_row]) {
+            (DocRow::Line { tint: a, .. }, DocRow::Line { tint: b, .. }) => a == b,
+            (DocRow::Divider { run: a, expand: x }, DocRow::Divider { run: b, expand: y }) => {
+                let hidden = |doc: &Doc, run: usize| doc.folds.get(run).map(|r| r.last - r.first);
+                x == y && hidden(self, *a) == hidden(other, *b)
+            }
+            (a, b) => a == b,
+        }
+    }
+
     /// The display line a row is. `None` for a filler, a divider or a
     /// spacer, which is no line of anything.
     pub fn display_line(&self, row: usize) -> Option<usize> {
@@ -907,16 +924,31 @@ impl Region {
 /// divider whose run is the same is the same row wherever the run sits
 /// in the folds.
 pub fn changed_region(old: &Doc, new: &Doc) -> Option<Region> {
+    region_by(old, new, Doc::same_row)
+}
+
+/// [`changed_region`] between documents over two buffers of a file, one
+/// reloaded after the other was written to: a line after an added one is
+/// the same line under another number.
+pub fn changed_region_renumbered(old: &Doc, new: &Doc) -> Option<Region> {
+    region_by(old, new, Doc::same_row_renumbered)
+}
+
+fn region_by(
+    old: &Doc,
+    new: &Doc,
+    same: impl Fn(&Doc, usize, &Doc, usize) -> bool,
+) -> Option<Region> {
     let shorter = old.len().min(new.len());
     let mut prefix = 0;
-    while prefix < shorter && old.same_row(prefix, new, prefix) {
+    while prefix < shorter && same(old, prefix, new, prefix) {
         prefix += 1;
     }
     if prefix == old.len() && prefix == new.len() {
         return None;
     }
     let mut suffix = 0;
-    while suffix < shorter - prefix && old.same_row(old.len() - 1 - suffix, new, new.len() - 1 - suffix) {
+    while suffix < shorter - prefix && same(old, old.len() - 1 - suffix, new, new.len() - 1 - suffix) {
         suffix += 1;
     }
     let (old_end, new_end) = (old.len() - suffix, new.len() - suffix);

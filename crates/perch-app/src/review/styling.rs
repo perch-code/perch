@@ -27,11 +27,13 @@ use perch_syntax::Span;
 use crate::review::doc::{Doc, DocRow, Tint};
 use crate::review::editor::Side;
 use crate::review::find::Match;
-use crate::review::model::LoadedFile;
+use crate::review::model::LiveFile;
 use crate::theme;
 
 pub struct PerchStyling {
-    file: Arc<LoadedFile>,
+    /// Read live, as the document is: a reload is edited in place under
+    /// the editor, and its spans come with it.
+    file: LiveFile,
     /// The document the editor is laying out. Read live, never copied:
     /// the document is edited in place under the editor, and a row asked
     /// about after an edit is the edited one.
@@ -56,7 +58,7 @@ pub struct PerchStyling {
 impl PerchStyling {
     /// The stacked view: the document over the unified buffer.
     pub fn new(
-        file: Arc<LoadedFile>,
+        file: LiveFile,
         doc: RwSignal<Arc<Doc>>,
         highlights: RwSignal<Arc<Vec<(usize, usize, usize)>>>,
         find: RwSignal<Arc<Vec<Match>>>,
@@ -77,7 +79,7 @@ impl PerchStyling {
 
     /// One half of a split.
     pub fn side(
-        file: Arc<LoadedFile>,
+        file: LiveFile,
         side: Side,
         doc: RwSignal<Arc<Doc>>,
         highlights: RwSignal<Arc<Vec<(usize, usize, usize)>>>,
@@ -140,20 +142,23 @@ impl PerchStyling {
 
     /// Highlight spans for a row, taken from whichever side of the diff
     /// its line came from. A row that is no line has none.
-    fn spans_for(&self, row: usize) -> &[Span] {
+    fn spans_for(&self, row: usize) -> Vec<Span> {
         let Some(DocRow::Line { display, .. }) = self.row(row) else {
-            return &[];
+            return Vec::new();
         };
-        match self.side {
-            // The base side's document is over the base file, whose display
-            // lines are its own.
-            Some(Side::Base) => self.file.base_spans.line(display),
-            Some(Side::Head) | None => match self.file.buffer.row(display) {
-                Some(perch_git::Row::Head { head_line, .. }) => self.file.head_spans.line(head_line),
-                Some(perch_git::Row::Deleted { base_line }) => self.file.base_spans.line(base_line),
-                None => &[],
-            },
-        }
+        self.file.with_untracked(|file| {
+            match self.side {
+                // The base side's document is over the base file, whose
+                // display lines are its own.
+                Some(Side::Base) => file.base_spans.line(display),
+                Some(Side::Head) | None => match file.buffer.row(display) {
+                    Some(perch_git::Row::Head { head_line, .. }) => file.head_spans.line(head_line),
+                    Some(perch_git::Row::Deleted { base_line }) => file.base_spans.line(base_line),
+                    None => &[],
+                },
+            }
+            .to_vec()
+        })
     }
 
     /// Whether a row is a ghost of the stacked view: a removed line spliced
@@ -283,7 +288,7 @@ mod tests {
         ));
         let doc = RwSignal::new(Arc::new(doc::build(&DisplayBuffer::plain(text), &folds, &[])));
         PerchStyling::new(
-            file,
+            RwSignal::new(file),
             doc,
             RwSignal::new(Arc::new(Vec::new())),
             RwSignal::new(Arc::new(Vec::new())),

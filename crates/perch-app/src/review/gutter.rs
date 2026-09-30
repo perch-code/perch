@@ -50,7 +50,7 @@ use crate::icons::{self, SidebarIcon};
 use crate::review::cards::tip_with;
 use crate::review::doc::{self, CardId, Doc, DocRow, Expand, Tint};
 use crate::review::editor::Side;
-use crate::review::model::{LoadedFile, ReviewState};
+use crate::review::model::{LiveFile, LoadedFile, ReviewState};
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{clickable, icon_in, sidebar_glyph};
@@ -156,13 +156,13 @@ pub(crate) fn column_offset(scroll_top: f64, line_height: f64) -> f64 {
 pub fn diff_gutter(
     state: ReviewState,
     app: AppState,
-    file: Arc<LoadedFile>,
+    file: LiveFile,
     doc: RwSignal<Arc<Doc>>,
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
 ) -> impl IntoView {
-    column(viewport, scroll_delta, doc, width_of(&file), move |row, entry| {
-        gutter_row(state, app, file.clone(), doc, row, entry)
+    column(viewport, scroll_delta, doc, file, move |file, row, entry| {
+        gutter_row(state, app, file, doc, row, entry)
     })
 }
 
@@ -172,17 +172,17 @@ pub fn diff_gutter(
 pub fn plain_gutter(
     state: ReviewState,
     app: AppState,
-    file: Arc<LoadedFile>,
+    file: LiveFile,
     doc: RwSignal<Arc<Doc>>,
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
 ) -> impl IntoView {
-    column(viewport, scroll_delta, doc, width_of(&file), move |row, entry| {
+    column(viewport, scroll_delta, doc, file, move |file, row, entry| {
         let number = match entry {
             DocRow::Line { display, .. } => Some(display + 1),
             _ => None,
         };
-        row_view(state, app, file.clone(), row, number, false, None, Slot::Blank)
+        row_view(state, app, file, row, number, false, None, Slot::Blank)
     })
 }
 
@@ -191,46 +191,50 @@ pub fn plain_gutter(
 pub fn side_gutter(
     state: ReviewState,
     app: AppState,
-    file: Arc<LoadedFile>,
+    file: LiveFile,
     side: Side,
     doc: RwSignal<Arc<Doc>>,
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
 ) -> impl IntoView {
-    column(viewport, scroll_delta, doc, width_of(&file), move |row, entry| {
-        side_row(state, app, file.clone(), side, doc, row, entry)
+    column(viewport, scroll_delta, doc, file, move |file, row, entry| {
+        side_row(state, app, file, side, doc, row, entry)
     })
 }
 
 /// The rows in view, slid to the scroll, in a column `width` wide beside
 /// the editor. Each row's view is built from its index and what the
 /// document says the row is, and keyed by both, so an edit to the document
-/// rebuilds the rows it changed and no other.
+/// rebuilds the rows it changed and no other. And by the file, which a
+/// reload set in place changes, numbers and markers with it: every row in
+/// view is built again from the new one.
 fn column<V: IntoView + 'static>(
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
     doc: RwSignal<Arc<Doc>>,
-    width: f64,
-    row: impl Fn(usize, DocRow) -> V + 'static,
+    file: LiveFile,
+    row: impl Fn(Arc<LoadedFile>, usize, DocRow) -> V + 'static,
 ) -> impl IntoView {
     let line_height = theme::CODE_LINE_HEIGHT as f64;
+    let width = file.with_untracked(|file| width_of(file));
 
     let visible = move || {
         let vp = viewport.get();
+        let file = file.get();
         // The document is read here, tracked, so one that changes under
         // the editor changes the column with it.
         doc.with(|d| {
             visible_lines(vp.y0, vp.height(), line_height, d.len())
                 .into_iter()
-                .map(|row| (row, d.rows[row].clone()))
+                .map(|row| (file.clone(), row, d.rows[row].clone()))
                 .collect::<Vec<_>>()
         })
     };
 
     let column = dyn_stack(
         visible,
-        |(row, entry)| (*row, entry.clone()),
-        move |(index, entry)| row(index, entry),
+        |(file, row, entry)| (Arc::as_ptr(file) as usize, *row, entry.clone()),
+        move |(file, index, entry)| row(file, index, entry),
     )
     .style(move |s| {
         // The whole column slides by the sub-line remainder of the
