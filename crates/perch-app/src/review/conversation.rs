@@ -348,6 +348,7 @@ fn conversation_title(state: ReviewState) -> impl IntoView {
         .debug_name("conversation-title")
         .style(|s| {
             s.width_full()
+                .text_wrap()
                 .font_size(theme::TEXT_PAGE_TITLE)
                 .font_weight(theme::weight_emphasis())
                 .line_height(theme::PAGE_TITLE_LINE_HEIGHT)
@@ -1085,6 +1086,43 @@ mod tests {
                     .map(str::to_string)
             })
             .collect()
+    }
+
+    /// A title longer than the column wraps onto more lines rather than
+    /// running past the page's edge.
+    #[test]
+    fn a_long_title_wraps_in_a_narrow_pane() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = ReviewState::new();
+        let mut pr = pull();
+        pr.title = "Fence the manifest and the reader and the admin builders, ".repeat(4);
+        let now = at("2026-09-18T09:59:00Z");
+        let mut item = Item::new("criccomini/perch", now);
+        item.id = "wt".into();
+        item.subject = Some(ItemSubject::PullRequest(pr.clone()));
+        state.item.set(Some(Arc::new(item)));
+        state.ready.set(true);
+        state.set_phase(crate::review::model::Phase::Ready);
+        state.pull_request.set(Some(Arc::new(pr)));
+        state.composer_autofocus.set(false);
+        let backend = crate::backend::Backend::detached();
+        let view = crate::ui::app_view(app, state, Rc::new(backend));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1000.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+
+        let title = find(harness.root_id(), "conversation-title").unwrap();
+        let rect = title.get_visual_rect_no_clip();
+        let page = find(harness.root_id(), "conversation")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        assert!(rect.x1 <= page.x1, "the title at {rect:?} runs past {page:?}");
+        let line = (crate::theme::TEXT_PAGE_TITLE * crate::theme::PAGE_TITLE_LINE_HEIGHT) as f64;
+        assert!(
+            rect.height() - crate::theme::CONVERSATION_TITLE_GAP > 1.5 * line,
+            "the title is one line high: {rect:?}"
+        );
     }
 
     /// The page's end can be scrolled to, whatever wraps on it. Under a
