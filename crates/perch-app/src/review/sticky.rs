@@ -41,7 +41,7 @@ use floem::views::{dyn_stack, rich_text, ClipExt, Container, Decorators, Empty, 
 use perch_git::ChangeStatus;
 
 use crate::backend::Backend;
-use crate::review::doc::Doc;
+use crate::review::doc::{Doc, DocRow};
 use crate::review::editor::{passes_wheel, row_tint};
 use crate::review::model::{LiveFile, LoadedFile, ReviewState};
 use crate::theme;
@@ -71,37 +71,65 @@ pub(crate) struct Pin {
 
 /// Where each block, `(first, last)` in head lines, is in the document.
 /// `row_of` is the row a head line is on, `None` when it is folded away,
-/// and `lines` how many lines the head has; a folded line is placed on the row before the next
+/// `is_divider` whether a row is a divider's, and `lines` how many lines
+/// the head has. A folded first line is placed on the row before the next
 /// line shown, which is its divider's last, or on the last row when no
-/// line below it is shown.
+/// line below it is shown. A folded last line is placed on the row above
+/// its divider, so the block ends before the divider as the next block
+/// starts on it: otherwise an `impl` whose closing lines are folded and
+/// the `impl` after it, whose first lines are folded behind the same
+/// divider, would both hold the top and pin together. A block folded
+/// away whole ends above where it starts, and is dropped.
 pub(crate) fn place(
     blocks: &[(usize, usize)],
     rows: usize,
     lines: usize,
     row_of: impl Fn(usize) -> Option<usize>,
+    is_divider: impl Fn(usize) -> bool,
 ) -> Vec<Placed> {
     if blocks.is_empty() || rows == 0 {
         return Vec::new();
     }
-    // Worked out once from the bottom up.
+    // The row above the divider over a row, if any, `None` above the
+    // first row.
+    let above_divider = |mut row: usize| {
+        while row > 0 && is_divider(row - 1) {
+            row -= 1;
+        }
+        row.checked_sub(1)
+    };
+    // Worked out once from the bottom up: where a line starts a block,
+    // and where it ends one.
     let mut next = rows;
-    let mut at = vec![0; lines];
+    let mut above = above_divider(rows);
+    let mut starts = vec![0; lines];
+    let mut ends = vec![None; lines];
     for line in (0..lines).rev() {
-        at[line] = match row_of(line) {
+        match row_of(line) {
             Some(row) => {
                 next = row;
-                row
+                above = above_divider(row);
+                starts[line] = row;
+                ends[line] = Some(row);
             }
-            None => next.saturating_sub(1),
-        };
+            None => {
+                starts[line] = next.saturating_sub(1);
+                ends[line] = above;
+            }
+        }
     }
-    let at = |line: usize| at.get(line).copied().unwrap_or(rows - 1).min(rows - 1);
+    let last_row = rows - 1;
+    let start = |line: usize| starts.get(line).map_or(last_row, |&r| r.min(last_row));
+    let end = |line: usize| ends.get(line).map_or(Some(last_row), |r| r.map(|r| r.min(last_row)));
     blocks
         .iter()
-        .map(|&(first, last)| Placed {
-            line: first,
-            start_row: at(first),
-            end_row: at(last),
+        .filter_map(|&(first, last)| {
+            let (start_row, end_row) = (start(first), end(last)?);
+            (end_row >= start_row).then_some(Placed {
+                line: first,
+                start_row,
+                end_row,
+            })
         })
         .collect()
 }
@@ -109,12 +137,15 @@ pub(crate) fn place(
 /// The lines pinned at a scroll: each block, outermost first, whose first
 /// row has gone above the next free slot and whose last row is still
 /// below it, up to `max`. A slot's line is pushed up by the block's last
-/// row as that row comes into the slot. Pure, for the tests.
+/// row as that row comes into the slot, and a block that starts below
+/// the last pinned one's end, a sibling rather than a block inside it,
+/// waits for it to go. Pure, for the tests.
 pub(crate) fn pinned(placed: &[Placed], scroll_top: f64, line_height: f64, max: usize) -> Vec<Pin> {
     let mut out: Vec<Pin> = Vec::new();
     if line_height <= 0.0 {
         return out;
     }
+    let mut inside: Option<usize> = None;
     for p in placed {
         let slot = out.len();
         if slot >= max {
@@ -123,7 +154,7 @@ pub(crate) fn pinned(placed: &[Placed], scroll_top: f64, line_height: f64, max: 
         let slot_top = scroll_top + slot as f64 * line_height;
         // In order of first line, so every block after this one starts
         // lower still.
-        if p.start_row as f64 * line_height >= slot_top {
+        if p.start_row as f64 * line_height >= slot_top || inside.is_some_and(|end| p.start_row > end) {
             break;
         }
         let bottom = (p.end_row + 1) as f64 * line_height;
@@ -131,6 +162,7 @@ pub(crate) fn pinned(placed: &[Placed], scroll_top: f64, line_height: f64, max: 
             continue;
         }
         let y = (slot as f64 * line_height).min(bottom - scroll_top - line_height);
+        inside = Some(p.end_row);
         out.push(Pin {
             line: p.line,
             start_row: p.start_row,
@@ -258,13 +290,19 @@ pub(crate) fn layer(
         let (_, lines) = counted.get();
         outline.with(|blocks| {
             doc.with(|d| {
-                place(blocks, d.len(), lines, |line| {
-                    if base {
-                        d.row_of_display(line)
-                    } else {
-                        d.row_of_head(line)
-                    }
-                })
+                place(
+                    blocks,
+                    d.len(),
+                    lines,
+                    |line| {
+                        if base {
+                            d.row_of_display(line)
+                        } else {
+                            d.row_of_head(line)
+                        }
+                    },
+                    |row| matches!(d.rows.get(row), Some(DocRow::Divider { .. })),
+                )
             })
         })
     });
@@ -357,7 +395,7 @@ fn pinned_row(
         let row = pins.with(|p| p.iter().find(|p| p.line == line).map(|p| p.start_row));
         doc.with(|d| {
             row.and_then(|r| d.rows.get(r))
-                .filter(|r| matches!(r, crate::review::doc::DocRow::Line { .. }))
+                .filter(|r| matches!(r, DocRow::Line { .. }))
                 .and_then(row_tint)
         })
     };
@@ -479,7 +517,7 @@ mod tests {
 
     /// Placed one row per line, nothing folded.
     fn flat(blocks: &[(usize, usize)], rows: usize) -> Vec<Placed> {
-        place(blocks, rows, rows, |line| (line < rows).then_some(line))
+        place(blocks, rows, rows, |line| (line < rows).then_some(line), |_| false)
     }
 
     fn lines(pins: &[Pin]) -> Vec<usize> {
@@ -539,7 +577,7 @@ mod tests {
         // Lines 0..=9 of a function are folded behind a two-row divider;
         // rows 0 and 1 are the divider, and line 10 is on row 2.
         let row_of = |line: usize| (line >= 10).then(|| line - 8);
-        let placed = place(&[scope(3, 14)], 7, 15, row_of);
+        let placed = place(&[scope(3, 14)], 7, 15, row_of, |row| row < 2);
         assert_eq!(
             placed,
             vec![Placed {
@@ -550,6 +588,40 @@ mod tests {
         );
         // With the divider scrolled off, the folded `fn` is pinned.
         assert_eq!(lines(&pinned(&placed, 2.0 * LH, LH, 5)), vec![3]);
+    }
+
+    #[test]
+    fn a_divider_ends_the_block_above_it_and_starts_the_one_below() {
+        // Lines 0..=4 are on rows 0..=4, lines 5..=19 folded behind a
+        // one-row divider on row 5, lines 20..=29 on rows 6..=15. The
+        // divider hides the end of one impl, a function whole, and the
+        // start of the next impl and its function.
+        let row_of = |line: usize| match line {
+            0..=4 => Some(line),
+            20..=29 => Some(line - 14),
+            _ => None,
+        };
+        let blocks = [scope(0, 12), scope(2, 8), scope(9, 11), scope(14, 28), scope(15, 27)];
+        let placed = place(&blocks, 16, 30, row_of, |row| row == 5);
+        let at = |line, start_row, end_row| Placed {
+            line,
+            start_row,
+            end_row,
+        };
+        assert_eq!(placed, vec![at(0, 0, 4), at(2, 2, 4), at(14, 5, 14), at(15, 5, 13)]);
+        // The first impl slides out alone, and the second takes the top
+        // once it has gone.
+        assert_eq!(lines(&pinned(&placed, 4.5 * LH, LH, 5)), vec![0]);
+        assert_eq!(lines(&pinned(&placed, 5.5 * LH, LH, 5)), vec![14, 15]);
+    }
+
+    #[test]
+    fn a_sibling_does_not_pin_under_the_block_before_it() {
+        // Two impls back to back, each with a function.
+        let placed = flat(&[scope(0, 5), scope(1, 4), scope(6, 12), scope(7, 11)], 20);
+        let pins = pinned(&placed, 5.5 * LH, LH, 5);
+        assert_eq!(lines(&pins), vec![0]);
+        assert!((pins[0].y + 0.5 * LH).abs() < 1e-9, "{pins:?}");
     }
 
     #[test]
