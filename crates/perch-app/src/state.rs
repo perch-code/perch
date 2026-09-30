@@ -1641,6 +1641,11 @@ impl AppState {
             Event::LspDocumentHighlight { token, ranges } => {
                 review.finish_highlights(token, ranges);
             }
+            Event::LspDocumentSymbols { path, outline } => {
+                review.symbols.update(|symbols| {
+                    symbols.insert(path, outline);
+                });
+            }
             Event::LspCallHierarchy { token, items, place } => {
                 review.finish_prepare_hierarchy(token, items, place);
             }
@@ -2536,6 +2541,7 @@ impl AppState {
             | Event::LspTypeDefinition { .. }
             | Event::LspImplementation { .. }
             | Event::LspDocumentHighlight { .. }
+            | Event::LspDocumentSymbols { .. }
             | Event::LspCallHierarchy { .. }
             | Event::LspCalls { .. }
             | Event::LspNames { .. }

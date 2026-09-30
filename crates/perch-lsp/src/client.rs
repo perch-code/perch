@@ -11,6 +11,7 @@ use lsp_types::{
     CallHierarchyClientCapabilities, CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams,
     CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams,
     CallHierarchyPrepareParams, ClientCapabilities, DocumentHighlight,
+    DocumentSymbol, DocumentSymbolClientCapabilities, DocumentSymbolParams, DocumentSymbolResponse,
     DocumentHighlightClientCapabilities, DocumentHighlightParams, GeneralClientCapabilities,
     GotoCapability, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverClientCapabilities,
     HoverParams, InitializeParams, InitializeResult, InitializedParams, Location, MarkupKind,
@@ -164,6 +165,12 @@ impl Client {
                     implementation: Some(plain_goto()),
                     call_hierarchy: Some(CallHierarchyClientCapabilities::default()),
                     document_highlight: Some(DocumentHighlightClientCapabilities::default()),
+                    // Nested symbols, so a function's range and its name's
+                    // line come with it, inside its impl's.
+                    document_symbol: Some(DocumentSymbolClientCapabilities {
+                        hierarchical_document_symbol_support: Some(true),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }),
                 window: Some(WindowClientCapabilities {
@@ -338,6 +345,32 @@ impl Client {
             return Vec::new();
         };
         decode_result(value).unwrap_or_default()
+    }
+
+    /// The blocks of a file, from the server's outline of it: each symbol
+    /// that runs over more than one line, as the line its name is on and
+    /// its last line, zero based. See `blocks`.
+    pub async fn document_blocks(&self, path: &Path) -> Vec<(usize, usize)> {
+        let Some(uri) = path_to_uri(path) else {
+            return Vec::new();
+        };
+        let params = DocumentSymbolParams {
+            text_document: TextDocumentIdentifier { uri },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: Default::default(),
+        };
+        let Ok(params) = serde_json::to_value(params) else {
+            return Vec::new();
+        };
+        let Ok(value) = self
+            .request("textDocument/documentSymbol", params, QUICK_TIMEOUT)
+            .await
+        else {
+            return Vec::new();
+        };
+        decode_result::<DocumentSymbolResponse>(value)
+            .map(blocks)
+            .unwrap_or_default()
     }
 
     /// The call hierarchy items at a position: the function there, or none
@@ -684,9 +717,59 @@ pub fn uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(String::from_utf8_lossy(&out).into_owned()))
 }
 
+/// A document's symbols as blocks, `(first, last)` lines, in order of
+/// their first line with an outer block before an inner one that starts
+/// on the same line. A block starts on the line of its name, as VS Code's
+/// sticky scroll has it, and not at its range's start, which takes in the
+/// doc comment and the attributes above the name. A symbol on one line
+/// is no block. A server that answers flat, with no nesting, gives each
+/// symbol's range whole.
+pub fn blocks(response: DocumentSymbolResponse) -> Vec<(usize, usize)> {
+    fn walk(symbols: &[DocumentSymbol], out: &mut Vec<(usize, usize)>) {
+        for symbol in symbols {
+            let (first, last) = (symbol.selection_range.start.line, symbol.range.end.line);
+            if last > first {
+                out.push((first as usize, last as usize));
+            }
+            walk(symbol.children.as_deref().unwrap_or_default(), out);
+        }
+    }
+    let mut out = Vec::new();
+    match response {
+        DocumentSymbolResponse::Nested(symbols) => walk(&symbols, &mut out),
+        DocumentSymbolResponse::Flat(symbols) => out.extend(
+            symbols
+                .iter()
+                .map(|s| (s.location.range.start.line as usize, s.location.range.end.line as usize))
+                .filter(|(first, last)| last > first),
+        ),
+    }
+    out.sort_by_key(|&(first, last)| (first, std::cmp::Reverse(last)));
+    out.dedup();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blocks_start_at_the_name_and_nest_outer_first() {
+        let range = |a: u32, b: u32| json!({"start": {"line": a, "character": 0}, "end": {"line": b, "character": 1}});
+        // An impl on lines 0 to 20 holding a function whose doc comment
+        // starts on line 2 and whose name is on line 4, a one-line
+        // constant, and a struct after it.
+        let response: DocumentSymbolResponse = serde_json::from_value(json!([
+            {"name": "impl Default for X", "kind": 19, "range": range(0, 20), "selectionRange": range(0, 0),
+             "children": [
+                {"name": "default", "kind": 12, "range": range(2, 10), "selectionRange": range(4, 4)},
+                {"name": "N", "kind": 14, "range": range(12, 12), "selectionRange": range(12, 12)},
+             ]},
+            {"name": "Y", "kind": 23, "range": range(22, 25), "selectionRange": range(22, 22)},
+        ]))
+        .unwrap();
+        assert_eq!(blocks(response), vec![(0, 20), (4, 10), (22, 25)]);
+    }
 
     #[test]
     fn paths_round_trip_through_a_file_uri() {

@@ -30,6 +30,7 @@ pub mod review_launch;
 pub mod review_menu;
 pub mod scope;
 pub mod start_work;
+pub mod sticky;
 pub mod styling;
 pub mod submit_review;
 pub mod suggestion;

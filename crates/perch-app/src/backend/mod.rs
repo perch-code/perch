@@ -341,6 +341,12 @@ pub enum Command {
         line: u32,
         character: u32,
     },
+    /// A file's outline, as the blocks its first lines pin over the code
+    /// while the rest of them scrolls under. Opening a file asks for its
+    /// own; this is for the files open before the server came up.
+    DocumentSymbols {
+        path: String,
+    },
     /// The function at a position, as the server names it for a call
     /// hierarchy, or nothing when the position is not on one.
     PrepareCallHierarchy {
@@ -1314,6 +1320,11 @@ pub enum Event {
         token: u64,
         ranges: Vec<(usize, usize, usize)>,
     },
+    /// A file's outline, by its path.
+    LspDocumentSymbols {
+        path: String,
+        outline: Arc<crate::review::model::Outline>,
+    },
     /// The items a call hierarchy can start from, with where the first is.
     LspCallHierarchy {
         token: u64,
@@ -1364,6 +1375,7 @@ impl Event {
                 | Event::LspImplementation { .. }
                 | Event::LspReferences { .. }
                 | Event::LspDocumentHighlight { .. }
+                | Event::LspDocumentSymbols { .. }
                 | Event::LspCallHierarchy { .. }
                 | Event::LspCalls { .. }
                 | Event::LspNames { .. }
@@ -2669,6 +2681,12 @@ impl Backend {
             path: path.to_string(),
             line,
             character,
+        });
+    }
+
+    pub fn document_symbols(&self, path: &str) {
+        let _ = self.commands.send(Command::DocumentSymbols {
+            path: path.to_string(),
         });
     }
 
@@ -4399,7 +4417,7 @@ async fn run(
                     if open_file(
                         preparer,
                         checkout.clone(),
-                        events,
+                        events.clone(),
                         navigation_requests.clone(),
                         path.clone(),
                         navigation_id,
@@ -4410,6 +4428,7 @@ async fn run(
                             checkout,
                             language_server,
                             navigation_requests,
+                            events,
                             path,
                             navigation_id,
                         )
@@ -4428,7 +4447,7 @@ async fn run(
                 tokio::spawn(async move {
                     if open_outside_file(
                         checkout.clone(),
-                        events,
+                        events.clone(),
                         navigation_requests.clone(),
                         path.clone(),
                         navigation_id,
@@ -4439,6 +4458,7 @@ async fn run(
                             checkout,
                             language_server,
                             navigation_requests,
+                            events,
                             path,
                             navigation_id,
                         )
@@ -4590,6 +4610,23 @@ async fn run(
                         })
                         .collect();
                     let _ = events.send(Event::LspDocumentHighlight { token, ranges });
+                });
+            }
+            Command::DocumentSymbols { path } => {
+                let checkout = checkout.clone();
+                let language_server = language_server.clone();
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let Some((client, full)) = resolve(&checkout, &language_server, &path).await
+                    else {
+                        return;
+                    };
+                    // Not announced, so the server answers from the file on
+                    // disk.
+                    let Ok(text) = tokio::fs::read_to_string(&full).await else {
+                        return;
+                    };
+                    send_outline(&client, &full, &text, path, &events).await;
                 });
             }
             Command::PrepareCallHierarchy {
@@ -15603,11 +15640,14 @@ fn send_lsp_status_if_current(
     });
 }
 
-/// Tell the language server about a file the user just opened.
+/// Tell the language server about a file the user just opened, and ask
+/// it for the file's outline straight after, so the answer is about the
+/// text it was just given.
 async fn announce_file(
     checkout: Arc<std::sync::Mutex<Option<ReviewContext>>>,
     slot: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
     navigation_requests: Arc<NavigationRequests>,
+    events: EventSender<Event>,
     path: String,
     navigation_id: u64,
 ) {
@@ -15627,7 +15667,7 @@ async fn announce_file(
     let Some(client) = slot.lock().await.clone() else {
         return;
     };
-    let full = worktree.join(path);
+    let full = worktree.join(&path);
     if let Ok(text) = tokio::fs::read_to_string(&full).await {
         let still_current = navigation_requests
             .with_current(navigation_id, || {
@@ -15640,8 +15680,29 @@ async fn announce_file(
             .unwrap_or(false);
         if still_current {
             client.did_open(&full, &text).await;
+            send_outline(&client, &full, &text, path, &events).await;
         }
     }
+}
+
+/// Ask the server for a file's outline and send it on with a hash of the
+/// lines it is counted in, `text`, the file as the server has it: a head
+/// of other text, a commit's, takes none of it.
+async fn send_outline(
+    client: &perch_lsp::Client,
+    full: &Path,
+    text: &str,
+    path: String,
+    events: &EventSender<Event>,
+) {
+    let blocks = client.document_blocks(full).await;
+    let _ = events.send(Event::LspDocumentSymbols {
+        path,
+        outline: Arc::new(crate::review::model::Outline {
+            lines: crate::review::sticky::lines_hash(text.lines()),
+            blocks,
+        }),
+    });
 }
 
 /// The server and the absolute path for a file of the open checkout.

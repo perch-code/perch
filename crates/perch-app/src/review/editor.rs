@@ -66,6 +66,7 @@ use crate::review::model::{
 use crate::review::navigation;
 use crate::review::picture;
 use crate::review::references;
+use crate::review::sticky;
 use crate::review::styling::PerchStyling;
 use crate::review::threads::{self, ThreadFace};
 use crate::review::OpenFile;
@@ -412,6 +413,16 @@ fn stacked_view(
     let editor = navigation::navigable(editor, state, backend.clone(), file.clone(), doc);
 
     let path = file.path.clone();
+    let sticky = sticky::layer(
+        state,
+        backend.clone(),
+        live_file,
+        doc,
+        viewport,
+        gutter::width_of(&file),
+        scroll_delta,
+        Rc::new(move |y| scroll_to.set(Some(Vec2::new(viewport.get_untracked().x0, y)))),
+    );
     // A file outside the worktree is a place to read: numbers beside it,
     // and no diff gutter, since there is no diff.
     let gutter = if file.origin.is_outside() {
@@ -446,8 +457,10 @@ fn stacked_view(
                 .height_full()
                 .position(Position::Relative)
         }),
+        // Over the gutter and the code both, and over the cards.
+        sticky,
     ))
-    .style(|s| s.size_full().min_height(0.0))
+    .style(|s| s.size_full().min_height(0.0).position(Position::Relative))
 }
 
 /// Whether a file has two sides to split: a base to put on the left, and
@@ -676,7 +689,7 @@ fn shift_cursor(cursor: &mut Cursor, start: usize, delta: isize) {
 /// The colour behind a row: a line's diff tint, grey for a split's
 /// filler, github.com's hunk row blue for a divider. A plain line has
 /// none, and a spacer none, since the card is drawn over its rows.
-fn row_tint(row: &DocRow) -> Option<Color> {
+pub(crate) fn row_tint(row: &DocRow) -> Option<Color> {
     match row {
         DocRow::Line { tint, .. } => match tint {
             Tint::Plain => None,
@@ -908,7 +921,7 @@ fn divider_bar(
 /// A part of a divider's bar that hands the wheel on: down the file to
 /// the editor that owns the scroll, `scroll_delta`, and across to
 /// `across` where the part is over another editor, or to the same one.
-fn passes_wheel(
+pub(crate) fn passes_wheel(
     part: impl IntoView + 'static,
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
@@ -1447,6 +1460,18 @@ fn split_view(
     #[cfg(test)]
     SPLIT_VIEWPORTS.with(|v| v.set(Some((left_viewport, right_viewport))));
 
+    // The head pins its blocks; the base is no file the server has.
+    let right_sticky = sticky::layer(
+        state,
+        backend.clone(),
+        live_file,
+        right_doc,
+        right_viewport,
+        gutter::width_of(&file),
+        right_delta,
+        Rc::new(move |y| right_scroll_to.set(Some(Vec2::new(right_viewport.get_untracked().x0, y)))),
+    );
+
     let left_pane = Stack::horizontal((
         side_gutter(
             state,
@@ -1496,6 +1521,21 @@ fn split_view(
             .height_full()
     });
 
+    // The pinned lines, over the dividers and the cards, over the right
+    // half of the outer stack: past the left and the rule.
+    let sticky = Stack::horizontal((
+        Empty::new().style(|s| s.flex_basis(0.0).flex_grow(1.0_f32).min_width(0.0)),
+        Empty::new().style(|s| s.width(1.0).height_full().flex_shrink(0.0_f32)),
+        Container::new(right_sticky).style(|s| {
+            s.flex_basis(0.0)
+                .flex_grow(1.0_f32)
+                .min_width(0.0)
+                .height_full()
+                .position(Position::Relative)
+        }),
+    ))
+    .style(|s| s.absolute().inset(0.0).size_full().pointer_events_none());
+
     // The layers are placed against the outer stack, so it takes the
     // relative position; a bar spans the whole row, its header past the
     // base side's gutter, and a card spans both sides from the base side's
@@ -1531,6 +1571,7 @@ fn split_view(
             gutter_width + theme::CODE_GUTTER_GAP,
             None,
         ),
+        sticky,
     ))
     // The base side takes no pointer, so a click on it would focus
     // nothing and a bare key would go nowhere: the split takes the focus,
@@ -2149,6 +2190,15 @@ mod window {
 
     /// The window with a changed file of the given head and base open.
     fn harness_with(head: String, base: String) -> (HeadlessHarness, ReviewState) {
+        harness_on(head, base, crate::backend::Backend::detached())
+    }
+
+    /// The same, over a backend of the test's, such as a recording one.
+    fn harness_on(
+        head: String,
+        base: String,
+        backend: crate::backend::Backend,
+    ) -> (HeadlessHarness, ReviewState) {
         let root = TestRoot::new();
         let app = AppState::new();
         let state = ReviewState::new();
@@ -2186,7 +2236,6 @@ mod window {
         state.open_tab("src/x.rs");
         state.finish_load("src/x.rs", file);
 
-        let backend = crate::backend::Backend::detached();
         let view = crate::ui::app_view(app, state, Rc::new(backend));
         let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
         harness.rebuild();
@@ -2318,6 +2367,133 @@ mod window {
             right.get().y0,
             (50.0 - 4.0) * crate::theme::CODE_LINE_HEIGHT as f64
         );
+    }
+
+    /// Scrolled into a function, the server's outline pins its first
+    /// line and its impl's over the top of the code, the impl's first,
+    /// each with its number over the gutter and its text from the first
+    /// code column; a click on the function's scrolls it back to where it
+    /// is pinned. The outline is asked for when the server comes up, and
+    /// one counted in other lines than the head's pins nothing. Split,
+    /// only the head pins.
+    #[test]
+    fn the_blocks_the_top_of_the_code_is_in_are_pinned_over_it() {
+        use crate::review::model::Outline;
+        use crate::review::sticky::lines_hash;
+
+        // An impl on line 0 and its function on line 1, longer than the
+        // pane and changed on every third line so that nothing folds; the
+        // function's closing brace is line 122 and the impl's 123.
+        let file = |changed: &str| {
+            let body: String = (0..120)
+                .map(|i| format!("        let x{i} = {};\n", if i % 3 == 0 { changed } else { "0" }))
+                .collect();
+            format!("impl Default for Options {{\n    fn default() -> Self {{\n{body}    }}\n}}\n")
+        };
+        let head = file("1");
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let (mut harness, state) = harness_on(head.clone(), file("2"), backend);
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let (left, top) = pane_origin();
+
+        let mut asked = || {
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .filter(|c| matches!(c, crate::backend::Command::DocumentSymbols { path } if path == "src/x.rs"))
+                .count()
+        };
+        assert_eq!(asked(), 0, "nothing is asked of a server that is not there");
+        state.lsp_status.set(perch_lsp::Status::Ready);
+        harness.rebuild();
+        assert_eq!(asked(), 1, "the outline is asked for when the server comes up");
+
+        let outline = |lines| {
+            let mut symbols = std::collections::HashMap::new();
+            symbols.insert(
+                "src/x.rs".to_string(),
+                Arc::new(Outline { lines, blocks: vec![(0, 123), (1, 122)] }),
+            );
+            symbols
+        };
+        state.symbols.set(outline(lines_hash(head.lines())));
+        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).expect("a stacked editor");
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(count(harness.root_id(), "sticky:"), 0, "nothing is pinned at the top");
+
+        harness.scroll_down(800.0, 500.0, 20.0 * line_height);
+        harness.rebuild();
+        harness.paint();
+        assert!(viewport.get().y0 > 10.0 * line_height, "the code did not scroll");
+        let root = harness.root_id();
+        let (outer, inner) = (rect_of(root, "sticky:0"), rect_of(root, "sticky:1"));
+        assert_eq!((outer.x0, outer.y0, outer.height()), (left, top, line_height));
+        assert_eq!((inner.x0, inner.y0), (left, top + line_height));
+        assert_eq!(count(root, "sticky:"), 2);
+        let text = rect_of(root, "impl Default for Options {");
+        assert_eq!(text.x0, left + gutter_width() + crate::theme::CODE_GUTTER_GAP);
+        assert!(find(root, "fn default() -> Self {").is_some());
+
+        // An outline of other text: a commit's head, say.
+        state.symbols.set(outline(lines_hash("fn other() {}".lines())));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(count(harness.root_id(), "sticky:"), 0);
+        state.symbols.set(outline(lines_hash(head.lines())));
+        harness.rebuild();
+        harness.paint();
+
+        // A reload edited in place, with its new outline: the pinned line
+        // is the new text, and the old outline no longer fits.
+        let epoch = state.editor_epoch.get();
+        let edited = head.replacen("fn default() -> Self {", "fn default() -> Options {", 1);
+        state.finish_load(
+            "src/x.rs",
+            Arc::new(crate::backend::build_loaded_file(
+                "src/x.rs".into(),
+                edited.clone(),
+                file("2"),
+                Some(perch_git::ChangeStatus::Modified),
+                false,
+                perch_git::Scope::Branch,
+                String::new(),
+            )),
+        );
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.editor_epoch.get(), epoch, "edited in place");
+        assert_eq!(count(harness.root_id(), "sticky:"), 0, "the old outline is of other text");
+        state.symbols.set(outline(lines_hash(edited.lines())));
+        harness.rebuild();
+        harness.paint();
+        let root = harness.root_id();
+        assert!(find(root, "fn default() -> Options {").is_some());
+        assert!(find(root, "fn default() -> Self {").is_none());
+
+        let inner = rect_of(harness.root_id(), "sticky:1");
+        harness.click(inner.center().x, inner.center().y);
+        harness.rebuild();
+        harness.paint();
+        // The function's first line is scrolled to its slot, one line
+        // down, with the impl's pinned over it. Changed, it is under the
+        // removed lines the reload put above it.
+        let row = stacked(state).doc.get().row_of_head(1).unwrap();
+        assert_eq!(viewport.get().y0, (row - 1) as f64 * line_height);
+        let root = harness.root_id();
+        assert_eq!(count(root, "sticky:"), 1);
+        assert!(find(root, "sticky:0").is_some());
+
+        state.layout.set(Layout::Split);
+        harness.rebuild();
+        harness.paint();
+        let (_, x_right, y) = pane_centers();
+        harness.scroll_down(x_right, y, 20.0 * line_height);
+        harness.rebuild();
+        harness.paint();
+        let root = harness.root_id();
+        assert_eq!(count(root, "sticky:0"), 1, "the head's alone");
+        let pinned = rect_of(root, "sticky:0");
+        let middle = left + (1400.0 - left - 1.0) / 2.0;
+        assert!(pinned.x0 > middle, "over the head side: {pinned:?}");
     }
 
     /// The left takes no pointer events, so a click there moves no cursor

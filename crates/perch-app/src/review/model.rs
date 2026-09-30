@@ -113,6 +113,15 @@ impl std::fmt::Debug for LoadedFile {
     }
 }
 
+/// A file's outline from the language server: its blocks, each the line
+/// of its name and its last line, and a hash of the lines they are
+/// counted in, which is the file on disk when the server was asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outline {
+    pub lines: u64,
+    pub blocks: Vec<(usize, usize)>,
+}
+
 impl LoadedFile {
     pub fn change_count(&self) -> usize {
         self.buffer.change_starts.len()
@@ -1553,6 +1562,9 @@ pub struct ReviewState {
     /// The document highlight asked for, with the symbol at the caret it
     /// is about, until the caret leaves the symbol.
     pub highlight_ask: RwSignal<Option<(u64, Symbol)>>,
+    /// The server's outline of each file it has been asked about, by path,
+    /// for the lines pinned over the code.
+    pub symbols: RwSignal<HashMap<String, Arc<Outline>>>,
     /// Whether the find bar is over the code. It stays up from one file
     /// to the next, searching each for the same thing, until Escape or
     /// its Close puts it away; leaving the item puts it away too.
@@ -1812,6 +1824,7 @@ impl ReviewState {
             hover: RwSignal::new(None),
             highlights: RwSignal::new(Arc::new(Vec::new())),
             highlight_ask: RwSignal::new(None),
+            symbols: RwSignal::new(HashMap::new()),
             find_open: RwSignal::new(false),
             find_query: RwSignal::new(String::new()),
             find_options: RwSignal::new(Default::default()),
@@ -1990,6 +2003,7 @@ impl ReviewState {
         self.pointer_symbol.set(None);
         self.hover.set(None);
         self.clear_highlights();
+        self.symbols.set(HashMap::new());
         self.last_position.set(None);
         // The names were looked up in this checkout's worktree.
         self.names.set(HashMap::new());
