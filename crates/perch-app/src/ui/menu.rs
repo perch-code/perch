@@ -330,7 +330,7 @@ pub const ROW_RADIUS: f64 = 12.0;
 const ROW_PADDING: f64 = 8.0;
 const SEPARATOR_HEIGHT: f64 = 9.0;
 const MIN_WIDTH: f64 = 180.0;
-const MAX_WIDTH: f64 = 380.0;
+const MAX_WIDTH: f64 = 480.0;
 /// The room kept between a menu and the window's edges.
 const EDGE: f64 = 8.0;
 /// Between a dropdown and the view it hangs from.

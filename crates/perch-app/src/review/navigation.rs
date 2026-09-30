@@ -386,19 +386,18 @@ impl Entry {
         }
     }
 
-    /// "Go to Definition of `parse`": the entry with the symbol it acts on.
+    /// "Go to Definition of `parse`": the first entry names the symbol
+    /// the menu acts on, so the rest stay short, as VS Code's do.
     pub fn label(self, symbol: Option<&Symbol>) -> String {
-        let name = symbol
-            .map(|s| format!(" of `{}`", s.text))
-            .unwrap_or_default();
         match self {
-            Entry::Definition => format!("Go to Definition{name}"),
-            Entry::TypeDefinition => format!("Go to Type Definition{name}"),
-            Entry::Implementations => format!("Go to Implementations{name}"),
-            Entry::References => format!("Find All References{}", name.replacen(" of ", " to ", 1)),
-            Entry::CallHierarchy => {
-                format!("Show Call Hierarchy{}", name.replacen(" of ", " for ", 1))
-            }
+            Entry::Definition => match symbol {
+                Some(s) => format!("Go to Definition of `{}`", s.text),
+                None => "Go to Definition".to_string(),
+            },
+            Entry::TypeDefinition => "Go to Type Definition".to_string(),
+            Entry::Implementations => "Go to Implementations".to_string(),
+            Entry::References => "Find All References".to_string(),
+            Entry::CallHierarchy => "Show Call Hierarchy".to_string(),
             Entry::Copy => "Copy".to_string(),
         }
     }
@@ -1310,7 +1309,7 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_names_what_each_entry_acts_on_and_is_copy_alone_on_nothing() {
+    fn the_menu_names_the_symbol_once_and_is_copy_alone_on_nothing() {
         let parse = Symbol {
             path: "src/x.rs".into(),
             line: 0,
@@ -1326,10 +1325,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "Go to Definition of `parse`",
-                "Go to Type Definition of `parse`",
-                "Go to Implementations of `parse`",
-                "Find All References to `parse`",
-                "Show Call Hierarchy for `parse`",
+                "Go to Type Definition",
+                "Go to Implementations",
+                "Find All References",
+                "Show Call Hierarchy",
                 "Copy",
             ]
         );
