@@ -1307,6 +1307,10 @@ pub struct ReviewState {
     /// as asked until the answer, whatever thread lists land meanwhile,
     /// and takes no second click.
     pub resolving: RwSignal<HashMap<String, bool>>,
+    /// Suggestions sent to be committed from Apply suggestion, by token:
+    /// `None` while GitHub is asked, then how it went, until the popover
+    /// that sent it lets it go.
+    pub suggestion_commits: RwSignal<HashMap<u64, Option<Result<(), String>>>>,
     /// The workflow runs' verdict for the head, once fetched. `None` means
     /// unknown, and the summary has no Checks row.
     pub checks: RwSignal<Option<Arc<Checks>>>,
@@ -1740,6 +1744,7 @@ impl ReviewState {
             reactions: RwSignal::new(HashMap::new()),
             reacting: RwSignal::new(HashSet::new()),
             resolving: RwSignal::new(HashMap::new()),
+            suggestion_commits: RwSignal::new(HashMap::new()),
             checks: RwSignal::new(None),
             pull_request_overview: RwSignal::new(None),
             pull_request_overview_loading: RwSignal::new(false),
@@ -1937,6 +1942,7 @@ impl ReviewState {
         self.reactions.set(HashMap::new());
         self.reacting.set(HashSet::new());
         self.resolving.set(HashMap::new());
+        self.suggestion_commits.set(HashMap::new());
         self.checks.set(None);
         self.pull_request_overview.set(None);
         self.pull_request_overview_loading.set(false);
@@ -3431,6 +3437,32 @@ impl ReviewState {
         if self.resolving.with_untracked(|r| r.contains_key(thread_id)) {
             self.resolving.update(|r| {
                 r.remove(thread_id);
+            });
+        }
+    }
+
+    /// A suggestion was sent to be committed under `token`.
+    pub fn start_suggestion_commit(&self, token: u64) {
+        self.suggestion_commits.update(|c| {
+            c.insert(token, None);
+        });
+    }
+
+    /// How the commit sent under `token` went, kept while its popover
+    /// is still waiting on it.
+    pub fn settle_suggestion_commit(&self, token: u64, result: Result<(), String>) {
+        if self.suggestion_commits.with_untracked(|c| c.contains_key(&token)) {
+            self.suggestion_commits.update(|c| {
+                c.insert(token, Some(result));
+            });
+        }
+    }
+
+    /// The commit sent under `token` is no longer waited on.
+    pub fn forget_suggestion_commit(&self, token: u64) {
+        if self.suggestion_commits.with_untracked(|c| c.contains_key(&token)) {
+            self.suggestion_commits.update(|c| {
+                c.remove(&token);
             });
         }
     }

@@ -716,7 +716,7 @@ fn preview(
                     .into_any()
             } else if let Some(original) = original.as_ref() {
                 let lines = Effect::untrack(|| original());
-                crate::review::markdown::render_suggesting(&body, state, lines).into_any()
+                crate::review::markdown::render_suggesting(&body, state, lines, None).into_any()
             } else {
                 crate::review::markdown::render_linked(&body, state).into_any()
             };

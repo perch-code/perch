@@ -1,5 +1,6 @@
 //! The review view: a pull request, its files, and a read-only editor.
 
+pub mod apply_suggestion;
 pub mod cards;
 pub mod close_as_issue;
 pub mod close_menu;

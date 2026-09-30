@@ -527,3 +527,70 @@ async fn a_thread_github_will_not_resolve_is_an_error_and_no_id_asks_nothing() {
     assert!(matches!(none, Error::Decode(_)), "{none:?}");
     assert_eq!(requests.lock().unwrap().len(), 2, "no id, no request");
 }
+
+#[tokio::test]
+async fn a_file_is_read_at_a_commit_and_a_change_to_it_committed_over_the_head() {
+    let (base, requests) = spawn(vec![
+        Response::new(
+            "200 OK",
+            r#"{"data":{"repository":{"object":{"text":"a\nb\n","isBinary":false,"isTruncated":false}}}}"#,
+        ),
+        Response::new(
+            "200 OK",
+            r#"{"data":{"repository":{"object":{"text":null,"isBinary":true,"isTruncated":false}}}}"#,
+        ),
+        Response::new("200 OK", r#"{"data":{"repository":{"object":null}}}"#),
+        Response::new(
+            "200 OK",
+            r#"{"data":{"createCommitOnBranch":{"commit":{"oid":"c2"}}}}"#,
+        ),
+        Response::new(
+            "200 OK",
+            r#"{"data":{"createCommitOnBranch":null},"errors":[{"message":"Expected branch to point to \"h1\" but it did not"}]}"#,
+        ),
+    ]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    assert_eq!(github.file_text("a/b", "h1", "src/x.rs").await.unwrap(), Ok("a\nb\n".into()));
+    assert_eq!(
+        github.file_text("a/b", "h1", "logo.png").await.unwrap(),
+        Err(perch_github::Unreadable::Binary)
+    );
+    assert_eq!(
+        github.file_text("a/b", "h1", "gone.rs").await.unwrap(),
+        Err(perch_github::Unreadable::Missing)
+    );
+    let oid = github
+        .commit_file("fork/b", "feature", "h1", "src/x.rs", "a\nB\n", "Update src/x.rs", "")
+        .await
+        .unwrap();
+    assert_eq!(oid, "c2");
+    let moved = github
+        .commit_file("fork/b", "feature", "h1", "src/x.rs", "a\nB\n", "Update src/x.rs", "why")
+        .await
+        .unwrap_err();
+    assert!(matches!(&moved, Error::Graphql(m) if m.contains("Expected branch")), "{moved:?}");
+    assert!(
+        github.commit_file("fork/b", "feature", "h1", "src/x.rs", "", " ", "").await.is_err(),
+        "no message, no request"
+    );
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 5);
+    let asked = |i: usize| -> serde_json::Value { serde_json::from_str(&requests[i].body).unwrap() };
+    let read = asked(0);
+    assert_eq!(read["variables"]["owner"], "a");
+    assert_eq!(read["variables"]["name"], "b");
+    assert_eq!(read["variables"]["expression"], "h1:src/x.rs");
+    let commit = asked(3);
+    assert!(commit["query"].as_str().unwrap().contains("createCommitOnBranch(input: $input)"));
+    let input = &commit["variables"]["input"];
+    assert_eq!(input["branch"]["repositoryNameWithOwner"], "fork/b");
+    assert_eq!(input["branch"]["branchName"], "feature");
+    assert_eq!(input["expectedHeadOid"], "h1");
+    assert_eq!(input["message"]["headline"], "Update src/x.rs");
+    assert!(input["message"].get("body").is_none(), "no body when there is none");
+    assert_eq!(input["fileChanges"]["additions"][0]["path"], "src/x.rs");
+    assert_eq!(input["fileChanges"]["additions"][0]["contents"], "YQpCCg==");
+    assert_eq!(asked(4)["variables"]["input"]["message"]["body"], "why");
+}

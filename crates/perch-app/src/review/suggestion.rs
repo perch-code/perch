@@ -6,7 +6,9 @@
 //! to edit; the preview and the thread draw it against the lines it
 //! replaces. Those come from the file as it is loaded, where the thread's
 //! numbers count there, and otherwise from the hunk GitHub sent with the
-//! comment. With neither, the suggestion is drawn on its own.
+//! comment. With neither, the suggestion is drawn on its own. Against
+//! them, on an open pull request, it has Apply suggestion, which commits
+//! it on the head branch as github.com does.
 
 use perch_github::{Anchor, CommentThread, Side};
 
@@ -18,6 +20,24 @@ use crate::review::model::{LoadedFile, ReviewState};
 pub struct Original {
     pub first: u32,
     pub lines: Vec<String>,
+}
+
+/// A suggestion to commit on a pull request's head: the thread it is
+/// in, the lines it replaces and what they become, and the commit's
+/// message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Commit {
+    pub thread_id: String,
+    pub path: String,
+    pub original: Original,
+    pub lines: Vec<String>,
+    pub headline: String,
+    pub body: String,
+}
+
+/// The commit message github.com starts Apply suggestion with.
+pub fn headline_for(path: &str) -> String {
+    format!("Update {path}")
 }
 
 /// Whether `text` has a suggestion in it, so a body without one is drawn

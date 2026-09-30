@@ -29,6 +29,7 @@
 use std::collections::HashMap;
 use std::iter::Peekable;
 use std::ops::Range;
+use std::rc::Rc;
 
 use floem::peniko::Color;
 use floem::prelude::*;
@@ -1080,14 +1081,36 @@ pub fn render_linked(text: &str, state: ReviewState) -> impl IntoView {
             color: theme::FG,
             depth: 0,
             refs: Refs::of(state),
+            foot: None,
         },
     ))
 }
 
+/// What a suggested change has under it, such as Apply suggestion: a
+/// view built from the lines it puts in, the fence's, none when it takes
+/// the lines out.
+#[derive(Clone, Copy)]
+pub struct Foot(RwSignal<Rc<dyn Fn(Vec<String>) -> AnyView>>);
+
+impl Foot {
+    pub fn new(build: impl Fn(Vec<String>) -> AnyView + 'static) -> Self {
+        Self(RwSignal::new(Rc::new(build)))
+    }
+
+    fn build(&self, lines: Vec<String>) -> AnyView {
+        self.0.get_untracked()(lines)
+    }
+}
+
 /// [`render_linked`] for a comment on lines, where a `suggestion` fence
 /// is a suggested change to them, drawn against `original`, the lines
-/// as they are, when those are known.
-pub fn render_suggesting(text: &str, state: ReviewState, original: Option<Original>) -> impl IntoView {
+/// as they are, when those are known, with `foot` under each.
+pub fn render_suggesting(
+    text: &str,
+    state: ReviewState,
+    original: Option<Original>,
+    foot: Option<Foot>,
+) -> impl IntoView {
     let repo = state
         .item
         .with_untracked(|i| i.as_ref().map(|i| i.repo_full_name.clone()));
@@ -1098,6 +1121,7 @@ pub fn render_suggesting(text: &str, state: ReviewState, original: Option<Origin
             color: theme::FG,
             depth: 0,
             refs: Refs::of(state),
+            foot,
         },
     ))
 }
@@ -1130,7 +1154,7 @@ fn suggesting(blocks: Vec<Block>, original: &Option<Original>) -> Vec<Block> {
 /// conversation card draws one; a tooltip hands its blocks here at the
 /// meta size, so a doc comment reads a step below the signature.
 pub fn render_blocks(blocks: Vec<Block>, size: f32) -> impl IntoView {
-    passage(stack(blocks, Ctx { size, color: theme::FG, depth: 0, refs: None }))
+    passage(stack(blocks, Ctx { size, color: theme::FG, depth: 0, refs: None, foot: None }))
 }
 
 /// How the blocks in a container are drawn: the prose size, its colour,
@@ -1141,6 +1165,8 @@ struct Ctx {
     color: Color,
     depth: usize,
     refs: Option<Refs>,
+    /// What a suggested change has under it.
+    foot: Option<Foot>,
 }
 
 /// Codex's unit of vertical rhythm: a quarter of the prose size, 3.5px
@@ -1209,7 +1235,7 @@ fn block_view(block: Block, ctx: Ctx) -> AnyView {
         Block::Quote { alert: Some(alert), blocks } => alert_view(alert, blocks, ctx),
         Block::List { start, tight, items } => list_view(start, tight, items, ctx),
         Block::Code { lang, text } => code_view(text, lang, ctx),
-        Block::Suggestion { text, original } => suggestion_view(text, original),
+        Block::Suggestion { text, original } => suggestion_view(text, original, ctx.foot),
         Block::Table { align, head, rows } => table_view(align, head, rows, ctx),
         Block::Rule => Empty::new()
             .style(|s| s.width_full().height(1.0).background(theme::BORDER).margin_vert(4.0))
@@ -1432,8 +1458,9 @@ fn code_view(text: String, lang: Option<String>, ctx: Ctx) -> AnyView {
 /// A suggested change as github.com draws one: headed Suggested change,
 /// the lines it replaces, removed, over what it puts in their place,
 /// added, each numbered from the first commented line. Without the
-/// lines it replaces, what it puts in is all there is to show.
-fn suggestion_view(text: String, original: Option<Original>) -> AnyView {
+/// lines it replaces, what it puts in is all there is to show. `foot`
+/// goes under the lines, inside the frame.
+fn suggestion_view(text: String, original: Option<Original>, foot: Option<Foot>) -> AnyView {
     use crate::review::cards::{code_row, CodeLine, Tint};
     let first = original.as_ref().map(|o| o.first as usize);
     let line = |i: usize, tint: Tint, text: &str| CodeLine {
@@ -1462,7 +1489,20 @@ fn suggestion_view(text: String, original: Option<Original>) -> AnyView {
             .border_color(theme::BORDER_MUTED)
             .selectable(false)
     });
-    Stack::vertical((header, Stack::vertical_from_iter(rows).style(|s| s.flex_col().width_full())))
+    let lines = if text.is_empty() {
+        Vec::new()
+    } else {
+        text.split('\n').map(str::to_string).collect()
+    };
+    let foot = match foot {
+        Some(foot) => foot.build(lines),
+        None => Empty::new().into_any(),
+    };
+    Stack::vertical((
+        header,
+        Stack::vertical_from_iter(rows).style(|s| s.flex_col().width_full()),
+        foot,
+    ))
         .debug_name("suggested-change")
         .clip()
         .style(|s| {

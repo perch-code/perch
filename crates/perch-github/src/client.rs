@@ -16,6 +16,10 @@ use http_body_util::BodyExt;
 use jiff::Timestamp;
 use octocrab::Octocrab;
 
+use crate::commits::{
+    commit_variables, CommitOnBranchData, FileTextData, Unreadable, COMMIT_ON_BRANCH_MUTATION,
+    FILE_TEXT_QUERY,
+};
 use crate::discussion::{
     resolve_thread_mutation, Discussion, IssueComment, IssueCommentPayload, PullReviewEvent,
     PullSummary, ResolveThreadData, Review, ReviewComment, ReviewCommentDraft,
@@ -908,6 +912,52 @@ impl GitHub {
         let data: ResolveThreadData = self.graphql(&payload).await?;
         data.into_resolved()
             .ok_or_else(|| Error::Decode("GitHub answered without the thread".into()))
+    }
+
+    /// The text of `path` at commit `sha` of `repo_full_name`, or why it
+    /// has none: not there, binary, or too big for GitHub to send whole.
+    pub async fn file_text(
+        &self,
+        repo_full_name: &str,
+        sha: &str,
+        path: &str,
+    ) -> Result<Result<String, Unreadable>, Error> {
+        let (owner, name) = repo_parts(repo_full_name)?;
+        let payload = serde_json::json!({
+            "query": FILE_TEXT_QUERY,
+            "variables": { "owner": owner, "name": name, "expression": format!("{sha}:{path}") },
+        });
+        let data: FileTextData = self.graphql(&payload).await?;
+        Ok(data.into_text())
+    }
+
+    /// Commit `contents` as the whole of `path` on `branch` of
+    /// `repo_full_name`, the head repository of a pull request, as
+    /// github.com commits an applied suggestion. GitHub refuses it when
+    /// the branch is no longer at `expected_head`. The new commit's sha.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn commit_file(
+        &self,
+        repo_full_name: &str,
+        branch: &str,
+        expected_head: &str,
+        path: &str,
+        contents: &str,
+        headline: &str,
+        body: &str,
+    ) -> Result<String, Error> {
+        if headline.trim().is_empty() {
+            return Err(Error::Decode("a commit needs a message".into()));
+        }
+        let payload = serde_json::json!({
+            "query": COMMIT_ON_BRANCH_MUTATION,
+            "variables": commit_variables(
+                repo_full_name, branch, expected_head, path, contents, headline, body,
+            ),
+        });
+        let data: CommitOnBranchData = self.graphql(&payload).await?;
+        data.into_oid()
+            .ok_or_else(|| Error::Decode("GitHub answered the commit without it".into()))
     }
 
     /// The reactions on everything in a discussion, as the reader sees

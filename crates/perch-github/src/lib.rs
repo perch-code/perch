@@ -8,6 +8,7 @@ pub mod auth;
 pub mod cache;
 pub mod client;
 pub mod comments;
+pub mod commits;
 pub mod config;
 pub mod discussion;
 pub mod items;
@@ -29,6 +30,7 @@ pub use cache::{
     Cache, CacheError, CacheOpen, DraftRow, Reconciled, RunContext, RunEventAppend, StoredReveals,
     WorkGrantRecord, NOTIFICATIONS_LAST_MODIFIED_KEY,
 };
+pub use commits::Unreadable;
 pub use client::{Error, GitHub, ListResult, PullLookup};
 pub use comments::{
     Anchor, Author, CommentMessage, CommentThread, NewRunEvent, RevisionContext, RunEvent,

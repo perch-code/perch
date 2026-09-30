@@ -184,6 +184,18 @@ only while the file still reads those lines; otherwise the composer says they
 changed and keeps the text. A suggestion with words beside it goes to the
 agent as any message does.
 
+On an open pull request, a suggestion in a comment on GitHub has **Apply
+suggestion** under it. It opens a popover with the commit message, `Update
+<path>` to start, and an optional description; **Commit changes** (or Enter in
+the message) commits the change on the pull request's head branch through
+GitHub, as github.com does, and resolves the thread where GitHub lets you. The
+file is read at the head GitHub has then, and the commit goes only while the
+lines still read as the suggestion was written against and the branch has not
+moved; otherwise the popover says why and stays. Your worktree is not touched:
+it is behind by that commit until you pull. The button is off on a resolved
+thread, offline, or when the suggestion changes nothing, and absent on an
+outdated thread, a draft, or a closed pull request.
+
 At the foot of Conversation, a message to GitHub is an issue comment and
 posts at once, after one confirmation naming the pull request. Beside
 **Comment**, **Close with comment** posts it and closes the pull request, or

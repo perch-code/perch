@@ -587,6 +587,13 @@ pub enum Command {
         navigation_id: u64,
         scope_revision: Option<u64>,
     },
+    /// Commit a suggestion on the open pull request's head branch, as
+    /// Apply suggestion does on github.com, and resolve its thread.
+    CommitSuggestion {
+        item_id: String,
+        token: u64,
+        commit: crate::review::suggestion::Commit,
+    },
     /// Close the item's pull request without merging it, posting `body`
     /// as an issue comment first when it says anything. `token` is the
     /// same kind as `PostIssueComment`'s.
@@ -1218,6 +1225,14 @@ pub enum Event {
         item_id: String,
         token: u64,
         result: Result<(), String>,
+    },
+    /// The suggestion is committed on the pull request's head, or why
+    /// not. `Ok(true)` when its thread is being resolved after.
+    SuggestionCommitted {
+        item_id: String,
+        token: u64,
+        thread_id: String,
+        result: Result<bool, String>,
     },
     /// The pull request was closed, or why nothing happened. A comment
     /// that posted before a close GitHub refused is not a refusal: the
@@ -3094,6 +3109,18 @@ impl Backend {
         token
     }
 
+    /// Commit a suggestion on the open pull request's head. The token
+    /// comes back on `SuggestionCommitted`.
+    pub fn commit_suggestion(&self, item_id: &str, commit: crate::review::suggestion::Commit) -> u64 {
+        let token = next_posting_token();
+        let _ = self.commands.send(Command::CommitSuggestion {
+            item_id: item_id.to_string(),
+            token,
+            commit,
+        });
+        token
+    }
+
     pub fn close_as_issue(&self, item_id: &str, title: &str, body: &str, comment: &str) {
         let _ = self.commands.send(Command::CloseAsIssue {
             item_id: item_id.to_string(),
@@ -4394,6 +4421,16 @@ async fn run(
                     if let (true, Some(revision)) = (applied, scope_revision) {
                         refresh_scope(&ctx, &item_id, navigation_id, revision).await;
                     }
+                });
+            }
+            Command::CommitSuggestion {
+                item_id,
+                token,
+                commit,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    commit_suggestion(&ctx, &item_id, token, commit).await;
                 });
             }
             Command::ClosePullRequest {
@@ -9285,6 +9322,106 @@ async fn post_issue_comment(ctx: &Ctx, item_id: &str, token: u64, body: &str) {
         None => show_posted_issue_comment(ctx, item_id, &comment).await,
     }
     answer(Ok(Arc::new(comment)));
+}
+
+/// Commit a suggestion on the item's pull request, as Apply suggestion
+/// does on github.com: the file is read at the head GitHub has now, the
+/// suggestion put over the lines it was written against, which must
+/// still read as they did, and the whole file committed on the head
+/// branch, which GitHub refuses if it has moved since. Its thread is then
+/// resolved, as github.com resolves it, where GitHub lets the reader, and
+/// the pull request fetched again for its new head.
+async fn commit_suggestion(
+    ctx: &Ctx,
+    item_id: &str,
+    token: u64,
+    commit: crate::review::suggestion::Commit,
+) {
+    let thread_id = commit.thread_id.clone();
+    let result = commit_suggestion_inner(ctx, item_id, &commit).await;
+    if let Err(message) = &result {
+        tracing::info!(item = item_id, %message, "suggestion not committed");
+    }
+    let resolvable = result.is_ok()
+        && ctx
+            .with_cache(|cache| cache.load_comment_threads(item_id))
+            .and_then(Result::ok)
+            .and_then(|threads| threads.into_iter().find(|t| t.id == thread_id))
+            .is_some_and(|t| !t.resolved && matches!(resolved_in(&t, false, "resolve"), Ok(ResolvedIn::GitHub { .. })));
+    let committed = result.is_ok();
+    let _ = ctx.events.send(Event::SuggestionCommitted {
+        item_id: item_id.to_string(),
+        token,
+        thread_id: thread_id.clone(),
+        result: result.map(|()| resolvable),
+    });
+    if resolvable {
+        resolve_thread(ctx, item_id, &thread_id, true).await;
+    }
+    if committed && ctx.is_open(item_id) {
+        refresh_open_item(ctx, item_id).await;
+    }
+}
+
+async fn commit_suggestion_inner(
+    ctx: &Ctx,
+    item_id: &str,
+    commit: &crate::review::suggestion::Commit,
+) -> Result<(), String> {
+    let github = ctx
+        .github()
+        .ok_or("GitHub is unavailable while Perch is offline")?;
+    let item = ctx.item(item_id).ok_or("The item is gone")?;
+    let pr = item
+        .pull_request()
+        .cloned()
+        .ok_or("There is no pull request to commit to")?;
+    let pr = github
+        .fetch_pull_request(&pr.repo_full_name, pr.number)
+        .await
+        .map_err(|e| format!("GitHub could not find the pull request: {e}"))?;
+    if !pr.is_open() || pr.merged {
+        return Err("Suggestions cannot be applied while the pull request is closed".into());
+    }
+    let head_repo = pr
+        .head_repo_full_name
+        .clone()
+        .ok_or("The pull request's head repository is gone")?;
+    let path = &commit.path;
+    let text = match github.file_text(&head_repo, &pr.head_sha, path).await {
+        Ok(Ok(text)) => text,
+        Ok(Err(perch_github::Unreadable::Missing)) => {
+            return Err(format!("{path} is not on the pull request's head"))
+        }
+        Ok(Err(perch_github::Unreadable::Binary)) => return Err(format!("{path} is binary")),
+        Ok(Err(perch_github::Unreadable::TooLarge)) => {
+            return Err(format!("{path} is too big for GitHub to send"))
+        }
+        Err(e) => return Err(format!("GitHub could not read {path}: {e}")),
+    };
+    let applied = crate::review::suggestion::apply(&text, &commit.original, &commit.lines)?;
+    if applied == text {
+        return Err("This suggestion makes no change to the code".into());
+    }
+    github
+        .commit_file(
+            &head_repo,
+            &pr.head_ref,
+            &pr.head_sha,
+            path,
+            &applied,
+            commit.headline.trim(),
+            commit.body.trim(),
+        )
+        .await
+        .map_err(|e| match e {
+            perch_github::Error::Graphql(m) if m.contains("Expected branch to point to") => {
+                "The pull request's head moved while committing. Try again.".to_string()
+            }
+            e => format!("GitHub could not commit the suggestion: {e}"),
+        })?;
+    tracing::info!(item = item_id, path, "committed a suggestion");
+    Ok(())
 }
 
 /// Write a suggestion into `path` in the open item's worktree, over the
@@ -20769,6 +20906,82 @@ read eof || true
         "head":{"sha":"h7","ref":"branch-7","repo":{"full_name":"a/b"}},
         "base":{"sha":"m","ref":"main","repo":{"full_name":"a/b"}},
         "updated_at":"2026-09-16T11:40:00Z"}"#;
+
+    /// Apply suggestion reads the file at the head GitHub has now,
+    /// commits the change there over it and resolves the thread; lines
+    /// that changed since commit nothing.
+    #[tokio::test]
+    async fn a_suggestion_commits_on_the_head_and_resolves_its_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let sent = Arc::new(Mutex::new(Vec::<String>::new()));
+        let asked = sent.clone();
+        let (base, _) = serve_by_body(move |method, path, _, body| match (method, path) {
+            ("GET", "/repos/a/b/pulls/7") => ("200 OK", PULL_7.to_string()),
+            ("POST", "/graphql") => {
+                asked.lock().unwrap().push(body.to_string());
+                if body.contains("object(expression") {
+                    (
+                        "200 OK",
+                        r#"{"data":{"repository":{"object":{"text":"a\nb\nc\n","isBinary":false,"isTruncated":false}}}}"#.to_string(),
+                    )
+                } else if body.contains("createCommitOnBranch") {
+                    ("200 OK", r#"{"data":{"createCommitOnBranch":{"commit":{"oid":"c8"}}}}"#.to_string())
+                } else {
+                    ("200 OK", r#"{"data":{"resolveReviewThread":{"thread":{"isResolved":true}}}}"#.to_string())
+                }
+            }
+            _ => ("404 Not Found", "{}".to_string()),
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let item = store_pull(&ctx, 7);
+        store_github_thread_state(&ctx, &item, false, true);
+        let commit = |lines: &[&str]| crate::review::suggestion::Commit {
+            thread_id: "gh-31".into(),
+            path: "src/x.rs".into(),
+            original: crate::review::suggestion::Original { first: 2, lines: lines.iter().map(|l| l.to_string()).collect() },
+            lines: vec!["B".into()],
+            headline: "Update src/x.rs".into(),
+            body: String::new(),
+        };
+
+        commit_suggestion(&ctx, &item.id, 5, commit(&["b"])).await;
+
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            matches!(
+                events.first(),
+                Some(Event::SuggestionCommitted { token: 5, thread_id, result: Ok(true), .. }) if thread_id == "gh-31"
+            ),
+            "{events:?}"
+        );
+        let bodies = sent.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 3, "read, commit, resolve: {bodies:?}");
+        let read: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+        assert_eq!(read["variables"]["expression"], "h7:src/x.rs");
+        let commit_sent: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+        let input = &commit_sent["variables"]["input"];
+        assert_eq!(input["branch"]["branchName"], "branch-7");
+        assert_eq!(input["expectedHeadOid"], "h7");
+        // "a\nB\nc\n"
+        assert_eq!(input["fileChanges"]["additions"][0]["contents"], "YQpCCmMK");
+        assert!(bodies[2].contains("resolveReviewThread"));
+        let kept = ctx
+            .with_cache(|c| c.load_comment_threads(&item.id).unwrap())
+            .unwrap();
+        assert!(kept.iter().any(|t| t.id == "gh-31" && t.resolved));
+
+        sent.lock().unwrap().clear();
+        commit_suggestion(&ctx, &item.id, 6, commit(&["x"])).await;
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            matches!(
+                events.first(),
+                Some(Event::SuggestionCommitted { token: 6, result: Err(m), .. }) if m.contains("have changed")
+            ),
+            "{events:?}"
+        );
+        assert_eq!(sent.lock().unwrap().len(), 1, "read, and nothing committed");
+    }
 
     #[tokio::test]
     async fn a_review_request_with_no_item_makes_none() {

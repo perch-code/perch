@@ -2775,7 +2775,7 @@ fn local_message_view(
     let settled = is_agent
         && !body.trim().is_empty()
         && (finished || message.run.is_none());
-    let text = message_body(state, &thread, &body);
+    let text = message_body(state, &thread, &body, None);
     let actions = if settled {
         agent_actions(app, state, thread.clone(), body.clone(), text.id(), hovered)
     } else {
@@ -2970,6 +2970,7 @@ fn github_message_view(
     let react = message.node_id.as_deref().and_then(cards::reactable);
     let url = message.html_url.clone().unwrap_or_default();
     let reactions = cards::reactions_under(app, state, backend.clone(), &react);
+    let applying = backend.clone();
     let name = login.clone();
     let author = login.clone();
     let byline = byline_row(
@@ -2987,7 +2988,7 @@ fn github_message_view(
         login,
     )
     .into_any();
-    let body = Stack::vertical((message_body(state, thread, &message.body), reactions))
+    let body = Stack::vertical((message_body(state, thread, &message.body, Some(applying)), reactions))
     .style(|s| s.flex_col().width_full())
     .into_any();
     cards::track_hover(comment_frame(face, place, avatar, byline, body), hovered).into_any()
@@ -3040,7 +3041,7 @@ fn draft_message_view(
         ],
         actions,
     );
-    let body = message_body(state, thread, &message.body);
+    let body = message_body(state, thread, &message.body, None);
     let avatar = viewer_avatar(app, face.avatar()).into_any();
     cards::track_hover(comment_frame(face, place, avatar, byline, body), hovered).into_any()
 }
@@ -3064,6 +3065,7 @@ fn posted_message_view(
     let react = message.node_id.as_deref().and_then(cards::reactable);
     let url = message.html_url.clone().unwrap_or_default();
     let reactions = cards::reactions_under(app, state, backend.clone(), &react);
+    let applying = backend.clone();
     let byline = byline_row(
         name_label(move || author_name(app, &Author::User), move |s| name_style(s, face)),
         vec![
@@ -3072,7 +3074,7 @@ fn posted_message_view(
         ],
         cards::actions(state, backend, hovered, Some(reply_button), Some(ask), react, url),
     );
-    let body = Stack::vertical((message_body(state, thread, &message.body), reactions))
+    let body = Stack::vertical((message_body(state, thread, &message.body, Some(applying)), reactions))
     .style(|s| s.flex_col().width_full())
     .into_any();
     let avatar = viewer_avatar(app, face.avatar()).into_any();
@@ -3080,17 +3082,29 @@ fn posted_message_view(
 }
 
 /// A message's text, a suggestion in it drawn as the change it makes to
-/// the thread's lines, which follow the file as it loads.
-fn message_body(state: ReviewState, thread: &CommentThread, body: &str) -> floem::AnyView {
+/// the thread's lines, which follow the file as it loads. A message on
+/// GitHub, given `applying` with its backend, has Apply suggestion under
+/// each suggestion.
+fn message_body(
+    state: ReviewState,
+    thread: &CommentThread,
+    body: &str,
+    applying: Option<Rc<Backend>>,
+) -> floem::AnyView {
     if thread.anchor.is_none() || !crate::review::suggestion::has_suggestion(body) {
         return crate::review::markdown::render_linked(body, state).into_any();
     }
     let (thread, body) = (thread.clone(), body.to_string());
-    let original = Memo::new(move |_| crate::review::suggestion::original_of(state, &thread));
+    let original_thread = thread.clone();
+    let original =
+        Memo::new(move |_| crate::review::suggestion::original_of(state, &original_thread));
     dyn_container(
         move || original.get(),
         move |original| {
-            crate::review::markdown::render_suggesting(&body, state, original).into_any()
+            let foot = applying.clone().and_then(|backend| {
+                crate::review::apply_suggestion::foot(state, backend, &thread, original.clone())
+            });
+            crate::review::markdown::render_suggesting(&body, state, original, foot).into_any()
         },
     )
     .style(|s| s.width_full())
