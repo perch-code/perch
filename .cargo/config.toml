@@ -1,0 +1,9 @@
+# rustc asks LLVM for asynchronous unwind tables, which describe every
+# epilogue as well as the prologue, and compact unwind can't encode an
+# epilogue. So nearly every function fell back to a DWARF FDE in __eh_frame,
+# which passed 16 MB in a debug build and made ld warn that it could no
+# longer point compact unwind entries into it. Synchronous tables (unwinding
+# from calls only) are all a panic needs, and most functions now fit compact
+# unwind: perch's __eh_frame went from over 16 MB to under 5 MB.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "force-unwind-tables=no"]
