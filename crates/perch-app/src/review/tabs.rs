@@ -146,7 +146,7 @@ fn tab_view(state: ReviewState, backend: Rc<Backend>, path: String, origin: Orig
     let close_path = path.clone();
     let debug_name = format!("file tab:{path}");
 
-    Stack::horizontal((
+    let tab = Stack::horizontal((
         language_dot(state, dot_path),
         Label::derived(move || name.clone()).style(move |s| tab_label(s, is_active_text())),
         // Where a file outside the worktree is from, beside its name.
@@ -162,7 +162,23 @@ fn tab_view(state: ReviewState, backend: Rc<Backend>, path: String, origin: Orig
     // Its content is asked for when it is not here, as for a tab an item
     // opened on again whose load has failed.
     .on_event_stop(el::Click, move |_, _| show_file(state, &backend, &select_path))
-    .style(move |s| tab_style(s, is_active_box()))
+    .style(move |s| tab_style(s, is_active_box()));
+
+    // Where the file is on disk, since the tab has room for its name only.
+    tip_with(tab, move || on_disk(state, &path)).style(|s| s.height_full().flex_shrink(0.0_f32))
+}
+
+/// A tab's file as a full path: a worktree file's is under the checkout,
+/// and an outside file's is absolute already.
+fn on_disk(state: ReviewState, path: &str) -> String {
+    let root = state.item.with(|i| {
+        i.as_ref()
+            .and_then(|i| i.checkout.as_ref().map(|c| c.path.clone()))
+    });
+    match root {
+        Some(root) => root.join(path).display().to_string(),
+        None => path.to_string(),
+    }
 }
 
 /// Show a file's tab, from Conversation too, in one rebuild of the pane
