@@ -3546,6 +3546,7 @@ async fn run(
         homes_refreshed: Default::default(),
         notifications: Arc::new(std::sync::Mutex::new(initial_notifications.clone())),
         asked_subjects: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        rechecked_subjects: Default::default(),
         run_misses: Default::default(),
         asked_participants: Default::default(),
         approvals: Default::default(),
@@ -5141,6 +5142,12 @@ struct Ctx {
     /// time, so one it could not resolve is not asked about again at
     /// every poll until the thread moves on.
     asked_subjects: Arc<std::sync::Mutex<std::collections::HashSet<(String, Timestamp)>>>,
+    /// When the subject of each notification last found open was looked
+    /// at, by thread id. Merging or closing moves no thread for whoever
+    /// did it, so an open subject is looked at again every
+    /// [`SUBJECT_RECHECK`]. Empty at launch: every open row is looked at
+    /// once, for what happened while Perch was closed.
+    rechecked_subjects: Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
     /// Workflow run notifications a look did not find the run of, by id
     /// and time, with how many looks missed. Looked for again at the next
     /// poll until [`RUN_LOOKS`] have.
@@ -5631,6 +5638,9 @@ impl Ctx {
         if let Ok(mut asked) = self.asked_subjects.lock() {
             asked.retain(|key| current_keys.contains(key));
         }
+        if let Ok(mut rechecked) = self.rechecked_subjects.lock() {
+            rechecked.retain(|id, _| threads.iter().any(|thread| &thread.id == id));
+        }
         if let Ok(mut misses) = self.run_misses.lock() {
             misses.retain(|key, _| current_keys.contains(key));
         }
@@ -5672,6 +5682,40 @@ impl Ctx {
             tracing::warn!(error = %e, "could not cache changed notifications");
         }
         let _ = self.events.send(event(threads));
+    }
+
+    /// GitHub just said what state a pull request or an issue is in: a
+    /// notification about it draws that state. The reader's own merge or
+    /// close moves no thread, so the look that set the row's state would
+    /// not be taken again until someone else acts there.
+    fn settle_notification_state(
+        &self,
+        repo_full_name: &str,
+        kind: ItemKind,
+        number: u64,
+        state: perch_github::SubjectState,
+    ) {
+        let stale = |thread: &Thread| {
+            thread.is_about(repo_full_name, kind, number)
+                && thread
+                    .subject_snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.state != state)
+        };
+        let any_stale = self
+            .notifications
+            .lock()
+            .is_ok_and(|threads| threads.iter().any(stale));
+        if !any_stale {
+            return;
+        }
+        self.edit_polled_notifications(|threads| {
+            for thread in threads.iter_mut().filter(|thread| stale(thread)) {
+                if let Some(snapshot) = thread.subject_snapshot.as_mut() {
+                    snapshot.state = state;
+                }
+            }
+        });
     }
 
     /// GitHub has taken the thread as read: its row follows, and stays
@@ -6665,6 +6709,12 @@ async fn refresh_checkout_pulls(ctx: &Ctx) {
         if fresh.is_open() {
             continue;
         }
+        ctx.settle_notification_state(
+            &pr.repo_full_name,
+            ItemKind::PullRequest,
+            pr.number,
+            fresh.subject_state(),
+        );
         let _lifecycle = ctx.item_lifecycle.lock().await;
         let Some(mut item) = ctx.item(&item.id) else {
             continue;
@@ -9638,6 +9688,12 @@ fn install_issue_snapshot(ctx: &Ctx, item_id: &str, mut fetched: perch_github::I
         return;
     }
     fetched.reactions = current.reactions.clone();
+    ctx.settle_notification_state(
+        &fetched.repo_full_name,
+        ItemKind::Issue,
+        fetched.number,
+        fetched.subject_state(),
+    );
     item.subject = Some(ItemSubject::Issue(fetched.clone()));
     if let Some(Err(error)) = ctx.with_cache(|cache| cache.update_item(&item)) {
         tracing::warn!(item = item_id, %error, "could not store the closed issue");
@@ -10051,6 +10107,12 @@ fn install_pull_request_snapshot(
         }
         fetched
     };
+    ctx.settle_notification_state(
+        &pull_request.repo_full_name,
+        ItemKind::PullRequest,
+        pull_request.number,
+        pull_request.subject_state(),
+    );
     let item = Arc::new(item);
     let pull_request = Arc::new(pull_request);
     let installed = ctx.slot.lock().ok().is_some_and(|mut slot| {
@@ -11243,9 +11305,15 @@ async fn attend(ctx: &Ctx, threads: &[Thread]) {
 /// once, and a wave of faces on a big inbox rather than one long wait.
 const SUBJECTS_PER_LOOK: usize = 50;
 
+/// How long a notification's open pull request or issue goes before it
+/// is looked at again with no activity on the thread: long enough that
+/// a big inbox costs GitHub a few queries an hour.
+const SUBJECT_RECHECK: Duration = Duration::from_secs(5 * 60);
+
 /// Ask GitHub who opened each pull request and issue in the inbox and the
 /// state it is in, for the rows whose snapshot is missing or older than
-/// the thread, and keep the answers on the threads, a batch at a time.
+/// the thread, and for those last found open every [`SUBJECT_RECHECK`],
+/// and keep the answers on the threads, a batch at a time.
 ///
 /// Each thread revision is asked about once: a subject GitHub cannot
 /// resolve is not asked about again until the thread moves on. A failed
@@ -11260,14 +11328,32 @@ async fn look_at_subjects(ctx: &Ctx) {
             .lock()
             .map(|asked| asked.clone())
             .unwrap_or_default();
+        let rechecked = ctx
+            .rechecked_subjects
+            .lock()
+            .map(|rechecked| rechecked.clone())
+            .unwrap_or_default();
+        let due = |thread: &Thread| {
+            thread.subject_snapshot.as_ref().is_some_and(|snapshot| {
+                matches!(
+                    snapshot.state,
+                    perch_github::SubjectState::PrOpen
+                        | perch_github::SubjectState::PrDraft
+                        | perch_github::SubjectState::IssueOpen
+                )
+            }) && rechecked
+                .get(&thread.id)
+                .is_none_or(|at| at.elapsed() >= SUBJECT_RECHECK)
+        };
         ctx.notifications
             .lock()
             .map(|threads| {
                 threads
                     .iter()
                     .filter(|thread| {
-                        thread.wants_snapshot()
-                            && !asked.contains(&(thread.id.clone(), thread.updated_at))
+                        (thread.wants_snapshot()
+                            && !asked.contains(&(thread.id.clone(), thread.updated_at)))
+                            || due(thread)
                     })
                     .cloned()
                     .collect()
@@ -11285,6 +11371,21 @@ async fn look_at_subjects(ctx: &Ctx) {
         if let Ok(mut asked) = ctx.asked_subjects.lock() {
             asked.extend(batch.iter().map(|thread| (thread.id.clone(), thread.updated_at)));
         }
+        if let Ok(mut rechecked) = ctx.rechecked_subjects.lock() {
+            let now = std::time::Instant::now();
+            rechecked.extend(batch.iter().map(|thread| (thread.id.clone(), now)));
+        }
+        // A look again mostly finds what the last one did: only what
+        // changed is written and told.
+        let found: Vec<_> = found
+            .into_iter()
+            .filter(|(id, snapshot)| {
+                batch
+                    .iter()
+                    .find(|thread| &thread.id == id)
+                    .is_none_or(|thread| thread.subject_snapshot.as_ref() != Some(snapshot))
+            })
+            .collect();
         if found.is_empty() {
             continue;
         }
@@ -16650,6 +16751,7 @@ mod tests {
             homes_refreshed: Default::default(),
             notifications: Default::default(),
             asked_subjects: Default::default(),
+            rechecked_subjects: Default::default(),
             run_misses: Default::default(),
             asked_participants: Default::default(),
             approvals: Default::default(),
@@ -17709,6 +17811,51 @@ mod tests {
         item.subject = Some(ItemSubject::PullRequest(pull_request(number)));
         ctx.with_cache(|c| c.insert_item(&item)).unwrap().unwrap();
         item
+    }
+
+    /// Merging a pull request moves no notification thread, so the row
+    /// about it takes its state from the merge, not from a look that
+    /// would wait for someone else to act there.
+    #[tokio::test]
+    async fn a_merged_pull_request_settles_its_notification_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(dir.path(), &nowhere(), &[]);
+        let item = store_pull(&ctx, 7);
+        let looked = |mut thread: Thread| {
+            thread.subject_snapshot = Some(perch_github::SubjectSnapshot {
+                author_login: "someone".into(),
+                author_avatar_url: String::new(),
+                state: perch_github::SubjectState::PrOpen,
+                churn: Some((1, 1)),
+                review_requested: false,
+                participants: Some(vec![]),
+                at: thread.updated_at,
+            });
+            thread
+        };
+        ctx.replace_notifications(
+            vec![looked(thread("7", "seven")), looked(thread("8", "eight"))],
+            Some("first"),
+        );
+        let mut merged = pull_request(7);
+        merged.state = "closed".into();
+        merged.merged = true;
+        merged.updated_at = Some(Timestamp::now());
+
+        install_pull_request_snapshot(&ctx, &item.id, merged, Some(1)).unwrap();
+
+        let state = |id: &str| {
+            ctx.notifications.lock().unwrap().iter().find(|t| t.id == id).unwrap()
+                .subject_snapshot.as_ref().unwrap().state
+        };
+        assert_eq!(state("7"), perch_github::SubjectState::PrMerged);
+        assert_eq!(state("8"), perch_github::SubjectState::PrOpen);
+        let cached = ctx.with_cache(|c| c.load_threads().unwrap()).unwrap();
+        assert_eq!(
+            cached.iter().find(|t| t.id == "7").unwrap().subject_snapshot.as_ref().unwrap().state,
+            perch_github::SubjectState::PrMerged,
+            "kept for the next launch"
+        );
     }
 
     /// An item that is an issue, `a/b#number`, in the cache.
@@ -20340,6 +20487,82 @@ read eof || true
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(paths.lock().unwrap().len(), 2);
+    }
+
+    /// Merging on github.com moves no thread for whoever merged, so a row
+    /// last found open is looked at again every so often, and one found
+    /// merged or closed is left alone. A look that finds nothing new
+    /// writes and tells nothing.
+    #[tokio::test]
+    async fn an_open_subject_is_looked_at_again_though_its_thread_is_quiet() {
+        let dir = tempfile::tempdir().unwrap();
+        let answer = r#"{ "data": { "r0": {
+            "n7": {
+              "__typename": "PullRequest",
+              "author": { "login": "someone", "avatar_url": "" },
+              "pull_state": "MERGED",
+              "is_draft": false,
+              "additions": 12,
+              "deletions": 3,
+              "review_requests": { "total_count": 0 }
+            },
+            "n9": {
+              "__typename": "PullRequest",
+              "author": { "login": "someone", "avatar_url": "" },
+              "pull_state": "OPEN",
+              "is_draft": false,
+              "additions": 12,
+              "deletions": 3,
+              "review_requests": { "total_count": 0 }
+            }
+        } } }"#;
+        let (base, paths) = serve_by_path(move |path| match path {
+            "/graphql" => ("200 OK", answer.to_string()),
+            _ => ("404 Not Found", "{}".to_string()),
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let open = |mut thread: Thread| {
+            thread.subject_snapshot = Some(perch_github::SubjectSnapshot {
+                author_login: "someone".into(),
+                author_avatar_url: String::new(),
+                state: perch_github::SubjectState::PrOpen,
+                churn: Some((12, 3)),
+                review_requested: false,
+                participants: Some(vec![]),
+                at: thread.updated_at,
+            });
+            thread
+        };
+        ctx.replace_notifications(
+            vec![open(thread("7", "seven")), open(thread("9", "nine"))],
+            Some("first"),
+        );
+        assert!(ctx.notifications.lock().unwrap().iter().all(|t| !t.wants_snapshot()));
+        let state = |id: &str| {
+            ctx.notifications.lock().unwrap().iter().find(|t| t.id == id).unwrap()
+                .subject_snapshot.as_ref().unwrap().state
+        };
+
+        // Launch: every open row is looked at once.
+        look_at_subjects(&ctx).await;
+        assert_eq!(paths.lock().unwrap().len(), 1);
+        assert_eq!(state("7"), perch_github::SubjectState::PrMerged);
+        assert_eq!(state("9"), perch_github::SubjectState::PrOpen);
+
+        // Not again until the recheck is due.
+        look_at_subjects(&ctx).await;
+        assert_eq!(paths.lock().unwrap().len(), 1);
+
+        // Due: only the row still open is asked after, and finding it as
+        // it was tells nothing.
+        let _ = received.try_iter().count();
+        let long_ago = std::time::Instant::now() - SUBJECT_RECHECK;
+        ctx.rechecked_subjects.lock().unwrap().values_mut().for_each(|at| *at = long_ago);
+        look_at_subjects(&ctx).await;
+        assert_eq!(paths.lock().unwrap().len(), 2);
+        assert!(!received
+            .try_iter()
+            .any(|event| matches!(event, Event::Notifications(_) | Event::NotificationsPolled(_))));
     }
 
     #[tokio::test]
