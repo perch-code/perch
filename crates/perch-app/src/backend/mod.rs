@@ -1260,6 +1260,11 @@ pub enum Event {
         item_id: String,
         scope: perch_git::Scope,
         files: Arc<Vec<perch_git::ChangedFile>>,
+        /// Every loaded file is to be read again, not only those whose
+        /// entry in the list changed: the reader picked the scope, or the
+        /// head moved, and a base side can change under an unchanged
+        /// entry.
+        reread_all: bool,
     },
     /// What the reader marked on the item's files, whole: every (path,
     /// blob) viewed, and, when the item opens, every run of head lines
@@ -7955,6 +7960,7 @@ async fn refresh_scope(ctx: &Ctx, item_id: &str, navigation_id: u64, scope_revis
                             item_id: item_id.to_string(),
                             scope: scope.clone(),
                             files: files.clone(),
+                            reread_all: moved,
                         });
                         committed_gen
                     })
@@ -9899,6 +9905,7 @@ async fn set_scope(
                             item_id: item_id.to_string(),
                             scope: scope.clone(),
                             files: files.clone(),
+                            reread_all: true,
                         });
                         ctx.send_threads(item_id);
                     }
@@ -17878,7 +17885,13 @@ mod tests {
             refresh_scope(&ctx, &item.id, navigation_id, revision).await;
             received
                 .try_iter()
-                .filter(|e| matches!(e, Event::ScopeReady { .. }))
+                .filter_map(|e| match e {
+                    Event::ScopeReady { reread_all, .. } => Some(reread_all),
+                    _ => None,
+                })
+                // An edit leaves the head where it was: only the files
+                // whose entry changed are read again.
+                .inspect(|all| assert!(!all))
                 .count()
         };
         let blob = || {

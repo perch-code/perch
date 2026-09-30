@@ -2160,11 +2160,12 @@ impl AppState {
                 item_id,
                 scope,
                 files,
+                reread_all,
             } => {
                 if self.accepts_navigation(navigation_id) && review.is_item(&item_id) {
                     review.scope_gen.set(Some(scope_gen));
                     let paths = if review.scope.with_untracked(|held| *held == scope) {
-                        review.reread_scope(files)
+                        review.reread_scope(files, reread_all)
                     } else {
                         review.change_scope(scope, files)
                     };
@@ -3787,18 +3788,20 @@ mod tests {
     }
 
     /// A new list under the scope held, as a look after an agent's edit
-    /// sends, asks for the loaded files again and leaves them showing until
-    /// their new sides arrive. Another scope forgets them at once.
+    /// sends, asks again for the loaded files whose entry changed and
+    /// leaves them showing until their new sides arrive. One whose entry
+    /// is the same is kept as it is; with the head moved, it is asked for
+    /// too. Another scope forgets them at once.
     #[test]
-    fn a_reread_scope_keeps_its_files_showing_while_they_reload() {
+    fn a_reread_scope_reloads_the_files_whose_entry_changed_and_keeps_them_showing() {
         let app = AppState::new();
         let review = ReviewState::new();
 
         app.begin_item_review(review, "Open", "same", 81);
         app.apply_with_review(review_ready_at_scope("same", 81, 810), review);
-        let loaded = |text: &str| {
+        let loaded = |path: &str, text: &str| {
             Arc::new(crate::backend::build_loaded_file(
-                "src/x.rs".into(),
+                path.into(),
                 text.into(),
                 "old\n".into(),
                 Some(perch_git::ChangeStatus::Modified),
@@ -3807,35 +3810,80 @@ mod tests {
                 String::new(),
             ))
         };
-        review.finish_load("src/x.rs", loaded("before\n"));
-        let _ = app.reload.try_update(std::mem::take);
-        let ready = |scope_gen, scope| Event::ScopeReady {
+        let entry = |path: &str, blob: &str| perch_git::ChangedFile {
+            path: path.into(),
+            old_path: None,
+            status: perch_git::ChangeStatus::Modified,
+            additions: 1,
+            deletions: 1,
+            binary: false,
+            head_blob: Some(blob.into()),
+        };
+        let ready = |scope_gen, scope, files: Vec<perch_git::ChangedFile>, reread_all| {
+            Event::ScopeReady {
+                navigation_id: 81,
+                scope_gen,
+                item_id: "same".into(),
+                scope,
+                files: Arc::new(files),
+                reread_all,
+            }
+        };
+        let file_loaded = |scope_gen, path: &str, text: &str| Event::FileLoaded {
             navigation_id: 81,
             scope_gen,
             item_id: "same".into(),
-            scope,
-            files: Arc::new(Vec::new()),
+            path: path.into(),
+            file: loaded(path, text),
         };
+        review.finish_load("src/x.rs", loaded("src/x.rs", "before\n"));
+        review.finish_load("src/y.rs", loaded("src/y.rs", "same\n"));
+        let _ = app.reload.try_update(std::mem::take);
 
-        app.apply_with_review(ready(811, perch_git::Scope::Branch), review);
-        assert_eq!(app.reload.get(), ["src/x.rs"]);
-        assert!(review.is_loading("src/x.rs"));
-        assert!(review.file("src/x.rs").is_some());
-
+        // Both enter the list: both are asked for again.
         app.apply_with_review(
-            Event::FileLoaded {
-                navigation_id: 81,
-                scope_gen: 811,
-                item_id: "same".into(),
-                path: "src/x.rs".into(),
-                file: loaded("after\n"),
-            },
+            ready(811, perch_git::Scope::Branch, vec![entry("src/x.rs", "x1"), entry("src/y.rs", "y1")], false),
             review,
         );
+        let mut asked = app.reload.try_update(std::mem::take).unwrap();
+        asked.sort();
+        assert_eq!(asked, ["src/x.rs", "src/y.rs"]);
+        assert!(review.is_loading("src/x.rs"));
+        assert!(review.file("src/x.rs").is_some(), "it shows while it reloads");
+        app.apply_with_review(file_loaded(811, "src/x.rs", "after\n"), review);
+        app.apply_with_review(file_loaded(811, "src/y.rs", "same\n"), review);
         assert!(!review.is_loading("src/x.rs"));
         assert!(review.file("src/x.rs").unwrap().buffer.text.contains("after"));
 
-        app.apply_with_review(ready(812, perch_git::Scope::Uncommitted), review);
+        // Only x's blob moved: y is kept, the very file it was.
+        let y = review.file("src/y.rs").unwrap();
+        app.apply_with_review(
+            ready(812, perch_git::Scope::Branch, vec![entry("src/x.rs", "x2"), entry("src/y.rs", "y1")], false),
+            review,
+        );
+        assert_eq!(app.reload.try_update(std::mem::take).unwrap(), ["src/x.rs"]);
+        assert!(!review.is_loading("src/y.rs"));
+        assert!(Arc::ptr_eq(&y, &review.file("src/y.rs").unwrap()));
+
+        // x's answer for 812 never came; the next list asks again though
+        // its entry is the same, since that answer would be dropped.
+        app.apply_with_review(
+            ready(813, perch_git::Scope::Branch, vec![entry("src/x.rs", "x2"), entry("src/y.rs", "y1")], false),
+            review,
+        );
+        assert_eq!(app.reload.try_update(std::mem::take).unwrap(), ["src/x.rs"]);
+        app.apply_with_review(file_loaded(813, "src/x.rs", "after\n"), review);
+
+        // The head moved: everything is read again.
+        app.apply_with_review(
+            ready(814, perch_git::Scope::Branch, vec![entry("src/x.rs", "x2"), entry("src/y.rs", "y1")], true),
+            review,
+        );
+        let mut asked = app.reload.try_update(std::mem::take).unwrap();
+        asked.sort();
+        assert_eq!(asked, ["src/x.rs", "src/y.rs"]);
+
+        app.apply_with_review(ready(815, perch_git::Scope::Uncommitted, Vec::new(), true), review);
         assert!(review.file("src/x.rs").is_none());
     }
 
@@ -3863,6 +3911,7 @@ mod tests {
                 item_id: "same".into(),
                 scope: perch_git::Scope::Branch,
                 files: changed.clone(),
+                reread_all: true,
             },
             review,
         );
@@ -3876,6 +3925,7 @@ mod tests {
                 item_id: "same".into(),
                 scope: perch_git::Scope::Branch,
                 files: changed,
+                reread_all: true,
             },
             review,
         );

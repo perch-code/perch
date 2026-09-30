@@ -3041,28 +3041,54 @@ impl ReviewState {
     pub fn change_scope(&self, scope: Scope, files: Arc<Vec<ChangedFile>>) -> Vec<String> {
         self.scope.set(scope);
         self.set_changed_files(files);
-        let paths = self.reload_loaded();
+        let paths = self.reload_loaded(|_| true);
         self.files.set(HashMap::new());
         self.editor_epoch.update(|e| *e += 1);
         paths
     }
 
     /// The scope read again with a new list under it: the working tree
-    /// was written to, or the head moved. Every loaded file is asked for
-    /// again as `change_scope` does, but stays on screen until its new
-    /// sides arrive, so each edit of an agent at work does not flash the
-    /// open file to its loading view.
-    pub fn reread_scope(&self, files: Arc<Vec<ChangedFile>>) -> Vec<String> {
-        self.set_changed_files(files);
-        self.reload_loaded()
+    /// was written to, or the head moved. The files asked for again stay
+    /// on screen until their new sides arrive, so each edit of an agent at
+    /// work does not flash the open file to its loading view.
+    ///
+    /// With the head where it was, a file whose entry in the list is the
+    /// same, blob and counts, has the same sides, and is kept as it is: a
+    /// file reloaded builds its editor again, which draws a frame at the
+    /// top of the file before the reader's place is put back. One loading
+    /// is asked for again all the same, since its answer is for the old
+    /// generation and will be dropped. `all` is for a head that moved,
+    /// where a base side can change under an unchanged entry, and a file
+    /// outside the list can be another file.
+    pub fn reread_scope(&self, files: Arc<Vec<ChangedFile>>, all: bool) -> Vec<String> {
+        let old = self.changed_files.get_untracked();
+        self.set_changed_files(files.clone());
+        if all {
+            return self.reload_loaded(|_| true);
+        }
+        let entry = |list: &[ChangedFile], path: &str| list.iter().find(|f| f.path == path).cloned();
+        let loaded = self.files.get_untracked();
+        let loading = self.loading.get_untracked();
+        self.reload_loaded(|path| {
+            !loaded.contains_key(path)
+                || loading.contains_key(path)
+                || entry(&old, path) != entry(&files, path)
+        })
     }
 
     /// Every loaded file, not only the tabs: a thread card on
     /// Conversation shows lines from a file no tab has, and would go
-    /// blank until something loaded it again. Then every tab, the active
-    /// one first; all marked loading.
-    fn reload_loaded(&self) -> Vec<String> {
+    /// blank until something loaded it again. And every file on its way,
+    /// whose answer is for the old generation and will be dropped. Then
+    /// every tab, the active one first. Those `wanted` says are all
+    /// marked loading.
+    fn reload_loaded(&self, wanted: impl Fn(&str) -> bool) -> Vec<String> {
         let mut paths: Vec<String> = self.files.with(|m| m.keys().cloned().collect());
+        for path in self.loading.with(|m| m.keys().cloned().collect::<Vec<_>>()) {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
         for tab in self
             .tabs
             .with(|t| t.iter().map(|t| t.path.clone()).collect::<Vec<_>>())
@@ -3075,6 +3101,7 @@ impl ReviewState {
             paths.retain(|p| *p != active);
             paths.insert(0, active);
         }
+        paths.retain(|p| wanted(p));
         self.loading
             .set(paths.iter().map(|p| (p.clone(), ())).collect());
         paths
