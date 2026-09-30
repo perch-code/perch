@@ -21,18 +21,22 @@
 //! block that names something is drawn as linked text rather than a
 //! label, in the same font, to carry the links.
 //!
+//! A `<details>` block folds as GitHub folds one: its summary with a
+//! chevron, shut until clicked.
+//!
 //! What GitHub does that this does not: images are shown by their alt
-//! text or file name, raw HTML by its text, code in a fence is not
+//! text or file name, other raw HTML by its text, code in a fence is not
 //! coloured, a cell's wrapped lines all start at the left, and `$math$`
 //! is left as written.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::iter::Peekable;
 use std::ops::Range;
 use std::rc::Rc;
 
 use floem::peniko::Color;
 use floem::prelude::*;
+use floem::reactive::Memo;
 use floem::taffy::prelude::auto;
 use floem::taffy::GridTemplateComponent;
 use floem::text::{Attrs, AttrsList, FamilyOwned, FontStyle, FontWeight, LineHeightValue, TextLayout};
@@ -42,13 +46,13 @@ use pulldown_cmark::{
     Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
 };
 
-use crate::icons::SidebarIcon;
+use crate::icons::{self, SidebarIcon};
 use crate::review::code_refs::{self, linked_run, Plan, Refs};
 use crate::review::linked_text::{linked_text, passage, Strike, Target};
 use crate::review::model::ReviewState;
 use crate::review::suggestion::Original;
 use crate::theme;
-use crate::ui::widgets::sidebar_glyph;
+use crate::ui::widgets::{clickable, icon_in, sidebar_glyph};
 
 /// The extensions GitHub renders. Not `Options::all()`: smart punctuation,
 /// wikilinks, definition lists, heading attributes and metadata blocks
@@ -90,6 +94,9 @@ pub enum Block {
     Suggestion { text: String, original: Option<Original> },
     Table { align: Vec<Align>, head: Vec<Vec<Span>>, rows: Vec<Vec<Vec<Span>>> },
     Rule,
+    /// A `<details>` block: its summary, and what it folds away until
+    /// opened.
+    Details { summary: Vec<Span>, blocks: Vec<Block> },
     /// The footnotes, in the order they were first referenced, drawn after
     /// everything else as GitHub draws them.
     Footnotes(Vec<Vec<Block>>),
@@ -136,6 +143,7 @@ pub fn parse_in(text: &str, repo: Option<&str>) -> Vec<Block> {
         task: None,
         loose: false,
         text: String::new(),
+        pending: VecDeque::new(),
     };
     let mut blocks = builder.blocks(Closer::Document);
     // GitHub numbers footnotes by first reference and drops a definition
@@ -170,6 +178,20 @@ struct Builder<'a> {
     /// splits text at every `_` and `*` that opened nothing, and a bare
     /// address has to be seen whole to be linked.
     text: String,
+    /// What an HTML block read ahead held and has not been built yet: a
+    /// `<details>` opens a run of blocks that the rest of its HTML block,
+    /// or a later one, closes.
+    pending: VecDeque<Piece>,
+}
+
+/// A piece of an HTML block, cut where a `<details>` opens or closes.
+#[derive(Debug, PartialEq)]
+enum Piece {
+    /// The text of the HTML between.
+    Html(String),
+    Open,
+    Summary(Vec<Span>),
+    Close,
 }
 
 /// What ends a run of blocks.
@@ -179,6 +201,7 @@ enum Closer {
     Quote,
     Item,
     Footnote,
+    Details,
 }
 
 /// What ends a run of inlines. `Bare` is text sitting directly in a
@@ -298,9 +321,32 @@ fn push_text(spans: &mut Vec<Span>, style: &Span, text: &str) {
 impl<'a> Builder<'a> {
     fn blocks(&mut self, closer: Closer) -> Vec<Block> {
         let mut out = Vec::new();
-        while let Some(event) = self.events.peek() {
+        loop {
+            if let Some(piece) = self.pending.pop_front() {
+                match piece {
+                    Piece::Html(text) => out.push(Block::Paragraph(vec![Span { text, ..Span::default() }])),
+                    Piece::Open => out.push(self.details()),
+                    Piece::Summary(spans) => out.push(Block::Paragraph(spans)),
+                    Piece::Close if closer == Closer::Details => break,
+                    // A close with nothing open, or one inside a list or
+                    // quote in the details: dropped.
+                    Piece::Close => {}
+                }
+                continue;
+            }
+            let Some(event) = self.events.peek() else { break };
             if closer.closes(event) {
                 self.events.next();
+                break;
+            }
+            // Details left open inside a list item, a quote or a footnote
+            // end with it, as the browser ends them.
+            if closer == Closer::Details
+                && matches!(
+                    event,
+                    Event::End(TagEnd::Item | TagEnd::BlockQuote(_) | TagEnd::FootnoteDefinition)
+                )
+            {
                 break;
             }
             let Some(event) = self.events.next() else { break };
@@ -341,10 +387,8 @@ impl<'a> Builder<'a> {
                     self.definitions.insert(label.to_string(), blocks);
                 }
                 Event::Start(Tag::HtmlBlock) => {
-                    let text = self.html_block();
-                    if !text.is_empty() {
-                        out.push(Block::Paragraph(vec![Span { text, ..Span::default() }]));
-                    }
+                    let pieces = html_pieces(&self.html_block());
+                    self.pending.extend(pieces);
                 }
                 Event::Start(Tag::MetadataBlock(_)) => self.skip_until(TagEnd::MetadataBlock(
                     pulldown_cmark::MetadataBlockKind::YamlStyle,
@@ -596,6 +640,7 @@ impl<'a> Builder<'a> {
         cells
     }
 
+    /// The raw HTML of the block just opened.
     fn html_block(&mut self) -> String {
         let mut raw = String::new();
         for event in self.events.by_ref() {
@@ -605,7 +650,24 @@ impl<'a> Builder<'a> {
                 _ => {}
             }
         }
-        html_text(&raw)
+        raw
+    }
+
+    /// A `<details>` just opened: its summary, which may be in the next
+    /// HTML block when a blank line comes between, and the blocks up to
+    /// its close. GitHub calls one with no summary "Details".
+    fn details(&mut self) -> Block {
+        if self.pending.is_empty() && matches!(self.events.peek(), Some(Event::Start(Tag::HtmlBlock))) {
+            self.events.next();
+            let pieces = html_pieces(&self.html_block());
+            self.pending.extend(pieces);
+        }
+        let summary = match self.pending.pop_front_if(|piece| matches!(piece, Piece::Summary(_))) {
+            Some(Piece::Summary(spans)) if !spans.is_empty() => spans,
+            _ => vec![Span { text: "Details".into(), ..Span::default() }],
+        };
+        let blocks = self.blocks(Closer::Details);
+        Block::Details { summary, blocks }
     }
 }
 
@@ -717,6 +779,128 @@ fn attribute(inner: &str, name: &str) -> Option<String> {
         return Some(value.to_string());
     }
     None
+}
+
+/// A block of HTML cut into its `<details>` opening and closing tags,
+/// each opening's `<summary>` taken with it, and the text of the HTML
+/// between. Blank text is left out.
+fn html_pieces(html: &str) -> Vec<Piece> {
+    let mut pieces = Vec::new();
+    let mut between = 0;
+    let mut at = 0;
+    let push_text = |pieces: &mut Vec<Piece>, raw: &str| {
+        let text = html_text(raw);
+        if !text.is_empty() {
+            pieces.push(Piece::Html(text));
+        }
+    };
+    while let Some(lt) = html[at..].find('<').map(|i| at + i) {
+        let after = &html[lt + 1..];
+        if after.starts_with("!--") {
+            at = after.find("-->").map(|i| lt + 1 + i + 3).unwrap_or(html.len());
+            continue;
+        }
+        let Some(gt) = after.find('>') else { break };
+        let inner = &after[..gt];
+        let end = lt + 1 + gt + 1;
+        let closing = inner.trim_start().starts_with('/');
+        match (tag_name(inner).as_str(), closing) {
+            ("details", true) => {
+                push_text(&mut pieces, &html[between..lt]);
+                pieces.push(Piece::Close);
+                between = end;
+            }
+            ("details", false) => {
+                push_text(&mut pieces, &html[between..lt]);
+                pieces.push(Piece::Open);
+                between = end;
+            }
+            ("summary", false) => {
+                let lower = html[end..].to_ascii_lowercase();
+                let close = lower.find("</summary").map(|i| end + i);
+                let stop = close.unwrap_or(html.len());
+                push_text(&mut pieces, &html[between..lt]);
+                pieces.push(Piece::Summary(html_spans(&html[end..stop])));
+                between = close
+                    .and_then(|c| html[c..].find('>').map(|i| c + i + 1))
+                    .unwrap_or(html.len());
+                at = between;
+                continue;
+            }
+            _ => {}
+        }
+        at = end;
+    }
+    push_text(&mut pieces, &html[between..]);
+    pieces
+}
+
+/// A line of inline HTML, a summary's, as styled runs: `<b>` and
+/// `<strong>` bold, `<i>` and `<em>` italic, `<code>` code, `<s>` and
+/// `<del>` struck, other tags dropped and white space run together.
+fn html_spans(html: &str) -> Vec<Span> {
+    let (mut bold, mut italic, mut code, mut strike) = (0u32, 0u32, 0u32, 0u32);
+    let mut spans: Vec<Span> = Vec::new();
+    let mut rest = html;
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix("<!--") {
+            rest = after.split_once("-->").map(|(_, r)| r).unwrap_or("");
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix('<') {
+            let opens = after.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '/');
+            if let Some((inner, r)) = after.split_once('>').filter(|_| opens) {
+                let count = match tag_name(inner).as_str() {
+                    "b" | "strong" => Some(&mut bold),
+                    "i" | "em" => Some(&mut italic),
+                    "code" => Some(&mut code),
+                    "s" | "del" | "strike" => Some(&mut strike),
+                    _ => None,
+                };
+                if let Some(count) = count {
+                    *count = if inner.trim_start().starts_with('/') {
+                        count.saturating_sub(1)
+                    } else {
+                        *count + 1
+                    };
+                }
+                rest = r;
+                continue;
+            }
+        }
+        // A `<` that opened no tag is text.
+        let skip = usize::from(rest.starts_with('<'));
+        let end = rest[skip..].find('<').map(|i| i + skip).unwrap_or(rest.len());
+        let mut squeezed = String::new();
+        for c in decode_entities(&rest[..end]).chars() {
+            let c = if c.is_ascii_whitespace() { ' ' } else { c };
+            if !(c == ' ' && squeezed.ends_with(' ')) {
+                squeezed.push(c);
+            }
+        }
+        let style = Span {
+            bold: bold > 0,
+            italic: italic > 0,
+            code: code > 0,
+            strike: strike > 0,
+            ..Span::default()
+        };
+        // A space already ending the line stands for this one too.
+        let squeezed = match spans.last() {
+            Some(last) if last.text.ends_with(' ') => squeezed.trim_start_matches(' ').to_string(),
+            _ => squeezed,
+        };
+        push_text(&mut spans, &style, &squeezed);
+        rest = &rest[end..];
+    }
+    if let Some(first) = spans.first_mut() {
+        first.text = first.text.trim_start().to_string();
+    }
+    if let Some(last) = spans.last_mut() {
+        last.text = last.text.trim_end().to_string();
+    }
+    spans.retain(|span| !span.text.is_empty());
+    spans
 }
 
 /// The text of a block of HTML: comments gone, tags gone, entities
@@ -1136,6 +1320,7 @@ fn suggesting(blocks: Vec<Block>, original: &Option<Original>) -> Vec<Block> {
                 Block::Suggestion { text, original: original.clone() }
             }
             Block::Quote { alert, blocks } => Block::Quote { alert, blocks: suggesting(blocks, original) },
+            Block::Details { summary, blocks } => Block::Details { summary, blocks: suggesting(blocks, original) },
             Block::List { start, tight, items } => Block::List {
                 start,
                 tight,
@@ -1197,7 +1382,7 @@ fn gap_before(prev: &Block, block: &Block) -> f64 {
             2 | 3 => 1.0,
             _ => 0.0,
         },
-        (Block::Paragraph(_), Block::Paragraph(_)) => 4.0,
+        (Block::Paragraph(_) | Block::Details { .. }, Block::Paragraph(_) | Block::Details { .. }) => 4.0,
         (Block::Paragraph(_), Block::List { .. } | Block::Table { .. } | Block::Quote { .. }) => 1.0,
         _ => 2.0,
     }
@@ -1240,8 +1425,55 @@ fn block_view(block: Block, ctx: Ctx) -> AnyView {
         Block::Rule => Empty::new()
             .style(|s| s.width_full().height(1.0).background(theme::BORDER).margin_vert(4.0))
             .into_any(),
+        Block::Details { summary, blocks } => details_view(summary, blocks, ctx),
         Block::Footnotes(notes) => footnotes_view(notes, ctx),
     }
+}
+
+/// A `<details>` block: a chevron and the summary, which open and shut
+/// what it folds on a click, and that, shut to begin with. Shut, it is
+/// hidden, so a drag over the passage passes it by as it does on GitHub.
+fn details_view(summary: Vec<Span>, blocks: Vec<Block>, ctx: Ctx) -> AnyView {
+    let open = RwSignal::new(false);
+    let shown = Memo::new(move |_| open.get());
+    let side = theme::CHEVRON_GLYPH;
+    // Centred on the first line of the summary, as a task box is.
+    let lift = ((ctx.size * theme::PROSE_LINE_HEIGHT) as f64 - side) / 2.0;
+    let chevron = icon_in(
+        move || {
+            let glyph = if shown.get() {
+                SidebarIcon::ChevronDown
+            } else {
+                SidebarIcon::ChevronRight
+            };
+            icons::sidebar_icon(glyph, theme::FG_MUTED)
+        },
+        || theme::FG_MUTED,
+    )
+    .style(move |s| {
+        s.size(side, side)
+            .flex_shrink(0.0_f32)
+            .margin_top(lift.max(0.0))
+            .margin_right(6.0)
+    });
+    let head = Stack::horizontal((
+        chevron,
+        prose_view(summary, ctx.size, theme::weight_body(), ctx.color, prose_leading(ctx.size), None, false)
+            .style(|s| s.min_width(0.0).flex_shrink(1.0_f32)),
+    ))
+    .on_event_stop(el::Click, move |_, _| open.update(|open| *open = !*open))
+    .style(|s| clickable(s).items_start().max_width_full())
+    .debug_name("details:summary");
+    let body = stack(blocks, ctx)
+        .style(move |s| {
+            s.margin_top(space(ctx.size) * 2.0)
+                .apply_if(!shown.get(), |s| s.hide())
+        })
+        .debug_name("details:body");
+    Stack::vertical((head, body))
+        .style(|s| s.flex_col().width_full().items_start())
+        .debug_name("details")
+        .into_any()
 }
 
 /// Codex's scale: an h1 half again the body, then a quarter, then an
@@ -2173,12 +2405,72 @@ mod tests {
         assert_eq!(
             blocks,
             vec![
-                paragraph("More"),
-                paragraph("inside"),
+                Block::Details { summary: vec![plain("More")], blocks: vec![paragraph("inside")] },
                 Block::Paragraph(vec![
                     plain("line\nbreak Ctrl & "),
                     Span { text: "pic".into(), link: Some("x.png".into()), ..Default::default() },
                 ]),
+            ]
+        );
+    }
+
+    #[test]
+    fn details_fold_their_blocks_under_their_summary() {
+        // As Dosu writes a suggested page: a summary with a bold name,
+        // then a fence, then the close in a block of its own.
+        let blocks = parse(
+            "Before\n\n<details>\n<summary>\u{1f4dd} <b>configuration</b></summary>\n\n````diff\n+ a\n````\n</details>\n\nAfter",
+        );
+        assert_eq!(
+            blocks,
+            vec![
+                paragraph("Before"),
+                Block::Details {
+                    summary: vec![
+                        plain("\u{1f4dd} "),
+                        Span { text: "configuration".into(), bold: true, ..Default::default() },
+                    ],
+                    blocks: vec![Block::Code { lang: Some("diff".into()), text: "+ a".into() }],
+                },
+                paragraph("After"),
+            ]
+        );
+    }
+
+    #[test]
+    fn details_nest_close_inside_their_html_and_name_themselves_when_unsummarised() {
+        let blocks = parse(
+            "<details><summary>Outer</summary>\n\n<details>\n\n<summary>Inner <code>x</code></summary>\n\n- one\n\n</details>\n</details>\n\n<details>\nraw text\n</details>",
+        );
+        assert_eq!(
+            blocks,
+            vec![
+                Block::Details {
+                    summary: vec![plain("Outer")],
+                    blocks: vec![Block::Details {
+                        summary: vec![
+                            plain("Inner "),
+                            Span { text: "x".into(), code: true, ..Default::default() },
+                        ],
+                        blocks: vec![Block::List { start: None, tight: true, items: vec![item("one")] }],
+                    }],
+                },
+                Block::Details { summary: vec![plain("Details")], blocks: vec![paragraph("raw text")] },
+            ]
+        );
+    }
+
+    #[test]
+    fn details_left_open_end_with_their_container_and_a_stray_close_vanishes() {
+        let blocks = parse("> <details><summary>S</summary>\n>\n> quoted\n\nafter\n\n</details>");
+        assert_eq!(
+            blocks,
+            vec![
+                Block::Quote {
+                    alert: None,
+                    blocks: vec![Block::Details { summary: vec![plain("S")], blocks: vec![paragraph("quoted")] }],
+                },
+                paragraph("after"),
             ]
         );
     }
@@ -2429,6 +2721,27 @@ mod tests {
             let mut all = Vec::new();
             find_all(harness.root_id(), text, &mut all);
             all.into_iter().map(|id| id.get_visual_rect()).collect()
+        }
+
+        #[test]
+        fn details_stay_shut_until_their_summary_is_clicked() {
+            let mut h = harness("<details>\n<summary>More</summary>\n\ninside\n\n</details>\n\nafter");
+            let summary = rect(&h, "details:summary");
+            let whole = |h: &HeadlessHarness| rects(h, "details")[0];
+            assert!(summary.height() > 0.0);
+            assert_eq!(whole(&h).height(), summary.height(), "shut details are their summary");
+            let at = summary.center();
+            h.click(at.x, at.y);
+            h.rebuild();
+            h.paint();
+            let body = rect(&h, "details:body");
+            assert!(body.height() > 0.0, "open body has no room: {body:?}");
+            assert!(body.y0 >= summary.y1);
+            assert!(whole(&h).height() > summary.height());
+            h.click(at.x, at.y);
+            h.rebuild();
+            h.paint();
+            assert_eq!(whole(&h).height(), summary.height());
         }
 
         #[test]
