@@ -719,13 +719,12 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                                     .changed_files
                                     .with(|f| f.iter().find(|f| f.path == path).cloned())
                             });
-                            // A deletion has no content to have viewed.
                             if let (Some(item_id), Some(file)) = (item_id, file) {
-                                if let Some(blob) = &file.head_blob {
+                                if let Some(key) = file.viewed_key() {
                                     key_backend.set_viewed(
                                         &item_id,
                                         &file.path,
-                                        blob,
+                                        key,
                                         !review.is_viewed(&file),
                                     );
                                 }

@@ -3158,20 +3158,20 @@ impl ReviewState {
 
     /// Whether a changed file's content has been marked viewed.
     pub fn is_viewed(&self, file: &ChangedFile) -> bool {
-        match &file.head_blob {
-            Some(blob) => self
+        match file.viewed_key() {
+            Some(key) => self
                 .viewed
-                .with(|v| v.contains(&(file.path.clone(), blob.clone()))),
+                .with(|v| v.contains(&(file.path.clone(), key.to_string()))),
             None => false,
         }
     }
 
     /// How many of the changed files are viewed, and how many there are.
     ///
-    /// A deletion has no content to view, so it is in neither number.
+    /// A file with nothing to key Viewed on is in neither number.
     pub fn viewed_count(&self) -> (usize, usize) {
         self.changed_files.with(|files| {
-            let viewable = files.iter().filter(|f| f.head_blob.is_some());
+            let viewable = files.iter().filter(|f| f.viewed_key().is_some());
             let viewed = viewable.clone().filter(|f| self.is_viewed(f)).count();
             (viewed, viewable.count())
         })
@@ -3199,7 +3199,7 @@ impl ReviewState {
             order
                 .into_iter()
                 .map(|i| &files[i])
-                .find(|f| f.head_blob.is_some() && !self.is_viewed(f))
+                .find(|f| f.viewed_key().is_some() && !self.is_viewed(f))
                 .map(|f| f.path.clone())
         })
     }
@@ -4438,7 +4438,7 @@ mod tests {
     }
 
     #[test]
-    fn viewed_is_by_path_and_blob_and_a_deletion_never_is() {
+    fn viewed_is_by_path_and_blob_and_a_deletion_by_a_fixed_key() {
         let state = state();
         let files = state.changed_files.get();
         assert!(state.is_viewed(&files[1]));
@@ -4448,17 +4448,25 @@ mod tests {
             "a new blob is new content"
         );
         assert!(!state.is_viewed(&files[2]));
-        // The deletion has nothing to view, so it is not counted.
-        assert_eq!(state.viewed_count(), (1, 3));
+        assert_eq!(state.viewed_count(), (1, 4));
+
+        state.viewed.update(|v| {
+            Arc::make_mut(v).insert(("gone.rs".into(), perch_git::DELETED_VIEWED_KEY.into()));
+        });
+        assert!(state.is_viewed(&files[2]), "a deletion can be marked");
+        assert_eq!(state.viewed_count(), (2, 4));
     }
 
     #[test]
     fn next_unviewed_skips_viewed_files_and_wraps_both_ways() {
         let state = state();
-        // b is viewed and the deletion has nothing to view, so both are
-        // stepped over.
+        // b is viewed, so it is stepped over; the deletion is not.
         assert_eq!(
             state.next_unviewed(Some("a.rs"), true).as_deref(),
+            Some("gone.rs")
+        );
+        assert_eq!(
+            state.next_unviewed(Some("gone.rs"), true).as_deref(),
             Some("c.rs")
         );
         assert_eq!(
@@ -6083,15 +6091,18 @@ mod tests {
     fn next_unviewed_is_none_once_everything_is_viewed() {
         let state = state();
         state.viewed.set(Arc::new(
-            [("a.rs", "blob-a"), ("b.rs", "blob-b"), ("c.rs", "blob-c")]
-                .into_iter()
-                .map(|(p, b)| (p.to_string(), b.to_string()))
-                .collect(),
+            [
+                ("a.rs", "blob-a"),
+                ("b.rs", "blob-b"),
+                ("gone.rs", perch_git::DELETED_VIEWED_KEY),
+                ("c.rs", "blob-c"),
+            ]
+            .into_iter()
+            .map(|(p, b)| (p.to_string(), b.to_string()))
+            .collect(),
         ));
-        // The deletion has no blob and is not in the round, so a review
-        // that deletes a file can still be viewed whole.
         assert_eq!(state.next_unviewed(Some("a.rs"), true), None);
-        assert_eq!(state.viewed_count(), (3, 3));
+        assert_eq!(state.viewed_count(), (4, 4));
 
         state
             .changed_files

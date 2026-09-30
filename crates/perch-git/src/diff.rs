@@ -58,6 +58,11 @@ pub struct ChangedFile {
     pub head_blob: Option<String>,
 }
 
+/// What a deletion is marked viewed under, having no head blob. Not hex,
+/// so no sha can match it, and a file that comes back gets a blob and is
+/// unviewed again.
+pub const DELETED_VIEWED_KEY: &str = "deleted";
+
 impl ChangedFile {
     /// The directory portion, which the rail draws muted.
     pub fn directory(&self) -> &str {
@@ -71,6 +76,17 @@ impl ChangedFile {
         match self.path.rfind('/') {
             Some(i) => &self.path[i + 1..],
             None => &self.path,
+        }
+    }
+
+    /// What Viewed is keyed on: the head blob, or for a deletion a fixed
+    /// key, so it can be marked done too. `None` for a file there is
+    /// nothing to mark by, one git did not hash say.
+    pub fn viewed_key(&self) -> Option<&str> {
+        match (&self.head_blob, self.status) {
+            (Some(blob), _) => Some(blob),
+            (None, ChangeStatus::Deleted) => Some(DELETED_VIEWED_KEY),
+            (None, _) => None,
         }
     }
 }

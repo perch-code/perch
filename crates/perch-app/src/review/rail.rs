@@ -96,10 +96,10 @@ fn viewed_row(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     // A memo, so the row is only rebuilt when the list empties or fills,
     // not on every toggle and scope change.
     let empty = Memo::new(move |_| state.changed_files.with(|f| f.is_empty()));
-    // A deletion has no content to view, so "all" is every file that has.
+    // "All" is every file that can be marked.
     let all_viewed = move || {
         state.changed_files.with(|files| {
-            let mut viewable = files.iter().filter(|f| f.head_blob.is_some()).peekable();
+            let mut viewable = files.iter().filter(|f| f.viewed_key().is_some()).peekable();
             viewable.peek().is_some() && viewable.all(|f| state.is_viewed(f))
         })
     };
@@ -204,9 +204,9 @@ fn set_all_viewed(state: ReviewState, backend: &Backend, viewed: bool) {
         return;
     };
     for file in state.changed_files.get().iter() {
-        if let Some(blob) = &file.head_blob {
+        if let Some(key) = file.viewed_key() {
             if state.is_viewed(file) != viewed {
-                backend.set_viewed(&item_id, &file.path, blob, viewed);
+                backend.set_viewed(&item_id, &file.path, key, viewed);
             }
         }
     }
@@ -424,13 +424,13 @@ fn change_marks(state: ReviewState, file: ChangedFile, backend: Rc<Backend>) -> 
     .style(|s| s.items_center().flex_shrink(0.0_f32).margin_left(8.0))
 }
 
-/// The Viewed check at the row's right edge. A deletion has no head
-/// content to have viewed, so it gets the space and no box, and the
-/// counts stay in their column. Checking a file is being done with it,
+/// The Viewed check at the row's right edge. A file with nothing to key
+/// Viewed on gets the space and no box, so the counts stay in their
+/// column. A deletion has a box. Checking a file is being done with it,
 /// so its tab shuts as well; unchecking leaves the tab, since the reader
 /// is going back to the file.
 fn viewed_box(state: ReviewState, file: ChangedFile, backend: Rc<Backend>) -> impl IntoView {
-    let Some(blob) = file.head_blob.clone() else {
+    let Some(blob) = file.viewed_key().map(str::to_string) else {
         return Empty::new()
             .style(|s| s.size(26.0, 26.0).flex_shrink(0.0_f32))
             .into_any();
@@ -756,12 +756,11 @@ mod tests {
         assert_eq!(state.active.get().as_deref(), Some("src/b.rs"));
     }
 
-    /// A deletion has nothing to view; its row keeps the check's space so
-    /// the counts line up, and a click there opens the file as the rest
-    /// of the row does. The deleted file is not in the worktree, and has
-    /// a row all the same.
+    /// A deletion has a check like any other file, so a click on it marks
+    /// the file rather than opening it. The deleted file is not in the
+    /// worktree, and has a row all the same.
     #[test]
-    fn a_deletion_has_no_check() {
+    fn a_deletion_has_a_check() {
         let (mut harness, state) = app_harness();
         state.set_changed_files(Arc::new(vec![
             changed("src/gone.rs", None),
@@ -771,6 +770,8 @@ mod tests {
         harness.paint();
         // src, a.rs, gone.rs: the tree's order, not the list's.
         click(&mut harness, checkbox_center(2));
+        assert_eq!(state.active.get(), None, "the check opened gone.rs");
+        click(&mut harness, name_center(2));
         assert_eq!(state.active.get().as_deref(), Some("src/gone.rs"));
     }
 
