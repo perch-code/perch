@@ -668,6 +668,11 @@ impl HunkRange {
 /// as on github.com, no header. Every ghost and every unchanged line is a
 /// line of the base, in order, and every line that is not a ghost is one
 /// of the head, so one pass counts both.
+///
+/// `None` too for a fold past the end of `buffer`. The divider layer's
+/// labels read the file and the doc's folds, and when a reload shortens
+/// the file they run once with the new buffer and the old folds, before
+/// the doc is rebuilt and the folds catch up.
 pub fn hunks_below(buffer: &DisplayBuffer, folds: &[Run]) -> Vec<Option<HunkRange>> {
     // The base and head lines before each display line, and past the last.
     let mut before = Vec::with_capacity(buffer.len() + 1);
@@ -693,6 +698,9 @@ pub fn hunks_below(buffer: &DisplayBuffer, folds: &[Run]) -> Vec<Option<HunkRang
                 return None;
             }
             let end = folds.get(i + 1).map_or(buffer.len(), |next| next.first);
+            if end > buffer.len() || start > end {
+                return None;
+            }
             let ((old_before, new_before), (old_end, new_end)) = (before[start], before[end]);
             Some(HunkRange { old_before, old_count: old_end - old_before, new_before, new_count: new_end - new_before })
         })
@@ -1744,6 +1752,20 @@ mod tests {
         // With the second run open, the first's hunk runs to the end.
         let hunks = hunks_below(&b, &all[..1]);
         assert_eq!((hunks[0].unwrap().old_count, hunks[0].unwrap().new_count), (3 + 1 + 20 + 1, 3 + 1 + 20 + 1));
+    }
+
+    #[test]
+    fn a_fold_past_the_end_of_a_shorter_buffer_has_no_hunk() {
+        // The folds of a longer file, read once against the shorter one a
+        // reload brought, before the doc catches up.
+        let long = format!("old top\n{}old mid\n{}old bottom\n", context(0, 20), context(20, 20));
+        let folds = runs(&buffer(&long, &long.replace("old", "new")), &[]);
+        assert_eq!(folds.len(), 2);
+        let short = format!("old top\n{}old mid\n", context(0, 20));
+        let b = buffer(&short, &short.replace("old", "new"));
+        assert!(folds[1].first > b.len());
+        let hunks = hunks_below(&b, &folds);
+        assert_eq!(hunks, vec![None, None]);
     }
 
     #[test]
