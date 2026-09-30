@@ -15558,7 +15558,7 @@ async fn start_language_server(
         return;
     };
 
-    let Some(spec) = perch_lsp::find_server("rust") else {
+    let Some(spec) = perch_lsp::find_server("rust", &worktree) else {
         send_lsp_status_if_current(
             &navigation_requests,
             &checkout,

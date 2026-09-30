@@ -1,6 +1,6 @@
 //! Finding and describing language servers.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// How to run a language server, and what it understands.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,23 +49,26 @@ impl Status {
     }
 }
 
-/// Locate rust-analyzer.
+/// Locate rust-analyzer for the checkout at `root`.
 ///
-/// PATH first, then cargo's bin directory, then whatever rustup would run.
+/// The one in the toolchain rustup picks for `root` first, then PATH, then
+/// cargo's bin directory. A rust-analyzer supports only toolchains from its
+/// own release back a few, so a newer one on PATH refuses a checkout that
+/// pins an older toolchain; the one shipped with that toolchain never does.
 /// Nothing is configurable: a review tool should find the toolchain the user
 /// already has rather than ask them to describe it.
-pub fn find_server(language: &str) -> Option<ServerSpec> {
+pub fn find_server(language: &str, root: &Path) -> Option<ServerSpec> {
     if language != "rust" {
         return None;
     }
 
     let candidates = [
+        rustup_rust_analyzer(root),
         which("rust-analyzer"),
         std::env::var_os("HOME")
             .map(PathBuf::from)
             .map(|h| h.join(".cargo/bin/rust-analyzer"))
             .filter(|p| p.is_file()),
-        rustup_rust_analyzer(),
     ];
 
     candidates.into_iter().flatten().next().map(|binary| ServerSpec {
@@ -96,9 +99,18 @@ fn which(name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-fn rustup_rust_analyzer() -> Option<PathBuf> {
+/// The rust-analyzer of the toolchain rustup would run in `root`, from its
+/// rust-toolchain.toml or the default. Nothing when that toolchain or its
+/// rust-analyzer component is not installed: finding a server should not
+/// download one.
+fn rustup_rust_analyzer(root: &Path) -> Option<PathBuf> {
     let out = std::process::Command::new("rustup")
         .args(["which", "rust-analyzer"])
+        .current_dir(root)
+        // As in `Client::start`: a toolchain pin inherited from `cargo run`
+        // would outrank the checkout's own.
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .env("RUSTUP_AUTO_INSTALL", "0")
         .output()
         .ok()?;
     if !out.status.success() {
@@ -114,8 +126,8 @@ mod tests {
 
     #[test]
     fn only_rust_has_a_server_configured() {
-        assert!(find_server("go").is_none());
-        assert!(find_server("python").is_none());
+        assert!(find_server("go", Path::new(".")).is_none());
+        assert!(find_server("python", Path::new(".")).is_none());
     }
 
     #[test]

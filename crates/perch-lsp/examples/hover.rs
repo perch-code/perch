@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let spec = find_server("rust").ok_or("rust-analyzer not found")?;
+    let spec = find_server("rust", &root).ok_or("rust-analyzer not found")?;
     eprintln!("server: {}", spec.binary.display());
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -201,7 +201,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// `--symbols`: every symbol the workspace search names for `query`,
 /// asked for all kinds as Perch asks, once the server has indexed.
 async fn search(root: &Path, query: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let spec = find_server("rust").ok_or("rust-analyzer not found")?;
+    let spec = find_server("rust", root).ok_or("rust-analyzer not found")?;
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let client = Client::start(spec, root, tx).await?;
     let query = format!("{query}#");
