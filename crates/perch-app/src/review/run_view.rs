@@ -544,6 +544,7 @@ fn tools_box(inner: impl IntoView + 'static) -> floem::AnyView {
         .debug_name("run-steps")
         .style(|s| {
             s.width_full()
+                .min_width(0.0)
                 .padding_horiz(8.0)
                 .padding_vert(4.0)
                 .border_radius(theme::RADIUS)
@@ -554,7 +555,7 @@ fn tools_box(inner: impl IntoView + 'static) -> floem::AnyView {
 
 fn rows(state: ReviewState, calls: &[RunStep], live: bool) -> impl IntoView {
     Stack::vertical_from_iter(calls.iter().map(|call| step_row(state, call.clone(), live)))
-        .style(|s| s.flex_col().width_full())
+        .style(|s| s.flex_col().width_full().min_width(0.0))
 }
 
 /// The latest run of calls: its last `TAIL` rows, and a line for the
@@ -723,6 +724,7 @@ fn step_row(state: ReviewState, step: RunStep, live: bool) -> floem::AnyView {
         None => Empty::new().into_any(),
     };
     let nested = line.nested;
+    let alone = line.arg.is_empty();
     Stack::horizontal((
         Container::new(icon).style(|s| {
             s.width(16.0)
@@ -731,11 +733,14 @@ fn step_row(state: ReviewState, step: RunStep, live: bool) -> floem::AnyView {
                 .justify_center()
                 .flex_shrink(0.0_f32)
         }),
+        // A step no verb matched, often an error, is all verb: it gives
+        // way at the edge instead of the missing argument.
         Label::derived(move || verb.clone()).style(move |s| {
             s.font_size(theme::TEXT_META)
                 .color(if pending { theme::FG } else { tint })
                 .margin_left(6.0)
-                .flex_shrink(0.0_f32)
+                .apply_if(alone, |s| s.text_ellipsis().min_width(0.0))
+                .apply_if(!alone, |s| s.flex_shrink(0.0_f32))
         }),
         Container::new(arg).style(|s| s.margin_left(6.0).min_width(0.0).flex_shrink(1.0_f32)),
         counts,
@@ -1023,5 +1028,43 @@ mod tests {
             fold_words(&run, &[]),
             ("Worked for 4m 12s".into(), String::new())
         );
+    }
+
+    /// A failed call's line, however long its error, stops at the edge of
+    /// the inset, and does not widen the calls beside it.
+    #[test]
+    fn a_long_failed_step_stays_inside_its_box() {
+        use floem::headless::{HeadlessHarness, TestRoot};
+
+        let root = TestRoot::new();
+        let failed = |summary: &str| RunStep {
+            ok: false,
+            ..step(summary, false)
+        };
+        let calls = vec![
+            step("Read src/db.rs", false),
+            failed("Ran cat INDEX.md && ls; grep -ril \"with_db_cache\\|share\" . | head: This Bash command contains multiple operations"),
+            failed("Bash: This Bash command contains multiple operations. The following part requires approval: cd /Users/someone/.perch/context"),
+        ];
+        let view = Container::new(tools_box(rows(ReviewState::new(), &calls, false)))
+            .debug_name("page")
+            .style(|s| s.width(300.0).height_full());
+        let mut harness = HeadlessHarness::new_with_size(root, view, 600.0, 300.0);
+        for _ in 0..2 {
+            harness.rebuild();
+            harness.paint();
+        }
+        let right = crate::review::header::tests::rect(&harness, "page").x1;
+        let mut ends = Vec::new();
+        fn walk(id: floem::ViewId, ends: &mut Vec<f64>) {
+            ends.push(id.get_visual_rect_no_clip().x1);
+            for child in id.children() {
+                walk(child, ends);
+            }
+        }
+        let page = crate::review::header::tests::named(harness.root_id(), "page").unwrap();
+        walk(page, &mut ends);
+        let widest = ends.into_iter().fold(0.0, f64::max);
+        assert!(widest <= right + 0.5, "a view ends at {widest}, past {right}");
     }
 }
