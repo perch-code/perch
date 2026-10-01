@@ -382,9 +382,9 @@ paths answered by the test server.
 
 - Entry points: the bug icon is in the item header and the empty bar,
   just before usage, and opens the box with Bug; Send Feedback… opens
-  it with Idea; Report on an error toast opens it with Bug, the toast's text as the title, and the
-  toast gone; a success toast has no Report; reopening keeps the draft;
-  a second Report asks before replacing it.
+  it with Idea; Report on an error toast opens it with Bug, the toast's
+  text as the title, and the toast gone; a success toast has no Report;
+  reopening keeps the draft; a second Report asks before replacing it.
 - Recent problems: holds 20, drops the oldest, skips success toasts.
 - Collection: each section renders from a fixed context; a command that
   hangs is `timed out` after its limit and the others still appear.
