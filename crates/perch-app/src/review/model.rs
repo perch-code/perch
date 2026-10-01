@@ -1697,6 +1697,12 @@ pub struct ReviewState {
     /// A notice for the popup, drained by the root view, which holds the
     /// app state: why a goto opened nothing, for one.
     pub pending_notice: RwSignal<Option<String>>,
+    /// An offer to install the server a goto wanted, drained by the root
+    /// view as the notice is.
+    pub pending_offer: RwSignal<Option<crate::state::ServerOffer>>,
+    /// The servers to start again, as their installs land, drained by the
+    /// root view, which holds the backend.
+    pub pending_server_starts: RwSignal<Vec<perch_lsp::ServerKind>>,
     /// A head line to scroll to once the file it belongs to is loaded.
     pub jump_to_line: RwSignal<Option<usize>>,
     /// Where the caret lands after `jump_to_line`, as the head line and a
@@ -1917,6 +1923,8 @@ impl ReviewState {
             names: RwSignal::new(HashMap::new()),
             pending_names: RwSignal::new(Vec::new()),
             pending_notice: RwSignal::new(None),
+            pending_offer: RwSignal::new(None),
+            pending_server_starts: RwSignal::new(Vec::new()),
             jump_to_line: RwSignal::new(None),
             jump_caret: RwSignal::new(None),
             paging: RwSignal::new(None),

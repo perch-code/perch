@@ -71,6 +71,38 @@ pub enum ToastKind {
     AgentRun(String),
     /// A line of news: something that could not be done, or was.
     Message { text: String, tone: Tone },
+    /// A language server that isn't there, or is out of date, with the
+    /// button that installs it. It stays until it's closed or the install
+    /// ends; other news shows over it meanwhile.
+    Server(ServerOffer),
+}
+
+/// A toast's offer to install or update a language server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerOffer {
+    pub kind: perch_lsp::ServerKind,
+    /// What the toast says.
+    pub text: String,
+    /// What its button runs, when Perch can install the server.
+    pub install: Option<perch_lsp::Install>,
+    /// Its button's label: Install, or Update.
+    pub action: &'static str,
+    /// Under which a closed offer stays closed for the session.
+    pub key: String,
+}
+
+impl ServerOffer {
+    /// The offer for a server that isn't there. `text` is what the toast
+    /// says, the missing server's own line unless a goto has more to say.
+    pub fn missing(missing: &perch_lsp::Missing, text: Option<String>) -> Self {
+        ServerOffer {
+            kind: missing.kind,
+            text: text.unwrap_or_else(|| missing.describe()),
+            install: missing.install.as_deref().cloned(),
+            action: "Install",
+            key: missing.describe(),
+        }
+    }
 }
 
 /// The colour of a message's dot.
@@ -214,6 +246,10 @@ pub struct AppState {
     /// before the reader can see them.
     pub toasts: RwSignal<VecDeque<Toast>>,
     pub toast_token: RwSignal<u64>,
+    /// The language servers being installed, from any window.
+    pub installing_servers: RwSignal<HashSet<perch_lsp::ServerKind>>,
+    /// The server offers closed this session, by their keys.
+    pub declined_offers: RwSignal<HashSet<String>>,
 
     /// Review capability/preferences are global; bases, groups, and launch
     /// errors are keyed by their stable item id so opening another item never
@@ -336,6 +372,8 @@ impl AppState {
             agent_archived_owner: RwSignal::new(None),
             toasts: RwSignal::new(VecDeque::new()),
             toast_token: RwSignal::new(0),
+            installing_servers: RwSignal::new(HashSet::new()),
+            declined_offers: RwSignal::new(HashSet::new()),
             review_capabilities: RwSignal::new(Arc::new(Vec::new())),
             review_preferences: RwSignal::new(Arc::new(Vec::new())),
             review_base_refs: RwSignal::new(HashMap::new()),
@@ -679,7 +717,7 @@ impl AppState {
         self.toasts.with(|toasts| {
             toasts.iter().find_map(|toast| match &toast.kind {
                 ToastKind::Message { text, .. } => Some(text.clone()),
-                ToastKind::AgentRun(_) => None,
+                ToastKind::AgentRun(_) | ToastKind::Server(_) => None,
             })
         })
     }
@@ -688,11 +726,70 @@ impl AppState {
         let token = self.toast_token.get_untracked().wrapping_add(1);
         self.toast_token.set(token);
         let was_empty = self.toasts.with_untracked(VecDeque::is_empty);
-        self.toasts
-            .update(|toasts| toasts.push_back(Toast { kind, token }));
-        if was_empty {
+        // News goes in front of an offer that is waiting to be answered,
+        // which comes back once the news has gone.
+        let over_offer = !matches!(kind, ToastKind::Server(_))
+            && self.toasts.with_untracked(|toasts| {
+                toasts
+                    .front()
+                    .is_some_and(|toast| matches!(toast.kind, ToastKind::Server(_)))
+            });
+        self.toasts.update(|toasts| {
+            if over_offer {
+                toasts.push_front(Toast { kind, token });
+            } else {
+                toasts.push_back(Toast { kind, token });
+            }
+        });
+        if was_empty || over_offer {
             self.schedule_toast_dismissal(token);
         }
+    }
+
+    /// Offer to install a language server, unless the same offer is up
+    /// already or, for one the reader didn't ask for, was closed this
+    /// session. `asked` is a goto that couldn't be answered for want of
+    /// the server, which offers it again whatever was closed.
+    pub fn offer_server(&self, offer: ServerOffer, asked: bool) {
+        if !asked && self.declined_offers.with_untracked(|d| d.contains(&offer.key)) {
+            return;
+        }
+        let shown = self.toasts.with_untracked(|toasts| {
+            toasts.iter().any(|toast| match &toast.kind {
+                ToastKind::Server(up) => up.key == offer.key,
+                _ => false,
+            })
+        });
+        if asked {
+            self.declined_offers.update(|d| _ = d.remove(&offer.key));
+            if shown {
+                // The goto's line over the offer already up.
+                self.toasts.update(|toasts| {
+                    for toast in toasts.iter_mut() {
+                        if let ToastKind::Server(up) = &mut toast.kind {
+                            if up.key == offer.key {
+                                up.text = offer.text.clone();
+                            }
+                        }
+                    }
+                });
+                return;
+            }
+        } else if shown {
+            return;
+        }
+        self.show_toast(ToastKind::Server(offer));
+    }
+
+    /// The reader closed an offer: it stays closed for the session.
+    pub fn decline_offer(&self, token: u64, key: &str) {
+        self.declined_offers.update(|d| _ = d.insert(key.to_string()));
+        self.dismiss_toast(token);
+    }
+
+    /// Take down the offers for `kind`.
+    fn drop_offers(&self, kind: perch_lsp::ServerKind) {
+        self.drop_toasts(|toast| matches!(toast, ToastKind::Server(offer) if offer.kind == kind));
     }
 
     pub fn current_toast(&self) -> Option<Toast> {
@@ -737,6 +834,15 @@ impl AppState {
 
     fn schedule_toast_dismissal(&self, token: u64) {
         let state = *self;
+        // An offer waits for its answer.
+        let offer = self.toasts.with_untracked(|toasts| {
+            toasts
+                .iter()
+                .any(|toast| toast.token == token && matches!(toast.kind, ToastKind::Server(_)))
+        });
+        if offer {
+            return;
+        }
         floem::action::exec_after(Duration::from_secs(8), move |_| {
             if state
                 .toasts
@@ -1642,8 +1748,28 @@ impl AppState {
                             self.complain(status.describe(kind));
                         }
                     }
+                    if let perch_lsp::Status::Missing(missing) = &status {
+                        self.offer_server(ServerOffer::missing(missing, None), false);
+                    }
                     review.set_server_status(kind, status);
                 }
+            }
+            Event::LspInstalled { kind, install } => {
+                // The open item's server was missing for want of this
+                // install: start it now. One missing for another toolchain
+                // stays missing.
+                let wanted = review.lsp_status.with_untracked(|statuses| {
+                    matches!(
+                        statuses.get(kind),
+                        Some(perch_lsp::Status::Missing(missing))
+                            if missing.install.as_deref() == Some(&install)
+                    )
+                });
+                if wanted {
+                    review.set_server_status(kind, perch_lsp::Status::Starting);
+                    review.pending_server_starts.update(|starts| starts.push(kind));
+                }
+                self.apply(Event::LspInstalled { kind, install });
             }
             Event::LspWarning {
                 navigation_id,
@@ -2380,6 +2506,18 @@ impl AppState {
     /// Fold one event into what the sidebar and the popup read.
     pub fn apply(&self, event: Event) {
         match event {
+            Event::LspInstalling { kind } => {
+                self.installing_servers.update(|i| _ = i.insert(kind));
+            }
+            Event::LspInstalled { kind, .. } => {
+                self.installing_servers.update(|i| _ = i.remove(&kind));
+                self.drop_offers(kind);
+            }
+            Event::LspInstallFailed { kind, error } => {
+                self.installing_servers.update(|i| _ = i.remove(&kind));
+                self.drop_offers(kind);
+                self.complain(format!("Couldn't install {}: {error}", kind.name()));
+            }
             Event::Avatar { url, bytes } => {
                 self.avatars.update(|m| {
                     m.insert(url, Arc::new(bytes));
@@ -3766,6 +3904,134 @@ mod tests {
         app.apply_with_review(review_ready("same", 42), review);
 
         assert_eq!(review.lsp_status.get(), Default::default());
+    }
+
+    fn missing_rust() -> perch_lsp::Missing {
+        perch_lsp::Missing {
+            kind: perch_lsp::ServerKind::RustAnalyzer,
+            needs: None,
+            install: Some(Box::new(perch_lsp::Install::Command {
+                program: "rustup".into(),
+                args: vec!["component".into(), "add".into(), "rust-analyzer".into()],
+                env: Vec::new(),
+                into: None,
+            })),
+            toolchain: Some("1.98.1-aarch64-apple-darwin".into()),
+        }
+    }
+
+    fn offers(app: &AppState) -> Vec<ServerOffer> {
+        app.toasts.with(|toasts| {
+            toasts
+                .iter()
+                .filter_map(|toast| match &toast.kind {
+                    ToastKind::Server(offer) => Some(offer.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+    }
+
+    /// A missing server is offered once, stays offered under other news,
+    /// and once closed stays closed until a goto asks for it.
+    #[test]
+    fn a_missing_server_is_offered_until_it_is_turned_down() {
+        let _root = floem::headless::TestRoot::new();
+        let app = AppState::new();
+        let review = ReviewState::new();
+        app.begin_item_review(review, "Open", "a", 91);
+        app.apply_with_review(review_ready("a", 91), review);
+        let missing = || Event::LspStatus {
+            navigation_id: 91,
+            kind: perch_lsp::ServerKind::RustAnalyzer,
+            status: perch_lsp::Status::Missing(missing_rust()),
+        };
+        app.apply_with_review(missing(), review);
+        let offered = offers(&app);
+        assert_eq!(offered.len(), 1);
+        assert_eq!(offered[0].text, "rust-analyzer isn't installed for Rust 1.98.1.");
+        assert_eq!(offered[0].action, "Install");
+        app.apply_with_review(missing(), review);
+        assert_eq!(offers(&app).len(), 1, "the same offer is up once");
+
+        // News goes over it, and it comes back when the news goes.
+        app.complain("Could not post");
+        assert_eq!(app.notice().as_deref(), Some("Could not post"));
+        let news = app.current_toast().unwrap().token;
+        app.dismiss_toast(news);
+        assert!(matches!(app.current_toast().unwrap().kind, ToastKind::Server(_)));
+
+        let token = app.current_toast().unwrap().token;
+        app.decline_offer(token, &offered[0].key);
+        assert!(offers(&app).is_empty());
+        app.apply_with_review(missing(), review);
+        assert!(offers(&app).is_empty(), "closed for the session");
+
+        // A goto that wanted the server offers it again, with its line.
+        app.offer_server(
+            ServerOffer::missing(&missing_rust(), Some("No definition found for `x`: …".into())),
+            true,
+        );
+        assert_eq!(offers(&app)[0].text, "No definition found for `x`: …");
+    }
+
+    /// Every window hears an install run; the one whose server was missing
+    /// for want of it starts the server, and a failure says why.
+    #[test]
+    fn an_installed_server_starts_where_it_was_missing() {
+        let _root = floem::headless::TestRoot::new();
+        let app = AppState::new();
+        let review = ReviewState::new();
+        app.begin_item_review(review, "Open", "a", 92);
+        app.apply_with_review(review_ready("a", 92), review);
+        let kind = perch_lsp::ServerKind::RustAnalyzer;
+        app.apply_with_review(
+            Event::LspStatus {
+                navigation_id: 92,
+                kind,
+                status: perch_lsp::Status::Missing(missing_rust()),
+            },
+            review,
+        );
+        app.apply_with_review(Event::LspInstalling { kind }, review);
+        assert!(app.installing_servers.get().contains(&kind));
+
+        let mut other = missing_rust();
+        other.install = None;
+        app.apply_with_review(
+            Event::LspInstalled {
+                kind,
+                install: perch_lsp::Install::Command {
+                    program: "rustup".into(),
+                    args: vec!["something".into(), "else".into()],
+                    env: Vec::new(),
+                    into: None,
+                },
+            },
+            review,
+        );
+        assert!(review.pending_server_starts.get().is_empty(), "another toolchain's install");
+        assert!(offers(&app).is_empty());
+
+        app.apply_with_review(
+            Event::LspInstalled {
+                kind,
+                install: *missing_rust().install.unwrap(),
+            },
+            review,
+        );
+        assert!(!app.installing_servers.get().contains(&kind));
+        assert_eq!(review.pending_server_starts.get(), [kind]);
+        assert_eq!(review.lsp_status.get().get(kind), Some(&perch_lsp::Status::Starting));
+
+        app.apply_with_review(
+            Event::LspInstallFailed {
+                kind,
+                error: "no network".into(),
+            },
+            review,
+        );
+        assert_eq!(app.notice().as_deref(), Some("Couldn't install rust-analyzer: no network"));
     }
 
     #[test]

@@ -5,11 +5,16 @@
 //! matching, progress reporting, and shutdown explicit.
 
 pub mod client;
+pub mod install;
 pub mod server;
 pub mod transport;
 
 pub use client::{Client, Request};
-pub use server::{find, kinds_at_root, language_id, ServerKind, ServerSpec, Status};
+pub use install::install;
+pub use server::{
+    find, kinds_at_root, language_id, partial, Env, Install, Missing, Need, ServerKind, ServerSpec,
+    Status,
+};
 
 pub use lsp_types;
 

@@ -1,6 +1,7 @@
-//! The popup at the window's bottom right: an agent run that finished, or
-//! a line the reader should see, such as something that could not be done
-//! or a poll that failed. One at a time, each up for a few seconds.
+//! The popup at the window's bottom right: an agent run that finished, a
+//! line the reader should see, such as something that could not be done
+//! or a poll that failed, or an offer to install a language server. One at
+//! a time, each up for a few seconds but the offer, which waits.
 
 use std::rc::Rc;
 
@@ -12,7 +13,7 @@ use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
-use crate::state::{AppState, ToastKind, Tone};
+use crate::state::{AppState, ServerOffer, ToastKind, Tone};
 use crate::theme;
 use crate::ui::{agents, widgets};
 
@@ -22,7 +23,7 @@ pub fn toast(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
             // A run's toast waits for the run's summary.
             state.current_toast().filter(|toast| match &toast.kind {
                 ToastKind::AgentRun(id) => state.agent_run(id).is_some(),
-                ToastKind::Message { .. } => true,
+                ToastKind::Message { .. } | ToastKind::Server(_) => true,
             })
         },
         move |toast| {
@@ -44,6 +45,10 @@ pub fn toast(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
                 ToastKind::Message { text, tone } => {
                     (message(state, token, text, tone).into_any(), None)
                 }
+                ToastKind::Server(offer) => (
+                    server_offer(state, backend.clone(), token, offer).into_any(),
+                    None,
+                ),
             };
             let clickable = open.is_some();
             let mut card = Container::new(body);
@@ -106,6 +111,74 @@ fn message(state: AppState, token: u64, text: String, tone: Tone) -> impl IntoVi
     .style(|s| s.items_center().width_full().gap(9.0))
 }
 
+/// An offer to install a language server: its line, the button that runs
+/// the install, with the command as its tip, and the close that turns it
+/// down for the session. While the install runs, the line says so and the
+/// buttons go.
+fn server_offer(state: AppState, backend: Rc<Backend>, token: u64, offer: ServerOffer) -> impl IntoView {
+    let kind = offer.kind;
+    let installing = move || state.installing_servers.with(|i| i.contains(&kind));
+    let text = offer.text.clone();
+    let line = Label::derived(move || {
+        if installing() {
+            format!("Installing {}…", kind.name())
+        } else {
+            text.clone()
+        }
+    })
+    .style(|s| {
+        s.font_size(theme::TEXT_BODY)
+            .color(theme::FG)
+            .text_wrap()
+            .min_width(0.0)
+            .flex_grow(1.0_f32)
+            .flex_basis(0.0)
+    });
+    let button = match offer.install.clone() {
+        Some(install) => {
+            let shown = install.shown();
+            let run = move || {
+                state.installing_servers.update(|i| _ = i.insert(kind));
+                backend.install_language_server(kind, install.clone());
+            };
+            let button = offer_button(offer.action, run)
+                .style(move |s| s.apply_if(installing(), |s| s.hide()));
+            crate::review::cards::tip(button, shown).into_any()
+        }
+        None => Empty::new().into_any(),
+    };
+    let key = offer.key.clone();
+    let close = agents::icon_action(SidebarIcon::Close, "Dismiss message", move || {
+        state.decline_offer(token, &key)
+    })
+    .style(move |s| s.apply_if(installing(), |s| s.hide()));
+    Stack::horizontal((dot(theme::DRAFT), line, button, close))
+        .style(|s| s.items_center().width_full().gap(9.0))
+}
+
+/// A toast's small bordered button.
+fn offer_button(label: &'static str, on_click: impl Fn() + 'static) -> impl View {
+    Container::new(Label::new(label).style(|s| {
+        s.font_size(theme::TEXT_META)
+            .color(theme::FG)
+            .selectable(false)
+    }))
+    .on_event_stop(el::Click, move |_, _| on_click())
+    .style(|s| {
+        widgets::clickable(s)
+            .height(26.0)
+            .items_center()
+            .padding_horiz(10.0)
+            .flex_shrink(0.0_f32)
+            .background(theme::CANVAS)
+            .border(1.0)
+            .border_color(theme::BORDER)
+            .border_radius(theme::RADIUS)
+            .hover(|s| s.background(theme::CANVAS_HOVER))
+    })
+    .debug_name(label)
+}
+
 /// The coloured dot at a toast's left.
 pub(crate) fn dot(color: Color) -> impl IntoView {
     Empty::new().style(move |s| {
@@ -147,5 +220,39 @@ mod tests {
         harness.paint();
         assert!(app.current_toast().is_none());
         assert!(named(harness.root_id(), "Could not archive").is_none());
+    }
+
+    /// An offer shows its line and Install. Pressing it says the install is
+    /// under way and takes the buttons away until it ends.
+    #[test]
+    fn an_offer_installs_from_its_button() {
+        use floem::prelude::*;
+        let (mut harness, app, _) = pull_request_harness();
+        let missing = perch_lsp::Missing {
+            kind: perch_lsp::ServerKind::RustAnalyzer,
+            needs: None,
+            install: Some(Box::new(perch_lsp::Install::Command {
+                program: "rustup".into(),
+                args: vec!["component".into(), "add".into(), "rust-analyzer".into()],
+                env: Vec::new(),
+                into: None,
+            })),
+            toolchain: Some("1.98.1-aarch64-apple-darwin".into()),
+        };
+        app.offer_server(crate::state::ServerOffer::missing(&missing, None), false);
+        harness.rebuild();
+        harness.paint();
+        let toast = named(harness.root_id(), "toast").expect("no toast");
+        assert!(named(toast, "rust-analyzer isn't installed for Rust 1.98.1.").is_some());
+        let install = named(toast, "Install").expect("no Install");
+        let at = install.get_visual_rect_no_clip().center();
+        harness.click(at.x, at.y);
+        harness.rebuild();
+        harness.paint();
+        assert!(app
+            .installing_servers
+            .with_untracked(|i| i.contains(&perch_lsp::ServerKind::RustAnalyzer)));
+        let toast = named(harness.root_id(), "toast").expect("the toast stays");
+        assert!(named(toast, "Installing rust-analyzer…").is_some());
     }
 }

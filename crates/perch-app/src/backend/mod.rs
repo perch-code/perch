@@ -304,6 +304,18 @@ pub enum Command {
         first: u32,
         last: u32,
     },
+    /// Install a missing language server, as the toast that offered it
+    /// shows the command. A second while one runs joins it.
+    InstallLanguageServer {
+        kind: perch_lsp::ServerKind,
+        install: perch_lsp::Install,
+    },
+    /// Start the open item's server of `kind` again, as one just installed
+    /// lets it.
+    StartLanguageServer {
+        navigation_id: u64,
+        kind: perch_lsp::ServerKind,
+    },
     /// Ask the language server about a position. `token` lets the UI drop an
     /// answer that arrives after the pointer has moved on.
     Hover {
@@ -1329,7 +1341,20 @@ pub enum Event {
         kind: perch_lsp::ServerKind,
         message: String,
     },
-    /// What rust-analyzer says about a symbol, as markdown.
+    /// An install of a missing server began. Every window hears it, as
+    /// they hear how it ended.
+    LspInstalling {
+        kind: perch_lsp::ServerKind,
+    },
+    LspInstalled {
+        kind: perch_lsp::ServerKind,
+        install: perch_lsp::Install,
+    },
+    LspInstallFailed {
+        kind: perch_lsp::ServerKind,
+        error: String,
+    },
+    /// What a language server says about a symbol, as markdown.
     LspHover {
         token: u64,
         markdown: String,
@@ -3190,6 +3215,21 @@ impl Backend {
         token
     }
 
+    pub fn install_language_server(&self, kind: perch_lsp::ServerKind, install: perch_lsp::Install) {
+        let _ = self
+            .commands
+            .send(Command::InstallLanguageServer { kind, install });
+    }
+
+    /// Start the open item's server of `kind` again.
+    pub fn start_language_server_here(&self, kind: perch_lsp::ServerKind) {
+        let navigation_id = self.navigation_requests.current_id().unwrap_or(0);
+        let _ = self.commands.send(Command::StartLanguageServer {
+            navigation_id,
+            kind,
+        });
+    }
+
     pub fn hover(&self, token: u64, path: &str, line: u32, character: u32) {
         let _ = self.commands.send(Command::Hover {
             token,
@@ -3533,6 +3573,7 @@ async fn run(
         language_servers: language_servers.clone(),
         kept_servers: Default::default(),
         starting_servers: Default::default(),
+        installing_servers: Default::default(),
         events: events.clone(),
         runs: run_manager,
         review_capabilities,
@@ -4525,6 +4566,17 @@ async fn run(
                     }
                 });
             }
+            Command::InstallLanguageServer { kind, install } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { install_language_server(&ctx, kind, install).await });
+            }
+            Command::StartLanguageServer {
+                navigation_id,
+                kind,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { start_server(&ctx, navigation_id, kind).await });
+            }
             Command::Hover {
                 token,
                 path,
@@ -5087,6 +5139,9 @@ struct Ctx {
     kept_servers: kept_servers::KeptServers,
     /// The servers being started, so one is started once.
     starting_servers: StartingServers,
+    /// The servers being installed, for every window: one install of a
+    /// server at a time.
+    installing_servers: Arc<std::sync::Mutex<std::collections::HashSet<perch_lsp::ServerKind>>>,
     events: EventSender<Event>,
     /// Durable admission, the shared execution limit, and live children.
     runs: runs::RunManager,
@@ -16095,21 +16150,25 @@ async fn start_server(ctx: &Ctx, navigation_id: u64, kind: perch_lsp::ServerKind
 
     let found = {
         let worktree = worktree.clone();
-        tokio::task::spawn_blocking(move || perch_lsp::find(kind, &worktree))
-            .await
-            .ok()
-            .flatten()
+        tokio::task::spawn_blocking(move || {
+            perch_lsp::find(kind, &worktree, &perch_lsp::Env::current(servers_dir()))
+        })
+        .await
     };
-    let Some(spec) = found else {
-        send_lsp_status_if_current(
-            navigation_requests,
-            checkout,
-            events,
-            navigation_id,
-            kind,
-            perch_lsp::Status::Absent,
-        );
-        return;
+    let spec = match found {
+        Ok(Ok(spec)) => spec,
+        Ok(Err(missing)) => {
+            send_lsp_status_if_current(
+                navigation_requests,
+                checkout,
+                events,
+                navigation_id,
+                kind,
+                perch_lsp::Status::Missing(missing),
+            );
+            return;
+        }
+        Err(_) => return,
     };
 
     let serves = |client: &perch_lsp::Client| {
@@ -16172,6 +16231,41 @@ async fn start_server(ctx: &Ctx, navigation_id: u64, kind: perch_lsp::ServerKind
         drop(language_servers);
         ctx.kept_servers.keep(ctx.window, client).await;
     }
+}
+
+/// Where Perch installs the servers that belong to no toolchain:
+/// `~/.perch/servers`.
+fn servers_dir() -> PathBuf {
+    perch_github::config::perch_home().join("servers")
+}
+
+/// Run a server's install, once at a time for every window, telling every
+/// window as it starts and ends. The windows that wanted it start it again
+/// themselves.
+async fn install_language_server(ctx: &Ctx, kind: perch_lsp::ServerKind, install: perch_lsp::Install) {
+    let claimed = ctx
+        .installing_servers
+        .lock()
+        .is_ok_and(|mut installing| installing.insert(kind));
+    if !claimed {
+        return;
+    }
+    tracing::info!(server = kind.name(), command = %install.shown(), "installing a language server");
+    let _ = ctx.events.send(Event::LspInstalling { kind });
+    let result = perch_lsp::install(&install).await;
+    if let Ok(mut installing) = ctx.installing_servers.lock() {
+        installing.remove(&kind);
+    }
+    let _ = ctx.events.send(match result {
+        Ok(()) => {
+            tracing::info!(server = kind.name(), "language server installed");
+            Event::LspInstalled { kind, install }
+        }
+        Err(error) => {
+            tracing::warn!(server = kind.name(), %error, "could not install a language server");
+            Event::LspInstallFailed { kind, error }
+        }
+    });
 }
 
 /// The servers being started, by window, worktree and kind.
@@ -17049,6 +17143,7 @@ mod tests {
             language_servers: Default::default(),
             kept_servers: Default::default(),
             starting_servers: Default::default(),
+            installing_servers: Default::default(),
             events,
             runs,
             review_capabilities: Arc::new(Vec::new()),

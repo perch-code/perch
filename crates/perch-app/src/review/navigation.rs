@@ -286,6 +286,20 @@ pub fn go_to_definition(state: ReviewState, backend: &Backend, symbol: &Symbol) 
 /// says why: the hand shows over a symbol whatever the server's state,
 /// and a click under it that did nothing would read as a miss.
 fn server_ready(state: ReviewState, noun: &str, symbol: &Symbol) -> bool {
+    let missing = state.lsp_status.with_untracked(|s| {
+        match perch_lsp::ServerKind::for_path(&symbol.path).and_then(|kind| s.get(kind)) {
+            Some(perch_lsp::Status::Missing(missing)) => Some(missing.clone()),
+            _ => None,
+        }
+    });
+    // A server that isn't there says so with the offer to install it.
+    if let Some(missing) = missing {
+        let text = format!("No {noun} found for `{}`: {}", symbol.text, missing.describe());
+        state
+            .pending_offer
+            .set(Some(crate::state::ServerOffer::missing(&missing, Some(text))));
+        return false;
+    }
     let why = state
         .lsp_status
         .with_untracked(|s| s.unusable_reason(&symbol.path));

@@ -691,7 +691,7 @@ const STDERR_TAIL: usize = 20;
 /// that says it is an error, else the last line. rustup's proxy for a
 /// toolchain without rust-analyzer writes
 /// `error: unknown binary 'rust-analyzer' in toolchain '1.98.1-…'`.
-fn exit_reason<'a>(lines: impl DoubleEndedIterator<Item = &'a str> + Clone) -> Option<String> {
+pub(crate) fn exit_reason<'a>(lines: impl DoubleEndedIterator<Item = &'a str> + Clone) -> Option<String> {
     let lines = lines.map(str::trim).filter(|line| !line.is_empty());
     let error = lines.clone().find_map(|line| {
         line.strip_prefix("error:").or_else(|| line.strip_prefix("Error:")).map(str::trim)

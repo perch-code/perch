@@ -120,6 +120,25 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             state.notify(text, crate::state::Tone::Warning);
         }
     });
+    floem::reactive::Effect::new(move |_| {
+        if let Some(offer) = review.pending_offer.get() {
+            review.pending_offer.set(None);
+            state.offer_server(offer, true);
+        }
+    });
+    {
+        let backend = backend.clone();
+        floem::reactive::Effect::new(move |_| {
+            let starts = review.pending_server_starts.get();
+            if starts.is_empty() {
+                return;
+            }
+            review.pending_server_starts.set(Vec::new());
+            for kind in starts {
+                backend.start_language_server_here(kind);
+            }
+        });
+    }
     // And the runs the reader opened out of a fold, or folded again, go
     // to the store from here too. The item is read as the write is sent:
     // the effect runs on the write, before anything else can open another.

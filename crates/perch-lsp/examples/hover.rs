@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use perch_lsp::client::{uri_to_path, Client, ServerEvent};
 use perch_lsp::lsp_types::{CallHierarchyItem, Location};
-use perch_lsp::{find, Request, ServerKind, Status};
+use perch_lsp::{find, Env, Request, ServerKind, Status};
 
 const MODES: &str =
     "hover|definition|type-definition|implementation|references|highlight|callers|callees";
@@ -55,7 +55,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let spec = find(ServerKind::RustAnalyzer, &root).ok_or("rust-analyzer not found")?;
+    let spec = find(ServerKind::RustAnalyzer, &root, &Env::current(std::env::temp_dir()))
+        .map_err(|missing| missing.describe())?;
     eprintln!("server: {}", spec.binary.display());
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -201,7 +202,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// `--symbols`: every symbol the workspace search names for `query`,
 /// asked for all kinds as Perch asks, once the server has indexed.
 async fn search(root: &Path, query: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let spec = find(ServerKind::RustAnalyzer, root).ok_or("rust-analyzer not found")?;
+    let spec = find(ServerKind::RustAnalyzer, root, &Env::current(std::env::temp_dir()))
+        .map_err(|missing| missing.describe())?;
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let client = Client::start(spec, root, tx).await?;
     let query = format!("{query}#");
