@@ -16197,6 +16197,19 @@ async fn start_server(ctx: &Ctx, navigation_id: u64, kind: perch_lsp::ServerKind
             match perch_lsp::Client::start(spec, &worktree, tx).await {
                 Ok(client) => {
                     tracing::info!(server = kind.name(), "language server started");
+                    for message in perch_lsp::start_warnings(kind, &worktree) {
+                        send_if_current(
+                            navigation_requests,
+                            checkout,
+                            events,
+                            navigation_id,
+                            Event::LspWarning {
+                                navigation_id,
+                                kind,
+                                message,
+                            },
+                        );
+                    }
                     client
                 }
                 Err(e) => {

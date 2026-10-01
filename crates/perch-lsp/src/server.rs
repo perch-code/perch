@@ -9,16 +9,23 @@ use std::time::Duration;
 pub enum ServerKind {
     RustAnalyzer,
     Gopls,
+    /// TypeScript and JavaScript both.
+    TypescriptLanguageServer,
 }
 
 impl ServerKind {
-    pub const ALL: [ServerKind; 2] = [ServerKind::RustAnalyzer, ServerKind::Gopls];
+    pub const ALL: [ServerKind; 3] = [
+        ServerKind::RustAnalyzer,
+        ServerKind::Gopls,
+        ServerKind::TypescriptLanguageServer,
+    ];
 
     /// The server's own name, as statuses and toasts say it.
     pub fn name(self) -> &'static str {
         match self {
             ServerKind::RustAnalyzer => "rust-analyzer",
             ServerKind::Gopls => "gopls",
+            ServerKind::TypescriptLanguageServer => "typescript-language-server",
         }
     }
 
@@ -36,6 +43,8 @@ impl ServerKind {
         match lang.to_ascii_lowercase().as_str() {
             "rust" | "rs" => Some(ServerKind::RustAnalyzer),
             "go" | "golang" => Some(ServerKind::Gopls),
+            "typescript" | "ts" | "tsx" | "javascript" | "js" | "jsx" | "mjs" | "cjs" | "mts"
+            | "cts" => Some(ServerKind::TypescriptLanguageServer),
             _ => None,
         }
     }
@@ -46,6 +55,9 @@ impl ServerKind {
         match self {
             ServerKind::RustAnalyzer => &["Cargo.toml"],
             ServerKind::Gopls => &["go.mod", "go.work"],
+            ServerKind::TypescriptLanguageServer => {
+                &["tsconfig.json", "jsconfig.json", "package.json"]
+            }
         }
     }
 
@@ -53,6 +65,9 @@ impl ServerKind {
     pub fn initialize_timeout(self) -> Duration {
         match self {
             ServerKind::RustAnalyzer | ServerKind::Gopls => Duration::from_secs(5),
+            // tsserver starts under it, which takes a while on a large
+            // project.
+            ServerKind::TypescriptLanguageServer => Duration::from_secs(15),
         }
     }
 
@@ -72,6 +87,10 @@ pub fn language_id(path: &str) -> Option<(ServerKind, &'static str)> {
     match ext.to_ascii_lowercase().as_str() {
         "rs" => Some((ServerKind::RustAnalyzer, "rust")),
         "go" => Some((ServerKind::Gopls, "go")),
+        "ts" | "mts" | "cts" => Some((ServerKind::TypescriptLanguageServer, "typescript")),
+        "tsx" => Some((ServerKind::TypescriptLanguageServer, "typescriptreact")),
+        "js" | "mjs" | "cjs" => Some((ServerKind::TypescriptLanguageServer, "javascript")),
+        "jsx" => Some((ServerKind::TypescriptLanguageServer, "javascriptreact")),
         _ => None,
     }
 }
@@ -168,6 +187,7 @@ impl Env {
 pub enum Need {
     Rustup,
     Go,
+    Node,
 }
 
 /// A server that wasn't found: what's missing, and how to install it when
@@ -189,6 +209,9 @@ impl Missing {
         match (self.needs, &self.toolchain) {
             (Some(Need::Rustup), _) => format!("{name} needs rustup, which isn't on your PATH."),
             (Some(Need::Go), _) => format!("{name} needs Go, which isn't on your PATH."),
+            (Some(Need::Node), _) => {
+                format!("{name} needs Node and npm, which aren't on your PATH.")
+            }
             (None, Some(toolchain)) => {
                 format!("{name} isn't installed for Rust {}.", short_toolchain(toolchain))
             }
@@ -266,7 +289,93 @@ pub fn find(kind: ServerKind, root: &Path, env: &Env) -> Result<ServerSpec, Miss
     match kind {
         ServerKind::RustAnalyzer => find_rust_analyzer(root, env),
         ServerKind::Gopls => find_gopls(env),
+        ServerKind::TypescriptLanguageServer => find_typescript_language_server(root, env),
     }
+}
+
+/// What Perch says as a server starts, once: a TypeScript checkout without
+/// its packages, whose imports from them can't resolve. Perch doesn't
+/// install them, since that runs the pull request's install scripts.
+pub fn start_warnings(kind: ServerKind, root: &Path) -> Vec<String> {
+    match kind {
+        ServerKind::TypescriptLanguageServer
+            if root.join("package.json").is_file() && !root.join("node_modules").is_dir() =>
+        {
+            vec!["No node_modules in this checkout, so imports from packages won't resolve.".into()]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The typescript-language-server Perch installs, and the TypeScript
+/// beside it. TypeScript 7 has no tsserver for it to run, so 6 it is.
+const TYPESCRIPT_LANGUAGE_SERVER_PIN: &str = "6.0.1";
+const TYPESCRIPT_PIN: &str = "6.0.3";
+
+/// typescript-language-server on `PATH`, else Perch's own. It runs the
+/// checkout's own TypeScript when the checkout has one with a tsserver,
+/// else the one installed beside it. Missing, Perch installs both with npm
+/// into its own directory, without their install scripts.
+fn find_typescript_language_server(root: &Path, env: &Env) -> Result<ServerSpec, Missing> {
+    let kind = ServerKind::TypescriptLanguageServer;
+    let users = env.which(kind.name());
+    let perchs = || newest_install(env, kind).map(|(_, dir)| dir);
+    let (binary, beside) = match users {
+        Some(binary) => (Some(binary), None),
+        None => match perchs() {
+            Some(dir) => (
+                Some(dir.join("node_modules/.bin").join(kind.name())).filter(|p| p.is_file()),
+                Some(dir.join("node_modules/typescript/lib")),
+            ),
+            None => (None, None),
+        },
+    };
+    if let Some(binary) = binary {
+        let checkouts = root.join("node_modules/typescript/lib");
+        let tsserver = [Some(checkouts), beside]
+            .into_iter()
+            .flatten()
+            .find(|lib| lib.join("tsserver.js").is_file());
+        let mut options = serde_json::json!({ "hostInfo": "perch" });
+        if let Some(lib) = tsserver {
+            options["tsserver"] = serde_json::json!({ "path": lib.display().to_string() });
+        }
+        return Ok(ServerSpec {
+            kind,
+            binary,
+            args: vec!["--stdio".into()],
+            options,
+        });
+    }
+    let (Some(npm), Some(_)) = (env.which("npm"), env.which("node")) else {
+        return Err(Missing {
+            kind,
+            needs: Some(Need::Node),
+            install: None,
+            toolchain: None,
+        });
+    };
+    let into = env.servers.join(kind.name()).join(TYPESCRIPT_LANGUAGE_SERVER_PIN);
+    Err(Missing {
+        kind,
+        needs: None,
+        install: Some(Box::new(Install::Command {
+            program: npm,
+            args: vec![
+                "install".into(),
+                "--prefix".into(),
+                partial(&into).display().to_string(),
+                "--ignore-scripts".into(),
+                "--no-fund".into(),
+                "--no-audit".into(),
+                format!("typescript-language-server@{TYPESCRIPT_LANGUAGE_SERVER_PIN}"),
+                format!("typescript@{TYPESCRIPT_PIN}"),
+            ],
+            env: Vec::new(),
+            into: Some(into),
+        })),
+        toolchain: None,
+    })
 }
 
 /// The gopls Perch installs, newest first, each with the oldest Go that
@@ -755,6 +864,68 @@ mod tests {
         assert_eq!(gopls(&fake).unwrap().binary, on_path);
     }
 
+    /// The TypeScript server: the user's, else Perch's, running the
+    /// checkout's TypeScript when it has a tsserver; missing, npm into
+    /// Perch's directory without install scripts, or nothing without Node.
+    #[test]
+    fn the_typescript_server_runs_the_checkouts_typescript() {
+        let fake = Fake::new();
+        let kind = ServerKind::TypescriptLanguageServer;
+        let ts = |fake: &Fake| find(kind, &fake.path("checkout"), &fake.env());
+        assert_eq!(ts(&fake).unwrap_err().needs, Some(Need::Node));
+        fake.tool("npm", "exit 0");
+        assert_eq!(ts(&fake).unwrap_err().needs, Some(Need::Node), "npm without node");
+        fake.tool("node", "exit 0");
+        let missing = ts(&fake).unwrap_err();
+        let into = fake.path("servers/typescript-language-server/6.0.1");
+        assert_eq!(
+            missing.install.unwrap().shown(),
+            format!(
+                "npm install --prefix {} --ignore-scripts --no-fund --no-audit \
+                 typescript-language-server@6.0.1 typescript@6.0.3",
+                partial(&into).display()
+            )
+        );
+
+        // Perch's own, with the TypeScript installed beside it.
+        let bin = into.join("node_modules/.bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("typescript-language-server"), "").unwrap();
+        let beside = into.join("node_modules/typescript/lib");
+        std::fs::create_dir_all(&beside).unwrap();
+        std::fs::write(beside.join("tsserver.js"), "").unwrap();
+        let spec = ts(&fake).unwrap();
+        assert_eq!(spec.binary, bin.join("typescript-language-server"));
+        assert_eq!(spec.args, ["--stdio"]);
+        assert_eq!(spec.options["tsserver"]["path"], beside.display().to_string());
+
+        // The checkout's own TypeScript, when it has a tsserver: 7 doesn't.
+        let checkouts = fake.path("checkout/node_modules/typescript/lib");
+        std::fs::create_dir_all(&checkouts).unwrap();
+        assert_eq!(ts(&fake).unwrap().options["tsserver"]["path"], beside.display().to_string());
+        std::fs::write(checkouts.join("tsserver.js"), "").unwrap();
+        assert_eq!(
+            ts(&fake).unwrap().options["tsserver"]["path"],
+            checkouts.display().to_string()
+        );
+
+        let users = fake.tool("typescript-language-server", "exit 0");
+        assert_eq!(ts(&fake).unwrap().binary, users);
+    }
+
+    #[test]
+    fn a_checkout_without_its_packages_is_warned_about() {
+        let fake = Fake::new();
+        let root = fake.path("checkout");
+        let kind = ServerKind::TypescriptLanguageServer;
+        assert!(start_warnings(kind, &root).is_empty());
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        assert_eq!(start_warnings(kind, &root).len(), 1);
+        assert!(start_warnings(ServerKind::Gopls, &root).is_empty());
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        assert!(start_warnings(kind, &root).is_empty());
+    }
+
     #[test]
     fn go_says_its_version() {
         assert_eq!(parse_go_version("go version go1.25.0 darwin/arm64\n"), Some((1, 25)));
@@ -791,6 +962,12 @@ mod tests {
         assert_eq!(ServerKind::for_fence("diff"), None);
         assert_eq!(language_id("cmd/main.go"), Some((ServerKind::Gopls, "go")));
         assert_eq!(ServerKind::for_fence("golang"), Some(ServerKind::Gopls));
+        let ts = ServerKind::TypescriptLanguageServer;
+        assert_eq!(language_id("src/App.tsx"), Some((ts, "typescriptreact")));
+        assert_eq!(language_id("src/App.jsx"), Some((ts, "javascriptreact")));
+        assert_eq!(language_id("index.mjs"), Some((ts, "javascript")));
+        assert_eq!(language_id("a.d.cts"), Some((ts, "typescript")));
+        assert_eq!(ServerKind::for_fence("tsx"), Some(ts));
     }
 
     #[test]

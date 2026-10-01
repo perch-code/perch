@@ -246,9 +246,13 @@ deliberate: one click, and from then on the server is the toolchain's.
 
 - `typescript-language-server --stdio`.
 - Initialization options: `tsserver.path` is the checkout's
-  `node_modules/typescript/lib` when it exists, so the project's own
-  TypeScript answers. Otherwise it's the `typescript` installed beside the
-  server (Perch's own) or, for a `PATH` server, left unset.
+  `node_modules/typescript/lib` when it has a `tsserver.js`, so the
+  project's own TypeScript answers. TypeScript 7, the native port, has
+  none, so a checkout on it falls back like one without TypeScript: to the
+  `typescript` installed beside the server (Perch's own) or, for a `PATH`
+  server, unset. Perch pins typescript-language-server 6.0.1 and
+  TypeScript 6.0.3, the last with a tsserver.
+- The warning is told once as the server starts, from `start_warnings`.
 - A checkout with a `package.json` at its root and no `node_modules` gets
   one warning: `No node_modules in this checkout, so imports from packages
   won't resolve.` Perch doesn't install them, since that runs the PR's

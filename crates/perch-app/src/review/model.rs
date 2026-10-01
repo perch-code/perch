@@ -317,7 +317,8 @@ pub struct References {
 /// `rust-src` is its library crate, `std`, `core` or `alloc`. A Go module
 /// in the module cache is its path and version, `github.com/spf13/cobra
 /// v1.8.0`, and a file of Go's own library `go` and its package, `go
-/// net/http`. Anywhere else under the home directory reads as its path
+/// net/http`. A file under `node_modules` is its package, `react`, with
+/// its version where pnpm's store gives one, `react 18.2.0`. Anywhere else under the home directory reads as its path
 /// relative to the home directory, and anywhere else as the path.
 pub fn outside_label(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
     let parts: Vec<&str> = path
@@ -357,6 +358,9 @@ pub fn outside_label(path: &std::path::Path, home: Option<&std::path::Path>) -> 
             format!("go {package}")
         };
     }
+    if let Some(package) = node_package(&parts) {
+        return package;
+    }
     // <GOMODCACHE>/<module>@<version>/..., under `pkg/mod`.
     if let Some(at) = parts.windows(2).position(|w| w == ["pkg", "mod"]) {
         let rest = &parts[at + 2..];
@@ -390,6 +394,30 @@ fn go_std_package(path: &std::path::Path, parts: &[&str]) -> Option<String> {
             path.ancestors().nth(up).is_some_and(|dir| dir.join("VERSION").is_file())
         });
     is_root.then(|| parts[at + 1..parts.len() - 1].join("/"))
+}
+
+/// The package a file under `node_modules` is in, from the last
+/// `node_modules` on its path, scope and all; with its version when pnpm's
+/// store, `.pnpm/<name>@<version>/node_modules/<name>`, names one.
+fn node_package(parts: &[&str]) -> Option<String> {
+    let at = parts.iter().rposition(|p| *p == "node_modules")?;
+    let first = *parts.get(at + 1)?;
+    let name = if first.starts_with('@') {
+        format!("{first}/{}", parts.get(at + 2)?)
+    } else {
+        first.to_string()
+    };
+    // pnpm: `.pnpm/@scope+name@1.2.3_peer@4.5.6/node_modules/@scope/name`.
+    let version = at
+        .checked_sub(1)
+        .and_then(|i| parts.get(i))
+        .filter(|_| at >= 2 && parts[at - 2] == ".pnpm")
+        .and_then(|store| store.strip_prefix(&format!("{}@", name.replace('/', "+"))))
+        .map(|rest| rest.split('_').next().unwrap_or(rest));
+    Some(match version {
+        Some(version) => format!("{name} {version}"),
+        None => name,
+    })
 }
 
 /// A module path as the module cache writes it, with each capital as `!`
@@ -6390,6 +6418,32 @@ mod tests {
         assert_ne!(outside_label(&file, None), "go strings");
         std::fs::write(dir.path().join("go/VERSION"), "go1.25.1").unwrap();
         assert_eq!(outside_label(&file, None), "go strings");
+    }
+
+    /// A file under node_modules is its package, by the last node_modules
+    /// on its path, with the version pnpm's store gives.
+    #[test]
+    fn a_package_file_outside_is_labelled_by_its_package() {
+        use std::path::Path;
+        let home = Path::new("/Users/me");
+        let label = |p: &str| outside_label(Path::new(p), Some(home));
+        assert_eq!(label("/Users/me/Code/app/node_modules/react/index.d.ts"), "react");
+        assert_eq!(
+            label("/Users/me/Code/app/node_modules/@types/node/fs.d.ts"),
+            "@types/node"
+        );
+        assert_eq!(
+            label("/Users/me/Code/app/node_modules/.pnpm/react-dom@18.2.0_react@18.2.0/node_modules/react-dom/index.d.ts"),
+            "react-dom 18.2.0"
+        );
+        assert_eq!(
+            label("/Users/me/Code/app/node_modules/.pnpm/@scope+pkg@1.2.3/node_modules/@scope/pkg/a.d.ts"),
+            "@scope/pkg 1.2.3"
+        );
+        assert_eq!(
+            label("/Users/me/.perch/servers/typescript-language-server/6.0.1/node_modules/typescript/lib/lib.dom.d.ts"),
+            "typescript"
+        );
     }
 
     #[test]

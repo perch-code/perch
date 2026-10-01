@@ -12,7 +12,7 @@ pub mod transport;
 pub use client::{Client, Request};
 pub use install::install;
 pub use server::{
-    find, kinds_at_root, language_id, partial, Env, Install, Missing, Need, ServerKind, ServerSpec,
+    find, kinds_at_root, language_id, partial, start_warnings, Env, Install, Missing, Need, ServerKind, ServerSpec,
     Status,
 };
 
