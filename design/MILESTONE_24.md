@@ -118,7 +118,8 @@ others don't, so:
 
 - `window/showMessage` of type Error makes the server `Unhealthy` with its
   message. Type Warning is a `ServerEvent::Warning`, told once per
-  message, as rust-analyzer's warnings are.
+  message, as rust-analyzer's warnings are. rust-analyzer's own messages
+  leave its status alone: its server status already says.
 - jdtls's `language/status` maps as: `Starting` and `ProjectStatus` with
   a message to `Indexing`, `Started` and `ServiceReady` to `Ready`, and
   `Error` to `Unhealthy`.
@@ -176,7 +177,7 @@ offers Install there too.
 | Server | Needs | Install runs | Into |
 | --- | --- | --- | --- |
 | rust-analyzer | rustup | `rustup component add rust-analyzer --toolchain <t>`, or `rustup toolchain install <t> --profile minimal --component rust-analyzer` when the toolchain is missing | the toolchain |
-| gopls | `go` | `go install golang.org/x/tools/gopls@v<pin>` with `GOBIN` set to Perch's directory | `~/.perch/servers/gopls/<pin>/` |
+| gopls | `go` | `go install golang.org/x/tools/gopls@v<pin>` with `GOBIN` set to Perch's directory and `GOTOOLCHAIN=local` | `~/.perch/servers/gopls/<pin>/` |
 | typescript-language-server | `node`, `npm` | `npm install --prefix <dir> --ignore-scripts --no-fund --no-audit typescript-language-server@<pin> typescript@<pin>` | `~/.perch/servers/typescript-language-server/<pin>/` |
 | jdtls | a JDK 21+ | a download of the release tarball from `download.eclipse.org`, checked against the pinned SHA-256, then unpacked | `~/.perch/servers/jdtls/<pin>/` |
 
@@ -186,8 +187,8 @@ for jdtls. Bumping one is a commit, like bumping a dependency.
 ### Installing
 
 - The backend runs the install with a 10-minute timeout. Its output goes
-  to the log. The toast becomes `Installing gopls…` with a spinner and no
-  close button until it ends.
+  to the log. The toast becomes `Installing gopls…` with no buttons until
+  it ends. (Perch has no spinner to give it.)
 - Perch installs into `<pin>.partial` and renames it to `<pin>` when the
   install succeeds, so a crash or a quit never leaves half a server where
   Perch looks. `.partial` directories are removed at startup.
@@ -227,6 +228,14 @@ deliberate: one click, and from then on the server is the toolchain's.
 
 - `gopls`, no arguments (it serves stdio by default), no initialization
   options.
+- Found on `PATH`, else in Go's default install directory, `~/go/bin`,
+  which a Finder launch has no `PATH` to, else Perch's own.
+- The pin depends on the local Go, from `go version` run with
+  `GOTOOLCHAIN=local` outside any module: gopls 0.23.0 builds only with Go
+  1.26, so Go 1.25 gets 0.21.1. The install runs with `GOTOOLCHAIN=local`
+  too, so the go command never downloads a newer Go for it; a Go too old
+  for every pin fails the install with Go's own line saying which it
+  needs.
 - External files from the module cache, `…/pkg/mod/<module>@<version>/…`,
   are labelled `<module> <version>`, with the cache's `!x` escapes turned
   back into uppercase. Files under `go env GOROOT`'s `src/`, or a

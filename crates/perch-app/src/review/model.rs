@@ -314,9 +314,11 @@ pub struct References {
 /// from, read off its path. A crate under cargo's registry is its name and
 /// version, `tokio 1.40.0`; a checkout under cargo's git directory is
 /// `git:` and the repository, `git: floem`; a file of the toolchain's
-/// `rust-src` is its library crate, `std`, `core` or `alloc`. Anywhere
-/// else under the home directory reads as its path relative to the home
-/// directory, and anywhere else as the path.
+/// `rust-src` is its library crate, `std`, `core` or `alloc`. A Go module
+/// in the module cache is its path and version, `github.com/spf13/cobra
+/// v1.8.0`, and a file of Go's own library `go` and its package, `go
+/// net/http`. Anywhere else under the home directory reads as its path
+/// relative to the home directory, and anywhere else as the path.
 pub fn outside_label(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
     let parts: Vec<&str> = path
         .components()
@@ -348,10 +350,60 @@ pub fn outside_label(path: &std::path::Path, home: Option<&std::path::Path>) -> 
     if let Some(krate) = after(&["lib", "rustlib", "src", "rust", "library"]) {
         return krate.to_string();
     }
+    if let Some(package) = go_std_package(path, &parts) {
+        return if package.is_empty() {
+            "go".to_string()
+        } else {
+            format!("go {package}")
+        };
+    }
+    // <GOMODCACHE>/<module>@<version>/..., under `pkg/mod`.
+    if let Some(at) = parts.windows(2).position(|w| w == ["pkg", "mod"]) {
+        let rest = &parts[at + 2..];
+        if let Some(i) = rest.iter().position(|p| p.contains('@')) {
+            if let Some((last, version)) = rest[i].split_once('@') {
+                let module = rest[..i].iter().copied().chain([last]).collect::<Vec<_>>().join("/");
+                return format!("{} {version}", unescape_module(&module));
+            }
+        }
+    }
     if let Some(relative) = home.and_then(|home| path.strip_prefix(home).ok()) {
         return relative.display().to_string();
     }
     path.display().to_string()
+}
+
+/// The package of a file of Go's standard library: what lies between a Go
+/// root's `src` and the file. A Go root is Homebrew's `libexec`, a
+/// toolchain the go command downloaded (`golang.org/toolchain@…`), or a
+/// `go` directory with Go's `VERSION` file in it.
+fn go_std_package(path: &std::path::Path, parts: &[&str]) -> Option<String> {
+    if !parts.last()?.ends_with(".go") {
+        return None;
+    }
+    let at = parts.iter().rposition(|p| *p == "src")?;
+    let root = *parts.get(at.checked_sub(1)?)?;
+    let is_root = root == "libexec"
+        || root.starts_with("toolchain@")
+        || (root.starts_with("go") && {
+            let up = parts.len() - at;
+            path.ancestors().nth(up).is_some_and(|dir| dir.join("VERSION").is_file())
+        });
+    is_root.then(|| parts[at + 1..parts.len() - 1].join("/"))
+}
+
+/// A module path as the module cache writes it, with each capital as `!`
+/// and the letter, read back: `github.com/!burnt!sushi/toml`.
+fn unescape_module(escaped: &str) -> String {
+    let mut out = String::with_capacity(escaped.len());
+    let mut chars = escaped.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '!' => out.extend(chars.next().map(|c| c.to_ascii_uppercase())),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// `tokio-util-0.7.12` as `tokio-util` and `0.7.12`: the version starts
@@ -6305,6 +6357,39 @@ mod tests {
             outside_label(Path::new("/Users/me/Code/other/src/lib.rs"), None),
             "/Users/me/Code/other/src/lib.rs"
         );
+    }
+
+    /// Go's module cache labels a module by its path and version, capitals
+    /// read back; Go's own library labels by package.
+    #[test]
+    fn a_go_file_outside_is_labelled_by_module_or_package() {
+        use std::path::Path;
+        let home = Path::new("/Users/me");
+        let label = |p: &str| outside_label(Path::new(p), Some(home));
+        assert_eq!(
+            label("/Users/me/go/pkg/mod/github.com/spf13/cobra@v1.8.0/command.go"),
+            "github.com/spf13/cobra v1.8.0"
+        );
+        assert_eq!(
+            label("/Users/me/go/pkg/mod/github.com/!burnt!sushi/toml@v1.3.2/decode.go"),
+            "github.com/BurntSushi/toml v1.3.2"
+        );
+        assert_eq!(
+            label("/opt/homebrew/Cellar/go/1.25.1/libexec/src/net/http/client.go"),
+            "go net/http"
+        );
+        assert_eq!(
+            label("/Users/me/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.1.darwin-arm64/src/fmt/print.go"),
+            "go fmt"
+        );
+        // A `go` directory is Go's root only with Go's VERSION in it.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("go/src/strings/builder.go");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "").unwrap();
+        assert_ne!(outside_label(&file, None), "go strings");
+        std::fs::write(dir.path().join("go/VERSION"), "go1.25.1").unwrap();
+        assert_eq!(outside_label(&file, None), "go strings");
     }
 
     #[test]

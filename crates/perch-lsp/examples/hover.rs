@@ -1,4 +1,6 @@
-//! Start rust-analyzer on a workspace and ask it about a position.
+//! Start a file's language server on a workspace and ask it about a
+//! position. The server is the one for the file's language; `--symbols`
+//! asks rust-analyzer.
 //!
 //!     cargo run -p perch-lsp --example hover -- <worktree> <file> <line> <col> [mode]
 //!     cargo run -p perch-lsp --example hover -- <worktree> --symbols <query>
@@ -55,7 +57,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let spec = find(ServerKind::RustAnalyzer, &root, &Env::current(std::env::temp_dir()))
+    let kind = ServerKind::for_path(&args[1]).unwrap_or(ServerKind::RustAnalyzer);
+    // Perch's own installs, under `$PERCH_HOME` as Perch has it.
+    let servers = std::env::var_os("PERCH_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".perch")))
+        .map_or_else(std::env::temp_dir, |home| home.join("servers"));
+    let spec = find(kind, &root, &Env::current(servers))
         .map_err(|missing| missing.describe())?;
     eprintln!("server: {}", spec.binary.display());
 
@@ -74,11 +82,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match event {
                 ServerEvent::Status(Status::Ready) => return true,
                 ServerEvent::Status(s @ Status::Unhealthy { .. }) => {
-                    eprintln!("\n  {}", s.describe(ServerKind::RustAnalyzer));
+                    eprintln!("\n  {}", s.describe(kind));
                     return false;
                 }
                 ServerEvent::Warning { message } => eprintln!("\n  warning: {message}"),
-                ServerEvent::Status(s) => eprint!("\r  {}          ", s.describe(ServerKind::RustAnalyzer)),
+                ServerEvent::Status(s) => eprint!("\r  {}          ", s.describe(kind)),
                 ServerEvent::Diagnostics { uri, diagnostics } => {
                     if !diagnostics.is_empty() {
                         eprintln!("\n  {} diagnostics in {uri}", diagnostics.len());
@@ -98,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         while let Some(event) = rx.recv().await {
             match event {
                 ServerEvent::Status(s @ Status::Unhealthy { .. }) => {
-                    eprintln!("  {}", s.describe(ServerKind::RustAnalyzer))
+                    eprintln!("  {}", s.describe(kind))
                 }
                 ServerEvent::Warning { message } => eprintln!("  warning: {message}"),
                 _ => {}

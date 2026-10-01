@@ -594,19 +594,28 @@ fn index_of(state: ReviewState) -> Rc<PathIndex> {
 // Symbols
 // ---------------------------------------------------------------------
 
-/// A name to ask rust-analyzer about: the name as written, which its
-/// answer is kept under, and its identifiers, qualifiers first.
+/// A name to ask the language servers about: the name as written, which
+/// its answer is kept under, its identifiers, qualifiers first, and the
+/// one server to ask when a fence named its language. Asked of every
+/// server otherwise.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NameAsk {
     pub key: String,
     pub segments: Vec<String>,
+    pub server: Option<perch_lsp::ServerKind>,
 }
 
 impl NameAsk {
-    fn of(name: &WrittenName) -> Self {
+    fn of(name: &WrittenName, server: Option<perch_lsp::ServerKind>) -> Self {
         NameAsk {
-            key: name.text.clone(),
+            // A name one server is asked about is kept apart from the same
+            // name asked of all.
+            key: match server {
+                Some(kind) => format!("{}:{}", kind.name(), name.text),
+                None => name.text.clone(),
+            },
             segments: name.names(),
+            server,
         }
     }
 }
@@ -858,6 +867,9 @@ impl Refs {
 pub struct Plan {
     pub links: Vec<(Range<usize>, Target)>,
     pub names: Vec<(usize, WrittenName)>,
+    /// The server a fenced block's language names, which alone is asked
+    /// about its names.
+    pub server: Option<perch_lsp::ServerKind>,
 }
 
 impl Plan {
@@ -919,7 +931,7 @@ pub fn linked_run(
     let asks: Vec<NameAsk> = plan
         .names
         .iter()
-        .map(|(_, name)| NameAsk::of(name))
+        .map(|(_, name)| NameAsk::of(name, plan.server))
         .collect();
     let keys: Vec<String> = asks.iter().map(|a| a.key.clone()).collect();
     let state = refs.state;
@@ -1483,6 +1495,7 @@ mod tests {
         let ask = |key: &str| NameAsk {
             key: key.into(),
             segments: vec![key.into()],
+            server: None,
         };
         state.ask_names(&[ask("Db"), ask("Manifest")]);
         state.ask_names(&[ask("Db")]);

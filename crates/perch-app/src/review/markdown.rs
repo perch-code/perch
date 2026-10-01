@@ -1672,7 +1672,10 @@ fn task_box(checked: bool, size: f32) -> AnyView {
 /// something of the review's worktree.
 fn code_view(text: String, lang: Option<String>, ctx: Ctx) -> AnyView {
     let code_size = small_size(ctx.size);
-    let mut plan = Plan::default();
+    let mut plan = Plan {
+        server: lang.as_deref().and_then(perch_lsp::ServerKind::for_fence),
+        ..Plan::default()
+    };
     if let Some(refs) = ctx.refs {
         let symbols = code_refs::names_in_fence(lang.as_deref());
         plan.add_mentions(refs, 0, code_refs::scan(&text, symbols));
@@ -3127,6 +3130,7 @@ mod tests {
                 vec![NameAsk {
                     key: "Manifest::load()".into(),
                     segments: vec!["Manifest".into(), "load".into()],
+                    server: None,
                 }]
             );
             assert!(links_on_first_line(&mut h, 0).is_empty(), "no link before the answer");

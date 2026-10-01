@@ -892,15 +892,15 @@ fn notice_text(state: ReviewState) -> Option<String> {
             perch_git::Scope::Commit { sha } => {
                 let short: String = sha.chars().take(7).collect();
                 return Some(format!(
-                    "Showing {short}; rust-analyzer sees the working tree"
+                    "Showing {short}; the language servers see the working tree"
                 ));
             }
             perch_git::Scope::Staged => {
-                return Some("Showing the index; rust-analyzer sees the working tree".to_string());
+                return Some("Showing the index; the language servers see the working tree".to_string());
             }
             perch_git::Scope::Run { .. } => {
                 return Some(
-                    "Showing what a run changed; rust-analyzer sees the working tree".to_string(),
+                    "Showing what a run changed; the language servers see the working tree".to_string(),
                 );
             }
             _ => {}

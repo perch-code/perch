@@ -4988,20 +4988,27 @@ fn spawn_names(
             let _ = events.send(Event::LspNames { token, answers });
             return;
         };
-        let mut found: std::collections::HashMap<String, Vec<perch_lsp::client::Defined>> =
-            std::collections::HashMap::new();
+        // What each identifier names, by the server asked, all of them
+        // under `None`.
+        let mut found: std::collections::HashMap<
+            Option<perch_lsp::ServerKind>,
+            std::collections::HashMap<String, Vec<perch_lsp::client::Defined>>,
+        > = std::collections::HashMap::new();
         for name in names {
+            let found = found.entry(name.server).or_default();
             for segment in &name.segments {
                 if !found.contains_key(segment) {
-                    // Every server is asked, and what each names is put
-                    // together. `#` asks rust-analyzer for symbols of
-                    // every kind, not types alone; the others take the
-                    // name alone.
+                    // Every server is asked, or the one the name's fence
+                    // names, and what each names is put together. `#` asks
+                    // rust-analyzer for symbols of every kind, not types
+                    // alone; the others take the name alone.
                     let mut exact = Vec::new();
-                    for client in &clients {
+                    let asked = clients
+                        .iter()
+                        .filter(|c| name.server.is_none_or(|kind| c.kind() == kind));
+                    for client in asked {
                         let query = match client.kind() {
                             perch_lsp::ServerKind::RustAnalyzer => format!("{segment}#"),
-                            #[allow(unreachable_patterns)]
                             _ => segment.clone(),
                         };
                         let symbols = client.workspace_symbols(&query).await;
@@ -5010,7 +5017,7 @@ fn spawn_names(
                     found.insert(segment.clone(), exact);
                 }
             }
-            let answer = match crate::review::code_refs::pick(&name.segments, &found, &worktree) {
+            let answer = match crate::review::code_refs::pick(&name.segments, found, &worktree) {
                 Some((segments, locations)) => {
                     let located = read_locations(&worktree, &locations).await;
                     (!located.is_empty()).then(|| (segments, Arc::new(located)))
@@ -16813,6 +16820,14 @@ mod tests {
         std::fs::write(root.join("Cargo.toml"), "").unwrap();
         assert_eq!(wanted_servers(root, &[changed("README.md")]), [ServerKind::RustAnalyzer]);
         assert_eq!(wanted_servers(root, &[]), [ServerKind::RustAnalyzer]);
+        assert_eq!(
+            wanted_servers(root, &[changed("cmd/main.go"), changed("src/lib.rs")]),
+            [ServerKind::RustAnalyzer, ServerKind::Gopls]
+        );
+        assert_eq!(wanted_servers(root, &[changed("main.go")]), [ServerKind::Gopls]);
+        std::fs::remove_file(root.join("Cargo.toml")).unwrap();
+        std::fs::write(root.join("go.mod"), "module x\n").unwrap();
+        assert_eq!(wanted_servers(root, &[]), [ServerKind::Gopls], "an issue in a Go repository");
     }
 
     #[test]
@@ -18395,6 +18410,155 @@ mod tests {
             review_group_id: None,
             review_request_id: None,
         });
+    }
+
+    /// A language server that answers a hover with its own name, and a
+    /// workspace search with a symbol of that name in its own file when
+    /// the name starts with its prefix.
+    const NAMED_SERVER: &str = r##"
+import json, sys
+name, prefix, root = sys.argv[1], sys.argv[2], sys.argv[3]
+def send(message):
+    body = json.dumps(message).encode()
+    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+    sys.stdout.buffer.flush()
+while True:
+    length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            sys.exit(0)
+        if line in (b"\r\n", b"\n"):
+            break
+        key, _, value = line.decode().partition(":")
+        if key.lower() == "content-length":
+            length = int(value)
+    message = json.loads(sys.stdin.buffer.read(length))
+    method = message.get("method")
+    if method == "exit":
+        sys.exit(0)
+    if "id" not in message:
+        continue
+    result = None
+    if method == "initialize":
+        result = {"capabilities": {}}
+    elif method == "textDocument/hover":
+        result = {"contents": {"kind": "markdown", "value": name}}
+    elif method == "workspace/symbol":
+        query = message["params"]["query"].rstrip("#")
+        if query.startswith(prefix):
+            spot = {"line": 0, "character": 0}
+            result = [{"name": query, "kind": 5, "location": {
+                "uri": "file://" + root + "/" + name + ".txt",
+                "range": {"start": spot, "end": spot}}}]
+        else:
+            result = []
+    send({"jsonrpc": "2.0", "id": message["id"], "result": result})
+"##;
+
+    /// Start a `NAMED_SERVER` as `kind`, answering names that start with
+    /// `prefix`.
+    async fn named_server(
+        root: &Path,
+        kind: perch_lsp::ServerKind,
+        prefix: &str,
+    ) -> Arc<perch_lsp::Client> {
+        let script = root.join(format!("{}.py", kind.name()));
+        std::fs::write(&script, NAMED_SERVER).unwrap();
+        std::fs::write(root.join(format!("{}.txt", kind.name())), "here\n").unwrap();
+        let spec = perch_lsp::ServerSpec {
+            kind,
+            binary: "python3".into(),
+            args: vec![
+                script.display().to_string(),
+                kind.name().into(),
+                prefix.into(),
+                root.display().to_string(),
+            ],
+            options: serde_json::Value::Null,
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        perch_lsp::Client::start(spec, root, tx).await.unwrap()
+    }
+
+    /// Each file's asks go to its own language's server; a name from prose
+    /// is asked of every server, and one in a fence of the server its
+    /// language names alone; one server gone leaves the other answering.
+    #[tokio::test]
+    async fn each_ask_goes_to_the_server_for_its_language() {
+        use perch_lsp::ServerKind;
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(dir.path(), &nowhere(), &[]);
+        let tree = tempfile::tempdir().unwrap();
+        let worktree = std::fs::canonicalize(tree.path()).unwrap();
+        let item = store_pull(&ctx, 8);
+        open_in_slot(&ctx, &item);
+        if let Some(open) = ctx.slot.lock().unwrap().as_mut() {
+            open.checkout.worktree = worktree.clone();
+        }
+        let rust = named_server(&worktree, ServerKind::RustAnalyzer, "Rust").await;
+        let go = named_server(&worktree, ServerKind::Gopls, "Go").await;
+        {
+            let mut servers = ctx.language_servers.lock().await;
+            servers.insert(ServerKind::RustAnalyzer, rust.clone());
+            servers.insert(ServerKind::Gopls, go.clone());
+        }
+
+        let hover = |path: &'static str| {
+            let (slot, servers) = (ctx.slot.clone(), ctx.language_servers.clone());
+            async move {
+                let (client, full) = resolve(&slot, &servers, path).await?;
+                let hover = client.hover(&full, 0, 0).await?;
+                Some(render_hover(&hover))
+            }
+        };
+        assert_eq!(hover("cmd/main.go").await.as_deref(), Some("gopls"));
+        assert_eq!(hover("src/lib.rs").await.as_deref(), Some("rust-analyzer"));
+        assert_eq!(hover("README.md").await, None);
+
+        let (events, received) = std::sync::mpsc::channel();
+        let ask = |key: &str, server| crate::review::code_refs::NameAsk {
+            key: key.into(),
+            segments: vec![key.trim_start_matches("gopls:").into()],
+            server,
+        };
+        spawn_names(
+            1,
+            vec![
+                ask("GoThing", None),
+                ask("RustThing", None),
+                ask("gopls:RustThing", Some(ServerKind::Gopls)),
+            ],
+            ctx.slot.clone(),
+            ctx.language_servers.clone(),
+            EventSender::from(events),
+        );
+        let answers = tokio::task::spawn_blocking(move || {
+            loop {
+                match received.recv().unwrap() {
+                    Event::LspNames { answers, .. } => return answers,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let found: Vec<(String, Option<String>)> = answers
+            .into_iter()
+            .map(|(key, answer)| (key, answer.map(|(_, located)| located[0].path.clone())))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("GoThing".to_string(), Some("gopls.txt".to_string())),
+                ("RustThing".to_string(), Some("rust-analyzer.txt".to_string())),
+                ("gopls:RustThing".to_string(), None),
+            ]
+        );
+
+        rust.shutdown().await;
+        assert_eq!(hover("cmd/main.go").await.as_deref(), Some("gopls"));
+        go.shutdown().await;
     }
 
     /// Give windows 1 and 2 views, as opening them does.

@@ -702,7 +702,12 @@ pub(crate) fn exit_reason<'a>(lines: impl DoubleEndedIterator<Item = &'a str> + 
 async fn read_loop(stdout: tokio::process::ChildStdout, pending: Pending, client: Arc<Client>) {
     let mut reader = BufReader::new(stdout);
     let mut headers = Vec::new();
-    let mut reported = Reported::default();
+    let mut reported = Reported {
+        // rust-analyzer says how it is with its server status; the others
+        // only say it in a message.
+        hears_messages: client.kind() != ServerKind::RustAnalyzer,
+        ..Default::default()
+    };
 
     loop {
         headers.clear();
@@ -777,7 +782,28 @@ fn handle_notification(method: &str, params: Value, reported: &mut Reported) -> 
             Some(health) => reported.health(health),
             None => Vec::new(),
         },
+        "window/showMessage" if reported.hears_messages => match message_health(&params) {
+            Some(health) => reported.health(health),
+            None => Vec::new(),
+        },
         _ => Vec::new(),
+    }
+}
+
+/// What a `window/showMessage` says of a server's health: an error leaves
+/// it unable to work, a warning leaves it usable, and anything else is
+/// news nobody needs.
+fn message_health(params: &Value) -> Option<Health> {
+    let message = params
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|m| !m.is_empty())?
+        .to_string();
+    match params.get("type").and_then(Value::as_u64)? {
+        1 => Some(Health::Error(message)),
+        2 => Some(Health::Warning(message)),
+        _ => None,
     }
 }
 
@@ -818,6 +844,8 @@ fn server_health(params: &Value) -> Option<Health> {
 /// goes quiet or busy.
 #[derive(Debug, Default)]
 struct Reported {
+    /// Whether `window/showMessage` says how the server is.
+    hears_messages: bool,
     progress: Option<Status>,
     health: Option<Health>,
     told: Option<Status>,
@@ -1221,6 +1249,31 @@ while True:
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A server that never reports progress is ready once it answers the
+    /// handshake; rust-analyzer waits to say so itself.
+    #[tokio::test]
+    async fn a_server_without_progress_is_ready_once_initialized() {
+        let dir = std::env::temp_dir().join(format!("perch-lsp-ready-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("server.py");
+        std::fs::write(&script, RECORDING_SERVER).unwrap();
+        let spec = ServerSpec {
+            kind: ServerKind::Gopls,
+            binary: PathBuf::from("python3"),
+            args: vec![script.display().to_string(), dir.join("methods").display().to_string()],
+            options: Value::Null,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let client = Client::start(spec, &dir, tx).await.unwrap();
+        let mut statuses = Vec::new();
+        while let Ok(ServerEvent::Status(status)) = rx.try_recv() {
+            statuses.push(status);
+        }
+        assert_eq!(statuses, [Status::Starting, Status::Ready]);
+        client.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn blocks_start_at_the_name_and_nest_outer_first() {
         let range = |a: u32, b: u32| json!({"start": {"line": a, "character": 0}, "end": {"line": b, "character": 1}});
@@ -1378,6 +1431,40 @@ while True:
             &[("experimental/serverStatus", json!({"health":"ok","quiescent":true}))],
         );
         assert_eq!(events, vec!["rust-analyzer ready"]);
+    }
+
+    /// A server with no status of its own says how it is in a message: an
+    /// error makes it unhealthy, a warning is told once. rust-analyzer's
+    /// messages leave its status alone.
+    #[test]
+    fn a_message_says_how_a_server_without_a_status_is() {
+        let message = |kind: u64, text: &str| {
+            ("window/showMessage", json!({"type": kind, "message": text}))
+        };
+        let mut reported = Reported {
+            hears_messages: true,
+            ..Default::default()
+        };
+        let events = told(
+            &mut reported,
+            &[
+                ("$/progress", json!({"value":{"kind":"end"}})),
+                message(2, "go.work is out of date"),
+                message(2, "go.work is out of date"),
+                message(3, "an info line"),
+                message(1, "Error loading workspace: go command required"),
+            ],
+        );
+        assert_eq!(
+            events,
+            vec![
+                "rust-analyzer ready",
+                "warning: go.work is out of date",
+                "rust-analyzer: Error loading workspace: go command required",
+            ]
+        );
+        let mut deaf = Reported::default();
+        assert_eq!(told(&mut deaf, &[message(1, "anything")]), Vec::<String>::new());
     }
 
     #[test]

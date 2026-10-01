@@ -8,17 +8,21 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ServerKind {
     RustAnalyzer,
+    Gopls,
 }
 
 impl ServerKind {
-    pub const ALL: [ServerKind; 1] = [ServerKind::RustAnalyzer];
+    pub const ALL: [ServerKind; 2] = [ServerKind::RustAnalyzer, ServerKind::Gopls];
 
     /// The server's own name, as statuses and toasts say it.
     pub fn name(self) -> &'static str {
         match self {
             ServerKind::RustAnalyzer => "rust-analyzer",
+            ServerKind::Gopls => "gopls",
         }
     }
+
+
 
     /// The kind that serves a file, by its extension. A path may be
     /// relative to the worktree or absolute.
@@ -31,6 +35,7 @@ impl ServerKind {
     pub fn for_fence(lang: &str) -> Option<Self> {
         match lang.to_ascii_lowercase().as_str() {
             "rust" | "rs" => Some(ServerKind::RustAnalyzer),
+            "go" | "golang" => Some(ServerKind::Gopls),
             _ => None,
         }
     }
@@ -40,13 +45,14 @@ impl ServerKind {
     pub fn markers(self) -> &'static [&'static str] {
         match self {
             ServerKind::RustAnalyzer => &["Cargo.toml"],
+            ServerKind::Gopls => &["go.mod", "go.work"],
         }
     }
 
     /// How long the handshake waits for the server's answer.
     pub fn initialize_timeout(self) -> Duration {
         match self {
-            ServerKind::RustAnalyzer => Duration::from_secs(5),
+            ServerKind::RustAnalyzer | ServerKind::Gopls => Duration::from_secs(5),
         }
     }
 
@@ -65,6 +71,7 @@ pub fn language_id(path: &str) -> Option<(ServerKind, &'static str)> {
     let (_, ext) = name.rsplit_once('.')?;
     match ext.to_ascii_lowercase().as_str() {
         "rs" => Some((ServerKind::RustAnalyzer, "rust")),
+        "go" => Some((ServerKind::Gopls, "go")),
         _ => None,
     }
 }
@@ -160,6 +167,7 @@ impl Env {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Need {
     Rustup,
+    Go,
 }
 
 /// A server that wasn't found: what's missing, and how to install it when
@@ -180,6 +188,7 @@ impl Missing {
         let name = self.kind.name();
         match (self.needs, &self.toolchain) {
             (Some(Need::Rustup), _) => format!("{name} needs rustup, which isn't on your PATH."),
+            (Some(Need::Go), _) => format!("{name} needs Go, which isn't on your PATH."),
             (None, Some(toolchain)) => {
                 format!("{name} isn't installed for Rust {}.", short_toolchain(toolchain))
             }
@@ -256,7 +265,130 @@ pub fn partial(into: &Path) -> PathBuf {
 pub fn find(kind: ServerKind, root: &Path, env: &Env) -> Result<ServerSpec, Missing> {
     match kind {
         ServerKind::RustAnalyzer => find_rust_analyzer(root, env),
+        ServerKind::Gopls => find_gopls(env),
     }
+}
+
+/// The gopls Perch installs, newest first, each with the oldest Go that
+/// builds it. Bumping one is a commit, like bumping a dependency.
+const GOPLS_PINS: &[((u64, u64), &str)] = &[((1, 26), "0.23.0"), ((1, 25), "0.21.1")];
+
+/// The gopls the Go at `go` builds: the newest pin it is new enough for,
+/// else the oldest, whose install then says which Go it wants.
+fn gopls_pin(go: &Path) -> &'static str {
+    let version = go_version(go);
+    GOPLS_PINS
+        .iter()
+        .find(|(needs, _)| version.is_some_and(|v| v >= *needs))
+        .or(GOPLS_PINS.last())
+        .map_or("0.23.0", |(_, pin)| pin)
+}
+
+/// The local Go's major and minor version, from `go version`. Asked with
+/// `GOTOOLCHAIN=local` and outside any module, so the go command doesn't
+/// switch to, and download, a toolchain some go.mod asks for.
+fn go_version(go: &Path) -> Option<(u64, u64)> {
+    let out = std::process::Command::new(go)
+        .arg("version")
+        .env("GOTOOLCHAIN", "local")
+        .current_dir(std::env::temp_dir())
+        .output()
+        .ok()?;
+    parse_go_version(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `go version go1.25.0 darwin/arm64` as `(1, 25)`.
+fn parse_go_version(text: &str) -> Option<(u64, u64)> {
+    let word = text.split_whitespace().find_map(|w| w.strip_prefix("go1."))?;
+    let minor = word.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()?;
+    Some((1, minor))
+}
+
+/// gopls on `PATH`, else in Go's default install directory, `~/go/bin`,
+/// which a Finder launch has no `PATH` to, else Perch's own. Missing, Perch
+/// installs it with `go install` into its own directory.
+fn find_gopls(env: &Env) -> Result<ServerSpec, Missing> {
+    let kind = ServerKind::Gopls;
+    let users = env.which("gopls").or_else(|| {
+        env.home
+            .as_ref()
+            .map(|home| home.join("go/bin/gopls"))
+            .filter(|p| p.is_file())
+    });
+    let perchs = || {
+        newest_install(env, kind).map(|(_, dir)| dir.join("gopls")).filter(|p| p.is_file())
+    };
+    if let Some(binary) = users.or_else(perchs) {
+        return Ok(ServerSpec {
+            kind,
+            binary,
+            args: Vec::new(),
+            options: serde_json::Value::Null,
+        });
+    }
+    let Some(go) = env.which("go") else {
+        return Err(Missing {
+            kind,
+            needs: Some(Need::Go),
+            install: None,
+            toolchain: None,
+        });
+    };
+    Err(Missing {
+        kind,
+        needs: None,
+        install: Some(Box::new(gopls_install(&go, env))),
+        toolchain: None,
+    })
+}
+
+/// `go install` of the gopls `go` builds, into Perch's directory. Never
+/// with a Go toolchain the go command would download for it.
+pub(crate) fn gopls_install(go: &Path, env: &Env) -> Install {
+    let pin = gopls_pin(go);
+    let into = env.servers.join(ServerKind::Gopls.name()).join(pin);
+    Install::Command {
+        program: go.to_path_buf(),
+        args: vec!["install".into(), format!("golang.org/x/tools/gopls@v{pin}")],
+        env: vec![
+            ("GOBIN".into(), partial(&into).display().to_string()),
+            ("GOTOOLCHAIN".into(), "local".into()),
+        ],
+        into: Some(into),
+    }
+}
+
+/// The newest version of `kind` under Perch's servers directory, and its
+/// directory. An install still under way, `.partial`, isn't one.
+pub fn newest_install(env: &Env, kind: ServerKind) -> Option<(String, PathBuf)> {
+    installs(&env.servers.join(kind.name())).into_iter().next_back()
+}
+
+/// The finished installs in a server's directory, oldest first.
+pub fn installs(dir: &Path) -> Vec<(String, PathBuf)> {
+    let mut found: Vec<(String, PathBuf)> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_str()?.to_string();
+            (!name.ends_with(".partial")).then(|| (name, entry.path()))
+        })
+        .collect();
+    found.sort_by(|a, b| compare_versions(&a.0, &b.0));
+    found
+}
+
+/// Dotted versions compared number by number, `0.23.0` after `0.9.1`.
+pub fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    let numbers = |v: &str| -> Vec<u64> {
+        v.trim_start_matches('v')
+            .split(['.', '-'])
+            .map(|part| part.parse().unwrap_or(0))
+            .collect()
+    };
+    numbers(a).cmp(&numbers(b)).then_with(|| a.cmp(b))
 }
 
 fn find_rust_analyzer(root: &Path, env: &Env) -> Result<ServerSpec, Missing> {
@@ -578,6 +710,66 @@ mod tests {
         assert!(fake.rust().is_err());
     }
 
+    /// gopls: the user's on PATH, else in `~/go/bin`, else Perch's newest;
+    /// missing, `go install` into Perch's directory, or nothing without Go.
+    #[test]
+    fn gopls_is_the_users_else_perchs_else_installed_with_go() {
+        let fake = Fake::new();
+        let gopls = |fake: &Fake| find(ServerKind::Gopls, &fake.path("checkout"), &fake.env());
+        let missing = gopls(&fake).unwrap_err();
+        assert_eq!(missing.needs, Some(Need::Go));
+        assert_eq!(missing.describe(), "gopls needs Go, which isn't on your PATH.");
+
+        fake.tool("go", "echo go version go1.25.0 darwin/arm64");
+        let missing = gopls(&fake).unwrap_err();
+        assert_eq!(missing.describe(), "gopls isn't installed.");
+        assert_eq!(
+            missing.install.as_deref().unwrap().shown(),
+            format!(
+                "GOBIN={} GOTOOLCHAIN=local go install golang.org/x/tools/gopls@v0.21.1",
+                partial(&fake.path("servers/gopls/0.21.1")).display()
+            )
+        );
+        fake.tool("go", "echo go version go1.27.2 darwin/arm64");
+        let into = fake.path("servers/gopls/0.23.0");
+        assert!(gopls(&fake)
+            .unwrap_err()
+            .install
+            .unwrap()
+            .shown()
+            .ends_with("gopls@v0.23.0"));
+
+        // Perch's newest, with an install under way and an older one beside.
+        for version in ["0.9.1", "0.23.0", "0.24.0.partial"] {
+            let dir = fake.path("servers/gopls").join(version);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("gopls"), "").unwrap();
+        }
+        assert_eq!(gopls(&fake).unwrap().binary, into.join("gopls"));
+
+        let users = fake.path("home/go/bin");
+        std::fs::create_dir_all(&users).unwrap();
+        std::fs::write(users.join("gopls"), "").unwrap();
+        assert_eq!(gopls(&fake).unwrap().binary, users.join("gopls"));
+        let on_path = fake.tool("gopls", "exit 0");
+        assert_eq!(gopls(&fake).unwrap().binary, on_path);
+    }
+
+    #[test]
+    fn go_says_its_version() {
+        assert_eq!(parse_go_version("go version go1.25.0 darwin/arm64\n"), Some((1, 25)));
+        assert_eq!(parse_go_version("go version go1.26rc1 linux/amd64"), Some((1, 26)));
+        assert_eq!(parse_go_version("nonsense"), None);
+    }
+
+    #[test]
+    fn versions_compare_number_by_number() {
+        use std::cmp::Ordering;
+        assert_eq!(compare_versions("0.23.0", "0.9.1"), Ordering::Greater);
+        assert_eq!(compare_versions("v1.61.0", "1.60.0"), Ordering::Greater);
+        assert_eq!(compare_versions("6.0.1", "6.0.1"), Ordering::Equal);
+    }
+
     #[test]
     fn without_rustup_rust_analyzer_needs_it() {
         let fake = Fake::new();
@@ -597,6 +789,8 @@ mod tests {
         assert_eq!(ServerKind::for_path("Makefile"), None);
         assert_eq!(ServerKind::for_fence("Rust"), Some(ServerKind::RustAnalyzer));
         assert_eq!(ServerKind::for_fence("diff"), None);
+        assert_eq!(language_id("cmd/main.go"), Some((ServerKind::Gopls, "go")));
+        assert_eq!(ServerKind::for_fence("golang"), Some(ServerKind::Gopls));
     }
 
     #[test]
@@ -606,6 +800,8 @@ mod tests {
         assert!(kinds_at_root(&dir).is_empty());
         std::fs::write(dir.join("Cargo.toml"), "").unwrap();
         assert_eq!(kinds_at_root(&dir), [ServerKind::RustAnalyzer]);
+        std::fs::write(dir.join("go.work"), "").unwrap();
+        assert_eq!(kinds_at_root(&dir), [ServerKind::RustAnalyzer, ServerKind::Gopls]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
