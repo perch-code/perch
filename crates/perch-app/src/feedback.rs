@@ -701,7 +701,7 @@ pub fn prompt(
 reporting a {kind} to Perch's maintainers. Find out why it happened on this machine.\n\n\
 ## Their report\n\nTitle: {title}\n\n{body}\n\n\
 ## What Perch collected\n\n{summary}\n\n{diagnostics}\n\
-Perch's own logs are in `{logs_dir}` (the newest is `perch.log`). Its config is \
+Perch's own logs are in `{logs_dir}` (`perch.<date>.log`, one a day). Its config is \
 `~/.perch/config.toml`.\n\n\
 ## What to do\n\n\
 - Look into the reported problem on this machine: read Perch's logs and config, and run \

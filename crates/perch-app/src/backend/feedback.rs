@@ -528,7 +528,7 @@ async fn collect(ctx: &Ctx, request: &PrepareRequest) -> FeedbackContext {
         .map(|p| problem_line(p, request.seed.as_ref()))
         .collect();
 
-    let log = crate::log_file::tail(&crate::log_file::current(), feedback::LOG_LINES);
+    let log = crate::log_file::recent(&crate::log_file::dir(), feedback::LOG_LINES);
 
     let mut summary = format!(
         "Perch {version} ({commit}) · macOS {} {arch}",

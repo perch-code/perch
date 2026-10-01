@@ -232,9 +232,8 @@ fn main() {
     .run();
 }
 
-/// The log goes to stderr, for a terminal launch, and to
-/// `$PERCH_HOME/logs/perch.log`, which a Finder launch keeps and a bug
-/// report reads. One filter for both; the file gets no colours.
+/// The log goes to stderr, for a terminal launch, and to a file a day in
+/// `$PERCH_HOME/logs`, which a Finder launch keeps and a bug report reads. One filter for both; the file gets no colours.
 fn init_logging() {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
@@ -249,7 +248,7 @@ fn init_logging() {
     let stderr = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_filter(filter());
-    let file = log_file::DailyFile::open(&log_file::dir()).ok().map(|file| {
+    let file = log_file::appender(&log_file::dir()).ok().map(|file| {
         tracing_subscriber::fmt::layer()
             .with_ansi(false)
             .with_writer(file)

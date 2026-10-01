@@ -265,7 +265,8 @@ heading in the Diagnostics section:
   repository or number (see [Redaction](#redaction)).
 - **Recent problems**: the session's last 20 errors and warnings, oldest
   first, with times, the reported one marked.
-- **Log**: the last 300 lines of `perch.log`.
+- **Log**: the last 300 lines Perch logged, reaching into yesterday's
+  file early in the day.
 
 Each command gets five seconds. One that doesn't answer is reported as
 `timed out`, and the rest go on.
@@ -361,8 +362,9 @@ pass is a pure function with its own tests.
 
 ### The log file
 
-Perch writes its log to `~/.perch/logs/perch.log` as well as stderr,
-with the same filter and no colours. It rotates daily and keeps 7 files.
+Perch writes its log to `~/.perch/logs/perch.<date>.log` as well as
+stderr, with the same filter and no colours: `tracing-appender`, a new
+file each day, the newest 7 kept.
 A panic hook logs the panic message and location at `error` before the
 default hook runs, so a crash leaves its cause in the file.
 
@@ -401,9 +403,10 @@ default hook runs, so a crash leaves its cause in the file.
   HEAD` and `-dirty` from `git status --porcelain`, or `unknown` outside
   a checkout. It reruns when `git rev-parse --git-path HEAD` and the ref
   it names change, which works in a worktree, where `.git` is a file.
-- `log_file::DailyFile`, a small writer of Perch's own for the file:
-  `tracing-appender` would bring the `time` crate for a date jiff
-  already gives. Each event is one locked append.
+- `tracing-appender`'s daily `RollingFileAppender` for the file, written
+  to directly rather than through `non_blocking`: a panic on the main
+  thread aborts on its way out through AppKit, and a line queued for the
+  worker would go with it.
 - `perch-github`: `create_issue_labeled(repo, title, body, labels)`,
   which `create_issue` now calls with none. `issue_viewer_states(repo,
   numbers)`, one GraphQL query for the similar issues' node ids, 👍
@@ -523,7 +526,7 @@ These file real issues on `criccomini/perch`. Close them afterwards.
   `criccomini/perch` with the `bug` label. Reply on github.com: the
   reply reaches the Inbox.
 - Launch Perch from Finder, use it for a minute and quit:
-  `~/.perch/logs/perch.log` has the session.
+  `~/.perch/logs/perch.<today>.log` has the session.
 - Paste your token into the preview's text and press File issue: nothing
   is filed, and the preview shows `‹redacted›` where it was, with the
   notice. Press File issue again: the issue matches the preview.
