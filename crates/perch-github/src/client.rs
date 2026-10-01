@@ -38,7 +38,10 @@ use crate::reactions::{
 };
 use crate::responses::{Responses, BUDGET_BYTES};
 use crate::subjects::{SubjectLook, SubjectLookData};
-use crate::timeline::{tidy, PullEvent, TimelineEventPayload, TIMELINE_MAX_PAGES};
+use crate::timeline::{
+    fill_logins, tidy, wants_login, PullCommitPayload, PullEvent, TimelineEventPayload,
+    TIMELINE_MAX_PAGES,
+};
 use crate::workflow_runs::{WorkflowRunPayload, WorkflowRunsPayload};
 
 /// Page size for the notifications list. GitHub caps `per_page` at 50 here.
@@ -769,6 +772,20 @@ impl GitHub {
                     .retain(|own| !events.iter().any(|e| e.kind == own.kind && e.at == own.at));
                 discussion.events.extend(events);
                 discussion.events = tidy(std::mem::take(&mut discussion.events));
+                // The timeline names a commit's author by git's name and
+                // email; the commit list says whose account that is, and
+                // is asked only when an email did not say.
+                if wants_login(&discussion.events) {
+                    match self
+                        .list_all::<PullCommitPayload>(&format!("{base}/pulls/{number}/commits"))
+                        .await
+                    {
+                        Ok(commits) => fill_logins(&mut discussion.events, &commits),
+                        Err(e) => {
+                            tracing::warn!(repo = repo_full_name, number, error = %e, "could not read the commits' authors");
+                        }
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(repo = repo_full_name, number, error = %e, "could not read the timeline");

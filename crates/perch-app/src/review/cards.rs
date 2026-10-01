@@ -1476,17 +1476,23 @@ fn more_row(more: usize) -> impl IntoView {
 /// line names after "opened" and opens.
 ///
 /// Everything after the name is the event's own pieces: words, a label
-/// in its colours, a commit in the code face, or a reference to open. The
-/// line ends with when it happened.
+/// in its colours, a commit in the code face, or a reference to open. A
+/// commit on the head opens by itself, and a file its subject names opens
+/// on Files. The line ends with when it happened.
 pub fn event_row(
     app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
     event: PullEvent,
     author: Option<String>,
     link: Option<(u64, String)>,
 ) -> impl IntoView {
     let who = match &event.kind {
-        // A commit is signed by a name out of git, which is nobody's
-        // profile.
+        // A commit is signed by a name out of git, which leads to a
+        // profile only when GitHub tied it to an account.
+        PullEventKind::Committed { login, .. } if !login.is_empty() => {
+            Some(Name::Login(login.clone()))
+        }
         PullEventKind::Committed { author, .. } if event.actor.is_empty() => {
             (!author.is_empty()).then(|| Name::Plain(author.clone()))
         }
@@ -1530,7 +1536,7 @@ pub fn event_row(
         dyn_stack(
             move || pieces.clone().into_iter().enumerate(),
             |(i, piece)| format!("{i}:{}", piece.text()),
-            |(_, piece)| event_piece(piece),
+            move |(_, piece)| event_piece(state, backend.clone(), piece),
         )
         .style(|s| s.items_center().gap(4.0).min_width(0.0)),
         match link {
@@ -1539,17 +1545,13 @@ pub fn event_row(
                 .on_event_stop(el::Click, move |_, _| open_in_browser(&url))
                 // Underlined under the pointer, as a name is.
                 .style(|s| {
-                    clickable(
+                    underlined_link(
                         s.font_size(theme::TEXT_META)
                             .font_weight(theme::weight_emphasis())
                             .color(theme::FG)
                             .margin_left(4.0)
-                            .flex_shrink(0.0_f32)
-                            .padding_top(1.0)
-                            .border_bottom(1.0)
-                            .border_color(Color::TRANSPARENT),
+                            .flex_shrink(0.0_f32),
                     )
-                    .hover(|s| s.border_color(theme::FG_MUTED))
                 })
                 .into_any(),
             None => Empty::new().into_any(),
@@ -1572,19 +1574,34 @@ pub fn event_row(
 }
 
 /// One piece of an event's line.
-fn event_piece(piece: Piece) -> floem::AnyView {
+fn event_piece(state: ReviewState, backend: Rc<Backend>, piece: Piece) -> floem::AnyView {
     if piece.text().is_empty() {
         return Empty::new().into_any();
     }
     match piece {
-        Piece::Text(text) => Label::derived(move || text.clone())
-            .style(|s| {
-                s.font_size(theme::TEXT_META)
-                    .color(theme::FG_MUTED)
-                    .text_ellipsis()
-                    .min_width(0.0)
-            })
-            .into_any(),
+        Piece::Text(text) => event_words(text).into_any(),
+        Piece::Subject(subject) => event_subject(state, subject),
+        Piece::Commit(sha) => {
+            let short = short_sha(&sha);
+            let on_head = sha.clone();
+            Label::derived(move || short.clone())
+                .debug_name("event commit")
+                .on_event_stop(el::Click, move |_, _| open_commit(state, &backend, &sha))
+                .style(move |s| {
+                    let opens = pull_url(state).is_some() || has_commit(state, &on_head);
+                    let s = s
+                        .font_family(theme::CODE_FONT_STACK.to_string())
+                        .font_size(theme::CODE_FONT_SIZE)
+                        .color(theme::FG_MUTED)
+                        .flex_shrink(0.0_f32);
+                    if opens {
+                        underlined_link(s)
+                    } else {
+                        s
+                    }
+                })
+                .into_any()
+        }
         Piece::Label(label) => crate::review::summary::label_chip(label.name, label.color)
             .style(|s| s.flex_shrink(0.0_f32))
             .into_any(),
@@ -1632,6 +1649,100 @@ fn event_piece(piece: Piece) -> floem::AnyView {
             .into_any()
         }
     }
+}
+
+/// Words on an event's line, cut short when the line runs out.
+fn event_words(text: String) -> Label {
+    Label::derived(move || text.clone()).style(|s| {
+        s.font_size(theme::TEXT_META)
+            .color(theme::FG_MUTED)
+            .text_ellipsis()
+            .min_width(0.0)
+    })
+}
+
+/// A link on an event's line: the pointer over it, and an underline, the
+/// label's bottom border, that shows under the pointer. The pixel of
+/// padding on top balances the border, so the text sits level with the
+/// words beside it, as a name's does.
+fn underlined_link(s: floem::style::Style) -> floem::style::Style {
+    clickable(
+        s.padding_top(1.0)
+            .border_bottom(1.0)
+            .border_color(Color::TRANSPARENT),
+    )
+    .hover(|s| s.border_color(theme::FG_MUTED))
+}
+
+/// Whether the checkout has a commit, so Files can show it by itself.
+fn has_commit(state: ReviewState, sha: &str) -> bool {
+    state.commits.with_untracked(|commits| commits.iter().any(|c| c.sha == sha))
+}
+
+/// The pull request's page, which shows a head commit as one of its own.
+/// A bare branch has none, and its commits are all in the checkout.
+fn pull_url(state: ReviewState) -> Option<String> {
+    state
+        .pull_request
+        .with(|p| p.as_ref().map(|p| p.html_url.clone()))
+        .filter(|url| !url.is_empty())
+}
+
+/// Open a head commit: on Files, as the one commit's changes, when the
+/// checkout has it, and else under the pull request on GitHub. A
+/// checkout that has not fetched a push yet lacks its commits.
+fn open_commit(state: ReviewState, backend: &Backend, sha: &str) {
+    let item_id = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone()));
+    match item_id {
+        Some(item_id) if has_commit(state, sha) => {
+            backend.set_scope(&item_id, perch_git::Scope::Commit { sha: sha.to_string() });
+            state.show_tab(ItemTab::Code);
+        }
+        _ => {
+            if let Some(url) = floem::reactive::Effect::untrack(|| pull_url(state)) {
+                open_in_browser(&format!("{url}/commits/{sha}"));
+            }
+        }
+    }
+}
+
+/// A commit's subject, with each file it names a link to the file on
+/// Files. Only a checkout has Files, and a subject in one is drawn again
+/// as its listing lands, since what a path names is looked up there.
+fn event_subject(state: ReviewState, subject: String) -> floem::AnyView {
+    let Some(refs) = crate::review::code_refs::Refs::of(state) else {
+        return event_words(subject).into_any();
+    };
+    let runs = Memo::new(move |_| {
+        refs.track_files();
+        crate::review::timeline::subject_runs(&subject, |word| {
+            refs.file(&crate::review::code_refs::written_place(word)?)
+        })
+    });
+    dyn_container(
+        move || runs.get(),
+        move |runs| {
+            Stack::horizontal_from_iter(runs.into_iter().map(|(text, link)| match link {
+                None => event_words(text).into_any(),
+                Some(link) => Label::derived(move || text.clone())
+                    .debug_name("event file")
+                    .on_event_stop(el::Click, move |_, _| refs.go(&link))
+                    .style(|s| {
+                        underlined_link(
+                            s.font_size(theme::TEXT_META)
+                                .color(theme::FG)
+                                .text_ellipsis()
+                                .min_width(0.0),
+                        )
+                    })
+                    .into_any(),
+            }))
+            .style(|s| s.items_center().min_width(0.0))
+            .into_any()
+        },
+    )
+    .style(|s| s.min_width(0.0))
+    .into_any()
 }
 
 // ---------------------------------------------------------------------

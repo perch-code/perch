@@ -381,7 +381,15 @@ fn card_view(
                 let item = i.as_deref()?;
                 Some((item.subject.as_ref()?.number(), crate::ui::items::github_url(item)?))
             });
-            cards::event_row(app, event, pull.map(|p| p.author_login.clone()), link).into_any()
+            cards::event_row(
+                app,
+                state,
+                backend,
+                event,
+                pull.map(|p| p.author_login.clone()),
+                link,
+            )
+            .into_any()
         }
         Card::Thread(thread) => {
             let card_id = crate::review::doc::CardId::Thread(thread.id.clone());
@@ -1264,6 +1272,7 @@ mod tests {
                 PullEventKind::Committed {
                     sha: "abc1234def5678".into(),
                     author: "Chris Riccomini".into(),
+                    login: String::new(),
                     subject: "Fence the manifest ".repeat(12),
                 },
                 at("2026-09-15T09:00:00Z"),
@@ -1347,6 +1356,105 @@ mod tests {
                 row.debug_name()
             );
         }
+    }
+
+    /// A commit's line links what it names: its author's page when GitHub
+    /// tied the commit to an account, the commit itself, and a file its
+    /// subject names. A commit the checkout has opens on Files by itself;
+    /// one it lacks opens under the pull request on GitHub. A file opens
+    /// on Files.
+    #[test]
+    fn a_commit_line_links_its_author_its_sha_and_the_file_it_names() {
+        let (here, away) = ("a".repeat(40), "b".repeat(40));
+        let mut discussion = discussion();
+        let commit = |sha: &str, login: &str, subject: &str, when: &str| {
+            PullEvent::new(
+                PullEventKind::Committed {
+                    sha: sha.into(),
+                    author: "Chris".into(),
+                    login: login.into(),
+                    subject: subject.into(),
+                },
+                at(when),
+                "",
+            )
+        };
+        discussion.events.extend([
+            commit(&here, "criccomini", "Fence the manifest", "2026-09-15T09:00:00Z"),
+            commit(&away, "", "Update src/manifest.rs", "2026-09-15T10:00:00Z"),
+        ]);
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let checked_out = here.clone();
+        let (mut harness, _, state) = app_harness_prepared(backend, discussion, move |state| {
+            state.commits.set(Arc::new(vec![perch_git::Commit {
+                sha: checked_out,
+                subject: "Fence the manifest".into(),
+                body: String::new(),
+                author: "Chris".into(),
+                authored_at: at("2026-09-15T09:00:00Z"),
+            }]));
+            state.tree.set(Arc::new(vec![perch_git::TreeEntry::new("src/manifest.rs", false)]));
+        });
+        let root = harness.root_id();
+        let click = |harness: &mut HeadlessHarness, id: floem::ViewId| {
+            let c = id.get_visual_rect_no_clip().center();
+            assert_eq!(
+                harness.element_id_at(c.x, c.y).map(|e| e.owning_id()),
+                Some(id),
+                "{} is not under the pointer at {c:?}",
+                id.debug_name()
+            );
+            harness.click(c.x, c.y);
+        };
+        let opened = crate::ui::widgets::opened;
+        opened();
+
+        // The account's login, not git's name, as every other line names
+        // someone; a commit with no account is signed by git's name.
+        click(&mut harness, find(root, "name label - Label: \"criccomini\"").unwrap());
+        assert_eq!(opened(), vec!["https://github.com/criccomini".to_string()]);
+        assert!(find(root, "name label - Label: \"Chris\"").is_some());
+
+        let sha = |short: &str| {
+            find(root, &format!("event commit - Label: {short:?}"))
+                .unwrap_or_else(|| panic!("no commit {short}"))
+        };
+        click(&mut harness, sha("bbbbbbb"));
+        assert_eq!(
+            opened(),
+            vec![format!("https://github.com/criccomini/perch/pull/57/commits/{away}")]
+        );
+
+        while commands.try_recv().is_ok() {}
+        click(&mut harness, sha("aaaaaaa"));
+        assert!(opened().is_empty(), "the checkout has it");
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(crate::backend::Command::SetScope { item_id, scope: perch_git::Scope::Commit { sha }, .. })
+                if item_id == "wt" && sha == here
+        ));
+        assert_eq!(state.tab.get_untracked(), crate::review::ItemTab::Code);
+
+        state.show_tab(crate::review::ItemTab::Conversation);
+        harness.rebuild();
+        harness.paint();
+        let root = harness.root_id();
+        let file = find(root, "event file - Label: \"src/manifest.rs\"").expect("the file is a link");
+        // The space before the file is kept, though it ends a label.
+        let words = find(root, "Label: \"Update \"").unwrap();
+        let (words, path) = (words.get_visual_rect_no_clip(), file.get_visual_rect_no_clip());
+        let bare = {
+            use floem::text::{Attrs, AttrsList, FamilyOwned, TextLayout};
+            let family: Vec<FamilyOwned> = FamilyOwned::parse_list(crate::theme::FONT_STACK).collect();
+            let attrs = AttrsList::new(Attrs::new().font_size(crate::theme::TEXT_META).family(&family));
+            TextLayout::new_with_text("Update", attrs, None).size().width
+        };
+        assert!(path.x0 >= words.x0 + bare + 2.0, "no space: {words:?} then {path:?}, the word {bare} wide");
+        click(&mut harness, file);
+        assert_eq!(state.tab.get_untracked(), crate::review::ItemTab::Code);
+        harness.rebuild();
+        assert_eq!(state.active.get_untracked().as_deref(), Some("src/manifest.rs"), "Files took it");
+        assert!(opened().is_empty());
     }
 
     /// A name on a card is a link to its page on GitHub: the author of a

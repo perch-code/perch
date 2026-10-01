@@ -160,6 +160,7 @@ fn event_line(event: &PullEvent) -> Option<EventLine> {
             sha,
             author,
             subject,
+            ..
         } => {
             let who = if author.is_empty() {
                 actor
@@ -858,6 +859,7 @@ mod tests {
                 PullEventKind::Committed {
                     sha: "a1b2c3d4e5".into(),
                     author: "Rohan".into(),
+                    login: String::new(),
                     subject: "Batch writes".into(),
                 },
                 at("2026-09-16T13:00:00Z"),

@@ -146,6 +146,8 @@ fn spawn(comments: usize) -> (String, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec
                 page((start..end).map(|i| comment(i + 1)).collect())
             } else if path.contains("/pulls/1/reviews") {
                 page(vec![r#"{"id":9,"node_id":"PRR_9","user":{"login":"r"},"body":"lgtm","state":"APPROVED","submitted_at":"2026-09-16T11:40:00Z","html_url":"https://github.com/a/b/pull/1#pullrequestreview-9"}"#.into()])
+            } else if path.contains("/pulls/1/commits") {
+                page(vec![r#"{"sha":"abc1234def","author":{"login":"criccomini"}}"#.into()])
             } else if path.contains("/pulls/1/comments") {
                 page(vec![
                     r#"{"id":3,"node_id":"PRRC_3","pull_request_review_id":9,"user":{"login":"r"},"body":"here","path":"src/x.rs","line":41,"side":"LEFT","diff_hunk":"@@ -40,3 +40,3 @@","created_at":"2026-09-16T11:38:00Z","html_url":"https://github.com/a/b/pull/1#discussion_r3"}"#.into(),
@@ -203,6 +205,9 @@ async fn every_page_of_the_conversation_is_read() {
                 PullEventKind::Committed {
                     sha: "abc1234def".into(),
                     author: "Chris".into(),
+                    // The timeline sent no email that says whose it is,
+                    // and the commit list does.
+                    login: "criccomini".into(),
                     subject: "Fence the manifest".into(),
                 },
                 at("2026-09-15T09:00:00Z"),
@@ -238,9 +243,9 @@ async fn every_page_of_the_conversation_is_read() {
     assert!(d.review_threads[0].resolved);
     assert!(!d.review_threads[0].outdated);
     // The pull request, two comment pages, one reviews page, one line page,
-    // one timeline page, the review threads query, and two reactions
-    // queries.
-    assert_eq!(requests.load(Ordering::SeqCst), 9);
+    // one timeline page, one commits page, the review threads query, and
+    // two reactions queries.
+    assert_eq!(requests.load(Ordering::SeqCst), 10);
 }
 
 #[tokio::test]

@@ -27,7 +27,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use floem::prelude::*;
-use floem::reactive::{Effect, Memo, SignalGet, SignalWith};
+use floem::reactive::{Effect, Memo, SignalGet, SignalTrack, SignalWith};
 use floem::views::dyn_container;
 use floem::AnyView;
 use perch_git::{ChangedFile, TreeEntry};
@@ -798,16 +798,27 @@ impl Refs {
             Some(line) => format!("{}:{line}", link.path),
             None => link.path.clone(),
         };
-        let state = self.state;
+        let refs = *self;
         Target::Local {
             tip,
-            open: Rc::new(move || {
-                let at = link
-                    .line
-                    .map(|line| (line - 1, link.column.map_or(0, |c| c - 1)));
-                state.go_to_file(&link.path, at);
-            }),
+            open: Rc::new(move || refs.go(&link)),
         }
+    }
+
+    /// Open a file a link names, at its line when it has one, on Files.
+    pub fn go(&self, link: &FileLink) {
+        let at = link
+            .line
+            .map(|line| (line - 1, link.column.map_or(0, |c| c - 1)));
+        self.state.go_to_file(&link.path, at);
+    }
+
+    /// Track the listing and the changed files, which what a written
+    /// path resolves to is read from, so a view that links paths is drawn
+    /// again when either lands.
+    pub fn track_files(&self) {
+        self.state.tree.track();
+        self.state.changed_files.track();
     }
 
     /// A link to a name's definitions: one opens, several open the panel.

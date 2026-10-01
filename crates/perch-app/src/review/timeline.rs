@@ -111,8 +111,14 @@ pub fn verdict(review: &Review) -> &'static str {
 pub enum Piece {
     Text(String),
     Label(Label),
-    /// A commit, by the seven characters everyone reads it as.
+    /// A commit, by the seven characters everyone reads it as, that may
+    /// be in another repository: a reference to this one names it.
     Sha(String),
+    /// A commit on the head branch, which opens: on Files by itself when
+    /// the checkout has it, else on GitHub.
+    Commit(String),
+    /// A commit's subject, where a file it names is a link to it.
+    Subject(String),
     Reference(Reference),
 }
 
@@ -125,9 +131,9 @@ impl Piece {
     /// reference reads as it is drawn: where it points, then its title.
     pub fn text(&self) -> String {
         match self {
-            Piece::Text(text) => text.clone(),
+            Piece::Text(text) | Piece::Subject(text) => text.clone(),
             Piece::Label(label) => label.name.clone(),
-            Piece::Sha(sha) => short_sha(sha),
+            Piece::Sha(sha) | Piece::Commit(sha) => short_sha(sha),
             Piece::Reference(reference) => {
                 format!("{} {}", reference.slug(), reference.title).trim_end().into()
             }
@@ -154,11 +160,11 @@ pub fn event_pieces(event: &PullEvent) -> Vec<Piece> {
         PullEventKind::Ready => vec![Piece::words("marked this ready for review")],
         PullEventKind::Committed { sha, subject, .. } => vec![
             Piece::words("committed"),
-            Piece::Sha(sha.clone()),
-            Piece::words(subject.clone()),
+            Piece::Commit(sha.clone()),
+            Piece::Subject(subject.clone()),
         ],
         PullEventKind::ForcePushed { sha } => {
-            vec![Piece::words("force-pushed to"), Piece::Sha(sha.clone())]
+            vec![Piece::words("force-pushed to"), Piece::Commit(sha.clone())]
         }
         PullEventKind::HeadDeleted => vec![Piece::words("deleted the head branch")],
         PullEventKind::HeadRestored => vec![Piece::words("restored the head branch")],
@@ -214,6 +220,43 @@ pub fn event_pieces(event: &PullEvent) -> Vec<Piece> {
         PullEventKind::MergeQueued => vec![Piece::words("added this to the merge queue")],
         PullEventKind::MergeDequeued => vec![Piece::words("removed this from the merge queue")],
     }
+}
+
+/// A commit's subject in runs, each with the file it names when `file`
+/// finds one in it. A word names a file when, with the quotes, brackets
+/// and sentence stops around it taken off, it has a dot or a slash in it
+/// and `file` knows it; a word that is only a word, `Update`, is never
+/// asked about, so a file called `build` does not turn every "build"
+/// into a link. The runs put together are the subject.
+pub fn subject_runs<T>(subject: &str, file: impl Fn(&str) -> Option<T>) -> Vec<(String, Option<T>)> {
+    let mut runs: Vec<(String, Option<T>)> = Vec::new();
+    let plain = |runs: &mut Vec<(String, Option<T>)>, text: &str| match runs.last_mut() {
+        Some((last, None)) => last.push_str(text),
+        _ if !text.is_empty() => runs.push((text.to_string(), None)),
+        _ => {}
+    };
+    let mut rest = subject;
+    while !rest.is_empty() {
+        let start = rest.find(|c: char| !c.is_whitespace()).unwrap_or(rest.len());
+        plain(&mut runs, &rest[..start]);
+        rest = &rest[start..];
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let word = &rest[..end];
+        rest = &rest[end..];
+        let head = word.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}', '"', '\'', '`']);
+        let core = head.trim_start_matches(['(', '[', '{', '"', '\'', '`']);
+        let found = core.contains(['.', '/']).then(|| file(core)).flatten();
+        match found {
+            Some(found) => {
+                let at = head.len() - core.len();
+                plain(&mut runs, &word[..at]);
+                runs.push((core.to_string(), Some(found)));
+                plain(&mut runs, &word[at + core.len()..]);
+            }
+            None => plain(&mut runs, word),
+        }
+    }
+    runs
 }
 
 /// The event's line as words, for the harness and for keying.
@@ -279,6 +322,7 @@ pub fn timeline(
                 PullEventKind::Committed {
                     sha: commit.sha.clone(),
                     author: commit.author.clone(),
+                    login: String::new(),
                     subject: commit.subject.clone(),
                 },
                 commit.authored_at,
@@ -663,6 +707,7 @@ pub(crate) mod tests {
             name(PullEventKind::Committed {
                 sha: "abc1234def5678".into(),
                 author: "Chris".into(),
+                login: String::new(),
                 subject: "Fence the manifest".into(),
             }),
             "committed abc1234 Fence the manifest",
@@ -707,11 +752,45 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_file_a_subject_names_is_a_run_of_its_own() {
+        let files = ["bindings/uniffi/src/config.rs", "README.md"];
+        let known = |word: &str| files.contains(&word).then(|| word.to_string());
+        let runs = |subject: &str| subject_runs(subject, known);
+        assert_eq!(
+            runs("Update bindings/uniffi/src/config.rs"),
+            vec![
+                ("Update ".into(), None),
+                ("bindings/uniffi/src/config.rs".into(), Some("bindings/uniffi/src/config.rs".into())),
+            ]
+        );
+        assert_eq!(
+            runs("Fix (README.md), and `bindings/uniffi/src/config.rs`."),
+            vec![
+                ("Fix (".into(), None),
+                ("README.md".into(), Some("README.md".into())),
+                ("), and `".into(), None),
+                ("bindings/uniffi/src/config.rs".into(), Some("bindings/uniffi/src/config.rs".into())),
+                ("`.".into(), None),
+            ]
+        );
+        assert_eq!(runs("Fence the manifest"), vec![("Fence the manifest".into(), None)]);
+        assert_eq!(runs("Bump to v1.2"), vec![("Bump to v1.2".into(), None)], "not a file");
+        assert_eq!(runs("  two  spaces "), vec![("  two  spaces ".into(), None)]);
+        let asked = std::cell::RefCell::new(Vec::new());
+        subject_runs("Update build and src/x.rs", |word| {
+            asked.borrow_mut().push(word.to_string());
+            None::<()>
+        });
+        assert_eq!(*asked.borrow(), ["src/x.rs"], "a bare word is never looked up");
+    }
+
+    #[test]
     fn the_pieces_of_a_line_are_what_the_view_draws_apart() {
         let commit = event(
             PullEventKind::Committed {
                 sha: "abc1234def".into(),
                 author: "Chris".into(),
+                login: String::new(),
                 subject: "Fence the manifest".into(),
             },
             "2026-09-16T11:00:00Z",
@@ -720,8 +799,8 @@ pub(crate) mod tests {
             event_pieces(&commit),
             vec![
                 Piece::Text("committed".into()),
-                Piece::Sha("abc1234def".into()),
-                Piece::Text("Fence the manifest".into()),
+                Piece::Commit("abc1234def".into()),
+                Piece::Subject("Fence the manifest".into()),
             ]
         );
         let label = Label { name: "bug".into(), color: "d73a4a".into() };

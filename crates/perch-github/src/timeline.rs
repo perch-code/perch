@@ -53,8 +53,16 @@ pub enum PullEventKind {
     /// A commit on the head branch. Its author is a name out of git, not
     /// an account, so it is here rather than in the event's actor, and
     /// only the subject of its message is kept: a line is all that is
-    /// ever drawn of it.
-    Committed { sha: String, author: String, subject: String },
+    /// ever drawn of it. `login` is the account the commit belongs to,
+    /// when GitHub could tie its email to one; empty when it could not,
+    /// and on a row an older build kept.
+    Committed {
+        sha: String,
+        author: String,
+        #[serde(default)]
+        login: String,
+        subject: String,
+    },
     ForcePushed { sha: String },
     HeadDeleted,
     HeadRestored,
@@ -146,12 +154,14 @@ pub(crate) struct TimelineEventPayload {
     pub source: Option<SourceRef>,
 }
 
-/// A commit's author, as git records one: a name, and the date it was
-/// written.
+/// A commit's author, as git records one: a name, an email, and the date
+/// it was written.
 #[derive(Debug, Deserialize)]
 pub(crate) struct GitActorRef {
     #[serde(default)]
     pub name: String,
+    #[serde(default)]
+    pub email: String,
     #[serde(default)]
     pub date: Option<Timestamp>,
 }
@@ -227,6 +237,7 @@ impl TimelineEventPayload {
                 actor,
                 kind: PullEventKind::Committed {
                     sha: self.sha.unwrap_or_default(),
+                    login: noreply_login(&author.email).unwrap_or_default(),
                     author: author.name,
                     subject: subject(self.message.as_deref().unwrap_or_default()),
                 },
@@ -331,6 +342,45 @@ pub(crate) fn tidy(mut events: Vec<PullEvent>) -> Vec<PullEvent> {
     events
 }
 
+/// A commit as a pull request's commit list sends one: the account GitHub
+/// tied its author's email to, which the timeline leaves out.
+#[derive(Debug, Deserialize)]
+pub(crate) struct PullCommitPayload {
+    #[serde(default)]
+    pub sha: String,
+    #[serde(default)]
+    pub author: Option<UserRef>,
+}
+
+/// Whether a commit line waits on its account: the timeline sent no email
+/// that says whose it is.
+pub(crate) fn wants_login(events: &[PullEvent]) -> bool {
+    events
+        .iter()
+        .any(|e| matches!(&e.kind, PullEventKind::Committed { login, .. } if login.is_empty()))
+}
+
+/// Give each commit line that has no account the one `commits` names for
+/// its sha.
+pub(crate) fn fill_logins(events: &mut [PullEvent], commits: &[PullCommitPayload]) {
+    for event in events {
+        let PullEventKind::Committed { sha, login, .. } = &mut event.kind else {
+            continue;
+        };
+        if !login.is_empty() {
+            continue;
+        }
+        let found = commits
+            .iter()
+            .find(|c| c.sha == *sha)
+            .and_then(|c| c.author.as_ref())
+            .map(|a| a.login.clone());
+        if let Some(found) = found {
+            *login = found;
+        }
+    }
+}
+
 /// The name, unless GitHub sent none: a line that would say what was
 /// done to nobody, or to no commit, is not a line.
 fn named(name: String) -> Option<String> {
@@ -346,6 +396,19 @@ fn subject(message: &str) -> String {
         .find(|line| !line.is_empty())
         .unwrap_or_default()
         .to_string()
+}
+
+/// The account a GitHub noreply address stands for: `login@` or, since
+/// 2017, `id+login@users.noreply.github.com`. The timeline names a
+/// commit's author by git's name and email alone, and this is the one
+/// email that says whose it is without asking.
+fn noreply_login(email: &str) -> Option<String> {
+    let (local, host) = email.rsplit_once('@')?;
+    if !host.eq_ignore_ascii_case("users.noreply.github.com") {
+        return None;
+    }
+    let login = local.split_once('+').map_or(local, |(_, login)| login);
+    Some(login.to_string()).filter(|login| !login.is_empty())
 }
 
 /// The other end of a cross-reference. One whose repository GitHub did
@@ -435,6 +498,7 @@ mod tests {
             PullEventKind::Committed {
                 sha: "abc1234".into(),
                 author: "Chris".into(),
+                login: String::new(),
                 subject: "Fence the manifest".into(),
             },
             "the body of the message is not a line"
@@ -443,6 +507,24 @@ mod tests {
             event(r#"{"event":"committed","sha":"abc1234","author":{"name":"Chris"}}"#).is_none(),
             "a commit with no date has no place in the order"
         );
+    }
+
+    #[test]
+    fn a_noreply_email_says_whose_commit_it_is() {
+        let login = |email: &str| {
+            let json = format!(
+                r#"{{"event":"committed","sha":"abc1234","message":"m",
+                    "author":{{"name":"Chris","email":"{email}","date":"2026-09-15T09:00:00Z"}}}}"#
+            );
+            match event(&json).unwrap().kind {
+                PullEventKind::Committed { login, .. } => login,
+                kind => panic!("{kind:?}"),
+            }
+        };
+        assert_eq!(login("criccomini@users.noreply.github.com"), "criccomini");
+        assert_eq!(login("12345+CRiccomini@users.noreply.github.com"), "CRiccomini");
+        assert_eq!(login("c@example.com"), "", "any other email names no account");
+        assert_eq!(login("@users.noreply.github.com"), "");
     }
 
     #[test]
