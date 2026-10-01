@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// How many bytes of bodies are kept. A large pull request's review
 /// comments run to a few megabytes, so this holds several open at once.
@@ -22,6 +23,9 @@ pub(crate) struct Known {
 struct Entry {
     known: Known,
     used: u64,
+    /// When GitHub last said this body was current: it was read, or a
+    /// conditional read of it came back 304.
+    checked: Instant,
 }
 
 pub(crate) struct Responses {
@@ -49,6 +53,20 @@ impl Responses {
         Some(entry.known.clone())
     }
 
+    /// What was last read at `path`, if GitHub said it was current no
+    /// longer than `within` ago.
+    pub fn fresh(&mut self, path: &str, within: Duration) -> Option<Known> {
+        let checked = self.entries.get(path)?.checked;
+        (checked.elapsed() <= within).then(|| self.get(path)).flatten()
+    }
+
+    /// GitHub said what is kept at `path` is still current.
+    pub fn confirm(&mut self, path: &str) {
+        if let Some(entry) = self.entries.get_mut(path) {
+            entry.checked = Instant::now();
+        }
+    }
+
     /// Keep `body` as what `path` answers while `etag` holds. A body larger
     /// than the whole budget is not kept, and drops what was kept before.
     pub fn put(&mut self, path: &str, etag: String, body: Arc<str>) {
@@ -64,6 +82,7 @@ impl Responses {
             Entry {
                 known: Known { etag, body },
                 used: self.clock,
+                checked: Instant::now(),
             },
         );
         while self.bytes > self.budget {
@@ -128,6 +147,18 @@ mod tests {
         assert!(r.get("/b").is_none());
         assert!(r.get("/c").is_some());
         assert_eq!(r.bytes, 80);
+    }
+
+    #[test]
+    fn a_body_is_fresh_only_for_a_while_after_github_said_it_was_current() {
+        let mut r = Responses::new(1000);
+        r.put("/a", "a".into(), body(10));
+        assert!(r.fresh("/a", Duration::from_secs(60)).is_some());
+        assert!(r.fresh("/b", Duration::from_secs(60)).is_none());
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(r.fresh("/a", Duration::from_millis(10)).is_none());
+        r.confirm("/a");
+        assert!(r.fresh("/a", Duration::from_millis(10)).is_some());
     }
 
     #[test]

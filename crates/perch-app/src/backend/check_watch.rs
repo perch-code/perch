@@ -123,17 +123,19 @@ async fn tick(base: &Ctx, watches: &mut HashMap<String, Watch>) {
             .probe_checks(&pr.repo_full_name, &pr.head_sha, &asked)
             .await
         {
-            Ok(tags) if watch.tags.as_ref() == Some(&tags) => {
+            Ok(probe) if watch.tags.as_ref() == Some(&probe.tags) => {
                 watch.every = (watch.every * 2).min(SLOWEST);
             }
             // The first probe counts as a change: the open's read may
             // have been before something moved, and then no tag ever would.
+            // Unless the listings it read say what that read said, check
+            // for check, which is the usual answer a moment after an open.
             // The tags are kept only once the rollup is read, so a read
             // that fails is tried again at the next probe.
-            Ok(tags) => {
+            Ok(probe) => {
                 watch.every = FASTEST;
-                if read_again(&ctx, &item_id, &pr).await {
-                    watch.tags = Some(tags);
+                if probe.agrees_with(&checks) || read_again(&ctx, &item_id, &pr).await {
+                    watch.tags = Some(probe.tags);
                 }
             }
             Err(e) => {

@@ -787,6 +787,62 @@ fn is_newer_check(candidate: &Check, current: &Check) -> bool {
     }
 }
 
+/// Each check by kind and name, in its state: what a rollup and the REST
+/// listings of the same commit can be told apart by.
+pub(crate) type CheckSighting = std::collections::HashSet<(CheckKind, String, CheckRunState)>;
+
+/// The checks in a rollup, sighted.
+pub(crate) fn check_sighting(checks: &Checks) -> CheckSighting {
+    checks
+        .runs
+        .iter()
+        .map(|check| (check.kind, check.name.clone(), check.state))
+        .collect()
+}
+
+/// The checks in a commit's REST check-run and combined-status listings,
+/// sighted the way the rollup's are. None when either does not read, or
+/// holds more than the page it came in.
+pub(crate) fn rest_check_sighting(runs: &str, statuses: &str) -> Option<CheckSighting> {
+    #[derive(Deserialize)]
+    struct Runs {
+        total_count: usize,
+        check_runs: Vec<Run>,
+    }
+    #[derive(Deserialize)]
+    struct Run {
+        name: String,
+        status: String,
+        conclusion: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct Statuses {
+        total_count: usize,
+        statuses: Vec<Status>,
+    }
+    #[derive(Deserialize)]
+    struct Status {
+        context: String,
+        state: String,
+    }
+    let runs: Runs = serde_json::from_str(runs).ok()?;
+    let statuses: Statuses = serde_json::from_str(statuses).ok()?;
+    if runs.total_count > runs.check_runs.len() || statuses.total_count > statuses.statuses.len() {
+        return None;
+    }
+    // REST spells GraphQL's enums in lower case.
+    let runs = runs.check_runs.into_iter().map(|run| {
+        let conclusion = run.conclusion.map(|c| c.to_ascii_uppercase());
+        let state = check_run_state(&run.status.to_ascii_uppercase(), conclusion.as_deref());
+        (CheckKind::CheckRun, run.name, state)
+    });
+    let statuses = statuses.statuses.into_iter().map(|status| {
+        let state = status_context_state(&status.state.to_ascii_uppercase());
+        (CheckKind::StatusContext, status.context, state)
+    });
+    Some(runs.chain(statuses).collect())
+}
+
 fn check_run_state(status: &str, conclusion: Option<&str>) -> CheckRunState {
     match conclusion {
         Some("SUCCESS") => CheckRunState::Success,
@@ -1000,5 +1056,39 @@ mod tests {
         assert_eq!(loaded.html_url, "");
         assert_eq!(loaded.merged_at, pr.merged_at);
         assert_eq!(loaded.requested_reviewers, pr.requested_reviewers);
+    }
+
+    #[test]
+    fn the_rest_listings_agree_with_the_rollup_they_were_read_beside() {
+        let rollup = checks_from_contexts(
+            Some("PENDING".into()),
+            serde_json::from_str(
+                r#"[
+                    {"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"SUCCESS"},
+                    {"__typename":"CheckRun","name":"lint","status":"IN_PROGRESS","conclusion":null},
+                    {"__typename":"StatusContext","context":"ci/legacy","state":"SUCCESS"}
+                ]"#,
+            )
+            .unwrap(),
+        );
+        let statuses = r#"{"state":"success","total_count":1,
+            "statuses":[{"context":"ci/legacy","state":"success"}]}"#;
+        let runs = |lint: &str| {
+            format!(
+                r#"{{"total_count":2,"check_runs":[
+                    {{"name":"test","status":"completed","conclusion":"success"}},
+                    {{"name":"lint",{lint}}}]}}"#
+            )
+        };
+
+        let same = rest_check_sighting(&runs(r#""status":"in_progress","conclusion":null"#), statuses);
+        assert_eq!(same, Some(check_sighting(&rollup)));
+
+        let moved = rest_check_sighting(&runs(r#""status":"completed","conclusion":"failure""#), statuses);
+        assert_ne!(moved, Some(check_sighting(&rollup)));
+
+        // A listing cut at its page says nothing.
+        let cut = r#"{"total_count":101,"check_runs":[]}"#;
+        assert_eq!(rest_check_sighting(cut, statuses), None);
     }
 }

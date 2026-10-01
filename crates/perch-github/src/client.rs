@@ -31,8 +31,9 @@ use crate::discussion::{
 use crate::items::{Issue, IssueCloseReason, IssuePayload};
 use crate::model::{SubjectSnapshot, SubjectState, Thread};
 use crate::pulls::{
-    MergeMethod, MergeRequest, MergeResult, PullPayload, PullRequest, PullRequestOverview,
-    PullRequestOverviewAccumulator, PullRequestOverviewQuery, PULL_REQUEST_OVERVIEW_QUERY,
+    check_sighting, rest_check_sighting, CheckSighting, MergeMethod, MergeRequest, MergeResult,
+    PullPayload, PullRequest, PullRequestOverview, PullRequestOverviewAccumulator,
+    PullRequestOverviewQuery, PULL_REQUEST_OVERVIEW_QUERY,
 };
 use crate::reactions::{
     reaction_mutation, reactions_query, ReactionKind, ReactionMutationData, Reactions,
@@ -44,7 +45,7 @@ use crate::timeline::{
     fill_logins, tidy, wants_login, PullCommitPayload, PullEvent, TimelineEventPayload,
     TIMELINE_MAX_PAGES,
 };
-use crate::workflow_runs::{WorkflowRunPayload, WorkflowRunsPayload};
+use crate::workflow_runs::{Checks, WorkflowRunPayload, WorkflowRunsPayload};
 
 /// Page size for the notifications list. GitHub caps `per_page` at 50 here.
 const PER_PAGE: usize = 50;
@@ -61,6 +62,9 @@ const API_CONCURRENCY: usize = 4;
 /// The log target for each request's rate-limit cost. Off unless asked
 /// for: `RUST_LOG=perch=info,perch_github::spend=debug,warn`.
 const SPEND: &str = "perch_github::spend";
+/// How long a pull request read stands for the discussion asked for after
+/// it.
+const JUST_READ: Duration = Duration::from_secs(5);
 /// Asked beside every GraphQL query while the spend log is on, so the
 /// answer says what the query cost.
 const COST_FIELD: &str = "perch_cost: rateLimit { cost }";
@@ -102,6 +106,25 @@ pub enum PullLookup {
 pub struct CheckTags {
     pub runs: Option<String>,
     pub statuses: Option<String>,
+}
+
+/// What a probe of a commit's checks found: the tags to ask with next,
+/// and, when both listings were read whole, each check in them.
+#[derive(Debug, Clone)]
+pub struct CheckProbe {
+    pub tags: CheckTags,
+    seen: Option<CheckSighting>,
+}
+
+impl CheckProbe {
+    /// Whether the listings read say what `checks` says of every check:
+    /// the same checks, each in the same state. Nothing is known to agree
+    /// when either listing came back unchanged or was cut at a page.
+    pub fn agrees_with(&self, checks: &Checks) -> bool {
+        self.seen
+            .as_ref()
+            .is_some_and(|seen| *seen == check_sighting(checks))
+    }
 }
 
 /// Outcome of a notifications poll.
@@ -774,7 +797,11 @@ impl GitHub {
         number: u64,
     ) -> Result<Discussion, Error> {
         let base = format!("/repos/{repo_full_name}");
-        let body = self.get_text(&format!("{base}/pulls/{number}")).await?;
+        // An open or a refresh reads the pull request a moment before it
+        // asks for the discussion; that read stands.
+        let body = self
+            .get_text_within(&format!("{base}/pulls/{number}"), JUST_READ)
+            .await?;
         let pull: PullSummary =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
 
@@ -1478,38 +1505,51 @@ impl GitHub {
     /// Whether a commit's check runs or commit statuses may have changed
     /// since `tags` were read: both listings asked conditionally, so a
     /// quiet commit costs two 304s and none of the rate limit. The
-    /// listings themselves are thrown away; the rollup is what is shown.
-    /// Only their first page is asked for, so a change past a commit's
-    /// hundredth check goes unseen until something on the first page moves.
+    /// listings are read only to say whether they agree with a rollup
+    /// already read; the rollup is what is shown. Only their first page is
+    /// asked for, so a change past a commit's hundredth check goes unseen
+    /// until something on the first page moves.
     pub async fn probe_checks(
         &self,
         repo_full_name: &str,
         sha: &str,
         tags: &CheckTags,
-    ) -> Result<CheckTags, Error> {
+    ) -> Result<CheckProbe, Error> {
         let runs = format!("/repos/{repo_full_name}/commits/{sha}/check-runs?per_page=100");
         let statuses = format!("/repos/{repo_full_name}/commits/{sha}/status?per_page=100");
-        Ok(CheckTags {
-            runs: self.probe(&runs, tags.runs.as_deref()).await?,
-            statuses: self.probe(&statuses, tags.statuses.as_deref()).await?,
+        let (runs_tag, runs_body) = self.probe(&runs, tags.runs.as_deref()).await?;
+        let (statuses_tag, statuses_body) =
+            self.probe(&statuses, tags.statuses.as_deref()).await?;
+        Ok(CheckProbe {
+            tags: CheckTags {
+                runs: runs_tag,
+                statuses: statuses_tag,
+            },
+            seen: runs_body
+                .zip(statuses_body)
+                .and_then(|(runs, statuses)| rest_check_sighting(&runs, &statuses)),
         })
     }
 
-    /// The tag `path` answers with now: the old one on a 304, else its
-    /// `ETag`, else a hash of the body so a change can still be told.
-    async fn probe(&self, path: &str, tag: Option<&str>) -> Result<Option<String>, Error> {
+    /// The tag `path` answers with now, and the body when it came: the old
+    /// tag on a 304, else its `ETag`, else a hash of the body so a change
+    /// can still be told.
+    async fn probe(
+        &self,
+        path: &str,
+        tag: Option<&str>,
+    ) -> Result<(Option<String>, Option<String>), Error> {
         let fetched = self.get(path, conditional(tag)).await?;
         if fetched.status == StatusCode::NOT_MODIFIED {
-            return Ok(tag.map(str::to_string));
+            return Ok((tag.map(str::to_string), None));
         }
-        Ok(Some(
-            header_str(&fetched.headers, ETAG.as_str()).unwrap_or_else(|| {
-                use std::hash::{Hash, Hasher};
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                fetched.body.hash(&mut hasher);
-                format!("body:{:x}", hasher.finish())
-            }),
-        ))
+        let tag = header_str(&fetched.headers, ETAG.as_str()).unwrap_or_else(|| {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            fetched.body.hash(&mut hasher);
+            format!("body:{:x}", hasher.finish())
+        });
+        Ok((Some(tag), Some(fetched.body)))
     }
 
     /// Open a pull request on `repo_full_name` from `head`, which is
@@ -1603,6 +1643,7 @@ impl GitHub {
             .get(path, conditional(known.as_ref().map(|k| k.etag.as_str())))
             .await?;
         if fetched.status == StatusCode::NOT_MODIFIED {
+            self.responses.lock().unwrap().confirm(path);
             return match known {
                 Some(known) => Ok(known.body.to_string()),
                 None => Err(Error::Status {
@@ -1617,6 +1658,16 @@ impl GitHub {
             None => responses.remove(path),
         }
         Ok(fetched.body)
+    }
+
+    /// `get_text`, without asking when GitHub said the kept body was
+    /// current no longer than `within` ago.
+    async fn get_text_within(&self, path: &str, within: Duration) -> Result<String, Error> {
+        let fresh = self.responses.lock().unwrap().fresh(path, within);
+        match fresh {
+            Some(known) => Ok(known.body.to_string()),
+            None => self.get_text(path).await,
+        }
     }
 
     /// One GET, classified the way every request is.
