@@ -11763,6 +11763,12 @@ fn install_fetched_issue(
     if stored_is_newer(stored, Some(fetched.updated_at)) {
         return Some(current.clone());
     }
+    ctx.settle_notification_state(
+        &fetched.repo_full_name,
+        ItemKind::Issue,
+        fetched.number,
+        fetched.subject_state(),
+    );
     if current != &fetched {
         item.subject = Some(ItemSubject::Issue(fetched.clone()));
         if let Some(Err(error)) = ctx.with_cache(|cache| cache.update_item(&item)) {
@@ -12533,6 +12539,14 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
         }
     };
 
+    if !offline && !refetch {
+        ctx.settle_notification_state(
+            &issue.repo_full_name,
+            ItemKind::Issue,
+            issue.number,
+            issue.subject_state(),
+        );
+    }
     let now = Timestamp::now();
     let is_new = existing.is_none();
     // The row as it is now, not as it was before the fetch.
@@ -12807,7 +12821,15 @@ async fn open_pull_request(
             return open_pull_request_ahead(ctx, item, snapshot, &github, navigation_id).await
         }
         (_, Some(github)) => match github.fetch_pull_request(&repo_full_name, number).await {
-            Ok(pr) => (pr, PullSource::Fetched),
+            Ok(pr) => {
+                ctx.settle_notification_state(
+                    &pr.repo_full_name,
+                    ItemKind::PullRequest,
+                    pr.number,
+                    pr.subject_state(),
+                );
+                (pr, PullSource::Fetched)
+            }
             Err(e) => fail!("{e}"),
         },
         (_, None) => fail!("A GitHub token is required to fetch that pull request"),
@@ -17930,6 +17952,41 @@ mod tests {
             cached.iter().find(|t| t.id == "7").unwrap().subject_snapshot.as_ref().unwrap().state,
             perch_github::SubjectState::PrMerged,
             "kept for the next launch"
+        );
+    }
+
+    /// A refresh of the open issue that finds it closed settles the row
+    /// about it, rather than leaving it open until the thread moves or
+    /// the next recheck.
+    #[tokio::test]
+    async fn an_issue_refresh_that_finds_it_closed_settles_its_notification_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(dir.path(), &nowhere(), &[]);
+        let item = store_issue(&ctx, 7);
+        let mut about = thread("7", "seven");
+        about.subject.kind = SubjectKind::Issue;
+        about.subject.url = Some("https://api.github.com/repos/a/b/issues/7".into());
+        about.subject_snapshot = Some(perch_github::SubjectSnapshot {
+            author_login: "rohan".into(),
+            author_avatar_url: String::new(),
+            state: perch_github::SubjectState::IssueOpen,
+            churn: None,
+            review_requested: false,
+            participants: Some(vec![]),
+            at: about.updated_at,
+        });
+        ctx.replace_notifications(vec![about], Some("first"));
+        let mut closed = item.issue().unwrap().clone();
+        closed.state = "closed".into();
+        closed.state_reason = Some("completed".into());
+        closed.updated_at = Timestamp::now();
+
+        install_fetched_issue(&ctx, &item.id, closed).unwrap();
+
+        let threads = ctx.notifications.lock().unwrap().clone();
+        assert_eq!(
+            threads[0].subject_snapshot.as_ref().unwrap().state,
+            perch_github::SubjectState::IssueClosed
         );
     }
 
