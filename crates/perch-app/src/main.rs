@@ -12,6 +12,7 @@ mod icons;
 mod inbox;
 mod items;
 mod items_cli;
+mod log_file;
 mod reference;
 mod repos;
 mod review;
@@ -95,15 +96,7 @@ fn main() {
         timeline_cli::run(&args[2..]);
         return;
     }
-    tracing_subscriber::fmt()
-        // stderr, so logs are not held in a block-buffered stdout when the
-        // app is launched with its output redirected to a file.
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "perch=info,warn".into()),
-        )
-        .init();
+    init_logging();
     tracing::info!("perch starting");
     theme::install_code_font();
     theme::install_symbol_fallbacks();
@@ -236,4 +229,31 @@ fn main() {
         Some(config),
     )
     .run();
+}
+
+/// The log goes to stderr, for a terminal launch, and to
+/// `$PERCH_HOME/logs/perch.log`, which a Finder launch keeps and a bug
+/// report reads. One filter for both; the file gets no colours.
+fn init_logging() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::Layer;
+
+    let filter = || {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "perch=info,warn".into())
+    };
+    // stderr, so logs are not held in a block-buffered stdout when the
+    // app is launched with its output redirected to a file.
+    let stderr = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(filter());
+    let file = log_file::DailyFile::open(&log_file::dir()).ok().map(|file| {
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(file)
+            .with_filter(filter())
+    });
+    tracing_subscriber::registry().with(stderr).with(file).init();
+    log_file::install_panic_hook();
 }
