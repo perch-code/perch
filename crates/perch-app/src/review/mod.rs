@@ -10,6 +10,7 @@ pub mod conversation;
 pub mod conversation_find;
 pub mod doc;
 pub mod editor;
+pub mod emoji;
 pub mod find;
 pub mod go_to;
 pub mod gutter;

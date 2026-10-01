@@ -19,6 +19,10 @@
 //! number starts with the digits or whose title has the letters, and
 //! whatever GitHub's search found for them. One goes in as `#number`.
 //!
+//! A `:` and a letter list the emoji whose GitHub shortcodes have the
+//! letters, as GitHub's box does. One goes in as the emoji itself, which
+//! reads the same on GitHub and to an agent.
+//!
 //! The list is drawn over the window, not in the composer, so a composer
 //! in a card in the code does not cut it off.
 
@@ -39,6 +43,7 @@ use floem::views::{dyn_container, Container, Decorators, Empty, ScrollExt, Stack
 use perch_github::{IssueReference, MentionableUser};
 
 use crate::backend::Backend;
+use crate::review::emoji::{self, EmojiHit};
 use crate::review::go_to::{self, Hit, Pick, Sources};
 use crate::review::model::ReviewState;
 use crate::state::AppState;
@@ -66,11 +71,12 @@ const ASK_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
 // ---------------------------------------------------------------------
 
 /// What a mention names: a person or a file after `@`, an issue or a
-/// pull request after `#`.
+/// pull request after `#`, an emoji after `:`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trigger {
     At,
     Hash,
+    Colon,
 }
 
 impl Trigger {
@@ -78,13 +84,15 @@ impl Trigger {
         match self {
             Trigger::At => '@',
             Trigger::Hash => '#',
+            Trigger::Colon => ':',
         }
     }
 }
 
 /// The mention the caret is in: where its `@` or `#` is, which it is,
 /// and what is typed between it and the caret. One starts only at the
-/// start of the text or after a space, so an address is not one.
+/// start of the text or after a space, so an address is not one. A `:`
+/// needs a shortcode's letters after it, so a smiley is not one.
 pub fn token(text: &str, caret: usize) -> Option<(usize, Trigger, &str)> {
     let before = text.get(..caret)?;
     let start = before
@@ -96,9 +104,13 @@ pub fn token(text: &str, caret: usize) -> Option<(usize, Trigger, &str)> {
     let trigger = match word.chars().next()? {
         '@' => Trigger::At,
         '#' => Trigger::Hash,
+        ':' => Trigger::Colon,
         _ => return None,
     };
     let query = &word[1..];
+    if trigger == Trigger::Colon && !emoji::is_shortcode(query) {
+        return None;
+    }
     (!query.contains(trigger.char()) && query.len() <= MAX_QUERY).then_some((start, trigger, query))
 }
 
@@ -501,6 +513,7 @@ pub enum Suggestion {
     Person(PersonHit),
     File(Hit),
     Reference(ReferenceHit),
+    Emoji(EmojiHit),
 }
 
 /// The list while it is up, and the box it is for.
@@ -595,6 +608,7 @@ impl Mentions {
                     .update(|f| drop(f.insert(ask.query.clone(), None)));
                 backend.issue_references(&ask.item_id, &ask.repo, &ask.query);
             }
+            Trigger::Colon => {}
         }
     }
 
@@ -603,6 +617,8 @@ impl Mentions {
         match trigger {
             Trigger::At => self.found.with_untracked(|f| f.contains_key(query)),
             Trigger::Hash => self.references.with_untracked(|f| f.contains_key(query)),
+            // The shortcodes are all here.
+            Trigger::Colon => true,
         }
     }
 
@@ -801,6 +817,7 @@ pub fn attach(
         let askable = match trigger {
             Trigger::At => !query.is_empty() && names_someone(query),
             Trigger::Hash => names_a_reference(query),
+            Trigger::Colon => false,
         };
         let ask = repo.filter(|(_, repo)| {
             askable && !perch_github::is_local(repo) && !state.mentions.is_asked(trigger, query)
@@ -838,6 +855,10 @@ pub fn attach(
                     .map(Suggestion::Reference)
                     .collect()
             }),
+            Trigger::Colon => emoji::emoji(query)
+                .into_iter()
+                .map(Suggestion::Emoji)
+                .collect(),
         };
         if suggestions.is_empty() {
             state.mentions.put_away(owner);
@@ -873,6 +894,7 @@ pub fn attach(
                 Suggestion::Person(hit) => format!("@{} ", hit.person.login),
                 Suggestion::File(hit) => file_text(&hit.path),
                 Suggestion::Reference(hit) => format!("#{} ", hit.reference.number),
+                Suggestion::Emoji(hit) => format!("{} ", hit.emoji),
             };
             replace_mention(&accept_ed, &text);
         });
@@ -1051,6 +1073,7 @@ fn row(app: AppState, state: ReviewState, index: usize, suggestion: &Suggestion)
             format!("#{}", hit.reference.number),
             reference_row(hit).into_any(),
         ),
+        Suggestion::Emoji(hit) => (format!(":{}:", hit.shortcode), emoji_row(hit).into_any()),
     };
     Container::new(Container::new(content).style(move |s| {
         let s = s
@@ -1096,6 +1119,24 @@ fn person_row(app: AppState, hit: &PersonHit) -> impl IntoView {
         .style(|s| s.flex_shrink(0.0_f32).font_weight(theme::weight_strong())),
         go_to::highlighted(&name, &hit.name_matches, theme::TEXT_META, theme::FG_SUBTLE)
             .style(|s| s.margin_left(6.0).min_width(0.0).flex_shrink(1.0_f32)),
+    ))
+    .style(|s| s.items_center().width_full().min_width(0.0))
+}
+
+/// An emoji's row: the emoji, and its shortcode between colons, as
+/// GitHub's list has them.
+fn emoji_row(hit: &EmojiHit) -> impl IntoView {
+    let shortcode = format!(":{}:", hit.shortcode);
+    // Past the opening colon.
+    let matches: Vec<Range<usize>> = hit.matches.iter().map(|m| m.start + 1..m.end + 1).collect();
+    Stack::horizontal((
+        Label::new(hit.emoji).style(|s| {
+            s.flex_shrink(0.0_f32)
+                .margin_right(8.0)
+                .font_size(theme::TEXT_META)
+        }),
+        go_to::highlighted(&shortcode, &matches, theme::TEXT_META, theme::FG)
+            .style(|s| s.min_width(0.0).flex_shrink(1.0_f32)),
     ))
     .style(|s| s.items_center().width_full().min_width(0.0))
 }
@@ -1174,6 +1215,18 @@ mod tests {
         assert_eq!(token("## Heading", 2), None, "a heading's marks");
         assert_eq!(token("# Heading", 9), None);
         assert_eq!(token("#a@b", 4), Some((0, Hash, "a@b")));
+    }
+
+    #[test]
+    fn a_colon_and_a_letter_start_one_for_emoji() {
+        use Trigger::Colon;
+        assert_eq!(token("ship it :f", 10), Some((8, Colon, "f")));
+        assert_eq!(token(":+1", 3), Some((0, Colon, "+1")));
+        assert_eq!(token(":", 1), None, "nothing typed yet");
+        assert_eq!(token("nice :)", 7), None, "a smiley");
+        assert_eq!(token("Note:fi", 7), None, "not inside a word");
+        assert_eq!(token(":fire:", 6), None, "closed");
+        assert_eq!(token("::fire", 6), None);
     }
 
     fn reference(number: u64, title: &str) -> IssueReference {

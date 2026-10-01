@@ -4437,6 +4437,9 @@ mod tests {
                             crate::review::mention::Suggestion::Reference(r) => {
                                 format!("#{}", r.reference.number)
                             }
+                            crate::review::mention::Suggestion::Emoji(e) => {
+                                format!(":{}:", e.shortcode)
+                            }
                         })
                         .collect::<Vec<_>>()
                 })
@@ -4596,6 +4599,28 @@ mod tests {
             "hi @calavera @src/lib.rs @a #634 "
         );
         assert_eq!(shown(), None);
+
+        // `:` and a letter offer emoji by their shortcodes, and nothing is
+        // asked of GitHub. Enter puts in the emoji.
+        harness.dispatch_event(typed(":"));
+        harness.rebuild();
+        assert_eq!(shown(), None, "nothing until a letter");
+        for ch in ["f", "i", "r"] {
+            harness.dispatch_event(typed(ch));
+        }
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(shown().unwrap()[0], ":fire:");
+        let row = find_mention_row(&harness, "mention-row::fire:");
+        assert!(harness.get_layout_rect(row).width() > 0.0, "the row is drawn");
+        harness.dispatch_event(named(NamedKey::Enter, Code::Enter));
+        harness.rebuild();
+        assert_eq!(
+            state.composer_draft.get(),
+            "hi @calavera @src/lib.rs @a #634 🔥 "
+        );
+        assert_eq!(shown(), None);
+        assert!(commands.try_recv().is_err(), "nothing asked of GitHub");
     }
 
     fn find_mention_row(harness: &HeadlessHarness, name: &str) -> floem::ViewId {

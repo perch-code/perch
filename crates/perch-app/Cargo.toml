@@ -48,6 +48,9 @@ fontique = "0.7"
 # The find bar's query, plain or as a pattern: both go through one
 # matcher, the plain one escaped.
 regex = "1"
+# GitHub's emoji shortcodes, gemoji's: a composer's `:` lists them, and a
+# comment's `:tada:` is drawn as its emoji.
+emojis = "0.9"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"

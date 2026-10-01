@@ -48,6 +48,7 @@ use pulldown_cmark::{
 
 use crate::icons::{self, SidebarIcon};
 use crate::review::code_refs::{self, linked_run, Plan, Refs};
+use crate::review::emoji::emojify;
 use crate::review::linked_text::{linked_text, passage, Strike, Target};
 use crate::review::model::ReviewState;
 use crate::review::suggestion::Original;
@@ -447,7 +448,8 @@ impl<'a> Builder<'a> {
 
     /// The gathered text, with any bare address, issue reference or
     /// mention in it linked, as GitHub links one and the parser does not. Inside a link
-    /// they are the link's own text.
+    /// they are the link's own text. A `:shortcode:` outside an address
+    /// is its emoji.
     fn flush_text(&mut self, spans: &mut Vec<Span>, style: &Marks) {
         if self.text.is_empty() {
             return;
@@ -457,12 +459,17 @@ impl<'a> Builder<'a> {
             // `<address>`, or a link written out as its own address,
             // shortens as a bare one does.
             let short = (text == *link).then(|| issue_address(&text, self.repo)).flatten();
-            push_text(spans, &style.span(), short.as_deref().unwrap_or(&text));
+            let text = match short {
+                Some(short) => short,
+                None => emojify(&text).into_owned(),
+            };
+            push_text(spans, &style.span(), &text);
             return;
         }
         for (run, address) in autolink(&text) {
             if !address {
-                for (piece, link) in issue_refs(run, self.repo) {
+                let run = emojify(run);
+                for (piece, link) in issue_refs(&run, self.repo) {
                     if link.is_some() || self.repo.is_none() {
                         push_text(spans, &Span { link, ..style.span() }, piece);
                         continue;
@@ -2220,6 +2227,21 @@ mod tests {
                 Span { text: "#2".into(), code: true, ..Default::default() },
                 plain(" "),
                 Span { text: "https://x.y/#3".into(), link: Some("https://x.y/#3".into()), ..Default::default() },
+            ])]
+        );
+    }
+
+    #[test]
+    fn shortcodes_are_drawn_as_their_emoji_but_not_in_code_or_an_address() {
+        assert_eq!(
+            parse_in("Ship it :rocket: [:tada:](https://x.y) `:fire:` https://x.y/:fire:/a", Some("o/r")),
+            vec![Block::Paragraph(vec![
+                plain("Ship it 🚀 "),
+                Span { text: "🎉".into(), link: Some("https://x.y".into()), ..Default::default() },
+                plain(" "),
+                Span { text: ":fire:".into(), code: true, ..Default::default() },
+                plain(" "),
+                Span { text: "https://x.y/:fire:/a".into(), link: Some("https://x.y/:fire:/a".into()), ..Default::default() },
             ])]
         );
     }
