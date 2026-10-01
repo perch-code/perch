@@ -31,7 +31,7 @@ pub use cache::{
     WorkGrantRecord, NOTIFICATIONS_LAST_MODIFIED_KEY,
 };
 pub use commits::Unreadable;
-pub use client::{Error, GitHub, ListResult, PullLookup};
+pub use client::{CheckTags, Error, GitHub, ListResult, PullLookup};
 pub use comments::{
     Anchor, Author, CommentMessage, CommentThread, NewRunEvent, RevisionContext, RunEvent,
     RunEventRecord, RunHistoryCursor, RunHistoryFilter, RunHistoryPage, RunLabels, RunOwner,

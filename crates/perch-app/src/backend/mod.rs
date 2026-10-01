@@ -31,6 +31,7 @@ pub use windows::{EventSender, WindowId, NO_WINDOW};
 use windows::{CommandSender, View, Views};
 
 mod avatar;
+mod check_watch;
 mod issue_draft;
 pub(crate) mod open_pull;
 pub(crate) mod reviews;
@@ -3613,6 +3614,8 @@ async fn run(
     // owned checkouts are touched, so this can run beside whatever the
     // reader does next. It runs again after every poll.
     spawn_sweep(&ctx);
+    // The open pull request's checks, until they stop moving.
+    check_watch::spawn(&ctx);
 
     // Scan roots before entering the command loop so local work is available
     // immediately. Pull-request lookups for those branches run separately.
@@ -8338,24 +8341,7 @@ async fn fetch_checks(
     }
     match result {
         Ok(overview) if overview.head_sha == head => {
-            ctx.with_cache(|c| c.store_checks(item_id, head, &overview.checks));
-            if ctx.is_open(item_id) {
-                let _ = ctx.events.send(Event::ChecksReady {
-                    item_id: item_id.to_string(),
-                    repo_full_name: pr.repo_full_name.clone(),
-                    number: pr.number,
-                    head_sha: head.to_string(),
-                    status_generation,
-                    checks: Arc::new(overview.checks.clone()),
-                });
-                let _ = ctx.events.send(Event::PullRequestOverviewReady {
-                    item_id: item_id.to_string(),
-                    repo_full_name: pr.repo_full_name.clone(),
-                    number: pr.number,
-                    status_generation,
-                    overview: Arc::new(overview),
-                });
-            }
+            publish_pull_request_overview(ctx, item_id, pr, status_generation, overview);
             false
         }
         Ok(overview) => {
@@ -8391,6 +8377,36 @@ async fn fetch_checks(
             }
             false
         }
+    }
+}
+
+/// Keep the checks of an overview read at the head on screen, and show it
+/// all if the item is open.
+fn publish_pull_request_overview(
+    ctx: &Ctx,
+    item_id: &str,
+    pr: &PullRequest,
+    status_generation: u64,
+    overview: PullRequestOverview,
+) {
+    let head = pr.head_sha.as_str();
+    ctx.with_cache(|c| c.store_checks(item_id, head, &overview.checks));
+    if ctx.is_open(item_id) {
+        let _ = ctx.events.send(Event::ChecksReady {
+            item_id: item_id.to_string(),
+            repo_full_name: pr.repo_full_name.clone(),
+            number: pr.number,
+            head_sha: head.to_string(),
+            status_generation,
+            checks: Arc::new(overview.checks.clone()),
+        });
+        let _ = ctx.events.send(Event::PullRequestOverviewReady {
+            item_id: item_id.to_string(),
+            repo_full_name: pr.repo_full_name.clone(),
+            number: pr.number,
+            status_generation,
+            overview: Arc::new(overview),
+        });
     }
 }
 

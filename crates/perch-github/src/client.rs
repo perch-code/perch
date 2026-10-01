@@ -88,6 +88,14 @@ pub enum PullLookup {
     },
 }
 
+/// The tags a commit's check runs and statuses were last read with. A
+/// change in either means the rollup may have moved.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CheckTags {
+    pub runs: Option<String>,
+    pub statuses: Option<String>,
+}
+
 /// Outcome of a notifications poll.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListResult {
@@ -1392,6 +1400,43 @@ impl GitHub {
             pull,
             etag: new_etag,
         })
+    }
+
+    /// Whether a commit's check runs or commit statuses may have changed
+    /// since `tags` were read: both listings asked conditionally, so a
+    /// quiet commit costs two 304s and none of the rate limit. The
+    /// listings themselves are thrown away; the rollup is what is shown.
+    /// Only their first page is asked for, so a change past a commit's
+    /// hundredth check goes unseen until something on the first page moves.
+    pub async fn probe_checks(
+        &self,
+        repo_full_name: &str,
+        sha: &str,
+        tags: &CheckTags,
+    ) -> Result<CheckTags, Error> {
+        let runs = format!("/repos/{repo_full_name}/commits/{sha}/check-runs?per_page=100");
+        let statuses = format!("/repos/{repo_full_name}/commits/{sha}/status?per_page=100");
+        Ok(CheckTags {
+            runs: self.probe(&runs, tags.runs.as_deref()).await?,
+            statuses: self.probe(&statuses, tags.statuses.as_deref()).await?,
+        })
+    }
+
+    /// The tag `path` answers with now: the old one on a 304, else its
+    /// `ETag`, else a hash of the body so a change can still be told.
+    async fn probe(&self, path: &str, tag: Option<&str>) -> Result<Option<String>, Error> {
+        let fetched = self.get(path, conditional(tag)).await?;
+        if fetched.status == StatusCode::NOT_MODIFIED {
+            return Ok(tag.map(str::to_string));
+        }
+        Ok(Some(
+            header_str(&fetched.headers, ETAG.as_str()).unwrap_or_else(|| {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                fetched.body.hash(&mut hasher);
+                format!("body:{:x}", hasher.finish())
+            }),
+        ))
     }
 
     /// Open a pull request on `repo_full_name` from `head`, which is
