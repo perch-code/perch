@@ -18725,6 +18725,43 @@ while True:
         jdtls.shutdown().await;
     }
 
+    /// Two Installs of one server run one command, and every window hears
+    /// it start and end once.
+    #[tokio::test]
+    async fn a_second_install_joins_the_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, _) = ctx(dir.path(), &nowhere(), &[]);
+        let (events, received) = std::sync::mpsc::channel();
+        ctx.events = EventSender::from(events);
+        let runs = dir.path().join("runs");
+        let install = perch_lsp::Install::Command {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), format!("echo ran >> {}; sleep 0.3", runs.display())],
+            env: Vec::new(),
+            into: None,
+        };
+        let kind = perch_lsp::ServerKind::Gopls;
+        tokio::join!(
+            install_language_server(&ctx, kind, install.clone()),
+            install_language_server(&ctx, kind, install.clone()),
+        );
+        assert_eq!(std::fs::read_to_string(&runs).unwrap(), "ran\n");
+        let told: Vec<&str> = received
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::LspInstalling { .. } => Some("installing"),
+                Event::LspInstalled { .. } => Some("installed"),
+                Event::LspInstallFailed { .. } => Some("failed"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(told, ["installing", "installed"]);
+
+        // Done, it can run again.
+        install_language_server(&ctx, kind, install).await;
+        assert_eq!(std::fs::read_to_string(&runs).unwrap(), "ran\nran\n");
+    }
+
     /// Give windows 1 and 2 views, as opening them does.
     fn two_windows(ctx: &Ctx) {
         let mut views = ctx.views.lock().unwrap();

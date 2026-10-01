@@ -310,53 +310,73 @@ deliberate: one click, and from then on the server is the toolchain's.
 ## Model
 
 - `ReviewState.lsp_status: RwSignal<Status>` becomes
-  `RwSignal<BTreeMap<ServerKind, Status>>`, with
-  `ReviewState::server_status(path) -> Option<Status>` for the file's
-  kind. The callers that ask `is_usable()` (`sticky.rs`, `code_refs.rs`,
-  `references.rs`, `navigation.rs`) ask it of the file they're about.
-- `Status::Absent` becomes `Missing(Missing)`. `Status::describe` names
-  the server.
-- `AppState` gains `server_installs: RwSignal<HashMap<ServerKind,
-  InstallState>>`, app-wide since an install is: `Running`, or `Failed {
-  error }` until the next try.
-- An external tab's source is a path or a `jdt://` URI.
+  `RwSignal<ServerStatuses>`, a `BTreeMap<ServerKind, Status>` with
+  `usable_for(path)`, `any_usable()` and `unusable_reason(path)`, and
+  `ReviewState::set_server_status(kind, status)`. The callers that asked
+  `is_usable()` (`sticky.rs`, `references.rs`, `hierarchy.rs`,
+  `navigation.rs`, `model.rs`) ask it of the file they're about;
+  `code_refs.rs`, for names in prose, asks whether any server is usable.
+- `Status::Absent` becomes `Missing(Missing)`. `Status::describe(kind)`
+  names the server.
+- `ToastKind` gains `Server(ServerOffer)`, an offer to install or update
+  with its line, its `Install`, its button's label and the key it is
+  turned down under. `AppState` gains `installing_servers` and
+  `declined_offers`, app-wide since an install is; a failed install is an
+  error toast, with nothing kept. `ReviewState` gains `pending_offer` and
+  `pending_server_starts`, drained by the root view as `pending_notice`
+  is.
+- `NameAsk` and the markdown `Plan` gain `server: Option<ServerKind>`,
+  the fence's.
+- An external tab's source is a path or a `jdt://` URI without its query.
 - Nothing is stored in the database. No schema change.
 
 ## perch-lsp
 
 - `ServerKind { RustAnalyzer, Gopls, TypescriptLanguageServer, Jdtls }`,
-  with `name()`, `for_path(path) -> Option<ServerKind>`,
-  `language_id(path)`, `markers()`, `options(root)`,
-  `initialize_timeout()` and `pin()`.
-- `find_server(language, root)` becomes `find(kind, root) ->
-  Result<ServerSpec, Missing>`. `Missing { kind, needs: Option<Need>,
-  install: Option<Install> }`. `Install` is `Command { program, args, env,
-  into }` or `Download { url, sha256, into }`. `find` never downloads.
-- `ServerSpec` loses `language_id`: `did_open` takes it from the path.
-- `Client::start` uses the spec's initialize timeout.
-- `handle_notification` handles `window/showMessage` and `language/status`
-  as in [Health](#health).
-- `Client::class_file_contents(uri) -> Option<String>`.
-- `install(Install) -> Result<PathBuf, Error>`: runs or downloads into
+  with `name()`, `for_path(path)`, `for_fence(lang)`, `markers()` and
+  `initialize_timeout()`; `language_id(path)` and `is_class_file(path)`
+  beside it.
+- `find_server(language, root)` becomes `find(kind, root, &Env) ->
+  Result<ServerSpec, Missing>`, where `Env` is the `PATH`, home, servers
+  directory and JDK lookup to use, so tests give their own. `Missing {
+  kind, needs: Option<Need>, install: Option<Box<Install>>, toolchain }`.
+  `Install` is `Command { program, args, env, into }` or `Download { url,
+  sha256, into }`, with `shown()` for the tooltip and `version()`. `find`
+  never downloads.
+- `ServerSpec` loses `language_id` for `kind`: `did_open` takes the id
+  from the path.
+- `Client::start` uses the kind's initialize timeout, and a kind that
+  doesn't report readiness is `Ready` once initialized.
+- `handle_notification` handles `window/showMessage` (for every kind but
+  rust-analyzer) and `language/status` as in [Health](#health).
+- `Client::remember_class_file(uri) -> key` and
+  `Client::class_file_contents(key or uri) -> Option<String>`.
+- `install(&Install) -> Result<(), String>`: runs or downloads into
   `.partial`, verifies, renames. A checksum mismatch deletes what it
   downloaded and fails with both hashes.
-- Every child gets the environment `main` sets up (the stripped rustup pin
-  and the extended `PATH`).
+- `outdated(&spec, &Env) -> Option<Outdated>`, `sweep(servers)`,
+  `start_warnings(kind, root)` and `jdtls_data_path(servers, root)`.
 
 ## Backend
 
-- `language_server: Arc<Mutex<Option<Arc<Client>>>>` becomes a map from
-  `ServerKind` to client, and `resolve` picks by path.
+- `language_server: Arc<Mutex<Option<Arc<Client>>>>` becomes
+  `language_servers: Servers`, a map from `ServerKind` to client, and
+  `resolve` picks by path. `kept_servers` keeps and takes them by kind.
 - `start_language_server(ctx, navigation_id)` starts the kinds for the
-  open item as in [When a server starts](#when-a-server-starts). A new
-  command, `StartLanguageServer { navigation_id, kind }`, comes from the
-  UI on a file open.
-- `InstallLanguageServer { kind, toolchain: Option<String> }`, with the
-  events `LspInstalling { kind }`, `LspInstalled { kind }` and
-  `LspInstallFailed { kind, error }`.
+  open item as in [When a server starts](#when-a-server-starts), each by
+  `start_server`, at most one start of a window's server at a time. An
+  `OpenFile` of a language whose server isn't running starts it in the
+  backend; `StartLanguageServer { navigation_id, kind }` comes from the UI
+  when an install lands.
+- `InstallLanguageServer { kind, install }`, the `Install` the toast
+  showed, with the events `LspInstalling { kind }`, `LspInstalled { kind,
+  install }` and `LspInstallFailed { kind, error }` for every window, and
+  `LspUpdateAvailable` for the window that started the server.
 - `Event::LspStatus` and `Event::LspWarning` carry the `ServerKind`.
-- Startup removes `.partial` directories, superseded versions and orphaned
-  jdtls data. The worktree removal removes that worktree's jdtls data.
+- `read_locations` takes the server that named the locations, to read a
+  class file from jdtls; `open_outside_file` reads one from it too.
+- Startup runs `sweep`. The worktree removal removes that worktree's
+  jdtls data.
 
 ## Harness
 
