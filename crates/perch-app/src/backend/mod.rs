@@ -8937,8 +8937,12 @@ async fn submit_open_pull_request_review(
             count_of(kept, "draft", "drafts"),
             if kept == 1 { "a draft" } else { "drafts" }
         ));
+        ctx.notice(notice);
+    } else if review_needed || posted > 0 {
+        ctx.done(notice);
+    } else {
+        ctx.notice(notice);
     }
-    ctx.notice(notice);
     true
 }
 
@@ -19698,6 +19702,10 @@ read eof || true
         });
         assert_eq!(outcome, Some((true, 1, 0, 0)), "{events:?}");
         assert!(!events.iter().any(|e| matches!(e, Event::PullRequestReviewFailed { .. })));
+        assert!(
+            events.iter().any(|e| matches!(e, Event::Done(m) if m == "Posted 1 comment")),
+            "everything went, so the line is not a complaint: {events:?}"
+        );
         assert!(!ctx.discussion_requests.is_held(&item.id));
 
         // The draft is the reader's comment now, under the same thread.
