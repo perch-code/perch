@@ -19,6 +19,8 @@ pub enum Error {
     Spawn { binary: String, source: std::io::Error },
     #[error("the language server exited")]
     Exited,
+    #[error("the language server exited: {0}")]
+    ExitedSaying(String),
     #[error("the language server did not answer in time")]
     Timeout,
     #[error("the language server reported: {0}")]

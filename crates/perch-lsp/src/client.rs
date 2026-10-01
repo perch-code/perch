@@ -97,6 +97,8 @@ pub struct Client {
     /// The files given to the server, by URI: the version each is at and
     /// a hash of the text it was given.
     documents: std::sync::Mutex<HashMap<String, (i32, u64)>>,
+    /// Why the server exited, from its error output, once it has.
+    exited: std::sync::OnceLock<Option<String>>,
 }
 
 impl Client {
@@ -132,19 +134,29 @@ impl Client {
         let stdout = child.stdout.take().ok_or(Error::Exited)?;
         // What the server logs goes to Perch's log: a server that fails to
         // load a workspace says why there, and nowhere else says as much.
-        if let Some(stderr) = child.stderr.take() {
+        // The last lines are kept for a server that exits: rustup's proxy
+        // for a toolchain without rust-analyzer says why and quits.
+        let stderr_tail = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let stderr_done = child.stderr.take().map(|stderr| {
             let server = spec
                 .binary
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            let tail = stderr_tail.clone();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     tracing::warn!(server = %server, "{line}");
+                    if let Ok(mut tail) = tail.lock() {
+                        if tail.len() == STDERR_TAIL {
+                            tail.pop_front();
+                        }
+                        tail.push_back(line);
+                    }
                 }
-            });
-        }
+            })
+        });
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
 
         let client = Arc::new(Self {
@@ -155,6 +167,7 @@ impl Client {
             root: root.to_path_buf(),
             told: std::sync::Mutex::new((events, Status::Starting)),
             documents: Default::default(),
+            exited: Default::default(),
         });
 
         client.tell(ServerEvent::Status(Status::Starting));
@@ -163,9 +176,20 @@ impl Client {
         {
             let client = client.clone();
             tokio::spawn(async move {
-                read_loop(stdout, pending, client.clone()).await;
+                read_loop(stdout, pending.clone(), client.clone()).await;
+                // Its error output closes as it goes; wait for the last of it.
+                if let Some(done) = stderr_done {
+                    let _ = tokio::time::timeout(Duration::from_millis(500), done).await;
+                }
+                let reason = stderr_tail
+                    .lock()
+                    .ok()
+                    .and_then(|tail| exit_reason(tail.iter().map(String::as_str)));
+                let _ = client.exited.set(reason);
+                // Fail what is waiting now rather than at its timeout.
+                pending.lock().await.clear();
                 client.tell(ServerEvent::Status(Status::Failed {
-                    reason: "the server exited".into(),
+                    reason: client.exited_error().to_string(),
                 }));
             });
         }
@@ -580,8 +604,19 @@ impl Client {
         })
     }
 
+    /// What a request to a server that has exited fails with.
+    fn exited_error(&self) -> Error {
+        match self.exited.get() {
+            Some(Some(reason)) => Error::ExitedSaying(reason.clone()),
+            _ => Error::Exited,
+        }
+    }
+
     /// Send a request and wait `timeout` for its answer.
     async fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, Error> {
+        if self.exited.get().is_some() {
+            return Err(self.exited_error());
+        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
@@ -589,13 +624,13 @@ impl Client {
         let body = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}).to_string();
         if self.write(&body).await.is_err() {
             self.pending.lock().await.remove(&id);
-            return Err(Error::Exited);
+            return Err(self.exited_error());
         }
 
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(value))) => Ok(value),
             Ok(Ok(Err(message))) => Err(Error::Server(message)),
-            Ok(Err(_)) => Err(Error::Exited),
+            Ok(Err(_)) => Err(self.exited_error()),
             Err(_) => {
                 // Do not leak the slot when nothing ever answers.
                 self.pending.lock().await.remove(&id);
@@ -625,6 +660,21 @@ impl Client {
         let _ = self.request("shutdown", Value::Null, LIFECYCLE_TIMEOUT).await;
         self.notify("exit", Value::Null).await;
     }
+}
+
+/// How many lines of a server's error output are kept to say why it exited.
+const STDERR_TAIL: usize = 20;
+
+/// Why a server exited, from the last lines of its error output: the line
+/// that says it is an error, else the last line. rustup's proxy for a
+/// toolchain without rust-analyzer writes
+/// `error: unknown binary 'rust-analyzer' in toolchain '1.98.1-…'`.
+fn exit_reason<'a>(lines: impl DoubleEndedIterator<Item = &'a str> + Clone) -> Option<String> {
+    let lines = lines.map(str::trim).filter(|line| !line.is_empty());
+    let error = lines.clone().find_map(|line| {
+        line.strip_prefix("error:").or_else(|| line.strip_prefix("Error:")).map(str::trim)
+    });
+    error.or_else(|| lines.clone().next_back()).map(str::to_string)
 }
 
 async fn read_loop(stdout: tokio::process::ChildStdout, pending: Pending, client: Arc<Client>) {
@@ -1003,6 +1053,61 @@ pub fn blocks(response: DocumentSymbolResponse) -> Vec<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_exit_is_explained_by_the_error_line_else_the_last() {
+        assert_eq!(
+            exit_reason(
+                [
+                    "warn: auto-installation is deprecated",
+                    "error: unknown binary 'rust-analyzer' in toolchain '1.98.1'",
+                    "",
+                ]
+                .into_iter()
+            )
+            .as_deref(),
+            Some("unknown binary 'rust-analyzer' in toolchain '1.98.1'")
+        );
+        assert_eq!(
+            exit_reason(["starting", "thread 'main' panicked", "  "].into_iter()).as_deref(),
+            Some("thread 'main' panicked")
+        );
+        assert_eq!(exit_reason([" "].into_iter()), None);
+    }
+
+    /// A server that exits before it answers fails the start at once, with
+    /// what it said, rather than at the handshake's timeout.
+    #[tokio::test]
+    async fn a_server_that_exits_fails_its_start_with_its_reason() {
+        let spec = ServerSpec {
+            binary: PathBuf::from("sh"),
+            args: vec![
+                "-c".into(),
+                "echo \"error: unknown binary 'rust-analyzer'\" >&2; exit 1".into(),
+            ],
+            language_id: "rust",
+            options: Value::Null,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let started = std::time::Instant::now();
+        let error = Client::start(spec, &std::env::temp_dir(), tx)
+            .await
+            .err()
+            .expect("the start fails");
+        assert!(started.elapsed() < LIFECYCLE_TIMEOUT, "{:?}", started.elapsed());
+        assert_eq!(
+            error.to_string(),
+            "the language server exited: unknown binary 'rust-analyzer'"
+        );
+        let mut statuses = Vec::new();
+        while let Ok(ServerEvent::Status(status)) = rx.try_recv() {
+            statuses.push(status);
+        }
+        assert_eq!(
+            statuses.last(),
+            Some(&Status::Failed { reason: error.to_string() })
+        );
+    }
 
     /// A server that answers the lifecycle requests and writes down the
     /// method of everything it is sent, one to a line.
