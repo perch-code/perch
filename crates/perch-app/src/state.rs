@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use jiff::Timestamp;
@@ -214,9 +214,6 @@ pub struct AppState {
     /// before the reader can see them.
     pub toasts: RwSignal<VecDeque<Toast>>,
     pub toast_token: RwSignal<u64>,
-    /// The toast fading out as its time runs out, by token, and how much
-    /// of it is left showing.
-    toast_fade: RwSignal<Option<(u64, f32)>>,
 
     /// Review capability/preferences are global; bases, groups, and launch
     /// errors are keyed by their stable item id so opening another item never
@@ -339,7 +336,6 @@ impl AppState {
             agent_archived_owner: RwSignal::new(None),
             toasts: RwSignal::new(VecDeque::new()),
             toast_token: RwSignal::new(0),
-            toast_fade: RwSignal::new(None),
             review_capabilities: RwSignal::new(Arc::new(Vec::new())),
             review_preferences: RwSignal::new(Arc::new(Vec::new())),
             review_base_refs: RwSignal::new(HashMap::new()),
@@ -739,43 +735,15 @@ impl AppState {
         }
     }
 
-    /// How much of the toast `token` shows: all of it, until its time runs
-    /// out and it fades.
-    pub fn toast_opacity(&self, token: u64) -> f32 {
-        match self.toast_fade.get() {
-            Some((fading, opacity)) if fading == token => opacity,
-            _ => 1.0,
-        }
-    }
-
     fn schedule_toast_dismissal(&self, token: u64) {
         let state = *self;
         floem::action::exec_after(Duration::from_secs(8), move |_| {
-            state.fade_toast(token, Instant::now());
-        });
-    }
-
-    /// One step of the toast `token` fading out from `started`, and the
-    /// next, until it is gone. Stops if it is taken down some other way.
-    fn fade_toast(&self, token: u64, started: Instant) {
-        const FADE: Duration = Duration::from_millis(250);
-        if !self
-            .toasts
-            .with_untracked(|toasts| toasts.front().is_some_and(|toast| toast.token == token))
-        {
-            return;
-        }
-        let t = started.elapsed().as_secs_f32() / FADE.as_secs_f32();
-        if t >= 1.0 {
-            self.dismiss_toast(token);
-            self.toast_fade.set(None);
-            return;
-        }
-        // Ease in and out, so it neither pops at the start nor the end.
-        self.toast_fade.set(Some((token, 1.0 - t * t * (3.0 - 2.0 * t))));
-        let state = *self;
-        floem::action::exec_after(Duration::from_millis(16), move |_| {
-            state.fade_toast(token, started);
+            if state
+                .toasts
+                .with_untracked(|toasts| toasts.front().is_some_and(|toast| toast.token == token))
+            {
+                state.dismiss_toast(token);
+            }
         });
     }
 
@@ -5440,28 +5408,6 @@ mod tests {
             app.current_toast().map(|toast| toast.kind),
             Some(ToastKind::AgentRun("run".into()))
         );
-    }
-
-    /// A toast whose time is up fades before it goes, and only that one.
-    #[test]
-    fn a_toast_fades_out_when_its_time_is_up() {
-        let _root = floem::headless::TestRoot::new();
-        let app = AppState::new();
-        app.complain("first");
-        app.show_agent_completion("run".into());
-        let first = app.current_toast().unwrap().token;
-        let next = app.toasts.with(|toasts| toasts[1].token);
-        assert_eq!(app.toast_opacity(first), 1.0);
-
-        app.fade_toast(first, Instant::now() - Duration::from_millis(125));
-        let halfway = app.toast_opacity(first);
-        assert!(0.3 < halfway && halfway < 0.7, "{halfway}");
-        assert_eq!(app.toast_opacity(next), 1.0);
-        assert_eq!(app.current_toast().map(|toast| toast.token), Some(first));
-
-        app.fade_toast(first, Instant::now() - Duration::from_secs(1));
-        assert_eq!(app.current_toast().map(|toast| toast.token), Some(next));
-        assert_eq!(app.toast_opacity(next), 1.0);
     }
 
     /// A merge that went through is news, not a complaint.

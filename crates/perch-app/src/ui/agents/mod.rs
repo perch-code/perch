@@ -23,7 +23,7 @@ use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::{clickable, icon_in};
+use crate::ui::widgets::{clickable, sidebar_glyph};
 
 use model::{AgentRunStatus, AgentRunSummary};
 
@@ -53,25 +53,10 @@ pub(crate) fn icon_action(
     debug: &'static str,
     action: impl Fn() + 'static,
 ) -> impl View {
-    icon_action_faded(icon, debug, |color| color, action)
-}
-
-/// An [`icon_action`] whose colours all go through `fade`, as a toast's do.
-pub(crate) fn icon_action_faded(
-    icon: SidebarIcon,
-    debug: &'static str,
-    fade: impl Fn(Color) -> Color + Copy + 'static,
-    action: impl Fn() + 'static,
-) -> impl View {
     let action: Rc<dyn Fn()> = Rc::new(action);
     let click = action.clone();
     Container::new(
-        // The view's colour tints the whole SVG, so the markup's stays put.
-        icon_in(
-            move || crate::icons::sidebar_icon(icon, theme::FG_MUTED),
-            move || fade(theme::FG_MUTED),
-        )
-        .style(|s| s.size(14.0, 14.0).pointer_events_none()),
+        sidebar_glyph(icon, theme::FG_MUTED).style(|s| s.size(14.0, 14.0).pointer_events_none()),
     )
     .on_event_stop(el::Click, move |_, _| click())
     .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
@@ -82,15 +67,15 @@ pub(crate) fn icon_action_faded(
             EventPropagation::Continue
         }
     })
-    .style(move |s| {
+    .style(|s| {
         clickable(s)
             .size(28.0, 28.0)
             .items_center()
             .justify_center()
             .border_radius(theme::RADIUS)
             .keyboard_navigable()
-            .focus_visible(move |s| s.outline(2.0).outline_color(fade(theme::ACCENT_RING)))
-            .hover(move |s| s.background(fade(theme::CANVAS_HOVER)))
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
+            .hover(|s| s.background(theme::CANVAS_HOVER))
     })
     .debug_name(debug)
     .into_view()
@@ -230,25 +215,21 @@ pub(crate) fn completion_toast(
         state.dismiss_toast(token);
         dropdown::go_to_run(state, review, &backend, &run);
     });
-    let fade = move |color| crate::ui::toast::faded(state, token, color);
-    let dismiss = icon_action_faded(
-        SidebarIcon::Close,
-        "Dismiss agent completion",
-        fade,
-        move || state.dismiss_toast(token),
-    );
+    let dismiss = icon_action(SidebarIcon::Close, "Dismiss agent completion", move || {
+        state.dismiss_toast(token)
+    });
     let body = Stack::horizontal((
-        crate::ui::toast::dot(color, fade),
+        crate::ui::toast::dot(color),
         Stack::vertical((
-            Label::derived(move || title.clone()).style(move |s| {
+            Label::derived(move || title.clone()).style(|s| {
                 s.font_size(theme::TEXT_BODY)
                     .font_weight(theme::weight_emphasis())
-                    .color(fade(theme::FG))
+                    .color(theme::FG)
                     .selectable(false)
             }),
-            Label::derived(move || context.clone()).style(move |s| {
+            Label::derived(move || context.clone()).style(|s| {
                 s.font_size(theme::TEXT_BADGE)
-                    .color(fade(theme::FG_SUBTLE))
+                    .color(theme::FG_SUBTLE)
                     .text_ellipsis()
                     .min_width(0.0)
                     .selectable(false)
