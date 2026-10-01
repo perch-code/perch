@@ -142,12 +142,17 @@ codegen-units = 4
 # `-[NSWindow zoom:]` does not return until its animation ends, and
 # called from inside the handler it held back every resize and redraw of
 # the animation, so a double click on the title bar stretched the last
-# frame to the new size and relaid out only at the end. Last, one that
+# frame to the new size and relaid out only at the end. Then one that
 # centres an emoji on its bitmap, at the nearest whole pixel. Apple Color
 # Emoji gives its cap height as a whole em while swash draws its bitmaps
 # 0.125em below the baseline, and a bitmap ignores the subpixel bin that
 # takes up the half pixel a label measures wider than its text, so each
-# emoji in the reaction picker drew 3px low and 1px left. Drop a
+# emoji in the reaction picker drew 3px low and 1px left. Last, one that
+# holds a window's paint, for 100ms at most, while an update its 4ms
+# budget cut short leaves deferred messages queued. A scroll's
+# `scroll_to` waits in those for layout, so a pane built with its scroll
+# put back, as a file's tab or Conversation is on every switch, painted
+# a frame at its top before jumping to where the reader had left it. Drop a
 # patch from the branch once upstream merges it; `cargo update -p floem`
 # takes the branch's new head. `floem_renderer` is patched too so that
 # perch-app's own dependency on it resolves to the checkout floem's does,
