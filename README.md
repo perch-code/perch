@@ -47,6 +47,12 @@ you open. Writes also need:
 | Comment, review, resolve threads, react on a PR, open a PR | Pull requests: write |
 | Merge, push a branch | Contents: write |
 | React on an issue, Close as issue | Issues: write |
+| Send feedback | Issues: write on `criccomini/perch` |
+
+A fine-grained token can only write to repositories its owner picked, so it
+can't file feedback on Perch's repository unless it's yours. When filing is
+refused, Perch copies the report to your clipboard and opens GitHub's
+new-issue page instead.
 
 ### Repositories
 
@@ -124,16 +130,37 @@ so Perch assumes any of it might try to steer them.
 - Agents don't get your GitHub token or other `*_TOKEN`/`*_SECRET`-style
   variables.
 - Nothing an agent writes reaches GitHub unless you post it.
+- The agent that looks into a bug report is an Ask run in the open checkout
+  (or `~/.perch`), and its notes go into the report's preview, not to
+  GitHub, until you file it.
 
 The CLIs still read `CLAUDE.md` and `AGENTS.md`, and an agent can read any
 file your user can.
+
+## Feedback
+
+The bug icon at the top right, or **Send Feedback…** in the Perch menu,
+files a bug report or an idea as an issue on `criccomini/perch`. An error
+or warning toast has **Report**, which starts one about it.
+
+A report carries what Perch knows about itself: its version and commit,
+macOS and your screens, the agent CLIs it found, its language servers (which
+binary, from where, how much memory), where the token came from, your config
+with the token and repository names left out, the session's recent errors,
+and the end of its log. For a bug, Claude or Codex can look into it first,
+read-only and offline, and add notes. Tokens and secret-looking values,
+emails, your home directory and user name, and every repository but Perch's
+are redacted. You see the whole issue, and can edit it, before anything is
+sent. If it's already been reported, you can comment on that issue instead,
+or +1 it, which also subscribes you.
 
 ## Data
 
 Everything lives under `~/.perch` (or `$PERCH_HOME`): the config, a SQLite
 database, worktrees, clones, agent state, and in `servers/` the language
 servers Perch installed and jdtls's data for each checkout. Delete
-`servers/` to uninstall them. The database holds your local
+`servers/` to uninstall them. Perch's log is in `logs/`, one file a day,
+the last seven kept. The database holds your local
 conversations, drafts and review history, so don't treat it as a cache.
 
 Perch removes the worktrees it made under `~/.perch` once they're done

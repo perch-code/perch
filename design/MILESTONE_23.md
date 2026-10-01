@@ -90,10 +90,13 @@ It behaves as the other two do:
 - Opening it shuts the Agents dropdown, usage and the review menu, and
   opening any of them shuts it.
 - A press outside it shuts it (`ui::dismiss_popovers`), and so does
-  `Escape` or Cancel. The keyboard goes back to whatever had it.
+  `Escape`. The keyboard goes back to whatever had it.
 - Shutting it never loses anything. The draft lives in `AppState` until
-  Perch quits or the report is sent, so the bug icon brings it back as
-  it was, on whichever step it was on, in any window.
+  Perch quits, the report is sent, or **Discard**, so the bug icon
+  brings it back as it was, on whichever step it was on, in any window.
+
+Each page's buttons sit in a footer under a rule, outside the part that
+scrolls, so File issue and an error about it are never scrolled away.
 
 ### The form
 
@@ -106,15 +109,21 @@ The dropdown's first page:
   completion. Placeholder for Bug: `What did you do, what did you
   expect, and what happened instead?` For Idea: `What would you like
   Perch to do?`
-- **Let Claude look into it**, a checkbox. On for Bug, off for Idea.
-  The run uses the model menu's pick, as Milestone 21's Write with
-  Claude does, and the label names it: **Let Codex look into it** when
-  Codex is picked, or is the only CLI installed. Off and disabled, with
-  the reason as its tooltip, when neither CLI is installed.
-- **Preview…** and **Cancel**.
+- **Let Claude look into it**, a checkbox, with a line under it saying
+  what the agent does. On for Bug, off for Idea. The run uses the model
+  menu's pick, as Milestone 21's Write with Claude does, and the label
+  names it: **Let Codex look into it** when Codex is picked, or is the
+  only CLI installed. Off and dimmed, its line saying a CLI is needed,
+  when neither is installed.
+- **Discard**, once anything is typed, which ends the draft and shuts
+  the dropdown, and **Preview…**, which needs a title. `Cmd-Enter` is
+  Preview… too.
 
-Opening it from another toast's Report while a draft exists asks
-`Replace the draft you started?`
+The toast being reported shows over the title as `Reporting: …`.
+Switching Bug and Idea draws the form again, for the kind's
+placeholders. Opening it from another toast's Report while the draft
+has something in it asks `You've started a report. Replace it with this
+one?` with Keep mine and Replace.
 
 ### Preview
 
@@ -122,14 +131,18 @@ Opening it from another toast's Report while a draft exists asks
 
 1. **Collecting…** Perch gathers its context, at once, with no network
    but the rate-limit figure it already has.
-2. **Looking into it…**, when the box is ticked. The agent run, with a
-   **Stop** beside the label. See [The agent's notes](#the-agents-notes).
+2. **Looking into it…**, when the box is ticked. The agent run, with
+   **Skip Claude**, which stops it and goes on without notes. See [The
+   agent's notes](#the-agents-notes).
 3. **Searching…** Up to three open issues on `criccomini/perch` whose
    titles match the report's, from one `search_issues` call
    (`repo:criccomini/perch is:issue is:open` and the title's words),
    then one GraphQL query for those issues' node ids, 👍 counts, whether
    you gave one, and `viewerSubscription`. A failed or offline search
    shows none and says nothing.
+
+Meanwhile the page lists the steps, each done, under way or to come,
+with **Back** to the form (which stops the agent) and **Close**.
 
 Then the dropdown turns to the preview:
 
@@ -141,14 +154,15 @@ Then the dropdown turns to the preview:
   number, title, age and 👍 count, opens the issue in Perch on click
   (which shuts the dropdown, the draft kept),
   and has **+1** (see [+1](#1)) and **Comment there instead**. For an
-  Idea, +1 is the primary button. For a Bug, Comment there instead is,
-  since a second machine's diagnostics are what a second report of a
-  bug adds.
-- **File issue**, **Back** to the form, and **Cancel**.
+  Idea, +1 comes first. For a Bug, Comment there instead does, since a
+  second machine's diagnostics are what a second report of a bug adds.
+  Both are quiet buttons: File issue is the page's one dark one.
+- **Back** to the form, which drops what was collected, and **File
+  issue**.
 
 The dropdown can be shut during step 2. The run carries on, and when it
 ends a toast says `Your report is ready to review`, which reopens the
-preview on click. Stop, or a run that fails or takes more than ten
+preview on click. Skip, or a run that fails or takes more than ten
 minutes, gives a preview with no agent notes and a line saying why.
 
 ### Filing
@@ -240,8 +254,8 @@ heading in the Diagnostics section:
   `rust-analyzer` processes Perch didn't start.
 - **GitHub**: the hosts, where the token came from (`GITHUB_TOKEN`,
   `GH_TOKEN`, `gh auth token` or config, never the value), the last
-  poll's outcome and time, and the rate limit's remaining and reset as
-  Perch last saw them.
+  poll's outcome and time, and whether the rate limit is in force and
+  until when, as Perch last saw it.
 - **Config**: `~/.perch/config.toml` with `token` taken out and each
   `[[repo]]` reduced to whether it has `github`, how many `roots`, and
   whether it sets `trust` or `[repo.work]`. `[agent]` and `[work]` as
@@ -355,20 +369,28 @@ default hook runs, so a crash leaves its cause in the file.
 ## Model
 
 - `AppState` gains `feedback: RwSignal<Option<FeedbackDraft>>`, one for
-  the app, not per item: `FeedbackDraft { kind, title, body, diagnose,
-  seed, step, context, notes, preview, similar, error, generation }`.
-  `seed` is the toast being reported. `step` is `Editing`, `Collecting`,
+  the app, not per item: every window's state holds the same signal
+  (`windows::window`), as it does `recent_problems`. `FeedbackDraft {
+  kind, title, body, diagnose, seed, offer, step, context, notes,
+  notes_error, preview, redacted, caught_on_send, similar, error,
+  pending, attempt, generation }`. `seed` is the toast being reported,
+  `offer` another toast's Report waiting on an answer, `pending` the
+  send in flight. `step` is `Editing`, `Collecting`,
   `Diagnosing`, `Searching`, `Preview` or `Filing`. `similar` is up to
   three `SimilarIssue { number, title, updated_at, node_id, thumbs_up,
   viewer_thumbs_up, viewer_subscription }`.
 - `ReviewState` gains `feedback_open`, `feedback_anchor` and
   `feedback_opener`, per window, as `usage_open`, `usage_anchor` and
   `usage_opener` are, and `dismiss_popovers` checks it beside them.
-  `theme` gains `FEEDBACK_DROPDOWN_WIDTH`.
+  `theme` gains `FEEDBACK_DROPDOWN_WIDTH` and
+  `FEEDBACK_DROPDOWN_MAX_HEIGHT`.
 - `ToastKind::Message` gains `open: Option<ToastOpen>`, `ToastOpen {
   Subject { repo_full_name, kind, number }, FeedbackPreview }`. A toast
   with one is clickable, as a run's toast is, and the click dismisses
-  it. Everything that notifies today passes `None`.
+  it. Everything that notifies today passes `None`; `notify_with` takes
+  one, and is where errors and warnings are kept for a report. Every
+  window hears a poll's complaint into the one shared list, so the same
+  line again within three seconds is kept once.
 - `AppState` gains `recent_problems`, a ring of 20 `(time, text, tone)`,
   pushed by `notify` for errors and warnings.
 - Nothing is stored in the database. No schema change.
@@ -379,25 +401,33 @@ default hook runs, so a crash leaves its cause in the file.
   HEAD` and `-dirty` from `git status --porcelain`, or `unknown` outside
   a checkout. It reruns when `git rev-parse --git-path HEAD` and the ref
   it names change, which works in a worktree, where `.git` is a file.
-- `tracing-appender` for the file, non-blocking, its guard held by
-  `main`.
-- `perch-github`: `create_issue(repo, title, body, labels)`, parsing the
-  response as `subject_kind` parses an issue. `issue_looks(repo,
-  numbers)`, the GraphQL query for the similar issues' viewer fields.
-  `set_subscription(node_id, state)` over `updateSubscription`, beside
-  `set_reaction`.
-- `backend/feedback.rs`: `collect(ctx, item_id, problems) ->
-  FeedbackContext`, `redact(text, secrets) -> (String, usize)`,
-  `render(draft) -> String` and the agent run, spawned directly with
-  `perch_agent::Run` and kept for Stop, as `open_pull::describe` is.
-- The commands `PrepareFeedback { kind, title, body, diagnose, seed,
-  item_id, backend, model, effort }`, `StopFeedbackDiagnosis`, and
-  `FileFeedback { title, body, label, comment_on: Option<u64> }` and
-  `PlusOneFeedback { number, node_id, react, subscribe }`, with the
-  events `FeedbackStep`, `FeedbackReady { context, notes, preview,
-  similar }`, `FeedbackFiled { number, outcome }` (`Filed`, `Commented`,
-  or `PlusOned { subscribed }`) and `FeedbackFailed { error,
-  can_open_on_github }`. `PlusOneFeedback` reads `viewerSubscription`
+- `log_file::DailyFile`, a small writer of Perch's own for the file:
+  `tracing-appender` would bring the `time` crate for a date jiff
+  already gives. Each event is one locked append.
+- `perch-github`: `create_issue_labeled(repo, title, body, labels)`,
+  which `create_issue` now calls with none. `issue_viewer_states(repo,
+  numbers)`, one GraphQL query for the similar issues' node ids, 👍
+  counts and viewer fields. `set_subscription(node_id, state)` over
+  `updateSubscription`, beside `set_reaction`. `rate_limited_until()`.
+- `perch-lsp`: the client keeps its server's pid and start time, and
+  says its last status, for Language servers.
+- `feedback.rs` holds what needs no window or network: the draft,
+  `redact`, `render`, the search query and the agent's prompt.
+  `backend/feedback.rs` collects, runs the agent (spawned directly with
+  `perch_agent::Run` and kept for Skip, as `open_pull::describe` is),
+  searches, files and +1s. `ui/feedback.rs` is the icon and the
+  dropdown.
+- The commands `PrepareFeedback(PrepareRequest)` (the draft, the
+  session's problems, the open item, the model menu's pick and what the
+  window knows: screens, the language server's status, the last poll),
+  `StopFeedbackDiagnosis`, `FileFeedback { title, body, kind,
+  comment_on }` and `PlusOneFeedback { number, node_id, react }`, with
+  the events `FeedbackStep { attempt, step }`, `FeedbackReady`,
+  `FeedbackSent { number, outcome }` (`Filed`, `Commented`, or
+  `PlusOned { reacted, subscription }`), `FeedbackCaught` and
+  `FeedbackFailed`. Each goes to the window that asked. An answer
+  carries its Preview…'s attempt, and one for an attempt the draft has
+  moved past is dropped. `PlusOneFeedback` reads `viewerSubscription`
   again before subscribing, since the preview's may be old.
 - The target repository is a constant, `criccomini/perch`.
 
@@ -431,7 +461,7 @@ paths answered by the test server.
   cut from its oldest end with the count.
 - The agent run: its prompt has the user's text, the context and the
   logs path; it runs with Ask's tools in the open checkout, or
-  `~/.perch` with none; it records no run; Stop and a timeout give a
+  `~/.perch` with none; it records no run; Skip and a timeout give a
   preview without notes and say why.
 - Similar issues: the search query; three at most; the viewer fields
   parse; Comment there instead posts to that number; a failed search
