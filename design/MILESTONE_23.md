@@ -12,8 +12,9 @@ means a back-and-forth in chat, or asking them to ask an agent.
 After this milestone the report is filed from Perch, with that context
 attached.
 
-- **Send Feedback…** in the Perch menu opens a form: a title, what
-  happened, and Bug or Idea.
+- A bug icon in the window's top bar, beside usage, is always there
+  and opens a form: a title, what happened, and Bug or Idea. **Send
+  Feedback…** in the Perch menu opens the same form.
 - An error or warning toast gets a **Report** link that opens the same
   form, seeded with the toast's text.
 - Perch collects what it knows about itself, its environment and the
@@ -51,6 +52,14 @@ which a Finder launch throws away.
 
 ### Where it is
 
+- A **bug** icon in the top bar, just before usage's gauge, in both
+  places `usage::button` sits: the item header's trailing group and
+  the empty bar with no item open. So it shows whatever the window
+  holds. It's a `SidebarIcon::Bug` drawn as the gauge is, in a 26-point
+  round button with the same hover, focus ring and `FG_MUTED`, with the
+  tooltip `Report a bug`. Clicking it opens the form with Kind set to
+  Bug, or the draft if there is one. It holds no state and never
+  changes colour or shows a count.
 - **Send Feedback…** goes in the Perch menu after Open…, with no key
   equivalent. It has the app's target as New Window and Open… do, so it
   works with no window open: it opens one first.
@@ -68,15 +77,18 @@ which a Finder launch throws away.
 
 A box over the window, as Open… is, wider, with:
 
-- **Kind**: Bug · Idea. Bug from a toast, Idea from the menu.
+- **Kind**: Bug · Idea. Bug from the bug icon or a toast, Idea from
+  the menu.
 - **Title**, one line.
 - **What happened**, the composer's box with no destination and no `@`
   completion. Placeholder for Bug: `What did you do, what did you
   expect, and what happened instead?` For Idea: `What would you like
   Perch to do?`
-- **Let Claude look into it** (or Codex, the model menu's pick), a
-  checkbox. On for Bug, off for Idea. Off and disabled, with the reason
-  as its tooltip, when neither CLI is installed.
+- **Let Claude look into it**, a checkbox. On for Bug, off for Idea.
+  The run uses the model menu's pick, as Milestone 21's Write with
+  Claude does, and the label names it: **Let Codex look into it** when
+  Codex is picked, or is the only CLI installed. Off and disabled, with
+  the reason as its tooltip, when neither CLI is installed.
 - **Preview…** and **Cancel**.
 
 `Escape` or Cancel closes the box. What was typed stays until Perch
@@ -368,8 +380,9 @@ default hook runs, so a crash leaves its cause in the file.
 Headless tests in the style of the ones they sit beside, with GitHub's
 paths answered by the test server.
 
-- Entry points: Send Feedback… opens the box with Idea; Report on an
-  error toast opens it with Bug, the toast's text as the title, and the
+- Entry points: the bug icon is in the item header and the empty bar,
+  just before usage, and opens the box with Bug; Send Feedback… opens
+  it with Idea; Report on an error toast opens it with Bug, the toast's text as the title, and the
   toast gone; a success toast has no Report; reopening keeps the draft;
   a second Report asks before replacing it.
 - Recent problems: holds 20, drops the oldest, skips success toasts.
@@ -413,8 +426,8 @@ paths answered by the test server.
    on its own: the log is useful before any of the rest exists.)
 2. `collect`, `redact` and `render`, with their tests. Commit.
 3. `create_issue`, `FileFeedback`, and the form and preview without the
-   agent or the search: Send Feedback…, Report on toasts, recent
-   problems, Open on GitHub. Commit.
+   agent or the search: the bug icon, Send Feedback…, Report on toasts,
+   recent problems, Open on GitHub. Commit.
 4. The agent's notes: the run, Stop, the timeout, the toast when the box
    was closed. Commit.
 5. Similar issues, Comment there instead, and +1 with the subscribe.
@@ -438,8 +451,11 @@ These file real issues on `criccomini/perch`. Close them afterwards.
   binary and that it came from `PATH`; the agent's notes say so too and
   suggest the toolchain's. Nothing in the body has your home directory,
   user name, token or any repository name but Perch's.
-- Wait for that toast to go, then open Send Feedback… from the menu and
-  Preview: the toast is under Recent problems.
+- Wait for that toast to go, then click the bug icon and Preview: the
+  toast is under Recent problems. Close the item: the icon is still
+  there in the empty bar.
+- With Codex picked in the model menu, the box reads Let Codex look
+  into it, and the notes say Codex.
 - File it: the box is gone, the pull request you had open is still
   open, and the toast names the issue. Click it: the issue opens, on
   `criccomini/perch` with the `bug` label. Reply on github.com: the
