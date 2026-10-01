@@ -2,8 +2,8 @@
 
 Perch is a native macOS app for reviewing pull requests and doing work with
 coding agents. It puts your GitHub notifications, a code browser with
-rust-analyzer, and Claude Code and Codex in one window, with a git worktree
-behind every item.
+language servers, and Claude Code and Codex in one window, with a git
+worktree behind every item.
 
 ## Requirements
 
@@ -11,7 +11,9 @@ behind every item.
 - A GitHub token (the easiest way is `gh auth login`)
 - Optional: [Claude Code](https://claude.com/claude-code) 2.1.223+ and/or
   [Codex CLI](https://github.com/openai/codex) 0.155.1+ for agents and reviews
-- Optional: `rust-analyzer` on your `PATH` for code navigation
+- Optional, for code navigation in Rust, Go, TypeScript, JavaScript and
+  Java: a language server for each (see [Language servers](#language-servers)).
+  Perch offers to install one that's missing.
 
 ## Install
 
@@ -81,6 +83,30 @@ branch_prefix = "chris/"
 approvals = "auto"             # or "ask"
 ```
 
+### Language servers
+
+Perch starts the server for each language a pull request changes, and
+others as you open their files:
+
+| Language | Server | Perch looks for it | Perch can install it with |
+|---|---|---|---|
+| Rust | rust-analyzer | the checkout's rustup toolchain | `rustup component add` (needs rustup) |
+| Go | gopls | `PATH`, `~/go/bin` | `go install` (needs Go) |
+| TypeScript, JavaScript | typescript-language-server | `PATH` | `npm install` (needs Node) |
+| Java | jdtls | `PATH` (Homebrew's) | a checksummed download from Eclipse (needs a JDK 21+) |
+
+When a server is missing, a toast says so with an **Install** button; its
+tooltip is the command it runs. Perch downloads nothing without that click,
+or **Update** on an install of its own that's older than the version it
+pins. rust-analyzer goes into the checkout's toolchain, where it matches
+the compiler; the others go in `~/.perch/servers`. Perch never installs Go,
+Node or a JDK, and never runs `npm install` in a checkout, so a TypeScript
+checkout without `node_modules` can't resolve its packages' types.
+
+Language servers run project code: rust-analyzer runs build scripts and
+proc macros, and jdtls runs a Gradle build when it imports one. Keep that
+in mind on a pull request from someone you don't know.
+
 ## Agent safety
 
 Agents read pull requests, comments and code that anyone could have written,
@@ -105,7 +131,9 @@ file your user can.
 ## Data
 
 Everything lives under `~/.perch` (or `$PERCH_HOME`): the config, a SQLite
-database, worktrees, clones, and agent state. The database holds your local
+database, worktrees, clones, agent state, and in `servers/` the language
+servers Perch installed and jdtls's data for each checkout. Delete
+`servers/` to uninstall them. The database holds your local
 conversations, drafts and review history, so don't treat it as a cache.
 
 Perch removes the worktrees it made under `~/.perch` once they're done
