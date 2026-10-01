@@ -72,6 +72,12 @@ pub enum Language {
     Markdown,
     Toml,
     Yaml,
+    Go,
+    /// JavaScript, JSX among it.
+    JavaScript,
+    TypeScript,
+    Tsx,
+    Java,
 }
 
 impl Language {
@@ -86,6 +92,11 @@ impl Language {
             Some("md" | "markdown") => Some(Language::Markdown),
             Some("toml") => Some(Language::Toml),
             Some("yaml" | "yml") => Some(Language::Yaml),
+            Some("go") => Some(Language::Go),
+            Some("js" | "mjs" | "cjs" | "jsx") => Some(Language::JavaScript),
+            Some("ts" | "mts" | "cts") => Some(Language::TypeScript),
+            Some("tsx") => Some(Language::Tsx),
+            Some("java") => Some(Language::Java),
             // Files whose name carries the type rather than an extension.
             _ => match name {
                 "Cargo.lock" => Some(Language::Toml),
@@ -101,6 +112,28 @@ impl Language {
             Language::Markdown => "Markdown",
             Language::Toml => "TOML",
             Language::Yaml => "YAML",
+            Language::Go => "Go",
+            Language::JavaScript => "JavaScript",
+            Language::TypeScript => "TypeScript",
+            Language::Tsx => "TSX",
+            Language::Java => "Java",
+        }
+    }
+
+    /// The grammar a fenced block's language names, as GitHub reads it.
+    pub fn from_fence(lang: &str) -> Option<Self> {
+        match lang.to_ascii_lowercase().as_str() {
+            "rust" | "rs" => Some(Language::Rust),
+            "json" => Some(Language::Json),
+            "markdown" | "md" => Some(Language::Markdown),
+            "toml" => Some(Language::Toml),
+            "yaml" | "yml" => Some(Language::Yaml),
+            "go" | "golang" => Some(Language::Go),
+            "javascript" | "js" | "jsx" | "mjs" | "cjs" => Some(Language::JavaScript),
+            "typescript" | "ts" | "mts" | "cts" => Some(Language::TypeScript),
+            "tsx" => Some(Language::Tsx),
+            "java" => Some(Language::Java),
+            _ => None,
         }
     }
 
@@ -164,9 +197,82 @@ impl Language {
                 "",
                 ""
             ),
+            Language::Go => grammar!(
+                GO,
+                tree_sitter_go::LANGUAGE,
+                "go",
+                tree_sitter_go::HIGHLIGHTS_QUERY,
+                "",
+                ""
+            ),
+            Language::JavaScript => grammar!(
+                JAVASCRIPT,
+                tree_sitter_javascript::LANGUAGE,
+                "javascript",
+                &JAVASCRIPT_HIGHLIGHTS,
+                tree_sitter_javascript::INJECTIONS_QUERY,
+                tree_sitter_javascript::LOCALS_QUERY
+            ),
+            Language::TypeScript => grammar!(
+                TYPESCRIPT,
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
+                "typescript",
+                &TYPESCRIPT_HIGHLIGHTS,
+                tree_sitter_javascript::INJECTIONS_QUERY,
+                &TYPESCRIPT_LOCALS
+            ),
+            Language::Tsx => grammar!(
+                TSX,
+                tree_sitter_typescript::LANGUAGE_TSX,
+                "tsx",
+                &TSX_HIGHLIGHTS,
+                tree_sitter_javascript::INJECTIONS_QUERY,
+                &TYPESCRIPT_LOCALS
+            ),
+            Language::Java => grammar!(
+                JAVA,
+                tree_sitter_java::LANGUAGE,
+                "java",
+                tree_sitter_java::HIGHLIGHTS_QUERY,
+                "",
+                ""
+            ),
         }
     }
 }
+
+// TypeScript's queries cover only what it adds to JavaScript, so each is
+// its own put before JavaScript's: the first pattern that matches a node
+// wins. JSX's are JavaScript's own grammar's, and TSX's too.
+static JAVASCRIPT_HIGHLIGHTS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    [
+        tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+        tree_sitter_javascript::HIGHLIGHT_QUERY,
+    ]
+    .join("\n")
+});
+static TYPESCRIPT_HIGHLIGHTS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    [
+        tree_sitter_typescript::HIGHLIGHTS_QUERY,
+        tree_sitter_javascript::HIGHLIGHT_QUERY,
+    ]
+    .join("\n")
+});
+static TSX_HIGHLIGHTS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    [
+        tree_sitter_typescript::HIGHLIGHTS_QUERY,
+        tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
+        tree_sitter_javascript::HIGHLIGHT_QUERY,
+    ]
+    .join("\n")
+});
+static TYPESCRIPT_LOCALS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    [
+        tree_sitter_typescript::LOCALS_QUERY,
+        tree_sitter_javascript::LOCALS_QUERY,
+    ]
+    .join("\n")
+});
 
 /// The inline half of the markdown grammar.
 fn markdown_inline() -> Option<&'static HighlightConfiguration> {
@@ -401,6 +507,24 @@ mod tests {
         assert_eq!(Language::from_path("a/b/c.json"), Some(Language::Json));
         assert_eq!(Language::from_path("README.md"), Some(Language::Markdown));
         assert_eq!(Language::from_path("ci.yml"), Some(Language::Yaml));
+        assert_eq!(Language::from_path("cmd/main.go"), Some(Language::Go));
+        assert_eq!(Language::from_path("src/index.js"), Some(Language::JavaScript));
+        assert_eq!(Language::from_path("src/App.jsx"), Some(Language::JavaScript));
+        assert_eq!(Language::from_path("lib/a.mjs"), Some(Language::JavaScript));
+        assert_eq!(Language::from_path("src/index.ts"), Some(Language::TypeScript));
+        assert_eq!(Language::from_path("src/a.d.mts"), Some(Language::TypeScript));
+        assert_eq!(Language::from_path("src/App.tsx"), Some(Language::Tsx));
+        assert_eq!(Language::from_path("src/Main.java"), Some(Language::Java));
+    }
+
+    #[test]
+    fn a_fence_names_its_grammar() {
+        assert_eq!(Language::from_fence("Go"), Some(Language::Go));
+        assert_eq!(Language::from_fence("ts"), Some(Language::TypeScript));
+        assert_eq!(Language::from_fence("tsx"), Some(Language::Tsx));
+        assert_eq!(Language::from_fence("javascript"), Some(Language::JavaScript));
+        assert_eq!(Language::from_fence("java"), Some(Language::Java));
+        assert_eq!(Language::from_fence("diff"), None);
     }
 
     #[test]
@@ -448,6 +572,11 @@ mod tests {
             (Language::Toml, "[table]\nkey = 1\n"),
             (Language::Yaml, "key: value\n"),
             (Language::Markdown, "# Heading\n\ntext\n"),
+            (Language::Go, "package main\n\nfunc f() int { return 1 }\n"),
+            (Language::JavaScript, "const a = () => <div className=\"x\">{1}</div>;\n"),
+            (Language::TypeScript, "interface A { b: number }\nconst c: A = { b: 1 };\n"),
+            (Language::Tsx, "const a = (p: { n: number }) => <b>{p.n}</b>;\n"),
+            (Language::Java, "class A { int f() { return 1; } }\n"),
         ];
         for (lang, src) in cases {
             assert!(lang.config().is_some(), "{} grammar failed to load", lang.name());

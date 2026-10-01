@@ -454,6 +454,10 @@ pub fn language_color(language: Option<perch_syntax::Language>) -> Color {
         Some(Language::Json) => Color::from_rgb8(0xc6, 0xa1, 0x00),
         Some(Language::Markdown) => Color::from_rgb8(0x51, 0x7f, 0xbf),
         Some(Language::Yaml) => Color::from_rgb8(0x8a, 0x6d, 0xbd),
+        Some(Language::Go) => Color::from_rgb8(0x00, 0x9c, 0xc4),
+        Some(Language::JavaScript) => Color::from_rgb8(0xd4, 0xb8, 0x30),
+        Some(Language::TypeScript | Language::Tsx) => Color::from_rgb8(0x31, 0x78, 0xc6),
+        Some(Language::Java) => Color::from_rgb8(0xb0, 0x72, 0x19),
         None => Color::from_rgb8(0xa8, 0xb0, 0xb8),
     }
 }

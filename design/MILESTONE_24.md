@@ -69,10 +69,12 @@ TypeScript and JavaScript share one server process. A worktree has at most
 one server of each kind, so four at most, not five.
 
 `perch-syntax` gains grammars for Go, JavaScript (with JSX), TypeScript,
-TSX and Java, at versions that build against its tree-sitter 0.27. Fenced
-blocks in hovers, descriptions and comments named `go`, `ts`,
-`typescript`, `tsx`, `js`, `javascript`, `jsx` or `java` use them.
-`theme::language_color` gains a colour for each.
+TSX and Java, at versions that build against its tree-sitter 0.27, and
+`Language::from_fence` for the names a fence gives them. Fenced blocks
+aren't coloured anywhere yet, Rust's included; what a fence named `go`,
+`ts`, `typescript`, `tsx`, `js`, `javascript`, `jsx` or `java` gets is
+its names looked up, as a `rust` fence's are. `theme::language_color`
+gains a colour for each.
 
 ### When a server starts
 

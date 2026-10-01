@@ -318,6 +318,12 @@ fn is_extension(name: &str) -> bool {
             | "js"
             | "ts"
             | "tsx"
+            | "jsx"
+            | "mjs"
+            | "cjs"
+            | "mts"
+            | "cts"
+            | "java"
             | "sh"
             | "html"
             | "css"
@@ -363,25 +369,24 @@ pub fn in_code_span(text: &str) -> Vec<Mention> {
 }
 
 /// Whether a fenced block's language is one whose type names may be
-/// looked up: Rust, a diff or suggestion of it, output, or none named.
-/// The paths in any block are.
+/// looked up: a language with a server, a diff or suggestion, output, or
+/// none named. The paths in any block are.
 pub fn names_in_fence(lang: Option<&str>) -> bool {
     lang.is_none_or(|lang| {
-        matches!(
-            lang.to_ascii_lowercase().as_str(),
-            "rust"
-                | "rs"
-                | "diff"
-                | "patch"
-                | "suggestion"
-                | "text"
-                | "txt"
-                | "plain"
-                | "plaintext"
-                | "console"
-                | "log"
-                | "output"
-        )
+        perch_lsp::ServerKind::for_fence(lang).is_some()
+            || matches!(
+                lang.to_ascii_lowercase().as_str(),
+                "diff"
+                    | "patch"
+                    | "suggestion"
+                    | "text"
+                    | "txt"
+                    | "plain"
+                    | "plaintext"
+                    | "console"
+                    | "log"
+                    | "output"
+            )
     })
 }
 
