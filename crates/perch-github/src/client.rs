@@ -5,6 +5,8 @@
 //! other read asks with the `ETag` it last saw, and rate-limit headers
 //! classify failures.
 
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,6 +58,12 @@ const LIST_MAX_PAGES: usize = 100;
 /// an open waiting behind whatever the pollers had queued; GitHub asks
 /// for few concurrent requests, not none.
 const API_CONCURRENCY: usize = 4;
+/// The log target for each request's rate-limit cost. Off unless asked
+/// for: `RUST_LOG=perch=info,perch_github::spend=debug,warn`.
+const SPEND: &str = "perch_github::spend";
+/// Asked beside every GraphQL query while the spend log is on, so the
+/// answer says what the query cost.
+const COST_FIELD: &str = "perch_cost: rateLimit { cost }";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -140,6 +148,18 @@ pub struct GitHub {
     /// The bodies of recent reads and their tags, shared by every clone,
     /// so a read of an unchanged path costs a 304.
     responses: Arc<std::sync::Mutex<Responses>>,
+    /// What this process has spent of each rate-limit resource, for the
+    /// spend log. Shared by every clone.
+    spent: Arc<std::sync::Mutex<HashMap<String, Spent>>>,
+}
+
+/// One rate-limit resource's spend: in the window GitHub last named,
+/// and since launch.
+#[derive(Debug, Default)]
+struct Spent {
+    reset: Option<i64>,
+    window: i64,
+    total: i64,
 }
 
 impl GitHub {
@@ -178,6 +198,7 @@ impl GitHub {
             rate_limit_until: Arc::new(AtomicI64::new(0)),
             search_limit_until: Arc::new(AtomicI64::new(0)),
             responses: Arc::new(std::sync::Mutex::new(Responses::new(BUDGET_BYTES))),
+            spent: Arc::default(),
         })
     }
 
@@ -267,6 +288,7 @@ impl GitHub {
         self.finish_mutation(
             response,
             &[StatusCode::RESET_CONTENT, StatusCode::NOT_MODIFIED],
+            &format!("PATCH {path}"),
         )
         .await
     }
@@ -281,7 +303,7 @@ impl GitHub {
             ._delete(&path, None::<&()>)
             .await
             .map_err(map_octocrab_error)?;
-        self.finish_mutation(response, &[StatusCode::NO_CONTENT])
+        self.finish_mutation(response, &[StatusCode::NO_CONTENT], &format!("DELETE {path}"))
             .await
     }
 
@@ -297,7 +319,11 @@ impl GitHub {
             ._put(&path, Some(&body))
             .await
             .map_err(map_octocrab_error)?;
-        self.finish_mutation(response, &[StatusCode::OK, StatusCode::NOT_MODIFIED])
+        self.finish_mutation(
+            response,
+            &[StatusCode::OK, StatusCode::NOT_MODIFIED],
+            &format!("PUT {path}"),
+        )
             .await
     }
 
@@ -368,7 +394,9 @@ impl GitHub {
                     "contextsCursor": cursor.as_deref(),
                 }
             });
-            let data: PullRequestOverviewQuery = self.graphql(&payload).await?;
+            let data: PullRequestOverviewQuery = self
+                .graphql(&payload, "pull request overview")
+                .await?;
             let page = data.into_page().ok_or_else(|| {
                 Error::Decode(format!(
                     "GitHub returned no pull request for {repo_full_name}#{number}"
@@ -428,7 +456,7 @@ impl GitHub {
             ._put(&path, Some(&body))
             .await
             .map_err(map_octocrab_error)?;
-        let body = self.finish_response(response, &[StatusCode::OK]).await?;
+        let body = self.finish_response(response, &[StatusCode::OK], &format!("PUT {path}")).await?;
         serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))
     }
 
@@ -455,7 +483,9 @@ impl GitHub {
             ._patch(&path, Some(&Request { state: "closed" }))
             .await
             .map_err(map_octocrab_error)?;
-        let body = self.finish_response(response, &[StatusCode::OK]).await?;
+        let body = self
+            .finish_response(response, &[StatusCode::OK], &format!("PATCH {path}"))
+            .await?;
         let payload: PullPayload =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
         Ok(payload.into_pull_request(repo_full_name))
@@ -517,7 +547,9 @@ impl GitHub {
             ._post(&path, Some(&request))
             .await
             .map_err(map_octocrab_error)?;
-        let body = self.finish_response(response, &[StatusCode::OK]).await?;
+        let body = self
+            .finish_response(response, &[StatusCode::OK], &format!("POST {path}"))
+            .await?;
         let review: ReviewPayload =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
         Ok(Review::from(review))
@@ -606,7 +638,7 @@ impl GitHub {
             .await
             .map_err(map_octocrab_error)?;
         let body = self
-            .finish_response(response, &[StatusCode::CREATED])
+            .finish_response(response, &[StatusCode::CREATED], &format!("POST {path}"))
             .await?;
         let comment: ReviewCommentPayload =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
@@ -642,7 +674,7 @@ impl GitHub {
             .await
             .map_err(map_octocrab_error)?;
         let body = self
-            .finish_response(response, &[StatusCode::CREATED])
+            .finish_response(response, &[StatusCode::CREATED], &format!("POST {path}"))
             .await?;
         let comment: IssueCommentPayload =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
@@ -677,7 +709,7 @@ impl GitHub {
             .await
             .map_err(map_octocrab_error)?;
         let body = self
-            .finish_response(response, &[StatusCode::CREATED])
+            .finish_response(response, &[StatusCode::CREATED], &format!("POST {path}"))
             .await?;
         let payload: IssuePayload =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
@@ -882,7 +914,9 @@ impl GitHub {
                     "cursor": cursor.as_deref(),
                 }
             });
-            let (data, problems) = self.graphql_partial::<ReviewThreadsData>(&payload).await?;
+            let (data, problems) = self
+                .graphql_partial::<ReviewThreadsData>(&payload, "review threads")
+                .await?;
             let Some(data) = data else {
                 return Err(if problems.is_empty() {
                     Error::Decode("GitHub's GraphQL response had no data".into())
@@ -934,7 +968,7 @@ impl GitHub {
             "query": resolve_thread_mutation(resolve),
             "variables": { "thread": node_id },
         });
-        let data: ResolveThreadData = self.graphql(&payload).await?;
+        let data: ResolveThreadData = self.graphql(&payload, "resolve thread").await?;
         data.into_resolved()
             .ok_or_else(|| Error::Decode("GitHub answered without the thread".into()))
     }
@@ -952,7 +986,7 @@ impl GitHub {
             "query": FILE_TEXT_QUERY,
             "variables": { "owner": owner, "name": name, "expression": format!("{sha}:{path}") },
         });
-        let data: FileTextData = self.graphql(&payload).await?;
+        let data: FileTextData = self.graphql(&payload, "file text").await?;
         Ok(data.into_text())
     }
 
@@ -980,7 +1014,7 @@ impl GitHub {
                 repo_full_name, branch, expected_head, path, contents, headline, body,
             ),
         });
-        let data: CommitOnBranchData = self.graphql(&payload).await?;
+        let data: CommitOnBranchData = self.graphql(&payload, "commit on branch").await?;
         data.into_oid()
             .ok_or_else(|| Error::Decode("GitHub answered the commit without it".into()))
     }
@@ -1010,7 +1044,7 @@ impl GitHub {
                 "query": reactions_query(),
                 "variables": { "ids": ids },
             });
-            let data: ReactionsData = self.graphql(&payload).await?;
+            let data: ReactionsData = self.graphql(&payload, "reactions").await?;
             all.extend(data.by_id(ids));
         }
         Ok(all)
@@ -1033,7 +1067,7 @@ impl GitHub {
             "query": reaction_mutation(add),
             "variables": { "subject": node_id, "content": kind.graphql() },
         });
-        let data: ReactionMutationData = self.graphql(&payload).await?;
+        let data: ReactionMutationData = self.graphql(&payload, "react").await?;
         data.into_reactions()
             .ok_or_else(|| Error::Decode("GitHub answered the reaction without its subject".into()))
     }
@@ -1057,7 +1091,9 @@ impl GitHub {
                 "first": first.clamp(1, 100),
             },
         });
-        let data: crate::mentions::MentionableUsersData = self.graphql(&payload).await?;
+        let data: crate::mentions::MentionableUsersData = self
+            .graphql(&payload, "mentionable users")
+            .await?;
         Ok(data.into_users())
     }
 
@@ -1086,7 +1122,7 @@ impl GitHub {
         });
         // A number nobody has is an error beside the search's answer.
         let (data, problems) = self
-            .graphql_partial::<crate::references::IssueReferencesData>(&payload)
+            .graphql_partial::<crate::references::IssueReferencesData>(&payload, "issue references")
             .await?;
         match data {
             Some(data) => Ok(data.into_references()),
@@ -1166,7 +1202,9 @@ impl GitHub {
             ._patch(&path, Some(&request))
             .await
             .map_err(map_octocrab_error)?;
-        let body = self.finish_response(response, &[StatusCode::OK]).await?;
+        let body = self
+            .finish_response(response, &[StatusCode::OK], &format!("PATCH {path}"))
+            .await?;
         let payload: IssuePayload =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
         Ok(payload.into_issue(repo_full_name))
@@ -1203,7 +1241,7 @@ impl GitHub {
 }",
             "variables": { "owner": owner, "name": name, "number": number },
         });
-        let data: Data = self.graphql(&payload).await?;
+        let data: Data = self.graphql(&payload, "viewer can close").await?;
         data.repository
             .and_then(|repository| repository.issue)
             .map(|issue| issue.viewer_can_close)
@@ -1261,6 +1299,7 @@ impl GitHub {
             .map_err(map_octocrab_error)?;
         let status = response.status();
         let (remaining, reset, retry_after) = rate_headers(response.headers());
+        self.note_spend(&format!("GET {path}"), status, response.headers(), None);
         let body = body_text(response).await;
         let spent = |reset_epoch, retry_after_secs| {
             self.search_limit_until.fetch_max(
@@ -1323,7 +1362,9 @@ impl GitHub {
             return Ok(Vec::new());
         };
         let payload = serde_json::json!({ "query": look.query() });
-        let (data, problems) = self.graphql_partial::<SubjectLookData>(&payload).await?;
+        let (data, problems) = self
+            .graphql_partial::<SubjectLookData>(&payload, "subject looks")
+            .await?;
         let Some(data) = data else {
             return Err(if problems.is_empty() {
                 Error::Decode("GitHub's GraphQL response had no data".into())
@@ -1350,7 +1391,9 @@ impl GitHub {
             return Ok(Vec::new());
         };
         let payload = serde_json::json!({ "query": look.query() });
-        let (data, problems) = self.graphql_partial::<SubjectLookData>(&payload).await?;
+        let (data, problems) = self
+            .graphql_partial::<SubjectLookData>(&payload, "subject participants")
+            .await?;
         let Some(data) = data else {
             return Err(if problems.is_empty() {
                 Error::Decode("GitHub's GraphQL response had no data".into())
@@ -1477,7 +1520,7 @@ impl GitHub {
             .await
             .map_err(map_octocrab_error)?;
         let body = self
-            .finish_response(response, &[StatusCode::CREATED])
+            .finish_response(response, &[StatusCode::CREATED], &format!("POST {path}"))
             .await?;
         let payload: PullPayload =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
@@ -1564,6 +1607,7 @@ impl GitHub {
         let headers = response.headers().clone();
         let (remaining, reset, retry_after) = rate_headers(&headers);
         self.remember_rate_headers(remaining, reset, retry_after);
+        self.note_spend(&format!("GET {path}"), status, &headers, None);
 
         if status == StatusCode::NOT_MODIFIED {
             return Ok(Fetched {
@@ -1592,8 +1636,9 @@ impl GitHub {
     async fn graphql<T: serde::de::DeserializeOwned>(
         &self,
         payload: &serde_json::Value,
+        what: &str,
     ) -> Result<T, Error> {
-        let (data, problems) = self.graphql_partial(payload).await?;
+        let (data, problems) = self.graphql_partial(payload, what).await?;
         if !problems.is_empty() {
             return Err(Error::Graphql(problems.join("; ")));
         }
@@ -1607,17 +1652,38 @@ impl GitHub {
     async fn graphql_partial<T: serde::de::DeserializeOwned>(
         &self,
         payload: &serde_json::Value,
+        what: &str,
     ) -> Result<(Option<T>, Vec<String>), Error> {
+        let payload = if spend_logged() {
+            asking_cost(payload)
+        } else {
+            Cow::Borrowed(payload)
+        };
+        let asked = matches!(payload, Cow::Owned(_));
         let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let response = self
             .octo
-            ._post("/graphql", Some(payload))
+            ._post("/graphql", Some(payload.as_ref()))
             .await
             .map_err(map_octocrab_error)?;
-        let body = self.finish_response(response, &[StatusCode::OK]).await?;
-        let envelope: GraphqlEnvelope<T> =
-            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        let what = format!("POST /graphql {what}");
+        let body = self
+            .finish_costed(response, &[StatusCode::OK], &what, graphql_cost)
+            .await?;
+        let envelope: GraphqlEnvelope<T> = if asked {
+            // Some answers are maps of aliases, which would read the cost
+            // as one of theirs.
+            let mut value: serde_json::Value =
+                serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+            if let Some(data) = value.get_mut("data").and_then(|d| d.as_object_mut()) {
+                data.remove("perch_cost");
+            }
+            serde_json::from_value(value)
+        } else {
+            serde_json::from_str(&body)
+        }
+        .map_err(|e| Error::Decode(e.to_string()))?;
         Ok((
             envelope.data,
             envelope
@@ -1635,18 +1701,36 @@ impl GitHub {
         &self,
         response: http::Response<B>,
         accepted: &[StatusCode],
+        what: &str,
     ) -> Result<(), Error>
     where
         B: http_body::Body<Data = Bytes>,
     {
-        self.finish_response(response, accepted).await.map(drop)
+        self.finish_response(response, accepted, what).await.map(drop)
     }
 
     /// Consume a response, preserving its body for a JSON-returning mutation.
+    /// `what` names the request in the spend log.
     async fn finish_response<B>(
         &self,
         response: http::Response<B>,
         accepted: &[StatusCode],
+        what: &str,
+    ) -> Result<String, Error>
+    where
+        B: http_body::Body<Data = Bytes>,
+    {
+        self.finish_costed(response, accepted, what, |_| None).await
+    }
+
+    /// The same, with the request's cost read from its body when the body
+    /// says it.
+    async fn finish_costed<B>(
+        &self,
+        response: http::Response<B>,
+        accepted: &[StatusCode],
+        what: &str,
+        cost: fn(&str) -> Option<i64>,
     ) -> Result<String, Error>
     where
         B: http_body::Body<Data = Bytes>,
@@ -1656,6 +1740,9 @@ impl GitHub {
         let (remaining, reset, retry_after) = rate_headers(&headers);
         self.remember_rate_headers(remaining, reset, retry_after);
         let body = body_text(response).await;
+        if spend_logged() {
+            self.note_spend(what, status, &headers, cost(&body));
+        }
 
         if accepted.contains(&status) {
             return Ok(body);
@@ -1711,6 +1798,46 @@ impl GitHub {
         self.rate_limit_until.fetch_max(until, Ordering::SeqCst);
     }
 
+    /// Log one request's cost against its rate-limit resource, beside what
+    /// this process has spent of that resource in the current window and
+    /// since launch. `used` is the whole account's spend in the window,
+    /// which counts every other client on the same token too.
+    ///
+    /// `cost` is what the response said it cost. Without it, a request
+    /// costs one, except a 304, which GitHub does not count.
+    fn note_spend(&self, what: &str, status: StatusCode, headers: &HeaderMap, cost: Option<i64>) {
+        if !spend_logged() {
+            return;
+        }
+        let resource =
+            header_str(headers, "x-ratelimit-resource").unwrap_or_else(|| "unknown".into());
+        let reset = header_str(headers, "x-ratelimit-reset").and_then(|v| v.parse::<i64>().ok());
+        let cost = cost.unwrap_or(i64::from(status != StatusCode::NOT_MODIFIED));
+        let (window, total) = {
+            let mut spent = self.spent.lock().unwrap();
+            let spent = spent.entry(resource.clone()).or_default();
+            // A response from the window before can land after the first
+            // of the next; only a later reset starts a new window.
+            if reset > spent.reset {
+                spent.reset = reset;
+                spent.window = 0;
+            }
+            spent.window += cost;
+            spent.total += cost;
+            (spent.window, spent.total)
+        };
+        let header = |name| header_str(headers, name).unwrap_or_else(|| "?".into());
+        tracing::debug!(
+            target: SPEND,
+            cost,
+            window,
+            total,
+            used = %format!("{}/{}", header("x-ratelimit-used"), header("x-ratelimit-limit")),
+            "{what} {} {resource}",
+            status.as_u16(),
+        );
+    }
+
     /// Download an avatar at display size. Returns raw encoded bytes.
     pub async fn fetch_avatar(&self, url: &str) -> Result<Vec<u8>, Error> {
         let sized = with_size_param(url, 64);
@@ -1747,6 +1874,44 @@ struct GraphqlEnvelope<T> {
 struct GraphqlProblem {
     #[serde(default)]
     message: String,
+}
+
+/// Whether the spend log is on.
+fn spend_logged() -> bool {
+    tracing::enabled!(target: SPEND, tracing::Level::DEBUG)
+}
+
+/// The payload with its query asking its own cost beside its answer. A
+/// mutation is left as it is: `rateLimit` is a field of `Query`.
+fn asking_cost(payload: &serde_json::Value) -> Cow<'_, serde_json::Value> {
+    let Some(query) = payload.get("query").and_then(serde_json::Value::as_str) else {
+        return Cow::Borrowed(payload);
+    };
+    let open = query.find('{');
+    let Some(open) = open.filter(|_| !query.trim_start().starts_with("mutation")) else {
+        return Cow::Borrowed(payload);
+    };
+    let mut asked = payload.clone();
+    asked["query"] = format!("{} {COST_FIELD}{}", &query[..=open], &query[open + 1..]).into();
+    Cow::Owned(asked)
+}
+
+/// What a GraphQL answer says its query cost, when it was asked.
+fn graphql_cost(body: &str) -> Option<i64> {
+    #[derive(serde::Deserialize)]
+    struct Probe {
+        data: Option<Data>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Data {
+        perch_cost: Option<Cost>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Cost {
+        cost: i64,
+    }
+    let probe: Probe = serde_json::from_str(body).ok()?;
+    Some(probe.data?.perch_cost?.cost)
 }
 
 /// Split a repository identity before placing it in either a GraphQL
@@ -1919,6 +2084,33 @@ mod tests {
                 retry_after_secs: Some(120)
             }
         ));
+    }
+
+    #[test]
+    fn a_query_asks_its_cost_and_a_mutation_does_not() {
+        let query = serde_json::json!({
+            "query": "\nquery Q($a: Int!) {\n  repository { id }\n}\nfragment F on X { id }",
+            "variables": { "a": 1 },
+        });
+        let asked = asking_cost(&query);
+        assert_eq!(
+            asked["query"],
+            "\nquery Q($a: Int!) { perch_cost: rateLimit { cost }\n  repository { id }\n}\nfragment F on X { id }"
+        );
+        assert_eq!(asked["variables"], query["variables"]);
+
+        let mutation = serde_json::json!({ "query": "mutation($s: ID!) { addReaction { id } }" });
+        assert!(matches!(asking_cost(&mutation), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn a_graphql_answer_says_what_it_cost() {
+        assert_eq!(
+            graphql_cost(r#"{"data":{"r0":{},"perch_cost":{"cost":3}}}"#),
+            Some(3)
+        );
+        assert_eq!(graphql_cost(r#"{"data":{"r0":{}}}"#), None);
+        assert_eq!(graphql_cost(r#"{"errors":[]}"#), None);
     }
 
     #[tokio::test]
