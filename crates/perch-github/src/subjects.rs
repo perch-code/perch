@@ -148,6 +148,22 @@ fragment subject on IssueOrPullRequest {
 }
 "#;
 
+/// Only the state: the look a sweep sends after many pull requests that
+/// were open, to learn which of them no longer are.
+const STATE_FRAGMENT: &str = r#"
+fragment subject on IssueOrPullRequest {
+  __typename
+  ... on Issue {
+    issue_state: state
+    state_reason: stateReason
+  }
+  ... on PullRequest {
+    pull_state: state
+    is_draft: isDraft
+  }
+}
+"#;
+
 impl SubjectLook {
     /// The look at the pull requests and the issues among `threads`, or
     /// `None` when there is nothing among them to ask after.
@@ -213,6 +229,15 @@ impl SubjectLook {
     /// The GraphQL document: one aliased `repository` per repository, one
     /// aliased `issueOrPullRequest` per subject under it.
     pub(crate) fn query(&self) -> String {
+        self.query_with(FRAGMENT)
+    }
+
+    /// The document that asks only for each subject's state.
+    pub(crate) fn state_query(&self) -> String {
+        self.query_with(STATE_FRAGMENT)
+    }
+
+    fn query_with(&self, fragment: &str) -> String {
         let mut numbers: HashMap<usize, Vec<u64>> = HashMap::new();
         for &(repo, number) in self.threads.keys() {
             numbers.entry(repo).or_default().push(number);
@@ -239,7 +264,7 @@ impl SubjectLook {
             query.push_str("  }\n");
         }
         query.push_str("}\n");
-        query.push_str(FRAGMENT);
+        query.push_str(fragment);
         query
     }
 
@@ -301,6 +326,17 @@ impl SubjectLook {
             }
         }
         found
+    }
+
+    /// The state of each subject the answer holds, by repository and
+    /// number.
+    pub(crate) fn states(&self, data: SubjectLookData) -> Vec<((String, u64), SubjectState)> {
+        self.nodes(data)
+            .into_iter()
+            .filter_map(|(repo, number, node)| {
+                Some(((self.repos[repo].clone(), number), state_of(&node)?))
+            })
+            .collect()
     }
 
     /// Who acted on each subject the answer holds last, by repository
@@ -444,6 +480,34 @@ mod tests {
         assert!(query.contains("comments(last: 10)"), "{query}");
         assert!(query.contains("reviews(last: 10)"), "{query}");
         assert!(query.contains("commits(last: 1)"), "{query}");
+    }
+
+    #[test]
+    fn a_look_at_states_asks_only_the_state_and_reads_it_back() {
+        let look =
+            SubjectLook::of_subjects([("a/b", 7), ("a/b", 8), ("c/d", 9), ("c/d", 10)]).unwrap();
+        let query = look.state_query();
+        assert!(query.contains("n7: issueOrPullRequest(number: 7) { ...subject }"), "{query}");
+        assert!(query.contains("pull_state: state"), "{query}");
+        assert!(!query.contains("comments("), "{query}");
+        assert!(!query.contains("author"), "{query}");
+        let data: SubjectLookData = serde_json::from_str(
+            r#"{"r0":{"n7":{"__typename":"PullRequest","pull_state":"MERGED","is_draft":false},
+                      "n8":null},
+                "r1":{"n9":{"__typename":"PullRequest","pull_state":"OPEN","is_draft":true},
+                      "n10":{"__typename":"Issue","issue_state":"CLOSED","state_reason":"COMPLETED"}}}"#,
+        )
+        .unwrap();
+        let mut states = look.states(data);
+        states.sort_by_key(|((_, number), _)| *number);
+        assert_eq!(
+            states,
+            [
+                (("a/b".to_string(), 7), SubjectState::PrMerged),
+                (("c/d".to_string(), 9), SubjectState::PrDraft),
+                (("c/d".to_string(), 10), SubjectState::IssueClosed),
+            ]
+        );
     }
 
     #[test]

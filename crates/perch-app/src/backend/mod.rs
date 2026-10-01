@@ -6692,24 +6692,59 @@ async fn removable(ctx: &Ctx, item: &Item) -> Result<bool, String> {
 
 /// Ask GitHub again after the pull request of each worktree Perch made
 /// whose pull request was open when last seen, so one merged or closed
-/// without Perch looking is seen by the sweep. Conditional, so a pull
-/// request that hasn't moved costs a 304. Only the state is taken: the
-/// checks and the review on the row are the open item's to refresh.
+/// without Perch looking is seen by the sweep. Their states are asked in
+/// one GraphQL query, fifty to a request, and only one no longer open is
+/// fetched whole, for when it ended and who merged it. Only the state is
+/// taken: the checks and the review on the row are the open item's to
+/// refresh.
 async fn refresh_checkout_pulls(ctx: &Ctx) {
     let Some(github) = ctx.github() else {
         return;
     };
-    let items = ctx
+    let items: Vec<Item> = ctx
         .with_cache(|c| c.load_items().ok())
         .flatten()
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|item| {
+            let owned = item.checkout.as_ref().is_some_and(|c| c.owned && c.on_disk);
+            owned
+                && item.pull_request().is_some_and(|pr| pr.is_open())
+                && !item.is_archived()
+                && !ctx.is_open_anywhere(&item.id)
+        })
+        .collect();
+    let asked: Vec<(String, u64)> = items
+        .iter()
+        .filter_map(|item| item.pull_request())
+        .map(|pr| (pr.repo_full_name.clone(), pr.number))
+        .collect();
+    let mut ended = std::collections::HashSet::new();
+    for batch in asked.chunks(SUBJECTS_PER_LOOK) {
+        match github.look_at_states(batch).await {
+            Ok(states) => ended.extend(
+                states
+                    .into_iter()
+                    .filter(|(_, state)| {
+                        matches!(
+                            state,
+                            perch_github::SubjectState::PrMerged | perch_github::SubjectState::PrClosed
+                        )
+                    })
+                    .map(|(subject, _)| subject),
+            ),
+            Err(e) => {
+                tracing::debug!(error = %e, "could not ask after the checkouts' pull requests");
+                return;
+            }
+        }
+    }
     let mut changed = false;
     for item in items {
-        let owned = item.checkout.as_ref().is_some_and(|c| c.owned && c.on_disk);
-        let Some(pr) = item.pull_request().filter(|pr| pr.is_open()) else {
+        let Some(pr) = item.pull_request() else {
             continue;
         };
-        if !owned || item.is_archived() || ctx.is_open_anywhere(&item.id) {
+        if !ended.contains(&(pr.repo_full_name.clone(), pr.number)) {
             continue;
         }
         let fresh = match github.fetch_pull_request(&pr.repo_full_name, pr.number).await {
@@ -23437,42 +23472,64 @@ read eof || true
     }
 
     /// The sweep asks after the pull request of each worktree Perch made
-    /// that was open when last seen, and takes only its state.
+    /// that was open when last seen, all in one query, fetches only the
+    /// one found merged, and takes only its state.
     #[tokio::test]
     async fn a_checkouts_pull_request_merged_elsewhere_is_seen() {
         let dir = tempfile::tempdir().unwrap();
         let merged = PULL_7
             .replace(r#""state":"open""#, r#""state":"closed","merged":true,"merged_at":"2026-09-20T10:00:00Z""#);
         let merged: &'static str = Box::leak(merged.into_boxed_str());
-        let (base, paths) = serve_by_path(move |path| {
-            if path.starts_with("/repos/a/b/pulls/7") {
+        let queries = Arc::new(Mutex::new(Vec::new()));
+        let asked = queries.clone();
+        let (base, paths) = serve_by_body(move |_method, path, _headers, sent| {
+            if path == "/graphql" {
+                asked.lock().unwrap().push(sent.to_string());
+                let states = r#"{"data":{"r0":{
+                    "n7":{"__typename":"PullRequest","pull_state":"MERGED","is_draft":false},
+                    "n9":{"__typename":"PullRequest","pull_state":"OPEN","is_draft":false}}}}"#;
+                ("200 OK", states.to_string())
+            } else if path.starts_with("/repos/a/b/pulls/7") {
                 ("200 OK", merged.to_string())
             } else {
                 ("404 Not Found", r#"{"message":"Not Found"}"#.into())
             }
         });
         let (ctx, _received) = ctx(dir.path(), &base, &["a/b"]);
-        let mut item = store_pull(&ctx, 7);
-        item.checkout = Some(ItemCheckout {
-            branch: "perch/pr-7".into(),
-            base_ref: "main".into(),
-            head_sha: "h7".into(),
-            path: dir.path().join("wt"),
-            owned: true,
-            on_disk: true,
-            churn: None,
-            last_seen_head: None,
-            divergence: None,
-            source: None,
-        });
-        ctx.with_cache(|c| c.update_item(&item)).unwrap().unwrap();
+        let checked_out = |number: u64| {
+            let mut item = store_pull(&ctx, number);
+            item.checkout = Some(ItemCheckout {
+                branch: format!("perch/pr-{number}"),
+                base_ref: "main".into(),
+                head_sha: format!("h{number}"),
+                path: dir.path().join(format!("wt{number}")),
+                owned: true,
+                on_disk: true,
+                churn: None,
+                last_seen_head: None,
+                divergence: None,
+                source: None,
+            });
+            ctx.with_cache(|c| c.update_item(&item)).unwrap().unwrap();
+            item
+        };
+        let item = checked_out(7);
+        let still_open = checked_out(9);
         // Viewed, never checked out: not the sweep's.
         store_pull(&ctx, 8);
 
         refresh_checkout_pulls(&ctx).await;
 
         assert!(ctx.item(&item.id).unwrap().is_closed());
-        assert_eq!(paths.lock().unwrap().len(), 1, "only the checkout's pull request was asked after");
+        assert!(!ctx.item(&still_open.id).unwrap().is_closed());
+        assert_eq!(
+            paths.lock().unwrap().as_slice(),
+            ["/graphql", "/repos/a/b/pulls/7"],
+            "the open one is not fetched"
+        );
+        let query = &queries.lock().unwrap()[0];
+        assert!(query.contains("n7:") && query.contains("n9:"), "{query}");
+        assert!(!query.contains("n8:"), "only the checkouts' pull requests are asked after");
         assert!(sweep_due(&ctx.item(&item.id).unwrap(), Timestamp::now() - jiff::SignedDuration::from_hours(24 * 14)));
     }
 

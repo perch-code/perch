@@ -29,7 +29,7 @@ use crate::discussion::{
     REVIEW_THREADS_MAX_PAGES, REVIEW_THREADS_QUERY,
 };
 use crate::items::{Issue, IssueCloseReason, IssuePayload};
-use crate::model::{SubjectSnapshot, Thread};
+use crate::model::{SubjectSnapshot, SubjectState, Thread};
 use crate::pulls::{
     MergeMethod, MergeRequest, MergeResult, PullPayload, PullRequest, PullRequestOverview,
     PullRequestOverviewAccumulator, PullRequestOverviewQuery, PULL_REQUEST_OVERVIEW_QUERY,
@@ -1406,6 +1406,35 @@ impl GitHub {
             tracing::debug!(problem, "a subject's participants could not be looked at");
         }
         Ok(look.participants(data))
+    }
+
+    /// The state of each of these pull requests and issues, named by
+    /// repository and number: fifty or so a request, which GitHub counts
+    /// as one point. A subject GitHub cannot resolve is passed over.
+    pub async fn look_at_states(
+        &self,
+        subjects: &[(String, u64)],
+    ) -> Result<Vec<((String, u64), SubjectState)>, Error> {
+        let Some(look) =
+            SubjectLook::of_subjects(subjects.iter().map(|(repo, number)| (repo.as_str(), *number)))
+        else {
+            return Ok(Vec::new());
+        };
+        let payload = serde_json::json!({ "query": look.state_query() });
+        let (data, problems) = self
+            .graphql_partial::<SubjectLookData>(&payload, "subject states")
+            .await?;
+        let Some(data) = data else {
+            return Err(if problems.is_empty() {
+                Error::Decode("GitHub's GraphQL response had no data".into())
+            } else {
+                Error::Graphql(problems.join("; "))
+            });
+        };
+        for problem in problems {
+            tracing::debug!(problem, "a subject's state could not be looked at");
+        }
+        Ok(look.states(data))
     }
 
     /// The pull request whose head is `owner:branch` on `repo_full_name`,
