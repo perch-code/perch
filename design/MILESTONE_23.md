@@ -22,8 +22,8 @@ attached.
   offline, and write notes on what it checked and what it thinks the
   cause is.
 - You read and edit the whole issue before anything is sent. **File
-  issue** creates it on `criccomini/perch` with your token, and it opens
-  in Perch as an issue.
+  issue** creates it on `criccomini/perch` with your token, and a toast
+  links to it. Perch stays on whatever you had open.
 - When it's already been filed, **+1** gives that issue your 👍 and
   subscribes you to it, so you hear when it's fixed.
 
@@ -44,8 +44,8 @@ which a Finder launch throws away.
   Ask's sandbox and writes notes, and Perch does the rest.
 - Shelling out to `gh`, as in Milestone 21.
 - Reports to any repository but Perch's own.
-- Editing or following up on an issue after it's filed. It's an issue
-  item in Perch, and Conversation does that already.
+- Editing or following up on an issue after it's filed. Its replies
+  reach the Inbox, and Conversation does that already.
 
 ## Behaviour
 
@@ -134,10 +134,11 @@ too. If that changes anything, nothing is sent: the preview takes the
 redacted text and says `Redacted 1 value you added. Check it and file
 again.`
 
-On success the draft is cleared, the box closes, a toast says `Filed
-criccomini/perch#123` (or `Commented on …`), and the issue opens through
-`open_subject`, so it's an item with its Conversation, and its replies
-reach the Inbox as notifications.
+On success the draft is cleared, the box closes, and a toast says `Filed
+criccomini/perch#123` (or `Commented on …`). Perch stays on whatever you
+had open. Clicking the toast opens the issue through `open_subject`.
+Left alone, the issue's replies still reach the Inbox as notifications,
+as an author's or commenter's do.
 
 On failure the box stays with what was typed:
 
@@ -171,8 +172,8 @@ The button says what it will do: **+1** when you haven't reacted,
 ignored.
 
 On success it goes as filing does: the draft is cleared, the box closes,
-a toast says `+1'd criccomini/perch#57 and subscribed you`, and the
-issue opens through `open_subject`.
+and a toast says `+1'd criccomini/perch#57 and subscribed you`, which
+opens the issue on click.
 
 On failure:
 
@@ -182,7 +183,7 @@ On failure:
 - **The subscribe fails** after the reaction landed: the 👍 stays, the
   box closes as on success, and the toast is a warning: `+1'd
   criccomini/perch#57, but couldn't subscribe you. Watch it on
-  github.com.`
+  github.com.` It opens the issue on click too.
 
 ### What Perch collects
 
@@ -326,6 +327,10 @@ default hook runs, so a crash leaves its cause in the file.
   `Diagnosing`, `Searching`, `Preview` or `Filing`. `similar` is up to
   three `SimilarIssue { number, title, updated_at, node_id, thumbs_up,
   viewer_thumbs_up, viewer_subscription }`.
+- `ToastKind::Message` gains `open: Option<ToastOpen>`, `ToastOpen {
+  Subject { repo_full_name, kind, number }, FeedbackPreview }`. A toast
+  with one is clickable, as a run's toast is, and the click dismisses
+  it. Everything that notifies today passes `None`.
 - `AppState` gains `recent_problems`, a ring of 20 `(time, text, tone)`,
   pushed by `notify` for errors and warnings.
 - Nothing is stored in the database. No schema change.
@@ -387,15 +392,16 @@ paths answered by the test server.
   parse; Comment there instead posts to that number; a failed search
   shows none. +1 is primary for an Idea and Comment there instead for a
   Bug.
-- +1: reacts and subscribes, then clears the draft and opens the issue;
+- +1: reacts and subscribes, then clears the draft, leaves the open item
+  as it was, and toasts with the issue;
   reads Subscribe and only subscribes when you'd reacted; shows `You
   +1'd this` when both are done; never subscribes an `IGNORED` issue,
   even when it became ignored after the preview; a failed reaction
   doesn't subscribe and keeps the box; a failed subscribe keeps the
   reaction and warns.
 - Filing: posts the preview's title and body, unchanged, and the label
-  to `criccomini/perch`;
-  opens the issue as an item; clears the draft. A `403` offers Open on
+  to `criccomini/perch`; clears the draft; leaves the open item as it
+  was; toasts with the issue, and clicking the toast opens it. A `403` offers Open on
   GitHub, which copies the body and puts only the title in the URL.
   Offline sends nothing and keeps the draft.
 - The log file: written under `$PERCH_HOME/logs`, with no escape codes;
@@ -434,9 +440,10 @@ These file real issues on `criccomini/perch`. Close them afterwards.
   user name, token or any repository name but Perch's.
 - Wait for that toast to go, then open Send Feedback… from the menu and
   Preview: the toast is under Recent problems.
-- File it: the issue is on `criccomini/perch` with the `bug` label,
-  opens in Perch as an issue item, and the box is gone. Reply on
-  github.com: the reply reaches the Inbox.
+- File it: the box is gone, the pull request you had open is still
+  open, and the toast names the issue. Click it: the issue opens, on
+  `criccomini/perch` with the `bug` label. Reply on github.com: the
+  reply reaches the Inbox.
 - Launch Perch from Finder, use it for a minute and quit:
   `~/.perch/logs/perch.log` has the session.
 - Paste your token into the preview's text and press File issue: nothing
@@ -463,6 +470,8 @@ These file real issues on `criccomini/perch`. Close them afterwards.
   instead or +1 button, and don't send text the user hasn't seen in the
   preview.
 - Don't change a subscription the user set to ignored.
+- Don't open the issue, or change what the window shows, after filing,
+  commenting or +1. The toast is the way there.
 - Don't put the body, or anything collected, in a URL.
 - Don't give the agent the token, the network, or a way to file.
 - Don't collect the user's project source, their notifications, or the
