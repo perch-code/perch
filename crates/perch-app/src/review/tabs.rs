@@ -185,6 +185,8 @@ fn on_disk(state: ReviewState, path: &str) -> String {
 /// rather than one for each write. Its content is asked for when it is
 /// not here. Nothing for the file already showing: opening it again
 /// would rebuild the editor, which flickered and lost the scroll a beat.
+/// A tab names the file the reader wants, as a link does, so Code stays
+/// over a composer drawn in the file it leaves.
 fn show_file(state: ReviewState, backend: &Backend, path: &str) {
     let showing = state.tab.get_untracked() == ItemTab::Code
         && state.active.with_untracked(|a| a.as_deref() == Some(path));
@@ -193,7 +195,7 @@ fn show_file(state: ReviewState, backend: &Backend, path: &str) {
     }
     let load = floem::reactive::Effect::batch(|| {
         state.show_tab(ItemTab::Code);
-        state.open_tab(path)
+        state.open_for_jump(|| state.open_tab(path))
     });
     if load {
         crate::review::load_file(backend, path);
@@ -737,6 +739,60 @@ mod tests {
         harness.rebuild();
         assert_eq!(state.editor_epoch.get_untracked(), epoch);
         assert_eq!(state.cursor_line.get_untracked(), 7);
+    }
+
+    /// A click on another file's tab, with a composer drawn in the code
+    /// of the one showing, shows that file on Code. The composer waits in
+    /// its file, drawn there again when it shows.
+    #[test]
+    fn a_click_on_a_tab_beside_a_composer_in_the_code_stays_on_code() {
+        let (mut harness, _, state) = pull_request_harness();
+        state.open_tab("slatedb/src/config.rs");
+        state.open_tab("bindings/uniffi/src/config.rs");
+        for path in ["slatedb/src/config.rs", "bindings/uniffi/src/config.rs"] {
+            state.finish_load(
+                path,
+                Arc::new(crate::backend::build_loaded_file(
+                    path.into(),
+                    "a\nb\nc\n".into(),
+                    "a\nb\n".into(),
+                    Some(perch_git::ChangeStatus::Modified),
+                    false,
+                    perch_git::Scope::Branch,
+                    String::new(),
+                )),
+            );
+        }
+        state.show_tab(ItemTab::Code);
+        let anchor = perch_github::Anchor {
+            path: "bindings/uniffi/src/config.rs".into(),
+            start_line: 3,
+            line: 3,
+            side: perch_github::Side::Right,
+            commit_sha: "h".into(),
+        };
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
+        state.open_composer(None, Some(anchor), "why?".into(), choice);
+        harness.rebuild();
+        harness.paint();
+        assert!(state.composer_in_code());
+
+        let tab = rect(&harness, "file tab:slatedb/src/config.rs");
+        harness.click(tab.center().x, tab.center().y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.tab.get(), ItemTab::Code);
+        assert_eq!(state.active.get().as_deref(), Some("slatedb/src/config.rs"));
+        assert_eq!(state.composer_draft.get(), "why?");
+
+        let tab = rect(&harness, "file tab:bindings/uniffi/src/config.rs");
+        harness.click(tab.center().x, tab.center().y);
+        harness.rebuild();
+        assert!(state.composer_in_code());
     }
 
     #[test]

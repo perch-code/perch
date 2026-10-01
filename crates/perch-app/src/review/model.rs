@@ -2914,10 +2914,11 @@ impl ReviewState {
 
     /// Open a file, through `open`, for a jump or a link: Code stays up
     /// over a composer drawn in the file it leaves.
-    pub fn open_for_jump(&self, open: impl FnOnce()) {
+    pub fn open_for_jump<R>(&self, open: impl FnOnce() -> R) -> R {
         self.opening_for_jump.set(true);
-        open();
+        let opened = open();
         self.opening_for_jump.set(false);
+        opened
     }
 
     /// `composer_in_code` for a caller that may be an effect, which is not
