@@ -188,7 +188,14 @@ pub fn always(request: &ApprovalRequest) -> (String, String) {
                 .suggestion
                 .clone()
                 .unwrap_or_else(|| request.subject.clone());
-            (format!("tool:{name}:{what}"), format!("{name} {what}"))
+            // A grant for the whole tool comes back named after the
+            // tool, which would read "AskUserQuestion AskUserQuestion".
+            let label = if what == *name {
+                name.clone()
+            } else {
+                format!("{name} {what}")
+            };
+            (format!("tool:{name}:{what}"), label)
         }
     }
 }
@@ -345,7 +352,30 @@ mod tests {
                 "Fetch docs.rs",
             )
         };
-        assert_eq!(always(&tool).0, "tool:WebFetch:domain:docs.rs");
+        assert_eq!(
+            always(&tool),
+            (
+                "tool:WebFetch:domain:docs.rs".to_string(),
+                "WebFetch domain:docs.rs".to_string()
+            )
+        );
+
+        let whole_tool = ApprovalRequest {
+            suggestion: Some("AskUserQuestion".into()),
+            ..request(
+                ApprovalKind::Tool {
+                    name: "AskUserQuestion".into(),
+                },
+                "AskUserQuestion",
+            )
+        };
+        assert_eq!(
+            always(&whole_tool),
+            (
+                "tool:AskUserQuestion:AskUserQuestion".to_string(),
+                "AskUserQuestion".to_string()
+            )
+        );
     }
 
     #[test]
