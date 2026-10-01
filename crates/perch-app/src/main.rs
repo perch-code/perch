@@ -108,6 +108,7 @@ fn main() {
     theme::install_code_font();
     theme::install_symbol_fallbacks();
 
+    windows::load_frame();
     let (backend, events) = backend::spawn();
     let mut started = Some((backend, events));
 
@@ -117,7 +118,7 @@ fn main() {
     let open_at_launch = std::env::var("PERCH_OPEN_PR").ok().and_then(|spec| reference::launch_hook(&spec));
     tracing::info!(hook = ?open_at_launch, "launch hook");
 
-    Application::new()
+    let app = Application::new()
         // A click on the Dock icon with every window shut opens one.
         .on_event(|event| {
             if let floem::AppEvent::Reopen {
@@ -126,111 +127,113 @@ fn main() {
             {
                 windows::reopen();
             }
-        })
-        .window(
-            move |_| {
-                app_icon::install();
-                app_menu::install();
-                // Backend events arrive on a std channel, which floem drains
-                // on the UI thread into the windows' state.
-                if let Some((backend, events)) = started.take() {
-                    windows::start(backend, events);
-                }
-                let Some((state, review, backend)) = windows::window(None) else {
-                    return floem::views::Empty::new().into_any();
-                };
+        });
+    // After the application, which AppKit's screens are asked of.
+    let (config, frame) = windows::config();
+    app.window(
+        move |_| {
+            app_icon::install();
+            app_menu::install();
+            // Backend events arrive on a std channel, which floem drains
+            // on the UI thread into the windows' state.
+            if let Some((backend, events)) = started.take() {
+                windows::start(backend, events);
+            }
+            let Some((state, review, backend)) = windows::window(None) else {
+                return floem::views::Empty::new().into_any();
+            };
 
-                // PERCH_OPEN_BRANCH=owner/repo:branch opens a branch item once
-                // the cache has painted it. Its id is not known until then.
-                if let Ok(spec) = std::env::var("PERCH_OPEN_BRANCH") {
-                    if let Some((repo, branch)) = spec.split_once(':') {
-                        let (repo, branch) = (repo.to_string(), branch.to_string());
-                        let backend = backend.clone();
-                        floem::reactive::Effect::new(move |opened: Option<bool>| {
-                            if opened == Some(true) {
-                                return true;
-                            }
-                            let found = state.items.with(|all| {
-                                all.iter()
-                                    .find(|i| {
-                                        i.repo_full_name.eq_ignore_ascii_case(&repo)
-                                            && i.branch() == Some(branch.as_str())
-                                    })
-                                    .map(|i| i.id.clone())
-                            });
-                            match found {
-                                Some(id) => {
-                                    let navigation_id = backend.open_item(&id);
-                                    state.begin_item_review(
-                                        review,
-                                        "Reading the worktree",
-                                        &id,
-                                        navigation_id,
-                                    );
-                                    true
-                                }
-                                None => false,
-                            }
-                        });
-                    }
-                }
-
-                // PERCH_OPEN_ISSUE=owner/repo#N opens an issue the same way.
-                if let Some((repo, number)) =
-                    std::env::var("PERCH_OPEN_ISSUE").ok().and_then(|spec| reference::launch_hook(&spec))
-                {
-                    let navigation_id =
-                        backend.open_subject(&repo, perch_github::ItemKind::Issue, number);
-                    state.begin_open("Reading the issue", navigation_id);
-                }
-
-                // PERCH_START_WORK=1 presses Start work once the issue is up.
-                if std::env::var("PERCH_START_WORK").is_ok() {
+            // PERCH_OPEN_BRANCH=owner/repo:branch opens a branch item once
+            // the cache has painted it. Its id is not known until then.
+            if let Ok(spec) = std::env::var("PERCH_OPEN_BRANCH") {
+                if let Some((repo, branch)) = spec.split_once(':') {
+                    let (repo, branch) = (repo.to_string(), branch.to_string());
                     let backend = backend.clone();
-                    floem::reactive::Effect::new(move |pressed: Option<bool>| {
-                        if pressed == Some(true) {
+                    floem::reactive::Effect::new(move |opened: Option<bool>| {
+                        if opened == Some(true) {
                             return true;
                         }
-                        let issue_item = review
-                            .issue
-                            .with(|i| i.is_some())
-                            .then(|| review.item.with(|i| i.as_ref().map(|i| i.id.clone())))
-                            .flatten();
-                        match issue_item {
+                        let found = state.items.with(|all| {
+                            all.iter()
+                                .find(|i| {
+                                    i.repo_full_name.eq_ignore_ascii_case(&repo)
+                                        && i.branch() == Some(branch.as_str())
+                                })
+                                .map(|i| i.id.clone())
+                        });
+                        match found {
                             Some(id) => {
-                                crate::review::start_work::start_work(state, &backend, &id);
+                                let navigation_id = backend.open_item(&id);
+                                state.begin_item_review(
+                                    review,
+                                    "Reading the worktree",
+                                    &id,
+                                    navigation_id,
+                                );
                                 true
                             }
                             None => false,
                         }
                     });
                 }
+            }
 
-                if let Some((repo, number)) = open_at_launch.clone() {
-                    let navigation_id =
-                        backend.open_subject(&repo, perch_github::ItemKind::PullRequest, number);
-                    state.begin_open("Reading the pull request", navigation_id);
+            // PERCH_OPEN_ISSUE=owner/repo#N opens an issue the same way.
+            if let Some((repo, number)) =
+                std::env::var("PERCH_OPEN_ISSUE").ok().and_then(|spec| reference::launch_hook(&spec))
+            {
+                let navigation_id =
+                    backend.open_subject(&repo, perch_github::ItemKind::Issue, number);
+                state.begin_open("Reading the issue", navigation_id);
+            }
 
-                    // Optionally open a file once the checkout lands, so the
-                    // whole path can be exercised without a pointer.
-                    if let Ok(path) = std::env::var("PERCH_OPEN_FILE") {
-                        let backend = backend.clone();
-                        floem::reactive::Effect::new(move |opened: Option<bool>| {
-                            if opened == Some(true) || !review.is_open() {
-                                return opened.unwrap_or(false);
-                            }
-                            if review.open_tab(&path) {
-                                backend.open_file(&path);
-                            }
-                            review.show_in_tree(&path);
-                            true
-                        });
+            // PERCH_START_WORK=1 presses Start work once the issue is up.
+            if std::env::var("PERCH_START_WORK").is_ok() {
+                let backend = backend.clone();
+                floem::reactive::Effect::new(move |pressed: Option<bool>| {
+                    if pressed == Some(true) {
+                        return true;
                     }
-                }
+                    let issue_item = review
+                        .issue
+                        .with(|i| i.is_some())
+                        .then(|| review.item.with(|i| i.as_ref().map(|i| i.id.clone())))
+                        .flatten();
+                    match issue_item {
+                        Some(id) => {
+                            crate::review::start_work::start_work(state, &backend, &id);
+                            true
+                        }
+                        None => false,
+                    }
+                });
+            }
 
-                windows::view(state, review, backend).into_any()
-            },
-            Some(windows::config()),
-        )
-        .run();
+            if let Some((repo, number)) = open_at_launch.clone() {
+                let navigation_id =
+                    backend.open_subject(&repo, perch_github::ItemKind::PullRequest, number);
+                state.begin_open("Reading the pull request", navigation_id);
+
+                // Optionally open a file once the checkout lands, so the
+                // whole path can be exercised without a pointer.
+                if let Ok(path) = std::env::var("PERCH_OPEN_FILE") {
+                    let backend = backend.clone();
+                    floem::reactive::Effect::new(move |opened: Option<bool>| {
+                        if opened == Some(true) || !review.is_open() {
+                            return opened.unwrap_or(false);
+                        }
+                        if review.open_tab(&path) {
+                            backend.open_file(&path);
+                        }
+                        review.show_in_tree(&path);
+                        true
+                    });
+                }
+            }
+
+            windows::view(state, review, backend, frame).into_any()
+        },
+        Some(config),
+    )
+    .run();
 }

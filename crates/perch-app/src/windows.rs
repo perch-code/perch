@@ -6,9 +6,11 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
+use floem::action::TimerToken;
 use floem::ext_event::update_signal_from_channel;
-use floem::kurbo::Size;
+use floem::kurbo::{Point, Rect, Size, Vec2};
 use floem::prelude::*;
 use floem::reactive::{Effect, RwSignal, Scope, SignalGet, SignalUpdate};
 use floem::views::Stack;
@@ -46,6 +48,53 @@ struct Window {
 
 thread_local! {
     static APP: RefCell<Option<Rc<App>>> = const { RefCell::new(None) };
+    /// Where the last window moved or was resized to, for the next one
+    /// opened with none open to go. Read from the database at launch.
+    static LEFT_AT: Cell<Option<Rect>> = const { Cell::new(None) };
+}
+
+/// The meta key a window's frame is kept under: `x,y,width,height`, in
+/// points, the top-left from the top of the main screen, as floem places
+/// windows.
+const FRAME_KEY: &str = "window.frame";
+const DEFAULT_SIZE: Size = Size::new(1280.0, 820.0);
+const MIN_SIZE: Size = Size::new(900.0, 600.0);
+/// How long a window has to sit still before where it is gets written: a
+/// drag moves it on every frame.
+const SAVE_AFTER: Duration = Duration::from_millis(500);
+/// How far a cascaded window sits down and right of the key window.
+const STEP: f64 = 28.0;
+/// The strip along a window's top, which is what it is dragged by.
+const DRAG_STRIP: f64 = 40.0;
+
+/// Read where the last window was left. Before the backend starts, so
+/// that it is not opening the database, a migration say, at the time.
+pub fn load_frame() {
+    let frame = perch_github::config::db_path()
+        .and_then(|db| perch_github::Cache::peek_meta(&db, FRAME_KEY))
+        .and_then(|value| parse_frame(&value));
+    LEFT_AT.set(frame);
+}
+
+fn parse_frame(value: &str) -> Option<Rect> {
+    let numbers = value
+        .split(',')
+        .map(|n| n.trim().parse::<f64>().ok().filter(|n| n.is_finite()))
+        .collect::<Option<Vec<_>>>()?;
+    let [x, y, width, height] = numbers[..] else {
+        return None;
+    };
+    (width > 0.0 && height > 0.0).then(|| Rect::new(x, y, x + width, y + height))
+}
+
+fn format_frame(frame: Rect) -> String {
+    format!(
+        "{},{},{},{}",
+        frame.x0.round(),
+        frame.y0.round(),
+        frame.width().round(),
+        frame.height().round()
+    )
 }
 
 fn app() -> Option<Rc<App>> {
@@ -123,7 +172,13 @@ pub fn window(settings: Option<AppState>) -> Option<(AppState, ReviewState, Rc<B
 }
 
 /// The window's whole view: the app's, and what makes it one of several.
-pub fn view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+/// `frame` is where it was opened, from `config`.
+pub fn view(
+    state: AppState,
+    review: ReviewState,
+    backend: Rc<Backend>,
+    frame: Rect,
+) -> impl IntoView {
     let raise = Raise::new();
     let raise_id = raise.id;
     if let Some(app) = app() {
@@ -137,11 +192,48 @@ pub fn view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
     }
     let id = backend.window();
     let closing = backend.clone();
+    // Where the window is, kept as it moves and resizes, and written once
+    // it has stopped.
+    let frame = Rc::new(Cell::new(frame));
+    let timer = Rc::new(Cell::new(None::<TimerToken>));
+    let remember = {
+        let backend = backend.clone();
+        move |at: Rect| {
+            if let Some(timer) = timer.take() {
+                timer.cancel();
+            }
+            let backend = backend.clone();
+            timer.set(Some(floem::action::exec_after(SAVE_AFTER, move |_| {
+                // A full-screen window is the screen's size; the next one
+                // should open at the size it came out of full screen to.
+                if key_window_full_screen() {
+                    return;
+                }
+                LEFT_AT.set(Some(at));
+                backend.set_meta(FRAME_KEY, &format_frame(at));
+            })));
+        }
+    };
+    let (resized, moved) = (frame.clone(), frame);
+    let remember_size = remember.clone();
     Stack::new((
         crate::ui::app_view(state, review, backend),
         raise.style(|s| s.absolute()),
     ))
     .style(|s| s.size_full())
+    .on_event_cont(
+        floem::event::listener::WindowResized,
+        move |_, size: &Size| {
+            let at = Rect::from_origin_size(resized.get().origin(), *size);
+            resized.set(at);
+            remember_size(at);
+        },
+    )
+    .on_event_cont(floem::event::listener::WindowMoved, move |_, to: &Point| {
+        let at = Rect::from_origin_size(*to, moved.get().size());
+        moved.set(at);
+        remember(at);
+    })
     .on_event_cont(floem::event::listener::WindowGainedFocus, move |_, _| {
         if let Some(app) = app() {
             app.focused.set(Some(id));
@@ -157,12 +249,13 @@ pub fn view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
 
 /// Open a new window, laid out as `from` is.
 pub fn open(from: Option<AppState>) {
+    let (config, frame) = config();
     floem::new_window(
         move |_| match window(from) {
-            Some((state, review, backend)) => view(state, review, backend).into_any(),
+            Some((state, review, backend)) => view(state, review, backend, frame).into_any(),
             None => floem::views::Empty::new().into_any(),
         },
-        Some(config()),
+        Some(config),
     );
 }
 
@@ -255,15 +348,13 @@ pub fn raise_holding(item_id: &str, asking: WindowId) -> bool {
     }
 }
 
-pub fn config() -> WindowConfig {
-    let config = WindowConfig::default();
-    let config = match cascaded() {
-        Some(at) => config.position(at),
-        None => config,
-    };
-    config
-        .size(Size::new(1280.0, 820.0))
-        .min_size(Size::new(900.0, 600.0))
+/// A new window's config, and the frame it opens at.
+pub fn config() -> (WindowConfig, Rect) {
+    let frame = placement();
+    let config = WindowConfig::default()
+        .position(frame.origin())
+        .size(frame.size())
+        .min_size(MIN_SIZE)
         .title("Perch")
         .with_mac_os_config(|mac| {
             // No title bar: the content runs to the top of the window and
@@ -279,31 +370,175 @@ pub fn config() -> WindowConfig {
                 .transparent_title_bar(true)
                 .hide_title(true)
                 .traffic_lights_offset((16.0, 21.0))
-        })
+        });
+    (config, frame)
 }
 
-/// Down and to the right of the key window, as macOS cascades a
-/// document's windows, so a new one does not land square on the last.
-/// Top-left, from the top of the main screen, which is what floem takes.
+/// Where a new window goes. Down and to the right of the key window, at
+/// its size, as macOS cascades a document's windows, so a new one does
+/// not land square on the last. With none open, where the last one was
+/// left; the first time, the middle of the main screen.
+fn placement() -> Rect {
+    let screens = screens();
+    match key_window_frame()
+        .map(|key| key + Vec2::new(STEP, STEP))
+        .or(LEFT_AT.get())
+    {
+        Some(frame) => fit(frame, &screens),
+        None => centred(DEFAULT_SIZE, &screens),
+    }
+}
+
+/// `frame`, kept on the screen its top is on and no bigger than it. One
+/// whose top is on no screen, left on a display since unplugged say, could
+/// not be dragged back, and goes to the middle of the main screen.
+fn fit(frame: Rect, screens: &[Rect]) -> Rect {
+    let strip = Rect::new(frame.x0, frame.y0, frame.x1, frame.y0 + DRAG_STRIP);
+    let on = screens.iter().find(|screen| {
+        let overlap = screen.intersect(strip);
+        overlap.width() >= 100.0 && overlap.height() >= DRAG_STRIP / 2.0
+    });
+    let Some(screen) = on else {
+        return centred(frame.size(), screens);
+    };
+    let size = Size::new(
+        frame.width().min(screen.width()).max(MIN_SIZE.width),
+        frame.height().min(screen.height()).max(MIN_SIZE.height),
+    );
+    let x = frame.x0.min(screen.x1 - size.width).max(screen.x0);
+    let y = frame.y0.min(screen.y1 - size.height).max(screen.y0);
+    Rect::from_origin_size((x, y), size)
+}
+
+fn centred(size: Size, screens: &[Rect]) -> Rect {
+    let Some(main) = screens.first() else {
+        return Rect::from_origin_size(Point::ZERO, size);
+    };
+    let size = Size::new(
+        size.width.min(main.width()).max(MIN_SIZE.width),
+        size.height.min(main.height()).max(MIN_SIZE.height),
+    );
+    let x = (main.x0 + ((main.width() - size.width) / 2.0).max(0.0)).round();
+    let y = (main.y0 + ((main.height() - size.height) / 2.0).max(0.0)).round();
+    Rect::from_origin_size((x, y), size)
+}
+
+/// The key window's frame, top-left from the top of the main screen,
+/// which is what floem takes.
 #[cfg(target_os = "macos")]
-fn cascaded() -> Option<floem::kurbo::Point> {
-    use objc2_app_kit::{NSApplication, NSScreen};
-    const STEP: f64 = 28.0;
+fn key_window_frame() -> Option<Rect> {
+    use objc2_app_kit::NSApplication;
     let mtm = objc2::MainThreadMarker::new()?;
     let app = NSApplication::sharedApplication(mtm);
     // Perch's frontmost when another app is active.
     let key = app
         .keyWindow()
         .or_else(|| app.orderedWindows().firstObject())?;
-    let main = NSScreen::screens(mtm).firstObject()?.frame();
-    let frame = key.frame();
-    let top = main.size.height - (frame.origin.y + frame.size.height);
-    Some(floem::kurbo::Point::new(frame.origin.x + STEP, top + STEP))
+    Some(flipped(key.frame(), main_screen_height(mtm)?))
+}
+
+#[cfg(target_os = "macos")]
+fn key_window_full_screen() -> bool {
+    use objc2_app_kit::{NSApplication, NSWindowStyleMask};
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return false;
+    };
+    NSApplication::sharedApplication(mtm)
+        .keyWindow()
+        .is_some_and(|key| key.styleMask().contains(NSWindowStyleMask::FullScreen))
+}
+
+/// Each screen's room for windows, less the menu bar and the Dock, top-left
+/// from the top of the main screen. The main screen first.
+#[cfg(target_os = "macos")]
+fn screens() -> Vec<Rect> {
+    use objc2_app_kit::NSScreen;
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return Vec::new();
+    };
+    let Some(height) = main_screen_height(mtm) else {
+        return Vec::new();
+    };
+    NSScreen::screens(mtm)
+        .iter()
+        .map(|screen| flipped(screen.visibleFrame(), height))
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn main_screen_height(mtm: objc2::MainThreadMarker) -> Option<f64> {
+    Some(
+        objc2_app_kit::NSScreen::screens(mtm)
+            .firstObject()?
+            .frame()
+            .size
+            .height,
+    )
+}
+
+/// An AppKit rect, whose origin is its bottom-left from the bottom of the
+/// main screen, as floem's: top-left, from the top.
+#[cfg(target_os = "macos")]
+fn flipped(rect: objc2_foundation::NSRect, main_height: f64) -> Rect {
+    let top = main_height - (rect.origin.y + rect.size.height);
+    Rect::from_origin_size((rect.origin.x, top), (rect.size.width, rect.size.height))
 }
 
 #[cfg(not(target_os = "macos"))]
-fn cascaded() -> Option<floem::kurbo::Point> {
+fn key_window_frame() -> Option<Rect> {
     None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn key_window_full_screen() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+fn screens() -> Vec<Rect> {
+    Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SCREEN: Rect = Rect::new(0.0, 24.0, 1920.0, 1080.0);
+
+    #[test]
+    fn frames_round_trip() {
+        let frame = Rect::new(120.0, 80.0, 1520.0, 980.0);
+        assert_eq!(parse_frame(&format_frame(frame)), Some(frame));
+        assert_eq!(parse_frame("1,2,3"), None);
+        assert_eq!(parse_frame("1,2,0,4"), None);
+        assert_eq!(parse_frame("a,b,c,d"), None);
+    }
+
+    #[test]
+    fn a_frame_on_screen_stays_put() {
+        let frame = Rect::new(120.0, 80.0, 1520.0, 980.0);
+        assert_eq!(fit(frame, &[SCREEN]), frame);
+    }
+
+    #[test]
+    fn a_frame_off_every_screen_is_centred() {
+        let frame = Rect::new(3000.0, 80.0, 4400.0, 980.0);
+        let placed = fit(frame, &[SCREEN]);
+        assert_eq!(placed.size(), frame.size());
+        assert_eq!(placed.center(), SCREEN.center());
+    }
+
+    #[test]
+    fn a_frame_bigger_than_its_screen_shrinks_onto_it() {
+        let frame = Rect::new(100.0, 100.0, 3000.0, 2000.0);
+        assert_eq!(fit(frame, &[SCREEN]), SCREEN);
+    }
+
+    #[test]
+    fn a_frame_is_never_under_the_minimum() {
+        let frame = Rect::new(100.0, 100.0, 300.0, 300.0);
+        assert_eq!(fit(frame, &[SCREEN]).size(), MIN_SIZE);
+    }
 }
 
 /// Nothing to see. A state update to it focuses its window: floem focuses

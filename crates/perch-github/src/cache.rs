@@ -4436,6 +4436,22 @@ impl Cache {
             .optional()?)
     }
 
+    /// One meta value, read without opening the cache: no migration runs
+    /// and no file is made. For what the UI needs before the backend has
+    /// the database open.
+    pub fn peek_meta(db_path: &Path, key: &str) -> Option<String> {
+        let conn = Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .ok()?;
+        conn.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+            r.get(0)
+        })
+        .optional()
+        .ok()?
+    }
+
     pub fn avatar_path(&self, url: &str) -> Option<PathBuf> {
         Some(self.avatar_dir.as_ref()?.join(format!("{}.img", hash(url))))
     }
