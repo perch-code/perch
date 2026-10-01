@@ -12,9 +12,10 @@ means a back-and-forth in chat, or asking them to ask an agent.
 After this milestone the report is filed from Perch, with that context
 attached.
 
-- A bug icon in the window's top bar, beside usage, is always there
-  and opens a form: a title, what happened, and Bug or Idea. **Send
-  Feedback…** in the Perch menu opens the same form.
+- A bug icon in the window's top bar, beside usage, is always there.
+  It drops down a form, as Agents and usage drop down theirs: a title,
+  what happened, and Bug or Idea. **Send Feedback…** in the Perch menu
+  opens the same dropdown.
 - An error or warning toast gets a **Report** link that opens the same
   form, seeded with the toast's text.
 - Perch collects what it knows about itself, its environment and the
@@ -57,15 +58,17 @@ which a Finder launch throws away.
   the empty bar with no item open. So it shows whatever the window
   holds. It's a `SidebarIcon::Bug` drawn as the gauge is, in a 26-point
   round button with the same hover, focus ring and `FG_MUTED`, with the
-  tooltip `Report a bug`. Clicking it opens the form with Kind set to
-  Bug, or the draft if there is one. It holds no state and never
+  tooltip `Report a bug`. Clicking it drops down the feedback form
+  (see [The dropdown](#the-dropdown)) with Kind set to Bug, or the
+  draft if there is one, and clicking it again folds it. It never
   changes colour or shows a count.
 - **Send Feedback…** goes in the Perch menu after Open…, with no key
   equivalent. It has the app's target as New Window and Open… do, so it
-  works with no window open: it opens one first.
+  works with no window open: it opens one first. It drops the form down
+  from that window's bug icon.
 - A toast of `Tone::Error` or `Tone::Warning` gets **Report** between its
-  text and its close button. Clicking it dismisses the toast and opens
-  the form with Kind set to Bug, the title set to the toast's text
+  text and its close button. Clicking it dismisses the toast and drops
+  the form down from the bug icon with Kind set to Bug, the title set to the toast's text
   (first line, up to 80 characters), and the toast recorded as the
   problem being reported.
 - Toasts go after a few seconds, so Perch keeps the last 20 error and
@@ -73,9 +76,28 @@ which a Finder launch throws away.
   report includes them (see [What Perch collects](#what-perch-collects)),
   so one filed from the menu after the toast has gone still has it.
 
+### The dropdown
+
+The form hangs from the bug icon as the Agents dropdown hangs from its
+button: six points under it, right edges aligned, on the menus' panel
+surface, `FEEDBACK_DROPDOWN_WIDTH` (440) wide. Its content scrolls inside
+it when it's taller than the window allows under the bar, as the
+Agents dropdown's does past `AGENTS_DROPDOWN_MAX_HEIGHT`; the preview
+usually is.
+
+It behaves as the other two do:
+
+- Opening it shuts the Agents dropdown, usage and the review menu, and
+  opening any of them shuts it.
+- A press outside it shuts it (`ui::dismiss_popovers`), and so does
+  `Escape` or Cancel. The keyboard goes back to whatever had it.
+- Shutting it never loses anything. The draft lives in `AppState` until
+  Perch quits or the report is sent, so the bug icon brings it back as
+  it was, on whichever step it was on, in any window.
+
 ### The form
 
-A box over the window, as Open… is, wider, with:
+The dropdown's first page:
 
 - **Kind**: Bug · Idea. Bug from the bug icon or a toast, Idea from
   the menu.
@@ -91,10 +113,8 @@ A box over the window, as Open… is, wider, with:
   the reason as its tooltip, when neither CLI is installed.
 - **Preview…** and **Cancel**.
 
-`Escape` or Cancel closes the box. What was typed stays until Perch
-quits or the issue is filed, so reopening the box from the menu brings
-the draft back. Opening it from another toast's Report while a draft
-exists asks `Replace the draft you started?`
+Opening it from another toast's Report while a draft exists asks
+`Replace the draft you started?`
 
 ### Preview
 
@@ -111,21 +131,22 @@ exists asks `Replace the draft you started?`
    you gave one, and `viewerSubscription`. A failed or offline search
    shows none and says nothing.
 
-Then the box becomes the preview:
+Then the dropdown turns to the preview:
 
 - The title, still editable.
 - The issue body as it will be sent, in one editable text box, in the
   shape given in [The issue](#the-issue). Edits here are what's sent:
   delete a section and it's gone.
 - **Similar issues**, when the search found any: each row is the
-  number, title, age and 👍 count, opens the issue in Perch on click,
+  number, title, age and 👍 count, opens the issue in Perch on click
+  (which shuts the dropdown, the draft kept),
   and has **+1** (see [+1](#1)) and **Comment there instead**. For an
   Idea, +1 is the primary button. For a Bug, Comment there instead is,
   since a second machine's diagnostics are what a second report of a
   bug adds.
 - **File issue**, **Back** to the form, and **Cancel**.
 
-The box can be closed during step 2. The run carries on, and when it
+The dropdown can be shut during step 2. The run carries on, and when it
 ends a toast says `Your report is ready to review`, which reopens the
 preview on click. Stop, or a run that fails or takes more than ten
 minutes, gives a preview with no agent notes and a line saying why.
@@ -146,13 +167,13 @@ too. If that changes anything, nothing is sent: the preview takes the
 redacted text and says `Redacted 1 value you added. Check it and file
 again.`
 
-On success the draft is cleared, the box closes, and a toast says `Filed
+On success the draft is cleared, the dropdown shuts, and a toast says `Filed
 criccomini/perch#123` (or `Commented on …`). Perch stays on whatever you
 had open. Clicking the toast opens the issue through `open_subject`.
 Left alone, the issue's replies still reach the Inbox as notifications,
 as an author's or commenter's do.
 
-On failure the box stays with what was typed:
+On failure the dropdown stays open with what was typed:
 
 - **The token can't write issues there**: a `403` or `404`, which is
   what a fine-grained token gets on a repository its owner didn't pick.
@@ -183,17 +204,18 @@ The button says what it will do: **+1** when you haven't reacted,
 `You +1'd this` in its place, when both are done or the issue is
 ignored.
 
-On success it goes as filing does: the draft is cleared, the box closes,
-and a toast says `+1'd criccomini/perch#57 and subscribed you`, which
+On success it goes as filing does: the draft is cleared, the dropdown
+shuts, and a toast says `+1'd criccomini/perch#57 and subscribed you`, which
 opens the issue on click.
 
 On failure:
 
-- **The reaction fails**: nothing else is tried, the box stays, and the
+- **The reaction fails**: nothing else is tried, the dropdown stays, and
+  the
   error line says why. A `403` or `404` offers **Open on GitHub**, which
   opens the issue's page.
 - **The subscribe fails** after the reaction landed: the 👍 stays, the
-  box closes as on success, and the toast is a warning: `+1'd
+  dropdown shuts as on success, and the toast is a warning: `+1'd
   criccomini/perch#57, but couldn't subscribe you. Watch it on
   github.com.` It opens the issue on click too.
 
@@ -339,6 +361,10 @@ default hook runs, so a crash leaves its cause in the file.
   `Diagnosing`, `Searching`, `Preview` or `Filing`. `similar` is up to
   three `SimilarIssue { number, title, updated_at, node_id, thumbs_up,
   viewer_thumbs_up, viewer_subscription }`.
+- `ReviewState` gains `feedback_open`, `feedback_anchor` and
+  `feedback_opener`, per window, as `usage_open`, `usage_anchor` and
+  `usage_opener` are, and `dismiss_popovers` checks it beside them.
+  `theme` gains `FEEDBACK_DROPDOWN_WIDTH`.
 - `ToastKind::Message` gains `open: Option<ToastOpen>`, `ToastOpen {
   Subject { repo_full_name, kind, number }, FeedbackPreview }`. A toast
   with one is clickable, as a run's toast is, and the click dismisses
@@ -381,10 +407,16 @@ Headless tests in the style of the ones they sit beside, with GitHub's
 paths answered by the test server.
 
 - Entry points: the bug icon is in the item header and the empty bar,
-  just before usage, and opens the box with Bug; Send Feedback… opens
-  it with Idea; Report on an error toast opens it with Bug, the toast's
-  text as the title, and the toast gone; a success toast has no Report;
-  reopening keeps the draft; a second Report asks before replacing it.
+  just before usage, drops the form down with Bug, and folds it on a
+  second click; Send Feedback… opens it with Idea; Report on an error
+  toast opens it with Bug, the toast's text as the title, and the toast
+  gone; a success toast has no Report; reopening keeps the draft; a
+  second Report asks before replacing it.
+- The dropdown: hangs under the bug icon with right edges aligned;
+  opening it shuts Agents, usage and the review menu, and each of them
+  shuts it; a press outside or `Escape` shuts it and gives the keyboard
+  back; shutting keeps the draft and its step; a preview taller than the
+  window scrolls inside it.
 - Recent problems: holds 20, drops the oldest, skips success toasts.
 - Collection: each section renders from a fixed context; a command that
   hangs is `timed out` after its limit and the others still appear.
@@ -410,7 +442,7 @@ paths answered by the test server.
   reads Subscribe and only subscribes when you'd reacted; shows `You
   +1'd this` when both are done; never subscribes an `IGNORED` issue,
   even when it became ignored after the preview; a failed reaction
-  doesn't subscribe and keeps the box; a failed subscribe keeps the
+  doesn't subscribe and keeps the dropdown open; a failed subscribe keeps the
   reaction and warns.
 - Filing: posts the preview's title and body, unchanged, and the label
   to `criccomini/perch`; clears the draft; leaves the open item as it
@@ -428,8 +460,8 @@ paths answered by the test server.
 3. `create_issue`, `FileFeedback`, and the form and preview without the
    agent or the search: the bug icon, Send Feedback…, Report on toasts,
    recent problems, Open on GitHub. Commit.
-4. The agent's notes: the run, Stop, the timeout, the toast when the box
-   was closed. Commit.
+4. The agent's notes: the run, Stop, the timeout, the toast when the
+   dropdown was shut. Commit.
 5. Similar issues, Comment there instead, and +1 with the subscribe.
    Commit.
 6. README: Setup › GitHub's table gains `File feedback | Issues: write on
@@ -446,17 +478,17 @@ These file real issues on `criccomini/perch`. Close them afterwards.
 
 - Put a `rust-analyzer` on `PATH` that sleeps forever, remove the
   toolchain's own, and open a Rust pull request. The `rust-analyzer
-  failed` toast shows with Report. Press it: the box has Bug and the
-  toast's text. Tick the box, Preview. The Diagnostics name the sleeping
-  binary and that it came from `PATH`; the agent's notes say so too and
+  failed` toast shows with Report. Press it: the dropdown hangs from the
+  bug icon with Bug and the toast's text. Tick the box, Preview. The
+  Diagnostics name the sleeping binary and that it came from `PATH`; the agent's notes say so too and
   suggest the toolchain's. Nothing in the body has your home directory,
   user name, token or any repository name but Perch's.
 - Wait for that toast to go, then click the bug icon and Preview: the
   toast is under Recent problems. Close the item: the icon is still
   there in the empty bar.
-- With Codex picked in the model menu, the box reads Let Codex look
+- With Codex picked in the model menu, the checkbox reads Let Codex look
   into it, and the notes say Codex.
-- File it: the box is gone, the pull request you had open is still
+- File it: the dropdown is gone, the pull request you had open is still
   open, and the toast names the issue. Click it: the issue opens, on
   `criccomini/perch` with the `bug` label. Reply on github.com: the
   reply reaches the Inbox.
@@ -468,9 +500,11 @@ These file real issues on `criccomini/perch`. Close them afterwards.
 - With a fine-grained token that doesn't include `criccomini/perch`,
   file: the `can't open issues` line shows, and Open on GitHub opens the
   new-issue page with the title, the body on the clipboard.
-- Start a report with the box ticked, close the box while it's looking:
-  the toast says the report is ready, and clicking it opens the
-  preview.
+- Start a report with the box ticked and click outside the dropdown
+  while it's looking: it shuts. When the run ends, the toast says the
+  report is ready, and clicking it drops the preview down. Open the
+  Agents dropdown while the feedback one is up: the feedback one shuts,
+  and the bug icon brings it back on the same step.
 - File a second report with the first one's title: the first one is
   under Similar issues, and Comment there instead adds a comment to it.
 - From another GitHub account, start a report with that title and press
