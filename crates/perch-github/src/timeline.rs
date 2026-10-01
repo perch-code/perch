@@ -324,13 +324,20 @@ impl TimelineEventPayload {
     }
 }
 
+/// Whether two stamps are one thing as GitHub records it. A merge's
+/// `merged_at`, its timeline event and the close that comes with it are
+/// written separately and can land a second or two apart.
+pub(crate) fn same_moment(a: Timestamp, b: Timestamp) -> bool {
+    a.duration_since(b).abs() <= jiff::SignedDuration::from_secs(5)
+}
+
 /// The events in the order they are read in, with the noise GitHub's own
 /// timeline hides taken out.
 ///
 /// A commit is dated by when it was written and not by when it was
 /// pushed, so the list as GitHub sends it is not in time order. And a
 /// merge closes the pull request, which GitHub sends as a second event at
-/// the same instant; only the merge is a line.
+/// the same moment; only the merge is a line.
 pub(crate) fn tidy(mut events: Vec<PullEvent>) -> Vec<PullEvent> {
     events.sort_by_key(|e| e.at);
     let merges: Vec<Timestamp> = events
@@ -338,7 +345,9 @@ pub(crate) fn tidy(mut events: Vec<PullEvent>) -> Vec<PullEvent> {
         .filter(|e| e.kind == PullEventKind::Merged)
         .map(|e| e.at)
         .collect();
-    events.retain(|e| e.kind != PullEventKind::Closed || !merges.contains(&e.at));
+    events.retain(|e| {
+        e.kind != PullEventKind::Closed || !merges.iter().any(|&m| same_moment(m, e.at))
+    });
     events
 }
 
@@ -727,7 +736,7 @@ mod tests {
     fn tidying_orders_by_time_and_says_a_merge_once() {
         let e = |kind, when| PullEvent::new(kind, at(when), "rohan");
         let events = tidy(vec![
-            e(PullEventKind::Closed, "2026-09-17T15:00:00Z"),
+            e(PullEventKind::Closed, "2026-09-17T15:00:01Z"),
             e(PullEventKind::Merged, "2026-09-17T15:00:00Z"),
             e(
                 PullEventKind::Labeled {

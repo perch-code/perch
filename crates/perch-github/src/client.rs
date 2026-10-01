@@ -42,7 +42,7 @@ use crate::reactions::{
 use crate::responses::{Responses, BUDGET_BYTES};
 use crate::subjects::{SubjectLook, SubjectLookData};
 use crate::timeline::{
-    fill_logins, tidy, wants_login, PullCommitPayload, PullEvent, TimelineEventPayload,
+    fill_logins, same_moment, tidy, wants_login, PullCommitPayload, PullEvent, TimelineEventPayload,
     TIMELINE_MAX_PAGES,
 };
 use crate::workflow_runs::{Checks, WorkflowRunPayload, WorkflowRunsPayload};
@@ -835,9 +835,9 @@ impl GitHub {
             // dropped where the timeline said the same thing, and kept
             // where it did not.
             Ok(events) => {
-                discussion
-                    .events
-                    .retain(|own| !events.iter().any(|e| e.kind == own.kind && e.at == own.at));
+                discussion.events.retain(|own| {
+                    !events.iter().any(|e| e.kind == own.kind && same_moment(e.at, own.at))
+                });
                 discussion.events.extend(events);
                 discussion.events = tidy(std::mem::take(&mut discussion.events));
                 // The timeline names a commit's author by git's name and

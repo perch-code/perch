@@ -32,7 +32,8 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String)> {
 }
 
 /// One page of the timeline: a label, a commit, a review request, and
-/// the merge that also closes the pull request. `mentioned` is sent to
+/// the merge that also closes the pull request, stamped a second after the
+/// payload's `merged_at` as GitHub does. `mentioned` is sent to
 /// everyone and shown to no one, and `reviewed` is already a card.
 fn timeline() -> Vec<String> {
     vec![
@@ -40,8 +41,8 @@ fn timeline() -> Vec<String> {
         r#"{"event":"committed","sha":"abc1234def","message":"Fence the manifest\n\nlonger","author":{"name":"Chris","date":"2026-09-15T09:00:00Z"}}"#.into(),
         r#"{"event":"review_requested","actor":{"login":"r"},"created_at":"2026-09-15T10:00:00Z","requested_reviewer":{"login":"a"}}"#.into(),
         r#"{"event":"mentioned","actor":{"login":"r"},"created_at":"2026-09-15T11:00:00Z"}"#.into(),
-        r#"{"event":"closed","actor":{"login":"r"},"created_at":"2026-09-17T15:00:00Z"}"#.into(),
-        r#"{"event":"merged","actor":{"login":"r"},"created_at":"2026-09-17T15:00:00Z","commit_id":"h"}"#.into(),
+        r#"{"event":"closed","actor":{"login":"r"},"created_at":"2026-09-17T15:00:01Z"}"#.into(),
+        r#"{"event":"merged","actor":{"login":"r"},"created_at":"2026-09-17T15:00:01Z","commit_id":"h"}"#.into(),
     ]
 }
 
@@ -188,7 +189,7 @@ async fn every_page_of_the_conversation_is_read() {
     // The opening out of the pull request's own payload, since the
     // timeline has no line for it, and the rest out of the timeline. The
     // merge is said once: the payload's and the close beside it are both
-    // the same moment.
+    // the same moment, though GitHub stamps them a second apart.
     let at = |s: &str| s.parse::<jiff::Timestamp>().unwrap();
     assert_eq!(
         d.events,
@@ -218,7 +219,7 @@ async fn every_page_of_the_conversation_is_read() {
                 at("2026-09-15T10:00:00Z"),
                 "r",
             ),
-            PullEvent::new(PullEventKind::Merged, at("2026-09-17T15:00:00Z"), "r"),
+            PullEvent::new(PullEventKind::Merged, at("2026-09-17T15:00:01Z"), "r"),
         ]
     );
     // The reactions, on everything at once: the description, 150 comments,
