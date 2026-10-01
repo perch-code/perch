@@ -153,12 +153,13 @@ pub struct GitHub {
     spent: Arc<std::sync::Mutex<HashMap<String, Spent>>>,
 }
 
-/// One rate-limit resource's spend: in the window GitHub last named,
-/// and since launch.
+/// One rate-limit resource's spend: in each window by the epoch GitHub
+/// says it resets at, and since launch. GitHub can answer from more than
+/// one window at once, each with its own `used` and reset, so a window is
+/// counted by its reset rather than by the one seen last.
 #[derive(Debug, Default)]
 struct Spent {
-    reset: Option<i64>,
-    window: i64,
+    windows: std::collections::BTreeMap<i64, i64>,
     total: i64,
 }
 
@@ -1813,18 +1814,17 @@ impl GitHub {
             header_str(headers, "x-ratelimit-resource").unwrap_or_else(|| "unknown".into());
         let reset = header_str(headers, "x-ratelimit-reset").and_then(|v| v.parse::<i64>().ok());
         let cost = cost.unwrap_or(i64::from(status != StatusCode::NOT_MODIFIED));
+        let now = Timestamp::now().as_second();
         let (window, total) = {
             let mut spent = self.spent.lock().unwrap();
             let spent = spent.entry(resource.clone()).or_default();
-            // A response from the window before can land after the first
-            // of the next; only a later reset starts a new window.
-            if reset > spent.reset {
-                spent.reset = reset;
-                spent.window = 0;
-            }
-            spent.window += cost;
+            // Windows an hour past their reset are done with.
+            spent.windows.retain(|reset, _| *reset > now - 3600);
+            let window = spent.windows.entry(reset.unwrap_or(0)).or_default();
+            *window += cost;
+            let window = *window;
             spent.total += cost;
-            (spent.window, spent.total)
+            (window, spent.total)
         };
         let header = |name| header_str(headers, name).unwrap_or_else(|| "?".into());
         tracing::debug!(
@@ -1833,6 +1833,7 @@ impl GitHub {
             window,
             total,
             used = %format!("{}/{}", header("x-ratelimit-used"), header("x-ratelimit-limit")),
+            resets_in = %reset.map_or("?".into(), |reset| format!("{}s", reset - now)),
             "{what} {} {resource}",
             status.as_u16(),
         );
