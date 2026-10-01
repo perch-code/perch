@@ -1,6 +1,10 @@
 //! The popup at the window's bottom right: an agent run that finished, or
 //! a line the reader should see, such as something that could not be done
-//! or a poll that failed. One at a time, each up for a few seconds.
+//! or a poll that failed. One at a time, each up for a few seconds before
+//! it fades out.
+//!
+//! vger draws no view at less than full opacity, so a toast fades by
+//! taking the alpha out of each of its colours, all through [`faded`].
 
 use std::rc::Rc;
 
@@ -51,21 +55,22 @@ pub fn toast(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
                 card = card.on_event_stop(el::Click, move |_, _| open());
             }
             card.style(move |s| {
+                let fade = move |color| faded(state, token, color);
                 let s = s
                     .width(328.0)
                     .max_width_full()
                     .padding_left(13.0)
                     .padding_right(7.0)
                     .padding_vert(9.0)
-                    .background(theme::CANVAS)
+                    .background(fade(theme::CANVAS))
                     .border(1.0)
-                    .border_color(theme::BORDER)
+                    .border_color(fade(theme::BORDER))
                     .border_radius(8.0)
                     .box_shadow_blur(18.0)
                     .box_shadow_v_offset(5.0)
-                    .box_shadow_color(theme::SHADOW);
+                    .box_shadow_color(fade(theme::SHADOW));
                 if clickable {
-                    widgets::clickable(s).hover(|s| s.background(theme::CANVAS_SUBTLE))
+                    widgets::clickable(s).hover(move |s| s.background(fade(theme::CANVAS_SUBTLE)))
                 } else {
                     s
                 }
@@ -88,14 +93,16 @@ fn message(state: AppState, token: u64, text: String, tone: Tone) -> impl IntoVi
         Tone::Warning => theme::DRAFT,
         Tone::Success => theme::OPEN,
     };
-    let dismiss = agents::icon_action(SidebarIcon::Close, "Dismiss message", move || {
-        state.dismiss_toast(token)
-    });
+    let fade = move |color| faded(state, token, color);
+    let dismiss =
+        agents::icon_action_faded(SidebarIcon::Close, "Dismiss message", fade, move || {
+            state.dismiss_toast(token)
+        });
     Stack::horizontal((
-        dot(color),
-        Label::derived(move || text.clone()).style(|s| {
+        dot(color, fade),
+        Label::derived(move || text.clone()).style(move |s| {
             s.font_size(theme::TEXT_BODY)
-                .color(theme::FG)
+                .color(fade(theme::FG))
                 .text_wrap()
                 .min_width(0.0)
                 .flex_grow(1.0_f32)
@@ -106,12 +113,17 @@ fn message(state: AppState, token: u64, text: String, tone: Tone) -> impl IntoVi
     .style(|s| s.items_center().width_full().gap(9.0))
 }
 
+/// `color` as the toast `token` draws it, which is fainter as it fades.
+pub(crate) fn faded(state: AppState, token: u64, color: Color) -> Color {
+    color.multiply_alpha(state.toast_opacity(token))
+}
+
 /// The coloured dot at a toast's left.
-pub(crate) fn dot(color: Color) -> impl IntoView {
+pub(crate) fn dot(color: Color, fade: impl Fn(Color) -> Color + 'static) -> impl IntoView {
     Empty::new().style(move |s| {
         s.size(9.0, 9.0)
             .border_radius(5.0)
-            .background(color)
+            .background(fade(color))
             .flex_shrink(0.0_f32)
     })
 }
