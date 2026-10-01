@@ -205,6 +205,12 @@ pub const AGENTS_DROPDOWN_WIDTH: f64 = 430.0;
 pub const AGENTS_DROPDOWN_MAX_HEIGHT: f64 = 460.0;
 /// The plan usage popover under the bar's gauge.
 pub const USAGE_POPOVER_WIDTH: f64 = 320.0;
+/// Send Feedback's dropdown, a little wider than Agents': the preview's
+/// text wants the room.
+pub const FEEDBACK_DROPDOWN_WIDTH: f64 = 440.0;
+/// Past this the dropdown scrolls: the preview, with similar issues, is
+/// taller.
+pub const FEEDBACK_DROPDOWN_MAX_HEIGHT: f64 = 640.0;
 /// The strip at the top of the drawer, where the traffic lights sit.
 ///
 /// The lights and the scope controls share this strip, and the bar over

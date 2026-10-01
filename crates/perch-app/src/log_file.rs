@@ -157,7 +157,9 @@ fn prune(dir: &Path) {
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("perch.") && name.ends_with(".log") && name != NAME)
+                .is_some_and(|name| {
+                    name.starts_with("perch.") && name.ends_with(".log") && name != NAME
+                })
         })
         .collect();
     // Dated names sort by day.

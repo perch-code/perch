@@ -69,8 +69,13 @@ pub struct Toast {
 pub enum ToastKind {
     /// An agent run reached a terminal state.
     AgentRun(String),
-    /// A line of news: something that could not be done, or was.
-    Message { text: String, tone: Tone },
+    /// A line of news: something that could not be done, or was. One
+    /// with `open` goes somewhere when clicked.
+    Message {
+        text: String,
+        tone: Tone,
+        open: Option<ToastOpen>,
+    },
     /// A language server that isn't there, or is out of date, with the
     /// button that installs it. It stays until it's closed or the install
     /// ends; other news shows over it meanwhile.
@@ -103,6 +108,19 @@ impl ServerOffer {
             key: missing.describe(),
         }
     }
+}
+
+/// Where a message toast goes when clicked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToastOpen {
+    /// A pull request or issue, opened as anything is.
+    Subject {
+        repo_full_name: String,
+        kind: perch_github::ItemKind,
+        number: u64,
+    },
+    /// Send Feedback's preview, dropped down from the bug icon.
+    FeedbackPreview,
 }
 
 /// The colour of a message's dot.
@@ -250,6 +268,12 @@ pub struct AppState {
     pub installing_servers: RwSignal<HashSet<perch_lsp::ServerKind>>,
     /// The server offers closed this session, by their keys.
     pub declined_offers: RwSignal<HashSet<String>>,
+    /// Send Feedback's draft. One for the app: every window's state holds
+    /// the same signal (`windows::window`).
+    pub feedback: RwSignal<Option<crate::feedback::FeedbackDraft>>,
+    /// The session's last errors and warnings, for a report. Shared as
+    /// `feedback` is.
+    pub recent_problems: RwSignal<VecDeque<crate::feedback::Problem>>,
 
     /// Review capability/preferences are global; bases, groups, and launch
     /// errors are keyed by their stable item id so opening another item never
@@ -374,6 +398,8 @@ impl AppState {
             toast_token: RwSignal::new(0),
             installing_servers: RwSignal::new(HashSet::new()),
             declined_offers: RwSignal::new(HashSet::new()),
+            feedback: RwSignal::new(None),
+            recent_problems: RwSignal::new(VecDeque::new()),
             review_capabilities: RwSignal::new(Arc::new(Vec::new())),
             review_preferences: RwSignal::new(Arc::new(Vec::new())),
             review_base_refs: RwSignal::new(HashMap::new()),
@@ -699,11 +725,46 @@ impl AppState {
     /// waiting, so a burst of complaints ends with the latest; an empty
     /// one only takes the old ones down.
     pub fn notify(&self, text: impl Into<String>, tone: Tone) {
+        self.notify_with(text, tone, None);
+    }
+
+    /// [`Self::notify`], going to `open` when clicked. An error or a
+    /// warning is kept for a bug report too.
+    pub fn notify_with(&self, text: impl Into<String>, tone: Tone, open: Option<ToastOpen>) {
         let text = text.into();
         self.drop_toasts(|kind| matches!(kind, ToastKind::Message { .. }));
-        if !text.is_empty() {
-            self.show_toast(ToastKind::Message { text, tone });
+        if text.is_empty() {
+            return;
         }
+        if tone != Tone::Success {
+            self.remember_problem(&text, tone);
+        }
+        self.show_toast(ToastKind::Message { text, tone, open });
+    }
+
+    /// Keep an error or warning for Send Feedback. Every window hears a
+    /// poll's complaint and they share the list, so the same line again
+    /// within a few seconds is the same problem.
+    fn remember_problem(&self, text: &str, tone: Tone) {
+        let at = Timestamp::now();
+        let repeated = self.recent_problems.with_untracked(|problems| {
+            problems.back().is_some_and(|last| {
+                last.text == text && (at - last.at).get_seconds().abs() < 3
+            })
+        });
+        if repeated {
+            return;
+        }
+        self.recent_problems.update(|problems| {
+            crate::feedback::remember_problem(
+                problems,
+                crate::feedback::Problem {
+                    at,
+                    text: text.to_string(),
+                    tone,
+                },
+            )
+        });
     }
 
     /// Something that could not be done, in the popup.
@@ -2448,6 +2509,11 @@ impl AppState {
                 }
                 self.apply(Event::PullRequestDescription { item_id, outcome });
             }
+            event @ (Event::FeedbackStep { .. }
+            | Event::FeedbackReady(_)
+            | Event::FeedbackSent { .. }
+            | Event::FeedbackCaught { .. }
+            | Event::FeedbackFailed(_)) => crate::ui::feedback::apply(*self, review, event),
             Event::IssueDraft { item_id, outcome } => {
                 if review.is_item(&item_id) {
                     review.issue_drafting.set(false);
@@ -2590,6 +2656,12 @@ impl AppState {
                 }
             }
             Event::IssueDraft { .. } => {}
+            // A window's own, applied with its review state.
+            Event::FeedbackStep { .. }
+            | Event::FeedbackReady(_)
+            | Event::FeedbackSent { .. }
+            | Event::FeedbackCaught { .. }
+            | Event::FeedbackFailed(_) => {}
             // The rest are about the open item, and wait for no one.
             Event::PullRequestReadiness { .. }
             | Event::PullRequestBases { .. }
@@ -5747,6 +5819,7 @@ mod tests {
             Some(ToastKind::Message {
                 text: "Merged a/b#1 (squash)".into(),
                 tone: Tone::Success,
+                open: None,
             })
         );
     }

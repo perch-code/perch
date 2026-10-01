@@ -1,7 +1,10 @@
 //! The popup at the window's bottom right: an agent run that finished, a
 //! line the reader should see, such as something that could not be done
 //! or a poll that failed, or an offer to install a language server. One at
-//! a time, each up for a few seconds but the offer, which waits.
+//! a time, each up for a few seconds but the offer, which waits. An error
+//! or a warning has Report, which starts a bug report about it; a line
+//! that names somewhere to go, such as a filed issue, goes there when
+//! clicked.
 
 use std::rc::Rc;
 
@@ -13,7 +16,7 @@ use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
-use crate::state::{AppState, ServerOffer, ToastKind, Tone};
+use crate::state::{AppState, ServerOffer, ToastKind, ToastOpen, Tone};
 use crate::theme;
 use crate::ui::{agents, widgets};
 
@@ -42,8 +45,10 @@ pub fn toast(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
                     }
                     None => return Empty::new().into_any(),
                 },
-                ToastKind::Message { text, tone } => {
-                    (message(state, token, text, tone).into_any(), None)
+                ToastKind::Message { text, tone, open } => {
+                    let reportable = tone != Tone::Success && open.is_none();
+                    let go = open.map(|open| destination(state, review, backend.clone(), token, open));
+                    (message(state, review, token, text, tone, reportable).into_any(), go)
                 }
                 ToastKind::Server(offer) => (
                     server_offer(state, backend.clone(), token, offer).into_any(),
@@ -87,7 +92,50 @@ pub fn toast(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
     .debug_name("toast")
 }
 
-fn message(state: AppState, token: u64, text: String, tone: Tone) -> impl IntoView {
+/// What clicking a toast that names somewhere does: it goes, and the
+/// toast comes down.
+fn destination(
+    state: AppState,
+    review: ReviewState,
+    backend: Rc<Backend>,
+    token: u64,
+    open: ToastOpen,
+) -> Rc<dyn Fn()> {
+    Rc::new(move || {
+        state.dismiss_toast(token);
+        match &open {
+            ToastOpen::Subject {
+                repo_full_name,
+                kind,
+                number,
+            } => {
+                let navigation_id = backend.open_subject(repo_full_name, *kind, *number);
+                state.begin_open(
+                    match kind {
+                        perch_github::ItemKind::PullRequest => "Reading the pull request",
+                        perch_github::ItemKind::Issue => "Reading the issue",
+                    },
+                    navigation_id,
+                );
+            }
+            ToastOpen::FeedbackPreview => crate::ui::feedback::open(
+                state,
+                review,
+                crate::feedback::FeedbackKind::Bug,
+                None,
+            ),
+        }
+    })
+}
+
+fn message(
+    state: AppState,
+    review: ReviewState,
+    token: u64,
+    text: String,
+    tone: Tone,
+    reportable: bool,
+) -> impl IntoView {
     let color = match tone {
         Tone::Error => theme::CLOSED,
         Tone::Warning => theme::DRAFT,
@@ -96,6 +144,26 @@ fn message(state: AppState, token: u64, text: String, tone: Tone) -> impl IntoVi
     let dismiss = agents::icon_action(SidebarIcon::Close, "Dismiss message", move || {
         state.dismiss_toast(token)
     });
+    let reported = text.clone();
+    let report = Label::derived(|| "Report".to_string())
+        .on_event_stop(el::Click, move |_, _| {
+            state.dismiss_toast(token);
+            crate::ui::feedback::report(state, review, reported.clone(), tone);
+        })
+        .style(move |s| {
+            widgets::clickable(s)
+                .font_size(theme::TEXT_BADGE)
+                .font_weight(theme::weight_emphasis())
+                .color(theme::FG_MUTED)
+                .padding_horiz(7.0)
+                .height(22.0)
+                .items_center()
+                .flex_shrink(0.0_f32)
+                .border_radius(5.0)
+                .hover(|s| s.color(theme::FG).background(theme::BADGE_BG))
+                .apply_if(!reportable, |s| s.hide())
+        })
+        .debug_name("Report problem");
     Stack::horizontal((
         dot(color),
         Label::derived(move || text.clone()).style(|s| {
@@ -106,6 +174,7 @@ fn message(state: AppState, token: u64, text: String, tone: Tone) -> impl IntoVi
                 .flex_grow(1.0_f32)
                 .flex_basis(0.0)
         }),
+        report,
         dismiss,
     ))
     .style(|s| s.items_center().width_full().gap(9.0))

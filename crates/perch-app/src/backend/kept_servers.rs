@@ -64,6 +64,14 @@ impl KeptServers {
         });
     }
 
+    /// Every server set aside, for a bug report.
+    pub(super) fn clients(&self) -> Vec<Arc<perch_lsp::Client>> {
+        self.0
+            .lock()
+            .map(|kept| kept.iter().map(|k| k.client.clone()).collect())
+            .unwrap_or_default()
+    }
+
     /// Set aside every server of a worktree `window` no longer shows.
     pub(super) async fn keep_all(
         &self,

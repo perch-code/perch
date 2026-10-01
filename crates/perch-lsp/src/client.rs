@@ -102,6 +102,10 @@ pub struct Client {
     class_files: std::sync::Mutex<HashMap<String, String>>,
     /// Why the server exited, from its error output, once it has.
     exited: std::sync::OnceLock<Option<String>>,
+    /// The server process, for a bug report's memory and uptime.
+    pid: Option<u32>,
+    /// When it was started.
+    started: std::time::Instant,
 }
 
 impl Client {
@@ -161,6 +165,7 @@ impl Client {
             })
         });
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let pid = child.id();
 
         let client = Arc::new(Self {
             stdin: Arc::new(Mutex::new(stdin)),
@@ -172,6 +177,8 @@ impl Client {
             documents: Default::default(),
             class_files: Default::default(),
             exited: Default::default(),
+            pid,
+            started: std::time::Instant::now(),
         });
 
         client.tell(ServerEvent::Status(Status::Starting));
@@ -304,6 +311,24 @@ impl Client {
             .await
             .ok()?;
         decode_result::<String>(value).filter(|text| !text.is_empty())
+    }
+
+    /// The server's process id, when the system gave one.
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
+    /// How long ago the server was started.
+    pub fn age(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    /// The status last sent.
+    pub fn status(&self) -> Status {
+        self.told
+            .lock()
+            .map(|told| told.1.clone())
+            .unwrap_or(Status::Starting)
     }
 
     /// Send `event` on, keeping it if it is a status.

@@ -1,6 +1,6 @@
-//! New Window and Open… in the Perch menu. The menu is winit's; the items'
-//! target is Perch's own, not a window's, so they still work with no
-//! window left.
+//! New Window, Open… and Send Feedback… in the Perch menu. The menu is
+//! winit's; the items' target is Perch's own, not a window's, so they
+//! still work with no window left.
 
 #[cfg(target_os = "macos")]
 mod mac {
@@ -28,6 +28,11 @@ mod mac {
             fn open_reference(&self, _sender: Option<&AnyObject>) {
                 crate::windows::show_open_box();
             }
+
+            #[unsafe(method(sendFeedback:))]
+            fn send_feedback(&self, _sender: Option<&AnyObject>) {
+                crate::windows::show_feedback();
+            }
         }
     );
 
@@ -36,8 +41,8 @@ mod mac {
             return;
         };
         let app = NSApplication::sharedApplication(mtm);
-        // About, a separator, then New Window, Open… and a separator of
-        // their own.
+        // About, a separator, then New Window, Open…, Send Feedback… and a
+        // separator of their own.
         let Some(menu) = app
             .mainMenu()
             .and_then(|bar| bar.itemAtIndex(0))
@@ -68,10 +73,20 @@ mod mac {
         };
         open.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
         unsafe { open.setTarget(Some(&target)) };
+        let feedback = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                mtm.alloc(),
+                ns_string!("Send Feedback…"),
+                Some(sel!(sendFeedback:)),
+                ns_string!(""),
+            )
+        };
+        unsafe { feedback.setTarget(Some(&target)) };
         let at = menu.numberOfItems().min(2);
         menu.insertItem_atIndex(&item, at);
         menu.insertItem_atIndex(&open, at + 1);
-        menu.insertItem_atIndex(&NSMenuItem::separatorItem(mtm), at + 2);
+        menu.insertItem_atIndex(&feedback, at + 2);
+        menu.insertItem_atIndex(&NSMenuItem::separatorItem(mtm), at + 3);
         // A menu item holds its target weakly, and this one is for the
         // app's life.
         std::mem::forget(target);

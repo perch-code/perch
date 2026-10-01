@@ -1242,6 +1242,19 @@ impl ServerStatuses {
         self.0.insert(kind, status);
     }
 
+    /// Every server's status, as its status line says it, for a bug
+    /// report: `none started` when none has said anything.
+    pub fn describe(&self) -> String {
+        if self.0.is_empty() {
+            return "none started".to_string();
+        }
+        self.0
+            .iter()
+            .map(|(kind, status)| status.describe(*kind))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
     /// Whether the server for `path`'s language can be asked about it.
     pub fn usable_for(&self, path: &str) -> bool {
         perch_lsp::ServerKind::for_path(path)
@@ -1348,6 +1361,12 @@ pub struct ReviewState {
     pub usage_open: RwSignal<bool>,
     pub usage_opener: RwSignal<Option<floem::ViewId>>,
     pub usage_anchor: RwSignal<Option<floem::ViewId>>,
+    /// Send Feedback's dropdown under the bar's bug icon, the same way.
+    /// The draft is the app's (`AppState::feedback`); only whether this
+    /// window shows it is here.
+    pub feedback_open: RwSignal<bool>,
+    pub feedback_opener: RwSignal<Option<floem::ViewId>>,
+    pub feedback_anchor: RwSignal<Option<floem::ViewId>>,
     pub submit_review_focused: RwSignal<bool>,
     pub submit_review_autofocus: RwSignal<bool>,
     /// The backend-assigned attempt currently in flight, if any.
@@ -1864,6 +1883,9 @@ impl ReviewState {
             usage_open: RwSignal::new(false),
             usage_opener: RwSignal::new(None),
             usage_anchor: RwSignal::new(None),
+            feedback_open: RwSignal::new(false),
+            feedback_opener: RwSignal::new(None),
+            feedback_anchor: RwSignal::new(None),
             submit_review_focused: RwSignal::new(false),
             submit_review_autofocus: RwSignal::new(true),
             submit_review_pending: RwSignal::new(None),

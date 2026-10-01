@@ -713,6 +713,19 @@ impl GitHub {
         title: &str,
         body: &str,
     ) -> Result<Issue, Error> {
+        self.create_issue_labeled(repo_full_name, title, body, &[])
+            .await
+    }
+
+    /// [`Self::create_issue`] asking for `labels` too. GitHub drops them,
+    /// and still makes the issue, for someone without push access.
+    pub async fn create_issue_labeled(
+        &self,
+        repo_full_name: &str,
+        title: &str,
+        body: &str,
+        labels: &[&str],
+    ) -> Result<Issue, Error> {
         if title.trim().is_empty() {
             return Err(Error::Decode("an issue requires a title".into()));
         }
@@ -722,6 +735,8 @@ impl GitHub {
         struct Request<'a> {
             title: &'a str,
             body: &'a str,
+            #[serde(skip_serializing_if = "<[_]>::is_empty")]
+            labels: &'a [&'a str],
         }
 
         let path = format!("/repos/{owner}/{name}/issues");
@@ -729,7 +744,7 @@ impl GitHub {
         self.check_rate_limit()?;
         let response = self
             .octo
-            ._post(&path, Some(&Request { title, body }))
+            ._post(&path, Some(&Request { title, body, labels }))
             .await
             .map_err(map_octocrab_error)?;
         let body = self
@@ -1098,6 +1113,52 @@ impl GitHub {
         let data: ReactionMutationData = self.graphql(&payload, "react").await?;
         data.into_reactions()
             .ok_or_else(|| Error::Decode("GitHub answered the reaction without its subject".into()))
+    }
+
+    /// Whether the reader gave each of these issues a 👍, how many did,
+    /// and whether they hear about it, in one query. An issue GitHub
+    /// can't find is left out.
+    pub async fn issue_viewer_states(
+        &self,
+        repo_full_name: &str,
+        numbers: &[u64],
+    ) -> Result<Vec<crate::subscription::IssueViewerState>, Error> {
+        if numbers.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (owner, name) = repo_parts(repo_full_name)?;
+        let payload = serde_json::json!({
+            "query": crate::subscription::issues_query(numbers),
+            "variables": { "owner": owner, "name": name },
+        });
+        let (data, _problems) = self
+            .graphql_partial::<crate::subscription::IssuesData>(&payload, "issue viewer states")
+            .await?;
+        Ok(data.map(|d| d.into_states(numbers)).unwrap_or_default())
+    }
+
+    /// Subscribe the reader to a subject, or unsubscribe or ignore it:
+    /// `state` is `SUBSCRIBED`, `UNSUBSCRIBED` or `IGNORED`. Answers the
+    /// state GitHub ended with.
+    pub async fn set_subscription(&self, node_id: &str, state: &str) -> Result<String, Error> {
+        if node_id.is_empty() {
+            return Err(Error::Decode("the subject has no node id".into()));
+        }
+        let payload = serde_json::json!({
+            "query": crate::subscription::SUBSCRIPTION_MUTATION,
+            "variables": { "id": node_id, "state": state },
+        });
+        let data: crate::subscription::SubscriptionData =
+            self.graphql(&payload, "subscribe").await?;
+        data.state()
+            .ok_or_else(|| Error::Decode("GitHub answered the subscription without its state".into()))
+    }
+
+    /// When the rate limit GitHub last named lifts, as seconds since the
+    /// epoch, while it's still in force.
+    pub fn rate_limited_until(&self) -> Option<i64> {
+        let until = self.rate_limit_until.load(Ordering::SeqCst);
+        (until > jiff::Timestamp::now().as_second()).then_some(until)
     }
 
     /// The repository's users an `@` can name whose login or name

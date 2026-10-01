@@ -33,6 +33,8 @@ struct App {
     /// Open… was asked for with no window open: the next one opens with
     /// the box up.
     open_box_on_open: Cell<bool>,
+    /// Send Feedback… was asked for with no window open, the same way.
+    feedback_on_open: Cell<bool>,
 }
 
 #[derive(Clone)]
@@ -123,6 +125,7 @@ pub fn start(backend: Backend, events: std::sync::mpsc::Receiver<(WindowId, Even
             windows: RefCell::new(Vec::new()),
             focused: Cell::new(None),
             open_box_on_open: Cell::new(false),
+            feedback_on_open: Cell::new(false),
         })));
     });
 }
@@ -161,11 +164,18 @@ fn deliver(window: WindowId, event: Event) {
 /// `settings` is the window it was opened from, whose layout it takes.
 pub fn window(settings: Option<AppState>) -> Option<(AppState, ReviewState, Rc<Backend>)> {
     let app = app()?;
-    let state = new_state();
+    let mut state = new_state();
+    // Send Feedback's draft and the problems it reports are the app's,
+    // not a window's.
+    state.feedback = app.model.feedback;
+    state.recent_problems = app.model.recent_problems;
     state.seed_from(&app.model, settings.as_ref().unwrap_or(&app.model));
     let review = state.review.get_untracked()?;
     if app.open_box_on_open.replace(false) {
         crate::ui::open_box::show(state, None);
+    }
+    if app.feedback_on_open.replace(false) {
+        crate::ui::feedback::open(state, review, crate::feedback::FeedbackKind::Idea, None);
     }
     let backend = Rc::new(app.backend.open_window());
     Some((state, review, backend))
@@ -275,6 +285,72 @@ pub fn open_new() {
 
 /// Open…, from the Perch menu: the box in the window that last had the
 /// keyboard, or in a new one with none left.
+/// Send Feedback… from the Perch menu: the focused window's dropdown,
+/// as an Idea unless a draft is there. With no window, one opens with it.
+pub fn show_feedback() {
+    let Some(app) = app() else {
+        return;
+    };
+    let focused = app.focused.get();
+    let window = {
+        let windows = app.windows.borrow();
+        windows
+            .iter()
+            .find(|w| Some(w.id) == focused)
+            .or(windows.first())
+            .cloned()
+    };
+    match window {
+        Some(window) => crate::ui::feedback::open(
+            window.state,
+            window.review,
+            crate::feedback::FeedbackKind::Idea,
+            None,
+        ),
+        None => {
+            app.feedback_on_open.set(true);
+            open(None);
+        }
+    }
+}
+
+/// Each screen's size and backing scale, and the key window's size, for
+/// a bug report: a drawing fault often belongs to one scale.
+pub fn display_facts() -> Vec<String> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::{NSApplication, NSScreen};
+        let Some(mtm) = objc2::MainThreadMarker::new() else {
+            return Vec::new();
+        };
+        let mut lines: Vec<String> = NSScreen::screens(mtm)
+            .iter()
+            .enumerate()
+            .map(|(i, screen)| {
+                let frame = screen.frame();
+                format!(
+                    "Screen {}: {}x{} points at {}x",
+                    i + 1,
+                    frame.size.width.round(),
+                    frame.size.height.round(),
+                    screen.backingScaleFactor()
+                )
+            })
+            .collect();
+        if let Some(window) = NSApplication::sharedApplication(mtm).keyWindow() {
+            let frame = window.frame();
+            lines.push(format!(
+                "Window: {}x{} points",
+                frame.size.width.round(),
+                frame.size.height.round()
+            ));
+        }
+        lines
+    }
+    #[cfg(not(target_os = "macos"))]
+    Vec::new()
+}
+
 pub fn show_open_box() {
     let Some(app) = app() else {
         return;

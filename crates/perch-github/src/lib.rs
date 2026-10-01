@@ -21,6 +21,7 @@ pub mod reviews;
 mod responses;
 pub mod search;
 mod subjects;
+pub mod subscription;
 pub mod timeline;
 pub mod workflow_runs;
 
@@ -58,6 +59,7 @@ pub use pulls::{
     PullRequestOverview, RepositoryPermission, ReviewDecision, Reviewer,
 };
 pub use reactions::{ReactionGroup, ReactionKind, Reactions};
+pub use subscription::IssueViewerState;
 pub use references::IssueReference;
 pub use search::{SearchHit, SearchPage};
 pub use reviews::{

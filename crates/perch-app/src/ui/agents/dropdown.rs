@@ -176,6 +176,7 @@ pub fn toggle(
 pub fn open(app: AppState, review: ReviewState, backend: &Backend, opener: Option<floem::ViewId>) {
     crate::review::review_menu::close(review, false);
     crate::ui::usage::close(review, false);
+    crate::ui::feedback::close(review, false);
     review.agents_dropdown_opener.set(opener);
     review.agents_dropdown_open.set(true);
     request_agent_runs(app, backend, RECENT_RUNS);

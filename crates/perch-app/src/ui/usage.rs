@@ -195,6 +195,7 @@ pub fn toggle(review: ReviewState, backend: &Backend, opener: Option<floem::View
 pub fn open(review: ReviewState, backend: &Backend, opener: Option<floem::ViewId>) {
     crate::review::review_menu::close(review, false);
     crate::ui::agents::dropdown::close(review, false);
+    crate::ui::feedback::close(review, false);
     review.usage_opener.set(opener);
     review.usage_open.set(true);
     backend.refresh_usage();

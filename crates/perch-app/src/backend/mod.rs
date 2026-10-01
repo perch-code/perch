@@ -32,6 +32,7 @@ use windows::{CommandSender, View, Views};
 
 mod avatar;
 mod check_watch;
+mod feedback;
 mod issue_draft;
 mod kept_servers;
 pub(crate) mod open_pull;
@@ -644,6 +645,26 @@ pub enum Command {
     },
     StopIssueDraft {
         item_id: String,
+    },
+    /// Send Feedback's Preview…: collect, look into it when asked, search
+    /// for similar issues, and put the issue together. `FeedbackStep`s,
+    /// then `FeedbackReady`, answer.
+    PrepareFeedback(Box<crate::feedback::PrepareRequest>),
+    StopFeedbackDiagnosis,
+    /// File the report on Perch's repository, or comment on `comment_on`
+    /// there, with exactly this text. `FeedbackSent`, `FeedbackCaught` or
+    /// `FeedbackFailed` answers.
+    FileFeedback {
+        title: String,
+        body: String,
+        kind: crate::feedback::FeedbackKind,
+        comment_on: Option<u64>,
+    },
+    /// +1 a similar issue: the 👍 when `react`, then subscribe.
+    PlusOneFeedback {
+        number: u64,
+        node_id: String,
+        react: bool,
     },
 }
 
@@ -1292,6 +1313,24 @@ pub enum Event {
         item_id: String,
         outcome: DescriptionOutcome,
     },
+    /// Where Send Feedback's Preview… has got to.
+    FeedbackStep {
+        attempt: u64,
+        step: crate::feedback::Step,
+    },
+    FeedbackReady(Box<crate::feedback::Prepared>),
+    /// The report went: filed, commented, or +1'd.
+    FeedbackSent {
+        number: u64,
+        outcome: crate::feedback::Sent,
+    },
+    /// The pass before sending redacted something, so nothing was sent.
+    FeedbackCaught {
+        title: String,
+        preview: String,
+        count: usize,
+    },
+    FeedbackFailed(crate::feedback::SendError),
     /// The commits over the base and whether the checkout has work in it,
     /// for the scope menu, and the head as it was at the previous open,
     /// which "Since you last looked" ranges from.
@@ -1466,6 +1505,11 @@ impl Event {
                 | Event::OpenReferenceFailed { .. }
                 | Event::Bases { .. }
                 | Event::Grants { .. }
+                | Event::FeedbackStep { .. }
+                | Event::FeedbackReady(_)
+                | Event::FeedbackSent { .. }
+                | Event::FeedbackCaught { .. }
+                | Event::FeedbackFailed(_)
         )
     }
 }
@@ -2572,6 +2616,37 @@ impl Backend {
     pub fn stop_pull_request_description(&self, item_id: &str) {
         let _ = self.commands.send(Command::StopPullRequestDescription {
             item_id: item_id.to_string(),
+        });
+    }
+
+    pub fn prepare_feedback(&self, request: crate::feedback::PrepareRequest) {
+        let _ = self.commands.send(Command::PrepareFeedback(Box::new(request)));
+    }
+
+    pub fn stop_feedback_diagnosis(&self) {
+        let _ = self.commands.send(Command::StopFeedbackDiagnosis);
+    }
+
+    pub fn file_feedback(
+        &self,
+        title: &str,
+        body: &str,
+        kind: crate::feedback::FeedbackKind,
+        comment_on: Option<u64>,
+    ) {
+        let _ = self.commands.send(Command::FileFeedback {
+            title: title.to_string(),
+            body: body.to_string(),
+            kind,
+            comment_on,
+        });
+    }
+
+    pub fn plus_one_feedback(&self, number: u64, node_id: &str, react: bool) {
+        let _ = self.commands.send(Command::PlusOneFeedback {
+            number,
+            node_id: node_id.to_string(),
+            react,
         });
     }
 
@@ -4510,6 +4585,30 @@ async fn run(
             }
             Command::StopIssueDraft { item_id } => {
                 open_pull::stop_describing(&item_id);
+            }
+            Command::PrepareFeedback(request) => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { feedback::prepare(&ctx, *request).await });
+            }
+            Command::StopFeedbackDiagnosis => feedback::stop_diagnosis(),
+            Command::FileFeedback {
+                title,
+                body,
+                kind,
+                comment_on,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    feedback::file(&ctx, &title, &body, kind, comment_on).await
+                });
+            }
+            Command::PlusOneFeedback {
+                number,
+                node_id,
+                react,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { feedback::plus_one(&ctx, number, &node_id, react).await });
             }
             Command::OpenFile {
                 path,
@@ -20743,6 +20842,286 @@ read eof || true
             "updated_at": "2026-09-27T10:00:00Z",
         })
         .to_string()
+    }
+
+    /// Send Feedback files exactly the text it's given, on Perch's own
+    /// repository, with the kind's label, and says which issue it made.
+    #[tokio::test]
+    async fn feedback_files_the_text_unchanged_with_its_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let sent = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let seen = sent.clone();
+        let (base, _) = serve_by_body(move |method, path, _, body| {
+            seen.lock().unwrap().push((path.to_string(), body.to_string()));
+            match (method, path) {
+                ("POST", "/repos/criccomini/perch/issues") => ("201 Created", created_issue_json(123)),
+                _ => ("404 Not Found", "{}".to_string()),
+            }
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let body = "It hung.\n\n---\n\nPerch 0.1.0";
+        feedback::file(&ctx, " RA failed ", body, crate::feedback::FeedbackKind::Bug, None).await;
+        let sent = sent.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        let issue: serde_json::Value = serde_json::from_str(&sent[0].1).unwrap();
+        assert_eq!(
+            issue,
+            serde_json::json!({ "title": "RA failed", "body": body, "labels": ["bug"] })
+        );
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Event::FeedbackSent { number: 123, outcome: crate::feedback::Sent::Filed }
+            )),
+            "{events:?}"
+        );
+    }
+
+    /// Comment there instead posts the body on that issue, and nothing is
+    /// filed.
+    #[tokio::test]
+    async fn feedback_comments_on_a_similar_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve_by_method(|method, path, _| match (method, path) {
+            ("POST", "/repos/criccomini/perch/issues/57/comments") => {
+                ("201 Created", issue_comment_json(9, "It hung."))
+            }
+            _ => ("404 Not Found", "{}".to_string()),
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        feedback::file(&ctx, "RA failed", "It hung.", crate::feedback::FeedbackKind::Idea, Some(57)).await;
+        assert_eq!(paths.lock().unwrap().clone(), ["/repos/criccomini/perch/issues/57/comments"]);
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::FeedbackSent { number: 57, outcome: crate::feedback::Sent::Commented }
+        )));
+    }
+
+    /// A secret pasted into the preview is caught on the way out: nothing
+    /// is sent, and the redacted text goes back to be checked.
+    #[tokio::test]
+    async fn feedback_with_a_secret_in_it_sends_nothing_and_hands_back_the_redacted_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve("201 Created", "{}");
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let token = format!("ghp_{}", "a".repeat(36));
+        feedback::file(
+            &ctx,
+            "RA failed",
+            &format!("my token is {token}"),
+            crate::feedback::FeedbackKind::Bug,
+            None,
+        )
+        .await;
+        assert!(paths.lock().unwrap().is_empty(), "nothing sent");
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Event::FeedbackCaught { preview, count: 1, .. } if preview == "my token is ‹redacted›"
+            )),
+            "{events:?}"
+        );
+    }
+
+    /// A token that can't open issues on Perch's repository is told apart,
+    /// so the dropdown offers github.com.
+    #[tokio::test]
+    async fn feedback_refused_for_the_token_offers_github() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, _) = serve("403 Forbidden", r#"{"message":"Resource not accessible by personal access token"}"#);
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        feedback::file(&ctx, "RA failed", "It hung.", crate::feedback::FeedbackKind::Bug, None).await;
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Event::FeedbackFailed(crate::feedback::SendError { forbidden: true, message })
+                    if message == "Your token can't open issues on criccomini/perch."
+            )),
+            "{events:?}"
+        );
+    }
+
+    /// Preview… with no agent: the steps it goes through, the issue put
+    /// together and redacted, and the open issues that look like it, each
+    /// with whether the reader gave it a 👍.
+    #[tokio::test]
+    async fn feedback_preview_collects_searches_and_redacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let asked = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = asked.clone();
+        let (base, _) = serve_by_body(move |_, path, _, _| {
+            seen.lock().unwrap().push(path.to_string());
+            if path.starts_with("/search/issues") {
+                (
+                    "200 OK",
+                    serde_json::json!({
+                        "total_count": 1,
+                        "items": [{
+                            "number": 41,
+                            "title": "rust-analyzer times out",
+                            "state": "open",
+                            "updated_at": "2026-09-30T12:00:00Z",
+                            "repository_url": "https://api.github.com/repos/criccomini/perch",
+                        }],
+                    })
+                    .to_string(),
+                )
+            } else {
+                (
+                    "200 OK",
+                    r#"{"data":{"repository":{"i41":{"number":41,"id":"I_41","viewerSubscription":"UNSUBSCRIBED","reactionGroups":[{"content":"THUMBS_UP","viewerHasReacted":true,"reactors":{"totalCount":3}}]}}}}"#
+                        .to_string(),
+                )
+            }
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &["acme/rocket"]);
+        let request = crate::feedback::PrepareRequest {
+            attempt: 7,
+            kind: crate::feedback::FeedbackKind::Bug,
+            title: "rust-analyzer failed: no answer".into(),
+            body: "It hung in acme/rocket. Mail me at someone@example.com.".into(),
+            diagnose: true,
+            seed: None,
+            problems: Vec::new(),
+            item_id: None,
+            choice: None,
+            facts: Default::default(),
+        };
+        feedback::prepare(&ctx, request).await;
+
+        let asked = asked.lock().unwrap().clone();
+        assert!(asked[0].starts_with("/search/issues?q=repo%3Acriccomini%2Fperch"), "{asked:?}");
+        assert_eq!(asked[1], "/graphql");
+        let events: Vec<Event> = received.try_iter().collect();
+        let steps: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::FeedbackStep { attempt: 7, step } => Some(*step),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            steps,
+            [crate::feedback::Step::Collecting, crate::feedback::Step::Searching],
+            "no agent without a choice"
+        );
+        let ready = events
+            .iter()
+            .find_map(|e| match e {
+                Event::FeedbackReady(ready) => Some(ready.clone()),
+                _ => None,
+            })
+            .expect("no FeedbackReady");
+        assert_eq!(ready.attempt, 7);
+        assert!(ready.preview.starts_with("It hung in ‹repo›. Mail me at ‹email›."), "{}", ready.preview);
+        assert!(ready.preview.contains("<summary>Diagnostics</summary>"));
+        assert!(ready.redacted >= 2);
+        assert!(ready.notes.is_none());
+        assert_eq!(ready.similar.len(), 1);
+        assert_eq!(ready.similar[0].number, 41);
+        assert_eq!(ready.similar[0].thumbs_up, 3);
+        assert!(ready.similar[0].viewer_thumbs_up);
+    }
+
+    /// GitHub's GraphQL for +1: the reaction, the issue's state as given,
+    /// and the subscription as `subscribe` says.
+    fn plus_one_graphql(
+        state: &'static str,
+        subscribe: &'static str,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let seen = asked.clone();
+        let (base, _) = serve_by_body(move |_, _, _, body| {
+            let answer = if body.contains("addReaction") {
+                seen.lock().unwrap().push("react".to_string());
+                r#"{"data":{"addReaction":{"subject":{"reactionGroups":[]}}}}"#.to_string()
+            } else if body.contains("updateSubscription") {
+                seen.lock().unwrap().push("subscribe".to_string());
+                subscribe.to_string()
+            } else {
+                seen.lock().unwrap().push("read".to_string());
+                format!(
+                    r#"{{"data":{{"repository":{{"i57":{{"number":57,"id":"I_57","viewerSubscription":"{state}","reactionGroups":[]}}}}}}}}"#
+                )
+            };
+            ("200 OK", answer)
+        });
+        (base, asked)
+    }
+
+    const SUBSCRIBED: &str =
+        r#"{"data":{"updateSubscription":{"subscribable":{"viewerSubscription":"SUBSCRIBED"}}}}"#;
+
+    #[tokio::test]
+    async fn plus_one_reacts_then_subscribes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, asked) = plus_one_graphql("UNSUBSCRIBED", SUBSCRIBED);
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        feedback::plus_one(&ctx, 57, "I_57", true).await;
+        assert_eq!(asked.lock().unwrap().clone(), ["react", "read", "subscribe"]);
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::FeedbackSent {
+                number: 57,
+                outcome: crate::feedback::Sent::PlusOned {
+                    reacted: true,
+                    subscription: crate::feedback::Subscribed::Yes
+                }
+            }
+        )), "{events:?}");
+    }
+
+    /// An issue the reader ignores stays ignored, even when they ignored it
+    /// after the preview was made.
+    #[tokio::test]
+    async fn plus_one_never_subscribes_an_ignored_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, asked) = plus_one_graphql("IGNORED", SUBSCRIBED);
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        feedback::plus_one(&ctx, 57, "I_57", true).await;
+        assert_eq!(asked.lock().unwrap().clone(), ["react", "read"]);
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::FeedbackSent {
+                outcome: crate::feedback::Sent::PlusOned {
+                    subscription: crate::feedback::Subscribed::Ignored,
+                    ..
+                },
+                ..
+            }
+        )));
+    }
+
+    /// Subscribe alone, for an issue already given its 👍; a refused
+    /// subscribe keeps the reaction and says so.
+    #[tokio::test]
+    async fn plus_one_that_cannot_subscribe_keeps_the_reaction_and_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, asked) = plus_one_graphql(
+            "UNSUBSCRIBED",
+            r#"{"errors":[{"message":"Resource not accessible"}]}"#,
+        );
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        feedback::plus_one(&ctx, 57, "I_57", false).await;
+        assert_eq!(asked.lock().unwrap().clone(), ["read", "subscribe"]);
+        let events: Vec<Event> = received.try_iter().collect();
+        let outcome = events.iter().find_map(|e| match e {
+            Event::FeedbackSent { outcome, .. } => Some(*outcome),
+            _ => None,
+        });
+        assert_eq!(
+            outcome,
+            Some(crate::feedback::Sent::PlusOned {
+                reacted: false,
+                subscription: crate::feedback::Subscribed::Failed
+            })
+        );
     }
 
     /// Close as issue opens the issue, comments with its number in place

@@ -3,6 +3,7 @@
 pub mod agents;
 pub mod browse;
 pub mod drawer;
+pub mod feedback;
 pub mod items;
 pub mod menu;
 pub mod nav_row;
@@ -441,6 +442,14 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     && review.usage_open.get_untracked()
                 {
                     usage::close(review, true);
+                    return EventPropagation::Stop;
+                }
+                // And Send Feedback's dropdown.
+                if key.code == Code::Escape
+                    && key.modifiers.is_empty()
+                    && review.feedback_open.get_untracked()
+                {
+                    feedback::close(review, true);
                     return EventPropagation::Stop;
                 }
                 // Page Up and Page Down move Conversation or the open file
@@ -926,6 +935,7 @@ fn pane_with_bar(
                         .min_width(0.0)
                         .pointer_events_none()
                 }),
+                feedback::button(state, review, backend.clone()),
                 usage::button(state, review, backend.clone()),
                 agents::dropdown::button(state, review, backend),
                 close,
@@ -975,6 +985,9 @@ fn dismiss_popovers(review: ReviewState, hit_path: Option<&[floem::ElementId]>) 
     }
     if review.usage_open.get_untracked() && !inside(review.usage_anchor.get_untracked()) {
         usage::close(review, false);
+    }
+    if review.feedback_open.get_untracked() && !inside(review.feedback_anchor.get_untracked()) {
+        feedback::close(review, false);
     }
 }
 

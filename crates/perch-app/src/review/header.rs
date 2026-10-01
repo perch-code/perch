@@ -134,6 +134,7 @@ fn state_glyph(state: ReviewState) -> impl IntoView {
 fn trailing(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     Stack::horizontal((
         github_button(state),
+        crate::ui::feedback::button(app, state, backend.clone()),
         crate::ui::usage::button(app, state, backend.clone()),
         crate::ui::agents::dropdown::button(app, state, backend.clone()),
         crate::review::start_work::button(app, state),

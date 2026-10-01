@@ -8,6 +8,7 @@ mod approvals;
 mod ask;
 mod backend;
 mod context;
+mod feedback;
 mod icons;
 mod inbox;
 mod items;
