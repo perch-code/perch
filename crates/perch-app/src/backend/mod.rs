@@ -3544,6 +3544,7 @@ async fn run(
         review_reconcile: Arc::new(tokio::sync::Mutex::new(())),
         knowledge,
         item_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
+        root_cuts: Arc::new(tokio::sync::Mutex::new(())),
         avatars,
         seen_notifications: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         refreshing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -5123,6 +5124,10 @@ struct Ctx {
     /// Serializes checkout archive/restore/delete so deferred agent cleanup
     /// cannot remove a worktree while it is being restored or deleted.
     item_lifecycle: Arc<tokio::sync::Mutex<()>>,
+    /// Held by a root scan, and by a cut in a root from `git worktree add`
+    /// until its row is in, so the scan cannot find the new worktree first
+    /// and take it for the reader's own.
+    root_cuts: Arc<tokio::sync::Mutex<()>>,
     /// The avatar download limit, shared by everything that wants a face.
     avatars: Arc<Semaphore>,
     /// Notifications already acted on, by id and time, so one GitHub keeps
@@ -10692,7 +10697,7 @@ async fn create_worktree(ctx: &Ctx, work: &NewWork, navigation_id: u64) -> Resul
     let name = &work.branch;
     let reserved = branches_in(ctx, identity);
 
-    let (cut, base_ref, source) = if let Some(root) = root_of(ctx, identity) {
+    let (cut, base_ref, source, _cuts) = if let Some(root) = root_of(ctx, identity) {
         let repo_dir = ctx
             .preparer
             .repository_of(&root)
@@ -10724,13 +10729,14 @@ async fn create_worktree(ctx: &Ctx, work: &NewWork, navigation_id: u64) -> Resul
             None => work.base.name.clone(),
         };
         progress("Adding the worktree".into());
+        let cuts = ctx.root_cuts.lock().await;
         let cut = ctx
             .preparer
             .cut_branch(&repo_dir, &repo, name, &start, &reserved)
             .await
             .map_err(|e| e.to_string())?;
         // Diffed against what it was cut from.
-        (cut, work.base.name.clone(), Some(repo_dir))
+        (cut, work.base.name.clone(), Some(repo_dir), Some(cuts))
     } else {
         if let Some(message) = no_root_for_local(ctx, identity) {
             return Err(message);
@@ -10765,7 +10771,7 @@ async fn create_worktree(ctx: &Ctx, work: &NewWork, navigation_id: u64) -> Resul
             .cut_branch(&bare, &repo, name, &start, &reserved)
             .await
             .map_err(|e| e.to_string())?;
-        (cut, work.base.name.clone(), None)
+        (cut, work.base.name.clone(), None, None)
     };
 
     let head_sha = ctx
@@ -10906,6 +10912,10 @@ async fn fork_item(ctx: &Ctx, id: &str) -> Result<String, String> {
     };
     // The source's own name is spoken for by the source; the cut takes
     // the next one, whether or not this clone has heard of it.
+    let _cuts = match root {
+        Some(_) => Some(ctx.root_cuts.lock().await),
+        None => None,
+    };
     let cut = ctx
         .preparer
         .cut_branch(
@@ -11915,6 +11925,7 @@ async fn refresh_items(ctx: &Ctx) {
 /// whose directory has gone is deleted, or archived when it has threads.
 /// Returns whether anything changed.
 async fn scan_roots(ctx: &Ctx) -> bool {
+    let _cuts = ctx.root_cuts.lock().await;
     let git = ctx.preparer.git();
     let mut changed = false;
     // Which unowned items were seen, by directory and branch, so the rest
@@ -16807,6 +16818,7 @@ mod tests {
             review_reconcile: Arc::new(tokio::sync::Mutex::new(())),
             knowledge: None,
             item_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
+            root_cuts: Arc::new(tokio::sync::Mutex::new(())),
             avatars: Arc::new(Semaphore::new(1)),
             seen_notifications: Default::default(),
             refreshing: Default::default(),
@@ -21772,6 +21784,49 @@ read eof || true
         // The same name again moves on.
         let id = create_worktree(&ctx, &work, 2).await.unwrap();
         assert_eq!(ctx.item(&id).unwrap().checkout.unwrap().branch, "chris/readme-2");
+    }
+
+    #[tokio::test]
+    async fn a_scan_waits_for_a_cut_in_its_root_to_have_its_row() {
+        // The poll's scan once listed a worktree Perch had just cut, before
+        // its row was in, and made a row of its own for the branch; the
+        // cut's insert then broke the unique index.
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received, root) = local_notes(dir.path());
+        assert!(scan_roots(&ctx).await);
+        let before = ctx.with_cache(|c| c.load_items().unwrap()).unwrap().len();
+
+        let cuts = ctx.root_cuts.lock().await;
+        let path = dir.path().join("cut");
+        git(&root, &["worktree", "add", "-q", "-b", "cut", path.to_str().unwrap()]);
+        let scan = scan_roots(&ctx);
+        tokio::pin!(scan);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut scan)
+                .await
+                .is_err(),
+            "the scan waits while the cut is under way"
+        );
+        let mut item = Item::new("local/notes", Timestamp::now());
+        item.checkout = Some(ItemCheckout {
+            branch: "cut".into(),
+            base_ref: "main".into(),
+            head_sha: git(&root, &["rev-parse", "main"]),
+            path: path.canonicalize().unwrap(),
+            owned: true,
+            on_disk: true,
+            churn: Some((0, 0)),
+            last_seen_head: None,
+            divergence: None,
+            source: Some(root.clone()),
+        });
+        ctx.with_cache(|c| c.insert_item(&item)).unwrap().unwrap();
+        drop(cuts);
+        scan.await;
+
+        let items = ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
+        assert_eq!(items.len(), before + 1, "{items:?}");
+        assert!(ctx.item(&item.id).unwrap().checkout.unwrap().owned);
     }
 
     #[test]
