@@ -24,6 +24,8 @@ attached.
 - You read and edit the whole issue before anything is sent. **File
   issue** creates it on `criccomini/perch` with your token, and it opens
   in Perch as an issue.
+- When it's already been filed, **+1** gives that issue your 👍 and
+  subscribes you to it, so you hear when it's fixed.
 
 Perch also starts writing its log to a file. Today it goes to stderr,
 which a Finder launch throws away.
@@ -92,7 +94,9 @@ exists asks `Replace the draft you started?`
    **Stop** beside the label. See [The agent's notes](#the-agents-notes).
 3. **Searching…** Up to three open issues on `criccomini/perch` whose
    titles match the report's, from one `search_issues` call
-   (`repo:criccomini/perch is:issue is:open` and the title's words). A failed or offline search
+   (`repo:criccomini/perch is:issue is:open` and the title's words),
+   then one GraphQL query for those issues' node ids, 👍 counts, whether
+   you gave one, and `viewerSubscription`. A failed or offline search
    shows none and says nothing.
 
 Then the box becomes the preview:
@@ -102,8 +106,11 @@ Then the box becomes the preview:
   shape given in [The issue](#the-issue). Edits here are what's sent:
   delete a section and it's gone.
 - **Similar issues**, when the search found any: each row is the
-  number, title and age, opens the issue in Perch on click, and has
-  **Comment there instead**.
+  number, title, age and 👍 count, opens the issue in Perch on click,
+  and has **+1** (see [+1](#1)) and **Comment there instead**. For an
+  Idea, +1 is the primary button. For a Bug, Comment there instead is,
+  since a second machine's diagnostics are what a second report of a
+  bug adds.
 - **File issue**, **Back** to the form, and **Cancel**.
 
 The box can be closed during step 2. The run carries on, and when it
@@ -142,6 +149,40 @@ On failure the box stays with what was typed:
   The body never goes in the URL.
 - **Offline**: `Offline.` Nothing is attempted. The draft keeps.
 - Anything else: GitHub's message.
+
+### +1
+
+**+1** is for an issue that's already the one you'd file. It sends no
+text, so it needs no redaction pass. It does whichever of these isn't
+done yet:
+
+1. Adds your 👍 with `set_reaction`, as a reaction anywhere in Perch
+   does.
+2. Subscribes you to the issue with GraphQL's `updateSubscription`
+   (`state: SUBSCRIBED`), so its comments and its closing reach the
+   Inbox. A reaction alone doesn't subscribe you, and without this you'd
+   never hear it was fixed. Filing and commenting need no such step:
+   GitHub subscribes the author and every commenter. An issue whose
+   `viewerSubscription` is `IGNORED` stays ignored.
+
+The button says what it will do: **+1** when you haven't reacted,
+**Subscribe** when you have and aren't subscribed, and nothing, with
+`You +1'd this` in its place, when both are done or the issue is
+ignored.
+
+On success it goes as filing does: the draft is cleared, the box closes,
+a toast says `+1'd criccomini/perch#57 and subscribed you`, and the
+issue opens through `open_subject`.
+
+On failure:
+
+- **The reaction fails**: nothing else is tried, the box stays, and the
+  error line says why. A `403` or `404` offers **Open on GitHub**, which
+  opens the issue's page.
+- **The subscribe fails** after the reaction landed: the 👍 stays, the
+  box closes as on success, and the toast is a warning: `+1'd
+  criccomini/perch#57, but couldn't subscribe you. Watch it on
+  github.com.`
 
 ### What Perch collects
 
@@ -282,7 +323,9 @@ default hook runs, so a crash leaves its cause in the file.
   the app, not per item: `FeedbackDraft { kind, title, body, diagnose,
   seed, step, context, notes, preview, similar, error, generation }`.
   `seed` is the toast being reported. `step` is `Editing`, `Collecting`,
-  `Diagnosing`, `Searching`, `Preview` or `Filing`.
+  `Diagnosing`, `Searching`, `Preview` or `Filing`. `similar` is up to
+  three `SimilarIssue { number, title, updated_at, node_id, thumbs_up,
+  viewer_thumbs_up, viewer_subscription }`.
 - `AppState` gains `recent_problems`, a ring of 20 `(time, text, tone)`,
   pushed by `notify` for errors and warnings.
 - Nothing is stored in the database. No schema change.
@@ -296,17 +339,23 @@ default hook runs, so a crash leaves its cause in the file.
 - `tracing-appender` for the file, non-blocking, its guard held by
   `main`.
 - `perch-github`: `create_issue(repo, title, body, labels)`, parsing the
-  response as `subject_kind` parses an issue.
+  response as `subject_kind` parses an issue. `issue_looks(repo,
+  numbers)`, the GraphQL query for the similar issues' viewer fields.
+  `set_subscription(node_id, state)` over `updateSubscription`, beside
+  `set_reaction`.
 - `backend/feedback.rs`: `collect(ctx, item_id, problems) ->
   FeedbackContext`, `redact(text, secrets) -> (String, usize)`,
   `render(draft) -> String` and the agent run, spawned directly with
   `perch_agent::Run` and kept for Stop, as `open_pull::describe` is.
 - The commands `PrepareFeedback { kind, title, body, diagnose, seed,
   item_id, backend, model, effort }`, `StopFeedbackDiagnosis`, and
-  `FileFeedback { title, body, label, comment_on: Option<u64> }`, with
-  the events `FeedbackStep`, `FeedbackReady { context, notes, preview,
-  similar }`, `FeedbackFiled { number, comment }` and `FeedbackFailed {
-  error, can_open_on_github }`.
+  `FileFeedback { title, body, label, comment_on: Option<u64> }` and
+  `PlusOneFeedback { number, node_id, react, subscribe }`, with the
+  events `FeedbackStep`, `FeedbackReady { context, notes, preview,
+  similar }`, `FeedbackFiled { number, outcome }` (`Filed`, `Commented`,
+  or `PlusOned { subscribed }`) and `FeedbackFailed { error,
+  can_open_on_github }`. `PlusOneFeedback` reads `viewerSubscription`
+  again before subscribing, since the preview's may be old.
 - The target repository is a constant, `criccomini/perch`.
 
 ## Harness
@@ -334,8 +383,16 @@ paths answered by the test server.
   logs path; it runs with Ask's tools in the open checkout, or
   `~/.perch` with none; it records no run; Stop and a timeout give a
   preview without notes and say why.
-- Similar issues: the search query; three at most; Comment there instead
-  posts to that number; a failed search shows none.
+- Similar issues: the search query; three at most; the viewer fields
+  parse; Comment there instead posts to that number; a failed search
+  shows none. +1 is primary for an Idea and Comment there instead for a
+  Bug.
+- +1: reacts and subscribes, then clears the draft and opens the issue;
+  reads Subscribe and only subscribes when you'd reacted; shows `You
+  +1'd this` when both are done; never subscribes an `IGNORED` issue,
+  even when it became ignored after the preview; a failed reaction
+  doesn't subscribe and keeps the box; a failed subscribe keeps the
+  reaction and warns.
 - Filing: posts the preview's title and body, unchanged, and the label
   to `criccomini/perch`;
   opens the issue as an item; clears the draft. A `403` offers Open on
@@ -354,7 +411,8 @@ paths answered by the test server.
    problems, Open on GitHub. Commit.
 4. The agent's notes: the run, Stop, the timeout, the toast when the box
    was closed. Commit.
-5. Similar issues and Comment there instead. Commit.
+5. Similar issues, Comment there instead, and +1 with the subscribe.
+   Commit.
 6. README: Setup › GitHub's table gains `File feedback | Issues: write on
    criccomini/perch`, with a line that a fine-grained token can't get it
    for someone else's repository and Perch falls back to github.com.
@@ -392,14 +450,19 @@ These file real issues on `criccomini/perch`. Close them afterwards.
   preview.
 - File a second report with the first one's title: the first one is
   under Similar issues, and Comment there instead adds a comment to it.
+- From another GitHub account, start a report with that title and press
+  +1: the issue has its 👍, and a comment on it from the first account
+  reaches that account's Inbox. Start another: the row says `You +1'd
+  this`.
 - Turn the network off and press File issue: `Offline.`, and the draft
   is intact.
 
 ## Things the implementer should not do
 
-- Don't send anything to GitHub without the File issue or Comment there
-  instead button, and don't send text the user hasn't seen in the
+- Don't send anything to GitHub without the File issue, Comment there
+  instead or +1 button, and don't send text the user hasn't seen in the
   preview.
+- Don't change a subscription the user set to ignored.
 - Don't put the body, or anything collected, in a URL.
 - Don't give the agent the token, the network, or a way to file.
 - Don't collect the user's project source, their notifications, or the
