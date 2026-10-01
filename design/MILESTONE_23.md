@@ -120,9 +120,12 @@ drops labels from someone without push access, and that's fine.
 **Comment there instead** posts the body, without the user's title, as a
 comment on that issue with `create_issue_comment`.
 
-Before either, Perch runs the redaction again over the edited text (see
+What's sent is the preview's title and text, word for word. Before
+either, Perch runs the redaction again over the edited text (see
 [Redaction](#redaction)), so a secret pasted into the preview is caught
-too.
+too. If that changes anything, nothing is sent: the preview takes the
+redacted text and says `Redacted 1 value you added. Check it and file
+again.`
 
 On success the draft is cleared, the box closes, a toast says `Filed
 criccomini/perch#123` (or `Commented on …`), and the issue opens through
@@ -264,8 +267,7 @@ preview, and again over the edited text before sending:
   the preview.
 
 The preview shows `Redacted 3 values` over the text when any were. Each
-pass is a pure function with its own tests, and the send refuses if the
-second pass still finds the token.
+pass is a pure function with its own tests.
 
 ### The log file
 
@@ -305,9 +307,7 @@ default hook runs, so a crash leaves its cause in the file.
   the events `FeedbackStep`, `FeedbackReady { context, notes, preview,
   similar }`, `FeedbackFiled { number, comment }` and `FeedbackFailed {
   error, can_open_on_github }`.
-- The target repository is a constant, `criccomini/perch`, which a
-  `[feedback] repo = "…"` in the config overrides, so the acceptance
-  steps can file somewhere harmless. The README doesn't mention it.
+- The target repository is a constant, `criccomini/perch`.
 
 ## Harness
 
@@ -325,7 +325,8 @@ paths answered by the test server.
   shape, `$HOME`, the user name in a path, an email but not a `noreply`
   one, and a configured repository name in prose, a path and a URL are
   each replaced and counted; `criccomini/perch` isn't. A send whose text
-  still holds the token is refused.
+  the second pass changes posts nothing and puts the redacted text in the
+  preview.
 - The issue: summary line always; notes only when present; an Idea
   without diagnosis has neither Diagnostics nor Log; an oversized log is
   cut from its oldest end with the count.
@@ -335,7 +336,8 @@ paths answered by the test server.
   preview without notes and say why.
 - Similar issues: the search query; three at most; Comment there instead
   posts to that number; a failed search shows none.
-- Filing: posts title, body and label to the configured repository;
+- Filing: posts the preview's title and body, unchanged, and the label
+  to `criccomini/perch`;
   opens the issue as an item; clears the draft. A `403` offers Open on
   GitHub, which copies the body and puts only the title in the URL.
   Offline sends nothing and keeps the draft.
@@ -363,7 +365,7 @@ paths answered by the test server.
 
 ## Acceptance
 
-Set `[feedback] repo` to a scratch repository of your own first.
+These file real issues on `criccomini/perch`. Close them afterwards.
 
 - Put a `rust-analyzer` on `PATH` that sleeps forever, remove the
   toolchain's own, and open a Rust pull request. The `rust-analyzer
@@ -374,17 +376,17 @@ Set `[feedback] repo` to a scratch repository of your own first.
   user name, token or any repository name but Perch's.
 - Wait for that toast to go, then open Send Feedback… from the menu and
   Preview: the toast is under Recent problems.
-- File it: the issue is on the scratch repository with the `bug` label,
+- File it: the issue is on `criccomini/perch` with the `bug` label,
   opens in Perch as an issue item, and the box is gone. Reply on
   github.com: the reply reaches the Inbox.
 - Launch Perch from Finder, use it for a minute and quit:
   `~/.perch/logs/perch.log` has the session.
-- Paste your token into the preview's text and press File issue: it
-  goes out as `‹redacted›`.
-- With a fine-grained token limited to your own repositories, file on a
-  repository you don't own: the `can't open issues` line shows, and Open
-  on GitHub opens the new-issue page with the title, the body on the
-  clipboard.
+- Paste your token into the preview's text and press File issue: nothing
+  is filed, and the preview shows `‹redacted›` where it was, with the
+  notice. Press File issue again: the issue matches the preview.
+- With a fine-grained token that doesn't include `criccomini/perch`,
+  file: the `can't open issues` line shows, and Open on GitHub opens the
+  new-issue page with the title, the body on the clipboard.
 - Start a report with the box ticked, close the box while it's looking:
   the toast says the report is ready, and clicking it opens the
   preview.
