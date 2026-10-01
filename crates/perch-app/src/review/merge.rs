@@ -435,6 +435,11 @@ fn checks_summary(checks: &Checks) -> String {
         .iter()
         .filter(|check| check.state.is_pending())
         .count();
+    let waiting = checks
+        .runs
+        .iter()
+        .filter(|check| check.state == CheckRunState::Waiting)
+        .count();
     let passing = checks
         .runs
         .iter()
@@ -450,6 +455,17 @@ fn checks_summary(checks: &Checks) -> String {
     }
     if matches!(checks.state, CheckState::Failing { .. }) {
         return "Checks failed".to_string();
+    }
+    if waiting > 0 && waiting == pending {
+        return format!("{} waiting · {} passed", waiting, passing);
+    }
+    if waiting > 0 {
+        return format!(
+            "{} running · {} waiting · {} passed",
+            pending - waiting,
+            waiting,
+            passing
+        );
     }
     if pending > 0 {
         return format!("{} running · {} passed", pending, passing);
@@ -468,6 +484,8 @@ fn check_icon(state: CheckRunState) -> (SidebarIcon, Color) {
         (SidebarIcon::Check, theme::OPEN)
     } else if state.is_failing() {
         (SidebarIcon::Close, theme::CLOSED)
+    } else if state == CheckRunState::Waiting {
+        (SidebarIcon::Waiting, theme::FG_SUBTLE)
     } else if state.is_pending() {
         (SidebarIcon::Refresh, theme::DRAFT_YELLOW)
     } else {
@@ -480,6 +498,8 @@ fn check_color(state: CheckRunState) -> Color {
         theme::OPEN
     } else if state.is_failing() {
         theme::CLOSED
+    } else if state == CheckRunState::Waiting {
+        theme::FG_SUBTLE
     } else if state.is_pending() {
         theme::DRAFT_YELLOW
     } else {
@@ -490,6 +510,7 @@ fn check_color(state: CheckRunState) -> Color {
 fn check_status(state: CheckRunState) -> &'static str {
     match state {
         CheckRunState::Pending => "In progress",
+        CheckRunState::Waiting => "Waiting",
         CheckRunState::Success => "Passed",
         CheckRunState::Failure => "Failed",
         CheckRunState::Neutral => "Neutral",
@@ -1560,6 +1581,25 @@ mod tests {
             runs: vec![check(CheckRunState::Success)],
         };
         assert_eq!(checks_summary(&truncated_failure), "Checks failed");
+    }
+
+    #[test]
+    fn checks_summary_counts_jobs_a_rerun_has_not_reached_apart() {
+        let rerun = |runs| Checks {
+            state: CheckState::Running,
+            url: None,
+            runs,
+        };
+        let partway = rerun(vec![
+            check(CheckRunState::Pending),
+            check(CheckRunState::Waiting),
+            check(CheckRunState::Waiting),
+            check(CheckRunState::Success),
+        ]);
+        assert_eq!(checks_summary(&partway), "1 running · 2 waiting · 1 passed");
+
+        let between = rerun(vec![check(CheckRunState::Waiting), check(CheckRunState::Success)]);
+        assert_eq!(checks_summary(&between), "1 waiting · 1 passed");
     }
 
     #[test]

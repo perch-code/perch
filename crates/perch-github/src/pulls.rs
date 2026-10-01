@@ -10,7 +10,22 @@ use serde::{Deserialize, Serialize};
 use crate::workflow_runs::{Check, CheckKind, CheckRunState, CheckState, Checks};
 
 type CheckRunKey = (String, String, String);
-type ParsedCheck = (Check, Option<CheckRunKey>);
+
+/// A rollup entry with what it is told apart from the others by.
+struct ParsedCheck {
+    check: Check,
+    /// Present only for CheckRuns: GitHub can return retries of the same
+    /// workflow job, while distinct legacy status contexts remain rows.
+    key: Option<CheckRunKey>,
+    /// The workflow run a check run belongs to, when Actions made it.
+    suite: Option<SuiteRef>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SuiteRef {
+    id: u64,
+    done: bool,
+}
 
 /// What Perch needs to check out and describe a pull request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -400,6 +415,8 @@ query PullRequestOverview($owner: String!, $name: String!, $number: Int!, $conte
               started_at: startedAt
               completed_at: completedAt
               check_suite: checkSuite {
+                database_id: databaseId
+                status
                 workflow_run: workflowRun {
                   event
                   workflow { name }
@@ -640,6 +657,10 @@ enum CheckContextPayload {
 #[derive(Debug, Deserialize)]
 struct CheckSuitePayload {
     #[serde(default)]
+    database_id: Option<u64>,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
     workflow_run: Option<WorkflowRunRefPayload>,
 }
 
@@ -668,14 +689,44 @@ fn checks_from_contexts(
             runs: Vec::new(),
         };
     };
+    let parsed: Vec<ParsedCheck> = contexts
+        .into_iter()
+        .flatten()
+        .filter_map(CheckContextPayload::into_check)
+        .collect();
+    let current = current_suites(&parsed);
+    let current_names: std::collections::HashSet<(u64, &str)> = parsed
+        .iter()
+        .filter_map(|p| Some((p.suite?.id, p.check.name.as_str())))
+        .collect();
+
     let mut runs = Vec::<Check>::new();
     let mut check_run_keys = std::collections::HashMap::<CheckRunKey, usize>::new();
-
-    for context in contexts.into_iter().flatten() {
-        let Some((check, dedupe_key)) = context.into_check() else {
-            continue;
-        };
-        if let Some(key) = dedupe_key {
+    let mut superseded = Vec::<Check>::new();
+    for ParsedCheck { check, key, suite } in &parsed {
+        // A workflow run on the same commit, for the same event, that
+        // started later stands for the workflow. While it runs, a job it
+        // has not got to yet is waiting, not whatever the older run said;
+        // once it is done, it is the older run's word or nothing.
+        if let (Some(suite), Some((workflow, event, _))) = (suite, key) {
+            let running = current
+                .get(&(workflow.as_str(), event.as_str()))
+                .filter(|newer| newer.id != suite.id && !newer.done);
+            if let Some(newer) = running {
+                if !current_names.contains(&(newer.id, check.name.as_str())) {
+                    superseded.push(Check {
+                        state: CheckRunState::Waiting,
+                        url: None,
+                        started_at: None,
+                        completed_at: None,
+                        ..check.clone()
+                    });
+                }
+                continue;
+            }
+        }
+        let check = check.clone();
+        if let Some(key) = key.clone() {
             match check_run_keys.get(&key).copied() {
                 Some(index) if is_newer_check(&check, &runs[index]) => runs[index] = check,
                 Some(_) => {}
@@ -685,6 +736,18 @@ fn checks_from_contexts(
                 }
             }
         } else {
+            runs.push(check);
+        }
+    }
+    // An older run may hold the same job more than once, as its attempts.
+    for check in superseded {
+        let key = (
+            check.workflow.clone().unwrap_or_default(),
+            check.event.clone().unwrap_or_default(),
+            check.name.clone(),
+        );
+        if let std::collections::hash_map::Entry::Vacant(entry) = check_run_keys.entry(key) {
+            entry.insert(runs.len());
             runs.push(check);
         }
     }
@@ -703,7 +766,9 @@ fn checks_from_contexts(
     };
     let preferred = match state {
         CheckState::Failing { .. } => runs.iter().find(|check| check.state.is_failing()),
-        CheckState::Running => runs.iter().find(|check| check.state.is_pending()),
+        CheckState::Running => runs
+            .iter()
+            .find(|check| check.state.is_pending() && check.url.is_some()),
         _ => None,
     };
     let url = preferred
@@ -712,9 +777,27 @@ fn checks_from_contexts(
     Checks { state, url, runs }
 }
 
+/// Per workflow and event, the run that stands for it: one still running
+/// before one that is done, else the one whose jobs started last.
+fn current_suites(parsed: &[ParsedCheck]) -> std::collections::HashMap<(&str, &str), SuiteRef> {
+    type Rank = (bool, Option<Timestamp>, u64);
+    let mut latest = std::collections::HashMap::<(&str, &str), (Rank, SuiteRef)>::new();
+    for p in parsed {
+        let (Some(suite), Some((workflow, event, _))) = (p.suite, &p.key) else {
+            continue;
+        };
+        let rank = (!suite.done, p.check.started_at, suite.id);
+        let entry = latest
+            .entry((workflow.as_str(), event.as_str()))
+            .or_insert((rank, suite));
+        if rank > entry.0 {
+            *entry = (rank, suite);
+        }
+    }
+    latest.into_iter().map(|(key, (_, suite))| (key, suite)).collect()
+}
+
 impl CheckContextPayload {
-    /// The key is present only for CheckRuns: GitHub can return retries of the
-    /// same workflow job, while distinct legacy status contexts remain rows.
     fn into_check(self) -> Option<ParsedCheck> {
         match self {
             CheckContextPayload::CheckRun {
@@ -726,7 +809,17 @@ impl CheckContextPayload {
                 completed_at,
                 check_suite,
             } => {
-                let workflow_run = check_suite.and_then(|suite| suite.workflow_run);
+                let (suite_id, suite_done, workflow_run) = match check_suite {
+                    Some(suite) => (
+                        suite.database_id,
+                        suite.status == "COMPLETED",
+                        suite.workflow_run,
+                    ),
+                    None => (None, false, None),
+                };
+                let suite = suite_id
+                    .filter(|_| workflow_run.is_some())
+                    .map(|id| SuiteRef { id, done: suite_done });
                 let workflow = workflow_run
                     .as_ref()
                     .and_then(|run| run.workflow.as_ref())
@@ -740,8 +833,8 @@ impl CheckContextPayload {
                     event.clone().unwrap_or_default(),
                     name.clone(),
                 );
-                Some((
-                    Check {
+                Some(ParsedCheck {
+                    check: Check {
                         name,
                         workflow,
                         event,
@@ -752,16 +845,17 @@ impl CheckContextPayload {
                         completed_at,
                         kind: CheckKind::CheckRun,
                     },
-                    Some(key),
-                ))
+                    key: Some(key),
+                    suite,
+                })
             }
             CheckContextPayload::StatusContext {
                 context,
                 state,
                 description,
                 target_url,
-            } => Some((
-                Check {
+            } => Some(ParsedCheck {
+                check: Check {
                     name: context,
                     workflow: None,
                     event: None,
@@ -772,8 +866,9 @@ impl CheckContextPayload {
                     completed_at: None,
                     kind: CheckKind::StatusContext,
                 },
-                None,
-            )),
+                key: None,
+                suite: None,
+            }),
             CheckContextPayload::Unknown => None,
         }
     }
@@ -1056,6 +1151,65 @@ mod tests {
         assert_eq!(loaded.html_url, "");
         assert_eq!(loaded.merged_at, pr.merged_at);
         assert_eq!(loaded.requested_reviewers, pr.requested_reviewers);
+    }
+
+    /// slatedb#2122: two runs of PR Checks on one head, the second
+    /// cancelled and then re-run. The rollup holds both; the first run's
+    /// passes must not stand in for jobs the re-run has not reached.
+    fn rerun_rollup(rerun_status: &str) -> Checks {
+        let run = |name: &str, status: &str, conclusion: &str, started: &str, suite: u64| {
+            let suite_status = if suite == 2 { rerun_status } else { "COMPLETED" };
+            serde_json::json!({
+                "__typename": "CheckRun",
+                "name": name,
+                "status": status,
+                "conclusion": if conclusion.is_empty() { None } else { Some(conclusion) },
+                "details_url": format!("https://github.com/a/b/actions/runs/{suite}/job/{name}"),
+                "started_at": started,
+                "check_suite": {
+                    "database_id": suite,
+                    "status": suite_status,
+                    "workflow_run": {
+                        "event": "pull_request",
+                        "workflow": { "name": "PR Checks" },
+                    },
+                },
+            })
+        };
+        let contexts = serde_json::json!([
+            run("tests", "IN_PROGRESS", "", "2026-10-01T18:54:58Z", 2),
+            run("tests", "COMPLETED", "SUCCESS", "2026-10-01T18:23:36Z", 1),
+            run("style", "COMPLETED", "SUCCESS", "2026-10-01T18:54:57Z", 2),
+            run("style", "COMPLETED", "SUCCESS", "2026-10-01T18:23:40Z", 1),
+            run("bindings-go", "COMPLETED", "SUCCESS", "2026-10-01T18:37:43Z", 1),
+            {"__typename": "StatusContext", "context": "license/cla", "state": "SUCCESS"},
+        ]);
+        checks_from_contexts(Some("PENDING".into()), serde_json::from_value(contexts).unwrap())
+    }
+
+    #[test]
+    fn a_rerun_leaves_the_jobs_it_has_not_reached_waiting() {
+        let checks = rerun_rollup("IN_PROGRESS");
+        let row = |name: &str| checks.runs.iter().find(|c| c.name == name).unwrap();
+
+        assert_eq!(checks.runs.len(), 4);
+        assert_eq!(row("tests").state, CheckRunState::Pending);
+        assert_eq!(row("style").started_at, Some("2026-10-01T18:54:57Z".parse().unwrap()));
+        let waiting = row("bindings-go");
+        assert_eq!(waiting.state, CheckRunState::Waiting);
+        assert_eq!((waiting.url.as_deref(), waiting.completed_at), (None, None));
+        assert_eq!(row("license/cla").state, CheckRunState::Success);
+        assert_eq!(
+            checks.url.as_deref(),
+            Some("https://github.com/a/b/actions/runs/2/job/tests")
+        );
+    }
+
+    #[test]
+    fn a_finished_rerun_keeps_what_the_older_run_alone_ran() {
+        let checks = rerun_rollup("COMPLETED");
+        let go = checks.runs.iter().find(|c| c.name == "bindings-go").unwrap();
+        assert_eq!(go.state, CheckRunState::Success);
     }
 
     #[test]

@@ -195,6 +195,9 @@ pub enum CheckKind {
 #[serde(rename_all = "snake_case")]
 pub enum CheckRunState {
     Pending,
+    /// A job a newer run of its workflow has not got to yet. GitHub has no
+    /// check run for it; the row comes from an older run's.
+    Waiting,
     Success,
     Failure,
     Neutral,
@@ -209,7 +212,7 @@ pub enum CheckRunState {
 
 impl CheckRunState {
     pub fn is_pending(self) -> bool {
-        self == Self::Pending
+        matches!(self, Self::Pending | Self::Waiting)
     }
 
     pub fn is_passing(self) -> bool {

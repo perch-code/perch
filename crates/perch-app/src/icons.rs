@@ -379,6 +379,10 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M8 4.8 V8.4" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
                <circle cx="8" cy="10.9" r="0.95" fill="{c}"/>"#
         ),
+        // An empty circle: a job not started yet, as GitHub draws one.
+        SidebarIcon::Waiting => format!(
+            r#"<circle cx="8" cy="8" r="6.3" fill="none" stroke="{c}" stroke-width="1.5"/>"#
+        ),
         // A circle with a slash through it: a run that was called off, as
         // GitHub draws a skipped check.
         SidebarIcon::Skip => format!(
@@ -604,6 +608,8 @@ pub enum SidebarIcon {
     Caution,
     /// A circle with a slash through it: a run that was cancelled.
     Skip,
+    /// An empty circle: a check that has not started.
+    Waiting,
     /// A face: leave a reaction.
     Smiley,
     /// Two angle brackets: a file's markup, for the tile that shows a
@@ -653,7 +659,8 @@ impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 68] = [
+    pub const ALL: [SidebarIcon; 69] = [
+        SidebarIcon::Waiting,
         SidebarIcon::File,
         SidebarIcon::Clock,
         SidebarIcon::ArrowUpRight,
