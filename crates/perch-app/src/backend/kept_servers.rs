@@ -64,16 +64,31 @@ impl KeptServers {
         });
     }
 
-    /// The server `window` set aside for `root`, run by `binary`, taken
-    /// back out.
+    /// Set aside every server of a worktree `window` no longer shows.
+    pub(super) async fn keep_all(
+        &self,
+        window: WindowId,
+        clients: std::collections::HashMap<perch_lsp::ServerKind, Arc<perch_lsp::Client>>,
+    ) {
+        for client in clients.into_values() {
+            self.keep(window, client).await;
+        }
+    }
+
+    /// The server of `kind` that `window` set aside for `root`, run by
+    /// `binary`, taken back out.
     pub(super) fn take(
         &self,
         window: WindowId,
         root: &Path,
+        kind: perch_lsp::ServerKind,
         binary: &Path,
     ) -> Option<Arc<perch_lsp::Client>> {
         self.take_where(|k| {
-            k.window == window && k.client.root() == root && k.client.binary() == binary
+            k.window == window
+                && k.client.root() == root
+                && k.client.kind() == kind
+                && k.client.binary() == binary
         })
     }
 

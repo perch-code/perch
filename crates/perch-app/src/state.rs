@@ -1501,7 +1501,9 @@ impl AppState {
                 });
                 if review.is_item(&item_id) && selected {
                     review.scope_gen.set(Some(scope_gen));
-                    review.lsp_status.set(perch_lsp::Status::Absent);
+                    review
+                        .lsp_status
+                        .set(crate::review::model::ServerStatuses::default());
                     // Historical membership is fixed by the selected
                     // group's observations, not by each finding's current
                     // disposition. Do not let today's Open filter hide a
@@ -1621,6 +1623,7 @@ impl AppState {
             }
             Event::LspStatus {
                 navigation_id,
+                kind,
                 status,
             } => {
                 if self.accepts_navigation(navigation_id) {
@@ -1635,22 +1638,23 @@ impl AppState {
                     if let perch_lsp::Status::Failed { .. } | perch_lsp::Status::Unhealthy { .. } =
                         &status
                     {
-                        if review.lsp_status.get_untracked() != status {
-                            self.complain(status.describe());
+                        if review.lsp_status.with_untracked(|s| s.get(kind) != Some(&status)) {
+                            self.complain(status.describe(kind));
                         }
                     }
-                    review.lsp_status.set(status);
+                    review.set_server_status(kind, status);
                 }
             }
             Event::LspWarning {
                 navigation_id,
+                kind,
                 message,
             } => {
                 if self.accepts_navigation(navigation_id) {
                     // Its first line: rust-analyzer puts the tool output it
                     // failed on under it, which the log keeps.
                     let first = message.lines().next().unwrap_or(&message);
-                    self.notify(format!("rust-analyzer: {first}"), Tone::Warning);
+                    self.notify(format!("{}: {first}", kind.name()), Tone::Warning);
                 }
             }
             Event::LspHover { token, markdown } => {
@@ -3693,7 +3697,7 @@ mod tests {
         review
             .loading
             .update(|loading| _ = loading.insert("src/old.rs".into(), ()));
-        review.lsp_status.set(perch_lsp::Status::Ready);
+        review.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
         app.expect_item_navigation("new", 41);
 
         app.apply_with_review(review_ready("new", 41), review);
@@ -3701,7 +3705,7 @@ mod tests {
         assert!(review.is_item("new"));
         assert!(review.tabs.with(Vec::is_empty));
         assert!(review.loading.with(HashMap::is_empty));
-        assert_eq!(review.lsp_status.get(), perch_lsp::Status::Absent);
+        assert_eq!(review.lsp_status.get(), Default::default());
     }
 
     /// An item opened again comes back on the pane it was left with, and
@@ -3756,12 +3760,12 @@ mod tests {
     fn an_accepted_same_item_ready_fences_the_old_lsp_status() {
         let app = AppState::new();
         let review = review_of("same");
-        review.lsp_status.set(perch_lsp::Status::Ready);
+        review.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
         app.expect_item_navigation("same", 42);
 
         app.apply_with_review(review_ready("same", 42), review);
 
-        assert_eq!(review.lsp_status.get(), perch_lsp::Status::Absent);
+        assert_eq!(review.lsp_status.get(), Default::default());
     }
 
     #[test]
@@ -3773,6 +3777,7 @@ mod tests {
         app.apply_with_review(review_ready("a", 81), review);
         let status = |status| Event::LspStatus {
             navigation_id: 81,
+            kind: perch_lsp::ServerKind::RustAnalyzer,
             status,
         };
         let unhealthy = perch_lsp::Status::Unhealthy {
@@ -3786,7 +3791,7 @@ mod tests {
             app.notice().as_deref(),
             Some("rust-analyzer: Failed to load workspaces")
         );
-        assert!(!review.lsp_status.get().is_usable());
+        assert!(!review.lsp_status.get().usable_for("src/lib.rs"));
 
         // The same again is no news.
         app.notify("", Tone::Error);
@@ -3798,6 +3803,7 @@ mod tests {
         app.apply_with_review(
             Event::LspWarning {
                 navigation_id: 81,
+                kind: perch_lsp::ServerKind::RustAnalyzer,
                 message: "Failed to read Cargo metadata: unexpected argument\n\nUsage: cargo"
                     .into(),
             },
@@ -3807,13 +3813,14 @@ mod tests {
             app.notice().as_deref(),
             Some("rust-analyzer: Failed to read Cargo metadata: unexpected argument")
         );
-        assert!(review.lsp_status.get().is_usable());
+        assert!(review.lsp_status.get().usable_for("src/lib.rs"));
 
         // One from a checkout since left says nothing.
         app.notify("", Tone::Error);
         app.apply_with_review(
             Event::LspWarning {
                 navigation_id: 80,
+                kind: perch_lsp::ServerKind::RustAnalyzer,
                 message: "stale".into(),
             },
             review,

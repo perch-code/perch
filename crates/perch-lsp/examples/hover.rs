@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use perch_lsp::client::{uri_to_path, Client, ServerEvent};
 use perch_lsp::lsp_types::{CallHierarchyItem, Location};
-use perch_lsp::{find_server, Request, Status};
+use perch_lsp::{find, Request, ServerKind, Status};
 
 const MODES: &str =
     "hover|definition|type-definition|implementation|references|highlight|callers|callees";
@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let spec = find_server("rust", &root).ok_or("rust-analyzer not found")?;
+    let spec = find(ServerKind::RustAnalyzer, &root).ok_or("rust-analyzer not found")?;
     eprintln!("server: {}", spec.binary.display());
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -73,11 +73,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match event {
                 ServerEvent::Status(Status::Ready) => return true,
                 ServerEvent::Status(s @ Status::Unhealthy { .. }) => {
-                    eprintln!("\n  {}", s.describe());
+                    eprintln!("\n  {}", s.describe(ServerKind::RustAnalyzer));
                     return false;
                 }
                 ServerEvent::Warning { message } => eprintln!("\n  warning: {message}"),
-                ServerEvent::Status(s) => eprint!("\r  {}          ", s.describe()),
+                ServerEvent::Status(s) => eprint!("\r  {}          ", s.describe(ServerKind::RustAnalyzer)),
                 ServerEvent::Diagnostics { uri, diagnostics } => {
                     if !diagnostics.is_empty() {
                         eprintln!("\n  {} diagnostics in {uri}", diagnostics.len());
@@ -97,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         while let Some(event) = rx.recv().await {
             match event {
                 ServerEvent::Status(s @ Status::Unhealthy { .. }) => {
-                    eprintln!("  {}", s.describe())
+                    eprintln!("  {}", s.describe(ServerKind::RustAnalyzer))
                 }
                 ServerEvent::Warning { message } => eprintln!("  warning: {message}"),
                 _ => {}
@@ -201,7 +201,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// `--symbols`: every symbol the workspace search names for `query`,
 /// asked for all kinds as Perch asks, once the server has indexed.
 async fn search(root: &Path, query: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let spec = find_server("rust", root).ok_or("rust-analyzer not found")?;
+    let spec = find(ServerKind::RustAnalyzer, root).ok_or("rust-analyzer not found")?;
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let client = Client::start(spec, root, tx).await?;
     let query = format!("{query}#");

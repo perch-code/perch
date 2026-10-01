@@ -1,14 +1,80 @@
 //! Finding and describing language servers.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// A language server Perch knows how to run. A worktree runs at most one
+/// of each kind, rooted at the worktree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ServerKind {
+    RustAnalyzer,
+}
+
+impl ServerKind {
+    pub const ALL: [ServerKind; 1] = [ServerKind::RustAnalyzer];
+
+    /// The server's own name, as statuses and toasts say it.
+    pub fn name(self) -> &'static str {
+        match self {
+            ServerKind::RustAnalyzer => "rust-analyzer",
+        }
+    }
+
+    /// The kind that serves a file, by its extension. A path may be
+    /// relative to the worktree or absolute.
+    pub fn for_path(path: &str) -> Option<Self> {
+        language_id(path).map(|(kind, _)| kind)
+    }
+
+    /// The kind that serves a fenced block's language, as a fence names
+    /// it.
+    pub fn for_fence(lang: &str) -> Option<Self> {
+        match lang.to_ascii_lowercase().as_str() {
+            "rust" | "rs" => Some(ServerKind::RustAnalyzer),
+            _ => None,
+        }
+    }
+
+    /// The files at a worktree's root that say a project of this kind is
+    /// there.
+    pub fn markers(self) -> &'static [&'static str] {
+        match self {
+            ServerKind::RustAnalyzer => &["Cargo.toml"],
+        }
+    }
+
+    /// How long the handshake waits for the server's answer.
+    pub fn initialize_timeout(self) -> Duration {
+        match self {
+            ServerKind::RustAnalyzer => Duration::from_secs(5),
+        }
+    }
+
+    /// Whether the server says on its own, with `$/progress`, when it is
+    /// ready. One that doesn't is ready once it has answered the
+    /// handshake.
+    pub(crate) fn reports_readiness(self) -> bool {
+        matches!(self, ServerKind::RustAnalyzer)
+    }
+}
+
+/// The kind serving a file and the LSP language identifier its
+/// `textDocument/didOpen` carries.
+pub fn language_id(path: &str) -> Option<(ServerKind, &'static str)> {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let (_, ext) = name.rsplit_once('.')?;
+    match ext.to_ascii_lowercase().as_str() {
+        "rs" => Some((ServerKind::RustAnalyzer, "rust")),
+        _ => None,
+    }
+}
 
 /// How to run a language server, and what it understands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerSpec {
+    pub kind: ServerKind,
     pub binary: PathBuf,
     pub args: Vec<String>,
-    /// The LSP language identifier sent with `textDocument/didOpen`.
-    pub language_id: &'static str,
     /// Settings sent with `initialize`, in the server's own shape.
     pub options: serde_json::Value,
 }
@@ -28,19 +94,21 @@ pub enum Status {
 }
 
 impl Status {
-    pub fn describe(&self) -> String {
+    /// The status as a line that names `kind`'s server.
+    pub fn describe(&self, kind: ServerKind) -> String {
+        let name = kind.name();
         match self {
-            Status::Absent => "rust-analyzer not found".into(),
-            Status::Starting => "rust-analyzer starting".into(),
-            Status::Indexing { percent: Some(p) } => format!("rust-analyzer indexing {p}%"),
-            Status::Indexing { percent: None } => "rust-analyzer indexing".into(),
-            Status::Ready => "rust-analyzer ready".into(),
+            Status::Absent => format!("{name} not found"),
+            Status::Starting => format!("{name} starting"),
+            Status::Indexing { percent: Some(p) } => format!("{name} indexing {p}%"),
+            Status::Indexing { percent: None } => format!("{name} indexing"),
+            Status::Ready => format!("{name} ready"),
             // Its first line: rust-analyzer puts the tool output it failed
             // on under it, a usage text and all.
             Status::Unhealthy { message } => {
-                format!("rust-analyzer: {}", message.lines().next().unwrap_or(message))
+                format!("{name}: {}", message.lines().next().unwrap_or(message))
             }
-            Status::Failed { reason } => format!("rust-analyzer failed: {reason}"),
+            Status::Failed { reason } => format!("{name} failed: {reason}"),
         }
     }
 
@@ -49,34 +117,42 @@ impl Status {
     }
 }
 
-/// Locate rust-analyzer for the checkout at `root`.
+/// Locate a server of `kind` for the checkout at `root`.
 ///
-/// The one in the toolchain rustup picks for `root` first, then PATH, then
-/// cargo's bin directory. A rust-analyzer supports only toolchains from its
-/// own release back a few, so a newer one on PATH refuses a checkout that
-/// pins an older toolchain; the one shipped with that toolchain never does.
-/// Nothing is configurable: a review tool should find the toolchain the user
-/// already has rather than ask them to describe it.
-pub fn find_server(language: &str, root: &Path) -> Option<ServerSpec> {
-    if language != "rust" {
-        return None;
+/// For rust-analyzer: the one in the toolchain rustup picks for `root`
+/// first, then PATH, then cargo's bin directory. A rust-analyzer supports
+/// only toolchains from its own release back a few, so a newer one on PATH
+/// refuses a checkout that pins an older toolchain; the one shipped with
+/// that toolchain never does. Nothing is configurable: a review tool
+/// should find the toolchain the user already has rather than ask them to
+/// describe it.
+pub fn find(kind: ServerKind, root: &Path) -> Option<ServerSpec> {
+    match kind {
+        ServerKind::RustAnalyzer => {
+            let candidates = [
+                rustup_rust_analyzer(root),
+                which("rust-analyzer"),
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .map(|h| h.join(".cargo/bin/rust-analyzer"))
+                    .filter(|p| p.is_file()),
+            ];
+            candidates.into_iter().flatten().next().map(|binary| ServerSpec {
+                kind,
+                binary,
+                args: Vec::new(),
+                options: rust_analyzer_options(),
+            })
+        }
     }
+}
 
-    let candidates = [
-        rustup_rust_analyzer(root),
-        which("rust-analyzer"),
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|h| h.join(".cargo/bin/rust-analyzer"))
-            .filter(|p| p.is_file()),
-    ];
-
-    candidates.into_iter().flatten().next().map(|binary| ServerSpec {
-        binary,
-        args: Vec::new(),
-        language_id: "rust",
-        options: rust_analyzer_options(),
-    })
+/// The kinds whose project markers sit at `root`.
+pub fn kinds_at_root(root: &Path) -> Vec<ServerKind> {
+    ServerKind::ALL
+        .into_iter()
+        .filter(|kind| kind.markers().iter().any(|marker| root.join(marker).is_file()))
+        .collect()
 }
 
 /// What rust-analyzer is told as it starts. Its workspace symbol search,
@@ -125,24 +201,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_rust_has_a_server_configured() {
-        assert!(find_server("go", Path::new(".")).is_none());
-        assert!(find_server("python", Path::new(".")).is_none());
+    fn a_file_picks_its_server_by_extension() {
+        assert_eq!(language_id("src/lib.rs"), Some((ServerKind::RustAnalyzer, "rust")));
+        assert_eq!(language_id("/abs/MAIN.RS"), Some((ServerKind::RustAnalyzer, "rust")));
+        assert_eq!(ServerKind::for_path("README.md"), None);
+        assert_eq!(ServerKind::for_path("Makefile"), None);
+        assert_eq!(ServerKind::for_fence("Rust"), Some(ServerKind::RustAnalyzer));
+        assert_eq!(ServerKind::for_fence("diff"), None);
+    }
+
+    #[test]
+    fn a_root_marker_names_its_kind() {
+        let dir = std::env::temp_dir().join(format!("perch-lsp-markers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(kinds_at_root(&dir).is_empty());
+        std::fs::write(dir.join("Cargo.toml"), "").unwrap();
+        assert_eq!(kinds_at_root(&dir), [ServerKind::RustAnalyzer]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn status_text_is_written_for_a_status_line() {
-        assert_eq!(Status::Ready.describe(), "rust-analyzer ready");
+        let rust = ServerKind::RustAnalyzer;
+        assert_eq!(Status::Ready.describe(rust), "rust-analyzer ready");
         assert_eq!(
-            Status::Indexing { percent: Some(42) }.describe(),
+            Status::Indexing { percent: Some(42) }.describe(rust),
             "rust-analyzer indexing 42%"
         );
-        assert!(Status::Failed { reason: "boom".into() }.describe().contains("boom"));
+        assert!(Status::Failed { reason: "boom".into() }.describe(rust).contains("boom"));
         assert_eq!(
             Status::Unhealthy {
                 message: "Failed to load workspaces\n\nUsage: cargo metadata".into()
             }
-            .describe(),
+            .describe(rust),
             "rust-analyzer: Failed to load workspaces"
         );
     }

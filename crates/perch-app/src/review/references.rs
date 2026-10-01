@@ -70,7 +70,7 @@ pub fn symbol_at_cursor(state: ReviewState) -> Option<Symbol> {
 /// answer comes back with the same token. Nothing while the server is not
 /// there.
 pub fn find(state: ReviewState, backend: &Backend, symbol: &Symbol, kind: Locations) {
-    if !state.lsp_status.with(|s| s.is_usable()) {
+    if !state.lsp_status.with(|s| s.usable_for(&symbol.path)) {
         return;
     }
     let token = state.next_token();
@@ -854,7 +854,7 @@ mod window {
         state.tab.set(crate::review::model::ItemTab::Code);
         state.pull_request.set(Some(Arc::new(pr)));
         state.composer_autofocus.set(false);
-        state.lsp_status.set(perch_lsp::Status::Ready);
+        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
         let backend = crate::backend::Backend::detached();
         let view = crate::ui::app_view(app, state, Rc::new(backend));
         let mut harness = HeadlessHarness::new_with_size(root, view, WIDTH, HEIGHT);

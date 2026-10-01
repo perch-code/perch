@@ -251,7 +251,7 @@ pub(crate) fn layer(
     {
         let path = path.clone();
         Effect::new(move |was: Option<bool>| {
-            let usable = state.lsp_status.with(|s| s.is_usable());
+            let usable = state.lsp_status.with(|s| s.usable_for(&path));
             if !usable {
                 return false;
             }

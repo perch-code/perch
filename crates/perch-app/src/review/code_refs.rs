@@ -837,7 +837,7 @@ impl Refs {
     /// What `keys` have found, tracked: none while the server is not
     /// there to have been asked, so the links go when it does.
     fn answers(&self, keys: &[String]) -> Vec<Option<Found>> {
-        let usable = self.state.lsp_status.with(|s| s.is_usable());
+        let usable = self.state.lsp_status.with(|s| s.any_usable());
         self.state.names.with(|names| {
             keys.iter()
                 .map(|key| names.get(key).filter(|_| usable).and_then(|n| n.found()))
@@ -919,7 +919,7 @@ pub fn linked_run(
     let keys: Vec<String> = asks.iter().map(|a| a.key.clone()).collect();
     let state = refs.state;
     Effect::new(move |_| {
-        if state.lsp_status.with(|s| s.is_usable()) {
+        if state.lsp_status.with(|s| s.any_usable()) {
             state.ask_names(&asks);
         }
     });

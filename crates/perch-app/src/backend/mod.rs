@@ -1319,12 +1319,14 @@ pub enum Event {
 
     LspStatus {
         navigation_id: u64,
+        kind: perch_lsp::ServerKind,
         status: perch_lsp::Status,
     },
-    /// The language server says something is wrong that leaves it usable,
+    /// A language server says something is wrong that leaves it usable,
     /// once per message.
     LspWarning {
         navigation_id: u64,
+        kind: perch_lsp::ServerKind,
         message: String,
     },
     /// What rust-analyzer says about a symbol, as markdown.
@@ -3485,8 +3487,7 @@ async fn run(
     ));
     let checkout: Arc<std::sync::Mutex<Option<ReviewContext>>> =
         Arc::new(std::sync::Mutex::new(None));
-    let language_server: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>> =
-        Arc::new(tokio::sync::Mutex::new(None));
+    let language_servers: Servers = Default::default();
 
     // The runs spawn what discovery found, so the shared config carries
     // its answer. A discovery that panicked leaves the file's own words.
@@ -3529,8 +3530,9 @@ async fn run(
         cache: cache.clone(),
         config: Arc::new(std::sync::RwLock::new(config.clone())),
         slot: checkout.clone(),
-        language_server: language_server.clone(),
+        language_servers: language_servers.clone(),
         kept_servers: Default::default(),
+        starting_servers: Default::default(),
         events: events.clone(),
         runs: run_manager,
         review_capabilities,
@@ -3668,7 +3670,7 @@ async fn run(
         // The command runs in the view of the window that sent it.
         let ctx = base.for_window(window);
         let checkout = ctx.slot.clone();
-        let language_server = ctx.language_server.clone();
+        let language_servers = ctx.language_servers.clone();
 
         if !matches!(&command, Command::Refresh | Command::WakeSnoozed | Command::Hover { .. }) {
             tracing::debug!(command = ?command, "command");
@@ -4464,8 +4466,9 @@ async fn run(
                 let preparer = preparer.clone();
                 let checkout = checkout.clone();
                 let events = events.clone();
-                let language_server = language_server.clone();
+                let language_servers = language_servers.clone();
                 let navigation_requests = ctx.navigation_requests.clone();
+                let ctx = ctx.clone();
                 tokio::spawn(async move {
                     if open_file(
                         preparer,
@@ -4477,9 +4480,12 @@ async fn run(
                     )
                     .await
                     {
+                        // A file of a language whose server isn't running
+                        // starts it, and is given to it once it has.
+                        start_server_for_file(&ctx, navigation_id, &path).await;
                         announce_file(
                             checkout,
-                            language_server,
+                            language_servers,
                             navigation_requests,
                             events,
                             path,
@@ -4495,7 +4501,7 @@ async fn run(
             } => {
                 let checkout = checkout.clone();
                 let events = events.clone();
-                let language_server = language_server.clone();
+                let language_servers = language_servers.clone();
                 let navigation_requests = ctx.navigation_requests.clone();
                 tokio::spawn(async move {
                     if open_outside_file(
@@ -4509,7 +4515,7 @@ async fn run(
                     {
                         announce_file(
                             checkout,
-                            language_server,
+                            language_servers,
                             navigation_requests,
                             events,
                             path,
@@ -4526,10 +4532,10 @@ async fn run(
                 character,
             } => {
                 let checkout = checkout.clone();
-                let language_server = language_server.clone();
+                let language_servers = language_servers.clone();
                 let events = events.clone();
                 tokio::spawn(async move {
-                    let Some((client, full)) = resolve(&checkout, &language_server, &path).await
+                    let Some((client, full)) = resolve(&checkout, &language_servers, &path).await
                     else {
                         return;
                     };
@@ -4614,10 +4620,10 @@ async fn run(
                 character,
             } => {
                 let checkout = checkout.clone();
-                let language_server = language_server.clone();
+                let language_servers = language_servers.clone();
                 let events = events.clone();
                 tokio::spawn(async move {
-                    let Some((client, full)) = resolve(&checkout, &language_server, &path).await
+                    let Some((client, full)) = resolve(&checkout, &language_servers, &path).await
                     else {
                         return;
                     };
@@ -4638,10 +4644,10 @@ async fn run(
                 character,
             } => {
                 let checkout = checkout.clone();
-                let language_server = language_server.clone();
+                let language_servers = language_servers.clone();
                 let events = events.clone();
                 tokio::spawn(async move {
-                    let Some((client, full)) = resolve(&checkout, &language_server, &path).await
+                    let Some((client, full)) = resolve(&checkout, &language_servers, &path).await
                     else {
                         return;
                     };
@@ -4667,10 +4673,10 @@ async fn run(
             }
             Command::DocumentSymbols { path } => {
                 let checkout = checkout.clone();
-                let language_server = language_server.clone();
+                let language_servers = language_servers.clone();
                 let events = events.clone();
                 tokio::spawn(async move {
-                    let Some((client, full)) = resolve(&checkout, &language_server, &path).await
+                    let Some((client, full)) = resolve(&checkout, &language_servers, &path).await
                     else {
                         return;
                     };
@@ -4684,10 +4690,10 @@ async fn run(
             }
             Command::RemovedSymbols { path, text } => {
                 let checkout = checkout.clone();
-                let language_server = language_server.clone();
+                let language_servers = language_servers.clone();
                 let events = events.clone();
                 tokio::spawn(async move {
-                    let Some((client, full)) = resolve(&checkout, &language_server, &path).await
+                    let Some((client, full)) = resolve(&checkout, &language_servers, &path).await
                     else {
                         return;
                     };
@@ -4711,10 +4717,10 @@ async fn run(
                 character,
             } => {
                 let checkout = checkout.clone();
-                let language_server = language_server.clone();
+                let language_servers = language_servers.clone();
                 let events = events.clone();
                 tokio::spawn(async move {
-                    let Some((client, full)) = resolve(&checkout, &language_server, &path).await
+                    let Some((client, full)) = resolve(&checkout, &language_servers, &path).await
                     else {
                         return;
                     };
@@ -4752,7 +4758,7 @@ async fn run(
                     token,
                     *item,
                     checkout.clone(),
-                    language_server.clone(),
+                    language_servers.clone(),
                     events.clone(),
                 );
             }
@@ -4762,7 +4768,7 @@ async fn run(
                     token,
                     *item,
                     checkout.clone(),
-                    language_server.clone(),
+                    language_servers.clone(),
                     events.clone(),
                 );
             }
@@ -4771,7 +4777,7 @@ async fn run(
                     token,
                     names,
                     checkout.clone(),
-                    language_server.clone(),
+                    language_servers.clone(),
                     events.clone(),
                 );
             }
@@ -4790,7 +4796,7 @@ async fn run(
                     line,
                     character,
                     checkout.clone(),
-                    language_server.clone(),
+                    language_servers.clone(),
                     events.clone(),
                 );
             }
@@ -4807,7 +4813,7 @@ async fn run(
                     line,
                     character,
                     checkout.clone(),
-                    language_server.clone(),
+                    language_servers.clone(),
                     events.clone(),
                 );
             }
@@ -4824,7 +4830,7 @@ async fn run(
                     line,
                     character,
                     checkout.clone(),
-                    language_server.clone(),
+                    language_servers.clone(),
                     events.clone(),
                 );
             }
@@ -4844,11 +4850,9 @@ async fn run(
                         })
                         .unwrap_or(false);
                     if closed {
-                        let client = ctx.language_server.lock().await.take();
-                        if let Some(client) = client {
-                            let (kept, window) = (ctx.kept_servers.clone(), ctx.window);
-                            tokio::spawn(async move { kept.keep(window, client).await });
-                        }
+                        let clients = std::mem::take(&mut *ctx.language_servers.lock().await);
+                        let (kept, window) = (ctx.kept_servers.clone(), ctx.window);
+                        tokio::spawn(async move { kept.keep_all(window, clients).await });
                     }
                 });
             }
@@ -4875,7 +4879,7 @@ fn spawn_goto(
     line: u32,
     character: u32,
     checkout: Arc<std::sync::Mutex<Option<ReviewContext>>>,
-    language_server: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
+    language_servers: Servers,
     events: EventSender<Event>,
 ) {
     tokio::spawn(async move {
@@ -4885,7 +4889,7 @@ fn spawn_goto(
             Goto::Implementation => Event::LspImplementation { token, locations },
         };
         // Answered even with no server, so the ask is not left waiting.
-        let Some((client, full)) = resolve(&checkout, &language_server, &path).await else {
+        let Some((client, full)) = resolve(&checkout, &language_servers, &path).await else {
             let _ = events.send(answer(Err(perch_lsp::Error::Exited.to_string())));
             return;
         };
@@ -4917,17 +4921,17 @@ fn spawn_names(
     token: u64,
     names: Vec<crate::review::code_refs::NameAsk>,
     checkout: Arc<std::sync::Mutex<Option<ReviewContext>>>,
-    language_server: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
+    language_servers: Servers,
     events: EventSender<Event>,
 ) {
     tokio::spawn(async move {
-        let client = language_server.lock().await.clone();
+        let clients: Vec<_> = language_servers.lock().await.values().cloned().collect();
         let worktree = checkout
             .lock()
             .ok()
             .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()));
         let mut answers = Vec::with_capacity(names.len());
-        let (Some(client), Some(worktree)) = (client, worktree) else {
+        let (false, Some(worktree)) = (clients.is_empty(), worktree) else {
             let answers = names.into_iter().map(|name| (name.key, None)).collect();
             let _ = events.send(Event::LspNames { token, answers });
             return;
@@ -4937,9 +4941,20 @@ fn spawn_names(
         for name in names {
             for segment in &name.segments {
                 if !found.contains_key(segment) {
-                    // `#` asks for symbols of every kind, not types alone.
-                    let symbols = client.workspace_symbols(&format!("{segment}#")).await;
-                    let exact = symbols.into_iter().filter(|s| s.name == *segment).collect();
+                    // Every server is asked, and what each names is put
+                    // together. `#` asks rust-analyzer for symbols of
+                    // every kind, not types alone; the others take the
+                    // name alone.
+                    let mut exact = Vec::new();
+                    for client in &clients {
+                        let query = match client.kind() {
+                            perch_lsp::ServerKind::RustAnalyzer => format!("{segment}#"),
+                            #[allow(unreachable_patterns)]
+                            _ => segment.clone(),
+                        };
+                        let symbols = client.workspace_symbols(&query).await;
+                        exact.extend(symbols.into_iter().filter(|s| s.name == *segment));
+                    }
                     found.insert(segment.clone(), exact);
                 }
             }
@@ -4965,12 +4980,18 @@ fn spawn_calls(
     token: u64,
     item: perch_lsp::lsp_types::CallHierarchyItem,
     checkout: Arc<std::sync::Mutex<Option<ReviewContext>>>,
-    language_server: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
+    language_servers: Servers,
     events: EventSender<Event>,
 ) {
     use crate::review::model::Direction;
     tokio::spawn(async move {
-        let Some(client) = language_server.lock().await.clone() else {
+        // The server whose language the item's file is in.
+        let kind = perch_lsp::client::uri_to_path(item.uri.as_str())
+            .and_then(|path| perch_lsp::ServerKind::for_path(&path.to_string_lossy()));
+        let Some(client) = (match kind {
+            Some(kind) => language_servers.lock().await.get(&kind).cloned(),
+            None => None,
+        }) else {
             return;
         };
         let worktree = checkout
@@ -5035,6 +5056,11 @@ fn spawn_calls(
     });
 }
 
+/// A window's language servers for the worktree it shows, one of each
+/// kind.
+pub(super) type Servers =
+    Arc<tokio::sync::Mutex<std::collections::HashMap<perch_lsp::ServerKind, Arc<perch_lsp::Client>>>>;
+
 /// How long a worktree Perch made stays on disk without being opened
 /// before the sweep removes it.
 const CHECKOUT_MAX_AGE: Duration = Duration::from_secs(14 * 24 * 60 * 60);
@@ -5056,9 +5082,11 @@ struct Ctx {
     /// the `[[repo]]` list; nothing else in it changes while Perch runs.
     config: Arc<std::sync::RwLock<Arc<Config>>>,
     slot: Arc<std::sync::Mutex<Option<ReviewContext>>>,
-    language_server: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
+    language_servers: Servers,
     /// Language servers no window shows, kept a while for a return.
     kept_servers: kept_servers::KeptServers,
+    /// The servers being started, so one is started once.
+    starting_servers: StartingServers,
     events: EventSender<Event>,
     /// Durable admission, the shared execution limit, and live children.
     runs: runs::RunManager,
@@ -5140,7 +5168,7 @@ struct Ctx {
     /// about for an item or a search hit, by repository, number and when
     /// each last moved.
     asked_participants: Arc<std::sync::Mutex<std::collections::HashSet<(String, u64, Timestamp)>>>,
-    /// The window whose view `slot`, `language_server` and the request
+    /// The window whose view `slot`, `language_servers` and the request
     /// sequences are, and whose events these
     /// are. `NO_WINDOW` for the worker's own work, whose slot stays empty.
     window: WindowId,
@@ -5911,7 +5939,7 @@ impl Ctx {
     fn in_view(&self, view: &View) -> Ctx {
         Ctx {
             slot: view.slot.clone(),
-            language_server: view.language_server.clone(),
+            language_servers: view.language_servers.clone(),
             navigation_requests: view.navigation_requests.clone(),
             scope_requests: view.scope_requests.clone(),
             review_navigation: view.review_navigation.clone(),
@@ -5986,13 +6014,13 @@ impl Ctx {
         }
     }
 
-    /// Drop the open review and stop its language server.
+    /// Drop the open review and stop its language servers.
     async fn close_review(&self) {
         if let Ok(mut guard) = self.slot.lock() {
             *guard = None;
         }
-        let client = self.language_server.lock().await.take();
-        if let Some(client) = client {
+        let clients = std::mem::take(&mut *self.language_servers.lock().await);
+        for client in clients.into_values() {
             client.shutdown().await;
         }
     }
@@ -6213,7 +6241,7 @@ async fn view_review_attempt_owner(ctx: &Ctx, item_id: &str, attempt_id: &str, r
         return;
     }
     if !owner_was_open {
-        let mut language_server = ctx.language_server.lock().await;
+        let mut language_servers = ctx.language_servers.lock().await;
         let previous = ctx
             .navigation_requests
             .with_current(request_id, || {
@@ -6222,12 +6250,12 @@ async fn view_review_attempt_owner(ctx: &Ctx, item_id: &str, attempt_id: &str, r
                         open.item_id == item_id && open.navigation_id == request_id
                     })
                 });
-                current_owner.then(|| language_server.take()).flatten()
+                current_owner.then(|| std::mem::take(&mut *language_servers))
             })
             .flatten();
-        drop(language_server);
+        drop(language_servers);
         if let Some(previous) = previous {
-            ctx.kept_servers.keep(ctx.window, previous).await;
+            ctx.kept_servers.keep_all(ctx.window, previous).await;
         }
     }
     let group_id = summary.group.id.clone();
@@ -16002,8 +16030,56 @@ fn send_file_event_if_current(
 /// already on show for it, else one this window set aside for it, else a
 /// new one. The server it takes the place of is set aside.
 async fn start_language_server(ctx: &Ctx, navigation_id: u64) {
+    let Some((worktree, files)) = ctx.slot.lock().ok().and_then(|g| {
+        g.as_ref()
+            .filter(|context| context.navigation_id == navigation_id)
+            .map(|context| (context.checkout.worktree.clone(), context.files.clone()))
+    }) else {
+        return;
+    };
+    let mut starts = tokio::task::JoinSet::new();
+    for kind in wanted_servers(&worktree, &files) {
+        let ctx = ctx.clone();
+        starts.spawn(async move { start_server(&ctx, navigation_id, kind).await });
+    }
+    while starts.join_next().await.is_some() {}
+}
+
+/// The servers an item wants at open: one for each language among its
+/// changed files that has a server, or, when none of them has one, one for
+/// each project marker at the worktree's root. Any other starts when a
+/// file of its language opens.
+fn wanted_servers(worktree: &Path, files: &[perch_git::ChangedFile]) -> Vec<perch_lsp::ServerKind> {
+    let mut kinds: Vec<_> = files
+        .iter()
+        .filter_map(|file| perch_lsp::ServerKind::for_path(&file.path))
+        .collect();
+    if kinds.is_empty() {
+        kinds = perch_lsp::kinds_at_root(worktree);
+    }
+    kinds.sort();
+    kinds.dedup();
+    kinds
+}
+
+/// Start the server of the kind a newly opened file wants, when the
+/// window has none of that kind for its worktree yet.
+async fn start_server_for_file(ctx: &Ctx, navigation_id: u64, path: &str) {
+    let Some(kind) = perch_lsp::ServerKind::for_path(path) else {
+        return;
+    };
+    if !ctx.language_servers.lock().await.contains_key(&kind) {
+        start_server(ctx, navigation_id, kind).await;
+    }
+}
+
+/// Start the server of `kind` for the open item's worktree, or take up
+/// the one already running or set aside. One start per window, worktree
+/// and kind at a time: a file opened while its server is still starting
+/// leaves that start to finish.
+async fn start_server(ctx: &Ctx, navigation_id: u64, kind: perch_lsp::ServerKind) {
     let checkout = &ctx.slot;
-    let slot = &ctx.language_server;
+    let slot = &ctx.language_servers;
     let events = &ctx.events;
     let navigation_requests = &ctx.navigation_requests;
     let Some(worktree) = checkout.lock().ok().and_then(|g| {
@@ -16013,13 +16089,24 @@ async fn start_language_server(ctx: &Ctx, navigation_id: u64) {
     }) else {
         return;
     };
+    let Some(_starting) = Starting::claim(&ctx.starting_servers, ctx.window, &worktree, kind) else {
+        return;
+    };
 
-    let Some(spec) = perch_lsp::find_server("rust", &worktree) else {
+    let found = {
+        let worktree = worktree.clone();
+        tokio::task::spawn_blocking(move || perch_lsp::find(kind, &worktree))
+            .await
+            .ok()
+            .flatten()
+    };
+    let Some(spec) = found else {
         send_lsp_status_if_current(
             navigation_requests,
             checkout,
             events,
             navigation_id,
+            kind,
             perch_lsp::Status::Absent,
         );
         return;
@@ -16028,22 +16115,22 @@ async fn start_language_server(ctx: &Ctx, navigation_id: u64) {
     let serves = |client: &perch_lsp::Client| {
         client.root() == worktree.as_path() && client.binary() == spec.binary.as_path()
     };
-    if let Some(client) = slot.lock().await.as_ref().filter(|c| serves(c)) {
+    if let Some(client) = slot.lock().await.get(&kind).filter(|c| serves(c)) {
         client.tell_status_again();
         return;
     }
 
-    let client = match ctx.kept_servers.take(ctx.window, &worktree, &spec.binary) {
+    let client = match ctx.kept_servers.take(ctx.window, &worktree, kind, &spec.binary) {
         Some(client) => {
-            tracing::info!("language server taken up again");
+            tracing::info!(server = kind.name(), "language server taken up again");
             client
         }
         None => {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            forward_language_server_events(ctx, &worktree, &spec.binary, rx);
+            forward_language_server_events(ctx, &worktree, kind, &spec.binary, rx);
             match perch_lsp::Client::start(spec, &worktree, tx).await {
                 Ok(client) => {
-                    tracing::info!("language server started");
+                    tracing::info!(server = kind.name(), "language server started");
                     client
                 }
                 Err(e) => {
@@ -16052,6 +16139,7 @@ async fn start_language_server(ctx: &Ctx, navigation_id: u64) {
                         checkout,
                         events,
                         navigation_id,
+                        kind,
                         perch_lsp::Status::Failed {
                             reason: e.to_string(),
                         },
@@ -16062,7 +16150,7 @@ async fn start_language_server(ctx: &Ctx, navigation_id: u64) {
         }
     };
 
-    let mut language_server = slot.lock().await;
+    let mut language_servers = slot.lock().await;
     let current_context = navigation_requests
         .with_current(navigation_id, || {
             checkout.lock().ok().is_some_and(|context| {
@@ -16073,16 +16161,50 @@ async fn start_language_server(ctx: &Ctx, navigation_id: u64) {
         })
         .unwrap_or(false);
     if current_context {
-        let previous = language_server.replace(client.clone());
-        drop(language_server);
+        let previous = language_servers.insert(kind, client.clone());
+        drop(language_servers);
         // What it said before it was on show went nowhere.
         client.tell_status_again();
         if let Some(previous) = previous {
             ctx.kept_servers.keep(ctx.window, previous).await;
         }
     } else {
-        drop(language_server);
+        drop(language_servers);
         ctx.kept_servers.keep(ctx.window, client).await;
+    }
+}
+
+/// The servers being started, by window, worktree and kind.
+type StartingServers =
+    Arc<std::sync::Mutex<std::collections::HashSet<(WindowId, PathBuf, perch_lsp::ServerKind)>>>;
+
+/// A claim on starting one server, given up when dropped.
+struct Starting {
+    set: StartingServers,
+    key: (WindowId, PathBuf, perch_lsp::ServerKind),
+}
+
+impl Starting {
+    /// The claim, or nothing when a start of the same server is under way.
+    fn claim(
+        set: &StartingServers,
+        window: WindowId,
+        worktree: &Path,
+        kind: perch_lsp::ServerKind,
+    ) -> Option<Self> {
+        let key = (window, worktree.to_path_buf(), kind);
+        set.lock().ok()?.insert(key.clone()).then(|| Starting {
+            set: set.clone(),
+            key,
+        })
+    }
+}
+
+impl Drop for Starting {
+    fn drop(&mut self) {
+        if let Ok(mut set) = self.set.lock() {
+            set.remove(&self.key);
+        }
     }
 }
 
@@ -16093,11 +16215,12 @@ async fn start_language_server(ctx: &Ctx, navigation_id: u64) {
 fn forward_language_server_events(
     ctx: &Ctx,
     worktree: &Path,
+    kind: perch_lsp::ServerKind,
     binary: &Path,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<perch_lsp::client::ServerEvent>,
 ) {
     let checkout = ctx.slot.clone();
-    let slot = ctx.language_server.clone();
+    let slot = ctx.language_servers.clone();
     let events = ctx.events.clone();
     let navigation_requests = ctx.navigation_requests.clone();
     let (worktree, binary) = (worktree.to_path_buf(), binary.to_path_buf());
@@ -16105,16 +16228,16 @@ fn forward_language_server_events(
         while let Some(event) = rx.recv().await {
             match &event {
                 perch_lsp::client::ServerEvent::Status(status) => {
-                    tracing::debug!(status = %status.describe(), "language server");
+                    tracing::debug!(status = %status.describe(kind), "language server");
                 }
                 perch_lsp::client::ServerEvent::Warning { message } => {
-                    tracing::warn!(%message, "language server");
+                    tracing::warn!(server = kind.name(), %message, "language server");
                 }
                 perch_lsp::client::ServerEvent::Diagnostics { .. } => {}
             }
-            // On show, or still starting with none other on show for the
-            // worktree.
-            let another = slot.lock().await.as_ref().is_some_and(|client| {
+            // On show, or still starting with none other of its kind on
+            // show for the worktree.
+            let another = slot.lock().await.get(&kind).is_some_and(|client| {
                 client.root() == worktree.as_path() && client.binary() != binary.as_path()
             });
             let showing = checkout.lock().ok().and_then(|guard| {
@@ -16133,6 +16256,7 @@ fn forward_language_server_events(
                         &checkout,
                         &events,
                         navigation_id,
+                        kind,
                         status,
                     );
                 }
@@ -16146,6 +16270,7 @@ fn forward_language_server_events(
                         navigation_id,
                         Event::LspWarning {
                             navigation_id,
+                            kind,
                             message,
                         },
                     );
@@ -16161,6 +16286,7 @@ fn send_lsp_status_if_current(
     checkout: &std::sync::Mutex<Option<ReviewContext>>,
     events: &EventSender<Event>,
     navigation_id: u64,
+    kind: perch_lsp::ServerKind,
     status: perch_lsp::Status,
 ) {
     send_if_current(
@@ -16170,6 +16296,7 @@ fn send_lsp_status_if_current(
         navigation_id,
         Event::LspStatus {
             navigation_id,
+            kind,
             status,
         },
     );
@@ -16200,7 +16327,7 @@ fn send_if_current(
 /// text it was just given.
 async fn announce_file(
     checkout: Arc<std::sync::Mutex<Option<ReviewContext>>>,
-    slot: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
+    slot: Servers,
     navigation_requests: Arc<NavigationRequests>,
     events: EventSender<Event>,
     path: String,
@@ -16219,7 +16346,10 @@ async fn announce_file(
     else {
         return;
     };
-    let Some(client) = slot.lock().await.clone() else {
+    let Some(kind) = perch_lsp::ServerKind::for_path(&path) else {
+        return;
+    };
+    let Some(client) = slot.lock().await.get(&kind).cloned() else {
         return;
     };
     let full = worktree.join(&path);
@@ -16260,13 +16390,15 @@ async fn send_outline(
     });
 }
 
-/// The server and the absolute path for a file of the open checkout.
+/// The server for a file of the open checkout, by the file's language,
+/// and the file's absolute path.
 async fn resolve(
     checkout: &Arc<std::sync::Mutex<Option<ReviewContext>>>,
-    slot: &Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
+    slot: &Servers,
     path: &str,
 ) -> Option<(Arc<perch_lsp::Client>, std::path::PathBuf)> {
-    let client = slot.lock().await.clone()?;
+    let kind = perch_lsp::ServerKind::for_path(path)?;
+    let client = slot.lock().await.get(&kind).cloned()?;
     let worktree = checkout
         .lock()
         .ok()
@@ -16557,6 +16689,37 @@ fn backoff_until(reset_epoch: Option<i64>, retry_after_secs: Option<u64>) -> Dur
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn changed(path: &str) -> perch_git::ChangedFile {
+        perch_git::ChangedFile {
+            path: path.into(),
+            old_path: None,
+            status: perch_git::ChangeStatus::Modified,
+            additions: 1,
+            deletions: 0,
+            binary: false,
+            head_blob: None,
+        }
+    }
+
+    /// The changed files pick the servers an item starts with; with none
+    /// of a language that has one, the project markers at the root do.
+    #[test]
+    fn the_changed_files_pick_the_servers_else_the_root_markers() {
+        use perch_lsp::ServerKind;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert_eq!(wanted_servers(root, &[changed("src/lib.rs")]), [ServerKind::RustAnalyzer]);
+        assert_eq!(
+            wanted_servers(root, &[changed("a.rs"), changed("b.rs")]),
+            [ServerKind::RustAnalyzer],
+            "one of a kind"
+        );
+        assert!(wanted_servers(root, &[changed("README.md")]).is_empty());
+        std::fs::write(root.join("Cargo.toml"), "").unwrap();
+        assert_eq!(wanted_servers(root, &[changed("README.md")]), [ServerKind::RustAnalyzer]);
+        assert_eq!(wanted_servers(root, &[]), [ServerKind::RustAnalyzer]);
+    }
 
     #[test]
     fn only_the_latest_scope_request_can_commit() {
@@ -16883,8 +17046,9 @@ mod tests {
             cache,
             config: Arc::new(std::sync::RwLock::new(Arc::new(config))),
             slot: Arc::new(std::sync::Mutex::new(None)),
-            language_server: Arc::new(tokio::sync::Mutex::new(None)),
+            language_servers: Default::default(),
             kept_servers: Default::default(),
+            starting_servers: Default::default(),
             events,
             runs,
             review_capabilities: Arc::new(Vec::new()),

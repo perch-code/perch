@@ -1137,6 +1137,48 @@ pub enum RevealWrite {
     },
 }
 
+/// What each of the worktree's language servers last said, by kind. A
+/// kind with no entry has said nothing: no file of its language has asked
+/// for it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerStatuses(std::collections::BTreeMap<perch_lsp::ServerKind, perch_lsp::Status>);
+
+impl ServerStatuses {
+    pub fn get(&self, kind: perch_lsp::ServerKind) -> Option<&perch_lsp::Status> {
+        self.0.get(&kind)
+    }
+
+    pub fn set(&mut self, kind: perch_lsp::ServerKind, status: perch_lsp::Status) {
+        self.0.insert(kind, status);
+    }
+
+    /// Whether the server for `path`'s language can be asked about it.
+    pub fn usable_for(&self, path: &str) -> bool {
+        perch_lsp::ServerKind::for_path(path)
+            .and_then(|kind| self.get(kind))
+            .is_some_and(perch_lsp::Status::is_usable)
+    }
+
+    /// Whether any server can be asked, as a name in prose may be of all
+    /// of them.
+    pub fn any_usable(&self) -> bool {
+        self.0.values().any(perch_lsp::Status::is_usable)
+    }
+
+    /// Why the server for `path` can't be asked, naming it, or `None`
+    /// when it can. A file of a language with no server has none to ask.
+    pub fn unusable_reason(&self, path: &str) -> Option<String> {
+        let Some(kind) = perch_lsp::ServerKind::for_path(path) else {
+            return Some("no language server for this file".to_string());
+        };
+        match self.get(kind) {
+            Some(status) if status.is_usable() => None,
+            Some(status) => Some(status.describe(kind)),
+            None => Some(format!("{} not started", kind.name())),
+        }
+    }
+}
+
 /// Everything the review view renders from. All fields are signals, so the
 /// struct is `Copy` and can be handed to any view closure.
 #[derive(Clone, Copy)]
@@ -1560,7 +1602,7 @@ pub struct ReviewState {
     /// Why the last issue comment did not post, under the composer's
     /// box until the text changes or the composer closes.
     pub composer_error: RwSignal<Option<String>>,
-    pub lsp_status: RwSignal<perch_lsp::Status>,
+    pub lsp_status: RwSignal<ServerStatuses>,
     /// Rises with every hover and jump request. An answer carrying an older
     /// token is stale, because the pointer has moved on since it was asked.
     pub request_token: RwSignal<u64>,
@@ -1690,6 +1732,11 @@ impl Default for ReviewState {
 }
 
 impl ReviewState {
+    /// Keep what the server of `kind` last said.
+    pub fn set_server_status(&self, kind: perch_lsp::ServerKind, status: perch_lsp::Status) {
+        self.lsp_status.update(|statuses| statuses.set(kind, status));
+    }
+
     pub fn new() -> Self {
         Self {
             pull_request: RwSignal::new(None),
@@ -1840,7 +1887,7 @@ impl ReviewState {
             close_duplicate_query: RwSignal::new(String::new()),
             posting: RwSignal::new(None),
             composer_error: RwSignal::new(None),
-            lsp_status: RwSignal::new(perch_lsp::Status::Absent),
+            lsp_status: RwSignal::new(ServerStatuses::default()),
             request_token: RwSignal::new(0),
             pointer_symbol: RwSignal::new(None),
             hover: RwSignal::new(None),
@@ -2002,7 +2049,7 @@ impl ReviewState {
         self.files.set(HashMap::new());
         self.loading.set(HashMap::new());
         self.changed_only.set(true);
-        self.lsp_status.set(perch_lsp::Status::Absent);
+        self.lsp_status.set(ServerStatuses::default());
         self.comment_threads.set(Arc::new(Vec::new()));
         self.hidden_review_threads.set(HashSet::new());
         self.review_finding_filter.set(ReviewFindingFilter::Open);
@@ -2064,7 +2111,7 @@ impl ReviewState {
         } else {
             // A fresh live checkout always gets a fresh language server. Its
             // status event follows Ready and names the same navigation.
-            self.lsp_status.set(perch_lsp::Status::Absent);
+            self.lsp_status.set(ServerStatuses::default());
         }
     }
 
@@ -2479,7 +2526,7 @@ impl ReviewState {
 
     /// Ask for every use in the file of the symbol the caret rests on.
     pub fn ask_highlights(&self, backend: &crate::backend::Backend, symbol: Symbol) {
-        if !self.lsp_status.with_untracked(|s| s.is_usable()) {
+        if !self.lsp_status.with_untracked(|s| s.usable_for(&symbol.path)) {
             return;
         }
         let token = self.next_token();
@@ -4481,6 +4528,31 @@ pub fn anchors_of(threads: &[CommentThread], path: &str) -> Vec<(usize, usize)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file asks the server of its own language, and a name in prose
+    /// any server that can answer.
+    #[test]
+    fn a_file_is_served_by_its_own_languages_server() {
+        use perch_lsp::{ServerKind, Status};
+        let mut statuses = ServerStatuses::default();
+        assert!(!statuses.usable_for("src/lib.rs"));
+        assert!(!statuses.any_usable());
+        assert_eq!(
+            statuses.unusable_reason("src/lib.rs").as_deref(),
+            Some("rust-analyzer not started")
+        );
+        statuses.set(ServerKind::RustAnalyzer, Status::Starting);
+        assert_eq!(
+            statuses.unusable_reason("src/lib.rs").as_deref(),
+            Some("rust-analyzer starting")
+        );
+        statuses.set(ServerKind::RustAnalyzer, Status::Ready);
+        assert!(statuses.usable_for("src/lib.rs"));
+        assert!(statuses.any_usable());
+        assert_eq!(statuses.unusable_reason("src/lib.rs"), None);
+        assert!(!statuses.usable_for("README.md"));
+        assert!(statuses.unusable_reason("README.md").is_some());
+    }
 
     fn changed(path: &str, blob: Option<&str>) -> ChangedFile {
         ChangedFile {

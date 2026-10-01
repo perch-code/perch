@@ -9,7 +9,7 @@ pub mod server;
 pub mod transport;
 
 pub use client::{Client, Request};
-pub use server::{find_server, ServerSpec, Status};
+pub use server::{find, kinds_at_root, language_id, ServerKind, ServerSpec, Status};
 
 pub use lsp_types;
 

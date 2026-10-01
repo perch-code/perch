@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use super::{Command, NavigationRequests, ReviewContext, ScopeRequests};
+use super::{Command, NavigationRequests, ReviewContext, ScopeRequests, Servers};
 
 pub type WindowId = u64;
 
@@ -117,7 +117,7 @@ impl CommandSender {
 pub(super) struct View {
     pub(super) window: WindowId,
     pub(super) slot: Arc<std::sync::Mutex<Option<ReviewContext>>>,
-    pub(super) language_server: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
+    pub(super) language_servers: Servers,
     pub(super) navigation_requests: Arc<NavigationRequests>,
     pub(super) scope_requests: Arc<ScopeRequests>,
     pub(super) review_navigation: Arc<tokio::sync::Mutex<()>>,
@@ -132,7 +132,7 @@ impl View {
         Self {
             window,
             slot: Default::default(),
-            language_server: Default::default(),
+            language_servers: Default::default(),
             navigation_requests,
             scope_requests,
             review_navigation: Default::default(),

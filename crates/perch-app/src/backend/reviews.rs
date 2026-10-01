@@ -715,7 +715,7 @@ pub(super) async fn open_snapshot(ctx: &Ctx, group_id: &str, request_id: u64) {
         // used by live server installation so it cannot survive or race the
         // historical slot commit.
         let scope_gen = super::next_scope_gen();
-        let mut language_server = ctx.language_server.lock().await;
+        let mut language_servers = ctx.language_servers.lock().await;
         let installed = ctx
             .navigation_requests
             .commit_current_group(group_id, request_id, || {
@@ -735,15 +735,15 @@ pub(super) async fn open_snapshot(ctx: &Ctx, group_id: &str, request_id: u64) {
                     review_group_id: Some(group.id.clone()),
                     review_request_id: Some(request_id),
                 });
-                Some(language_server.take())
+                Some(std::mem::take(&mut *language_servers))
             });
-        drop(language_server);
+        drop(language_servers);
         let Some(previous_language_server) = installed else {
             return Err("A newer historical review was selected".to_string());
         };
-        if let Some(client) = previous_language_server {
-            ctx.kept_servers.keep(ctx.window, client).await;
-        }
+        ctx.kept_servers
+            .keep_all(ctx.window, previous_language_server)
+            .await;
         Ok::<_, String>((group, snapshot, files, tree, findings, scope_gen))
     }
     .await;

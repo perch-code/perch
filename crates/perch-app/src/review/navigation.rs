@@ -288,7 +288,7 @@ pub fn go_to_definition(state: ReviewState, backend: &Backend, symbol: &Symbol) 
 fn server_ready(state: ReviewState, noun: &str, symbol: &Symbol) -> bool {
     let why = state
         .lsp_status
-        .with_untracked(|s| (!s.is_usable()).then(|| s.describe()));
+        .with_untracked(|s| s.unusable_reason(&symbol.path));
     match why {
         Some(why) => {
             state
@@ -487,7 +487,7 @@ fn track(state: ReviewState, backend: &Rc<Backend>, symbol: Option<Symbol>) {
     }
     state.pointer_symbol.set(symbol.clone());
     let Some(symbol) = symbol else { return };
-    if !state.lsp_status.with_untracked(|s| s.is_usable()) {
+    if !state.lsp_status.with_untracked(|s| s.usable_for(&symbol.path)) {
         return;
     }
     let backend = backend.clone();
@@ -589,7 +589,7 @@ mod tests {
         state.set_phase(Phase::Ready);
         state.tab.set(ItemTab::Code);
         state.composer_autofocus.set(false);
-        state.lsp_status.set(perch_lsp::Status::Ready);
+        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
 
         let file = Arc::new(crate::backend::build_loaded_file(
             "src/x.rs".into(),
@@ -881,7 +881,7 @@ mod tests {
 
         // With the server gone, the caret is placed and nothing is asked.
         state.goto.set(None);
-        state.lsp_status.set(perch_lsp::Status::Failed {
+        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Failed {
             reason: "gone".into(),
         });
         let offset = doc.offset_of_row(0) + 4;
@@ -901,7 +901,7 @@ mod tests {
 
         // rust-analyzer whose workspace did not load: the hand still shows,
         // so the click says why nothing opens.
-        state.lsp_status.set(perch_lsp::Status::Unhealthy {
+        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Unhealthy {
             message: "Failed to load workspaces".into(),
         });
         let (x, y) = point_of(doc.offset_of_row(3) + 6);
@@ -917,7 +917,7 @@ mod tests {
 
         // Ready, the click asks; an answer with nothing in it says so.
         app.notify("", crate::state::Tone::Error);
-        state.lsp_status.set(perch_lsp::Status::Ready);
+        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
         cmd_click_at(&mut harness, x, y);
         harness.rebuild();
         assert_eq!(
@@ -1331,7 +1331,7 @@ mod tests {
     #[test]
     fn the_type_definition_answers_as_a_definition_does() {
         let state = ReviewState::new();
-        state.lsp_status.set(perch_lsp::Status::Ready);
+        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
         let (backend, mut commands) = crate::backend::Backend::recording();
         let symbol = Symbol {
             path: "src/x.rs".into(),

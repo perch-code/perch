@@ -79,9 +79,10 @@ blocks in hovers, descriptions and comments named `go`, `ts`,
 Today rust-analyzer starts whenever an item with a checkout opens. Now:
 
 - **At open**, a server for each language among the pull request's
-  changed files. An item with no changed files (an issue, local work with
-  nothing changed yet) starts one for each project marker at the
-  worktree's root instead.
+  changed files. An item with none of a language that has a server (an
+  issue, local work with nothing changed yet, a pull request that only
+  touches docs) starts one for each project marker at the worktree's
+  root instead, so names in its prose can still be looked up.
 - **On opening a file** whose language has a server and whose worktree
   has none of that kind running, it starts then. A definition, a
   reference or a search hit opens files too, and counts.

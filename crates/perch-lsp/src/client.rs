@@ -25,7 +25,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-use crate::server::{ServerSpec, Status};
+use crate::server::{ServerKind, ServerSpec, Status};
 use crate::transport::{decode, decode_result, frame, parse_header_block, Incoming};
 use crate::Error;
 
@@ -200,6 +200,10 @@ impl Client {
         });
 
         client.initialize(root).await?;
+        // A server that never says it is ready is ready once it answers.
+        if !client.spec.kind.reports_readiness() {
+            client.tell_if_starting(Status::Ready);
+        }
         Ok(client)
     }
 
@@ -218,7 +222,7 @@ impl Client {
             .request(
                 "initialize",
                 serde_json::to_value(params).unwrap_or(Value::Null),
-                LIFECYCLE_TIMEOUT,
+                self.spec.kind.initialize_timeout(),
             )
             .await?;
         let encoding = decode_result::<InitializeResult>(result)
@@ -250,6 +254,11 @@ impl Client {
         &self.spec.binary
     }
 
+    /// Which server this is.
+    pub fn kind(&self) -> ServerKind {
+        self.spec.kind
+    }
+
     /// Send `event` on, keeping it if it is a status.
     fn tell(&self, event: ServerEvent) {
         let Ok(mut told) = self.told.lock() else { return };
@@ -257,6 +266,15 @@ impl Client {
             told.1 = status.clone();
         }
         let _ = told.0.send(event);
+    }
+
+    /// Tell `status` unless the server has already said something since
+    /// it started.
+    fn tell_if_starting(&self, status: Status) {
+        let starting = self.told.lock().is_ok_and(|told| told.1 == Status::Starting);
+        if starting {
+            self.tell(ServerEvent::Status(status));
+        }
     }
 
     /// Send the status last sent again, for a view that has just taken
@@ -312,7 +330,11 @@ impl Client {
         let params = lsp_types::DidOpenTextDocumentParams {
             text_document: TextDocumentItem {
                 uri,
-                language_id: self.spec.language_id.to_string(),
+                language_id: path
+                    .to_str()
+                    .and_then(crate::server::language_id)
+                    .map_or("plaintext", |(_, id)| id)
+                    .to_string(),
                 version: 1,
                 text: text.to_string(),
             },
@@ -1085,7 +1107,7 @@ mod tests {
                 "-c".into(),
                 "echo \"error: unknown binary 'rust-analyzer'\" >&2; exit 1".into(),
             ],
-            language_id: "rust",
+            kind: ServerKind::RustAnalyzer,
             options: Value::Null,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1150,7 +1172,7 @@ while True:
         let spec = ServerSpec {
             binary: PathBuf::from("python3"),
             args: vec![script.display().to_string(), log.display().to_string()],
-            language_id: "rust",
+            kind: ServerKind::RustAnalyzer,
             options: Value::Null,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1312,7 +1334,7 @@ while True:
             .iter()
             .flat_map(|(method, params)| handle_notification(method, params.clone(), reported))
             .map(|event| match event {
-                ServerEvent::Status(status) => status.describe(),
+                ServerEvent::Status(status) => status.describe(ServerKind::RustAnalyzer),
                 ServerEvent::Warning { message } => format!("warning: {message}"),
                 ServerEvent::Diagnostics { .. } => "diagnostics".into(),
             })
@@ -1494,7 +1516,7 @@ while True:
         let spec = ServerSpec {
             binary: "rust-analyzer".into(),
             args: Vec::new(),
-            language_id: "rust",
+            kind: ServerKind::RustAnalyzer,
             options: crate::server::rust_analyzer_options(),
         };
         let search = &spec.options["workspace"]["symbol"]["search"];

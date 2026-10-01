@@ -2925,7 +2925,7 @@ mod tests {
         fn linked_harness(markdown: &str, files: &[&str]) -> (HeadlessHarness, ReviewState) {
             let root = TestRoot::new();
             let state = crate::review::code_refs::review_of(files);
-            state.lsp_status.set(perch_lsp::Status::Ready);
+            state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
             let view = Container::new(render_linked(markdown, state))
                 .style(|s| s.width(WIDTH).padding(0.0));
             let mut harness = HeadlessHarness::new_with_size(root, view, WIDTH, 2000.0);
@@ -3172,7 +3172,7 @@ mod tests {
                 (harness, state)
             };
             assert!(state.pending_names.get().is_empty(), "asked with no server");
-            state.lsp_status.set(perch_lsp::Status::Indexing { percent: Some(10) });
+            state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Indexing { percent: Some(10) });
             let asked = state.pending_names.get();
             assert_eq!(asked.len(), 1, "asked once the server is there");
             let found = vec![crate::review::code_refs::located("slatedb/src/db.rs", 594, 11)];
@@ -3181,7 +3181,7 @@ mod tests {
             h.paint();
             assert_eq!(links_on_first_line(&mut h, 0).len(), 1);
             // A server that fails takes its links with it.
-            state.lsp_status.set(perch_lsp::Status::Failed { reason: "gone".into() });
+            state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Failed { reason: "gone".into() });
             h.rebuild();
             h.paint();
             assert!(links_on_first_line(&mut h, 0).is_empty());

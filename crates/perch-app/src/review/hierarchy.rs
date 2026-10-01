@@ -35,7 +35,7 @@ use crate::ui::widgets::{clickable, sidebar_glyph};
 /// local the server names nothing and nothing opens. Nothing while the
 /// server is not there.
 pub fn show(state: ReviewState, backend: &Backend, symbol: &Symbol) {
-    if !state.lsp_status.with_untracked(|s| s.is_usable()) {
+    if !state.lsp_status.with_untracked(|s| s.usable_for(&symbol.path)) {
         return;
     }
     let token = state.next_token();
@@ -575,7 +575,7 @@ mod tests {
     #[test]
     fn the_panel_opens_when_the_server_names_a_function_and_not_otherwise() {
         let state = ReviewState::new();
-        state.lsp_status.set(perch_lsp::Status::Ready);
+        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
         let (backend, mut commands) = crate::backend::Backend::recording();
         let symbol = Symbol {
             path: "src/x.rs".into(),

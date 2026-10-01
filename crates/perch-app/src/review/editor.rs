@@ -2420,7 +2420,7 @@ mod window {
                 .count()
         };
         assert_eq!(asked(), 0, "nothing is asked of a server that is not there");
-        state.lsp_status.set(perch_lsp::Status::Ready);
+        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
         harness.rebuild();
         assert_eq!(asked(), 1, "the outline is asked for when the server comes up");
 
@@ -2546,7 +2546,7 @@ mod window {
                 .collect::<Vec<_>>()
         };
         assert!(asked().is_empty(), "nothing is asked of a server that is not there");
-        state.lsp_status.set(perch_lsp::Status::Ready);
+        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
         harness.rebuild();
         assert_eq!(asked(), vec![base.clone()], "the removed lines are handed over");
 

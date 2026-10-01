@@ -1561,7 +1561,7 @@ mod tests {
                 perch_git::TreeEntry::new("src", true),
                 perch_git::TreeEntry::new("src/manifest.rs", false),
             ]));
-            state.lsp_status.set(perch_lsp::Status::Ready);
+            state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
         });
         let mut asked = Vec::new();
         while let Ok(command) = commands.try_recv() {
