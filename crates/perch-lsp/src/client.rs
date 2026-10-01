@@ -1,7 +1,7 @@
 //! Driving a language server over stdio.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -90,6 +90,13 @@ pub struct Client {
     pending: Pending,
     next_id: AtomicI64,
     spec: ServerSpec,
+    root: PathBuf,
+    /// Where events go, and the status last sent there. One lock holds
+    /// both, so a status told again lands in its place among the rest.
+    told: std::sync::Mutex<(mpsc::UnboundedSender<ServerEvent>, Status)>,
+    /// The files given to the server, by URI: the version each is at and
+    /// a hash of the text it was given.
+    documents: std::sync::Mutex<HashMap<String, (i32, u64)>>,
 }
 
 impl Client {
@@ -145,17 +152,19 @@ impl Client {
             pending: pending.clone(),
             next_id: AtomicI64::new(1),
             spec,
+            root: root.to_path_buf(),
+            told: std::sync::Mutex::new((events, Status::Starting)),
+            documents: Default::default(),
         });
 
-        let _ = events.send(ServerEvent::Status(Status::Starting));
+        client.tell(ServerEvent::Status(Status::Starting));
 
         // The read loop owns everything arriving from the server.
         {
-            let events = events.clone();
-            let client_for_replies = client.clone();
+            let client = client.clone();
             tokio::spawn(async move {
-                read_loop(stdout, pending, events.clone(), client_for_replies).await;
-                let _ = events.send(ServerEvent::Status(Status::Failed {
+                read_loop(stdout, pending, client.clone()).await;
+                client.tell(ServerEvent::Status(Status::Failed {
                     reason: "the server exited".into(),
                 }));
             });
@@ -207,9 +216,75 @@ impl Client {
         Ok(())
     }
 
-    /// Tell the server about a file. Sent once; nothing here ever edits.
+    /// The directory the server was started in.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// The server's binary.
+    pub fn binary(&self) -> &Path {
+        &self.spec.binary
+    }
+
+    /// Send `event` on, keeping it if it is a status.
+    fn tell(&self, event: ServerEvent) {
+        let Ok(mut told) = self.told.lock() else { return };
+        if let ServerEvent::Status(status) = &event {
+            told.1 = status.clone();
+        }
+        let _ = told.0.send(event);
+    }
+
+    /// Send the status last sent again, for a view that has just taken
+    /// the server up and missed it.
+    pub fn tell_status_again(&self) {
+        let Ok(told) = self.told.lock() else { return };
+        let _ = told.0.send(ServerEvent::Status(told.1.clone()));
+    }
+
+    /// Tell the server about a file. Nothing here ever edits, but a file
+    /// the server already has is sent again when its text differs, as a
+    /// change: the server keeps the text it was given over the file on
+    /// disk until the file is closed. The same text is not sent twice.
     pub async fn did_open(&self, path: &Path, text: &str) {
         let Some(uri) = path_to_uri(path) else { return };
+        let hash = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut hasher);
+            hasher.finish()
+        };
+        let changed = {
+            let Ok(mut documents) = self.documents.lock() else { return };
+            match documents.get_mut(&uri.to_string()) {
+                Some((_, given)) if *given == hash => return,
+                Some((version, given)) => {
+                    *version += 1;
+                    *given = hash;
+                    Some(*version)
+                }
+                None => {
+                    documents.insert(uri.to_string(), (1, hash));
+                    None
+                }
+            }
+        };
+        if let Some(version) = changed {
+            let params = lsp_types::DidChangeTextDocumentParams {
+                text_document: lsp_types::VersionedTextDocumentIdentifier { uri, version },
+                content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: text.to_string(),
+                }],
+            };
+            self.notify(
+                "textDocument/didChange",
+                serde_json::to_value(params).unwrap_or(Value::Null),
+            )
+            .await;
+            return;
+        }
         let params = lsp_types::DidOpenTextDocumentParams {
             text_document: TextDocumentItem {
                 uri,
@@ -229,6 +304,31 @@ impl Client {
     /// file, handed over only to be outlined.
     pub async fn did_close(&self, path: &Path) {
         let Some(uri) = path_to_uri(path) else { return };
+        let given = self
+            .documents
+            .lock()
+            .is_ok_and(|mut documents| documents.remove(&uri.to_string()).is_some());
+        if given {
+            self.close_uri(uri).await;
+        }
+    }
+
+    /// Close every file the server was given, so it reads them from disk
+    /// again: a server kept for later may outlive the text it was given.
+    pub async fn close_documents(&self) {
+        let given: Vec<String> = self
+            .documents
+            .lock()
+            .map(|mut documents| documents.drain().map(|(uri, _)| uri).collect())
+            .unwrap_or_default();
+        for uri in given {
+            if let Ok(uri) = uri.parse::<Uri>() {
+                self.close_uri(uri).await;
+            }
+        }
+    }
+
+    async fn close_uri(&self, uri: Uri) {
         let params = DidCloseTextDocumentParams {
             text_document: TextDocumentIdentifier { uri },
         };
@@ -527,12 +627,7 @@ impl Client {
     }
 }
 
-async fn read_loop(
-    stdout: tokio::process::ChildStdout,
-    pending: Pending,
-    events: mpsc::UnboundedSender<ServerEvent>,
-    client: Arc<Client>,
-) {
+async fn read_loop(stdout: tokio::process::ChildStdout, pending: Pending, client: Arc<Client>) {
     let mut reader = BufReader::new(stdout);
     let mut headers = Vec::new();
     let mut reported = Reported::default();
@@ -574,7 +669,7 @@ async fn read_loop(
             }
             Incoming::Notification { method, params } => {
                 for event in handle_notification(&method, params, &mut reported) {
-                    let _ = events.send(event);
+                    client.tell(event);
                 }
             }
             Incoming::Request { id, method } => {
@@ -908,6 +1003,96 @@ pub fn blocks(response: DocumentSymbolResponse) -> Vec<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server that answers the lifecycle requests and writes down the
+    /// method of everything it is sent, one to a line.
+    const RECORDING_SERVER: &str = r#"
+import json, sys
+log = open(sys.argv[1], "a")
+while True:
+    length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            sys.exit(0)
+        if line in (b"\r\n", b"\n"):
+            break
+        name, _, value = line.decode().partition(":")
+        if name.lower() == "content-length":
+            length = int(value)
+    message = json.loads(sys.stdin.buffer.read(length))
+    log.write(message["method"] + "\n")
+    log.flush()
+    if message["method"] == "exit":
+        sys.exit(0)
+    if "id" in message:
+        result = {"capabilities": {}} if message["method"] == "initialize" else None
+        body = json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}).encode()
+        sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+        sys.stdout.buffer.flush()
+"#;
+
+    /// A file is given once, sent again only as a change when its text
+    /// differs, and closed only while given; a status is told again on ask.
+    #[tokio::test]
+    async fn a_file_is_given_once_and_changed_only_when_its_text_differs() {
+        let dir = std::env::temp_dir().join(format!("perch-lsp-recording-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("server.py");
+        let log = dir.join("methods");
+        std::fs::write(&script, RECORDING_SERVER).unwrap();
+        let _ = std::fs::remove_file(&log);
+        let spec = ServerSpec {
+            binary: PathBuf::from("python3"),
+            args: vec![script.display().to_string(), log.display().to_string()],
+            language_id: "rust",
+            options: Value::Null,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let client = Client::start(spec, &dir, tx).await.unwrap();
+        assert_eq!(client.root(), dir.as_path());
+        assert_eq!(client.binary(), Path::new("python3"));
+
+        let file = dir.join("lib.rs");
+        client.did_open(&file, "one").await;
+        client.did_open(&file, "one").await;
+        client.did_open(&file, "two").await;
+        client.close_documents().await;
+        client.did_close(&file).await;
+        client.did_open(&file, "two").await;
+        client.tell_status_again();
+        client.shutdown().await;
+
+        let mut methods = String::new();
+        for _ in 0..50 {
+            methods = std::fs::read_to_string(&log).unwrap_or_default();
+            if methods.ends_with("exit\n") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            methods.lines().collect::<Vec<_>>(),
+            [
+                "initialize",
+                "initialized",
+                "textDocument/didOpen",
+                "textDocument/didChange",
+                "textDocument/didClose",
+                "textDocument/didOpen",
+                "shutdown",
+                "exit",
+            ]
+        );
+        let mut statuses = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let ServerEvent::Status(status) = event {
+                statuses.push(status);
+            }
+        }
+        assert_eq!(statuses[..2], [Status::Starting, Status::Starting]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn blocks_start_at_the_name_and_nest_outer_first() {

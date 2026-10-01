@@ -742,7 +742,7 @@ pub(super) async fn open_snapshot(ctx: &Ctx, group_id: &str, request_id: u64) {
             return Err("A newer historical review was selected".to_string());
         };
         if let Some(client) = previous_language_server {
-            client.shutdown().await;
+            ctx.kept_servers.keep(ctx.window, client).await;
         }
         Ok::<_, String>((group, snapshot, files, tree, findings, scope_gen))
     }

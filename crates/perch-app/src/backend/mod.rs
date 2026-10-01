@@ -33,6 +33,7 @@ use windows::{CommandSender, View, Views};
 mod avatar;
 mod check_watch;
 mod issue_draft;
+mod kept_servers;
 pub(crate) mod open_pull;
 pub(crate) mod reviews;
 pub(crate) mod runs;
@@ -3529,6 +3530,7 @@ async fn run(
         config: Arc::new(std::sync::RwLock::new(config.clone())),
         slot: checkout.clone(),
         language_server: language_server.clone(),
+        kept_servers: Default::default(),
         events: events.clone(),
         runs: run_manager,
         review_capabilities,
@@ -3725,13 +3727,7 @@ async fn run(
                     if open_subject_navigation(&ctx, repo_full_name, kind, number, navigation_id)
                         .await
                     {
-                        start_language_server(
-                            ctx.slot,
-                            ctx.language_server,
-                            ctx.events,
-                            ctx.navigation_requests,
-                            navigation_id,
-                        )
+                        start_language_server(&ctx, navigation_id)
                         .await;
                     }
                 });
@@ -3762,13 +3758,7 @@ async fn run(
                     if open_subject_navigation(&ctx, repo_full_name, kind, number, navigation_id)
                         .await
                     {
-                        start_language_server(
-                            ctx.slot,
-                            ctx.language_server,
-                            ctx.events,
-                            ctx.navigation_requests,
-                            navigation_id,
-                        )
+                        start_language_server(&ctx, navigation_id)
                         .await;
                     }
                 });
@@ -3817,13 +3807,7 @@ async fn run(
                     let repo = thread.repository.full_name;
                     tokio::spawn(async move {
                         if open_subject_navigation(&ctx, repo, kind, number, navigation_id).await {
-                            start_language_server(
-                                ctx.slot,
-                                ctx.language_server,
-                                ctx.events,
-                                ctx.navigation_requests,
-                                navigation_id,
-                            )
+                            start_language_server(&ctx, navigation_id)
                             .await;
                         }
                     });
@@ -3859,7 +3843,10 @@ async fn run(
                 // slot and start a language server nobody will stop.
                 if ctx.window != NO_WINDOW {
                     ctx.navigation_requests.begin_closed();
-                    tokio::spawn(async move { ctx.close_review().await });
+                    tokio::spawn(async move {
+                        ctx.close_review().await;
+                        ctx.kept_servers.stop(ctx.window).await;
+                    });
                 }
             }
             Command::DoneNotification { thread_id } => {
@@ -4065,13 +4052,7 @@ async fn run(
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     if open_item(&ctx, &id, navigation_id).await {
-                        start_language_server(
-                            ctx.slot,
-                            ctx.language_server,
-                            ctx.events,
-                            ctx.navigation_requests,
-                            navigation_id,
-                        )
+                        start_language_server(&ctx, navigation_id)
                         .await;
                     }
                 });
@@ -4095,13 +4076,7 @@ async fn run(
                         }
                         show_retained_review_owner(&ctx, item, navigation_id);
                     } else if open_item(&ctx, &id, navigation_id).await {
-                        start_language_server(
-                            ctx.slot,
-                            ctx.language_server,
-                            ctx.events,
-                            ctx.navigation_requests,
-                            navigation_id,
-                        )
+                        start_language_server(&ctx, navigation_id)
                         .await;
                     }
                 });
@@ -4257,13 +4232,7 @@ async fn run(
                                         .await;
                                     });
                                 }
-                                start_language_server(
-                                    ctx.slot,
-                                    ctx.language_server,
-                                    ctx.events,
-                                    ctx.navigation_requests,
-                                    navigation_id,
-                                )
+                                start_language_server(&ctx, navigation_id)
                                 .await;
                             }
                         }
@@ -4875,9 +4844,10 @@ async fn run(
                         })
                         .unwrap_or(false);
                     if closed {
-                        let mut guard = ctx.language_server.lock().await;
-                        if let Some(client) = guard.take() {
-                            tokio::spawn(async move { client.shutdown().await });
+                        let client = ctx.language_server.lock().await.take();
+                        if let Some(client) = client {
+                            let (kept, window) = (ctx.kept_servers.clone(), ctx.window);
+                            tokio::spawn(async move { kept.keep(window, client).await });
                         }
                     }
                 });
@@ -5087,6 +5057,8 @@ struct Ctx {
     config: Arc<std::sync::RwLock<Arc<Config>>>,
     slot: Arc<std::sync::Mutex<Option<ReviewContext>>>,
     language_server: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
+    /// Language servers no window shows, kept a while for a return.
+    kept_servers: kept_servers::KeptServers,
     events: EventSender<Event>,
     /// Durable admission, the shared execution limit, and live children.
     runs: runs::RunManager,
@@ -6255,7 +6227,7 @@ async fn view_review_attempt_owner(ctx: &Ctx, item_id: &str, attempt_id: &str, r
             .flatten();
         drop(language_server);
         if let Some(previous) = previous {
-            previous.shutdown().await;
+            ctx.kept_servers.keep(ctx.window, previous).await;
         }
     }
     let group_id = summary.group.id.clone();
@@ -10416,13 +10388,7 @@ async fn start_work_and_open(ctx: Ctx, source: Result<String, String>, navigatio
         ctx.send_navigation_event(navigation_id, Event::StartWorkDraft { navigation_id, prompt });
     }
     if open_item(&ctx, &id, navigation_id).await {
-        start_language_server(
-            ctx.slot,
-            ctx.language_server,
-            ctx.events,
-            ctx.navigation_requests,
-            navigation_id,
-        )
+        start_language_server(&ctx, navigation_id)
         .await;
     }
 }
@@ -16028,14 +15994,14 @@ fn send_file_event_if_current(
         .unwrap_or(false)
 }
 
-/// Start a language server for the open checkout, if one is installed.
-async fn start_language_server(
-    checkout: Arc<std::sync::Mutex<Option<ReviewContext>>>,
-    slot: Arc<tokio::sync::Mutex<Option<Arc<perch_lsp::Client>>>>,
-    events: EventSender<Event>,
-    navigation_requests: Arc<NavigationRequests>,
-    navigation_id: u64,
-) {
+/// Give the open checkout a language server, if one is installed: the one
+/// already on show for it, else one this window set aside for it, else a
+/// new one. The server it takes the place of is set aside.
+async fn start_language_server(ctx: &Ctx, navigation_id: u64) {
+    let checkout = &ctx.slot;
+    let slot = &ctx.language_server;
+    let events = &ctx.events;
+    let navigation_requests = &ctx.navigation_requests;
     let Some(worktree) = checkout.lock().ok().and_then(|g| {
         g.as_ref()
             .filter(|context| context.navigation_id == navigation_id)
@@ -16046,90 +16012,144 @@ async fn start_language_server(
 
     let Some(spec) = perch_lsp::find_server("rust", &worktree) else {
         send_lsp_status_if_current(
-            &navigation_requests,
-            &checkout,
-            &events,
+            navigation_requests,
+            checkout,
+            events,
             navigation_id,
             perch_lsp::Status::Absent,
         );
         return;
     };
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    {
-        let events = events.clone();
-        let checkout = checkout.clone();
-        let navigation_requests = navigation_requests.clone();
-        tokio::spawn(async move {
-            while let Some(event) = rx.recv().await {
-                match event {
-                    perch_lsp::client::ServerEvent::Status(status) => {
-                        tracing::debug!(status = %status.describe(), "language server");
-                        send_lsp_status_if_current(
-                            &navigation_requests,
-                            &checkout,
-                            &events,
-                            navigation_id,
-                            status,
-                        );
-                    }
-                    // Diagnostics are collected but not yet drawn; the editor
-                    // needs a decoration pass this milestone does not have.
-                    perch_lsp::client::ServerEvent::Warning { message } => {
-                        tracing::warn!(%message, "language server");
-                        send_if_current(
-                            &navigation_requests,
-                            &checkout,
-                            &events,
-                            navigation_id,
-                            Event::LspWarning {
-                                navigation_id,
-                                message,
-                            },
-                        );
-                    }
-                    perch_lsp::client::ServerEvent::Diagnostics { .. } => {}
-                }
-            }
-        });
+    let serves = |client: &perch_lsp::Client| {
+        client.root() == worktree.as_path() && client.binary() == spec.binary.as_path()
+    };
+    if let Some(client) = slot.lock().await.as_ref().filter(|c| serves(c)) {
+        client.tell_status_again();
+        return;
     }
 
-    match perch_lsp::Client::start(spec, &worktree, tx).await {
-        Ok(client) => {
-            let mut language_server = slot.lock().await;
-            let current_context = navigation_requests
-                .with_current(navigation_id, || {
-                    checkout.lock().ok().is_some_and(|context| {
-                        context
-                            .as_ref()
-                            .is_some_and(|context| context.navigation_id == navigation_id)
-                    })
-                })
-                .unwrap_or(false);
-            if current_context {
-                tracing::info!("language server started");
-                let previous = language_server.replace(client);
-                drop(language_server);
-                if let Some(previous) = previous {
-                    previous.shutdown().await;
+    let client = match ctx.kept_servers.take(ctx.window, &worktree, &spec.binary) {
+        Some(client) => {
+            tracing::info!("language server taken up again");
+            client
+        }
+        None => {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            forward_language_server_events(ctx, &worktree, &spec.binary, rx);
+            match perch_lsp::Client::start(spec, &worktree, tx).await {
+                Ok(client) => {
+                    tracing::info!("language server started");
+                    client
                 }
-            } else {
-                drop(language_server);
-                client.shutdown().await;
+                Err(e) => {
+                    send_lsp_status_if_current(
+                        navigation_requests,
+                        checkout,
+                        events,
+                        navigation_id,
+                        perch_lsp::Status::Failed {
+                            reason: e.to_string(),
+                        },
+                    );
+                    return;
+                }
             }
         }
-        Err(e) => {
-            send_lsp_status_if_current(
-                &navigation_requests,
-                &checkout,
-                &events,
-                navigation_id,
-                perch_lsp::Status::Failed {
-                    reason: e.to_string(),
-                },
-            );
+    };
+
+    let mut language_server = slot.lock().await;
+    let current_context = navigation_requests
+        .with_current(navigation_id, || {
+            checkout.lock().ok().is_some_and(|context| {
+                context
+                    .as_ref()
+                    .is_some_and(|context| context.navigation_id == navigation_id)
+            })
+        })
+        .unwrap_or(false);
+    if current_context {
+        let previous = language_server.replace(client.clone());
+        drop(language_server);
+        // What it said before it was on show went nowhere.
+        client.tell_status_again();
+        if let Some(previous) = previous {
+            ctx.kept_servers.keep(ctx.window, previous).await;
         }
+    } else {
+        drop(language_server);
+        ctx.kept_servers.keep(ctx.window, client).await;
     }
+}
+
+/// Send what the server for `worktree` says to the window's navigation
+/// that shows that worktree, whichever it is: a server set aside and taken
+/// up again outlives the open that started it. A server set aside says
+/// nothing to anyone.
+fn forward_language_server_events(
+    ctx: &Ctx,
+    worktree: &Path,
+    binary: &Path,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<perch_lsp::client::ServerEvent>,
+) {
+    let checkout = ctx.slot.clone();
+    let slot = ctx.language_server.clone();
+    let events = ctx.events.clone();
+    let navigation_requests = ctx.navigation_requests.clone();
+    let (worktree, binary) = (worktree.to_path_buf(), binary.to_path_buf());
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            match &event {
+                perch_lsp::client::ServerEvent::Status(status) => {
+                    tracing::debug!(status = %status.describe(), "language server");
+                }
+                perch_lsp::client::ServerEvent::Warning { message } => {
+                    tracing::warn!(%message, "language server");
+                }
+                perch_lsp::client::ServerEvent::Diagnostics { .. } => {}
+            }
+            // On show, or still starting with none other on show for the
+            // worktree.
+            let another = slot.lock().await.as_ref().is_some_and(|client| {
+                client.root() == worktree.as_path() && client.binary() != binary.as_path()
+            });
+            let showing = checkout.lock().ok().and_then(|guard| {
+                guard
+                    .as_ref()
+                    .filter(|context| context.checkout.worktree == worktree)
+                    .map(|context| context.navigation_id)
+            });
+            let Some(navigation_id) = showing.filter(|_| !another) else {
+                continue;
+            };
+            match event {
+                perch_lsp::client::ServerEvent::Status(status) => {
+                    send_lsp_status_if_current(
+                        &navigation_requests,
+                        &checkout,
+                        &events,
+                        navigation_id,
+                        status,
+                    );
+                }
+                // Diagnostics are collected but not yet drawn; the editor
+                // needs a decoration pass this milestone does not have.
+                perch_lsp::client::ServerEvent::Warning { message } => {
+                    send_if_current(
+                        &navigation_requests,
+                        &checkout,
+                        &events,
+                        navigation_id,
+                        Event::LspWarning {
+                            navigation_id,
+                            message,
+                        },
+                    );
+                }
+                perch_lsp::client::ServerEvent::Diagnostics { .. } => {}
+            }
+        }
+    });
 }
 
 fn send_lsp_status_if_current(
@@ -16860,6 +16880,7 @@ mod tests {
             config: Arc::new(std::sync::RwLock::new(Arc::new(config))),
             slot: Arc::new(std::sync::Mutex::new(None)),
             language_server: Arc::new(tokio::sync::Mutex::new(None)),
+            kept_servers: Default::default(),
             events,
             runs,
             review_capabilities: Arc::new(Vec::new()),
