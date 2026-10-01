@@ -23,6 +23,7 @@ use crate::review::doc::CardId;
 use crate::review::model::{ReviewGroupSummary, ReviewState};
 use crate::state::AppState;
 use crate::theme;
+use crate::timefmt;
 use crate::ui::widgets::{clickable, sidebar_glyph};
 
 use super::model::{
@@ -450,7 +451,7 @@ fn run_row(
 }
 
 /// A run's row: its status and what ran it, what it was asked, what it
-/// is doing or how it ended, and what can be done with it.
+/// is doing or how it ended, when it ran, and what can be done with it.
 fn header(
     app: AppState,
     review: ReviewState,
@@ -477,6 +478,7 @@ fn header(
     let queue = queue_position(app, &run.id);
     let status = run.status;
     let purpose = run.purpose.label();
+    let ran_at = run.ran_at();
     Stack::vertical((
         Stack::horizontal((
             Empty::new().style(move |s| {
@@ -536,7 +538,10 @@ fn header(
                 .selectable(false)
         }),
         Stack::horizontal((
-            Label::derived(move || purpose.to_string()).style(|s| {
+            Label::derived(move || {
+                format!("{purpose} · {}", timefmt::relative(ran_at, app.now.get()))
+            })
+            .style(|s| {
                 s.font_size(theme::TEXT_SECTION)
                     .color(theme::FG_SUBTLE)
                     .text_ellipsis()
@@ -629,8 +634,9 @@ fn title_case_status(status: &str) -> String {
         .unwrap_or_default()
 }
 
-/// A review's row, `Review #n · sha · against base` and how far it has
-/// got, over its attempts, with the way to the snapshot it read. It folds.
+/// A review's row, `Review #n · sha · against base`, how far it has got
+/// and when it ran, over its attempts, with the way to the snapshot it
+/// read. It folds.
 fn review_group_row(
     app: AppState,
     review: ReviewState,
@@ -639,6 +645,7 @@ fn review_group_row(
 ) -> impl IntoView {
     let key = group.key.clone();
     let count = group.runs.len();
+    let ran_at = group.ran_at();
     let (title, status) = match group.summary.as_ref() {
         Some(summary) => {
             let title = format!(
@@ -728,7 +735,11 @@ fn review_group_row(
                     .width_full()
                     .selectable(false)
             }),
-            Label::derived(move || status.clone()).style(|s| {
+            Label::derived(move || match ran_at {
+                Some(at) => format!("{status} · {}", timefmt::relative(at, app.now.get())),
+                None => status.clone(),
+            })
+            .style(|s| {
                 s.font_size(theme::TEXT_SECTION)
                     .font_weight(theme::weight_emphasis())
                     .color(theme::FG_MUTED)
@@ -1030,6 +1041,44 @@ mod tests {
             "the review did not fold"
         );
         assert!(shown(&harness, "agent-run:q"));
+    }
+
+    /// A run's row and a review's say when they ran, and keep up with
+    /// the clock.
+    #[test]
+    fn runs_and_reviews_say_when_they_ran() {
+        let (mut harness, app, review) = pull_request_harness();
+        let attempt = perch_github::RunRecord {
+            owner: perch_github::RunOwner::Review {
+                item_id: "pr".into(),
+                reviewer_run_id: "attempt-claude".into(),
+            },
+            purpose: perch_github::comments::RunPurpose::WorktreeReview,
+            ..record("claude-run", perch_github::RunStatus::Completed, 0)
+        };
+        add(
+            app,
+            &[attempt, record("q", perch_github::RunStatus::Completed, 30)],
+        );
+        app.review_groups.update(|all| {
+            all.insert(
+                "pr".into(),
+                Arc::new(vec![super::super::model::tests::review_summary(
+                    "group-3",
+                    &["attempt-claude"],
+                )]),
+            );
+        });
+        app.now.set(at("2026-09-19T12:40:00Z"));
+        review.agents_unfolded.set(true);
+        settle(&mut harness);
+        assert!(named(harness.root_id(), "\"Question · 2 hours ago\"").is_some());
+        assert!(named(harness.root_id(), "\"Completed · 2 hours ago\"").is_some());
+        assert!(named(harness.root_id(), "\"Worktree review · 2 hours ago\"").is_some());
+
+        app.now.set(at("2026-09-19T13:40:00Z"));
+        settle(&mut harness);
+        assert!(named(harness.root_id(), "\"Question · 3 hours ago\"").is_some());
     }
 
     /// While a review runs, the bar's Review says so, and Show in its

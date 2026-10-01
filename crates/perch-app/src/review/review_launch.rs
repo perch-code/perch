@@ -883,6 +883,7 @@ fn group_card(
     summary: ReviewGroupSummary,
 ) -> impl IntoView {
     let title = group_title(&summary);
+    let ran_at = summary.ran_at();
     let instructions = summary.group.instructions.clone();
     let attempts = attempt_summary(&summary);
     let unread = unread_summary(&summary);
@@ -971,14 +972,19 @@ fn group_card(
     Container::new(
         Stack::vertical((
             Stack::horizontal((
-                Label::derived(move || title.clone()).style(|s| {
-                    s.font_size(theme::TEXT_BODY)
-                        .font_weight(theme::weight_emphasis())
-                        .color(theme::FG)
-                        .text_wrap()
-                        .min_width(0.0)
-                        .flex_grow(1.0_f32)
-                }),
+                Stack::vertical((
+                    Label::derived(move || title.clone()).style(|s| {
+                        s.font_size(theme::TEXT_BODY)
+                            .font_weight(theme::weight_emphasis())
+                            .color(theme::FG)
+                            .text_wrap()
+                            .width_full()
+                    }),
+                    Label::derived(move || crate::timefmt::relative(ran_at, app.now.get()))
+                        .style(|s| s.font_size(theme::TEXT_META).color(theme::FG_MUTED))
+                        .debug_name("review-group-when"),
+                ))
+                .style(|s| s.flex_col().gap(2.0).min_width(0.0).flex_grow(1.0_f32)),
                 open,
             ))
             .style(|s| s.items_start().width_full().gap(8.0)),
@@ -1904,6 +1910,27 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert!(named(harness.root_id(), "review-group-instructions").is_some());
+    }
+
+    #[test]
+    fn a_history_card_says_when_the_review_ran() {
+        let (app, state) = item_state();
+        let mut queued = summary(perch_github::ReviewGroupStatus::Preparing);
+        queued.group.started_at = None;
+        app.update_review_group("worktree".into(), queued);
+        app.now
+            .set("2026-09-19T12:42:00Z".parse::<Timestamp>().unwrap());
+        let root = TestRoot::new();
+        let view = history(app, state, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 700.0, 500.0);
+        harness.rebuild();
+        harness.paint();
+        let when = named(harness.root_id(), "review-group-when").expect("no time on the card");
+        assert!(
+            when.debug_name().contains("42 minutes ago"),
+            "{}",
+            when.debug_name()
+        );
     }
 
     #[test]

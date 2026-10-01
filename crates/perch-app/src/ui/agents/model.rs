@@ -169,6 +169,11 @@ impl AgentRunSummary {
             .unwrap_or_else(|| AgentRetryTarget::Run(self.id.clone()))
     }
 
+    /// When the run ran: when it started, or was queued if it has not.
+    pub fn ran_at(&self) -> Timestamp {
+        self.started_at.unwrap_or(self.queued_at)
+    }
+
     pub fn subject(&self) -> String {
         let first = self.request.lines().next().unwrap_or("").trim();
         if first.is_empty() {
@@ -380,6 +385,17 @@ pub struct AgentReviewRunGroup {
     pub key: String,
     pub summary: Option<crate::review::model::ReviewGroupSummary>,
     pub runs: Vec<AgentRunSummary>,
+}
+
+impl AgentReviewRunGroup {
+    /// When the review ran, or its first attempt did while the review's
+    /// own record has not arrived.
+    pub fn ran_at(&self) -> Option<Timestamp> {
+        match &self.summary {
+            Some(summary) => Some(summary.ran_at()),
+            None => self.runs.iter().map(AgentRunSummary::ran_at).min(),
+        }
+    }
 }
 
 /// Find the durable group which owns one reviewer attempt.

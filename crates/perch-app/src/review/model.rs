@@ -962,6 +962,13 @@ pub struct ReviewGroupSummary {
     pub attempts: Vec<perch_github::ReviewerAttempt>,
 }
 
+impl ReviewGroupSummary {
+    /// When the review ran: when it started, or was asked for if it has not.
+    pub fn ran_at(&self) -> jiff::Timestamp {
+        self.group.started_at.unwrap_or(self.group.created_at)
+    }
+}
+
 /// Durable finding state plus the compact provenance needed to identify it
 /// in the ordinary conversation and Files thread surfaces.
 #[derive(Debug, Clone, PartialEq, Eq)]
