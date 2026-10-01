@@ -4,6 +4,7 @@
 //!
 //!     cargo run -p perch-lsp --example hover -- <worktree> <file> <line> <col> [mode]
 //!     cargo run -p perch-lsp --example hover -- <worktree> --symbols <query>
+//!     cargo run -p perch-lsp --example hover -- <worktree> --install <file>
 //!
 //! The modes are `hover`, `definition`, `type-definition`, `implementation`,
 //! `references`, `highlight`, `callers` and `callees`. Line and col are
@@ -13,7 +14,9 @@
 //! to it, so each request can be checked against a checkout from the shell
 //! before the UI asks it. `--symbols` searches the workspace for a name the
 //! way a name written in a comment is looked up, `#` and all, and prints
-//! each symbol's kind and container before its location.
+//! each symbol's kind and container before its location. `--install`
+//! installs the server for a file's language as the toast's Install does,
+//! when it is missing and Perch can.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -30,14 +33,34 @@ const MODES: &str =
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let symbols = args.get(1).is_some_and(|a| a == "--symbols");
-    if args.len() < 4 && !(symbols && args.len() == 3) {
+    let install = args.get(1).is_some_and(|a| a == "--install");
+    if args.len() < 4 && !((symbols || install) && args.len() == 3) {
         eprintln!("usage: hover <worktree> <file> <line> <col> [{MODES}]");
         eprintln!("       hover <worktree> --symbols <query>");
+        eprintln!("       hover <worktree> --install <file>");
         std::process::exit(2);
     }
     let root = PathBuf::from(&args[0]).canonicalize()?;
     if symbols {
         return search(&root, &args[2]).await;
+    }
+    if install {
+        let kind = ServerKind::for_path(&args[2]).ok_or("no server for that file")?;
+        return match find(kind, &root, &Env::current(servers_dir())) {
+            Ok(spec) => {
+                eprintln!("installed: {}", spec.binary.display());
+                Ok(())
+            }
+            Err(missing) => {
+                let described = missing.describe();
+                let install = missing.install.ok_or(described)?;
+                eprintln!("{}", install.shown());
+                let started = std::time::Instant::now();
+                perch_lsp::install(&install).await?;
+                eprintln!("installed in {:.1}s", started.elapsed().as_secs_f32());
+                Ok(())
+            }
+        };
     }
     let file = root.join(&args[1]);
     let line: u32 = args[2].parse()?;
@@ -58,12 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let kind = ServerKind::for_path(&args[1]).unwrap_or(ServerKind::RustAnalyzer);
-    // Perch's own installs, under `$PERCH_HOME` as Perch has it.
-    let servers = std::env::var_os("PERCH_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".perch")))
-        .map_or_else(std::env::temp_dir, |home| home.join("servers"));
-    let spec = find(kind, &root, &Env::current(servers))
+    let spec = find(kind, &root, &Env::current(servers_dir()))
         .map_err(|missing| missing.describe())?;
     eprintln!("server: {}", spec.binary.display());
 
@@ -134,7 +152,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Request::Definition => {
             let found = poll(|| answered(client.definition(&file, line, col))).await;
-            print_locations(&root, &found.unwrap_or_default());
+            let found = found.unwrap_or_default();
+            print_locations(&root, &found);
+            // A class file jdtls named: the line it points at, from the
+            // source jdtls gives.
+            for location in &found {
+                let uri = location.uri.to_string();
+                if perch_lsp::server::is_class_file(&uri) {
+                    let key = client.remember_class_file(&uri);
+                    let text = client.class_file_contents(&key).await.unwrap_or_default();
+                    let line = text.lines().nth(location.range.start.line as usize);
+                    eprintln!("{key}: {}", line.unwrap_or("(no source)").trim());
+                }
+            }
         }
         Request::TypeDefinition => {
             let found = poll(|| answered(client.type_definition(&file, line, col))).await;
@@ -205,6 +235,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     client.shutdown().await;
     Ok(())
+}
+
+/// Perch's own installs, under `$PERCH_HOME` as Perch has it.
+fn servers_dir() -> PathBuf {
+    std::env::var_os("PERCH_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".perch")))
+        .map_or_else(std::env::temp_dir, |home| home.join("servers"))
 }
 
 /// `--symbols`: every symbol the workspace search names for `query`,

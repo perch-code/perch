@@ -83,6 +83,10 @@ pub enum Language {
 impl Language {
     /// Pick a grammar from a file path. `None` renders as plain text.
     pub fn from_path(path: &str) -> Option<Self> {
+        // A class file jdtls gave the source of.
+        if path.starts_with("jdt://") {
+            return Some(Language::Java);
+        }
         let name = path.rsplit('/').next().unwrap_or(path);
         let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
 
@@ -515,6 +519,10 @@ mod tests {
         assert_eq!(Language::from_path("src/a.d.mts"), Some(Language::TypeScript));
         assert_eq!(Language::from_path("src/App.tsx"), Some(Language::Tsx));
         assert_eq!(Language::from_path("src/Main.java"), Some(Language::Java));
+        assert_eq!(
+            Language::from_path("jdt://contents/java.base/java.util/List.class"),
+            Some(Language::Java)
+        );
     }
 
     #[test]

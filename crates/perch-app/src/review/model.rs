@@ -321,6 +321,16 @@ pub struct References {
 /// its version where pnpm's store gives one, `react 18.2.0`. Anywhere else under the home directory reads as its path
 /// relative to the home directory, and anywhere else as the path.
 pub fn outside_label(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    // jdt://contents/<jar or module>/<package>/<Class>.class: the jar, or
+    // the JDK for its modules and its old rt.jar.
+    if let Some(rest) = path.to_str().and_then(|p| p.strip_prefix("jdt://contents/")) {
+        let container = rest.split('/').next().unwrap_or(rest);
+        return if container.ends_with(".jar") && container != "rt.jar" {
+            container.to_string()
+        } else {
+            "JDK".to_string()
+        };
+    }
     let parts: Vec<&str> = path
         .components()
         .filter_map(|c| match c {
@@ -6436,6 +6446,11 @@ mod tests {
             label("/Users/me/Code/app/node_modules/.pnpm/react-dom@18.2.0_react@18.2.0/node_modules/react-dom/index.d.ts"),
             "react-dom 18.2.0"
         );
+        assert_eq!(
+            label("jdt://contents/guava-33.3.1-jre.jar/com.google.common.collect/ImmutableList.class"),
+            "guava-33.3.1-jre.jar"
+        );
+        assert_eq!(label("jdt://contents/java.base/java.util/List.class"), "JDK");
         assert_eq!(
             label("/Users/me/Code/app/node_modules/.pnpm/@scope+pkg@1.2.3/node_modules/@scope/pkg/a.d.ts"),
             "@scope/pkg 1.2.3"

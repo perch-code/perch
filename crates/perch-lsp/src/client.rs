@@ -97,6 +97,9 @@ pub struct Client {
     /// The files given to the server, by URI: the version each is at and
     /// a hash of the text it was given.
     documents: std::sync::Mutex<HashMap<String, (i32, u64)>>,
+    /// The class files jdtls named, by the URI without its query, which is
+    /// how Perch knows them, to the URI jdtls gave.
+    class_files: std::sync::Mutex<HashMap<String, String>>,
     /// Why the server exited, from its error output, once it has.
     exited: std::sync::OnceLock<Option<String>>,
 }
@@ -167,6 +170,7 @@ impl Client {
             root: root.to_path_buf(),
             told: std::sync::Mutex::new((events, Status::Starting)),
             documents: Default::default(),
+            class_files: Default::default(),
             exited: Default::default(),
         });
 
@@ -259,6 +263,49 @@ impl Client {
         self.spec.kind
     }
 
+    /// The URI of a file as the server knows it: a path's `file://` URI,
+    /// or for a class file jdtls named, the whole URI it gave.
+    fn uri_for(&self, path: &Path) -> Option<Uri> {
+        let text = path.to_str()?;
+        if crate::server::is_class_file(text) {
+            let full = self
+                .class_files
+                .lock()
+                .ok()
+                .and_then(|files| files.get(text).cloned())
+                .unwrap_or_else(|| text.to_string());
+            return full.parse().ok();
+        }
+        path_to_uri(path)
+    }
+
+    /// Keep a class file's `jdt://` URI, and say how Perch knows it: the
+    /// URI without its query, which names the project and its classpath
+    /// and would make a tab's name unreadable.
+    pub fn remember_class_file(&self, uri: &str) -> String {
+        let key = uri.split('?').next().unwrap_or(uri).to_string();
+        if let Ok(mut files) = self.class_files.lock() {
+            files.insert(key.clone(), uri.to_string());
+        }
+        key
+    }
+
+    /// The source of a class file jdtls named, decompiled when no source
+    /// is attached, by its URI or the key `remember_class_file` gave.
+    pub async fn class_file_contents(&self, uri: &str) -> Option<String> {
+        let full = self
+            .class_files
+            .lock()
+            .ok()
+            .and_then(|files| files.get(uri).cloned())
+            .unwrap_or_else(|| uri.to_string());
+        let value = self
+            .request("java/classFileContents", json!({ "uri": full }), PANEL_TIMEOUT)
+            .await
+            .ok()?;
+        decode_result::<String>(value).filter(|text| !text.is_empty())
+    }
+
     /// Send `event` on, keeping it if it is a status.
     fn tell(&self, event: ServerEvent) {
         let Ok(mut told) = self.told.lock() else { return };
@@ -289,7 +336,7 @@ impl Client {
     /// change: the server keeps the text it was given over the file on
     /// disk until the file is closed. The same text is not sent twice.
     pub async fn did_open(&self, path: &Path, text: &str) {
-        let Some(uri) = path_to_uri(path) else { return };
+        let Some(uri) = self.uri_for(path) else { return };
         let hash = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -349,7 +396,7 @@ impl Client {
     /// Tell the server a file it was given is gone: the text of a deleted
     /// file, handed over only to be outlined.
     pub async fn did_close(&self, path: &Path) {
-        let Some(uri) = path_to_uri(path) else { return };
+        let Some(uri) = self.uri_for(path) else { return };
         let given = self
             .documents
             .lock()
@@ -512,7 +559,7 @@ impl Client {
     /// that runs over more than one line, as the line its name is on and
     /// its last line, zero based. See `blocks`.
     pub async fn document_blocks(&self, path: &Path) -> Vec<(usize, usize)> {
-        let Some(uri) = path_to_uri(path) else {
+        let Some(uri) = self.uri_for(path) else {
             return Vec::new();
         };
         let params = DocumentSymbolParams {
@@ -621,7 +668,7 @@ impl Client {
 
     fn position(&self, path: &Path, line: u32, character: u32) -> Option<TextDocumentPositionParams> {
         Some(TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier { uri: path_to_uri(path)? },
+            text_document: TextDocumentIdentifier { uri: self.uri_for(path)? },
             position: Position { line, character },
         })
     }
@@ -785,6 +832,24 @@ fn handle_notification(method: &str, params: Value, reported: &mut Reported) -> 
         "window/showMessage" if reported.hears_messages => match message_health(&params) {
             Some(health) => reported.health(health),
             None => Vec::new(),
+        },
+        // jdtls's own: starting, importing, started, or broken.
+        "language/status" => match params.get("type").and_then(Value::as_str) {
+            Some("Starting") => reported
+                .progress(Status::Indexing { percent: None })
+                .into_iter()
+                .collect(),
+            Some("Started" | "ServiceReady") => {
+                reported.progress(Status::Ready).into_iter().collect()
+            }
+            Some("Error") => {
+                let message = params
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("jdtls reported an error");
+                reported.health(Health::Error(message.to_string()))
+            }
+            _ => Vec::new(),
         },
         _ => Vec::new(),
     }
@@ -1249,6 +1314,59 @@ while True:
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A server that answers a class file's contents with the URI it was
+    /// asked about.
+    const CLASS_FILE_SERVER: &str = r#"
+import json, sys
+while True:
+    length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            sys.exit(0)
+        if line in (b"\r\n", b"\n"):
+            break
+        name, _, value = line.decode().partition(":")
+        if name.lower() == "content-length":
+            length = int(value)
+    message = json.loads(sys.stdin.buffer.read(length))
+    if message.get("method") == "exit":
+        sys.exit(0)
+    if "id" not in message:
+        continue
+    result = None
+    if message["method"] == "initialize":
+        result = {"capabilities": {}}
+    elif message["method"] == "java/classFileContents":
+        result = "// " + message["params"]["uri"]
+    body = json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}).encode()
+    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+    sys.stdout.buffer.flush()
+"#;
+
+    /// A class file is known by its URI without the query, and asked about
+    /// with the whole URI jdtls gave.
+    #[tokio::test]
+    async fn a_class_file_is_asked_for_by_the_uri_jdtls_gave() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("server.py");
+        std::fs::write(&script, CLASS_FILE_SERVER).unwrap();
+        let spec = ServerSpec {
+            kind: ServerKind::Jdtls,
+            binary: PathBuf::from("python3"),
+            args: vec![script.display().to_string()],
+            options: Value::Null,
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let client = Client::start(spec, dir.path(), tx).await.unwrap();
+        let uri = "jdt://contents/guava-33.3.1-jre.jar/com.google.common.collect/ImmutableList.class?=demo/%5C/Users%5C/me%5C/.m2";
+        let key = client.remember_class_file(uri);
+        assert_eq!(key, "jdt://contents/guava-33.3.1-jre.jar/com.google.common.collect/ImmutableList.class");
+        assert_eq!(client.class_file_contents(&key).await, Some(format!("// {uri}")));
+        assert_eq!(client.uri_for(Path::new(&key)).map(|u| u.to_string()), Some(uri.to_string()));
+        client.shutdown().await;
+    }
+
     /// A server that never reports progress is ready once it answers the
     /// handshake; rust-analyzer waits to say so itself.
     #[tokio::test]
@@ -1465,6 +1583,33 @@ while True:
         );
         let mut deaf = Reported::default();
         assert_eq!(told(&mut deaf, &[message(1, "anything")]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn jdtls_says_how_it_is_with_its_language_status() {
+        let status = |kind: &str, message: &str| {
+            ("language/status", json!({"type": kind, "message": message}))
+        };
+        let mut reported = Reported::default();
+        let events = told(
+            &mut reported,
+            &[
+                status("Starting", "Init..."),
+                status("Starting", "Importing Maven projects"),
+                status("ProjectStatus", "OK"),
+                status("Started", "Ready"),
+                status("ServiceReady", "ServiceReady"),
+                status("Error", "Initialization failed"),
+            ],
+        );
+        assert_eq!(
+            events,
+            vec![
+                "rust-analyzer indexing",
+                "rust-analyzer ready",
+                "rust-analyzer: Initialization failed",
+            ]
+        );
     }
 
     #[test]

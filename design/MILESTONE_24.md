@@ -120,9 +120,10 @@ others don't, so:
   message. Type Warning is a `ServerEvent::Warning`, told once per
   message, as rust-analyzer's warnings are. rust-analyzer's own messages
   leave its status alone: its server status already says.
-- jdtls's `language/status` maps as: `Starting` and `ProjectStatus` with
-  a message to `Indexing`, `Started` and `ServiceReady` to `Ready`, and
-  `Error` to `Unhealthy`.
+- jdtls's `language/status` maps as: `Starting` to `Indexing`, `Started`
+  and `ServiceReady` to `Ready`, and `Error` to `Unhealthy`.
+  `ProjectStatus` says `OK` once a project has imported, which is no
+  news.
 - `$/progress` still gives `Indexing { percent }` for every server. gopls
   and jdtls report it. typescript-language-server mostly doesn't, and is
   `Ready` once initialized.
@@ -268,7 +269,9 @@ deliberate: one click, and from then on the server is the toolchain's.
   `java -version` is 21 or later, else none. jdtls needs 21 to run, but a
   project can target any older Java.
 - **Launch**: a `jdtls` on `PATH` (Homebrew's wrapper) is run with
-  `-data <dir>`. Perch's own is run directly: `java
+  `--jvm-arg=-Djava.import.generatesMetadataFilesAtProjectRoot=false -data
+  <dir>`. Perch's own is run directly: `java
+  -Djava.import.generatesMetadataFilesAtProjectRoot=false
   -Declipse.application=org.eclipse.jdt.ls.core.id1
   -Dosgi.bundles.defaultStartLevel=4
   -Declipse.product=org.eclipse.jdt.ls.core.product -Xmx2G
@@ -283,16 +286,25 @@ deliberate: one click, and from then on the server is the toolchain's.
   startup any whose worktree is gone.
 - **Initialization options**: `extendedClientCapabilities.
   classFileContentsSupport: true`, so definitions in a jar come back as
-  `jdt://` URIs rather than nothing.
+  `jdt://` URIs rather than nothing; and `java.autobuild.enabled: false`.
+- **Nothing in the checkout**: tried on a Maven project, jdtls wrote
+  `.project`, `.classpath` and `.settings/` into it, and its build wrote
+  `target/classes`. The metadata setting has to be the JVM property
+  above, since jdtls's file system reads it as it starts; the build is
+  turned off, since navigating needs no classes.
 - **Startup**: jdtls can take longer than the five seconds the handshake
   waits today. `ServerSpec` gains an initialize timeout: 60 seconds for
   jdtls, five for the rest. The import after it can take minutes on a
   large Gradle build, shown as indexing.
 - **Class files**: a location whose URI is `jdt://…` opens as an external,
   read-only tab with the text from `java/classFileContents` for that URI.
-  The tab is keyed by the URI, not a path. Hover and goto inside it go to
-  jdtls with the URI. It's labelled with the jar's name (`guava-33.3.1-
-  jre.jar`), or `JDK` for the platform's classes.
+  The tab is keyed by the URI without its query (which names the project
+  and its classpath, slashes and all, and would make the tab's name
+  unreadable); the client keeps the whole URI for it, and hover and goto
+  inside it go to jdtls with that. It's labelled with the jar's name
+  (`guava-33.3.1-jre.jar`), or `JDK` for the platform's classes, which
+  jdtls names by module (`java.base`). With sources attached, jdtls names
+  the file `List.java` rather than `List.class`.
 
 ## Model
 

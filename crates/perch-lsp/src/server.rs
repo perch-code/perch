@@ -11,13 +11,15 @@ pub enum ServerKind {
     Gopls,
     /// TypeScript and JavaScript both.
     TypescriptLanguageServer,
+    Jdtls,
 }
 
 impl ServerKind {
-    pub const ALL: [ServerKind; 3] = [
+    pub const ALL: [ServerKind; 4] = [
         ServerKind::RustAnalyzer,
         ServerKind::Gopls,
         ServerKind::TypescriptLanguageServer,
+        ServerKind::Jdtls,
     ];
 
     /// The server's own name, as statuses and toasts say it.
@@ -26,6 +28,7 @@ impl ServerKind {
             ServerKind::RustAnalyzer => "rust-analyzer",
             ServerKind::Gopls => "gopls",
             ServerKind::TypescriptLanguageServer => "typescript-language-server",
+            ServerKind::Jdtls => "jdtls",
         }
     }
 
@@ -45,6 +48,7 @@ impl ServerKind {
             "go" | "golang" => Some(ServerKind::Gopls),
             "typescript" | "ts" | "tsx" | "javascript" | "js" | "jsx" | "mjs" | "cjs" | "mts"
             | "cts" => Some(ServerKind::TypescriptLanguageServer),
+            "java" => Some(ServerKind::Jdtls),
             _ => None,
         }
     }
@@ -58,6 +62,13 @@ impl ServerKind {
             ServerKind::TypescriptLanguageServer => {
                 &["tsconfig.json", "jsconfig.json", "package.json"]
             }
+            ServerKind::Jdtls => &[
+                "pom.xml",
+                "build.gradle",
+                "build.gradle.kts",
+                "settings.gradle",
+                "settings.gradle.kts",
+            ],
         }
     }
 
@@ -68,6 +79,8 @@ impl ServerKind {
             // tsserver starts under it, which takes a while on a large
             // project.
             ServerKind::TypescriptLanguageServer => Duration::from_secs(15),
+            // A JVM, and Eclipse's bundles, start first.
+            ServerKind::Jdtls => Duration::from_secs(60),
         }
     }
 
@@ -82,6 +95,10 @@ impl ServerKind {
 /// The kind serving a file and the LSP language identifier its
 /// `textDocument/didOpen` carries.
 pub fn language_id(path: &str) -> Option<(ServerKind, &'static str)> {
+    // A class file jdtls gave the source of.
+    if is_class_file(path) {
+        return Some((ServerKind::Jdtls, "java"));
+    }
     let name = path.rsplit('/').next().unwrap_or(path);
     let (_, ext) = name.rsplit_once('.')?;
     match ext.to_ascii_lowercase().as_str() {
@@ -91,8 +108,15 @@ pub fn language_id(path: &str) -> Option<(ServerKind, &'static str)> {
         "tsx" => Some((ServerKind::TypescriptLanguageServer, "typescriptreact")),
         "js" | "mjs" | "cjs" => Some((ServerKind::TypescriptLanguageServer, "javascript")),
         "jsx" => Some((ServerKind::TypescriptLanguageServer, "javascriptreact")),
+        "java" => Some((ServerKind::Jdtls, "java")),
         _ => None,
     }
+}
+
+/// Whether `path` is a class file inside a jar or the JDK, as jdtls names
+/// one: a `jdt://` URI, which Perch keeps without its query.
+pub fn is_class_file(path: &str) -> bool {
+    path.starts_with("jdt://")
 }
 
 /// How to run a language server, and what it understands.
@@ -154,6 +178,10 @@ pub struct Env {
     /// `~/.perch/servers`: one directory per server, one per version
     /// under it.
     pub servers: PathBuf,
+    /// macOS's tool that names a JDK by version.
+    pub java_home_tool: PathBuf,
+    /// `JAVA_HOME`.
+    pub java_home: Option<PathBuf>,
 }
 
 impl Env {
@@ -164,6 +192,8 @@ impl Env {
             path: std::env::var_os("PATH"),
             home: std::env::var_os("HOME").map(PathBuf::from),
             servers,
+            java_home_tool: PathBuf::from("/usr/libexec/java_home"),
+            java_home: std::env::var_os("JAVA_HOME").map(PathBuf::from),
         }
     }
 
@@ -188,6 +218,7 @@ pub enum Need {
     Rustup,
     Go,
     Node,
+    Jdk,
 }
 
 /// A server that wasn't found: what's missing, and how to install it when
@@ -212,6 +243,7 @@ impl Missing {
             (Some(Need::Node), _) => {
                 format!("{name} needs Node and npm, which aren't on your PATH.")
             }
+            (Some(Need::Jdk), _) => format!("{name} needs a JDK 21 or later, which isn't installed."),
             (None, Some(toolchain)) => {
                 format!("{name} isn't installed for Rust {}.", short_toolchain(toolchain))
             }
@@ -244,6 +276,13 @@ pub enum Install {
         env: Vec<(String, String)>,
         into: Option<PathBuf>,
     },
+    /// Download the tarball at `url`, check it against `sha256`, and
+    /// unpack it into `into`, by way of its `.partial` sibling.
+    Download {
+        url: String,
+        sha256: String,
+        into: PathBuf,
+    },
 }
 
 impl Install {
@@ -260,6 +299,9 @@ impl Install {
                     .chain(args.iter().cloned())
                     .collect::<Vec<_>>()
                     .join(" ")
+            }
+            Install::Download { url, sha256, .. } => {
+                format!("Download {url}, check its SHA-256 is {sha256}, and unpack it")
             }
         }
     }
@@ -290,6 +332,168 @@ pub fn find(kind: ServerKind, root: &Path, env: &Env) -> Result<ServerSpec, Miss
         ServerKind::RustAnalyzer => find_rust_analyzer(root, env),
         ServerKind::Gopls => find_gopls(env),
         ServerKind::TypescriptLanguageServer => find_typescript_language_server(root, env),
+        ServerKind::Jdtls => find_jdtls(root, env),
+    }
+}
+
+/// The jdtls Perch downloads, and the SHA-256 Eclipse publishes for it.
+const JDTLS_PIN: &str = "1.61.0";
+const JDTLS_TARBALL: &str = "jdt-language-server-1.61.0-202609031315.tar.gz";
+const JDTLS_SHA256: &str = "338e7e73d61836651ba2453919a0d34fa763eb4e7c03342092309bffb8934c64";
+
+/// jdtls: Homebrew's wrapper on `PATH`, else Perch's own, run directly on
+/// a JDK 21 or later. Missing, Perch downloads Eclipse's release tarball.
+/// Either way it keeps its workspace data for the checkout under
+/// `~/.perch/servers/jdtls-data`, never in the worktree, where it would
+/// be untracked files.
+fn find_jdtls(root: &Path, env: &Env) -> Result<ServerSpec, Missing> {
+    let kind = ServerKind::Jdtls;
+    let options = serde_json::json!({
+        // Definitions in a jar come back as `jdt://` URIs, whose source
+        // `java/classFileContents` gives, rather than nothing.
+        "extendedClientCapabilities": { "classFileContentsSupport": true },
+        // Nothing is built: a build writes its classes into the checkout,
+        // `target/classes` for Maven, and navigating needs none of them.
+        "settings": {
+            "java": {
+                "autobuild": { "enabled": false },
+                "import": { "generatesMetadataFilesAtProjectRoot": false }
+            }
+        },
+    });
+    let data = || jdtls_data(env, root).display().to_string();
+    if let Some(wrapper) = env.which("jdtls") {
+        return Ok(ServerSpec {
+            kind,
+            binary: wrapper,
+            args: vec![format!("--jvm-arg={NO_METADATA_AT_ROOT}"), "-data".into(), data()],
+            options,
+        });
+    }
+    let Some(jdk) = find_jdk(env) else {
+        return Err(Missing {
+            kind,
+            needs: Some(Need::Jdk),
+            install: None,
+            toolchain: None,
+        });
+    };
+    let install = newest_install(env, kind).and_then(|(_, dir)| {
+        let launcher = std::fs::read_dir(dir.join("plugins"))
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("org.eclipse.equinox.launcher_") && n.ends_with(".jar"))
+            })?;
+        Some((dir, launcher))
+    });
+    let Some((dir, launcher)) = install else {
+        let into = env.servers.join(kind.name()).join(JDTLS_PIN);
+        return Err(Missing {
+            kind,
+            needs: None,
+            install: Some(Box::new(Install::Download {
+                url: format!("https://download.eclipse.org/jdtls/milestones/{JDTLS_PIN}/{JDTLS_TARBALL}"),
+                sha256: JDTLS_SHA256.into(),
+                into,
+            })),
+            toolchain: None,
+        });
+    };
+    let config = if std::env::consts::ARCH == "aarch64" {
+        "config_mac_arm"
+    } else {
+        "config_mac"
+    };
+    let args = [
+        NO_METADATA_AT_ROOT,
+        "-Declipse.application=org.eclipse.jdt.ls.core.id1",
+        "-Dosgi.bundles.defaultStartLevel=4",
+        "-Declipse.product=org.eclipse.jdt.ls.core.product",
+        "-Xmx2G",
+        "--add-modules=ALL-SYSTEM",
+        "--add-opens",
+        "java.base/java.util=ALL-UNNAMED",
+        "--add-opens",
+        "java.base/java.lang=ALL-UNNAMED",
+        "-jar",
+    ]
+    .into_iter()
+    .map(String::from)
+    .chain([
+        launcher.display().to_string(),
+        "-configuration".into(),
+        dir.join(config).display().to_string(),
+        "-data".into(),
+        data(),
+    ])
+    .collect();
+    Ok(ServerSpec {
+        kind,
+        binary: jdk.join("bin/java"),
+        args,
+        options,
+    })
+}
+
+/// Eclipse's `.project`, `.classpath` and `.settings` go in jdtls's data
+/// directory, not the checkout, where they'd be untracked files. jdtls's
+/// file system reads this as it starts, so it's a JVM property; the
+/// setting of the same name comes too late.
+const NO_METADATA_AT_ROOT: &str = "-Djava.import.generatesMetadataFilesAtProjectRoot=false";
+
+/// Where jdtls keeps its workspace for the checkout at `root`: named by the
+/// first 12 hex digits of the SHA-256 of its path, with the path written
+/// beside it so a sweep can tell when the checkout is gone.
+pub fn jdtls_data(env: &Env, root: &Path) -> PathBuf {
+    let dir = jdtls_data_path(&env.servers, root);
+    if std::fs::create_dir_all(&dir).is_ok() {
+        let _ = std::fs::write(dir.join("worktree"), root.as_os_str().as_encoded_bytes());
+    }
+    dir
+}
+
+/// Where jdtls's workspace for the checkout at `root` is, made or not.
+pub fn jdtls_data_path(servers: &Path, root: &Path) -> PathBuf {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(root.as_os_str().as_encoded_bytes());
+    let name: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
+    servers.join("jdtls-data").join(name)
+}
+
+/// A JDK new enough to run jdtls: the one macOS's `java_home` picks for
+/// 21 or later, else `JAVA_HOME` when its `java` is 21 or later.
+fn find_jdk(env: &Env) -> Option<PathBuf> {
+    let picked = std::process::Command::new(&env.java_home_tool)
+        .args(["-v", "21+"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+        .filter(|home| home.join("bin/java").is_file());
+    picked.or_else(|| {
+        let home = env.java_home.clone()?;
+        let out = std::process::Command::new(home.join("bin/java"))
+            .arg("-version")
+            .output()
+            .ok()?;
+        // `java -version` writes to stderr.
+        let major = java_major(&String::from_utf8_lossy(&out.stderr))?;
+        (major >= 21).then_some(home)
+    })
+}
+
+/// The major version in `java -version`'s `version "21.0.2"`, or 8 for
+/// the old `version "1.8.0_402"`.
+fn java_major(text: &str) -> Option<u64> {
+    let quoted = text.split('"').nth(1)?;
+    let mut parts = quoted.split(['.', '-', '+']);
+    match parts.next()?.parse().ok()? {
+        1 => parts.next()?.parse().ok(),
+        major => Some(major),
     }
 }
 
@@ -713,6 +917,8 @@ mod tests {
                 path: Some(self.path("bin").into_os_string()),
                 home: Some(self.path("home")),
                 servers: self.path("servers"),
+                java_home_tool: self.path("bin/java_home"),
+                java_home: None,
             }
         }
 
@@ -924,6 +1130,80 @@ mod tests {
         assert!(start_warnings(ServerKind::Gopls, &root).is_empty());
         std::fs::create_dir_all(root.join("node_modules")).unwrap();
         assert!(start_warnings(kind, &root).is_empty());
+    }
+
+    /// jdtls: Homebrew's wrapper, else Perch's own on a JDK 21 or later;
+    /// missing, a checked download, or nothing without a JDK. Its data is
+    /// outside the checkout, one directory per checkout.
+    #[test]
+    fn jdtls_runs_on_a_jdk_with_its_data_outside_the_checkout() {
+        let fake = Fake::new();
+        let root = fake.path("checkout");
+        let jdtls = |fake: &Fake| find(ServerKind::Jdtls, &root, &fake.env());
+        assert_eq!(jdtls(&fake).unwrap_err().needs, Some(Need::Jdk));
+
+        let jdk = fake.path("jdk");
+        std::fs::create_dir_all(jdk.join("bin")).unwrap();
+        std::fs::write(jdk.join("bin/java"), "").unwrap();
+        fake.tool("java_home", &format!("echo {}", jdk.display()));
+        let missing = jdtls(&fake).unwrap_err();
+        let into = fake.path("servers/jdtls/1.61.0");
+        assert_eq!(
+            missing.install.as_deref(),
+            Some(&Install::Download {
+                url: "https://download.eclipse.org/jdtls/milestones/1.61.0/\
+                      jdt-language-server-1.61.0-202609031315.tar.gz"
+                    .into(),
+                sha256: JDTLS_SHA256.into(),
+                into: into.clone(),
+            })
+        );
+
+        let plugins = into.join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let launcher = plugins.join("org.eclipse.equinox.launcher_1.7.0.v20250424-1814.jar");
+        std::fs::write(&launcher, "").unwrap();
+        let spec = jdtls(&fake).unwrap();
+        assert_eq!(spec.binary, jdk.join("bin/java"));
+        assert_eq!(spec.args[0], NO_METADATA_AT_ROOT);
+        let data = jdtls_data(&fake.env(), &root);
+        assert!(data.starts_with(fake.path("servers/jdtls-data")));
+        assert_eq!(std::fs::read_to_string(data.join("worktree")).unwrap(), root.display().to_string());
+        let at = |flag: &str| spec.args.iter().position(|a| a == flag).unwrap();
+        assert_eq!(spec.args[at("-jar") + 1], launcher.display().to_string());
+        assert_eq!(spec.args[at("-data") + 1], data.display().to_string());
+        assert!(spec.args[at("-configuration") + 1].starts_with(&into.display().to_string()));
+        assert_eq!(spec.options["extendedClientCapabilities"]["classFileContentsSupport"], true);
+        assert_eq!(
+            spec.options["settings"]["java"]["import"]["generatesMetadataFilesAtProjectRoot"],
+            false
+        );
+        assert_ne!(jdtls_data(&fake.env(), &fake.path("elsewhere")), data);
+
+        let wrapper = fake.tool("jdtls", "exit 0");
+        let spec = jdtls(&fake).unwrap();
+        assert_eq!(spec.binary, wrapper);
+        assert_eq!(
+            spec.args,
+            [
+                format!("--jvm-arg={NO_METADATA_AT_ROOT}"),
+                "-data".to_string(),
+                data.display().to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn java_says_its_major_version() {
+        assert_eq!(java_major("openjdk version \"21.0.2\" 2024-01-16"), Some(21));
+        assert_eq!(java_major("java version \"1.8.0_402\""), Some(8));
+        assert_eq!(java_major("openjdk version \"25\" 2025-09-16"), Some(25));
+        assert_eq!(java_major("nothing"), None);
+        assert!(is_class_file("jdt://contents/rt.jar/java.util/List.class"));
+        assert_eq!(
+            language_id("jdt://contents/rt.jar/java.util/List.class"),
+            Some((ServerKind::Jdtls, "java"))
+        );
     }
 
     #[test]

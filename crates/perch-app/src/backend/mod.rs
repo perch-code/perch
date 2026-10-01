@@ -4547,6 +4547,7 @@ async fn run(
                 tokio::spawn(async move {
                     if open_outside_file(
                         checkout.clone(),
+                        language_servers.clone(),
                         events.clone(),
                         navigation_requests.clone(),
                         path.clone(),
@@ -4685,7 +4686,7 @@ async fn run(
                         .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()));
                     let Some(worktree) = worktree else { return };
                     let locations = client.references(&full, line, character).await;
-                    let locations = read_locations(&worktree, &locations).await;
+                    let locations = read_locations(&worktree, &locations, Some(&client)).await;
                     let _ = events.send(Event::LspReferences { token, locations });
                 });
             }
@@ -4791,6 +4792,7 @@ async fn run(
                                 uri: item.uri.clone(),
                                 range: item.selection_range,
                             }],
+                            Some(&client),
                         )
                         .await
                         .into_iter()
@@ -4956,7 +4958,7 @@ fn spawn_goto(
             Goto::Implementation => client.implementation(&full, line, character).await,
         };
         let locations = match locations {
-            Ok(locations) => Ok(read_locations(&worktree, &locations).await),
+            Ok(locations) => Ok(read_locations(&worktree, &locations, Some(&client)).await),
             Err(e) => Err(e.to_string()),
         };
         let _ = events.send(answer(locations));
@@ -5019,7 +5021,12 @@ fn spawn_names(
             }
             let answer = match crate::review::code_refs::pick(&name.segments, found, &worktree) {
                 Some((segments, locations)) => {
-                    let located = read_locations(&worktree, &locations).await;
+                    // A class file is jdtls's to read.
+                    let jdtls = clients
+                        .iter()
+                        .find(|c| c.kind() == perch_lsp::ServerKind::Jdtls)
+                        .map(|c| c.as_ref());
+                    let located = read_locations(&worktree, &locations, jdtls).await;
                     (!located.is_empty()).then(|| (segments, Arc::new(located)))
                 }
                 None => None,
@@ -5093,7 +5100,11 @@ fn spawn_calls(
             };
         let mut calls = Vec::with_capacity(named.len());
         for (call_item, location) in named {
-            let Some(site) = read_locations(&worktree, &[location]).await.into_iter().next() else {
+            let Some(site) = read_locations(&worktree, &[location], Some(&client))
+                .await
+                .into_iter()
+                .next()
+            else {
                 continue;
             };
             calls.push(crate::review::model::Call {
@@ -7097,6 +7108,7 @@ async fn retire_archived_checkout_from_cache(
             .remove_worktree(&bare, &checkout.path)
             .await
             .map_err(|error| error.to_string())?;
+        forget_server_data(&checkout.path);
     }
     let guard = cache
         .as_ref()
@@ -7187,6 +7199,7 @@ async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), Strin
                     .remove_worktree(&bare, &checkout.path)
                     .await
                     .map_err(|e| e.to_string())?;
+                forget_server_data(&checkout.path);
             }
             // The bare clone, or a root with its `.git`.
             if bare.join("HEAD").is_file() || bare.join(".git").exists() {
@@ -15982,6 +15995,7 @@ async fn open_file(
 /// view a worktree file does, saying why.
 async fn open_outside_file(
     slot: Arc<std::sync::Mutex<Option<ReviewContext>>>,
+    servers: Servers,
     events: EventSender<Event>,
     navigation_requests: Arc<NavigationRequests>,
     path: String,
@@ -16001,7 +16015,22 @@ async fn open_outside_file(
         return false;
     };
 
-    let (text, truncated) = match tokio::fs::read(&path).await {
+    // A class file is read from jdtls, which gives its source.
+    let class_file = if perch_lsp::server::is_class_file(&path) {
+        let jdtls = servers.lock().await.get(&perch_lsp::ServerKind::Jdtls).cloned();
+        Some(match jdtls {
+            Some(jdtls) => jdtls.class_file_contents(&path).await,
+            None => None,
+        })
+    } else {
+        None
+    };
+    let read = match class_file {
+        Some(Some(text)) => Ok(text.into_bytes()),
+        Some(None) => Err(std::io::Error::other("jdtls has nothing for it")),
+        None => tokio::fs::read(&path).await,
+    };
+    let (text, truncated) = match read {
         Ok(bytes) if bytes.len() > MAX_FILE_BYTES => {
             ("This file is too large to show.".to_string(), true)
         }
@@ -16259,6 +16288,17 @@ fn servers_dir() -> PathBuf {
     perch_github::config::perch_home().join("servers")
 }
 
+/// Remove what a language server kept for a worktree that's gone: jdtls's
+/// workspace data, which lives outside the worktree.
+fn forget_server_data(worktree: &Path) {
+    let dir = perch_lsp::server::jdtls_data_path(&servers_dir(), worktree);
+    if dir.is_dir() {
+        if let Err(error) = std::fs::remove_dir_all(&dir) {
+            tracing::warn!(%error, dir = %dir.display(), "could not remove jdtls's data");
+        }
+    }
+}
+
 /// Run a server's install, once at a time for every window, telling every
 /// window as it starts and ends. The windows that wanted it start it again
 /// themselves.
@@ -16513,6 +16553,9 @@ async fn resolve(
 ) -> Option<(Arc<perch_lsp::Client>, std::path::PathBuf)> {
     let kind = perch_lsp::ServerKind::for_path(path)?;
     let client = slot.lock().await.get(&kind).cloned()?;
+    if perch_lsp::server::is_class_file(path) {
+        return Some((client, std::path::PathBuf::from(path)));
+    }
     let worktree = checkout
         .lock()
         .ok()
@@ -16529,13 +16572,41 @@ async fn resolve(
 async fn read_locations(
     worktree: &Path,
     locations: &[perch_lsp::lsp_types::Location],
+    client: Option<&perch_lsp::Client>,
 ) -> Vec<crate::review::model::Located> {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let mut texts: std::collections::HashMap<std::path::PathBuf, Vec<String>> =
         std::collections::HashMap::new();
     let mut out = Vec::new();
     for location in locations {
-        let Some(target) = perch_lsp::client::uri_to_path(&location.uri.to_string()) else {
+        let uri = location.uri.to_string();
+        // A class in a jar or the JDK, as jdtls names one: known by its URI
+        // without the query, its text the source jdtls gives.
+        if perch_lsp::server::is_class_file(&uri) {
+            let Some(client) = client.filter(|c| c.kind() == perch_lsp::ServerKind::Jdtls) else {
+                continue;
+            };
+            let key = client.remember_class_file(&uri);
+            let target = std::path::PathBuf::from(&key);
+            if !texts.contains_key(&target) {
+                let lines = client
+                    .class_file_contents(&key)
+                    .await
+                    .map(|t| t.lines().map(str::to_string).collect())
+                    .unwrap_or_default();
+                texts.insert(target.clone(), lines);
+            }
+            let line = location.range.start.line as usize;
+            out.push(crate::review::model::Located {
+                outside: Some(crate::review::model::outside_label(&target, home.as_deref())),
+                path: key,
+                line: line + 1,
+                character: location.range.start.character as usize,
+                text: texts[&target].get(line).map(|l| l.trim().to_string()).unwrap_or_default(),
+            });
+            continue;
+        }
+        let Some(target) = perch_lsp::client::uri_to_path(&uri) else {
             continue;
         };
         let (path, outside) = match target.strip_prefix(worktree) {
@@ -18457,6 +18528,9 @@ while True:
         result = {"capabilities": {}}
     elif method == "textDocument/hover":
         result = {"contents": {"kind": "markdown", "value": name}}
+    elif method == "java/classFileContents":
+        result = "// " + message["params"]["uri"] + "\npublic interface List<E> {}\n"
+
     elif method == "workspace/symbol":
         query = message["params"]["query"].rstrip("#")
         if query.startswith(prefix):
@@ -18572,6 +18646,53 @@ while True:
         rust.shutdown().await;
         assert_eq!(hover("cmd/main.go").await.as_deref(), Some("gopls"));
         go.shutdown().await;
+    }
+
+    /// A definition in the JDK, as jdtls names it, is kept without its
+    /// query, labelled, and read from jdtls; a hover in it goes to jdtls
+    /// with the URI it gave.
+    #[tokio::test]
+    async fn a_class_file_is_read_from_jdtls() {
+        use perch_lsp::ServerKind;
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(dir.path(), &nowhere(), &[]);
+        let tree = tempfile::tempdir().unwrap();
+        let worktree = std::fs::canonicalize(tree.path()).unwrap();
+        let item = store_pull(&ctx, 9);
+        open_in_slot(&ctx, &item);
+        if let Some(open) = ctx.slot.lock().unwrap().as_mut() {
+            open.checkout.worktree = worktree.clone();
+        }
+        let jdtls = named_server(&worktree, ServerKind::Jdtls, "-").await;
+        ctx.language_servers.lock().await.insert(ServerKind::Jdtls, jdtls.clone());
+
+        let uri = "jdt://contents/java.base/java.util/List.class?=demo/%5C/jrt-fs.jar%60java.base";
+        let at = perch_lsp::lsp_types::Position {
+            line: 1,
+            character: 17,
+        };
+        let location = perch_lsp::lsp_types::Location {
+            uri: uri.parse().unwrap(),
+            range: perch_lsp::lsp_types::Range { start: at, end: at },
+        };
+        let located = read_locations(&worktree, std::slice::from_ref(&location), Some(&jdtls)).await;
+        let key = "jdt://contents/java.base/java.util/List.class";
+        assert_eq!(located.len(), 1);
+        assert_eq!(located[0].path, key);
+        assert_eq!(located[0].outside.as_deref(), Some("JDK"));
+        assert_eq!(located[0].line, 2);
+        assert_eq!(located[0].text, "public interface List<E> {}");
+        // Without jdtls a class file is nothing to read.
+        assert!(read_locations(&worktree, &[location], None).await.is_empty());
+
+        let (client, full) = resolve(&ctx.slot, &ctx.language_servers, key).await.unwrap();
+        assert_eq!(client.kind(), ServerKind::Jdtls);
+        assert_eq!(full, Path::new(key));
+        assert_eq!(
+            client.class_file_contents(key).await.unwrap().lines().next(),
+            Some(format!("// {uri}").as_str())
+        );
+        jdtls.shutdown().await;
     }
 
     /// Give windows 1 and 2 views, as opening them does.

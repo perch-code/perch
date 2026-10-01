@@ -46,7 +46,71 @@ pub(crate) async fn install_within(install: &Install, timeout: Duration) -> Resu
                 }
             }
         }
+        Install::Download { url, sha256, into } => {
+            let staging = partial(into);
+            fresh_dir(&staging).await?;
+            match download(url, sha256, &staging, timeout).await {
+                Ok(()) => settle(&staging, into).await,
+                Err(e) => {
+                    let _ = tokio::fs::remove_dir_all(&staging).await;
+                    Err(e)
+                }
+            }
+        }
     }
+}
+
+/// Fetch the tarball at `url` into `staging`, check it is the one pinned,
+/// and unpack it there. macOS's own curl and tar do the work.
+async fn download(url: &str, sha256: &str, staging: &Path, timeout: Duration) -> Result<(), String> {
+    let tarball = staging.join("download.tar.gz");
+    let tarball_arg = tarball.display().to_string();
+    run(
+        Path::new("/usr/bin/curl"),
+        &["-fsSL".into(), "-o".into(), tarball_arg.clone(), url.into()],
+        &[],
+        timeout,
+    )
+    .await?;
+    let got = {
+        let tarball = tarball.clone();
+        tokio::task::spawn_blocking(move || sha256_of(&tarball))
+            .await
+            .map_err(|e| e.to_string())??
+    };
+    if !got.eq_ignore_ascii_case(sha256) {
+        return Err(format!("the download's SHA-256 is {got}, not {sha256}"));
+    }
+    run(
+        Path::new("/usr/bin/tar"),
+        &["-xzf".into(), tarball_arg, "-C".into(), staging.display().to_string()],
+        &[],
+        timeout,
+    )
+    .await?;
+    tokio::fs::remove_file(&tarball)
+        .await
+        .map_err(|e| format!("could not remove the download: {e}"))
+}
+
+/// A file's SHA-256, in lowercase hex.
+fn sha256_of(path: &Path) -> Result<String, String> {
+    use sha2::Digest;
+    use std::io::Read;
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("could not read the download: {e}"))?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = vec![0u8; 1 << 16];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|e| format!("could not read the download: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// An empty directory at `dir`, whatever was there.
@@ -175,6 +239,48 @@ mod tests {
         assert_eq!(install(&failing).await.unwrap_err(), "no network");
         assert!(!other.exists());
         assert!(!partial(&other).exists());
+    }
+
+    /// A download is checked against its pin before it's unpacked; one
+    /// that doesn't match is deleted and says both hashes.
+    #[tokio::test]
+    async fn a_download_is_unpacked_only_when_its_hash_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = dir.path().join("content");
+        std::fs::create_dir_all(content.join("plugins")).unwrap();
+        std::fs::write(content.join("plugins/launcher.jar"), "jar").unwrap();
+        let tarball = dir.path().join("release.tar.gz");
+        let made = std::process::Command::new("/usr/bin/tar")
+            .args(["-czf"])
+            .arg(&tarball)
+            .arg("-C")
+            .arg(&content)
+            .arg("plugins")
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let sha256 = sha256_of(&tarball).unwrap();
+        let url = format!("file://{}", tarball.display());
+
+        let into = dir.path().join("servers/jdtls/1.61.0");
+        let wrong = Install::Download {
+            url: url.clone(),
+            sha256: "0".repeat(64),
+            into: into.clone(),
+        };
+        let error = install(&wrong).await.unwrap_err();
+        assert!(error.contains(&sha256) && error.contains(&"0".repeat(64)), "{error}");
+        assert!(!into.exists() && !partial(&into).exists());
+
+        let right = Install::Download {
+            url,
+            sha256,
+            into: into.clone(),
+        };
+        install(&right).await.unwrap();
+        assert_eq!(std::fs::read_to_string(into.join("plugins/launcher.jar")).unwrap(), "jar");
+        assert!(!into.join("download.tar.gz").exists());
+        assert!(!partial(&into).exists());
     }
 
     #[tokio::test]
