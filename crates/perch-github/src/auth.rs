@@ -5,6 +5,8 @@
 //! is what makes the app work when double-clicked, because `gh` keeps its
 //! token in its own config rather than the environment.
 
+use std::ffi::OsStr;
+use std::path::PathBuf;
 use std::process::Command;
 
 use crate::config::Config;
@@ -59,10 +61,59 @@ fn non_empty_env(key: &str) -> Option<String> {
 }
 
 fn gh_cli_token() -> Option<String> {
-    let out = Command::new("gh").args(["auth", "token"]).output().ok()?;
+    let gh = find_gh(std::env::var_os("PATH").as_deref(), &gh_install_dirs())?;
+    let out = Command::new(gh).args(["auth", "token"]).output().ok()?;
     if !out.status.success() {
         return None;
     }
     let token = String::from_utf8(out.stdout).ok()?.trim().to_string();
     (!token.is_empty()).then_some(token)
+}
+
+/// Where Homebrew, MacPorts and Nix put `gh`. A Finder launch gets only
+/// `/usr/bin:/bin:/usr/sbin:/sbin` on `PATH`, which holds none of them.
+fn gh_install_dirs() -> Vec<PathBuf> {
+    let mut dirs = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"].map(PathBuf::from).to_vec();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        dirs.push(home.join(".nix-profile/bin"));
+        dirs.push(home.join(".local/bin"));
+    }
+    dirs
+}
+
+/// `gh` on `PATH`, else in the first of `extra` that has it.
+fn find_gh(path: Option<&OsStr>, extra: &[PathBuf]) -> Option<PathBuf> {
+    let on_path = path.into_iter().flat_map(std::env::split_paths).collect::<Vec<_>>();
+    on_path
+        .iter()
+        .chain(extra)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join("gh"))
+        .find(|gh| gh.is_file())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gh_off_a_bare_finder_path_is_found_in_an_install_dir() {
+        let empty = tempfile::tempdir().unwrap();
+        let install = tempfile::tempdir().unwrap();
+        std::fs::write(install.path().join("gh"), "").unwrap();
+        let extra = [empty.path().to_path_buf(), install.path().to_path_buf()];
+        let bare = OsStr::new("/nonexistent-a:/nonexistent-b");
+        assert_eq!(find_gh(Some(bare), &extra), Some(install.path().join("gh")));
+        assert_eq!(find_gh(Some(bare), &extra[..1]), None);
+    }
+
+    #[test]
+    fn gh_on_path_wins_over_an_install_dir() {
+        let on_path = tempfile::tempdir().unwrap();
+        let install = tempfile::tempdir().unwrap();
+        std::fs::write(on_path.path().join("gh"), "").unwrap();
+        std::fs::write(install.path().join("gh"), "").unwrap();
+        let found = find_gh(Some(on_path.path().as_os_str()), &[install.path().to_path_buf()]);
+        assert_eq!(found, Some(on_path.path().join("gh")));
+    }
 }
