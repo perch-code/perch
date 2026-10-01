@@ -45,6 +45,15 @@ fn main() {
     for name in ["RUSTUP_TOOLCHAIN", "RUSTUP_TOOLCHAIN_SOURCE", "CARGO"] {
         std::env::remove_var(name);
     }
+    // A Finder launch gets a bare PATH. Everything Perch starts inherits it:
+    // gh, the agents, an npm-installed agent's `node`. Adding the install
+    // dirs here, at the end, fixes them all at once.
+    if let Some(path) = perch_agent::path_with_install_dirs(
+        std::env::var_os("PATH").as_deref(),
+        &perch_agent::install_dirs(),
+    ) {
+        std::env::set_var("PATH", path);
+    }
     // A debugging mode that renders a file the way the editor would, without
     // a window. The screen has to be unlocked to look at the real thing, and
     // this checks everything up to the pixels.

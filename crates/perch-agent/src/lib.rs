@@ -33,7 +33,8 @@ pub use codex::CodexParser;
 pub use interactive::{ApprovalKind, ApprovalRequest, Decision};
 use interactive::{ClaudeHost, CodexServer, CodexThread, Conversation};
 pub use discover::{
-    codex_catalog, codex_default_model, find_binary, parse_codex_catalog, CodexModel,
+    codex_catalog, codex_default_model, find_binary, install_dirs, parse_codex_catalog,
+    path_with_install_dirs, CodexModel,
 };
 pub use parse::{parse_line, summarize_tool_call};
 pub use review::{

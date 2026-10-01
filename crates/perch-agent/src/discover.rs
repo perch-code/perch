@@ -3,10 +3,41 @@
 //! is fixed; Codex has only slugs that change with each release, so its
 //! own catalog is the list.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+
+/// Where the CLIs and what they need get installed: the native installers'
+/// `~/.local/bin`, then Homebrew, MacPorts and Nix. A Finder launch gets
+/// only `/usr/bin:/bin:/usr/sbin:/sbin` on `PATH`, which holds none of them.
+pub fn install_dirs() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut dirs = Vec::new();
+    if let Some(home) = &home {
+        dirs.push(home.join(".local/bin"));
+    }
+    dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"].map(PathBuf::from));
+    if let Some(home) = &home {
+        dirs.push(home.join(".nix-profile/bin"));
+    }
+    dirs
+}
+
+/// `path` with each of `extra` that exists and is not already on it added
+/// at the end, so what the user put first still wins. An npm-installed
+/// CLI is a `#!/usr/bin/env node` script, and without this a Finder launch
+/// finds the script but not `node`. `None` when there is nothing to add.
+pub fn path_with_install_dirs(path: Option<&OsStr>, extra: &[PathBuf]) -> Option<OsString> {
+    let mut dirs = path.into_iter().flat_map(std::env::split_paths).collect::<Vec<_>>();
+    let before = dirs.len();
+    for dir in extra {
+        if dir.is_dir() && !dirs.contains(dir) {
+            dirs.push(dir.clone());
+        }
+    }
+    (dirs.len() > before).then(|| std::env::join_paths(dirs).ok()).flatten()
+}
 
 /// Where a binary is. A name is looked up on `PATH`, then in the
 /// directories the two CLIs install into, so an app launched from the
@@ -14,13 +45,7 @@ use serde_json::Value;
 /// with a leading `~` expanded. `None` means it is not there.
 pub fn find_binary(binary: &str) -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let mut extra = Vec::new();
-    if let Some(home) = &home {
-        extra.push(home.join(".local/bin"));
-    }
-    extra.push("/opt/homebrew/bin".into());
-    extra.push("/usr/local/bin".into());
-    find_binary_in(binary, std::env::var_os("PATH").as_deref(), &extra, home.as_deref())
+    find_binary_in(binary, std::env::var_os("PATH").as_deref(), &install_dirs(), home.as_deref())
 }
 
 /// `find_binary` with its environment passed in, so it can be tested.
@@ -173,6 +198,23 @@ mod tests {
         assert_eq!(find_binary_in("codex", Some(&path), &extras, None), Some(extra.join("codex")));
         assert_eq!(find_binary_in("gemini", Some(&path), &extras, None), None);
         assert_eq!(find_binary_in("claude", None, &[], None), None, "no PATH, no extras, nothing");
+    }
+
+    #[test]
+    fn install_dirs_go_after_the_path_once_each_and_only_if_they_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let on_path = dir.path().join("bin");
+        let brew = dir.path().join("brew");
+        std::fs::create_dir_all(&on_path).unwrap();
+        std::fs::create_dir_all(&brew).unwrap();
+        let missing = dir.path().join("missing");
+        let path = std::env::join_paths([&on_path]).unwrap();
+        let extra = [on_path.clone(), missing, brew.clone()];
+
+        let joined = path_with_install_dirs(Some(&path), &extra).unwrap();
+        assert_eq!(std::env::split_paths(&joined).collect::<Vec<_>>(), [on_path.clone(), brew.clone()]);
+        assert_eq!(path_with_install_dirs(Some(&joined), &extra), None, "nothing new to add");
+        assert_eq!(path_with_install_dirs(None, &[brew.clone()]), Some(brew.into_os_string()));
     }
 
     #[test]
