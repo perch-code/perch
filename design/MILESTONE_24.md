@@ -208,7 +208,8 @@ for jdtls. Bumping one is a commit, like bumping a dependency.
 - When the newest of Perch's installs of a server is older than the pin,
   the server's first start in a session also gets a toast:
   `gopls 0.20.0 is available.` **Update** (the install again, at the pin).
-  The old version keeps working meanwhile.
+  The old version keeps working meanwhile, and until the server next
+  starts: an update doesn't restart a running server.
 - After an install, older versions of that server under
   `~/.perch/servers` are removed at the next startup, when nothing runs
   them.

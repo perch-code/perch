@@ -12,8 +12,8 @@ pub mod transport;
 pub use client::{Client, Request};
 pub use install::install;
 pub use server::{
-    find, kinds_at_root, language_id, partial, start_warnings, Env, Install, Missing, Need, ServerKind, ServerSpec,
-    Status,
+    find, kinds_at_root, language_id, outdated, partial, start_warnings, sweep, Env, Install,
+    Missing, Need, Outdated, ServerKind, ServerSpec, Status,
 };
 
 pub use lsp_types;

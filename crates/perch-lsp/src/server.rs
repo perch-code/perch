@@ -286,6 +286,16 @@ pub enum Install {
 }
 
 impl Install {
+    /// The version an install into Perch's directory puts there, named by
+    /// the directory it goes in.
+    pub fn version(&self) -> Option<&str> {
+        let into = match self {
+            Install::Command { into, .. } => into.as_ref()?,
+            Install::Download { into, .. } => into,
+        };
+        into.file_name()?.to_str()
+    }
+
     /// The command as the toast's tooltip shows it.
     pub fn shown(&self) -> String {
         match self {
@@ -391,15 +401,10 @@ fn find_jdtls(root: &Path, env: &Env) -> Result<ServerSpec, Missing> {
         Some((dir, launcher))
     });
     let Some((dir, launcher)) = install else {
-        let into = env.servers.join(kind.name()).join(JDTLS_PIN);
         return Err(Missing {
             kind,
             needs: None,
-            install: Some(Box::new(Install::Download {
-                url: format!("https://download.eclipse.org/jdtls/milestones/{JDTLS_PIN}/{JDTLS_TARBALL}"),
-                sha256: JDTLS_SHA256.into(),
-                into,
-            })),
+            install: Some(Box::new(jdtls_install(env))),
             toolchain: None,
         });
     };
@@ -456,6 +461,15 @@ pub fn jdtls_data(env: &Env, root: &Path) -> PathBuf {
     dir
 }
 
+/// The download of the pinned jdtls into Perch's directory.
+fn jdtls_install(env: &Env) -> Install {
+    Install::Download {
+        url: format!("https://download.eclipse.org/jdtls/milestones/{JDTLS_PIN}/{JDTLS_TARBALL}"),
+        sha256: JDTLS_SHA256.into(),
+        into: env.servers.join(ServerKind::Jdtls.name()).join(JDTLS_PIN),
+    }
+}
+
 /// Where jdtls's workspace for the checkout at `root` is, made or not.
 pub fn jdtls_data_path(servers: &Path, root: &Path) -> PathBuf {
     use sha2::Digest;
@@ -494,6 +508,99 @@ fn java_major(text: &str) -> Option<u64> {
     match parts.next()?.parse().ok()? {
         1 => parts.next()?.parse().ok(),
         major => Some(major),
+    }
+}
+
+/// A server Perch installed that is older than the version Perch now
+/// pins, and the install that brings it up to date.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outdated {
+    pub kind: ServerKind,
+    pub installed: String,
+    pub pin: String,
+    pub install: Install,
+}
+
+impl Outdated {
+    /// The line its toast shows.
+    pub fn describe(&self) -> String {
+        format!("{} {} is available.", self.kind.name(), self.pin)
+    }
+}
+
+/// Whether the server `spec` runs is one of Perch's own installs that is
+/// older than the pin. A server Perch didn't install is never outdated:
+/// it isn't Perch's to update.
+pub fn outdated(spec: &ServerSpec, env: &Env) -> Option<Outdated> {
+    let kind = spec.kind;
+    let (installed, dir) = newest_install(env, kind)?;
+    // The binary, or for jdtls the launcher jar it runs, is in the install.
+    let runs_it = spec.binary.starts_with(&dir)
+        || spec.args.iter().any(|arg| Path::new(arg).starts_with(&dir));
+    if !runs_it {
+        return None;
+    }
+    let install = match kind {
+        ServerKind::RustAnalyzer => return None,
+        ServerKind::Gopls => gopls_install(&env.which("go")?, env),
+        ServerKind::TypescriptLanguageServer => typescript_install(&env.which("npm")?, env),
+        ServerKind::Jdtls => jdtls_install(env),
+    };
+    let pin = install.version()?.to_string();
+    (compare_versions(&installed, &pin) == std::cmp::Ordering::Less).then_some(Outdated {
+        kind,
+        installed,
+        pin,
+        install,
+    })
+}
+
+/// Tidy Perch's servers directory as Perch starts, when nothing runs
+/// from it: installs cut short (`.partial`), every version of a server but
+/// its newest, and jdtls data whose checkout is gone.
+pub fn sweep(servers: &Path) {
+    let Ok(entries) = std::fs::read_dir(servers) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        if dir.file_name().is_some_and(|n| n == "jdtls-data") {
+            sweep_jdtls_data(&dir);
+            continue;
+        }
+        for partial in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let name = partial.file_name();
+            if name.to_string_lossy().ends_with(".partial") {
+                remove(&partial.path());
+            }
+        }
+        let mut versions = installs(&dir);
+        versions.pop();
+        for (_, old) in versions {
+            remove(&old);
+        }
+    }
+}
+
+/// Remove each jdtls workspace whose checkout is no longer there.
+fn sweep_jdtls_data(data: &Path) {
+    for entry in std::fs::read_dir(data).into_iter().flatten().flatten() {
+        let worktree = std::fs::read(entry.path().join("worktree"))
+            .ok()
+            .map(|bytes| PathBuf::from(String::from_utf8_lossy(&bytes).into_owned()));
+        if !worktree.is_some_and(|w| w.is_dir()) {
+            remove(&entry.path());
+        }
+    }
+}
+
+fn remove(dir: &Path) {
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => tracing::info!(dir = %dir.display(), "removed an old language server install"),
+        Err(error) => tracing::warn!(%error, dir = %dir.display(), "could not remove"),
     }
 }
 
@@ -559,27 +666,34 @@ fn find_typescript_language_server(root: &Path, env: &Env) -> Result<ServerSpec,
             toolchain: None,
         });
     };
-    let into = env.servers.join(kind.name()).join(TYPESCRIPT_LANGUAGE_SERVER_PIN);
     Err(Missing {
         kind,
         needs: None,
-        install: Some(Box::new(Install::Command {
-            program: npm,
-            args: vec![
-                "install".into(),
-                "--prefix".into(),
-                partial(&into).display().to_string(),
-                "--ignore-scripts".into(),
-                "--no-fund".into(),
-                "--no-audit".into(),
-                format!("typescript-language-server@{TYPESCRIPT_LANGUAGE_SERVER_PIN}"),
-                format!("typescript@{TYPESCRIPT_PIN}"),
-            ],
-            env: Vec::new(),
-            into: Some(into),
-        })),
+        install: Some(Box::new(typescript_install(&npm, env))),
         toolchain: None,
     })
+}
+
+/// npm's install of typescript-language-server and its TypeScript into
+/// Perch's directory, without their install scripts.
+fn typescript_install(npm: &Path, env: &Env) -> Install {
+    let kind = ServerKind::TypescriptLanguageServer;
+    let into = env.servers.join(kind.name()).join(TYPESCRIPT_LANGUAGE_SERVER_PIN);
+    Install::Command {
+        program: npm.to_path_buf(),
+        args: vec![
+            "install".into(),
+            "--prefix".into(),
+            partial(&into).display().to_string(),
+            "--ignore-scripts".into(),
+            "--no-fund".into(),
+            "--no-audit".into(),
+            format!("typescript-language-server@{TYPESCRIPT_LANGUAGE_SERVER_PIN}"),
+            format!("typescript@{TYPESCRIPT_PIN}"),
+        ],
+        env: Vec::new(),
+        into: Some(into),
+    }
 }
 
 /// The gopls Perch installs, newest first, each with the oldest Go that
@@ -1204,6 +1318,71 @@ mod tests {
             language_id("jdt://contents/rt.jar/java.util/List.class"),
             Some((ServerKind::Jdtls, "java"))
         );
+    }
+
+    /// Only Perch's own install, older than the pin, is offered an update.
+    #[test]
+    fn an_old_install_of_perchs_is_offered_the_pin() {
+        let fake = Fake::new();
+        fake.tool("node", "exit 0");
+        let npm = fake.tool("npm", "exit 0");
+        let kind = ServerKind::TypescriptLanguageServer;
+        let old = fake.path("servers/typescript-language-server/5.1.0");
+        let bin = old.join("node_modules/.bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("typescript-language-server"), "").unwrap();
+        let spec = find(kind, &fake.path("checkout"), &fake.env()).unwrap();
+        let old_one = outdated(&spec, &fake.env()).unwrap();
+        assert_eq!(old_one.installed, "5.1.0");
+        assert_eq!(old_one.pin, "6.0.1");
+        assert_eq!(old_one.describe(), "typescript-language-server 6.0.1 is available.");
+        assert_eq!(old_one.install, typescript_install(&npm, &fake.env()));
+
+        // Up to date: nothing.
+        std::fs::rename(&old, fake.path("servers/typescript-language-server/6.0.1")).unwrap();
+        let spec = find(kind, &fake.path("checkout"), &fake.env()).unwrap();
+        assert_eq!(outdated(&spec, &fake.env()), None);
+        // The user's own: never Perch's to update.
+        fake.tool("typescript-language-server", "exit 0");
+        std::fs::rename(
+            fake.path("servers/typescript-language-server/6.0.1"),
+            fake.path("servers/typescript-language-server/5.0.0"),
+        )
+        .unwrap();
+        let spec = find(kind, &fake.path("checkout"), &fake.env()).unwrap();
+        assert_eq!(outdated(&spec, &fake.env()), None);
+    }
+
+    /// Startup leaves the newest install of each server, finished, and the
+    /// jdtls data of checkouts still there.
+    #[test]
+    fn the_sweep_keeps_the_newest_finished_install_and_live_data() {
+        let fake = Fake::new();
+        let servers = fake.path("servers");
+        for version in ["0.21.1", "0.23.0", "0.24.0.partial"] {
+            std::fs::create_dir_all(servers.join("gopls").join(version)).unwrap();
+        }
+        std::fs::create_dir_all(servers.join("jdtls/1.61.0.partial")).unwrap();
+        let live = jdtls_data(&fake.env(), &fake.path("checkout"));
+        let gone = jdtls_data(&fake.env(), &fake.path("gone"));
+        let unmarked = servers.join("jdtls-data/000000000000");
+        std::fs::create_dir_all(&unmarked).unwrap();
+
+        sweep(&servers);
+        let left = |dir: &str| {
+            let mut names: Vec<String> = std::fs::read_dir(servers.join(dir))
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(left("gopls"), ["0.23.0"]);
+        assert!(left("jdtls").is_empty());
+        assert!(live.is_dir());
+        assert!(!gone.exists());
+        assert!(!unmarked.exists());
     }
 
     #[test]

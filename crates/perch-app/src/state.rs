@@ -2506,6 +2506,25 @@ impl AppState {
     /// Fold one event into what the sidebar and the popup read.
     pub fn apply(&self, event: Event) {
         match event {
+            Event::LspUpdateAvailable {
+                navigation_id,
+                kind,
+                text,
+                install,
+            } => {
+                if self.accepts_navigation(navigation_id) {
+                    self.offer_server(
+                        ServerOffer {
+                            kind,
+                            key: text.clone(),
+                            text,
+                            install: Some(install),
+                            action: "Update",
+                        },
+                        false,
+                    );
+                }
+            }
             Event::LspInstalling { kind } => {
                 self.installing_servers.update(|i| _ = i.insert(kind));
             }
@@ -3973,6 +3992,40 @@ mod tests {
             true,
         );
         assert_eq!(offers(&app)[0].text, "No definition found for `x`: …");
+    }
+
+    /// An out-of-date install of Perch's is offered its update once, not
+    /// again for each start, and not for a navigation since left.
+    #[test]
+    fn an_old_install_is_offered_its_update_once() {
+        let _root = floem::headless::TestRoot::new();
+        let app = AppState::new();
+        let review = ReviewState::new();
+        app.begin_item_review(review, "Open", "a", 93);
+        app.apply_with_review(review_ready("a", 93), review);
+        let update = |navigation_id| Event::LspUpdateAvailable {
+            navigation_id,
+            kind: perch_lsp::ServerKind::Gopls,
+            text: "gopls 0.23.0 is available.".into(),
+            install: perch_lsp::Install::Command {
+                program: "go".into(),
+                args: vec!["install".into()],
+                env: Vec::new(),
+                into: None,
+            },
+        };
+        app.apply_with_review(update(92), review);
+        assert!(offers(&app).is_empty(), "a navigation since left");
+        app.apply_with_review(update(93), review);
+        app.apply_with_review(update(93), review);
+        let offered = offers(&app);
+        assert_eq!(offered.len(), 1);
+        assert_eq!(offered[0].action, "Update");
+        assert_eq!(offered[0].text, "gopls 0.23.0 is available.");
+        let token = app.current_toast().unwrap().token;
+        app.decline_offer(token, &offered[0].key);
+        app.apply_with_review(update(93), review);
+        assert!(offers(&app).is_empty(), "turned down for the session");
     }
 
     /// Every window hears an install run; the one whose server was missing

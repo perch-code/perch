@@ -1341,6 +1341,14 @@ pub enum Event {
         kind: perch_lsp::ServerKind,
         message: String,
     },
+    /// Perch's own install of a server the window started is older than
+    /// the version Perch pins.
+    LspUpdateAvailable {
+        navigation_id: u64,
+        kind: perch_lsp::ServerKind,
+        text: String,
+        install: perch_lsp::Install,
+    },
     /// An install of a missing server began. Every window hears it, as
     /// they hear how it ended.
     LspInstalling {
@@ -1437,6 +1445,7 @@ impl Event {
                 | Event::HistoricalReviewFailed { .. }
                 | Event::LspStatus { .. }
                 | Event::LspWarning { .. }
+                | Event::LspUpdateAvailable { .. }
                 | Event::LspHover { .. }
                 | Event::LspDefinition { .. }
                 | Event::LspTypeDefinition { .. }
@@ -3486,6 +3495,8 @@ async fn run(
         perch_github::config::data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     let local_preparer = Preparer::new(Store::new(data_root.clone()), None);
     retire_archived_checkouts_from_cache(&cache, &local_preparer, &events).await;
+    // Nothing runs from Perch's servers yet: tidy them.
+    tokio::task::spawn_blocking(|| perch_lsp::sweep(&servers_dir()));
 
     // GitHub is optional. The cache, local checkouts and agent history stay
     // useful without a token, so only polling and remote actions are gated
@@ -16187,13 +16198,32 @@ async fn start_server(ctx: &Ctx, navigation_id: u64, kind: perch_lsp::ServerKind
     let found = {
         let worktree = worktree.clone();
         tokio::task::spawn_blocking(move || {
-            perch_lsp::find(kind, &worktree, &perch_lsp::Env::current(servers_dir()))
+            let env = perch_lsp::Env::current(servers_dir());
+            let found = perch_lsp::find(kind, &worktree, &env);
+            let outdated = found.as_ref().ok().and_then(|spec| perch_lsp::outdated(spec, &env));
+            (found, outdated)
         })
         .await
     };
     let spec = match found {
-        Ok(Ok(spec)) => spec,
-        Ok(Err(missing)) => {
+        Ok((Ok(spec), outdated)) => {
+            if let Some(outdated) = outdated {
+                send_if_current(
+                    navigation_requests,
+                    checkout,
+                    events,
+                    navigation_id,
+                    Event::LspUpdateAvailable {
+                        navigation_id,
+                        text: outdated.describe(),
+                        kind,
+                        install: outdated.install,
+                    },
+                );
+            }
+            spec
+        }
+        Ok((Err(missing), _)) => {
             send_lsp_status_if_current(
                 navigation_requests,
                 checkout,
