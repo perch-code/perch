@@ -40,7 +40,7 @@ pub use comments::{
 };
 pub use config::{
     append_repo, is_local, AgentConfig, Approvals, CodexConfig, Config, DeclaredRepo, RepoConfig, RepoWork,
-    WorkDefaults, CLAUDE_CODE, CODEX, LOCAL_OWNER,
+    WorkDefaults, CLAUDE_CODE, CODEX, CODEX_DEFAULT_MODEL, LOCAL_OWNER,
 };
 pub use discussion::{
     Discussion, IssueComment, PullReviewEvent, Review, ReviewComment, ReviewCommentDraft,

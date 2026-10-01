@@ -5262,7 +5262,7 @@ mod tests {
         harness.click(c.x, c.y);
         let composer = state.composer.get().expect("Ask about this opened the composer");
         assert_eq!(composer.thread_id.as_deref(), Some("gh-31"));
-        assert_eq!(composer.destination, Destination::agent(sonnet_medium()));
+        assert_eq!(composer.destination, Destination::agent((perch_agent::Backend::ClaudeCode, "opus".into(), perch_agent::Effort::High)));
         assert_eq!(composer.editing, None);
     }
 

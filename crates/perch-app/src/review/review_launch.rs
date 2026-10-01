@@ -1742,8 +1742,8 @@ mod tests {
             .find(|choice| choice.backend == perch_agent::Backend::Codex)
             .unwrap();
         assert!(claude.enabled);
-        assert_eq!(claude.model.as_deref(), Some("sonnet"));
-        assert_eq!(claude.effort, Some(perch_agent::ReviewEffort::Medium));
+        assert_eq!(claude.model.as_deref(), Some("opus"));
+        assert_eq!(claude.effort, Some(perch_agent::ReviewEffort::High));
         assert!(!codex.enabled);
     }
 

@@ -237,9 +237,22 @@ pub fn backend_for(agent: &perch_github::AgentConfig, model: &str) -> perch_agen
 /// whose binary is missing loses its models: the picker then offers only
 /// what can run. Codex's models come from its own catalog unless the file
 /// pinned a list, and if the catalog cannot be read the one model Codex
-/// itself is set to run stands in. Returns what went wrong, for the log;
-/// a missing Codex is not wrong, so it is not reported.
+/// itself is set to run stands in. With Claude Code missing, a Claude
+/// model the picker would start on gives way to GPT-6.1-Sol when Codex
+/// offers it. Returns what went wrong, for the log; a missing Codex is
+/// not wrong, so it is not reported.
 pub async fn discover(agent: &mut perch_github::AgentConfig) -> Vec<String> {
+    let problems = find_agents(agent).await;
+    if agent.models.is_empty()
+        && !agent.codex.models.contains(&agent.model)
+        && agent.codex.models.iter().any(|m| m == perch_github::CODEX_DEFAULT_MODEL)
+    {
+        agent.model = perch_github::CODEX_DEFAULT_MODEL.into();
+    }
+    problems
+}
+
+async fn find_agents(agent: &mut perch_github::AgentConfig) -> Vec<String> {
     let mut problems = Vec::new();
 
     match perch_agent::find_binary(&agent.binary) {
@@ -1618,6 +1631,34 @@ mod tests {
         assert!(
             pinned.codex.efforts.is_empty(),
             "and nothing is doubted about it"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_picker_starts_on_opus_or_without_claude_on_sol() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = fake(dir.path(), "claude", "exit 0");
+        let catalog = r#"{"models":[{"slug":"gpt-6-astra","visibility":"list"},{"slug":"gpt-6.1-sol","visibility":"list"}]}"#;
+        let codex = fake(dir.path(), "codex", &format!("cat <<'EOF'\n{catalog}\nEOF"));
+
+        let mut both = perch_github::AgentConfig {
+            binary: claude,
+            ..Default::default()
+        };
+        both.codex.binary = codex.clone();
+        discover(&mut both).await;
+        assert_eq!((both.model.as_str(), both.effort.as_str()), ("opus", "high"));
+
+        let mut codex_only = perch_github::AgentConfig {
+            binary: dir.path().join("no-claude").to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        codex_only.codex.binary = codex;
+        discover(&mut codex_only).await;
+        assert_eq!(
+            (codex_only.model.as_str(), codex_only.effort.as_str()),
+            ("gpt-6.1-sol", "high"),
+            "not the catalog's first"
         );
     }
 

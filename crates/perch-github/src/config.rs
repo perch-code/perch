@@ -95,6 +95,10 @@ pub struct CodexConfig {
 pub const CLAUDE_CODE: &str = "claude-code";
 pub const CODEX: &str = "codex";
 
+/// What the picker starts on when Claude Code is missing and Codex offers
+/// it: GPT-6.1-Sol.
+pub const CODEX_DEFAULT_MODEL: &str = "gpt-6.1-sol";
+
 fn default_binary() -> String {
     "claude".into()
 }
@@ -102,10 +106,10 @@ fn default_codex_binary() -> String {
     "codex".into()
 }
 fn default_model() -> String {
-    "sonnet".into()
+    "opus".into()
 }
 fn default_effort() -> String {
-    "medium".into()
+    "high".into()
 }
 fn default_models() -> Vec<String> {
     // The aliases the CLI resolves to the latest of each tier.
@@ -814,16 +818,17 @@ network = ["index.crates.io"]
     fn the_agent_section_defaults_and_overrides() {
         let c: Config = toml::from_str("").unwrap();
         assert_eq!(c.agent.binary, "claude");
-        assert_eq!(c.agent.model, "sonnet");
+        assert_eq!(c.agent.model, "opus");
+        assert_eq!(c.agent.effort, "high");
         assert_eq!(c.agent.models, vec!["fable", "opus", "sonnet", "haiku"]);
         assert_eq!(c.agent.max_concurrent_runs, 4);
         let c: Config = toml::from_str(
-            "[agent]\nbinary = \"/opt/claude\"\neffort = \"high\"\nmax_concurrent_runs = 7",
+            "[agent]\nbinary = \"/opt/claude\"\neffort = \"low\"\nmax_concurrent_runs = 7",
         )
         .unwrap();
         assert_eq!(c.agent.binary, "/opt/claude");
-        assert_eq!(c.agent.effort, "high");
-        assert_eq!(c.agent.model, "sonnet");
+        assert_eq!(c.agent.effort, "low");
+        assert_eq!(c.agent.model, "opus");
         assert_eq!(c.agent.max_concurrent_runs, 7);
     }
 

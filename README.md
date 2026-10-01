@@ -69,8 +69,8 @@ Perch finds the `claude` and `codex` CLIs on its own. To change the defaults:
 
 ```toml
 [agent]
-model = "sonnet"
-effort = "medium"
+model = "opus"
+effort = "high"
 max_concurrent_runs = 4
 
 [agent.codex]

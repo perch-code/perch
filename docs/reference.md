@@ -546,8 +546,8 @@ Perch discovers both CLIs automatically. Their optional settings are:
 ```toml
 [agent]
 binary = "claude"
-model = "sonnet"
-effort = "medium"              # low | medium | high | xhigh | max | ultra
+model = "opus"
+effort = "high"                # low | medium | high | xhigh | max | ultra
 models = ["fable", "opus", "sonnet", "haiku"]
 max_concurrent_runs = 4
 
@@ -555,6 +555,9 @@ max_concurrent_runs = 4
 binary = "codex"
 models = ["gpt-6-astra"]       # omit to use Codex's own model catalog
 ```
+
+Without Claude Code installed, a Claude `model` gives way to `gpt-6.1-sol`
+when Codex offers it, at the same effort.
 
 `perch --agents [limit]` prints active runs and retained history without
 launching an agent. `perch --ask owner/repo#N path:start-end "question"`
