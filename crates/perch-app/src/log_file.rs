@@ -23,6 +23,9 @@ pub fn dir() -> PathBuf {
 /// worker thread: a panic on the main thread aborts on its way out
 /// through AppKit, and a line queued for a worker would go with it.
 pub fn appender(dir: &Path) -> Result<RollingFileAppender, String> {
+    // The builder prunes old files before it makes the directory, and
+    // prints an error to stderr when there's no directory to read.
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     RollingFileAppender::builder()
         .rotation(Rotation::DAILY)
         .filename_prefix(PREFIX)
