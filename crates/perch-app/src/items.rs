@@ -5,7 +5,7 @@
 //! the sidebar is paintable from the cache alone.
 //!
 //! Every tab has one filter menu of the same shape: View, then what the
-//! list is narrowed to (Repository, Reason, State), then Sort By, then
+//! list is narrowed to (Repository, State), then Sort By, then
 //! what is shown and done. A section is left out only where it cannot
 //! apply.
 
@@ -167,7 +167,8 @@ impl std::fmt::Display for WorktreeView {
     }
 }
 
-/// Browse's View: one of GitHub's searches.
+/// Browse's View: one of GitHub's searches. Inbox's View offers the
+/// same, under its lists, from the reasons GitHub gives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BrowseView {
     ReviewRequested,
@@ -435,6 +436,9 @@ impl Order {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboxFilters {
     pub view: InboxView,
+    /// The threads about the reader's part in them, as Browse's View
+    /// searches for it.
+    pub whose: BrowseView,
     pub unread_only: bool,
     pub state: StateFilter,
     /// GitHub's order, newest first, or turned over.
@@ -445,6 +449,7 @@ impl Default for InboxFilters {
     fn default() -> Self {
         Self {
             view: InboxView::Inbox,
+            whose: BrowseView::All,
             unread_only: false,
             state: StateFilter::Any,
             direction: Direction::Newest,
@@ -546,7 +551,7 @@ impl ItemFilters {
         let (inbox, worktrees, browse) = (&self.inbox, &self.worktrees, &self.browse);
         format!(
             "tab={};repository={};show_pr_status={};\
-             inbox={};inbox_unread={};inbox_state={};inbox_direction={};\
+             inbox={};inbox_whose={};inbox_unread={};inbox_state={};inbox_direction={};\
              worktrees={};worktrees_unread={};worktrees_state={};sort={};direction={};\
              recent_sort={};recent_direction={};\
              browse={};browse_state={};browse_sort={};browse_direction={}",
@@ -554,6 +559,7 @@ impl ItemFilters {
             self.repository.as_deref().map(encode_meta_value).unwrap_or_default(),
             u8::from(self.show_pr_status),
             inbox.view.key(),
+            inbox.whose.key(),
             u8::from(inbox.unread_only),
             inbox.state.key(),
             inbox.direction.key(),
@@ -645,6 +651,7 @@ impl ItemFilters {
                     }
                     _ => out.inbox.view = InboxView::from_key(value).ok_or_else(bad)?,
                 },
+                "inbox_whose" => out.inbox.whose = BrowseView::from_key(value).ok_or_else(bad)?,
                 // Before Done, Show was only ever Unread or All.
                 "unread" | "inbox_unread" => out.inbox.unread_only = flag()?,
                 "inbox_state" => out.inbox.state = state()?,
@@ -708,8 +715,7 @@ impl ItemFilters {
     }
 
     /// Whether the tab's menu is anywhere but its defaults, which lights
-    /// the filter button. Reason is Inbox's alone and lives outside
-    /// these filters, so the caller adds it.
+    /// the filter button.
     pub fn narrowed(&self) -> bool {
         let d = Self::default();
         self.repository.is_some()
@@ -1336,6 +1342,7 @@ mod tests {
             show_pr_status: false,
             inbox: InboxFilters {
                 view: InboxView::Done,
+                whose: BrowseView::Mentioned,
                 unread_only: true,
                 state: StateFilter::Closed,
                 direction: Direction::Oldest,

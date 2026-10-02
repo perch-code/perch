@@ -272,11 +272,7 @@ fn search_row(state: AppState, backend: Rc<Backend>) -> impl IntoView {
 fn filter_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     // Anything the current list is narrowed or ordered by lights the
     // button.
-    let narrowed = move || {
-        state.item_filters.with(|f| {
-            f.narrowed() || (f.tab == SidebarTab::Inbox && state.notification_reason.with(Option::is_some))
-        })
-    };
+    let narrowed = move || state.item_filters.with(ItemFilters::narrowed);
     // The menu is on the button, and a click lands on the deepest view
     // under the pointer, so the glyph and the container that rebuilds it
     // both let the click through.
@@ -323,16 +319,24 @@ fn view_submenu<V: Copy + PartialEq + std::fmt::Display + 'static>(
     pick: fn(&mut ItemFilters, V),
 ) -> Menu {
     let views = views.to_vec();
-    menu.submenu("View", move |mut sub| {
-        sub = sub.icon(icon);
-        for view in views {
-            let set = set.clone();
-            sub = sub.item(view.to_string(), move |item| {
-                item.checked(view == current).action(move || set(Box::new(move |f| pick(f, view))))
-            });
-        }
-        sub
-    })
+    menu.submenu("View", move |sub| view_items(sub.icon(icon), &views, current, set, pick))
+}
+
+/// One group of View's choices, the current one checked.
+fn view_items<V: Copy + PartialEq + std::fmt::Display + 'static>(
+    mut sub: Menu,
+    views: &[V],
+    current: V,
+    set: SetFilters,
+    pick: fn(&mut ItemFilters, V),
+) -> Menu {
+    for &view in views {
+        let set = set.clone();
+        sub = sub.item(view.to_string(), move |item| {
+            item.checked(view == current).action(move || set(Box::new(move |f| pick(f, view))))
+        });
+    }
+    sub
 }
 
 /// Repository, shared by the tabs: every one the tab can show, and the
@@ -427,45 +431,25 @@ fn pr_status_toggle(menu: Menu, f: &ItemFilters, set: SetFilters) -> Menu {
     })
 }
 
-/// Inbox's menu. Reason is the inbox's alone and is not kept between
-/// launches; the rest is.
+/// Inbox's menu.
 fn inbox_menu(state: AppState, backend: Rc<Backend>) -> Menu {
     let f = state.item_filters.get_untracked();
     let set = setter(state);
     let source = state.inbox_source(f.inbox.view);
 
-    let mut menu = view_submenu(Menu::new(), SidebarIcon::Inbox, &InboxView::ALL, f.inbox.view, set.clone(), |f, view| {
-        f.inbox.view = view
+    // View is two choices, as Sort By is: the list, then whose threads
+    // in it, as Browse's View offers.
+    let (view, whose, views) = (f.inbox.view, f.inbox.whose, set.clone());
+    let mut menu = Menu::new().submenu("View", move |sub| {
+        let sub = view_items(sub.icon(SidebarIcon::Inbox), &InboxView::ALL, view, views.clone(), |f, view| {
+            f.inbox.view = view
+        });
+        view_items(sub.separator(), &BrowseView::ALL, whose, views, |f, whose| f.inbox.whose = whose)
     });
     menu = menu.separator();
     let repositories = source.with_untracked(|threads| crate::inbox::repository_options(threads));
     menu = repository_submenu(menu, f.repository.clone(), repositories, set.clone());
 
-    let current_reason = state.notification_reason.get_untracked();
-    let mut reasons = source.with_untracked(|threads| crate::inbox::reason_options(threads));
-    if let Some(selected) = current_reason.as_ref() {
-        if !reasons.iter().any(|(wire, _)| wire == selected) {
-            reasons.push((selected.clone(), selected.clone()));
-            reasons.sort_by_key(|(wire, label)| (label.to_lowercase(), wire.clone()));
-        }
-    }
-    menu = menu.submenu("Reason", move |mut sub| {
-        sub = sub.icon(SidebarIcon::Tag);
-        let all_selected = current_reason.is_none();
-        sub = sub.item("Any", move |item| {
-            item.checked(all_selected).action(move || state.notification_reason.set(None))
-        });
-        sub = sub.separator();
-        for (wire, label) in &reasons {
-            let wire = wire.clone();
-            let selected = current_reason.as_deref() == Some(wire.as_str());
-            sub = sub.item(label.clone(), move |item| {
-                let wire = wire.clone();
-                item.checked(selected).action(move || state.notification_reason.set(Some(wire.clone())))
-            });
-        }
-        sub
-    });
     menu = state_submenu(menu, f.inbox.state, set.clone(), |f, value| f.inbox.state = value);
     menu = menu.separator();
     let order = Order { sort: ItemSort::LastActivity, direction: f.inbox.direction };
@@ -1079,12 +1063,23 @@ mod tests {
         assert_eq!(
             inbox_menu(state, backend.clone()).outline(),
             [
-                "View ▸", "—", "Repository ▸", "Reason ▸", "State ▸", "—", "Sort By ▸", "—", "Unread Only",
+                "View ▸", "—", "Repository ▸", "State ▸", "—", "Sort By ▸", "—", "Unread Only",
                 "✓ Show PR Status", "—", "Mark 2 Done",
             ]
         );
         let menu = inbox_menu(state, backend.clone());
-        assert_eq!(menu.submenu_named("View").unwrap().outline(), ["✓ Inbox", "Snoozed", "Done"]);
+        assert_eq!(
+            menu.submenu_named("View").unwrap().outline(),
+            ["✓ Inbox", "Snoozed", "Done", "—", "Review requested", "Yours", "Assigned", "Mentioned", "✓ All"]
+        );
+        // The two groups are picked apart.
+        menu.submenu_named("View").unwrap().choose("Mentioned");
+        assert_eq!(
+            inbox_menu(state, backend.clone()).submenu_named("View").unwrap().outline(),
+            ["✓ Inbox", "Snoozed", "Done", "—", "Review requested", "Yours", "Assigned", "✓ Mentioned", "All"]
+        );
+        set_filters(state, |f| f.inbox.whose = BrowseView::All);
+        let menu = inbox_menu(state, backend.clone());
         assert_eq!(
             menu.submenu_named("State").unwrap().outline(),
             ["✓ Any", "Open", "Merged or Closed"]

@@ -174,9 +174,6 @@ pub struct AppState {
     /// Whether a poll's notifications have arrived since launch. The first
     /// replaces the cached list outright rather than waiting to be asked.
     notifications_polled: RwSignal<bool>,
-    /// GitHub's wire name for the notification reason currently shown.
-    /// Separate from local item filters because notifications are not items.
-    pub notification_reason: RwSignal<Option<String>>,
     /// The item whose row is selected in the sidebar: the open one.
     pub open_item: RwSignal<Option<String>>,
     /// The agent section of config.toml: binary, defaults, and the models
@@ -363,7 +360,6 @@ impl AppState {
             pending_items: RwSignal::new(None),
             pending_notifications: RwSignal::new(None),
             notifications_polled: RwSignal::new(false),
-            notification_reason: RwSignal::new(None),
             open_item: RwSignal::new(None),
             review: RwSignal::new(None),
             viewer: RwSignal::new(None),
@@ -3042,10 +3038,10 @@ impl AppState {
     /// View › Done and View › Snoozed the ones put away so.
     pub fn visible_inbox(&self) -> Vec<Thread> {
         let (inbox, repository) = self.item_filters.with(|f| (f.inbox.clone(), f.repository.clone()));
-        let reason = self.notification_reason.get();
         let query = self.item_query.get();
+        let viewer = self.viewer.with(|viewer| viewer.as_ref().map(|(login, _)| login.clone()));
         self.inbox_source(inbox.view).with(|threads| {
-            crate::inbox::filter(threads, &inbox, repository.as_deref(), reason.as_deref(), &query)
+            crate::inbox::filter(threads, &inbox, viewer.as_deref(), repository.as_deref(), &query)
         })
     }
 
@@ -3066,9 +3062,9 @@ impl AppState {
         if inbox.view.is_put_away() {
             return Vec::new();
         }
-        let reason = self.notification_reason.get_untracked();
         let query = self.item_query.get_untracked();
-        crate::inbox::filter(threads, &inbox, repository.as_deref(), reason.as_deref(), &query)
+        let viewer = self.viewer.with_untracked(|viewer| viewer.as_ref().map(|(login, _)| login.clone()));
+        crate::inbox::filter(threads, &inbox, viewer.as_deref(), repository.as_deref(), &query)
             .into_iter()
             .map(|thread| thread.id)
             .collect()

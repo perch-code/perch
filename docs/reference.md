@@ -77,8 +77,10 @@ section is left out only where it cannot apply. The button lights up while
 the tab's list differs from its defaults, and the search box names the view
 it searches.
 
-- **Inbox**: View (Inbox, Snoozed, Done), Repository, Reason, State, Sort By
-  (Newest or Oldest first), Unread Only, Show PR Status, Mark N Done.
+- **Inbox**: View (Inbox, Snoozed, Done; then Review requested, Yours,
+  Assigned, Mentioned, All, from GitHub's reason, Yours also taking what you
+  opened), Repository, State, Sort By (Newest or Oldest first),
+  Unread Only, Show PR Status, Mark N Done.
 - **Worktrees**: View (Worktrees, or Recent: everything opened, worktree or
   not), Repository, State, Sort By (Last activity, Last opened, Created; each
   view keeps its own), Unread Only, Show PR Status.

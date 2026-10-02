@@ -1,29 +1,30 @@
-//! The Inbox list's filters: GitHub's threads under the repository,
-//! reason, State, Unread Only and search the sidebar has picked. GitHub's
+//! The Inbox list's filters: GitHub's threads under the View, repository,
+//! State, Unread Only and search the sidebar has picked. GitHub's
 //! order is kept, or turned over for Oldest first; filtering only removes
 //! rows from it.
 
-use perch_github::{SubjectState, Thread};
+use perch_github::{Reason, SubjectState, Thread};
 
-use crate::items::{Direction, InboxFilters};
+use crate::items::{BrowseView, Direction, InboxFilters};
 
 /// The threads under the menu's narrowing and the search, in order.
-/// The view, which list the threads come from, is the caller's.
+/// The view's list, which the threads come from, is the caller's.
+/// `viewer` is the signed-in login, for Yours.
 pub fn filter(
     threads: &[Thread],
     filters: &InboxFilters,
+    viewer: Option<&str>,
     repository: Option<&str>,
-    reason: Option<&str>,
     query: &str,
 ) -> Vec<Thread> {
     let query = query.trim().to_lowercase();
     let mut rows: Vec<Thread> = threads
         .iter()
         .filter(|thread| !filters.unread_only || thread.unread)
+        .filter(|thread| involves(filters.whose, thread, viewer))
         .filter(|thread| {
             repository.is_none_or(|repo| thread.repository.full_name.eq_ignore_ascii_case(repo))
         })
-        .filter(|thread| reason.is_none_or(|reason| thread.reason.wire() == reason))
         .filter(|thread| filters.state.admits(closed(thread)))
         .filter(|thread| {
             query.is_empty()
@@ -41,6 +42,28 @@ pub fn filter(
         rows.reverse();
     }
     rows
+}
+
+/// Whether the thread is under View › Review requested, Yours, Assigned
+/// or Mentioned. GitHub gives one reason, the latest, so a mention on the
+/// reader's own pull request is no longer `author`: Yours also takes a
+/// thread a look found the reader opened.
+pub fn involves(whose: BrowseView, thread: &Thread, viewer: Option<&str>) -> bool {
+    match whose {
+        BrowseView::ReviewRequested => thread.reason == Reason::ReviewRequested,
+        BrowseView::Yours => {
+            thread.reason == Reason::Author
+                || viewer.filter(|login| !login.is_empty()).is_some_and(|login| {
+                    thread
+                        .subject_snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.author_login.eq_ignore_ascii_case(login))
+                })
+        }
+        BrowseView::Assigned => thread.reason == Reason::Assign,
+        BrowseView::Mentioned => matches!(thread.reason, Reason::Mention | Reason::TeamMention),
+        BrowseView::All => true,
+    }
 }
 
 /// Whether a look has found the thread's pull request merged or closed,
@@ -67,24 +90,6 @@ pub fn repository_options(threads: &[Thread]) -> Vec<String> {
     repos.sort_by_key(|repo| repo.to_lowercase());
     repos.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
     repos
-}
-
-/// The reasons GitHub currently has in the inbox, as wire value and
-/// display label. New reasons appear automatically instead of being
-/// dropped by a closed app enum.
-pub fn reason_options(threads: &[Thread]) -> Vec<(String, String)> {
-    let mut reasons: Vec<(String, String)> = threads
-        .iter()
-        .map(|thread| {
-            (
-                thread.reason.wire().to_string(),
-                thread.reason.label().to_string(),
-            )
-        })
-        .collect();
-    reasons.sort_by_key(|(wire, label)| (label.to_lowercase(), wire.clone()));
-    reasons.dedup_by(|a, b| a.0 == b.0);
-    reasons
 }
 
 #[cfg(test)]
@@ -175,7 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn repository_reason_and_search_filter_notification_fields() {
+    fn repository_and_search_filter_notification_fields() {
         let threads = vec![
             thread(
                 "8",
@@ -202,7 +207,7 @@ mod tests {
                 true,
             ),
         ];
-        let visible = filter(&threads, &InboxFilters::default(), Some("ORG/ONE"), Some("mention"), "manifest");
+        let visible = filter(&threads, &InboxFilters::default(), None, Some("ORG/ONE"), "manifest");
         assert_eq!(
             visible
                 .iter()
@@ -211,13 +216,6 @@ mod tests {
             ["8"]
         );
         assert_eq!(repository_options(&threads), ["org/one", "org/two"]);
-        assert_eq!(
-            reason_options(&threads),
-            [
-                ("mention".into(), "mention".into()),
-                ("review_requested".into(), "review requested".into())
-            ]
-        );
     }
 
     /// State goes by what a look found; a thread not yet looked at, or a
@@ -255,5 +253,42 @@ mod tests {
         assert_eq!(ids(&open_only), ["2", "1"]);
         let oldest = InboxFilters { direction: Direction::Oldest, ..Default::default() };
         assert_eq!(ids(&oldest), ["1", "2", "3", "4"]);
+    }
+
+    /// View › Review requested, Yours, Assigned and Mentioned go by
+    /// GitHub's reason; Yours also by who a look found opened it.
+    #[test]
+    fn whose_narrows_on_the_reason_and_yours_on_the_author_too() {
+        let mut mentioned_on_mine = thread("6", "org/one", "Mine", SubjectKind::PullRequest, Reason::Mention, true);
+        mentioned_on_mine.subject_snapshot = Some(perch_github::SubjectSnapshot {
+            author_login: "Reader".into(),
+            author_avatar_url: String::new(),
+            state: SubjectState::PrOpen,
+            churn: None,
+            review_requested: false,
+            participants: None,
+            at: "2026-09-19T12:00:00Z".parse().unwrap(),
+        });
+        let threads = vec![
+            mentioned_on_mine,
+            thread("5", "org/one", "Team", SubjectKind::Issue, Reason::TeamMention, true),
+            thread("4", "org/one", "Assigned", SubjectKind::Issue, Reason::Assign, true),
+            thread("3", "org/one", "Authored", SubjectKind::PullRequest, Reason::Author, true),
+            thread("2", "org/one", "Review", SubjectKind::PullRequest, Reason::ReviewRequested, true),
+            thread("1", "org/one", "Watching", SubjectKind::Issue, Reason::Subscribed, true),
+        ];
+        let ids = |whose, viewer| {
+            let filters = InboxFilters { whose, ..Default::default() };
+            filter(&threads, &filters, viewer, None, "")
+                .into_iter()
+                .map(|thread| thread.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(BrowseView::ReviewRequested, Some("reader")), ["2"]);
+        assert_eq!(ids(BrowseView::Yours, Some("reader")), ["6", "3"]);
+        assert_eq!(ids(BrowseView::Yours, None), ["3"], "no login yet");
+        assert_eq!(ids(BrowseView::Assigned, Some("reader")), ["4"]);
+        assert_eq!(ids(BrowseView::Mentioned, Some("reader")), ["6", "5"]);
+        assert_eq!(ids(BrowseView::All, Some("reader")).len(), 6);
     }
 }
