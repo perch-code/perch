@@ -449,11 +449,17 @@ pub fn avatar_radius(size: f64, url: &str) -> f64 {
 /// tinted initial until the image arrives, so a row never reflows when
 /// the download lands.
 pub fn avatar(state: AppState, url: impl Fn() -> String + 'static, size: f64, seed: String) -> impl IntoView {
+    // Every face reads the one map of avatars, and a dyn_container rebuilds
+    // on every write to what it reads. Keyed on the map itself, each face
+    // arriving rebuilt every face on screen, decoding its picture again: at
+    // launch, with a full inbox, that held the main thread for seconds. The
+    // memo lets a face through only when its own picture changes.
+    let face = floem::reactive::Memo::new(move |_| {
+        let url = url();
+        (avatar_radius(size, &url), state.avatar_for(&url))
+    });
     dyn_container(
-        move || {
-            let url = url();
-            (avatar_radius(size, &url), state.avatar_for(&url))
-        },
+        move || face.get(),
         move |(radius, bytes)| match bytes {
             // The picture comes cut to its shape (`backend::avatar`) and is
             // drawn as it is, filling its square. A clip would round it with
@@ -756,5 +762,60 @@ mod tests {
             !views.iter().any(|id| id.debug_name().contains("Clip")),
             "the face is clipped"
         );
+    }
+
+    /// A face is built again only when its own picture arrives. Rebuilt on
+    /// every arrival, a launch with a few hundred rows decoded thousands of
+    /// pictures on the main thread and showed the spinner (issue #6).
+    #[test]
+    fn a_face_is_rebuilt_only_for_its_own_picture() {
+        use floem::headless::{HeadlessHarness, TestRoot};
+        use floem::{IntoView, View};
+        use image::{ImageFormat, Rgba, RgbaImage};
+
+        fn png() -> Vec<u8> {
+            let mut png = Vec::new();
+            RgbaImage::from_pixel(8, 8, Rgba([10, 20, 30, 255]))
+                .write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png)
+                .unwrap();
+            png
+        }
+
+        let root = TestRoot::new();
+        let app = crate::state::AppState::new();
+        let view = super::avatar(app, || "face".to_string(), 22.0, "chris".into()).into_view();
+        let face = view.id();
+        let shown = move || face.children()[0];
+        let mut harness = HeadlessHarness::new_with_size(root, view, 100.0, 100.0);
+        harness.rebuild();
+        let initial = shown();
+        assert!(!initial.debug_name().contains("Img"), "{}", initial.debug_name());
+
+        // Someone else's face changes nothing here.
+        app.apply(crate::backend::Event::Avatar {
+            url: "someone-else".into(),
+            bytes: png(),
+        });
+        harness.rebuild();
+        assert_eq!(shown(), initial);
+
+        // Its own swaps the initial for the picture.
+        app.apply(crate::backend::Event::Avatar {
+            url: "face".into(),
+            bytes: png(),
+        });
+        harness.rebuild();
+        let picture = shown();
+        assert!(picture.debug_name().contains("Img"), "{}", picture.debug_name());
+
+        // And the picture stays put while others keep arriving.
+        for n in 0..3 {
+            app.apply(crate::backend::Event::Avatar {
+                url: format!("other-{n}"),
+                bytes: png(),
+            });
+            harness.rebuild();
+            assert_eq!(shown(), picture);
+        }
     }
 }
