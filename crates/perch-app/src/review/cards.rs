@@ -1972,14 +1972,22 @@ pub(crate) fn finding_controls(
                         .find(|group| group.group.id == group_id)
                         .cloned()
                 });
+            // The checkout's head too, so a push redraws whether the
+            // code has moved past where the finding was looked at.
+            let head = state.item.with(|item| {
+                item.as_ref()
+                    .and_then(|item| item.checkout.as_ref())
+                    .map(|checkout| checkout.head_sha.clone())
+            });
             Some((
                 summary,
                 state.historical_review.with(Option::is_some),
                 original_group,
+                head,
             ))
         },
         move |summary| match summary {
-            Some((summary, historical, original_group)) => {
+            Some((summary, historical, original_group, head)) => {
                 let finding = &summary.finding;
                 // "Claude Code · Opus", as the Agents section names a run.
                 let name = |backend: &str, model: &str| {
@@ -2021,15 +2029,36 @@ pub(crate) fn finding_controls(
                             .join(", ")
                     )
                 };
-                let checked = finding.last_verified_head_sha.clone();
-                let checked_word = if finding.verification == perch_github::FindingVerification::Fixed
-                    || finding.disposition == perch_github::FindingDisposition::VerifiedFixed
-                {
-                    "fixed at"
-                } else {
-                    "checked at"
+                // A review's first report of a finding is stored as an
+                // observation that it is present, at the review's commit;
+                // only a later review seeing it again checks it.
+                let rechecked = match summary.original_review_number {
+                    Some(original) => summary.seen_in_reviews.iter().any(|n| *n != original),
+                    None => summary.seen_in_reviews.len() > 1,
                 };
-                let status = finding_status(finding);
+                let fixed = finding.verification == perch_github::FindingVerification::Fixed
+                    || finding.disposition == perch_github::FindingDisposition::VerifiedFixed;
+                let checked = finding.last_verified_head_sha.clone();
+                let checked_word = if fixed {
+                    "\u{b7} fixed at"
+                } else if rechecked {
+                    "\u{b7} checked at"
+                } else {
+                    "at"
+                };
+                // The checkout has moved past where the finding was last
+                // looked at, so what it says may no longer hold.
+                let last_looked = finding
+                    .last_checked_head_sha
+                    .clone()
+                    .or_else(|| finding.last_verified_head_sha.clone());
+                let moved = !fixed
+                    && finding.disposition == perch_github::FindingDisposition::Open
+                    && head
+                        .as_deref()
+                        .zip(last_looked.as_deref())
+                        .is_some_and(|(head, sha)| head != sha);
+                let status = finding_status(finding, rechecked);
                 let reason = (finding.disposition == perch_github::FindingDisposition::Dismissed)
                     .then(|| finding.dismissal_reason.clone())
                     .flatten();
@@ -2106,6 +2135,16 @@ pub(crate) fn finding_controls(
                     _ => absent(),
                 };
 
+                // Run another review: the one way to learn whether it holds.
+                let recheck = if moved && !historical {
+                    quiet_action("Re-check", move || {
+                        crate::review::review_menu::open_agents(state, None)
+                    })
+                    .debug_name("finding-recheck")
+                    .into_any()
+                } else {
+                    absent()
+                };
                 let sha_backend = backend.clone();
                 let provenance = Stack::horizontal((
                     sidebar_glyph(SidebarIcon::Agents, theme::fg_subtle)
@@ -2115,8 +2154,7 @@ pub(crate) fn finding_controls(
                     Label::derived(move || format!("\u{b7} {seen}")).style(finding_meta),
                     match checked {
                         Some(sha) => Stack::horizontal((
-                            Label::derived(move || format!("\u{b7} {checked_word}"))
-                                .style(finding_meta),
+                            Label::derived(move || checked_word.to_string()).style(finding_meta),
                             {
                                 let open = sha.clone();
                                 Label::derived(move || short_sha(&sha).to_string())
@@ -2139,6 +2177,13 @@ pub(crate) fn finding_controls(
                             .style(finding_meta)
                             .into_any(),
                     },
+                    Label::derived(|| "\u{b7} code changed since".to_string())
+                        .debug_name("finding-moved")
+                        .style(move |s| {
+                            finding_meta(s)
+                                .color(theme::notice_fg())
+                                .apply_if(!moved, |s| s.hide())
+                        }),
                 ))
                 .style(|s| s.items_center().gap(4.0).flex_wrap(floem::style::FlexWrap::Wrap));
                 Stack::vertical((
@@ -2165,6 +2210,7 @@ pub(crate) fn finding_controls(
                             None => absent(),
                         },
                         Empty::new().style(|s| s.flex_grow(1.0_f32).min_width(8.0)),
+                        recheck,
                         view_original,
                         dismiss,
                         reopen,
@@ -2201,8 +2247,9 @@ type ChipInk = fn() -> Color;
 
 /// What a finding's status chip says, and its ink and fill: fixed in
 /// green, a duplicate in GitHub's blue, disputed in the notice's yellow,
-/// and the rest grey.
-fn finding_status(finding: &perch_github::Finding) -> (String, ChipInk, ChipInk) {
+/// and the rest grey. Present is Still present only once a review after
+/// the one that found it has `rechecked` it; until then it is Reported.
+fn finding_status(finding: &perch_github::Finding, rechecked: bool) -> (String, ChipInk, ChipInk) {
     use perch_github::{FindingDisposition, FindingVerification};
     if let Some(canonical) = finding.duplicate_of.as_deref() {
         let text = format!("Duplicate of {}", short_finding(canonical));
@@ -2221,7 +2268,10 @@ fn finding_status(finding: &perch_github::Finding) -> (String, ChipInk, ChipInk)
         return ("\u{2713} Verified fixed".into(), theme::open, theme::diff_added_bg);
     }
     match finding.verification {
-        FindingVerification::Present => ("Still present".into(), theme::fg_muted, theme::badge_bg),
+        FindingVerification::Present if rechecked => {
+            ("Still present".into(), theme::fg_muted, theme::badge_bg)
+        }
+        FindingVerification::Present => ("Reported".into(), theme::fg_muted, theme::badge_bg),
         FindingVerification::Disputed => ("Disputed".into(), theme::notice_fg, theme::notice_bg),
         FindingVerification::NotVerified => {
             ("Couldn't verify".into(), theme::fg_muted, theme::badge_bg)
@@ -2441,6 +2491,40 @@ mod tests {
 
     /// A pill's tip names who left it as GitHub's does, the reader as
     /// You, first, whether or not GitHub has caught up with a toggle.
+    /// A finding one review reported is Reported; Still present needs a
+    /// later review to have seen it again. Fixed and dismissed say so
+    /// whatever the reviews were.
+    #[test]
+    fn a_finding_is_still_present_only_once_a_later_review_saw_it() {
+        use perch_github::{FindingDisposition, FindingVerification};
+        let at: jiff::Timestamp = "2026-09-18T09:59:00Z".parse().unwrap();
+        let finding = |disposition, verification| perch_github::Finding {
+            id: "f-1".into(),
+            item_id: "item-1".into(),
+            stable_key: "k".into(),
+            thread_id: "t".into(),
+            created_group_id: None,
+            disposition,
+            verification,
+            dismissal_reason: None,
+            possible_duplicate_of: None,
+            duplicate_of: None,
+            last_verified_snapshot_id: None,
+            last_verified_head_sha: Some("d1dc594".into()),
+            last_checked_snapshot_id: None,
+            last_checked_head_sha: Some("d1dc594".into()),
+            created_at: at,
+            updated_at: at,
+        };
+        let present = finding(FindingDisposition::Open, FindingVerification::Present);
+        assert_eq!(finding_status(&present, false).0, "Reported");
+        assert_eq!(finding_status(&present, true).0, "Still present");
+        let fixed = finding(FindingDisposition::VerifiedFixed, FindingVerification::Fixed);
+        assert_eq!(finding_status(&fixed, false).0, "\u{2713} Verified fixed");
+        let dismissed = finding(FindingDisposition::Dismissed, FindingVerification::Present);
+        assert_eq!(finding_status(&dismissed, true).0, "Dismissed");
+    }
+
     #[test]
     fn a_reactions_tip_names_who_left_it() {
         let me = Some("me");
