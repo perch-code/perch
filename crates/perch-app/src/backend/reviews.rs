@@ -744,11 +744,11 @@ pub(super) async fn open_snapshot(ctx: &Ctx, group_id: &str, request_id: u64) {
         ctx.kept_servers
             .keep_all(ctx.window, previous_language_server)
             .await;
-        Ok::<_, String>((group, snapshot, files, tree, findings, scope_gen))
+        Ok::<_, String>((group, files, tree, findings, scope_gen))
     }
     .await;
     match result {
-        Ok((group, snapshot, files, tree, findings, scope_gen)) => {
+        Ok((group, files, tree, findings, scope_gen)) => {
             let _ = ctx
                 .navigation_requests
                 .with_current_group(group_id, request_id, || {
@@ -765,12 +765,8 @@ pub(super) async fn open_snapshot(ctx: &Ctx, group_id: &str, request_id: u64) {
                         tree,
                         findings,
                     });
-                    ctx.notice(format!(
-                        "Review #{} · {} against {} · read-only",
-                        group.number,
-                        snapshot.head_label(),
-                        snapshot.requested_base_ref
-                    ));
+                    // No toast: a notice is an error, and the snapshot
+                    // banner already says the review is read-only.
                 });
         }
         Err(message) => {
