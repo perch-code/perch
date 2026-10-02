@@ -136,7 +136,7 @@ fn bar(
                         .items_center()
                         .padding(8.0)
                         .border_top(1.0)
-                        .border_color(theme::BORDER_MUTED)
+                        .border_color(theme::border_muted())
                 })
                 .into_any()
         },
@@ -266,7 +266,7 @@ fn popover(
     let title = Label::new("Apply suggestion").style(|s| {
         s.font_size(theme::TEXT_BODY)
             .font_weight(theme::weight_emphasis())
-            .color(theme::FG)
+            .color(theme::fg())
             .flex_grow(1.0_f32)
             .selectable(false)
     });
@@ -283,7 +283,7 @@ fn popover(
             .padding_right(8.0)
             .padding_vert(8.0)
             .border_bottom(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::border_muted())
     });
 
     let enter_commit = commit.clone();
@@ -304,18 +304,18 @@ fn popover(
                 .height(30.0)
                 .font_size(theme::TEXT_BODY)
                 .padding_horiz(8.0)
-                .background(theme::CANVAS)
+                .background(theme::canvas())
                 .border(1.0)
-                .border_color(theme::BORDER)
+                .border_color(theme::border())
                 .border_radius(theme::RADIUS)
-                .focus(|s| s.border_color(theme::ACCENT))
+                .focus(|s| s.border_color(theme::accent()))
                 .set_disabled(pending())
         });
     let headline_id = headline_input.id();
 
     let editor = text_editor("")
         .placeholder("Add an optional extended description\u{2026}".to_string())
-        .editor_style(|s| s.hide_gutter(true).selection_color(theme::SELECTION_BG));
+        .editor_style(|s| s.hide_gutter(true).selection_color(theme::selection_bg()));
     lay_out_every_line(editor.editor());
     let key_commit = commit.clone();
     let editor = editor
@@ -355,7 +355,7 @@ fn popover(
                 return Empty::new().into_any();
             };
             Stack::horizontal((
-                sidebar_glyph(SidebarIcon::Warning, theme::CLOSED)
+                sidebar_glyph(SidebarIcon::Warning, theme::closed)
                     .style(|s| s.size(14.0, 14.0).margin_right(7.0).flex_shrink(0.0_f32)),
                 Label::derived(move || message.clone())
                     .debug_name("apply-suggestion-error")
@@ -363,7 +363,7 @@ fn popover(
                         s.min_width(0.0)
                             .flex_grow(1.0_f32)
                             .font_size(theme::TEXT_META)
-                            .color(theme::CLOSED)
+                            .color(theme::closed())
                     }),
             ))
             .style(|s| s.width_full().items_start())
@@ -462,7 +462,7 @@ fn popover(
                 .font_family(theme::FONT_STACK.to_string())
                 .font_size(theme::TEXT_META)
                 .font_weight(theme::weight_body())
-                .color(theme::FG)
+                .color(theme::fg())
         })
 }
 

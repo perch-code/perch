@@ -104,7 +104,7 @@ fn section_header(app: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     } else {
                         SidebarIcon::ChevronRight
                     },
-                    theme::FG_SUBTLE,
+                    theme::fg_subtle,
                 )
                 .style(|s| s.size(10.0, 10.0))
             },
@@ -113,7 +113,7 @@ fn section_header(app: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         Label::derived(|| "AGENTS".to_string()).style(|s| {
             s.font_size(theme::TEXT_SECTION)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG_SUBTLE)
+                .color(theme::fg_subtle())
                 .selectable(false)
                 .flex_grow(1.0_f32)
         }),
@@ -126,7 +126,7 @@ fn section_header(app: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             };
             s.size(7.0, 7.0)
                 .border_radius(4.0)
-                .background(color)
+                .background(color())
                 .margin_right(7.0)
                 .flex_shrink(0.0_f32)
                 .apply_if(!counts.active(), |s| s.hide())
@@ -135,9 +135,9 @@ fn section_header(app: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             let counts = counts.get();
             s.font_size(theme::TEXT_BADGE)
                 .color(if !counts.active() && counts.last_failed {
-                    theme::CLOSED
+                    theme::closed()
                 } else {
-                    theme::FG_MUTED
+                    theme::fg_muted()
                 })
                 .selectable(false)
         }),
@@ -159,7 +159,7 @@ fn section_header(app: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             .height(22.0)
             .border_radius(theme::RADIUS)
             .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
     })
 }
 
@@ -207,7 +207,7 @@ pub fn section(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
                 .padding_top(18.0)
                 .padding_bottom(18.0)
                 .border_top(1.0)
-                .border_color(theme::BORDER_MUTED)
+                .border_color(theme::border_muted())
                 .apply_if(!present(app, review), |s| s.hide())
         })
 }
@@ -294,9 +294,9 @@ fn list(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoVi
         s.flex_col()
             .width_full()
             .border(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::border_muted())
             .border_radius(theme::RADIUS)
-            .background(theme::CANVAS)
+            .background(theme::canvas())
             .apply_if(!shown, |s| s.hide())
     })
 }
@@ -401,10 +401,10 @@ fn run_row(
         let base = clickable(s)
             .width_full()
             .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
-            .hover(|s| s.background(theme::CANVAS_HOVER));
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+            .hover(|s| s.background(theme::canvas_hover()));
         if open.get() {
-            base.background(theme::ACCENT_SUBTLE)
+            base.background(theme::accent_subtle())
         } else {
             base
         }
@@ -434,7 +434,7 @@ fn run_row(
             s.flex_col()
                 .width_full()
                 .border_bottom(1.0)
-                .border_color(theme::BORDER_MUTED)
+                .border_color(theme::border_muted())
         });
     // Brought into view, it scrolls the page to put itself at the top: a
     // rectangle taller than any window shows its top edge.
@@ -484,13 +484,13 @@ fn header(
             Empty::new().style(move |s| {
                 s.size(7.0, 7.0)
                     .border_radius(4.0)
-                    .background(color)
+                    .background(color())
                     .flex_shrink(0.0_f32)
             }),
             Label::derived(move || meta.clone()).style(|s| {
                 s.font_size(theme::TEXT_BADGE)
                     .font_weight(theme::weight_emphasis())
-                    .color(theme::FG_MUTED)
+                    .color(theme::fg_muted())
                     .text_ellipsis()
                     .min_width(0.0)
                     .flex_grow(1.0_f32)
@@ -511,7 +511,7 @@ fn header(
             .style(move |s| {
                 s.font_size(theme::TEXT_SECTION)
                     .font_weight(theme::weight_emphasis())
-                    .color(color)
+                    .color(color())
                     .flex_shrink(0.0_f32)
                     .selectable(false)
             }),
@@ -520,7 +520,7 @@ fn header(
         Label::derived(move || subject.clone()).style(|s| {
             s.font_size(theme::TEXT_BODY)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG)
+                .color(theme::fg())
                 .text_ellipsis()
                 .width_full()
                 .selectable(false)
@@ -529,9 +529,9 @@ fn header(
             s.font_size(theme::TEXT_BADGE)
                 .font_family(theme::CODE_FONT_STACK.to_string())
                 .color(if status == AgentRunStatus::Failed {
-                    theme::CLOSED
+                    theme::closed()
                 } else {
-                    theme::FG_SUBTLE
+                    theme::fg_subtle()
                 })
                 .text_ellipsis()
                 .width_full()
@@ -543,7 +543,7 @@ fn header(
             })
             .style(|s| {
                 s.font_size(theme::TEXT_SECTION)
-                    .color(theme::FG_SUBTLE)
+                    .color(theme::fg_subtle())
                     .text_ellipsis()
                     .min_width(0.0)
                     .flex_grow(1.0_f32)
@@ -616,7 +616,7 @@ fn actions(review: ReviewState, backend: Rc<Backend>, run: AgentRunSummary) -> i
         AgentRunStatus::Stopping => Label::derived(|| "Stopping…".to_string())
             .style(|s| {
                 s.font_size(theme::TEXT_BADGE)
-                    .color(theme::FG_SUBTLE)
+                    .color(theme::fg_subtle())
                     .selectable(false)
                     .padding_horiz(8.0)
             })
@@ -720,7 +720,7 @@ fn review_group_row(
                     } else {
                         SidebarIcon::ChevronDown
                     },
-                    theme::FG_SUBTLE,
+                    theme::fg_subtle,
                 )
                 .style(|s| s.size(10.0, 10.0))
             },
@@ -729,7 +729,7 @@ fn review_group_row(
             Label::derived(move || title.clone()).style(|s| {
                 s.font_size(theme::TEXT_BODY)
                     .font_weight(theme::weight_emphasis())
-                    .color(theme::FG)
+                    .color(theme::fg())
                     .text_ellipsis()
                     .min_width(0.0)
                     .width_full()
@@ -742,7 +742,7 @@ fn review_group_row(
             .style(|s| {
                 s.font_size(theme::TEXT_SECTION)
                     .font_weight(theme::weight_emphasis())
-                    .color(theme::FG_MUTED)
+                    .color(theme::fg_muted())
                     .selectable(false)
             }),
         ))
@@ -767,12 +767,12 @@ fn review_group_row(
             .padding_left(14.0)
             .padding_right(10.0)
             .padding_vert(8.0)
-            .background(theme::CANVAS_SUBTLE)
+            .background(theme::canvas_subtle())
             .border_bottom(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::border_muted())
             .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
-            .hover(|s| s.background(theme::CANVAS_HOVER))
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+            .hover(|s| s.background(theme::canvas_hover()))
     })
     .debug_name(format!("agent-review-group:{key}"));
     let runs = group.runs.clone();
@@ -793,7 +793,7 @@ fn review_group_row(
                 s.flex_col()
                     .width_full()
                     .padding_left(12.0)
-                    .background(theme::CANVAS_SUBTLE)
+                    .background(theme::canvas_subtle())
             })
             .into_any()
         },

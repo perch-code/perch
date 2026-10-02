@@ -109,7 +109,7 @@ fn detail_body(
         .style(move |s| {
             s.width_full()
                 .max_height(cap)
-                .background(theme::CANVAS_SUBTLE)
+                .background(theme::canvas_subtle())
         });
     let jump = dyn_container(
         move || !follow.get(),
@@ -140,7 +140,7 @@ fn heading(text: &'static str) -> impl IntoView {
     Label::derived(move || text.to_string()).style(|s| {
         s.font_size(theme::TEXT_SECTION)
             .font_weight(theme::weight_emphasis())
-            .color(theme::FG_SUBTLE)
+            .color(theme::fg_subtle())
             .selectable(false)
     })
 }
@@ -150,7 +150,7 @@ fn request_section(request: String) -> impl IntoView {
         heading("REQUEST"),
         Container::new(Label::derived(move || request.clone()).style(|s| {
             s.font_size(theme::TEXT_BODY)
-                .color(theme::FG)
+                .color(theme::fg())
                 .line_height(theme::PROSE_LINE_HEIGHT)
                 .text_wrap()
                 .width_full()
@@ -160,7 +160,7 @@ fn request_section(request: String) -> impl IntoView {
                 .padding_left(12.0)
                 .padding_vert(3.0)
                 .border_left(2.0)
-                .border_color(theme::ACCENT)
+                .border_color(theme::accent())
         }),
     ))
     .style(|s| s.flex_col().width_full().gap(9.0))
@@ -227,9 +227,9 @@ fn activity_section(
                         s.size(6.0, 6.0)
                             .border_radius(3.0)
                             .background(if row.ok {
-                                theme::FG_SUBTLE
+                                theme::fg_subtle()
                             } else {
-                                theme::CLOSED
+                                theme::closed()
                             })
                             .margin_top(6.0)
                             .flex_shrink(0.0_f32)
@@ -238,9 +238,9 @@ fn activity_section(
                         s.font_size(theme::TEXT_BADGE)
                             .font_family(theme::CODE_FONT_STACK.to_string())
                             .color(if row.ok {
-                                theme::FG_MUTED
+                                theme::fg_muted()
                             } else {
-                                theme::CLOSED
+                                theme::closed()
                             })
                             .line_height(theme::PROSE_LINE_HEIGHT)
                             // A hash or a path in a command breaks at the
@@ -273,7 +273,7 @@ fn activity_section(
                             "No tool activity reported.".to_string()
                         }
                     })
-                    .style(|s| s.font_size(theme::TEXT_META).color(theme::FG_SUBTLE))
+                    .style(|s| s.font_size(theme::TEXT_META).color(theme::fg_subtle()))
                     .into_any()
                 } else {
                     Empty::new().into_any()
@@ -463,7 +463,7 @@ fn result_content(
         (Some(error), false) => Stack::vertical((
             Container::new(Label::derived(move || error.clone()).style(move |s| {
                 s.font_size(theme::TEXT_BODY)
-                    .color(outcome_color)
+                    .color(outcome_color())
                     .line_height(theme::PROSE_LINE_HEIGHT)
                     .text_wrap()
                     .width_full()
@@ -471,9 +471,9 @@ fn result_content(
             .style(move |s| {
                 s.width_full()
                     .padding(11.0)
-                    .background(outcome_color.with_alpha(0.07))
+                    .background(outcome_color().with_alpha(0.07))
                     .border(1.0)
-                    .border_color(outcome_color.with_alpha(0.30))
+                    .border_color(outcome_color().with_alpha(0.30))
                     .border_radius(theme::RADIUS)
             }),
             crate::review::markdown::render_in(&result, &repository),
@@ -483,7 +483,7 @@ fn result_content(
         (Some(error), true) => {
             Container::new(Label::derived(move || error.clone()).style(move |s| {
                 s.font_size(theme::TEXT_BODY)
-                    .color(outcome_color)
+                    .color(outcome_color())
                     .line_height(theme::PROSE_LINE_HEIGHT)
                     .text_wrap()
                     .width_full()
@@ -491,9 +491,9 @@ fn result_content(
             .style(move |s| {
                 s.width_full()
                     .padding(11.0)
-                    .background(outcome_color.with_alpha(0.07))
+                    .background(outcome_color().with_alpha(0.07))
                     .border(1.0)
-                    .border_color(outcome_color.with_alpha(0.30))
+                    .border_color(outcome_color().with_alpha(0.30))
                     .border_radius(theme::RADIUS)
             })
             .into_any()
@@ -505,7 +505,7 @@ fn result_content(
                 "No response was reported.".to_string()
             }
         })
-        .style(|s| s.font_size(theme::TEXT_META).color(theme::FG_SUBTLE))
+        .style(|s| s.font_size(theme::TEXT_META).color(theme::fg_subtle()))
         .into_any(),
         (None, false) => crate::review::markdown::render_in(&result, &repository).into_any(),
     };
@@ -513,7 +513,7 @@ fn result_content(
         Stack::vertical((
             Container::new(Label::derived(move || message.to_string()).style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::FG_SUBTLE)
+                    .color(theme::fg_subtle())
                     .line_height(theme::PROSE_LINE_HEIGHT)
                     .text_wrap()
                     .width_full()
@@ -521,7 +521,7 @@ fn result_content(
             .style(|s| {
                 s.width_full()
                     .padding(9.0)
-                    .background(theme::BADGE_BG)
+                    .background(theme::badge_bg())
                     .border_radius(theme::RADIUS)
             }),
             content,
@@ -555,7 +555,7 @@ fn usage_content(run: AgentRunSummary) -> impl IntoView {
         heading("USAGE"),
         Label::derived(move || usage.clone()).style(|s| {
             s.font_size(theme::TEXT_BADGE)
-                .color(theme::FG_SUBTLE)
+                .color(theme::fg_subtle())
                 .text_wrap()
                 .width_full()
         }),
@@ -566,7 +566,7 @@ fn usage_content(run: AgentRunSummary) -> impl IntoView {
             .gap(7.0)
             .padding_top(14.0)
             .border_top(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::border_muted())
     })
 }
 

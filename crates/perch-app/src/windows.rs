@@ -244,6 +244,11 @@ pub fn view(
         moved.set(at);
         remember(at);
     })
+    // Sent as the window opens and whenever macOS switches between light
+    // and dark.
+    .on_event_cont(floem::event::listener::ThemeChanged, |_, theme: &floem::window::Theme| {
+        crate::theme::set_appearance((*theme).into());
+    })
     .on_event_cont(floem::event::listener::WindowGainedFocus, move |_, _| {
         if let Some(app) = app() {
             app.focused.set(Some(id));

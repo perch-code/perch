@@ -214,9 +214,9 @@ pub fn surface(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                 .style(|s| {
                     s.width_full()
                         .margin_top(theme::CONVERSATION_ENTRY_PADDING)
-                        .background(theme::CANVAS)
+                        .background(theme::canvas())
                         .border(1.0)
-                        .border_color(theme::BORDER)
+                        .border_color(theme::border())
                         .border_radius(theme::RADIUS_LG)
                 })
                 .into_any()
@@ -228,12 +228,12 @@ pub fn surface(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
 /// One line: what the branch has, and the way into the form.
 fn folded(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: String) -> impl IntoView {
     Stack::horizontal((
-        sidebar_glyph(SidebarIcon::PullRequest, theme::FG_MUTED)
+        sidebar_glyph(SidebarIcon::PullRequest, theme::fg_muted)
             .style(|s| s.size(14.0, 14.0).flex_shrink(0.0_f32)),
         Label::derived(|| "Pull request".to_string()).style(|s| {
             s.font_size(theme::TEXT_META)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG)
+                .color(theme::fg())
                 .selectable(false)
                 .flex_shrink(0.0_f32)
         }),
@@ -241,7 +241,7 @@ fn folded(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: Stri
             .debug_name("open-pull-request-ahead")
             .style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::FG_SUBTLE)
+                    .color(theme::fg_subtle())
                     .selectable(false)
                     .text_ellipsis()
                     .min_width(0.0)
@@ -327,11 +327,11 @@ fn form(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: String
                 .height(30.0)
                 .font_size(theme::TEXT_BODY)
                 .padding_horiz(8.0)
-                .background(theme::CANVAS)
+                .background(theme::canvas())
                 .border(1.0)
-                .border_color(theme::BORDER)
+                .border_color(theme::border())
                 .border_radius(theme::RADIUS)
-                .focus(|s| s.border_color(theme::ACCENT))
+                .focus(|s| s.border_color(theme::accent()))
                 .set_disabled(pending())
         });
 
@@ -378,7 +378,7 @@ fn form(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: String
         Label::derived(|| "Open a pull request".to_string()).style(|s| {
             s.font_size(theme::TEXT_META)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG)
+                .color(theme::fg())
                 .selectable(false)
         }),
         title_input,
@@ -415,7 +415,7 @@ fn body_editor(
 
     let editor = text_editor(draft_of(app, &item_id).body)
         .placeholder("Description".to_string())
-        .editor_style(|s| s.hide_gutter(true).selection_color(theme::SELECTION_BG));
+        .editor_style(|s| s.hide_gutter(true).selection_color(theme::selection_bg()));
     let styling_doc = editor.editor().doc();
     let styling_id = state.next_token();
     let editor = editor.styling(crate::review::composer_styling::ComposerStyling::new(
@@ -551,7 +551,7 @@ fn offer(app: AppState, state: ReviewState, item_id: String) -> impl IntoView {
         Label::derived(|| "The description is written. Replace what you wrote?".to_string())
             .style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::FG)
+                    .color(theme::fg())
                     .min_width(0.0)
                     .flex_grow(1.0_f32)
             }),
@@ -596,12 +596,12 @@ fn base_chip(app: AppState, state: ReviewState, item_id: String) -> impl IntoVie
         })
         .style(|s| {
             s.font_size(theme::TEXT_BADGE)
-                .color(theme::FG)
+                .color(theme::fg())
                 .selectable(false)
                 .pointer_events_none()
                 .margin_right(5.0)
         }),
-        sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE)
+        sidebar_glyph(SidebarIcon::ChevronDown, theme::fg_subtle)
             .style(|s| s.size(9.0, 9.0).pointer_events_none()),
     ))
     .dropdown(menu)
@@ -610,13 +610,13 @@ fn base_chip(app: AppState, state: ReviewState, item_id: String) -> impl IntoVie
             .items_center()
             .height(30.0)
             .padding_horiz(9.0)
-            .background(theme::CANVAS)
+            .background(theme::canvas())
             .border(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
             .border_radius(theme::RADIUS)
             .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
-            .hover(|s| s.background(theme::CANVAS_HOVER))
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+            .hover(|s| s.background(theme::canvas_hover()))
     })
     .debug_name("open-pull-request-base")
 }
@@ -672,7 +672,7 @@ fn draft_box(app: AppState, item_id: String) -> impl IntoView {
         ),
         Label::derived(|| "Draft".to_string()).style(|s| {
             s.font_size(theme::TEXT_BADGE)
-                .color(theme::FG)
+                .color(theme::fg())
                 .selectable(false)
                 .margin_left(6.0)
         }),
@@ -701,14 +701,14 @@ fn notes(app: AppState, state: ReviewState, title: RwSignal<String>) -> impl Int
             .debug_name("open-pull-request-dirty")
             .style(move |s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::DRAFT_YELLOW)
+                    .color(theme::draft_yellow())
                     .apply_if(dirty().is_none(), |s| s.hide())
             }),
         Label::derived(move || refused().unwrap_or_default())
             .debug_name("open-pull-request-refusal")
             .style(move |s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::FG_SUBTLE)
+                    .color(theme::fg_subtle())
                     .apply_if(refused().is_none(), |s| s.hide())
             }),
     ))
@@ -723,7 +723,7 @@ fn error_line(state: ReviewState) -> impl IntoView {
                 return Empty::new().into_any();
             };
             Stack::horizontal((
-                sidebar_glyph(SidebarIcon::Warning, theme::CLOSED)
+                sidebar_glyph(SidebarIcon::Warning, theme::closed)
                     .style(|s| s.size(14.0, 14.0).margin_right(7.0).flex_shrink(0.0_f32)),
                 Label::derived(move || message.clone())
                     .debug_name("open-pull-request-error")
@@ -731,7 +731,7 @@ fn error_line(state: ReviewState) -> impl IntoView {
                         s.min_width(0.0)
                             .flex_grow(1.0_f32)
                             .font_size(theme::TEXT_META)
-                            .color(theme::CLOSED)
+                            .color(theme::closed())
                     }),
             ))
             .style(|s| s.width_full().items_start())
@@ -756,7 +756,7 @@ pub(crate) fn action_button(
     Container::new(Label::derived(label).style(move |s| {
         s.font_size(theme::TEXT_BADGE)
             .font_weight(theme::weight_emphasis())
-            .color(if prominent { theme::CANVAS } else { theme::FG_MUTED })
+            .color(if prominent { theme::canvas() } else { theme::fg_muted() })
             .selectable(false)
             .pointer_events_none()
     }))
@@ -781,20 +781,20 @@ pub(crate) fn action_button(
             .items_center()
             .justify_center()
             .flex_shrink(0.0_f32)
-            .background(if prominent { theme::FG } else { theme::CANVAS })
+            .background(if prominent { theme::fg() } else { theme::canvas() })
             .border(1.0)
-            .border_color(if prominent { theme::FG } else { theme::BORDER })
+            .border_color(if prominent { theme::fg() } else { theme::border() })
             .border_radius(theme::RADIUS)
             .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
             .set_disabled(!available)
             .apply_if(!available, |s| s.opacity(0.45_f32).cursor(CursorStyle::Default))
             .apply_if(available, |s| {
                 s.hover(move |s| {
                     s.background(if prominent {
-                        theme::ACTION_HOVER
+                        theme::action_hover()
                     } else {
-                        theme::CANVAS_HOVER
+                        theme::canvas_hover()
                     })
                 })
             })

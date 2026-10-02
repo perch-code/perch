@@ -37,9 +37,9 @@ pub fn sidebar(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl
             .height_full()
             .flex_shrink(0.0_f32)
             .flex_col()
-            .background(theme::NAV_CANVAS)
+            .background(theme::nav_canvas())
             .border_right(1.0)
-            .border_color(theme::NAV_DIVIDER)
+            .border_color(theme::nav_divider())
     })
 }
 
@@ -83,7 +83,7 @@ pub fn lights_lane(state: AppState, inset: f64) -> impl IntoView {
 /// `+`: the new-work view, as `Cmd-N` opens it.
 fn new_work_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     Container::new(
-        sidebar_glyph(SidebarIcon::Plus, theme::NAV_MUTED).style(|s| s.size(16.0, 16.0)),
+        sidebar_glyph(SidebarIcon::Plus, theme::nav_muted).style(|s| s.size(16.0, 16.0)),
     )
     .on_event_stop(el::Click, move |_, _| crate::ui::new_work::open(state, &backend))
     .debug_name("new work")
@@ -95,8 +95,8 @@ fn new_work_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             .justify_center()
             .border_radius(8.0)
             .pointer_events_auto()
-            .apply_if(open, |s| s.background(theme::NAV_SELECTED))
-            .hover(|s| s.background(theme::NAV_HOVER))
+            .apply_if(open, |s| s.background(theme::nav_selected()))
+            .hover(|s| s.background(theme::nav_hover()))
     })
 }
 
@@ -104,7 +104,7 @@ fn new_work_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
 /// sidebar toggle is: it names the drawer, not the direction.
 fn toggle_button(state: AppState) -> impl IntoView {
     Container::new(
-        sidebar_glyph(SidebarIcon::Drawer, theme::NAV_MUTED).style(|s| s.size(16.0, 16.0)),
+        sidebar_glyph(SidebarIcon::Drawer, theme::nav_muted).style(|s| s.size(16.0, 16.0)),
     )
     .on_event_stop(el::Click, move |_, _| state.sidebar_open.update(|o| *o = !*o))
     .debug_name("drawer toggle")
@@ -115,7 +115,7 @@ fn toggle_button(state: AppState) -> impl IntoView {
             .justify_center()
             .border_radius(8.0)
             .pointer_events_auto()
-            .hover(|s| s.background(theme::NAV_HOVER))
+            .hover(|s| s.background(theme::nav_hover()))
     })
 }
 
@@ -147,11 +147,11 @@ fn scope_tabs(state: AppState) -> impl IntoView {
                         .border(0.0)
                         .border_radius(10.0)
                         .font_size(theme::TEXT_META)
-                        .color(if selected { theme::NAV_FG } else { theme::NAV_MUTED })
-                        .background(if selected { theme::NAV_SELECTED } else { theme::NAV_CANVAS })
+                        .color(if selected { theme::nav_fg() } else { theme::nav_muted() })
+                        .background(if selected { theme::nav_selected() } else { theme::nav_canvas() })
                         .flex_shrink(0.0_f32)
-                        .hover(|s| s.background(theme::NAV_HOVER))
-                        .focus_visible(|s| s.outline(2.0).outline_color(theme::NAV_CONTROL_BORDER))
+                        .hover(|s| s.background(theme::nav_hover()))
+                        .focus_visible(|s| s.outline(2.0).outline_color(theme::nav_control_border()))
                 })
         },
     )
@@ -199,11 +199,11 @@ fn search_row(state: AppState, backend: Rc<Backend>) -> impl IntoView {
                 .padding_left(34.0)
                 // Room for the clear button, so text never runs under it.
                 .padding_right(32.0)
-                .background(theme::NAV_CANVAS)
+                .background(theme::nav_canvas())
                 .border(1.0)
-                .border_color(theme::NAV_CONTROL_BORDER)
+                .border_color(theme::nav_control_border())
                 .border_radius(theme::NAV_CONTROL_RADIUS)
-                .focus(|s| s.border_color(theme::NAV_MUTED))
+                .focus(|s| s.border_color(theme::nav_muted()))
         });
     let id = input.view_id();
     state.search_box.set(Some(id));
@@ -218,12 +218,12 @@ fn search_row(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     // The glyph is laid over the box rather than beside the text, the way
     // the filter button's is, and lets the pointer through: a click on it
     // is a click in the box.
-    let glyph = sidebar_glyph(SidebarIcon::Search, theme::NAV_SUBTLE)
+    let glyph = sidebar_glyph(SidebarIcon::Search, theme::nav_subtle)
         .style(|s| s.size(15.0, 15.0).position(Position::Absolute).inset_left(10.0).pointer_events_none());
     // Shown once there is something to clear. Emptying the box leaves the
     // keyboard in it, ready for the next query.
     let clear = Container::new(
-        sidebar_glyph(SidebarIcon::Clear, theme::NAV_SUBTLE).style(|s| s.size(15.0, 15.0).pointer_events_none()),
+        sidebar_glyph(SidebarIcon::Clear, theme::nav_subtle).style(|s| s.size(15.0, 15.0).pointer_events_none()),
     )
     .on_event_stop(el::Click, move |_, _| {
         state.item_query.set(String::new());
@@ -238,7 +238,7 @@ fn search_row(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             .border_radius(11.0)
             .position(Position::Absolute)
             .inset_right(6.0)
-            .hover(|s| s.background(theme::NAV_HOVER))
+            .hover(|s| s.background(theme::nav_hover()))
             .apply_if(state.item_query.with(String::is_empty), |s| s.hide())
     });
     // The placeholder names the list the box searches, which the filter
@@ -252,7 +252,7 @@ fn search_row(state: AppState, backend: Rc<Backend>) -> impl IntoView {
                 .inset_left(35.0)
                 .inset_right(32.0)
                 .font_size(theme::TEXT_BODY)
-                .color(theme::NAV_SUBTLE)
+                .color(theme::nav_subtle())
                 .text_ellipsis()
                 .min_width(0.0)
                 .selectable(false)
@@ -282,7 +282,7 @@ fn filter_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     // both let the click through.
     Container::new(
         dyn_container(narrowed, |on| {
-            sidebar_glyph(SidebarIcon::Filter, if on { theme::ACCENT } else { theme::NAV_MUTED })
+            sidebar_glyph(SidebarIcon::Filter, move || if on { theme::accent() } else { theme::nav_muted() })
                 .style(|s| s.size(14.0, 14.0).pointer_events_none())
                 .into_any()
         })
@@ -299,10 +299,10 @@ fn filter_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             .size(32.0, 32.0)
             .items_center()
             .justify_center()
-            .background(if narrowed() { theme::NAV_SELECTED_PRESSED } else { theme::NAV_SELECTED })
+            .background(if narrowed() { theme::nav_selected_pressed() } else { theme::nav_selected() })
             .border(0.0)
             .border_radius(16.0)
-            .hover(|s| s.background(theme::NAV_SELECTED_PRESSED))
+            .hover(|s| s.background(theme::nav_selected_pressed()))
     })
 }
 
@@ -607,7 +607,7 @@ fn local_item_list(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> 
             |message| {
                 if let Some(message) = message {
                     Label::new(message)
-                        .style(|s| s.font_size(theme::TEXT_META).color(theme::NAV_SUBTLE).padding(24.0))
+                        .style(|s| s.font_size(theme::TEXT_META).color(theme::nav_subtle()).padding(24.0))
                         .into_any()
                 } else {
                     Empty::new().into_any()
@@ -844,6 +844,14 @@ mod tests {
             run_snapshot: None,
             snoozed_until: None,
         }
+    }
+
+    /// The list of items, all of it dark once the system is.
+    #[test]
+    fn the_list_goes_dark_with_the_system() {
+        let mut harness = harness().0;
+        let left = crate::theme::dark_check::light_left(&mut harness);
+        assert!(left.is_empty(), "light colours left in dark:\n{}", left.join("\n"));
     }
 
     fn harness() -> (HeadlessHarness, AppState) {
@@ -1492,7 +1500,7 @@ mod tests {
         );
         assert_eq!(
             harness.get_computed_style(title).get(TextColor),
-            Some(theme::NAV_FG),
+            Some(theme::nav_fg()),
             "and the full foreground"
         );
         let dot_rect = dot.get_visual_rect_no_clip();
@@ -1509,7 +1517,7 @@ mod tests {
         );
         assert_eq!(
             harness.get_computed_style(other_title).get(TextColor),
-            Some(theme::NAV_READ),
+            Some(theme::nav_read()),
             "so it is grey too"
         );
         assert_eq!(find(other, "unread dot").unwrap().get_visual_rect_no_clip().width(), 0.0);
@@ -1532,7 +1540,7 @@ mod tests {
         );
         assert_eq!(
             harness.get_computed_style(title).get(TextColor),
-            Some(theme::NAV_READ),
+            Some(theme::nav_read()),
             "and its grey"
         );
         assert_eq!(dot.get_visual_rect_no_clip().width(), 0.0, "the dot is gone");
@@ -1549,7 +1557,7 @@ mod tests {
             harness.get_computed_style(title).get(FontWeight),
             Some(theme::weight_emphasis())
         );
-        assert_eq!(harness.get_computed_style(title).get(TextColor), Some(theme::NAV_FG));
+        assert_eq!(harness.get_computed_style(title).get(TextColor), Some(theme::nav_fg()));
         assert_eq!(dot.get_visual_rect_no_clip().width(), 7.0);
     }
 
@@ -1565,7 +1573,7 @@ mod tests {
         let row = find(harness.root_id(), "notification row:11").unwrap();
         let title = find(row, "Unread pull request").unwrap();
         assert_eq!(harness.get_computed_style(title).get(FontWeight), Some(theme::weight_emphasis()));
-        assert_eq!(harness.get_computed_style(title).get(TextColor), Some(theme::NAV_FG));
+        assert_eq!(harness.get_computed_style(title).get(TextColor), Some(theme::nav_fg()));
         assert_eq!(find(row, "unread dot").unwrap().get_visual_rect_no_clip().width(), 7.0);
 
         state.notifications.update(|threads| {
@@ -1576,7 +1584,7 @@ mod tests {
         let row = find(harness.root_id(), "notification row:11").unwrap();
         let title = find(row, "Unread pull request").unwrap();
         assert_eq!(harness.get_computed_style(title).get(FontWeight), Some(theme::weight_read()));
-        assert_eq!(harness.get_computed_style(title).get(TextColor), Some(theme::NAV_READ));
+        assert_eq!(harness.get_computed_style(title).get(TextColor), Some(theme::nav_read()));
         assert_eq!(find(row, "unread dot").unwrap().get_visual_rect_no_clip().width(), 0.0);
     }
 
@@ -1645,12 +1653,20 @@ mod tests {
             let row = find(harness.root_id(), "item row:pr").unwrap();
             harness.get_computed_style(find(row, "row face:2").unwrap()).get(Background)
         };
-        assert_eq!(ring(&harness), Some(Brush::Solid(theme::NAV_CANVAS)));
+        assert_eq!(ring(&harness), Some(Brush::Solid(theme::nav_canvas())));
         let rect = row.get_visual_rect_no_clip();
         harness.pointer_move(rect.center().x, rect.center().y);
         harness.rebuild();
         harness.paint();
-        assert_eq!(ring(&harness), Some(Brush::Solid(theme::NAV_HOVER)), "the ring follows the row's wash");
+        assert_eq!(ring(&harness), Some(Brush::Solid(theme::nav_hover())), "the ring follows the row's wash");
+    }
+
+    /// The window with no item open, all of it dark once the system is.
+    #[test]
+    fn goes_dark_with_the_system() {
+        let mut harness = window().0;
+        let left = crate::theme::dark_check::light_left(&mut harness);
+        assert!(left.is_empty(), "light colours left in dark:\n{}", left.join("\n"));
     }
 
     /// The whole window, so the drawer sits where it does in the app: at

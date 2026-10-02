@@ -1082,9 +1082,9 @@ fn row(app: AppState, state: ReviewState, index: usize, suggestion: &Suggestion)
             .padding_horiz(8.0)
             .border_radius(crate::ui::menu::ROW_RADIUS);
         if selected() {
-            s.background(theme::MENU_HOVER)
+            s.background(theme::menu_hover())
         } else {
-            s.hover(|s| s.background(theme::MENU_POINTED))
+            s.hover(|s| s.background(theme::menu_pointed()))
         }
     }))
     // On the press, not the click: the press takes the keyboard from the
@@ -1114,10 +1114,10 @@ fn person_row(app: AppState, hit: &PersonHit) -> impl IntoView {
             &hit.person.login,
             &hit.login_matches,
             theme::TEXT_META,
-            theme::FG,
+            theme::fg,
         )
         .style(|s| s.flex_shrink(0.0_f32).font_weight(theme::weight_strong())),
-        go_to::highlighted(&name, &hit.name_matches, theme::TEXT_META, theme::FG_SUBTLE)
+        go_to::highlighted(&name, &hit.name_matches, theme::TEXT_META, theme::fg_subtle)
             .style(|s| s.margin_left(6.0).min_width(0.0).flex_shrink(1.0_f32)),
     ))
     .style(|s| s.items_center().width_full().min_width(0.0))
@@ -1135,7 +1135,7 @@ fn emoji_row(hit: &EmojiHit) -> impl IntoView {
                 .margin_right(8.0)
                 .font_size(theme::TEXT_META)
         }),
-        go_to::highlighted(&shortcode, &matches, theme::TEXT_META, theme::FG)
+        go_to::highlighted(&shortcode, &matches, theme::TEXT_META, theme::fg)
             .style(|s| s.min_width(0.0).flex_shrink(1.0_f32)),
     ))
     .style(|s| s.items_center().width_full().min_width(0.0))
@@ -1147,13 +1147,13 @@ pub(crate) fn reference_row(hit: &ReferenceHit) -> impl IntoView {
     let state = hit.reference.state;
     let number = format!("#{}", hit.reference.number);
     Stack::horizontal((
-        state_glyph(state, crate::icons::state_color(state))
+        state_glyph(state, move || crate::icons::state_color(state))
             .style(|s| s.flex_shrink(0.0_f32).margin_right(8.0)),
         go_to::highlighted(
             &hit.reference.title,
             &hit.title_matches,
             theme::TEXT_META,
-            theme::FG,
+            theme::fg,
         )
         .style(|s| {
             s.min_width(0.0)
@@ -1164,7 +1164,7 @@ pub(crate) fn reference_row(hit: &ReferenceHit) -> impl IntoView {
             &number,
             &hit.number_matches,
             theme::TEXT_META,
-            theme::FG_SUBTLE,
+            theme::fg_subtle,
         )
         .style(|s| s.flex_shrink(0.0_f32).margin_left(6.0)),
     ))

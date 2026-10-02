@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use floem::event::EventPropagation;
 use floem::kurbo::Rect;
-use floem::peniko::{Brush, Color};
+use floem::peniko::Brush;
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::Position;
@@ -1247,15 +1247,15 @@ fn query_box(state: ReviewState) -> impl IntoView {
                 .height(theme::GO_TO_BOX_HEIGHT)
                 .font_size(theme::TEXT_BODY)
                 .padding_horiz(8.0)
-                .background(theme::CANVAS)
-                .hover(|s| s.background(theme::CANVAS))
+                .background(theme::canvas())
+                .hover(|s| s.background(theme::canvas()))
                 .border(1.0)
-                .border_color(theme::BORDER)
+                .border_color(theme::border())
                 .border_radius(crate::ui::menu::ROW_RADIUS)
-                .focus(|s| s.border_color(theme::ACCENT))
-                .cursor_color(theme::FG)
-                .set(SelectionColor, Brush::Solid(theme::SELECTION_BG))
-                .class(PlaceholderTextClass, |s| s.color(theme::FG_SUBTLE))
+                .focus(|s| s.border_color(theme::accent()))
+                .cursor_color(theme::fg())
+                .set(SelectionColor, Brush::Solid(theme::selection_bg()))
+                .class(PlaceholderTextClass, |s| s.color(theme::fg_subtle()))
         });
     let id = input.view_id();
     state.go_to.text_box.set(Some(id));
@@ -1360,7 +1360,7 @@ fn list(state: ReviewState, open_file: OpenFile) -> impl IntoView {
                     .items_center()
                     .padding_horiz(8.0)
                     .font_size(theme::TEXT_META)
-                    .color(theme::FG_SUBTLE)
+                    .color(theme::fg_subtle())
                     .selectable(false)
                     .apply_if(note.with(Option::is_none), |s| s.hide())
             }),
@@ -1393,9 +1393,9 @@ fn row_view(state: ReviewState, open_file: OpenFile, row: Row) -> impl IntoView 
             .padding_horiz(8.0)
             .border_radius(crate::ui::menu::ROW_RADIUS);
         if selected() {
-            s.background(theme::MENU_HOVER)
+            s.background(theme::menu_hover())
         } else {
-            s.hover(|s| s.background(theme::MENU_POINTED))
+            s.hover(|s| s.background(theme::menu_pointed()))
         }
     }))
     .on_event_stop(el::Click, move |_, _| accept(state, &open_file, index))
@@ -1406,7 +1406,7 @@ fn row_view(state: ReviewState, open_file: OpenFile, row: Row) -> impl IntoView 
             .height(theme::GO_TO_ROW_HEIGHT)
             .flex_shrink(0.0_f32)
             .apply_if(rule, |s| {
-                s.border_top(1.0).border_color(theme::BORDER_MUTED)
+                s.border_top(1.0).border_color(theme::border_muted())
             })
     })
 }
@@ -1426,14 +1426,14 @@ pub(crate) fn file_row(hit: &Hit, heading: Option<Section>) -> impl IntoView {
         }),
         // A name as long as the row gives way before it runs out of the
         // palette, the directory first.
-        highlighted(&hit.name, &hit.name_matches, theme::TEXT_META, theme::FG)
+        highlighted(&hit.name, &hit.name_matches, theme::TEXT_META, theme::fg)
             .clip()
             .style(|s| s.flex_shrink(0.0_f32).max_width_pct(80.0)),
         highlighted(
             &hit.directory,
             &hit.directory_matches,
             theme::TEXT_BADGE,
-            theme::FG_SUBTLE,
+            theme::fg_subtle,
         )
         .clip()
         .style(|s| s.margin_left(6.0).min_width(0.0).flex_shrink(1.0_f32)),
@@ -1442,7 +1442,7 @@ pub(crate) fn file_row(hit: &Hit, heading: Option<Section>) -> impl IntoView {
             Some(section) => Label::new(section.label())
                 .style(|s| {
                     s.font_size(theme::TEXT_BADGE)
-                        .color(theme::FG_SUBTLE)
+                        .color(theme::fg_subtle())
                         .margin_left(12.0)
                         .flex_shrink(0.0_f32)
                 })
@@ -1466,10 +1466,10 @@ fn line_row(name: &str, line: usize, column: Option<usize>) -> impl IntoView {
         None => format!("Go to line {line}"),
     };
     Stack::horizontal((
-        Label::new(text).style(|s| s.font_size(theme::TEXT_META).color(theme::FG)),
+        Label::new(text).style(|s| s.font_size(theme::TEXT_META).color(theme::fg())),
         Label::new(name.to_string()).style(|s| {
             s.font_size(theme::TEXT_BADGE)
-                .color(theme::FG_SUBTLE)
+                .color(theme::fg_subtle())
                 .margin_left(6.0)
         }),
     ))
@@ -1494,14 +1494,14 @@ fn cut(text: &str, matches: &[Range<usize>]) -> Vec<(String, bool)> {
 /// heavier, as a row of labels, one to a run: floem's rich text wraps and
 /// has no ellipsis, and a long directory wants one. The last run takes
 /// it.
-pub(crate) fn highlighted(text: &str, matches: &[Range<usize>], size: f32, color: Color) -> Stack {
+pub(crate) fn highlighted(text: &str, matches: &[Range<usize>], size: f32, color: impl theme::Ink) -> Stack {
     let runs = cut(text, matches);
     let last = runs.len().saturating_sub(1);
     Stack::horizontal_from_iter(runs.into_iter().enumerate().map(move |(i, (run, hit))| {
         Label::new(run).style(move |s| {
             let s = s
                 .font_size(size)
-                .color(if hit { theme::MATCH_FG } else { color })
+                .color(if hit { theme::match_fg() } else { color() })
                 .apply_if(hit, |s| s.font_weight(theme::weight_strong()));
             if i == last {
                 s.min_width(0.0).text_ellipsis()
@@ -1994,6 +1994,16 @@ mod window {
     use crate::review::model::{ItemTab, Phase, ReviewState};
     use crate::state::AppState;
     use crate::theme;
+
+    /// The window under Cmd-P, all of it dark once the system is.
+    #[test]
+    fn goes_dark_with_the_system() {
+        let mut harness = harness().0;
+        focus_the_code(&mut harness);
+        cmd_p(&mut harness);
+        let left = crate::theme::dark_check::light_left(&mut harness);
+        assert!(left.is_empty(), "light colours left in dark:\n{}", left.join("\n"));
+    }
 
     /// The window on Code with `src/x.rs` open, a branch that changed it
     /// and deleted `src/gone.rs`, and a few other files in the tree.

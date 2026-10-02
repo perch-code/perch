@@ -149,9 +149,9 @@ pub fn panel(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
         let s = s
             .height_full()
             .flex_shrink(0.0_f32)
-            .background(theme::CANVAS)
+            .background(theme::canvas())
             .border_left(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
             .position(Position::Relative);
         match placement.get() {
             Placement::Docked(width) => s.width(width),
@@ -167,7 +167,7 @@ pub fn panel(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
                 .z_index(60)
                 .box_shadow_blur(18.0)
                 .box_shadow_h_offset(-5.0)
-                .box_shadow_color(theme::SHADOW),
+                .box_shadow_color(theme::shadow()),
         }
     })
     .debug_name("right-drawer")
@@ -186,7 +186,7 @@ pub fn header_bar(
         Label::derived(title).style(|s| {
             s.font_size(theme::TEXT_TITLE)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG)
+                .color(theme::fg())
                 .selectable(false)
                 .pointer_events_none()
         }),
@@ -202,9 +202,9 @@ pub fn header_bar(
             .gap(8.0)
             .padding_left(12.0)
             .padding_right(8.0)
-            .background(theme::CANVAS)
+            .background(theme::canvas())
             .border_bottom(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::border_muted())
     })
 }
 

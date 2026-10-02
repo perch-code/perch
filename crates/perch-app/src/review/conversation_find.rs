@@ -413,6 +413,14 @@ mod tests {
         (harness, app, state)
     }
 
+    /// Conversation under its find bar, all of it dark once the system is.
+    #[test]
+    fn goes_dark_with_the_system() {
+        let mut harness = harness().0;
+        let left = crate::theme::dark_check::light_left(&mut harness);
+        assert!(left.is_empty(), "light colours left in dark:\n{}", left.join("\n"));
+    }
+
     fn harness() -> (HeadlessHarness, AppState, ReviewState) {
         harness_with(discussion())
     }

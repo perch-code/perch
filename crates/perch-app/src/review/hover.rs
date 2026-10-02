@@ -227,7 +227,7 @@ pub fn card(markdown: &str, fit: Fit) -> impl IntoView {
                         .padding_vert(9.0)
                         .width_full()
                         .border_top(1.0)
-                        .border_color(theme::BORDER_MUTED)
+                        .border_color(theme::border_muted())
                         .selectable(false)
                 })
                 .into_any()
@@ -237,13 +237,13 @@ pub fn card(markdown: &str, fit: Fit) -> impl IntoView {
         s.flex_col()
             .max_width(fit.width)
             .margin_left(-fit.shift)
-            .background(theme::CANVAS)
+            .background(theme::canvas())
             .border(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
             .border_radius(theme::RADIUS_LG)
             .box_shadow_blur(14.0)
             .box_shadow_v_offset(4.0)
-            .box_shadow_color(theme::SHADOW)
+            .box_shadow_color(theme::shadow())
     })
 }
 
@@ -289,12 +289,12 @@ fn signature_view(blocks: Vec<String>, alone: bool) -> impl IntoView {
                         .selectable(false);
                     if is_path {
                         s.font_size(theme::TEXT_SECTION)
-                            .color(theme::FG_SUBTLE)
+                            .color(theme::fg_subtle())
                             .margin_bottom(4.0)
                     } else {
                         s.font_size(theme::CODE_FONT_SIZE)
                             .font_weight(theme::weight_emphasis())
-                            .color(theme::FG)
+                            .color(theme::fg())
                             .line_height(theme::PROSE_LINE_HEIGHT)
                     }
                 })
@@ -308,7 +308,7 @@ fn signature_view(blocks: Vec<String>, alone: bool) -> impl IntoView {
             .width_full()
             .padding_horiz(12.0)
             .padding_vert(9.0)
-            .background(theme::CANVAS_SUBTLE)
+            .background(theme::canvas_subtle())
             .set(BorderTopLeftRadius, radius)
             .set(BorderTopRightRadius, radius)
             .set(BorderBottomLeftRadius, if alone { radius } else { 0.0 })

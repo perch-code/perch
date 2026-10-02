@@ -129,9 +129,9 @@ pub fn card(header: impl IntoView + 'static, body: floem::AnyView) -> impl IntoV
     .style(|s| {
         s.width_full()
             .flex_col()
-            .background(theme::CANVAS)
+            .background(theme::canvas())
             .border_bottom(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::border_muted())
     })
 }
 
@@ -141,7 +141,7 @@ fn byline_strip(content: impl IntoView + 'static) -> impl IntoView {
         s.items_center()
             .width_full()
             .height(theme::BYLINE_HEIGHT)
-            .background(theme::CANVAS)
+            .background(theme::canvas())
     })
 }
 
@@ -153,7 +153,7 @@ pub(crate) struct Byline {
     pub(crate) avatar_url: Box<dyn Fn() -> String>,
     pub(crate) avatar_size: f64,
     /// A verdict's glyph between the avatar and the login.
-    pub(crate) glyph: Option<(SidebarIcon, Color)>,
+    pub(crate) glyph: Option<(SidebarIcon, fn() -> Color)>,
     pub(crate) verb: String,
     pub(crate) when: Option<jiff::Timestamp>,
 }
@@ -184,7 +184,7 @@ pub(crate) fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> im
             |s| {
                 s.font_size(theme::TEXT_META)
                     .font_weight(theme::weight_emphasis())
-                    .color(theme::FG)
+                    .color(theme::fg())
             },
         ),
         Label::derived(move || match when {
@@ -194,7 +194,7 @@ pub(crate) fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> im
         })
         .style(|s| {
             s.font_size(theme::TEXT_META)
-                .color(theme::FG_MUTED)
+                .color(theme::fg_muted())
                 .margin_left(6.0)
                 .text_ellipsis()
                 .min_width(0.0)
@@ -263,7 +263,7 @@ pub(crate) fn hover_action(
     action: Rc<dyn Fn()>,
 ) -> impl IntoView {
     tip(
-        Container::new(sidebar_glyph(icon, theme::FG_MUTED).style(|s| s.size(14.0, 14.0)))
+        Container::new(sidebar_glyph(icon, theme::fg_muted).style(|s| s.size(14.0, 14.0)))
             .on_event_stop(el::Click, move |_, _| action())
             .debug_name(name)
             .style(move |s| {
@@ -272,7 +272,7 @@ pub(crate) fn hover_action(
                     .items_center()
                     .justify_center()
                     .border_radius(12.0)
-                    .hover(|s| s.background(theme::BADGE_BG))
+                    .hover(|s| s.background(theme::badge_bg()))
                     .apply_if(!hovered.get(), |s| s.hide())
             }),
         tip_text.to_string(),
@@ -472,7 +472,7 @@ fn react_button(
         Stack::with_id(
             face_id,
             (
-                sidebar_glyph(SidebarIcon::Smiley, theme::FG_MUTED)
+                sidebar_glyph(SidebarIcon::Smiley, theme::fg_muted)
                     .style(|s| s.size(14.0, 14.0).pointer_events_none()),
                 slot,
             ),
@@ -486,17 +486,17 @@ fn react_button(
                 .justify_center()
                 .border_radius(size / 2.0)
                 .keyboard_navigable()
-                .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING));
+                .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()));
             let s = if in_byline {
-                s.hover(|s| s.background(theme::BADGE_BG))
+                s.hover(|s| s.background(theme::badge_bg()))
                     .apply_if(hovered.is_some_and(|h| !h.get()) && !open, |s| s.hide())
             } else {
                 s.border(rule)
-                    .border_color(theme::BORDER)
-                    .background(theme::CANVAS)
-                    .hover(|s| s.background(theme::BADGE_BG).border_color(theme::FG_SUBTLE))
+                    .border_color(theme::border())
+                    .background(theme::canvas())
+                    .hover(|s| s.background(theme::badge_bg()).border_color(theme::fg_subtle()))
             };
-            s.apply_if(open, |s| s.background(theme::BADGE_BG))
+            s.apply_if(open, |s| s.background(theme::badge_bg()))
         })
         .debug_name("react-button"),
         "React".into(),
@@ -650,12 +650,12 @@ fn pick(
             .justify_center()
             .border_radius(theme::RADIUS)
             .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
             .apply_if(keyed.get(), |s| {
-                s.focus(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
+                s.focus(|s| s.outline(2.0).outline_color(theme::accent_ring()))
             })
-            .apply_if(mine, |s| s.background(theme::REACTED_BG))
-            .hover(move |s| s.background(if mine { theme::REACTED_BG } else { theme::BADGE_BG }))
+            .apply_if(mine, |s| s.background(theme::reacted_bg()))
+            .hover(move |s| s.background(if mine { theme::reacted_bg() } else { theme::badge_bg() }))
             .apply_if(busy.get(), |s| s.opacity(0.4_f32))
     });
     let id = button.view_id();
@@ -731,7 +731,7 @@ fn reaction_pill(
             Label::derived(move || count.to_string()).style(move |s| {
                 s.font_size(theme::TEXT_BADGE)
                     .font_weight(theme::weight_emphasis())
-                    .color(if mine { theme::UNREAD } else { theme::FG_MUTED })
+                    .color(if mine { theme::unread() } else { theme::fg_muted() })
                     .margin_left(5.0)
                     .selectable(false)
                     .pointer_events_none()
@@ -750,11 +750,11 @@ fn reaction_pill(
                 .padding_horiz(9.0)
                 .border(1.0)
                 .border_radius(theme::REACTION_PILL_HEIGHT / 2.0)
-                .border_color(if mine { theme::REACTED_BORDER } else { theme::BORDER })
-                .background(if mine { theme::REACTED_BG } else { theme::CANVAS })
+                .border_color(if mine { theme::reacted_border() } else { theme::border() })
+                .background(if mine { theme::reacted_bg() } else { theme::canvas() })
                 .hover(move |s| {
-                    s.background(if mine { theme::REACTED_BG } else { theme::BADGE_BG })
-                        .border_color(if mine { theme::UNREAD } else { theme::FG_SUBTLE })
+                    s.background(if mine { theme::reacted_bg() } else { theme::badge_bg() })
+                        .border_color(if mine { theme::unread() } else { theme::fg_subtle() })
                 })
         }),
         move || {
@@ -864,18 +864,18 @@ pub fn within_window<V: IntoView + 'static>(tip: V) -> Stack {
 pub fn tip_body(text: impl Fn() -> String + 'static) -> Label {
     Label::derived(text).style(|s| {
         s.font_size(theme::TEXT_BADGE)
-            .color(theme::FG)
+            .color(theme::fg())
             .padding_vert(5.0)
             .padding_horiz(8.0)
             .max_width(320.0)
             .text_wrap()
-            .background(theme::CANVAS)
+            .background(theme::canvas())
             .border(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
             .border_radius(theme::RADIUS)
             .box_shadow_blur(6.0)
             .box_shadow_v_offset(2.0)
-            .box_shadow_color(theme::SHADOW)
+            .box_shadow_color(theme::shadow())
     })
 }
 
@@ -1040,7 +1040,7 @@ pub fn description_card(
     let hovered = RwSignal::new(false);
     let description = if body.trim().is_empty() {
         Label::derived(|| "No description.".to_string())
-            .style(|s| s.font_size(theme::TEXT_BODY).color(theme::FG_SUBTLE))
+            .style(|s| s.font_size(theme::TEXT_BODY).color(theme::fg_subtle()))
             .into_any()
     } else {
         markdown::render_linked(&body, state).into_any()
@@ -1057,7 +1057,7 @@ pub fn description_card(
                     Label::derived(|| "Description".to_string()).style(|s| {
                         s.font_size(theme::TEXT_SECTION_TITLE)
                             .font_weight(theme::weight_emphasis())
-                            .color(theme::FG)
+                            .color(theme::fg())
                     }),
                     Empty::new().style(|s| s.flex_grow(1.0_f32)),
                     actions(state, backend, hovered, quote, None, react, String::new()),
@@ -1115,11 +1115,11 @@ pub fn comment_card(
 
 /// The glyph a verdict takes: a green check, a red page of changes, or a
 /// muted comment bubble for anything else.
-pub fn verdict_glyph(review: &Review) -> (SidebarIcon, Color) {
+pub fn verdict_glyph(review: &Review) -> (SidebarIcon, fn() -> Color) {
     match review.state.as_str() {
-        "APPROVED" => (SidebarIcon::Check, theme::OPEN),
-        "CHANGES_REQUESTED" => (SidebarIcon::ChangesRequested, theme::CLOSED),
-        _ => (SidebarIcon::Comment, theme::FG_MUTED),
+        "APPROVED" => (SidebarIcon::Check, theme::open),
+        "CHANGES_REQUESTED" => (SidebarIcon::ChangesRequested, theme::closed),
+        _ => (SidebarIcon::Comment, theme::fg_muted),
     }
 }
 
@@ -1194,10 +1194,10 @@ fn path_link(state: ReviewState, open_file: OpenFile, anchor: Anchor) -> impl In
             clickable(s)
                 .font_size(theme::TEXT_BADGE)
                 .font_family(theme::CODE_FONT_STACK.to_string())
-                .color(theme::FG)
+                .color(theme::fg())
                 .text_ellipsis()
                 .min_width(0.0)
-                .hover(|s| s.color(theme::GITHUB))
+                .hover(|s| s.color(theme::github()))
         })
 }
 
@@ -1217,10 +1217,10 @@ pub enum Tint {
 impl Tint {
     fn colors(self) -> (Option<Color>, Color) {
         match self {
-            Tint::Plain => (None, theme::FG),
-            Tint::Added => (Some(theme::DIFF_ADDED_BG), theme::FG),
-            Tint::Modified => (Some(theme::DIFF_MODIFIED_BG), theme::FG),
-            Tint::Removed => (Some(theme::DIFF_DELETED_BG), theme::DIFF_DELETED_FG),
+            Tint::Plain => (None, theme::fg()),
+            Tint::Added => (Some(theme::diff_added_bg()), theme::fg()),
+            Tint::Modified => (Some(theme::diff_modified_bg()), theme::fg()),
+            Tint::Removed => (Some(theme::diff_deleted_bg()), theme::diff_deleted_fg()),
         }
     }
 }
@@ -1384,7 +1384,7 @@ fn code_lines(lines: Vec<CodeLine>) -> impl IntoView {
         s.flex_col()
             .width_full()
             .border_bottom(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
     })
     .into_any()
 }
@@ -1394,7 +1394,7 @@ fn code_lines(lines: Vec<CodeLine>) -> impl IntoView {
 const CODE_ROW_MARKER_WIDTH: f64 = 22.0;
 
 pub(crate) fn code_row(line: CodeLine) -> impl IntoView {
-    let (bg, fg) = line.tint.colors();
+    let tint = line.tint;
     let number = line.number.map(|n| n.to_string()).unwrap_or_default();
     let marker = match line.tint {
         Tint::Plain => "",
@@ -1409,7 +1409,7 @@ pub(crate) fn code_row(line: CodeLine) -> impl IntoView {
                 .text_align(floem::text::Alignment::End)
                 .font_family(theme::CODE_FONT_STACK.to_string())
                 .font_size(theme::TEXT_BADGE)
-                .color(theme::GUTTER_FG)
+                .color(theme::gutter_fg())
                 .selectable(false)
                 .flex_shrink(0.0_f32)
         }),
@@ -1418,14 +1418,14 @@ pub(crate) fn code_row(line: CodeLine) -> impl IntoView {
                 .padding_left(8.0)
                 .font_family(theme::CODE_FONT_STACK.to_string())
                 .font_size(theme::TEXT_BADGE)
-                .color(fg)
+                .color(tint.colors().1)
                 .selectable(false)
                 .flex_shrink(0.0_f32)
         }),
         Label::derived(move || text.clone()).style(move |s| {
             s.font_family(theme::CODE_FONT_STACK.to_string())
                 .font_size(theme::TEXT_BADGE)
-                .color(fg)
+                .color(tint.colors().1)
                 .text_ellipsis()
                 .min_width(0.0)
                 .flex_grow(1.0_f32)
@@ -1437,7 +1437,7 @@ pub(crate) fn code_row(line: CodeLine) -> impl IntoView {
             .width_full()
             .height(theme::CODE_ROW_HEIGHT)
             .padding_right(12.0);
-        match bg {
+        match tint.colors().0 {
             Some(bg) => base.background(bg),
             None => base,
         }
@@ -1452,14 +1452,14 @@ fn more_row(more: usize) -> impl IntoView {
     Label::derived(move || format!("{more} more {}", if more == 1 { "line" } else { "lines" }))
         .style(|s| {
             s.font_size(theme::TEXT_SECTION)
-                .color(theme::FG_SUBTLE)
+                .color(theme::fg_subtle())
                 .padding_left(theme::CODE_ROW_NUMBER_WIDTH + CODE_ROW_MARKER_WIDTH)
                 .height(theme::CODE_ROW_HEIGHT)
                 .items_center()
                 .width_full()
                 .selectable(false)
                 .border_bottom(1.0)
-                .border_color(theme::BORDER)
+                .border_color(theme::border())
         })
         .into_any()
 }
@@ -1499,11 +1499,11 @@ pub fn event_row(
         PullEventKind::Opened if event.actor.is_empty() => author.map(Name::Login),
         _ => (!event.actor.is_empty()).then(|| Name::Login(event.actor.clone())),
     };
-    let color = match &event.kind {
-        PullEventKind::Opened | PullEventKind::Reopened => theme::OPEN,
-        PullEventKind::Merged => theme::MERGED,
-        PullEventKind::Closed => theme::CLOSED,
-        _ => theme::FG_SUBTLE,
+    let color: fn() -> Color = match &event.kind {
+        PullEventKind::Opened | PullEventKind::Reopened => theme::open,
+        PullEventKind::Merged => theme::merged,
+        PullEventKind::Closed => theme::closed,
+        _ => theme::fg_subtle,
     };
     let at = event.at;
     let pieces = event_pieces(&event);
@@ -1516,7 +1516,7 @@ pub fn event_row(
         Empty::new().style(move |s| {
             s.size(theme::EVENT_DOT, theme::EVENT_DOT)
                 .border_radius(theme::EVENT_DOT / 2.0)
-                .background(color)
+                .background(color())
                 .flex_shrink(0.0_f32)
                 .margin_right(text_gap)
         }),
@@ -1526,7 +1526,7 @@ pub fn event_row(
                 |s| {
                     s.font_size(theme::TEXT_META)
                         .font_weight(theme::weight_emphasis())
-                        .color(theme::FG)
+                        .color(theme::fg())
                         .margin_right(4.0)
                 },
             )
@@ -1548,7 +1548,7 @@ pub fn event_row(
                     underlined_link(
                         s.font_size(theme::TEXT_META)
                             .font_weight(theme::weight_emphasis())
-                            .color(theme::FG)
+                            .color(theme::fg())
                             .margin_left(4.0)
                             .flex_shrink(0.0_f32),
                     )
@@ -1558,7 +1558,7 @@ pub fn event_row(
         },
         Label::derived(move || timefmt::relative(at, app.now.get())).style(|s| {
             s.font_size(theme::TEXT_META)
-                .color(theme::FG_MUTED)
+                .color(theme::fg_muted())
                 .margin_left(4.0)
                 .flex_shrink(0.0_f32)
         }),
@@ -1569,7 +1569,7 @@ pub fn event_row(
             .height(theme::EVENT_HEIGHT)
             .padding_left(dot_left)
             .border_bottom(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::border_muted())
     })
 }
 
@@ -1592,7 +1592,7 @@ fn event_piece(state: ReviewState, backend: Rc<Backend>, piece: Piece) -> floem:
                     let s = s
                         .font_family(theme::CODE_FONT_STACK.to_string())
                         .font_size(theme::CODE_FONT_SIZE)
-                        .color(theme::FG_MUTED)
+                        .color(theme::fg_muted())
                         .flex_shrink(0.0_f32);
                     if opens {
                         underlined_link(s)
@@ -1611,7 +1611,7 @@ fn event_piece(state: ReviewState, backend: Rc<Backend>, piece: Piece) -> floem:
                 .style(|s| {
                     s.font_family(theme::CODE_FONT_STACK.to_string())
                         .font_size(theme::CODE_FONT_SIZE)
-                        .color(theme::FG_MUTED)
+                        .color(theme::fg_muted())
                         .flex_shrink(0.0_f32)
                 })
                 .into_any()
@@ -1626,13 +1626,13 @@ fn event_piece(state: ReviewState, backend: Rc<Backend>, piece: Piece) -> floem:
             Stack::horizontal((
                 Label::derived(move || slug.clone()).style(|s| {
                     s.font_size(theme::TEXT_META)
-                        .color(theme::FG)
+                        .color(theme::fg())
                         .font_weight(theme::weight_emphasis())
                         .flex_shrink(0.0_f32)
                 }),
                 Label::derived(move || title.clone()).style(|s| {
                     s.font_size(theme::TEXT_META)
-                        .color(theme::FG_MUTED)
+                        .color(theme::fg_muted())
                         .text_ellipsis()
                         .min_width(0.0)
                 }),
@@ -1655,7 +1655,7 @@ fn event_piece(state: ReviewState, backend: Rc<Backend>, piece: Piece) -> floem:
 fn event_words(text: String) -> Label {
     Label::derived(move || text.clone()).style(|s| {
         s.font_size(theme::TEXT_META)
-            .color(theme::FG_MUTED)
+            .color(theme::fg_muted())
             .text_ellipsis()
             .min_width(0.0)
     })
@@ -1671,7 +1671,7 @@ fn underlined_link(s: floem::style::Style) -> floem::style::Style {
             .border_bottom(1.0)
             .border_color(Color::TRANSPARENT),
     )
-    .hover(|s| s.border_color(theme::FG_MUTED))
+    .hover(|s| s.border_color(theme::fg_muted()))
 }
 
 /// Whether the checkout has a commit, so Files can show it by itself.
@@ -1730,7 +1730,7 @@ fn event_subject(state: ReviewState, subject: String) -> floem::AnyView {
                     .style(|s| {
                         underlined_link(
                             s.font_size(theme::TEXT_META)
-                                .color(theme::FG)
+                                .color(theme::fg())
                                 .text_ellipsis()
                                 .min_width(0.0),
                         )
@@ -1809,9 +1809,9 @@ pub fn thread_card(
         let base = s
             .flex_col()
             .width_full()
-            .background(theme::CANVAS)
+            .background(theme::canvas())
             .border_radius(theme::RADIUS)
-            .border_color(theme::BORDER);
+            .border_color(theme::border());
         if local {
             base.border(floem::kurbo::Stroke::new(1.0).with_dashes(0.0, theme::THREAD_DASH))
         } else {
@@ -1840,7 +1840,7 @@ fn thread_header(
         None => Label::derived(move || format!("This {}", threads::subject_word(state)))
             .style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::FG_MUTED)
+                    .color(theme::fg_muted())
                     .selectable(false)
             })
             .into_any(),
@@ -1880,7 +1880,7 @@ fn thread_header(
         s.items_center()
             .width_full()
             .padding(theme::THREAD_HEADER_PADDING)
-            .background(theme::CANVAS_SUBTLE)
+            .background(theme::canvas_subtle())
             .set(BorderTopLeftRadius, radius)
             .set(BorderTopRightRadius, radius)
             .set(BorderBottomLeftRadius, foot)
@@ -2077,12 +2077,12 @@ pub(crate) fn finding_controls(
                     Label::derived(move || metadata.clone()).style(|s| {
                         s.font_size(theme::TEXT_BADGE)
                             .font_weight(theme::weight_emphasis())
-                            .color(theme::FG_MUTED)
+                            .color(theme::fg_muted())
                             .text_wrap()
                     }),
                     Stack::horizontal((
                         Label::derived(move || status.clone())
-                            .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::FG_SUBTLE)),
+                            .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::fg_subtle())),
                         Empty::new().style(|s| s.flex_grow(1.0_f32)),
                         dismiss,
                         reopen,
@@ -2097,7 +2097,7 @@ pub(crate) fn finding_controls(
                         .width_full()
                         .gap(5.0)
                         .padding(8.0)
-                        .background(theme::CANVAS_SUBTLE)
+                        .background(theme::canvas_subtle())
                         .border_radius(theme::RADIUS)
                 })
                 .into_any()
@@ -2119,10 +2119,10 @@ pub(crate) fn thread_action(label: &'static str, action: impl Fn() + 'static) ->
                 .items_center()
                 .font_size(theme::TEXT_BADGE)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG_MUTED)
-                .background(theme::CANVAS)
+                .color(theme::fg_muted())
+                .background(theme::canvas())
                 .border(1.0)
-                .border_color(theme::BORDER)
+                .border_color(theme::border())
                 .border_radius(theme::RADIUS)
                 .selectable(false)
         })
@@ -2228,12 +2228,12 @@ fn anchor_block(
 /// question will go in, with its placeholder, before it is a box.
 pub fn ask_box(app: AppState, state: ReviewState) -> impl IntoView {
     Stack::horizontal((
-        sidebar_glyph(SidebarIcon::Thread, theme::FG_SUBTLE)
+        sidebar_glyph(SidebarIcon::Thread, theme::fg_subtle)
             .style(|s| s.size(13.0, 13.0).margin_right(8.0)),
         Label::derived(move || format!("Ask about this {}…", threads::subject_word(state))).style(
             |s| {
                 s.font_size(theme::TEXT_BODY)
-                    .color(theme::FG_SUBTLE)
+                    .color(theme::fg_subtle())
                     .selectable(false)
             },
         ),
@@ -2246,13 +2246,13 @@ pub fn ask_box(app: AppState, state: ReviewState) -> impl IntoView {
             .width_full()
             .height(theme::ASK_BOX_HEIGHT)
             .padding_horiz(18.0)
-            .background(theme::CANVAS_SUBTLE)
+            .background(theme::canvas_subtle())
             .border(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::border_muted())
             .border_radius(14.0)
             .hover(|s| {
-                s.background(theme::CANVAS_HOVER)
-                    .border_color(theme::BORDER)
+                s.background(theme::canvas_hover())
+                    .border_color(theme::border())
                     .cursor(CursorStyle::Text)
             })
     })

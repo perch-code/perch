@@ -67,9 +67,9 @@ pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
     };
     let ink = move || {
         if prominent.get() {
-            theme::CANVAS
+            theme::canvas()
         } else {
-            theme::FG
+            theme::fg()
         }
     };
     let inner = Stack::horizontal((
@@ -83,11 +83,7 @@ pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
         dyn_container(
             move || prominent.get(),
             |prominent| {
-                let color = if prominent {
-                    theme::CANVAS
-                } else {
-                    theme::FG_SUBTLE
-                };
+                let color = if prominent { theme::canvas } else { theme::fg_subtle };
                 sidebar_glyph(SidebarIcon::ChevronDown, color)
                     .style(|s| s.size(9.0, 9.0).pointer_events_none())
             },
@@ -122,14 +118,14 @@ pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                 .items_center()
                 .border_radius(9.0)
                 .keyboard_navigable()
-                .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING));
+                .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()));
             if prominent.get() {
-                s.background(theme::FG)
-                    .hover(|s| s.background(theme::ACTION_HOVER))
+                s.background(theme::fg())
+                    .hover(|s| s.background(theme::action_hover()))
             } else {
                 let open = state.review_open.get();
-                s.background(if open { theme::BORDER } else { theme::BADGE_BG })
-                    .hover(|s| s.background(theme::BORDER))
+                s.background(if open { theme::border() } else { theme::badge_bg() })
+                    .hover(|s| s.background(theme::border()))
             }
         })
         .debug_name("review-control");
@@ -237,11 +233,11 @@ fn popover(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Into
                 Label::derived(|| "Review".to_string()).style(|s| {
                     s.font_size(theme::TEXT_BODY)
                         .font_weight(theme::weight_emphasis())
-                        .color(theme::FG)
+                        .color(theme::fg())
                 }),
                 Label::derived(move || title.clone()).style(|s| {
                     s.font_size(theme::TEXT_META)
-                        .color(theme::FG_SUBTLE)
+                        .color(theme::fg_subtle())
                         .text_ellipsis()
                         .min_width(0.0)
                         .margin_top(2.0)

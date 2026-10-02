@@ -286,9 +286,9 @@ pub(crate) fn panel_frame(
                 .flex_shrink(0.0_f32)
                 .items_center()
                 .padding_horiz(12.0)
-                .background(theme::CANVAS_SUBTLE)
+                .background(theme::canvas_subtle())
                 .border_bottom(1.0)
-                .border_color(theme::BORDER)
+                .border_color(theme::border())
         }),
         content,
         resize_cursor_sheet(resizing),
@@ -299,9 +299,9 @@ pub(crate) fn panel_frame(
             .flex_shrink(0.0_f32)
             .flex_col()
             .position(Position::Relative)
-            .background(theme::CANVAS)
+            .background(theme::canvas())
             .border_top(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
     })
 }
 
@@ -318,13 +318,13 @@ fn header(state: ReviewState) -> impl IntoView {
 
     Stack::horizontal((
         Label::derived(heading).style(|s| {
-            s.font_size(theme::TEXT_META).color(theme::FG_MUTED).selectable(false).flex_shrink(0.0_f32)
+            s.font_size(theme::TEXT_META).color(theme::fg_muted()).selectable(false).flex_shrink(0.0_f32)
         }),
         Label::derived(symbol).style(|s| {
             s.font_family(theme::CODE_FONT_STACK.to_string())
                 .font_size(theme::TEXT_BADGE)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG)
+                .color(theme::fg())
                 .margin_left(5.0)
                 .text_ellipsis()
                 .min_width(0.0)
@@ -332,7 +332,7 @@ fn header(state: ReviewState) -> impl IntoView {
         }),
         Label::derived(count).style(|s| {
             s.font_size(theme::TEXT_META)
-                .color(theme::FG_MUTED)
+                .color(theme::fg_muted())
                 .margin_left(10.0)
                 .flex_grow(1.0_f32)
                 .text_ellipsis()
@@ -346,7 +346,7 @@ fn header(state: ReviewState) -> impl IntoView {
 /// The close glyph at the header's right end, for either panel: whichever
 /// is open closes.
 pub(crate) fn close_button(state: ReviewState) -> impl IntoView {
-    Container::new(sidebar_glyph(SidebarIcon::Close, theme::FG_SUBTLE).style(|s| s.size(11.0, 11.0)))
+    Container::new(sidebar_glyph(SidebarIcon::Close, theme::fg_subtle).style(|s| s.size(11.0, 11.0)))
         .on_event_stop(el::Click, move |_, _| state.close_panel())
         .style(|s| {
             clickable(s)
@@ -354,7 +354,7 @@ pub(crate) fn close_button(state: ReviewState) -> impl IntoView {
                 .items_center()
                 .justify_center()
                 .border_radius(3.0)
-                .hover(|s| s.background(theme::BADGE_BG))
+                .hover(|s| s.background(theme::badge_bg()))
         })
 }
 
@@ -380,7 +380,7 @@ fn list(state: ReviewState, open_file: OpenFile) -> impl IntoView {
 fn notice(text: String) -> impl IntoView {
     Label::derived(move || text.clone()).style(|s| {
         s.font_size(theme::TEXT_META)
-            .color(theme::FG_SUBTLE)
+            .color(theme::fg_subtle())
             .padding_horiz(12.0)
             .padding_vert(8.0)
             .selectable(false)
@@ -424,7 +424,7 @@ fn file_row(
         },
         Label::derived(move || directory.clone()).style(|s| {
             s.font_size(theme::TEXT_META)
-                .color(theme::FG_SUBTLE)
+                .color(theme::fg_subtle())
                 .text_ellipsis()
                 .min_width(0.0)
                 .selectable(false)
@@ -432,14 +432,14 @@ fn file_row(
         Label::derived(move || name.clone()).style(|s| {
             s.font_size(theme::TEXT_META)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG)
+                .color(theme::fg())
                 .flex_shrink(0.0_f32)
                 .selectable(false)
         }),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
         Label::derived(move || count.to_string()).style(|s| {
             s.font_size(theme::TEXT_BADGE)
-                .color(theme::FG_SUBTLE)
+                .color(theme::fg_subtle())
                 .margin_left(8.0)
                 .flex_shrink(0.0_f32)
                 .selectable(false)
@@ -455,21 +455,21 @@ fn file_row(
             .padding_right(12.0)
             // A hairline between groups, and none above the first: the
             // header's border is already there.
-            .apply_if(!first, |s| s.border_top(1.0).border_color(theme::BORDER_MUTED))
-            .hover(|s| s.background(theme::CANVAS_HOVER))
+            .apply_if(!first, |s| s.border_top(1.0).border_color(theme::border_muted()))
+            .hover(|s| s.background(theme::canvas_hover()))
     })
 }
 
 /// The rail's status letter, drawn the same way here so a file reads the
 /// same in both lists.
 fn status_letter(status: ChangeStatus) -> impl IntoView {
-    let color = match status {
-        ChangeStatus::Added => theme::STATUS_ADDED,
-        ChangeStatus::Modified | ChangeStatus::TypeChanged => theme::STATUS_MODIFIED,
-        ChangeStatus::Deleted => theme::STATUS_DELETED,
-        ChangeStatus::Renamed | ChangeStatus::Copied => theme::STATUS_RENAMED,
-    };
     Label::derived(move || status.letter()).style(move |s| {
+        let color = match status {
+            ChangeStatus::Added => theme::status_added(),
+            ChangeStatus::Modified | ChangeStatus::TypeChanged => theme::status_modified(),
+            ChangeStatus::Deleted => theme::status_deleted(),
+            ChangeStatus::Renamed | ChangeStatus::Copied => theme::status_renamed(),
+        };
         s.font_size(theme::TEXT_BADGE)
             .font_weight(theme::weight_emphasis())
             .color(color)
@@ -496,7 +496,7 @@ fn location_row(
         Label::derived(move || line.to_string()).style(|s| {
             s.font_family(theme::CODE_FONT_STACK.to_string())
                 .font_size(theme::CODE_FONT_SIZE)
-                .color(theme::FG_SUBTLE)
+                .color(theme::fg_subtle())
                 .width(theme::REFERENCES_LINE_WIDTH)
                 .flex_shrink(0.0_f32)
                 .text_align(floem::text::Alignment::Right)
@@ -515,7 +515,7 @@ fn location_row(
             .padding_left(10.0)
             .padding_right(12.0)
             .gap(12.0)
-            .hover(|s| s.background(theme::CANVAS_HOVER))
+            .hover(|s| s.background(theme::canvas_hover()))
     })
 }
 
@@ -524,9 +524,9 @@ fn location_row(
 /// line must not; the clip is one row tall, so only the first line shows
 /// and the row keeps its height.
 pub(crate) fn line_text(text: String, symbol: String) -> impl IntoView {
-    let (text, attrs) = layout(&text, &symbol);
-    let again = (text.clone(), attrs.clone());
-    rich_text(text, attrs, move || again.clone())
+    // Laid out again when the appearance changes: the colours are in it.
+    let (first, attrs) = layout(&text, &symbol);
+    rich_text(first, attrs, move || layout(&text, &symbol))
         .style(|s| s.width_full())
         .clip()
         .style(|s| s.height(theme::REFERENCES_ROW_HEIGHT).flex_grow(1.0_f32).min_width(0.0))
@@ -536,14 +536,14 @@ fn layout(text: &str, symbol: &str) -> (String, AttrsList) {
     let code: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect();
     let base = || {
         Attrs::new()
-            .color(theme::FG)
+            .color(theme::fg())
             .font_size(theme::CODE_FONT_SIZE)
             .family(&code)
             .line_height(LineHeightValue::Pt(theme::REFERENCES_ROW_HEIGHT as f32))
     };
     let mut list = AttrsList::new(base());
     for range in occurrences(text, symbol) {
-        list.add_span(range, base().weight(theme::weight_strong()).color(theme::ACCENT));
+        list.add_span(range, base().weight(theme::weight_strong()).color(theme::accent()));
     }
     (text.to_string(), list)
 }
@@ -875,6 +875,14 @@ mod window {
 
     const WIDTH: f64 = 1400.0;
     const HEIGHT: f64 = 900.0;
+
+    /// The references panel and its code, all of it dark once the system is.
+    #[test]
+    fn goes_dark_with_the_system() {
+        let mut harness = app_harness().0;
+        let left = crate::theme::dark_check::light_left(&mut harness);
+        assert!(left.is_empty(), "light colours left in dark:\n{}", left.join("\n"));
+    }
 
     /// The whole window on Code, with one file open and loaded.
     fn app_harness() -> (HeadlessHarness, ReviewState) {

@@ -149,7 +149,7 @@ pub fn pane(file: &LoadedFile, picture: &Picture) -> impl IntoView {
             let frame = frame_of(&[&base, &head]);
             Stack::horizontal((
                 side("before", Some(caption("Before", &base)), base, frame)
-                    .style(|s| s.border_right(1.0).border_color(theme::BORDER_MUTED)),
+                    .style(|s| s.border_right(1.0).border_color(theme::border_muted())),
                 side("after", Some(caption("After", &head)), head, frame),
             ))
             .style(|s| s.size_full().min_height(0.0))
@@ -187,7 +187,7 @@ fn side(
         Some(text) => Label::derived(move || text.clone())
             .style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::FG_MUTED)
+                    .color(theme::fg_muted())
                     .padding_horiz(theme::PICTURE_INSET)
                     .padding_top(14.0)
                     .selectable(false)
@@ -351,8 +351,8 @@ impl View for Drawn {
         }
         #[cfg(test)]
         DRAWN.with(|drawn| drawn.borrow_mut().push((self.drawing.size(), rect)));
-        cx.fill(&rect, theme::PICTURE_CANVAS, 0.0);
-        cx.stroke(&rect.inset(-0.5), theme::BORDER_MUTED, &Stroke::new(1.0));
+        cx.fill(&rect, theme::picture_canvas(), 0.0);
+        cx.stroke(&rect.inset(-0.5), theme::border_muted(), &Stroke::new(1.0));
         // Clipped to its canvas: what an SVG draws outside its own bounds
         // would otherwise land on the side beside it.
         cx.clip(&rect);

@@ -81,7 +81,7 @@ pub fn tab_bar(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                 .min_width(0.0)
                 .height_full()
                 .border_bottom(1.0)
-                .border_color(theme::BORDER)
+                .border_color(theme::border())
         }),
         change_nav(state),
         tiles(app, state, backend),
@@ -92,7 +92,7 @@ pub fn tab_bar(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
             .width_full()
             .flex_shrink(0.0_f32)
             .items_center()
-            .background(theme::CANVAS_SUBTLE)
+            .background(theme::canvas_subtle())
     })
 }
 
@@ -247,7 +247,7 @@ fn strip_rule() -> Empty {
         s.flex_grow(1.0_f32)
             .height_full()
             .border_bottom(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
     })
 }
 
@@ -265,25 +265,25 @@ fn tab_style(s: Style, active: bool) -> Style {
         .flex_shrink(0.0_f32)
         .selectable(false)
         .border_right(1.0)
-        .border_color(theme::BORDER_MUTED)
+        .border_color(theme::border_muted())
         .hover(|s| s.cursor(CursorStyle::Pointer));
 
     if active {
-        base.background(theme::CODE_BG)
+        base.background(theme::code_bg())
             .border_top(2.0)
-            .border_color(theme::ACCENT)
+            .border_color(theme::accent())
     } else {
         base.background(Color::TRANSPARENT)
             .border_bottom(1.0)
-            .border_color(theme::BORDER)
-            .hover(|s| s.background(theme::CANVAS_HOVER))
+            .border_color(theme::border())
+            .hover(|s| s.background(theme::canvas_hover()))
     }
 }
 
 /// A tab's name: dark while it shows, muted otherwise.
 fn tab_label(s: Style, active: bool) -> Style {
     s.font_size(theme::TEXT_META)
-        .color(if active { theme::FG } else { theme::FG_MUTED })
+        .color(if active { theme::fg() } else { theme::fg_muted() })
         .text_ellipsis()
         .flex_grow(1.0_f32)
         .min_width(0.0)
@@ -296,12 +296,12 @@ fn tab_label(s: Style, active: bool) -> Style {
 pub fn origin_chip(label: String) -> impl IntoView {
     Label::derived(move || label.clone()).style(|s| {
         s.font_size(theme::TEXT_SECTION)
-            .color(theme::FG_MUTED)
+            .color(theme::fg_muted())
             .height(theme::ORIGIN_CHIP_HEIGHT)
             .padding_horiz(5.0)
             .items_center()
             .border_radius(4.0)
-            .background(theme::BADGE_BG)
+            .background(theme::badge_bg())
             .flex_shrink(0.0_f32)
             .selectable(false)
     })
@@ -322,7 +322,7 @@ fn language_dot(state: ReviewState, path: String) -> impl IntoView {
 
 fn close_button(on_close: impl Fn() + 'static) -> impl IntoView {
     Container::new(
-        crate::ui::widgets::sidebar_glyph(crate::icons::SidebarIcon::Close, theme::FG_SUBTLE)
+        crate::ui::widgets::sidebar_glyph(crate::icons::SidebarIcon::Close, theme::fg_subtle)
             .style(|s| s.size(11.0, 11.0)),
     )
     .on_event_stop(el::Click, move |_, _| on_close())
@@ -332,7 +332,7 @@ fn close_button(on_close: impl Fn() + 'static) -> impl IntoView {
             .items_center()
             .justify_center()
             .border_radius(3.0)
-            .hover(|s| s.background(theme::BADGE_BG).cursor(CursorStyle::Pointer))
+            .hover(|s| s.background(theme::badge_bg()).cursor(CursorStyle::Pointer))
     })
 }
 
@@ -365,7 +365,7 @@ fn change_nav(state: ReviewState) -> impl IntoView {
                 })
                 .style(|s| {
                     s.font_size(theme::TEXT_BADGE)
-                        .color(theme::FG_MUTED)
+                        .color(theme::fg_muted())
                         .selectable(false)
                         .margin_horiz(6.0)
                 }),
@@ -380,7 +380,7 @@ fn change_nav(state: ReviewState) -> impl IntoView {
             .height_full()
             .items_center()
             .border_bottom(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
     })
 }
 
@@ -411,14 +411,14 @@ fn nav_button(state: ReviewState, forward: bool) -> impl IntoView {
 
     let glyph = if forward { SidebarIcon::ChevronDown } else { SidebarIcon::ChevronUp };
 
-    Container::new(sidebar_glyph(glyph, theme::FG_MUTED))
+    Container::new(sidebar_glyph(glyph, theme::fg_muted))
         .on_event_stop(el::Click, move |_, _| jump_to_change(state, forward))
         .style(|s| {
             s.size(20.0, 20.0)
                 .items_center()
                 .justify_center()
                 .border_radius(4.0)
-                .hover(|s| s.background(theme::BADGE_BG).cursor(CursorStyle::Pointer))
+                .hover(|s| s.background(theme::badge_bg()).cursor(CursorStyle::Pointer))
         })
 }
 
@@ -464,7 +464,7 @@ fn tiles(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoVi
             .items_center()
             .padding_horiz(8.0)
             .border_bottom(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
     })
 }
 
@@ -475,7 +475,7 @@ fn tile_rule() -> impl IntoView {
             .height(theme::TILE_RULE_HEIGHT)
             .margin_horiz(theme::TILE_RULE_GAP)
             .flex_shrink(0.0_f32)
-            .background(theme::BORDER_MUTED)
+            .background(theme::border_muted())
     })
 }
 
@@ -576,7 +576,7 @@ fn fold_tile(state: ReviewState) -> impl IntoView {
 
 /// One `LAYOUT_TILE` square: filled while `active`, a glyph otherwise.
 fn tile(glyph: SidebarIcon, active: impl Fn() -> bool + Copy + 'static, on_click: impl Fn() + 'static) -> impl IntoView {
-    let color = move || if active() { theme::FG } else { theme::FG_MUTED };
+    let color = move || if active() { theme::fg() } else { theme::fg_muted() };
 
     Container::new(icon_in(move || crate::icons::sidebar_icon(glyph, color()), color))
         .on_event_stop(el::Click, move |_, _| on_click())
@@ -587,9 +587,9 @@ fn tile(glyph: SidebarIcon, active: impl Fn() -> bool + Copy + 'static, on_click
                 .justify_center()
                 .border_radius(4.0);
             if active() {
-                base.background(theme::BADGE_BG)
+                base.background(theme::badge_bg())
             } else {
-                base.hover(|s| s.background(theme::CANVAS_HOVER))
+                base.hover(|s| s.background(theme::canvas_hover()))
             }
         })
 }

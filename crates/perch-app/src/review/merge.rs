@@ -158,9 +158,9 @@ pub fn surface(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
             .style(|s| {
                 s.width_full()
                     .margin_top(theme::CONVERSATION_ENTRY_PADDING)
-                    .background(theme::CANVAS)
+                    .background(theme::canvas())
                     .border(1.0)
-                    .border_color(theme::BORDER)
+                    .border_color(theme::border())
                     .border_radius(theme::RADIUS_LG)
             })
             .into_any()
@@ -173,7 +173,7 @@ fn checks_section(state: ReviewState, expanded: RwSignal<bool>) -> impl IntoView
         Label::derived(|| "Checks".to_string()).style(|s| {
             s.font_size(theme::TEXT_BODY)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG)
+                .color(theme::fg())
                 .selectable(false)
                 .pointer_events_none()
         }),
@@ -192,7 +192,7 @@ fn checks_section(state: ReviewState, expanded: RwSignal<bool>) -> impl IntoView
         })
         .style(|s| {
             s.font_size(theme::TEXT_META)
-                .color(theme::FG_SUBTLE)
+                .color(theme::fg_subtle())
                 .selectable(false)
                 .pointer_events_none()
                 .margin_right(8.0)
@@ -206,7 +206,7 @@ fn checks_section(state: ReviewState, expanded: RwSignal<bool>) -> impl IntoView
                     } else {
                         SidebarIcon::ChevronDown
                     },
-                    theme::FG_SUBTLE,
+                    theme::fg_subtle,
                 )
                 .style(|s| s.size(12.0, 12.0).pointer_events_none())
             },
@@ -230,8 +230,8 @@ fn checks_section(state: ReviewState, expanded: RwSignal<bool>) -> impl IntoView
             .items_center()
             .padding_horiz(16.0)
             .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
-            .hover(|s| s.background(theme::CANVAS_SUBTLE))
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+            .hover(|s| s.background(theme::canvas_subtle()))
     });
 
     let body = dyn_container(
@@ -281,7 +281,7 @@ fn checks_rows(checks: Arc<Checks>) -> impl IntoView {
         s.flex_col()
             .width_full()
             .border_top(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::border_muted())
     })
 }
 
@@ -291,9 +291,9 @@ fn checks_message(message: &'static str) -> impl IntoView {
             .padding_horiz(16.0)
             .padding_vert(14.0)
             .border_top(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::border_muted())
             .font_size(theme::TEXT_META)
-            .color(theme::FG_SUBTLE)
+            .color(theme::fg_subtle())
     })
 }
 
@@ -315,14 +315,14 @@ fn check_row(check: Check, last: bool) -> impl IntoView {
             s.min_width(0.0)
                 .flex_grow(1.0_f32)
                 .font_size(theme::TEXT_META)
-                .color(theme::FG)
+                .color(theme::fg())
                 .text_ellipsis()
                 .selectable(false)
                 .pointer_events_none()
         }),
         Label::derived(move || status.clone()).style(move |s| {
             s.font_size(theme::TEXT_META)
-                .color(status_color)
+                .color(status_color())
                 .margin_left(16.0)
                 .selectable(false)
                 .pointer_events_none()
@@ -348,13 +348,13 @@ fn check_row(check: Check, last: bool) -> impl IntoView {
             .items_center()
             .padding_horiz(16.0)
             .apply_if(!last, |s| {
-                s.border_bottom(1.0).border_color(theme::BORDER_MUTED)
+                s.border_bottom(1.0).border_color(theme::border_muted())
             })
             .apply_if(interactive, |s| {
                 clickable(s)
                     .keyboard_navigable()
-                    .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
-                    .hover(|s| s.background(theme::CANVAS_SUBTLE))
+                    .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+                    .hover(|s| s.background(theme::canvas_subtle()))
             })
     })
     .debug_name(debug)
@@ -479,31 +479,31 @@ fn checks_summary(checks: &Checks) -> String {
     format!("{} checks passed", passing)
 }
 
-fn check_icon(state: CheckRunState) -> (SidebarIcon, Color) {
+fn check_icon(state: CheckRunState) -> (SidebarIcon, fn() -> Color) {
     if state.is_passing() {
-        (SidebarIcon::Check, theme::OPEN)
+        (SidebarIcon::Check, theme::open)
     } else if state.is_failing() {
-        (SidebarIcon::Close, theme::CLOSED)
+        (SidebarIcon::Close, theme::closed)
     } else if state == CheckRunState::Waiting {
-        (SidebarIcon::Waiting, theme::FG_SUBTLE)
+        (SidebarIcon::Waiting, theme::fg_subtle)
     } else if state.is_pending() {
-        (SidebarIcon::Refresh, theme::DRAFT_YELLOW)
+        (SidebarIcon::Refresh, theme::draft_yellow)
     } else {
-        (SidebarIcon::Warning, theme::FG_SUBTLE)
+        (SidebarIcon::Warning, theme::fg_subtle)
     }
 }
 
-fn check_color(state: CheckRunState) -> Color {
+fn check_color(state: CheckRunState) -> fn() -> Color {
     if state.is_passing() {
-        theme::OPEN
+        theme::open
     } else if state.is_failing() {
-        theme::CLOSED
+        theme::closed
     } else if state == CheckRunState::Waiting {
-        theme::FG_SUBTLE
+        theme::fg_subtle
     } else if state.is_pending() {
-        theme::DRAFT_YELLOW
+        theme::draft_yellow
     } else {
-        theme::FG_SUBTLE
+        theme::fg_subtle
     }
 }
 
@@ -580,11 +580,11 @@ fn merge_content(
     // Nothing is left to decide once it is merged or closed: it says so,
     // with no button that can never be pressed.
     if let Some((state, title, detail)) = finished_copy(pull) {
-        return status_row(state_glyph(state, state_color(state)), title, detail)
+        return status_row(state_glyph(state, move || state_color(state)), title, detail)
             .style(|s| {
                 s.padding(16.0)
                     .border_top(1.0)
-                    .border_color(theme::BORDER)
+                    .border_color(theme::border())
             })
             .debug_name("merge-finished")
             .into_any();
@@ -615,7 +615,7 @@ fn merge_content(
             .gap(10.0)
             .padding(16.0)
             .border_top(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
     })
     .into_any()
 }
@@ -625,34 +625,34 @@ fn merge_status(
     overview: Option<&PullRequestOverview>,
     diverged: Option<perch_github::Diverged>,
 ) -> impl IntoView {
-    let (icon, color, title, detail) = match decision {
+    let (icon, color, title, detail): (_, fn() -> Color, _, _) = match decision {
         MergeDecision::Loading => (
             SidebarIcon::Refresh,
-            theme::DRAFT_YELLOW,
+            theme::draft_yellow,
             "Checking merge requirements".to_string(),
             "Fetching a fresh status from GitHub.".to_string(),
         ),
         MergeDecision::Conflicts => (
             SidebarIcon::Warning,
-            theme::DRAFT,
+            theme::draft,
             "This branch has conflicts that must be resolved".to_string(),
             "Resolve the conflicts on GitHub before continuing.".to_string(),
         ),
         MergeDecision::Ready => (
             SidebarIcon::Check,
-            theme::OPEN,
+            theme::open,
             "Ready to merge".to_string(),
             ready_detail(overview),
         ),
         MergeDecision::Bypass => (
             SidebarIcon::Warning,
-            theme::CLOSED,
+            theme::closed,
             "Merging is blocked".to_string(),
             blocker_detail(overview),
         ),
         MergeDecision::Disabled(reason) => {
             let (title, detail) = disabled_copy(reason, overview, diverged);
-            (SidebarIcon::Warning, theme::FG_SUBTLE, title, detail)
+            (SidebarIcon::Warning, theme::fg_subtle, title, detail)
         }
     };
 
@@ -684,7 +684,7 @@ fn status_row(icon: impl IntoView + 'static, title: String, detail: String) -> S
             s.size(30.0, 30.0)
                 .items_center()
                 .justify_center()
-                .background(theme::CANVAS_SUBTLE)
+                .background(theme::canvas_subtle())
                 .border_radius(15.0)
                 .margin_right(10.0)
         }),
@@ -692,11 +692,11 @@ fn status_row(icon: impl IntoView + 'static, title: String, detail: String) -> S
             Label::derived(move || title.clone()).style(|s| {
                 s.font_size(theme::TEXT_BODY)
                     .font_weight(theme::weight_emphasis())
-                    .color(theme::FG)
+                    .color(theme::fg())
             }),
             Label::derived(move || detail.clone()).style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::FG_MUTED)
+                    .color(theme::fg_muted())
                     .margin_top(2.0)
                     .width_full()
                     .text_wrap()
@@ -843,7 +843,7 @@ fn bypass_checkbox(
         Label::derived(|| "Merge without waiting for requirements to be met".to_string()).style(
             |s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::CLOSED)
+                    .color(theme::closed())
                     .selectable(false)
             },
         ),
@@ -866,7 +866,7 @@ fn bypass_checkbox(
             .items_center()
             .margin_left(-5.0)
             .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
     })
     .debug_name("merge-bypass")
 }
@@ -922,7 +922,7 @@ fn confirmation_controls(
 
     Stack::vertical((
         Label::derived(move || summary.clone())
-            .style(|s| s.font_size(theme::TEXT_META).color(theme::FG_MUTED)),
+            .style(|s| s.font_size(theme::TEXT_META).color(theme::fg_muted())),
         Stack::horizontal((Empty::new().style(|s| s.flex_grow(1.0_f32)), cancel, submit))
             .style(|s| s.width_full().items_center().gap(8.0)),
     ))
@@ -931,9 +931,9 @@ fn confirmation_controls(
             .width_full()
             .gap(10.0)
             .padding(12.0)
-            .background(theme::CANVAS_SUBTLE)
+            .background(theme::canvas_subtle())
             .border(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::border_muted())
             .border_radius(theme::RADIUS)
     })
 }
@@ -952,12 +952,12 @@ fn merge_method_button(
         })
         .style(|s| {
             s.font_size(theme::TEXT_BADGE)
-                .color(theme::FG)
+                .color(theme::fg())
                 .selectable(false)
                 .pointer_events_none()
                 .margin_right(5.0)
         }),
-        sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE)
+        sidebar_glyph(SidebarIcon::ChevronDown, theme::fg_subtle)
             .style(|s| s.size(9.0, 9.0).pointer_events_none()),
     ))
     .dropdown(move || merge_method_menu(methods, selected_method, confirmation))
@@ -966,13 +966,13 @@ fn merge_method_button(
             .items_center()
             .height(30.0)
             .padding_horiz(9.0)
-            .background(theme::CANVAS)
+            .background(theme::canvas())
             .border(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
             .border_radius(theme::RADIUS)
             .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
-            .hover(|s| s.background(theme::CANVAS_HOVER))
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+            .hover(|s| s.background(theme::canvas_hover()))
     })
     .debug_name("merge-method")
     .into_view()
@@ -1032,9 +1032,9 @@ fn action_button(
         s.font_size(theme::TEXT_BADGE)
             .font_weight(theme::weight_emphasis())
             .color(if prominent {
-                theme::CANVAS
+                theme::canvas()
             } else {
-                theme::FG_MUTED
+                theme::fg_muted()
             })
             .selectable(false)
             .pointer_events_none()
@@ -1059,12 +1059,12 @@ fn action_button(
             .padding_horiz(11.0)
             .items_center()
             .justify_center()
-            .background(if prominent { theme::FG } else { theme::CANVAS })
+            .background(if prominent { theme::fg() } else { theme::canvas() })
             .border(1.0)
-            .border_color(if prominent { theme::FG } else { theme::BORDER })
+            .border_color(if prominent { theme::fg() } else { theme::border() })
             .border_radius(theme::RADIUS)
             .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
             .set_disabled(!available)
             .apply_if(!available, |s| {
                 s.opacity(0.45_f32).cursor(CursorStyle::Default)
@@ -1072,9 +1072,9 @@ fn action_button(
             .apply_if(available, |s| {
                 s.hover(move |s| {
                     s.background(if prominent {
-                        theme::ACTION_HOVER
+                        theme::action_hover()
                     } else {
-                        theme::CANVAS_HOVER
+                        theme::canvas_hover()
                     })
                 })
             })
@@ -1086,13 +1086,13 @@ fn action_button(
 fn error_line(message: Option<String>) -> AnyView {
     match message {
         Some(message) => Stack::horizontal((
-            sidebar_glyph(SidebarIcon::Warning, theme::CLOSED)
+            sidebar_glyph(SidebarIcon::Warning, theme::closed)
                 .style(|s| s.size(14.0, 14.0).margin_right(7.0)),
             Label::derived(move || message.clone()).style(|s| {
                 s.min_width(0.0)
                     .flex_grow(1.0_f32)
                     .font_size(theme::TEXT_META)
-                    .color(theme::CLOSED)
+                    .color(theme::closed())
             }),
         ))
         .style(|s| s.width_full().items_start())

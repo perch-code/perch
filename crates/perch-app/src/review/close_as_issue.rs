@@ -157,9 +157,9 @@ pub fn surface(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                 .style(|s| {
                     s.width_full()
                         .margin_top(theme::CONVERSATION_ENTRY_PADDING)
-                        .background(theme::CANVAS)
+                        .background(theme::canvas())
                         .border(1.0)
-                        .border_color(theme::BORDER)
+                        .border_color(theme::border())
                         .border_radius(theme::RADIUS_LG)
                 })
                 .into_any()
@@ -213,11 +213,11 @@ fn form(
                 .height(30.0)
                 .font_size(theme::TEXT_BODY)
                 .padding_horiz(8.0)
-                .background(theme::CANVAS)
+                .background(theme::canvas())
                 .border(1.0)
-                .border_color(theme::BORDER)
+                .border_color(theme::border())
                 .border_radius(theme::RADIUS)
-                .focus(|s| s.border_color(theme::ACCENT))
+                .focus(|s| s.border_color(theme::accent()))
                 .set_disabled(pending())
         });
 
@@ -327,7 +327,7 @@ fn heading(text: String) -> impl IntoView {
     Label::derived(move || text.clone()).style(|s| {
         s.font_size(theme::TEXT_META)
             .font_weight(theme::weight_emphasis())
-            .color(theme::FG)
+            .color(theme::fg())
             .selectable(false)
     })
 }
@@ -335,7 +335,7 @@ fn heading(text: String) -> impl IntoView {
 fn note(text: impl Fn() -> String + 'static) -> impl IntoView {
     Label::derived(text).style(|s| {
         s.font_size(theme::TEXT_META)
-            .color(theme::FG_SUBTLE)
+            .color(theme::fg_subtle())
             .text_wrap()
             .min_width(0.0)
     })
@@ -353,7 +353,7 @@ fn refused(state: ReviewState, title: RwSignal<String>) -> impl IntoView {
         .debug_name("close-as-issue-refusal")
         .style(move |s| {
             s.font_size(theme::TEXT_META)
-                .color(theme::FG_SUBTLE)
+                .color(theme::fg_subtle())
                 .apply_if(reason().is_none(), |s| s.hide())
         })
 }
@@ -381,7 +381,7 @@ fn markdown_box<B: IntoView + 'static>(
 
     let editor = text_editor(text)
         .placeholder(placeholder.to_string())
-        .editor_style(|s| s.hide_gutter(true).selection_color(theme::SELECTION_BG));
+        .editor_style(|s| s.hide_gutter(true).selection_color(theme::selection_bg()));
     let styling_doc = editor.editor().doc();
     let styling_id = state.next_token();
     let editor = editor.styling(crate::review::composer_styling::ComposerStyling::new(
@@ -507,7 +507,7 @@ fn offer(app: AppState, state: ReviewState, item_id: String) -> impl IntoView {
     Stack::horizontal((
         Label::derived(|| "The issue is written. Replace what you wrote?".to_string()).style(|s| {
             s.font_size(theme::TEXT_META)
-                .color(theme::FG)
+                .color(theme::fg())
                 .min_width(0.0)
                 .flex_grow(1.0_f32)
         }),
@@ -553,7 +553,7 @@ fn error_line(state: ReviewState) -> impl IntoView {
                 return Empty::new().into_any();
             };
             Stack::horizontal((
-                sidebar_glyph(SidebarIcon::Warning, theme::CLOSED)
+                sidebar_glyph(SidebarIcon::Warning, theme::closed)
                     .style(|s| s.size(14.0, 14.0).margin_right(7.0).flex_shrink(0.0_f32)),
                 Label::derived(move || message.clone())
                     .debug_name("close-as-issue-error")
@@ -561,7 +561,7 @@ fn error_line(state: ReviewState) -> impl IntoView {
                         s.min_width(0.0)
                             .flex_grow(1.0_f32)
                             .font_size(theme::TEXT_META)
-                            .color(theme::CLOSED)
+                            .color(theme::closed())
                     }),
             ))
             .style(|s| s.width_full().items_start())

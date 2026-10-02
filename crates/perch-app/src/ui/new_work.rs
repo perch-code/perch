@@ -405,7 +405,7 @@ pub fn new_work_view(state: AppState, backend: Rc<Backend>) -> impl IntoView {
                     Some(error) => Label::derived(move || error.clone())
                         .style(|s| {
                             s.font_size(theme::TEXT_META)
-                                .color(theme::CLOSED)
+                                .color(theme::closed())
                                 .text_wrap()
                                 .min_width(0.0)
                         })
@@ -446,7 +446,7 @@ pub fn new_work_view(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             .justify_center()
             .padding_top(72.0)
             .padding_horiz(16.0)
-            .background(theme::CANVAS)
+            .background(theme::canvas())
     })
 }
 
@@ -454,12 +454,12 @@ pub fn new_work_view(state: AppState, backend: Rc<Backend>) -> impl IntoView {
 /// New worktree.
 pub fn bar_title() -> impl IntoView {
     Stack::horizontal((
-        sidebar_glyph(SidebarIcon::Branch, theme::FG_MUTED).style(|s| s.size(16.0, 16.0)),
+        sidebar_glyph(SidebarIcon::Branch, theme::fg_muted).style(|s| s.size(16.0, 16.0)),
         Label::derived(|| "New worktree".to_string())
             .debug_name("new-work-title")
             .style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::FG)
+                    .color(theme::fg())
                     .text_ellipsis()
                     .min_width(0.0)
             }),
@@ -472,7 +472,7 @@ pub fn close_button(state: AppState) -> impl IntoView {
     tip(
         icon_button(
             || SidebarIcon::Close,
-            || theme::FG_MUTED,
+            theme::fg_muted,
             move || state.new_work.open.set(false),
         ),
         "Close (⌘[)".to_string(),
@@ -491,7 +491,7 @@ fn message_box(state: AppState, start: Rc<dyn Fn()>) -> impl IntoView {
     let nw = state.new_work;
     let editor = text_editor(nw.text.get_untracked())
         .placeholder("Describe the work, or leave it empty for just the worktree".to_string())
-        .editor_style(|s| s.hide_gutter(true).selection_color(theme::SELECTION_BG));
+        .editor_style(|s| s.hide_gutter(true).selection_color(theme::selection_bg()));
     lay_out_every_line(editor.editor());
     let editor = editor
         .pre_command(move |cmd| {

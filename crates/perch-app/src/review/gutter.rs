@@ -270,9 +270,9 @@ fn column<V: IntoView + 'static>(
             s.width(width)
                 .height_full()
                 .flex_shrink(0.0_f32)
-                .background(theme::GUTTER_BG)
+                .background(theme::gutter_bg())
                 .border_right(RULE)
-                .border_color(theme::BORDER_MUTED)
+                .border_color(theme::border_muted())
                 .focusable()
                 .class(floem::views::LabelClass, |s| s.focus_none())
         })
@@ -393,7 +393,7 @@ fn other_row(
                 s.width_full()
                     .height(theme::CODE_LINE_HEIGHT as f64)
                     .flex_shrink(0.0_f32)
-                    .background(theme::DIFF_DIVIDER_BG)
+                    .background(theme::diff_divider_bg())
             })
             .into_any(),
         DocRow::Line { .. } | DocRow::Filler | DocRow::Spacer { .. } => {
@@ -425,9 +425,9 @@ fn expander(
     let hovered = RwSignal::new(false);
     let color = move || {
         if hovered.get() {
-            theme::DIFF_EXPANDER_HOVER_FG
+            theme::diff_expander_hover_fg()
         } else {
-            theme::DIFF_EXPANDER_FG
+            theme::diff_expander_fg()
         }
     };
     let explanation = move || {
@@ -474,9 +474,9 @@ fn expander(
                 .items_center()
                 .justify_center()
                 .background(if hovered.get() {
-                    theme::DIFF_EXPANDER_HOVER_BG
+                    theme::diff_expander_hover_bg()
                 } else {
-                    theme::DIFF_EXPANDER_BG
+                    theme::diff_expander_bg()
                 })
         }),
         explanation,
@@ -484,11 +484,11 @@ fn expander(
     .into_any()
 }
 
-fn change_bar_color(tint: Tint) -> Option<Color> {
+fn change_bar_color(tint: Tint) -> Option<fn() -> Color> {
     match tint {
-        Tint::Added => Some(theme::DIFF_ADDED_BAR),
-        Tint::Modified => Some(theme::DIFF_MODIFIED_BAR),
-        Tint::Deleted => Some(theme::DIFF_DELETED_BAR),
+        Tint::Added => Some(theme::diff_added_bar),
+        Tint::Modified => Some(theme::diff_modified_bar),
+        Tint::Deleted => Some(theme::diff_deleted_bar),
         Tint::Plain => None,
     }
 }
@@ -506,7 +506,7 @@ fn row_view(
     key: usize,
     number: Option<usize>,
     dimmed: bool,
-    bar: Option<Color>,
+    bar: Option<fn() -> Color>,
     slot: Slot,
 ) -> AnyView {
     let slot_view = match slot {
@@ -533,9 +533,9 @@ fn row_view(
                 .font_family(theme::CODE_FONT_STACK.to_string())
                 .font_size(theme::CODE_FONT_SIZE)
                 .color(if dimmed {
-                    theme::DIFF_DELETED_BAR
+                    theme::diff_deleted_bar()
                 } else {
-                    theme::GUTTER_FG
+                    theme::gutter_fg()
                 })
                 .text_align(floem::text::Alignment::End)
                 .padding_right(theme::GUTTER_NUMBER_PADDING)
@@ -568,12 +568,12 @@ pub(crate) fn thread_mark(
     origin: ThreadOrigin,
     outdated: bool,
     draft: bool,
-) -> (SidebarIcon, Color) {
+) -> (SidebarIcon, fn() -> Color) {
     match origin {
-        _ if draft => (SidebarIcon::Thread, theme::GITHUB),
-        ThreadOrigin::GitHub => (SidebarIcon::ThreadHollow, theme::FG_MUTED),
-        ThreadOrigin::Local if outdated => (SidebarIcon::Thread, theme::FG_SUBTLE),
-        ThreadOrigin::Local => (SidebarIcon::Thread, theme::ACCENT),
+        _ if draft => (SidebarIcon::Thread, theme::github),
+        ThreadOrigin::GitHub => (SidebarIcon::ThreadHollow, theme::fg_muted),
+        ThreadOrigin::Local if outdated => (SidebarIcon::Thread, theme::fg_subtle),
+        ThreadOrigin::Local => (SidebarIcon::Thread, theme::accent),
     }
 }
 
@@ -634,7 +634,7 @@ fn anchor_slot(
             (None, Some(display_line)) => {
                 let plus_file = plus_file.clone();
                 Container::new(
-                    sidebar_glyph(SidebarIcon::Plus, theme::CANVAS).style(|s| s.size(11.0, 11.0)),
+                    sidebar_glyph(SidebarIcon::Plus, theme::canvas).style(|s| s.size(11.0, 11.0)),
                 )
                 .on_event_stop(el::Click, move |_, _| {
                     // The selection if this line is inside it, else this line.
@@ -656,7 +656,7 @@ fn anchor_slot(
                         .items_center()
                         .justify_center()
                         .border_radius(3.0)
-                        .background(theme::ACCENT)
+                        .background(theme::accent())
                 })
                 .into_any()
             }
@@ -665,11 +665,11 @@ fn anchor_slot(
     )
 }
 
-fn change_bar(color: Option<Color>) -> impl IntoView {
+fn change_bar(color: Option<fn() -> Color>) -> impl IntoView {
     Container::new(Empty::new().style(move |s| {
         let base = s.width(theme::GUTTER_BAR).height_full();
         match color {
-            Some(c) => base.background(c),
+            Some(c) => base.background(c()),
             None => base,
         }
     }))
@@ -684,26 +684,30 @@ mod tests {
 
     #[test]
     fn a_draft_marks_its_line_in_githubs_blue_ahead_of_whose_thread_it_is() {
+        let thread_mark = |origin, outdated, draft| {
+            let (icon, color) = thread_mark(origin, outdated, draft);
+            (icon, color())
+        };
         assert_eq!(
             thread_mark(ThreadOrigin::GitHub, false, true),
-            (SidebarIcon::Thread, theme::GITHUB)
+            (SidebarIcon::Thread, theme::github())
         );
         assert_eq!(
             thread_mark(ThreadOrigin::GitHub, true, true),
-            (SidebarIcon::Thread, theme::GITHUB),
+            (SidebarIcon::Thread, theme::github()),
             "a new draft thread has no id on GitHub yet, and is still on its way"
         );
         assert_eq!(
             thread_mark(ThreadOrigin::GitHub, false, false),
-            (SidebarIcon::ThreadHollow, theme::FG_MUTED)
+            (SidebarIcon::ThreadHollow, theme::fg_muted())
         );
         assert_eq!(
             thread_mark(ThreadOrigin::Local, false, false),
-            (SidebarIcon::Thread, theme::ACCENT)
+            (SidebarIcon::Thread, theme::accent())
         );
         assert_eq!(
             thread_mark(ThreadOrigin::Local, true, false),
-            (SidebarIcon::Thread, theme::FG_SUBTLE)
+            (SidebarIcon::Thread, theme::fg_subtle())
         );
     }
 

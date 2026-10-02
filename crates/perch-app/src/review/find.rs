@@ -669,15 +669,15 @@ fn body(state: ReviewState, pane: Pane) -> impl IntoView {
             .items_center()
             .padding_horiz(6.0)
             .gap(3.0)
-            .background(theme::CANVAS_SUBTLE)
+            .background(theme::canvas_subtle())
             .border(1.0)
             .border_top(0.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
             .border_bottom_left_radius(4.0)
             .border_bottom_right_radius(4.0)
             .box_shadow_blur(8.0)
             .box_shadow_v_offset(2.0)
-            .box_shadow_color(theme::SHADOW)
+            .box_shadow_color(theme::shadow())
     })
 }
 
@@ -695,15 +695,15 @@ fn query_box(state: ReviewState) -> impl IntoView {
                 .padding_left(6.0)
                 // Room for the toggles.
                 .padding_right(70.0)
-                .background(theme::CANVAS)
-                .hover(|s| s.background(theme::CANVAS))
+                .background(theme::canvas())
+                .hover(|s| s.background(theme::canvas()))
                 .border(1.0)
-                .border_color(theme::BORDER)
+                .border_color(theme::border())
                 .border_radius(3.0)
-                .focus(|s| s.border_color(theme::ACCENT))
-                .cursor_color(theme::FG)
-                .set(SelectionColor, Brush::Solid(theme::SELECTION_BG))
-                .class(PlaceholderTextClass, |s| s.color(theme::FG_SUBTLE))
+                .focus(|s| s.border_color(theme::accent()))
+                .cursor_color(theme::fg())
+                .set(SelectionColor, Brush::Solid(theme::selection_bg()))
+                .class(PlaceholderTextClass, |s| s.color(theme::fg_subtle()))
         });
     let id = input.view_id();
     state.find_box.set(Some(id));
@@ -785,7 +785,7 @@ fn toggle_tile(
     flip: fn(&mut Options),
 ) -> impl IntoView {
     let on = move || state.find_options.with(is_on);
-    let color = move || if on() { theme::FG } else { theme::FG_MUTED };
+    let color = move || if on() { theme::fg() } else { theme::fg_muted() };
     let label = Label::derived(move || letters.to_string()).style(move |s| {
         let s = s
             .font_size(theme::TEXT_BADGE)
@@ -810,9 +810,9 @@ fn toggle_tile(
                 .justify_center()
                 .border_radius(3.0);
             if on() {
-                base.background(theme::BADGE_BG)
+                base.background(theme::badge_bg())
             } else {
-                base.hover(|s| s.background(theme::CANVAS_HOVER))
+                base.hover(|s| s.background(theme::canvas_hover()))
             }
         });
     tip(tile, tip_text.to_string())
@@ -829,9 +829,9 @@ fn count(state: ReviewState, pane: Pane) -> impl IntoView {
         .style(move |s| {
             s.font_size(theme::TEXT_BADGE)
                 .color(if red() {
-                    theme::CLOSED
+                    theme::closed()
                 } else {
-                    theme::FG_MUTED
+                    theme::fg_muted()
                 })
                 .selectable(false)
                 .max_width(220.0)
@@ -875,7 +875,7 @@ fn arrow(state: ReviewState, pane: Pane, forward: bool) -> impl IntoView {
         SidebarIcon::ChevronUp
     };
     let none = move || pane.found(state) == 0;
-    let tile = Container::new(sidebar_glyph(glyph, theme::FG_MUTED))
+    let tile = Container::new(sidebar_glyph(glyph, theme::fg_muted))
         .on_event_stop(el::Click, move |_, _| {
             walk(state, pane, forward);
             keep_keyboard(state);
@@ -894,7 +894,7 @@ fn arrow(state: ReviewState, pane: Pane, forward: bool) -> impl IntoView {
             if none() {
                 s.opacity(0.3_f32)
             } else {
-                s.hover(|s| s.background(theme::BADGE_BG).cursor(CursorStyle::Pointer))
+                s.hover(|s| s.background(theme::badge_bg()).cursor(CursorStyle::Pointer))
             }
         });
     let text = if forward {
@@ -907,7 +907,7 @@ fn arrow(state: ReviewState, pane: Pane, forward: bool) -> impl IntoView {
 
 fn close_button(state: ReviewState, pane: Pane) -> impl IntoView {
     let tile = Container::new(
-        sidebar_glyph(SidebarIcon::Close, theme::FG_SUBTLE).style(|s| s.size(11.0, 11.0)),
+        sidebar_glyph(SidebarIcon::Close, theme::fg_subtle).style(|s| s.size(11.0, 11.0)),
     )
     .on_event_stop(el::Click, move |_, _| close(state, pane))
     .debug_name("find-close")
@@ -917,7 +917,7 @@ fn close_button(state: ReviewState, pane: Pane) -> impl IntoView {
             .items_center()
             .justify_center()
             .border_radius(3.0)
-            .hover(|s| s.background(theme::BADGE_BG))
+            .hover(|s| s.background(theme::badge_bg()))
     });
     tip(tile, "Close (Escape)".to_string())
 }
@@ -1179,6 +1179,15 @@ mod window {
     /// unified buffer is the first, the ghost, the rewrite, a line
     /// without a match, and the last: nothing folds, and a row is its
     /// display line.
+    /// The find bar over the code, all of it dark once the system is.
+    #[test]
+    fn goes_dark_with_the_system() {
+        let mut harness = harness().0;
+        harness.dispatch_event(cmd(Code::KeyF, "f"));
+        let left = crate::theme::dark_check::light_left(&mut harness);
+        assert!(left.is_empty(), "light colours left in dark:\n{}", left.join("\n"));
+    }
+
     fn harness() -> (HeadlessHarness, ReviewState) {
         harness_with(
             "let path = 1;\nlet a = Path;\nlet b = 2;\nlet c = path;\n",

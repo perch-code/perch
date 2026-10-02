@@ -350,10 +350,10 @@ pub(crate) fn layer(
             .inset_left(0.0)
             .width_full()
             .height(1.0)
-            .background(theme::BORDER_MUTED)
+            .background(theme::border_muted())
             .box_shadow_blur(6.0)
             .box_shadow_v_offset(2.0)
-            .box_shadow_color(theme::SHADOW)
+            .box_shadow_color(theme::shadow())
             .apply_if(bottom <= 0.0, |s| s.hide())
     });
 
@@ -390,7 +390,11 @@ fn pinned_row(
         layout.set_text(&text, attrs.clone(), None);
         layout.size().width.ceil() + 1.0
     };
-    let again = (text.clone(), attrs.clone());
+    // Laid out again when the appearance changes: the colours are in it.
+    let again = {
+        let file = file.clone();
+        move || line_layout(&file, line)
+    };
     // The row's own tint, as the line is drawn in the code: a pinned `fn`
     // that the change added reads as added.
     let tint = move || {
@@ -410,15 +414,15 @@ fn pinned_row(
             .selectable(false)
             .font_family(theme::CODE_FONT_STACK.to_string())
             .font_size(theme::CODE_FONT_SIZE)
-            .color(theme::GUTTER_FG)
+            .color(theme::gutter_fg())
             .text_align(floem::text::Alignment::End)
             .padding_right(theme::GUTTER_NUMBER_PADDING + theme::GUTTER_BAR)
-            .background(theme::GUTTER_BG)
+            .background(theme::gutter_bg())
             .border_right(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::border_muted())
     });
 
-    let text = rich_text(text, attrs, move || again.clone()).style(move |s| {
+    let text = rich_text(text, attrs, again).style(move |s| {
         // Read live, as the gutter reads its offset: the code slides
         // sideways under a row built before the scroll.
         s.absolute()
@@ -433,7 +437,7 @@ fn pinned_row(
             .min_width(0.0)
             .height_full()
             .position(Position::Relative)
-            .background(theme::CODE_BG)
+            .background(theme::code_bg())
     });
     let code = Container::new(code).style(move |s| {
         s.flex_grow(1.0_f32)
@@ -480,7 +484,7 @@ fn line_layout(file: &LoadedFile, line: usize) -> (String, AttrsList) {
         .family(&families)
         .font_size(theme::CODE_FONT_SIZE)
         .weight(theme::weight_body())
-        .color(theme::FG)
+        .color(theme::fg())
         // As the editor sets its lines, so the text sits in the row where
         // the same line sits in the code.
         .line_height(LineHeightValue::Pt(theme::CODE_LINE_HEIGHT));

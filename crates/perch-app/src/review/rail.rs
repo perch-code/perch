@@ -85,7 +85,7 @@ pub fn rail(state: ReviewState, on_open: OpenFile, backend: Rc<Backend>) -> impl
             .flex_grow(1.0_f32)
             .min_height(0.0)
             .flex_col()
-            .background(theme::RAIL_BG)
+            .background(theme::rail_bg())
     })
 }
 
@@ -110,7 +110,7 @@ fn viewed_row(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
             if empty {
                 return Container::new(Label::derived(move || "No changes").style(|s| {
                     s.font_size(theme::TEXT_BADGE)
-                        .color(theme::FG_MUTED)
+                        .color(theme::fg_muted())
                         .selectable(false)
                 }))
                 .style(|s| {
@@ -120,7 +120,7 @@ fn viewed_row(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                         .items_center()
                         .padding_left(10.0)
                         .border_bottom(1.0)
-                        .border_color(theme::BORDER)
+                        .border_color(theme::border())
                 })
                 .into_any();
             }
@@ -132,7 +132,7 @@ fn viewed_row(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                 })
                 .style(|s| {
                     s.font_size(theme::TEXT_BADGE)
-                        .color(theme::FG_MUTED)
+                        .color(theme::fg_muted())
                         .flex_grow(1.0_f32)
                         .selectable(false)
                 }),
@@ -148,13 +148,13 @@ fn viewed_row(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                 })
                 .style(|s| {
                     s.font_size(theme::TEXT_BADGE)
-                        .color(theme::ACCENT)
+                        .color(theme::accent())
                         .selectable(false)
                         .padding_horiz(6.0)
                         .padding_vert(2.0)
                         .margin_right(2.0)
                         .border_radius(4.0)
-                        .hover(|s| s.background(theme::BADGE_BG).cursor(CursorStyle::Pointer))
+                        .hover(|s| s.background(theme::badge_bg()).cursor(CursorStyle::Pointer))
                 }),
                 filter_button(state),
             ))
@@ -166,7 +166,7 @@ fn viewed_row(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                     .padding_left(10.0)
                     .padding_right(4.0)
                     .border_bottom(1.0)
-                    .border_color(theme::BORDER)
+                    .border_color(theme::border())
             })
             .into_any()
         },
@@ -182,7 +182,7 @@ fn filter_button(state: ReviewState) -> impl IntoView {
         move |on| {
             let button = icon_button(
                 || SidebarIcon::Filter,
-                move || if on { theme::ACCENT } else { theme::FG_MUTED },
+                move || if on { theme::accent() } else { theme::fg_muted() },
                 move || state.changed_only.set(!on),
             );
             let text = if on {
@@ -309,9 +309,9 @@ fn tree_row(
         Container::new(dyn_container(
             move || is_dir.then(&is_expanded),
             move |open| match open {
-                Some(true) => sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE).into_any(),
+                Some(true) => sidebar_glyph(SidebarIcon::ChevronDown, theme::fg_subtle).into_any(),
                 Some(false) => {
-                    sidebar_glyph(SidebarIcon::ChevronRight, theme::FG_SUBTLE).into_any()
+                    sidebar_glyph(SidebarIcon::ChevronRight, theme::fg_subtle).into_any()
                 }
                 None => Empty::new().into_any(),
             },
@@ -336,11 +336,11 @@ fn tree_row(
         Label::derived(move || label.clone()).style(move |s| {
             s.font_size(theme::TEXT_META)
                 .color(if viewed() {
-                    theme::FG_SUBTLE
+                    theme::fg_subtle()
                 } else if is_dir {
-                    theme::FG_MUTED
+                    theme::fg_muted()
                 } else {
-                    theme::FG
+                    theme::fg()
                 })
                 .font_weight(if active_name() {
                     theme::weight_emphasis()
@@ -375,9 +375,9 @@ fn tree_row(
             .items_center()
             .padding_left(10.0)
             .padding_right(4.0);
-        let base = base.hover(|s| s.background(theme::CANVAS_HOVER));
+        let base = base.hover(|s| s.background(theme::canvas_hover()));
         if active_row() {
-            base.background(theme::ACCENT_SUBTLE)
+            base.background(theme::accent_subtle())
         } else {
             base
         }
@@ -463,13 +463,13 @@ fn viewed_box(state: ReviewState, file: ChangedFile, backend: Rc<Backend>) -> im
 /// A changed file's status as git's letter in its colour: the rail's, and
 /// Cmd-P's list's.
 pub(crate) fn status_letter(status: ChangeStatus) -> impl IntoView {
-    let color = match status {
-        ChangeStatus::Added => theme::STATUS_ADDED,
-        ChangeStatus::Modified | ChangeStatus::TypeChanged => theme::STATUS_MODIFIED,
-        ChangeStatus::Deleted => theme::STATUS_DELETED,
-        ChangeStatus::Renamed | ChangeStatus::Copied => theme::STATUS_RENAMED,
-    };
     Label::derived(move || status.letter()).style(move |s| {
+        let color = match status {
+            ChangeStatus::Added => theme::status_added(),
+            ChangeStatus::Modified | ChangeStatus::TypeChanged => theme::status_modified(),
+            ChangeStatus::Deleted => theme::status_deleted(),
+            ChangeStatus::Renamed | ChangeStatus::Copied => theme::status_renamed(),
+        };
         s.font_size(theme::TEXT_BADGE)
             .font_weight(theme::weight_emphasis())
             .color(color)
@@ -498,9 +498,9 @@ fn counts(
         })
         .style(move |s| {
             s.font_size(theme::TEXT_BADGE).color(if binary || muted() {
-                theme::FG_SUBTLE
+                theme::fg_subtle()
             } else {
-                theme::STATUS_ADDED
+                theme::status_added()
             })
         }),
         Label::derived(move || {
@@ -513,9 +513,9 @@ fn counts(
         .style(move |s| {
             s.font_size(theme::TEXT_BADGE)
                 .color(if muted_deletions() {
-                    theme::FG_SUBTLE
+                    theme::fg_subtle()
                 } else {
-                    theme::STATUS_DELETED
+                    theme::status_deleted()
                 })
                 .margin_left(5.0)
         }),
@@ -557,6 +557,14 @@ mod tests {
     /// The left edge of the drawer on the right, docked at its default
     /// width against the window's right edge.
     const DRAWER_LEFT: f64 = 1400.0 - theme::DRAWER_WIDTH;
+
+    /// Code, its rail and the drawer, all of it dark once the system is.
+    #[test]
+    fn goes_dark_with_the_system() {
+        let mut harness = app_harness().0;
+        let left = crate::theme::dark_check::light_left(&mut harness);
+        assert!(left.is_empty(), "light colours left in dark:\n{}", left.join("\n"));
+    }
 
     /// The whole window on Code with a worktree of `src` and a README,
     /// a branch that changed three of the files in `src`, the second of
@@ -835,7 +843,7 @@ mod tests {
         assert_eq!(rect.center().y, name_center(4).1);
         assert_eq!(
             harness.get_computed_style(row).get(Background),
-            Some(Brush::Solid(theme::ACCENT_SUBTLE)),
+            Some(Brush::Solid(theme::accent_subtle())),
             "the row is selected"
         );
         assert_eq!(state.scroll_to_row.get(), None, "the row took the scroll");

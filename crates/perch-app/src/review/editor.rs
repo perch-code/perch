@@ -199,7 +199,7 @@ pub fn editor_pane(
                     }
                 },
             )
-            .style(|s| s.size_full().background(theme::CODE_BG)),
+            .style(|s| s.size_full().background(theme::code_bg())),
             // The find bar hangs from the top right of the code, over it and
             // outside the container that swaps editors, so it stays up with
             // its text and its keyboard from one file to the next.
@@ -697,12 +697,12 @@ pub(crate) fn row_tint(row: &DocRow) -> Option<Color> {
     match row {
         DocRow::Line { tint, .. } => match tint {
             Tint::Plain => None,
-            Tint::Added => Some(theme::DIFF_ADDED_BG),
-            Tint::Modified => Some(theme::DIFF_MODIFIED_BG),
-            Tint::Deleted => Some(theme::DIFF_DELETED_BG),
+            Tint::Added => Some(theme::diff_added_bg()),
+            Tint::Modified => Some(theme::diff_modified_bg()),
+            Tint::Deleted => Some(theme::diff_deleted_bg()),
         },
-        DocRow::Filler => Some(theme::DIFF_FILLER_BG),
-        DocRow::Divider { .. } => Some(theme::DIFF_DIVIDER_BG),
+        DocRow::Filler => Some(theme::diff_filler_bg()),
+        DocRow::Divider { .. } => Some(theme::diff_divider_bg()),
         DocRow::Spacer { .. } => None,
     }
 }
@@ -729,14 +729,13 @@ fn tint_layer(doc: RwSignal<Arc<Doc>>, viewport: RwSignal<Rect>) -> impl IntoVie
         visible,
         |(row, entry)| (*row, entry.clone()),
         move |(row, entry)| {
-            let tint = row_tint(&entry);
             Empty::new()
                 .debug_name(format!("tint:{row}"))
                 .style(move |s| {
                     s.width_full()
                         .height(line_height)
                         .flex_shrink(0.0_f32)
-                        .apply_opt(tint, |s, bg| s.background(bg))
+                        .apply_opt(row_tint(&entry), |s, bg| s.background(bg))
                 })
         },
     )
@@ -775,7 +774,7 @@ fn over_tints(
             s.size_full()
                 .min_width(0.0)
                 .position(Position::Relative)
-                .background(theme::CODE_BG)
+                .background(theme::code_bg())
         })
 }
 
@@ -973,7 +972,7 @@ fn divider_header(
             .min_width(0.0)
             .font_family(theme::CODE_FONT_STACK.to_string())
             .font_size(theme::CODE_FONT_SIZE)
-            .color(theme::DIFF_DIVIDER_FG)
+            .color(theme::diff_divider_fg())
             .text_ellipsis()
     });
     let reset = dyn_container(
@@ -1015,9 +1014,9 @@ fn fold_again(
     let hovered = RwSignal::new(false);
     let color = move || {
         if hovered.get() {
-            theme::ACCENT
+            theme::accent()
         } else {
-            theme::FG_MUTED
+            theme::fg_muted()
         }
     };
     cards::tip(
@@ -1038,7 +1037,7 @@ fn fold_again(
                 .items_center()
                 .justify_center()
                 .border_radius(3.0)
-                .hover(|s| s.background(theme::BADGE_BG))
+                .hover(|s| s.background(theme::badge_bg()))
         }),
         "Fold again".to_string(),
     )
@@ -1554,7 +1553,7 @@ fn split_view(
             s.width(1.0)
                 .height_full()
                 .flex_shrink(0.0_f32)
-                .background(theme::BORDER)
+                .background(theme::border())
         }),
         right_pane,
         divider_layer(
@@ -1622,7 +1621,7 @@ fn code_editor(text: String, styling: PerchStyling) -> TextEditor {
             // hard to follow. Long lines scroll sideways instead.
             s.hide_gutter(true)
                 .wrap_method(floem::views::editor::text::WrapMethod::None)
-                .selection_color(theme::SELECTION_BG)
+                .selection_color(theme::selection_bg())
         })
         // No background: the box the editor sits in paints the code's,
         // and the rows' tints over it, under the editor. See `over_tints`.
@@ -1959,7 +1958,7 @@ fn loading_view(path: String) -> impl IntoView {
     let name = path.rsplit('/').next().unwrap_or(&path).to_string();
     Container::new(
         Label::derived(move || format!("Opening {name}…"))
-            .style(|s| s.font_size(theme::TEXT_BODY).color(theme::FG_MUTED)),
+            .style(|s| s.font_size(theme::TEXT_BODY).color(theme::fg_muted())),
     )
     .style(|s| s.size_full().items_center().justify_center())
 }
@@ -2183,6 +2182,14 @@ mod window {
     /// makes room for.
     fn gutter_width() -> f64 {
         crate::review::gutter::width(3)
+    }
+
+    /// A changed file, its gutter and tints, all of it dark once the system is.
+    #[test]
+    fn goes_dark_with_the_system() {
+        let mut harness = harness().0;
+        let left = crate::theme::dark_check::light_left(&mut harness);
+        assert!(left.is_empty(), "light colours left in dark:\n{}", left.join("\n"));
     }
 
     /// The whole window on Code with one changed file open, so the split
@@ -2712,7 +2719,7 @@ mod window {
     #[test]
     fn a_changed_lines_tint_is_under_the_editor_so_the_selection_shows_over_it() {
         use crate::review::doc::{DocRow, Tint};
-        use crate::theme::{CODE_LINE_HEIGHT, DIFF_DELETED_BG, DIFF_MODIFIED_BG};
+        use crate::theme::{diff_deleted_bg, diff_modified_bg, CODE_LINE_HEIGHT};
         let line = |display, tint| DocRow::Line { display, tint };
 
         let (mut harness, state) = harness();
@@ -2743,10 +2750,10 @@ mod window {
             "the tint runs across the editor's box, gap included"
         );
         assert_eq!((rect.y0, rect.height()), (top + line_height, line_height));
-        assert_eq!(bg, Some(Brush::Solid(DIFF_DELETED_BG)));
+        assert_eq!(bg, Some(Brush::Solid(diff_deleted_bg())));
         let (changed, rect, bg) = tint(&harness, editor, 2);
         assert_eq!(rect.y0, top + 2.0 * line_height);
-        assert_eq!(bg, Some(Brush::Solid(DIFF_MODIFIED_BG)));
+        assert_eq!(bg, Some(Brush::Solid(diff_modified_bg())));
         let (_, _, bg) = tint(&harness, editor, 3);
         assert_eq!(bg, None, "a plain line has no tint");
 
@@ -2775,7 +2782,7 @@ mod window {
         assert!(scrolled > 0.0, "the editor did not scroll");
         let (_, rect, bg) = tint(&harness, editor, 10);
         assert_eq!(rect.y0, top + 10.0 * line_height - scrolled);
-        assert_eq!(bg, Some(Brush::Solid(DIFF_MODIFIED_BG)));
+        assert_eq!(bg, Some(Brush::Solid(diff_modified_bg())));
 
         // A split has a layer under each side, over that side's rows: the
         // deleted line on the left, the changed one on the right. The split
@@ -2798,10 +2805,10 @@ mod window {
         assert_eq!(right_box.x1, 1400.0);
         let (_, rect, bg) = tint(&harness, left, 1);
         assert_eq!((rect.x0, rect.x1, rect.y0), (left_box.x0, left_box.x1, top + line_height));
-        assert_eq!(bg, Some(Brush::Solid(DIFF_DELETED_BG)));
+        assert_eq!(bg, Some(Brush::Solid(diff_deleted_bg())));
         let (_, rect, bg) = tint(&harness, right, 1);
         assert_eq!((rect.x0, rect.x1, rect.y0), (right_box.x0, right_box.x1, top + line_height));
-        assert_eq!(bg, Some(Brush::Solid(DIFF_MODIFIED_BG)));
+        assert_eq!(bg, Some(Brush::Solid(diff_modified_bg())));
     }
 
     /// The scrollbar's element under a window point, when the point is
@@ -3203,7 +3210,7 @@ mod window {
     /// seventy it was when the controls sat in a row inside it.
     #[test]
     fn a_divider_is_githubs_hunk_row_with_its_expanders_in_the_gutter_and_its_header_over_the_code() {
-        use crate::theme::{CODE_GUTTER_GAP, DIFF_EXPANDER_BG, DIFF_EXPANDER_HOVER_BG};
+        use crate::theme::{diff_expander_bg, diff_expander_hover_bg, CODE_GUTTER_GAP};
         let (mut harness, state) = one_long_run();
         let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
         let root = harness.root_id();
@@ -3230,12 +3237,12 @@ mod window {
             let id = find(harness.root_id(), name).unwrap();
             harness.get_computed_style(id).get(floem::style::Background)
         };
-        assert_eq!(background(&harness, "expander:Down"), Some(Brush::Solid(DIFF_EXPANDER_BG)));
+        assert_eq!(background(&harness, "expander:Down"), Some(Brush::Solid(diff_expander_bg())));
         harness.pointer_move(up.center().x, up.center().y);
         harness.rebuild();
         harness.paint();
-        assert_eq!(background(&harness, "expander:Up"), Some(Brush::Solid(DIFF_EXPANDER_HOVER_BG)));
-        assert_eq!(background(&harness, "expander:Down"), Some(Brush::Solid(DIFF_EXPANDER_BG)));
+        assert_eq!(background(&harness, "expander:Up"), Some(Brush::Solid(diff_expander_hover_bg())));
+        assert_eq!(background(&harness, "expander:Down"), Some(Brush::Solid(diff_expander_bg())));
 
         // The header counts the hunk below the run, which runs to the end
         // of the file, and takes its context from the base: the nearest

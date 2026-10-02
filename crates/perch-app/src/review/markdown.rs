@@ -1269,7 +1269,7 @@ pub fn render_linked(text: &str, state: ReviewState) -> impl IntoView {
         parse_in(text, repo.as_deref()),
         Ctx {
             size: theme::TEXT_BODY,
-            color: theme::FG,
+            color: theme::fg,
             depth: 0,
             refs: Refs::of(state),
             foot: None,
@@ -1309,7 +1309,7 @@ pub fn render_suggesting(
         suggesting(parse_in(text, repo.as_deref()), &original),
         Ctx {
             size: theme::TEXT_BODY,
-            color: theme::FG,
+            color: theme::fg,
             depth: 0,
             refs: Refs::of(state),
             foot,
@@ -1346,7 +1346,7 @@ fn suggesting(blocks: Vec<Block>, original: &Option<Original>) -> Vec<Block> {
 /// conversation card draws one; a tooltip hands its blocks here at the
 /// meta size, so a doc comment reads a step below the signature.
 pub fn render_blocks(blocks: Vec<Block>, size: f32) -> impl IntoView {
-    passage(stack(blocks, Ctx { size, color: theme::FG, depth: 0, refs: None, foot: None }))
+    passage(stack(blocks, Ctx { size, color: theme::fg, depth: 0, refs: None, foot: None }))
 }
 
 /// How the blocks in a container are drawn: the prose size, its colour,
@@ -1354,7 +1354,7 @@ pub fn render_blocks(blocks: Vec<Block>, size: f32) -> impl IntoView {
 #[derive(Clone, Copy)]
 struct Ctx {
     size: f32,
-    color: Color,
+    color: fn() -> Color,
     depth: usize,
     refs: Option<Refs>,
     /// What a suggested change has under it.
@@ -1421,8 +1421,8 @@ fn block_view(block: Block, ctx: Ctx) -> AnyView {
             ctx.refs,
         ),
         Block::Heading { level, spans } => heading_view(level, spans, ctx),
-        Block::Quote { alert: None, blocks } => stack(blocks, Ctx { color: theme::FG_MUTED, ..ctx })
-            .style(|s| s.padding_left(10.0).border_left(3.0).border_color(theme::BORDER))
+        Block::Quote { alert: None, blocks } => stack(blocks, Ctx { color: theme::fg_muted, ..ctx })
+            .style(|s| s.padding_left(10.0).border_left(3.0).border_color(theme::border()))
             .into_any(),
         Block::Quote { alert: Some(alert), blocks } => alert_view(alert, blocks, ctx),
         Block::List { start, tight, items } => list_view(start, tight, items, ctx),
@@ -1430,7 +1430,7 @@ fn block_view(block: Block, ctx: Ctx) -> AnyView {
         Block::Suggestion { text, original } => suggestion_view(text, original, ctx.foot),
         Block::Table { align, head, rows } => table_view(align, head, rows, ctx),
         Block::Rule => Empty::new()
-            .style(|s| s.width_full().height(1.0).background(theme::BORDER).margin_vert(4.0))
+            .style(|s| s.width_full().height(1.0).background(theme::border()).margin_vert(4.0))
             .into_any(),
         Block::Details { summary, blocks } => details_view(summary, blocks, ctx),
         Block::Footnotes(notes) => footnotes_view(notes, ctx),
@@ -1453,9 +1453,9 @@ fn details_view(summary: Vec<Span>, blocks: Vec<Block>, ctx: Ctx) -> AnyView {
             } else {
                 SidebarIcon::ChevronRight
             };
-            icons::sidebar_icon(glyph, theme::FG_MUTED)
+            icons::sidebar_icon(glyph, theme::fg_muted())
         },
-        || theme::FG_MUTED,
+        theme::fg_muted,
     )
     .style(move |s| {
         s.size(side, side)
@@ -1528,12 +1528,12 @@ fn heading_view(level: u8, spans: Vec<Span>, ctx: Ctx) -> AnyView {
 }
 
 fn alert_view(alert: Alert, blocks: Vec<Block>, ctx: Ctx) -> AnyView {
-    let (title, icon, color) = match alert {
-        Alert::Note => ("Note", SidebarIcon::Note, theme::ALERT_NOTE),
-        Alert::Tip => ("Tip", SidebarIcon::Tip, theme::ALERT_TIP),
-        Alert::Important => ("Important", SidebarIcon::Important, theme::ALERT_IMPORTANT),
-        Alert::Warning => ("Warning", SidebarIcon::Warning, theme::ALERT_WARNING),
-        Alert::Caution => ("Caution", SidebarIcon::Caution, theme::ALERT_CAUTION),
+    let (title, icon, color): (_, _, fn() -> Color) = match alert {
+        Alert::Note => ("Note", SidebarIcon::Note, theme::alert_note),
+        Alert::Tip => ("Tip", SidebarIcon::Tip, theme::alert_tip),
+        Alert::Important => ("Important", SidebarIcon::Important, theme::alert_important),
+        Alert::Warning => ("Warning", SidebarIcon::Warning, theme::alert_warning),
+        Alert::Caution => ("Caution", SidebarIcon::Caution, theme::alert_caution),
     };
     let size = ctx.size;
     let header = Stack::horizontal((
@@ -1541,7 +1541,7 @@ fn alert_view(alert: Alert, blocks: Vec<Block>, ctx: Ctx) -> AnyView {
         Label::derived(move || title.to_string()).style(move |s| {
             s.font_size(size)
                 .font_weight(theme::weight_emphasis())
-                .color(color)
+                .color(color())
                 .selectable(false)
         }),
     ))
@@ -1553,7 +1553,7 @@ fn alert_view(alert: Alert, blocks: Vec<Block>, ctx: Ctx) -> AnyView {
                 .gap(4.0)
                 .padding_left(10.0)
                 .border_left(3.0)
-                .border_color(color)
+                .border_color(color())
         })
         .debug_name(format!("alert:{}", title.to_ascii_lowercase()))
         .into_any()
@@ -1594,7 +1594,7 @@ fn list_view(start: Option<u64>, _tight: bool, items: Vec<Item>, ctx: Ctx) -> An
                         // baseline.
                         s.font_size(size)
                             .line_height(theme::PROSE_LINE_HEIGHT)
-                            .color(theme::FG_MUTED)
+                            .color(theme::fg_muted())
                             .selectable(false)
                     }))
                     .style(move |s| {
@@ -1639,7 +1639,7 @@ fn task_box(checked: bool, size: f32) -> AnyView {
     // Centred on the first line of the item's text.
     let lift = ((size * theme::PROSE_LINE_HEIGHT) as f64 - side) / 2.0;
     let glyph: AnyView = if checked {
-        sidebar_glyph(SidebarIcon::Check, theme::CANVAS).into_any()
+        sidebar_glyph(SidebarIcon::Check, theme::canvas).into_any()
     } else {
         Empty::new().into_any()
     };
@@ -1657,9 +1657,9 @@ fn task_box(checked: bool, size: f32) -> AnyView {
             .margin_top(lift.max(0.0))
             .margin_right(8.0);
         if checked {
-            s.background(theme::ACCENT).border_color(theme::ACCENT)
+            s.background(theme::accent()).border_color(theme::accent())
         } else {
-            s.background(theme::CANVAS).border_color(theme::BORDER)
+            s.background(theme::canvas()).border_color(theme::border())
         }
     })
     .debug_name(if checked { "task:checked" } else { "task:empty" })
@@ -1683,14 +1683,15 @@ fn code_view(text: String, lang: Option<String>, ctx: Ctx) -> AnyView {
     let code_box = move |s: floem::style::Style| {
         s.padding(8.0)
             .width_full()
-            .background(theme::CANVAS_SUBTLE)
+            .background(theme::canvas_subtle())
             .border(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::border_muted())
             .border_radius(theme::RADIUS)
     };
     let run = linked_run(plan, ctx.refs, move |links| {
-        let attrs = code_attrs(code_size, &links);
-        linked_text(text.clone(), attrs, links, Vec::new())
+        let text = text.clone();
+        let styled_links = links.clone();
+        linked_text(text, links, move || (code_attrs(code_size, &styled_links), Vec::new()))
             .style(|s| s.width_full())
             .into_any()
     });
@@ -1725,10 +1726,10 @@ fn suggestion_view(text: String, original: Option<Original>, foot: Option<Foot>)
             .padding_horiz(12.0)
             .padding_vert(6.0)
             .font_size(theme::TEXT_BADGE)
-            .color(theme::FG_MUTED)
-            .background(theme::CANVAS_SUBTLE)
+            .color(theme::fg_muted())
+            .background(theme::canvas_subtle())
             .border_bottom(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::border_muted())
             .selectable(false)
     });
     let lines = if text.is_empty() {
@@ -1751,7 +1752,7 @@ fn suggestion_view(text: String, original: Option<Original>, foot: Option<Foot>)
             s.flex_col()
                 .width_full()
                 .border(1.0)
-                .border_color(theme::BORDER_MUTED)
+                .border_color(theme::border_muted())
                 .border_radius(theme::RADIUS)
         })
         .into_any()
@@ -1763,7 +1764,7 @@ fn code_attrs(size: f32, links: &[(Range<usize>, Target)]) -> AttrsList {
     let family: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect();
     let base = || {
         Attrs::new()
-            .color(theme::FG)
+            .color(theme::fg())
             .font_size(size)
             .weight(theme::weight_body())
             .family(&family)
@@ -1771,7 +1772,7 @@ fn code_attrs(size: f32, links: &[(Range<usize>, Target)]) -> AttrsList {
     };
     let mut list = AttrsList::new(base());
     for (range, _) in links {
-        list.add_span(range.clone(), base().color(theme::LINK));
+        list.add_span(range.clone(), base().color(theme::link()));
     }
     list
 }
@@ -1795,7 +1796,7 @@ fn table_view(align: Vec<Align>, head: Vec<Vec<Span>>, rows: Vec<Vec<Vec<Span>>>
                     .style(move |s| {
                         // GitHub stripes every other row.
                         if r % 2 == 1 {
-                            s.background(theme::CANVAS_SUBTLE)
+                            s.background(theme::canvas_subtle())
                         } else {
                             s
                         }
@@ -1818,7 +1819,7 @@ fn table_view(align: Vec<Align>, head: Vec<Vec<Span>>, rows: Vec<Vec<Vec<Span>>>
                 .align_self(floem::taffy::AlignItems::FLEX_START)
                 .max_width_full()
                 .border(1.0)
-                .border_color(theme::BORDER)
+                .border_color(theme::border())
                 .border_radius(theme::RADIUS)
         })
         .debug_name("table")
@@ -1851,8 +1852,8 @@ fn cell_view(spans: Vec<Span>, align: Align, ctx: Ctx, kind: Cell) -> AnyView {
                 Align::Right => s.justify_end(),
             };
             match kind {
-                Cell::Head => s.border_bottom(1.0).border_color(theme::BORDER),
-                Cell::Body => s.border_bottom(1.0).border_color(theme::BORDER_MUTED),
+                Cell::Head => s.border_bottom(1.0).border_color(theme::border()),
+                Cell::Body => s.border_bottom(1.0).border_color(theme::border_muted()),
                 Cell::Last => s,
             }
         })
@@ -1864,7 +1865,7 @@ fn footnotes_view(notes: Vec<Vec<Block>>, ctx: Ctx) -> AnyView {
     let small = Ctx { size: (ctx.size - 2.0).max(theme::TEXT_SECTION), ..ctx };
     let items = notes.into_iter().map(|blocks| Item { checked: None, blocks }).collect();
     Stack::vertical((
-        Empty::new().style(|s| s.width_full().height(1.0).background(theme::BORDER)),
+        Empty::new().style(|s| s.width_full().height(1.0).background(theme::border())),
         list_view(Some(1), false, items, small),
     ))
     .style(|s| s.flex_col().width_full().gap(8.0).margin_top(8.0))
@@ -1876,7 +1877,7 @@ fn text_view(
     spans: Vec<Span>,
     size: f32,
     weight: FontWeight,
-    color: Color,
+    color: fn() -> Color,
     leading: LineHeightValue,
     refs: Option<Refs>,
 ) -> AnyView {
@@ -1893,15 +1894,19 @@ fn prose_view(
     spans: Vec<Span>,
     size: f32,
     weight: FontWeight,
-    color: Color,
+    color: fn() -> Color,
     leading: LineHeightValue,
     refs: Option<Refs>,
     fill: bool,
 ) -> AnyView {
     let plan = plan(&spans, refs);
     linked_run(plan, refs, move |links| {
-        let (text, attrs, links, strikes) = layout(&spans, size, weight, color, leading, links);
-        linked_text(text, attrs, links, strikes)
+        let (text, _, links, _) = layout(&spans, size, weight, color, leading, links);
+        let (spans, styled_links) = (spans.clone(), links.clone());
+        linked_text(text, links, move || {
+            let (_, attrs, _, strikes) = layout(&spans, size, weight, color, leading, styled_links.clone());
+            (attrs, strikes)
+        })
             .style(move |s| if fill { s.width_full() } else { s })
             .into_any()
     })
@@ -1951,7 +1956,7 @@ fn layout(
     spans: &[Span],
     size: f32,
     weight: FontWeight,
-    color: Color,
+    color: fn() -> Color,
     leading: LineHeightValue,
     links: Vec<(Range<usize>, Target)>,
 ) -> (String, AttrsList, Vec<(Range<usize>, Target)>, Vec<Strike>) {
@@ -1959,7 +1964,7 @@ fn layout(
     let code: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect();
     let base = || {
         Attrs::new()
-            .color(color)
+            .color(color())
             .font_size(size)
             .weight(weight)
             .family(&body)
@@ -1989,7 +1994,7 @@ fn layout(
         for piece in cuts.windows(2).map(|pair| pair[0]..pair[1]) {
             let linked = span.footnote
                 || links.iter().any(|(link, _)| link.start <= piece.start && piece.end <= link.end);
-            let ink = if linked { theme::LINK } else { color };
+            let ink = if linked { theme::link() } else { color() };
             if span.strike {
                 match strikes.last_mut() {
                     Some((last, tint)) if last.end == piece.start && *tint == ink => last.end = piece.end,
@@ -2039,7 +2044,7 @@ mod tests {
     fn laid(spans: &[Span]) -> (String, Vec<(Range<usize>, Target)>, Vec<Strike>) {
         let links = plan(spans, None).links;
         let (text, _, links, strikes) =
-            layout(spans, 14.0, theme::weight_body(), theme::FG, prose_leading(14.0), links);
+            layout(spans, 14.0, theme::weight_body(), theme::fg, prose_leading(14.0), links);
         (text, links, strikes)
     }
 
@@ -2579,7 +2584,7 @@ mod tests {
         let (text, links, strikes) = laid(&spans);
         assert_eq!(text, "a bc d");
         assert!(links.is_empty());
-        assert_eq!(strikes, vec![(2..4, theme::FG)]);
+        assert_eq!(strikes, vec![(2..4, theme::fg())]);
     }
 
     #[test]
@@ -2590,7 +2595,7 @@ mod tests {
         ];
         let (_, links, strikes) = laid(&spans);
         assert_eq!(links, vec![(1..2, Target::Url("https://x".into()))]);
-        assert_eq!(strikes, vec![(0..1, theme::FG), (1..2, theme::LINK)]);
+        assert_eq!(strikes, vec![(0..1, theme::fg()), (1..2, theme::link())]);
     }
 
     #[test]
@@ -2677,7 +2682,7 @@ mod tests {
         let spans = spans_of("A `regular: Option<WalGcPolicy>` field");
         let links = vec![(18..29, local("src/gc.rs:3"))];
         let (text, attrs, links, _) =
-            layout(&spans, 14.0, theme::weight_body(), theme::FG, prose_leading(14.0), links);
+            layout(&spans, 14.0, theme::weight_body(), theme::fg, prose_leading(14.0), links);
         assert_eq!(&text[18..29], "WalGcPolicy");
         assert_eq!(links.len(), 1);
         // Three pieces of code: before, the link in the links' colour,
@@ -2687,8 +2692,8 @@ mod tests {
         let size = small_size(14.0);
         let code = |i: usize| attrs.get_span(i).font_size;
         assert_eq!((code(5), code(25), code(29)), (size, size, size));
-        assert_eq!(attrs.get_span(25).get_color(), Some(theme::LINK));
-        assert_eq!(attrs.get_span(5).get_color(), Some(theme::FG));
+        assert_eq!(attrs.get_span(25).get_color(), Some(theme::link()));
+        assert_eq!(attrs.get_span(5).get_color(), Some(theme::fg()));
     }
 
     #[test]

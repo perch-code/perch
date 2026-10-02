@@ -45,11 +45,11 @@ fn open_row(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     let row = Container::new(
         Stack::horizontal((
             nav_row::glyph_box(
-                sidebar_glyph(SidebarIcon::Search, theme::NAV_MUTED).style(|s| s.size(14.0, 14.0)),
+                sidebar_glyph(SidebarIcon::Search, theme::nav_muted).style(|s| s.size(14.0, 14.0)),
             ),
             Label::derived(move || label().unwrap_or_default()).style(|s| {
                 s.font_size(theme::TEXT_TITLE)
-                    .color(theme::NAV_FG)
+                    .color(theme::nav_fg())
                     .text_ellipsis()
                     .min_width(0.0)
             }),
@@ -114,7 +114,7 @@ fn search_list(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             .style(move |s| {
                 let shown = page().is_some_and(|page| page.error.is_some());
                 s.font_size(theme::TEXT_META)
-                    .color(theme::NAV_MUTED)
+                    .color(theme::nav_muted())
                     .padding_horiz(theme::NAV_GUTTER + 8.0)
                     .padding_bottom(8.0)
                     .text_wrap()
@@ -143,7 +143,7 @@ fn search_list(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             let empty =
                 visible().is_empty() && !page().is_some_and(|p| p.error.is_some() && p.pages == 0);
             s.font_size(theme::TEXT_META)
-                .color(theme::NAV_SUBTLE)
+                .color(theme::nav_subtle())
                 .padding(24.0)
                 .apply_if(!empty, |s| s.hide())
         }),
@@ -172,13 +172,13 @@ fn search_list(state: AppState, backend: Rc<Backend>) -> impl IntoView {
                 let more = page().is_some_and(|page| page.more);
                 crate::ui::widgets::clickable(s)
                     .font_size(theme::TEXT_META)
-                    .color(theme::NAV_MUTED)
+                    .color(theme::nav_muted())
                     .margin_left(theme::NAV_GUTTER)
                     .margin_top(8.0)
                     .padding_horiz(10.0)
                     .padding_vert(6.0)
                     .border_radius(14.0)
-                    .hover(|s| s.background(theme::NAV_HOVER).color(theme::NAV_FG))
+                    .hover(|s| s.background(theme::nav_hover()).color(theme::nav_fg()))
                     .selectable(false)
                     .apply_if(!more, |s| s.hide())
             }),
@@ -209,7 +209,7 @@ fn search_row(state: AppState, backend: Rc<Backend>, hit: SearchHit) -> impl Int
     let content = Stack::horizontal((
         nav_row::glyph_box(state_glyph(
             subject_state,
-            icons::state_color(subject_state),
+            move || icons::state_color(subject_state),
         )),
         nav_row::lines(
             nav_row::title_label(hit.title.clone(), false, unread.clone()),
@@ -236,7 +236,7 @@ fn search_row(state: AppState, backend: Rc<Backend>, hit: SearchHit) -> impl Int
                 },
                 repo.clone(),
                 nav_row::reference(Some(number)),
-                nav_row::note(note.map(str::to_string), theme::NAV_MUTED),
+                nav_row::note(note.map(str::to_string), theme::nav_muted),
                 Empty::new(),
             ),
         ),

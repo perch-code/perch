@@ -30,10 +30,10 @@ fn hex(c: Color) -> String {
 /// The colour a state's icon and its number are drawn in.
 pub fn state_color(state: SubjectState) -> Color {
     match state {
-        SubjectState::IssueOpen | SubjectState::PrOpen => theme::OPEN,
-        SubjectState::IssueClosed | SubjectState::PrMerged => theme::MERGED,
-        SubjectState::PrClosed => theme::CLOSED,
-        SubjectState::IssueNotPlanned | SubjectState::PrDraft => theme::DRAFT,
+        SubjectState::IssueOpen | SubjectState::PrOpen => theme::open(),
+        SubjectState::IssueClosed | SubjectState::PrMerged => theme::merged(),
+        SubjectState::PrClosed => theme::closed(),
+        SubjectState::IssueNotPlanned | SubjectState::PrDraft => theme::draft(),
     }
 }
 
@@ -776,15 +776,15 @@ mod tests {
         let draft = state_icon(SubjectState::PrDraft);
         assert_ne!(open, draft);
         assert_eq!(
-            open.replace(&hex(theme::OPEN), "X"),
-            draft.replace(&hex(theme::DRAFT), "X")
+            open.replace(&hex(theme::open()), "X"),
+            draft.replace(&hex(theme::draft()), "X")
         );
     }
 
     #[test]
     fn every_sidebar_glyph_is_drawn() {
         for icon in SidebarIcon::ALL {
-            let svg = sidebar_icon(icon, theme::FG);
+            let svg = sidebar_icon(icon, theme::fg());
             assert!(svg.starts_with("<svg"), "{icon:?}");
             assert!(svg.ends_with("</svg>"), "{icon:?}");
             assert!(svg.contains("viewBox=\"0 0 16 16\""), "{icon:?}");

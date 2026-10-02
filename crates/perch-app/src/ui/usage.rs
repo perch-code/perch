@@ -51,8 +51,8 @@ impl Tone {
     fn color(self, calm: Color) -> Color {
         match self {
             Tone::Calm => calm,
-            Tone::Warm => theme::ALERT_WARNING,
-            Tone::Hot => theme::ALERT_CAUTION,
+            Tone::Warm => theme::alert_warning(),
+            Tone::Hot => theme::alert_caution(),
         }
     }
 }
@@ -96,7 +96,7 @@ fn board_tone(app: AppState) -> Tone {
 
 /// The gauge, and the popover under it while it is open.
 pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    let color = move || board_tone(app).color(theme::FG_MUTED);
+    let color = move || board_tone(app).color(theme::fg_muted());
     let button = Container::new(
         icon_in(
             move || icons::sidebar_icon(SidebarIcon::Gauge, color()),
@@ -125,9 +125,9 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
                 .justify_center()
                 .border_radius(13.0)
                 .keyboard_navigable()
-                .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
-                .hover(|s| s.background(theme::BADGE_BG))
-                .apply_if(review.usage_open.get(), |s| s.background(theme::BADGE_BG))
+                .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+                .hover(|s| s.background(theme::badge_bg()))
+                .apply_if(review.usage_open.get(), |s| s.background(theme::badge_bg()))
         })
         .debug_name("usage-button");
 
@@ -249,7 +249,7 @@ fn popover(app: AppState) -> impl IntoView {
                 return Label::derived(|| "No agent CLI found".to_string())
                     .style(|s| {
                         s.font_size(theme::TEXT_META)
-                            .color(theme::FG_SUBTLE)
+                            .color(theme::fg_subtle())
                             .padding(16.0)
                             .selectable(false)
                     })
@@ -314,14 +314,14 @@ fn section(name: &'static str, account: Account, now: Timestamp, divided: bool) 
             if account.error.is_some() {
                 age.push_str(" · the last check failed");
             }
-            rows.push(line(age, theme::FG_SUBTLE).into_any());
+            rows.push(line(age, theme::fg_subtle).into_any());
         }
         None => {
             let text = account
                 .error
                 .clone()
                 .unwrap_or_else(|| "Checking…".to_string());
-            rows.push(line(text, theme::FG_SUBTLE).into_any());
+            rows.push(line(text, theme::fg_subtle).into_any());
         }
     }
     Stack::vertical_from_iter(rows)
@@ -333,24 +333,24 @@ fn section(name: &'static str, account: Account, now: Timestamp, divided: bool) 
                 .padding_top(10.0)
                 .padding_bottom(12.0)
                 .apply_if(divided, |s| {
-                    s.border_top(1.0).border_color(theme::BORDER_MUTED)
+                    s.border_top(1.0).border_color(theme::border_muted())
                 })
         })
         .debug_name(format!("usage-section:{name}"))
 }
 
 /// What is worth saying beyond the windows.
-fn notes(usage: &Usage) -> Vec<(String, Color)> {
-    let mut notes = Vec::new();
+fn notes(usage: &Usage) -> Vec<(String, fn() -> Color)> {
+    let mut notes: Vec<(String, fn() -> Color)> = Vec::new();
     if usage.limited {
-        notes.push(("Limit reached".to_string(), theme::ALERT_CAUTION));
+        notes.push(("Limit reached".to_string(), theme::alert_caution));
     }
     if usage.overage {
-        notes.push(("Using extra usage".to_string(), theme::ALERT_WARNING));
+        notes.push(("Using extra usage".to_string(), theme::alert_warning));
     }
     match usage.free_resets {
-        Some(1) => notes.push(("1 free reset available".to_string(), theme::FG_MUTED)),
-        Some(n) if n > 1 => notes.push((format!("{n} free resets available"), theme::FG_MUTED)),
+        Some(1) => notes.push(("1 free reset available".to_string(), theme::fg_muted)),
+        Some(n) if n > 1 => notes.push((format!("{n} free resets available"), theme::fg_muted)),
         _ => {}
     }
     notes
@@ -371,13 +371,13 @@ fn window_row(window: Window, now: Timestamp) -> impl IntoView {
         Stack::horizontal((
             Label::derived(move || window.label.clone()).style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::FG)
+                    .color(theme::fg())
                     .selectable(false)
                     .flex_shrink(0.0_f32)
             }),
             Label::derived(move || resets.clone()).style(|s| {
                 s.font_size(theme::TEXT_BADGE)
-                    .color(theme::FG_SUBTLE)
+                    .color(theme::fg_subtle())
                     .selectable(false)
                     .text_ellipsis()
                     .min_width(0.0)
@@ -386,7 +386,7 @@ fn window_row(window: Window, now: Timestamp) -> impl IntoView {
             Label::derived(move || percent.clone()).style(move |s| {
                 s.font_size(theme::TEXT_META)
                     .font_weight(theme::weight_emphasis())
-                    .color(tone.color(theme::FG))
+                    .color(tone.color(theme::fg()))
                     .selectable(false)
                     .flex_shrink(0.0_f32)
             }),
@@ -395,13 +395,13 @@ fn window_row(window: Window, now: Timestamp) -> impl IntoView {
         Container::new(Empty::new().style(move |s| {
             s.height_full()
                 .width_pct(fill)
-                .background(tone.color(theme::FG_SUBTLE))
+                .background(tone.color(theme::fg_subtle()))
                 .border_radius(2.0)
         }))
         .style(|s| {
             s.width_full()
                 .height(4.0)
-                .background(theme::BADGE_BG)
+                .background(theme::badge_bg())
                 .border_radius(2.0)
         }),
     ))
@@ -413,15 +413,15 @@ fn heading(text: String) -> impl IntoView {
     Label::derived(move || text.to_uppercase()).style(|s| {
         s.font_size(theme::TEXT_SECTION)
             .font_weight(theme::weight_emphasis())
-            .color(theme::FG_SUBTLE)
+            .color(theme::fg_subtle())
             .selectable(false)
     })
 }
 
-fn line(text: String, color: Color) -> impl IntoView {
+fn line(text: String, color: impl theme::Ink) -> impl IntoView {
     Label::derived(move || text.clone()).style(move |s| {
         s.font_size(theme::TEXT_BADGE)
-            .color(color)
+            .color(color())
             .selectable(false)
             .width_full()
     })

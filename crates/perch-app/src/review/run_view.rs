@@ -230,14 +230,14 @@ const FRAME: Duration = Duration::from_millis(66);
 /// for the next, so a spinner off the screen or gone costs nothing.
 pub struct Spinner {
     id: ViewId,
-    color: Color,
+    color: Box<dyn Fn() -> Color>,
     armed: Rc<Cell<bool>>,
 }
 
-pub fn spinner(color: Color) -> Spinner {
+pub fn spinner(color: impl theme::Ink) -> Spinner {
     Spinner {
         id: ViewId::new(),
-        color,
+        color: Box::new(color),
         armed: Rc::new(Cell::new(false)),
     }
 }
@@ -264,7 +264,7 @@ impl View for Spinner {
         let center = Point::new(width / 2.0, height / 2.0);
         cx.stroke(
             &Circle::new(center, radius),
-            theme::BORDER,
+            theme::border(),
             &Stroke::new(stroke),
         );
         let seconds = SystemTime::now()
@@ -278,7 +278,7 @@ impl View for Spinner {
             sweep_angle: TAU / 4.0,
             x_rotation: 0.0,
         };
-        cx.stroke(&arc, self.color, &Stroke::new(stroke));
+        cx.stroke(&arc, (self.color)(), &Stroke::new(stroke));
         if !self.armed.replace(true) {
             let (id, armed) = (self.id, self.armed.clone());
             floem::action::exec_after(FRAME, move |_| {
@@ -308,7 +308,7 @@ pub fn running_mark(state: ReviewState, thread_id: String) -> impl IntoView {
                 return Empty::new().into_any();
             }
             cards::tip(
-                spinner(theme::FG_MUTED).style(|s| s.size(10.0, 10.0).margin_left(8.0)),
+                spinner(theme::fg_muted).style(|s| s.size(10.0, 10.0).margin_left(8.0)),
                 "An agent is working in this thread".to_string(),
             )
             .into_any()
@@ -334,7 +334,7 @@ pub fn run_header(app: AppState, backend: Rc<Backend>, live: Memo<RunRecord>) ->
     let stop = cards::tip_with(
         icon_button(
             || SidebarIcon::Stop,
-            || theme::FG_MUTED,
+            theme::fg_muted,
             move || backend.cancel_run(&run_id),
         )
         .debug_name("run-stop"),
@@ -347,11 +347,11 @@ pub fn run_header(app: AppState, backend: Rc<Backend>, live: Memo<RunRecord>) ->
         },
     );
     let row = Stack::horizontal((
-        spinner(theme::FG_MUTED)
+        spinner(theme::fg_muted)
             .style(|s| s.size(12.0, 12.0).flex_shrink(0.0_f32).margin_right(8.0)),
         Label::derived(move || doing.get().0).style(|s| {
             s.font_size(theme::TEXT_META)
-                .color(theme::FG)
+                .color(theme::fg())
                 .selectable(false)
                 .flex_shrink(0.0_f32)
         }),
@@ -363,7 +363,7 @@ pub fn run_header(app: AppState, backend: Rc<Backend>, live: Memo<RunRecord>) ->
                 theme::TEXT_META
             })
             .apply_if(code, |s| s.font_family(theme::CODE_FONT_STACK.to_string()))
-            .color(theme::FG_MUTED)
+            .color(theme::fg_muted())
             .margin_left(5.0)
             .text_ellipsis()
             .min_width(0.0)
@@ -376,7 +376,7 @@ pub fn run_header(app: AppState, backend: Rc<Backend>, live: Memo<RunRecord>) ->
         .debug_name("run-elapsed")
         .style(|s| {
             s.font_size(theme::TEXT_BADGE)
-                .color(theme::FG_SUBTLE)
+                .color(theme::fg_subtle())
                 .margin_left(6.0)
                 .selectable(false)
                 .flex_shrink(0.0_f32)
@@ -384,7 +384,7 @@ pub fn run_header(app: AppState, backend: Rc<Backend>, live: Memo<RunRecord>) ->
         Label::derived(move || format!("\u{00b7} {}", usage.get().unwrap_or_default())).style(
             move |s| {
                 s.font_size(theme::TEXT_BADGE)
-                    .color(theme::FG_SUBTLE)
+                    .color(theme::fg_subtle())
                     .margin_left(6.0)
                     .selectable(false)
                     .flex_shrink(0.0_f32)
@@ -508,7 +508,7 @@ fn steer_view(state: ReviewState, text: &str, unread: bool, place: Place) -> flo
         Label::derived(|| "You".to_string()).style(|s| {
             s.font_size(theme::TEXT_META)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG_MUTED)
+                .color(theme::fg_muted())
                 .selectable(false)
         }),
         Container::new(crate::review::markdown::render_linked(text, state))
@@ -518,7 +518,7 @@ fn steer_view(state: ReviewState, text: &str, unread: bool, place: Place) -> flo
                 .debug_name("run-steer-unread")
                 .style(|s| {
                     s.font_size(theme::TEXT_META)
-                        .color(theme::FG_SUBTLE)
+                        .color(theme::fg_subtle())
                         .selectable(false)
                 })
                 .into_any(),
@@ -533,7 +533,7 @@ fn steer_view(state: ReviewState, text: &str, unread: bool, place: Place) -> flo
             .gap(2.0)
             .padding_left(10.0)
             .border_left(2.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
     })
     .into_any()
 }
@@ -548,7 +548,7 @@ fn tools_box(inner: impl IntoView + 'static) -> floem::AnyView {
                 .padding_horiz(8.0)
                 .padding_vert(4.0)
                 .border_radius(theme::RADIUS)
-                .background(theme::CANVAS_SUBTLE)
+                .background(theme::canvas_subtle())
         })
         .into_any()
 }
@@ -632,7 +632,7 @@ fn fold_row(text: String, open: bool, toggle: impl Fn() + 'static) -> impl IntoV
                 } else {
                     SidebarIcon::ChevronRight
                 },
-                theme::FG_SUBTLE,
+                theme::fg_subtle,
             )
             .style(|s| s.size(10.0, 10.0)),
         )
@@ -644,7 +644,7 @@ fn fold_row(text: String, open: bool, toggle: impl Fn() + 'static) -> impl IntoV
         }),
         Label::derived(move || text.clone()).style(|s| {
             s.font_size(theme::TEXT_BADGE)
-                .color(theme::FG_SUBTLE)
+                .color(theme::fg_subtle())
                 .margin_left(6.0)
                 .selectable(false)
         }),
@@ -661,21 +661,17 @@ fn step_row(state: ReviewState, step: RunStep, live: bool) -> floem::AnyView {
     let line = step_line(&step.summary);
     let pending = live && step.pending;
     let failed = !step.ok;
-    let tint = if failed {
-        theme::CLOSED
-    } else {
-        theme::FG_MUTED
-    };
+    let tint = if failed { theme::closed } else { theme::fg_muted };
     let icon = if pending {
-        spinner(theme::FG_MUTED)
+        spinner(theme::fg_muted)
             .style(|s| s.size(11.0, 11.0))
             .into_any()
     } else if failed {
-        sidebar_glyph(SidebarIcon::Warning, theme::CLOSED)
+        sidebar_glyph(SidebarIcon::Warning, theme::closed)
             .style(|s| s.size(13.0, 13.0))
             .into_any()
     } else {
-        sidebar_glyph(icon_of(line.kind), theme::FG_SUBTLE)
+        sidebar_glyph(icon_of(line.kind), theme::fg_subtle)
             .style(|s| s.size(13.0, 13.0))
             .into_any()
     };
@@ -700,7 +696,7 @@ fn step_row(state: ReviewState, step: RunStep, live: bool) -> floem::AnyView {
                     theme::TEXT_META
                 })
                 .apply_if(code, |s| s.font_family(theme::CODE_FONT_STACK.to_string()))
-                .color(tint)
+                .color(tint())
                 .text_ellipsis()
                 .min_width(0.0)
             })
@@ -711,12 +707,12 @@ fn step_row(state: ReviewState, step: RunStep, live: bool) -> floem::AnyView {
             Label::derived(move || format!("+{added}")).style(|s| {
                 s.font_family(theme::CODE_FONT_STACK.to_string())
                     .font_size(theme::TEXT_BADGE)
-                    .color(theme::STATUS_ADDED)
+                    .color(theme::status_added())
             }),
             Label::derived(move || format!("\u{2212}{removed}")).style(|s| {
                 s.font_family(theme::CODE_FONT_STACK.to_string())
                     .font_size(theme::TEXT_BADGE)
-                    .color(theme::STATUS_DELETED)
+                    .color(theme::status_deleted())
             }),
         ))
         .style(|s| s.gap(4.0).margin_left(6.0).flex_shrink(0.0_f32))
@@ -737,7 +733,7 @@ fn step_row(state: ReviewState, step: RunStep, live: bool) -> floem::AnyView {
         // way at the edge instead of the missing argument.
         Label::derived(move || verb.clone()).style(move |s| {
             s.font_size(theme::TEXT_META)
-                .color(if pending { theme::FG } else { tint })
+                .color(if pending { theme::fg() } else { tint() })
                 .margin_left(6.0)
                 .apply_if(alone, |s| s.text_ellipsis().min_width(0.0))
                 .apply_if(!alone, |s| s.flex_shrink(0.0_f32))
@@ -769,23 +765,23 @@ fn path_chip(state: ReviewState, path: String) -> floem::AnyView {
                 clickable(s)
                     .font_family(theme::CODE_FONT_STACK.to_string())
                     .font_size(theme::TEXT_BADGE)
-                    .color(theme::FG)
+                    .color(theme::fg())
                     .padding_horiz(5.0)
                     .padding_vert(1.0)
-                    .background(theme::CANVAS)
+                    .background(theme::canvas())
                     .border(1.0)
-                    .border_color(theme::BORDER)
+                    .border_color(theme::border())
                     .border_radius(4.0)
                     .text_ellipsis()
                     .min_width(0.0)
-                    .hover(|s| s.border_color(theme::FG_SUBTLE))
+                    .hover(|s| s.border_color(theme::fg_subtle()))
             })
             .into_any(),
         None => label
             .style(|s| {
                 s.font_family(theme::CODE_FONT_STACK.to_string())
                     .font_size(theme::TEXT_BADGE)
-                    .color(theme::FG_MUTED)
+                    .color(theme::fg_muted())
                     .text_ellipsis()
                     .min_width(0.0)
             })
@@ -821,7 +817,7 @@ pub fn run_fold(state: ReviewState, run: &RunRecord, mut steps: Vec<RunStep>) ->
                         } else {
                             SidebarIcon::ChevronRight
                         },
-                        theme::FG_SUBTLE,
+                        theme::fg_subtle,
                     )
                     .style(|s| s.size(10.0, 10.0))
                     .into_any()
@@ -832,14 +828,14 @@ pub fn run_fold(state: ReviewState, run: &RunRecord, mut steps: Vec<RunStep>) ->
             .style(|s| s.width(12.0).items_center().flex_shrink(0.0_f32)),
             Label::derived(move || main.clone()).style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::FG_MUTED)
+                    .color(theme::fg_muted())
                     .margin_left(8.0)
                     .selectable(false)
                     .flex_shrink(0.0_f32)
             }),
             Label::derived(move || detail.clone()).style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::FG_SUBTLE)
+                    .color(theme::fg_subtle())
                     .margin_left(5.0)
                     .selectable(false)
                     .text_ellipsis()

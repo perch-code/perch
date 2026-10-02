@@ -82,7 +82,7 @@ pub(crate) fn section(app: AppState, state: ReviewState, backend: Rc<Backend>) -
             .style(|s| {
                 s.width_full()
                     .font_size(theme::TEXT_BADGE)
-                    .color(theme::CLOSED)
+                    .color(theme::closed())
                     .text_wrap()
             })
             .debug_name(debug)
@@ -94,7 +94,7 @@ pub(crate) fn section(app: AppState, state: ReviewState, backend: Rc<Backend>) -
         Label::derived(|| "Your review".to_string()).style(|s| {
             s.font_size(theme::TEXT_BODY)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG)
+                .color(theme::fg())
         }),
         dyn_container(
             move || unavailable_note(state),
@@ -103,7 +103,7 @@ pub(crate) fn section(app: AppState, state: ReviewState, backend: Rc<Backend>) -
                     .style(|s| {
                         s.width_full()
                             .font_size(theme::TEXT_META)
-                            .color(theme::FG_SUBTLE)
+                            .color(theme::fg_subtle())
                             .text_wrap()
                     })
                     .debug_name("submit-review-held")
@@ -155,7 +155,7 @@ pub(crate) fn section(app: AppState, state: ReviewState, backend: Rc<Backend>) -
             .gap(12.0)
             .padding_top(14.0)
             .border_top(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::border_muted())
     })
     .debug_name("submit-review")
 }
@@ -168,7 +168,7 @@ pub(crate) fn folded(state: ReviewState) -> impl IntoView {
         Label::derived(|| "Your review".to_string()).style(|s| {
             s.font_size(theme::TEXT_BODY)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG)
+                .color(theme::fg())
                 .flex_shrink(0.0_f32)
         }),
         Label::derived(move || {
@@ -182,7 +182,7 @@ pub(crate) fn folded(state: ReviewState) -> impl IntoView {
         })
         .style(|s| {
             s.font_size(theme::TEXT_META)
-                .color(theme::FG_MUTED)
+                .color(theme::fg_muted())
                 .text_ellipsis()
                 .min_width(0.0)
                 .flex_grow(1.0_f32)
@@ -201,7 +201,7 @@ pub(crate) fn folded(state: ReviewState) -> impl IntoView {
             .gap(8.0)
             .padding_top(14.0)
             .border_top(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::border_muted())
     })
     .debug_name("submit-review-folded")
 }
@@ -267,7 +267,7 @@ fn drafts_list(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                     Label::derived(|| "Discard all drafts?".to_string()).style(|s| {
                         s.font_size(theme::TEXT_META)
                             .font_weight(theme::weight_emphasis())
-                            .color(theme::FG)
+                            .color(theme::fg())
                             .selectable(false)
                     }),
                     Empty::new().style(|s| s.flex_grow(1.0_f32)),
@@ -282,9 +282,9 @@ fn drafts_list(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                         .width_full()
                         .gap(6.0)
                         .padding(8.0)
-                        .background(theme::NOTICE_BG)
+                        .background(theme::notice_bg())
                         .border(1.0)
-                        .border_color(theme::NOTICE_BORDER)
+                        .border_color(theme::notice_border())
                         .border_radius(theme::RADIUS)
                 })
                 .into_any()
@@ -294,14 +294,14 @@ fn drafts_list(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                         .debug_name("drafts-summary")
                         .style(|s| {
                             s.font_size(theme::TEXT_BADGE)
-                                .color(theme::FG_MUTED)
+                                .color(theme::fg_muted())
                                 .selectable(false)
                         }),
                     Empty::new().style(|s| s.flex_grow(1.0_f32)),
                     Container::new(
                         Label::derived(|| "Discard all".to_string()).style(|s| {
                             s.font_size(theme::TEXT_BADGE)
-                                .color(theme::FG_MUTED)
+                                .color(theme::fg_muted())
                                 .selectable(false)
                                 .pointer_events_none()
                         }),
@@ -316,7 +316,7 @@ fn drafts_list(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                             .padding_horiz(6.0)
                             .padding_vert(3.0)
                             .border_radius(theme::RADIUS)
-                            .hover(|s| s.background(theme::CANVAS_HOVER))
+                            .hover(|s| s.background(theme::canvas_hover()))
                     })
                     .debug_name("discard-all"),
                 ))
@@ -376,7 +376,7 @@ fn draft_row(
     };
     crate::review::cards::track_hover(
         Stack::horizontal((
-            sidebar_glyph(SidebarIcon::Reply, theme::FG_MUTED)
+            sidebar_glyph(SidebarIcon::Reply, theme::fg_muted)
                 .style(move |s| {
                     s.size(12.0, 12.0)
                         .margin_right(4.0)
@@ -395,17 +395,17 @@ fn draft_row(
                 .style(move |s| {
                     s.font_size(theme::TEXT_BADGE)
                         .font_family(theme::CODE_FONT_STACK.to_string())
-                        .color(theme::FG)
+                        .color(theme::fg())
                         .flex_shrink(0.0_f32)
                         .selectable(false)
-                        .apply_if(linked, |s| clickable(s).hover(|s| s.color(theme::GITHUB)))
+                        .apply_if(linked, |s| clickable(s).hover(|s| s.color(theme::github())))
                 }),
             dyn_container(written_against, |note| match note {
                 Some(note) => Label::derived(move || note.clone())
                     .debug_name("draft-written-against")
                     .style(|s| {
                         s.font_size(theme::TEXT_BADGE)
-                            .color(theme::FG_MUTED)
+                            .color(theme::fg_muted())
                             .margin_left(6.0)
                             .flex_shrink(0.0_f32)
                             .selectable(false)
@@ -417,7 +417,7 @@ fn draft_row(
                 .debug_name("draft-excerpt")
                 .style(|s| {
                     s.font_size(theme::TEXT_BADGE)
-                        .color(theme::FG_MUTED)
+                        .color(theme::fg_muted())
                         .margin_left(8.0)
                         .min_width(0.0)
                         .flex_grow(1.0_f32)
@@ -425,7 +425,7 @@ fn draft_row(
                         .selectable(false)
                 }),
             crate::review::cards::tip_with(
-                icon_button(|| SidebarIcon::Trash, || theme::FG_SUBTLE, delete)
+                icon_button(|| SidebarIcon::Trash, theme::fg_subtle, delete)
                     .debug_name("delete-draft")
                     .style(move |s| {
                         s.size(22.0, 22.0)
@@ -441,7 +441,7 @@ fn draft_row(
                 .min_height(DRAFT_ROW_HEIGHT)
                 .padding_horiz(6.0)
                 .border_radius(theme::RADIUS)
-                .hover(|s| s.background(theme::CANVAS_SUBTLE))
+                .hover(|s| s.background(theme::canvas_subtle()))
         })
         .debug_name("draft-row"),
         hovered,
@@ -484,7 +484,7 @@ fn review_editor(
 
     let editor = text_editor(state.submit_review_draft.get_untracked())
         .placeholder("Leave a review…".to_string())
-        .editor_style(|s| s.hide_gutter(true).selection_color(theme::SELECTION_BG));
+        .editor_style(|s| s.hide_gutter(true).selection_color(theme::selection_bg()));
     let styling_doc = editor.editor().doc();
     let styling_id = state.next_token();
     let editor = editor.styling(crate::review::composer_styling::ComposerStyling::new(
@@ -626,9 +626,9 @@ fn outcome_row_content(state: ReviewState, event: PullReviewEvent) -> impl View 
             |selected| {
                 Container::new(Empty::new().style(move |s| {
                     s.size(7.0, 7.0).border_radius(4.0).background(if selected {
-                        theme::FG
+                        theme::fg()
                     } else {
-                        theme::CANVAS
+                        theme::canvas()
                     })
                 }))
                 .style(move |s| {
@@ -637,9 +637,9 @@ fn outcome_row_content(state: ReviewState, event: PullReviewEvent) -> impl View 
                         .justify_center()
                         .border(1.5)
                         .border_color(if selected {
-                            theme::FG
+                            theme::fg()
                         } else {
-                            theme::FG_SUBTLE
+                            theme::fg_subtle()
                         })
                         .border_radius(9.0)
                 })
@@ -650,13 +650,13 @@ fn outcome_row_content(state: ReviewState, event: PullReviewEvent) -> impl View 
             Label::derived(move || outcome_label(event).to_string()).style(|s| {
                 s.font_size(theme::TEXT_META)
                     .font_weight(theme::weight_emphasis())
-                    .color(theme::FG)
+                    .color(theme::fg())
                     .selectable(false)
                     .pointer_events_none()
             }),
             Label::derived(move || outcome_description(event).to_string()).style(|s| {
                 s.font_size(theme::TEXT_BADGE)
-                    .color(theme::FG_SUBTLE)
+                    .color(theme::fg_subtle())
                     .selectable(false)
                     .pointer_events_none()
                     .margin_top(1.0)
@@ -726,9 +726,9 @@ fn wire_outcome_row(
             // focusable-but-not-tabbable peers into the active slot.
             .apply_if(selected, |s| s.keyboard_navigable())
             .apply_if(!selected, |s| s.focusable())
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
             .set_disabled(!enabled)
-            .apply_if(enabled, |s| s.hover(|s| s.background(theme::CANVAS_SUBTLE)))
+            .apply_if(enabled, |s| s.hover(|s| s.background(theme::canvas_subtle())))
             .apply_if(!enabled, |s| {
                 s.opacity(0.5_f32).cursor(CursorStyle::Default)
             })
@@ -847,9 +847,9 @@ fn action_button(
         s.font_size(theme::TEXT_BADGE)
             .font_weight(theme::weight_emphasis())
             .color(if prominent {
-                theme::CANVAS
+                theme::canvas()
             } else {
-                theme::FG_MUTED
+                theme::fg_muted()
             })
             .selectable(false)
             .pointer_events_none()
@@ -874,12 +874,12 @@ fn action_button(
             .padding_horiz(11.0)
             .items_center()
             .justify_center()
-            .background(if prominent { theme::FG } else { theme::CANVAS })
+            .background(if prominent { theme::fg() } else { theme::canvas() })
             .border(1.0)
-            .border_color(if prominent { theme::FG } else { theme::BORDER })
+            .border_color(if prominent { theme::fg() } else { theme::border() })
             .border_radius(theme::RADIUS)
             .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
             .set_disabled(!available)
             .apply_if(!available, |s| {
                 s.opacity(0.45_f32).cursor(CursorStyle::Default)
@@ -887,9 +887,9 @@ fn action_button(
             .apply_if(available, |s| {
                 s.hover(move |s| {
                     s.background(if prominent {
-                        theme::ACTION_HOVER
+                        theme::action_hover()
                     } else {
-                        theme::CANVAS_HOVER
+                        theme::canvas_hover()
                     })
                 })
             })
@@ -910,7 +910,7 @@ pub(crate) fn icon_action(
     let action: Rc<dyn Fn()> = Rc::new(action);
     let click = action.clone();
     Container::new(
-        sidebar_glyph(icon, theme::FG_MUTED).style(|s| s.size(14.0, 14.0).pointer_events_none()),
+        sidebar_glyph(icon, theme::fg_muted).style(|s| s.size(14.0, 14.0).pointer_events_none()),
     )
     .on_event_stop(el::Click, move |_, _| {
         if event_enabled() {
@@ -933,13 +933,13 @@ pub(crate) fn icon_action(
             .justify_center()
             .border_radius(theme::RADIUS)
             .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
             .set_disabled(!available)
             .apply_if(!available, |s| {
                 s.opacity(0.45_f32).cursor(CursorStyle::Default)
             })
             .apply_if(available, |s| {
-                s.hover(|s| s.background(theme::CANVAS_HOVER))
+                s.hover(|s| s.background(theme::canvas_hover()))
             })
     })
     .debug_name(debug)

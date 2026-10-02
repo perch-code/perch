@@ -172,8 +172,8 @@ pub fn summary(
                     };
                     chip(
                         format!("#{n}"),
-                        theme::BADGE_BG,
-                        theme::FG_MUTED,
+                        theme::badge_bg,
+                        theme::fg_muted,
                         Some(Rc::new(open)),
                     )
                 })
@@ -192,8 +192,8 @@ pub fn summary(
                     let name = item.title().to_string();
                     chip(
                         name,
-                        theme::BADGE_BG,
-                        theme::FG_MUTED,
+                        theme::badge_bg,
+                        theme::fg_muted,
                         Some(Rc::new(move || open(&target))),
                     )
                 })
@@ -226,14 +226,14 @@ fn row(
 ) -> impl IntoView {
     Stack::horizontal((
         Stack::horizontal((
-            sidebar_glyph(glyph, theme::FG_SUBTLE).style(|s| {
+            sidebar_glyph(glyph, theme::fg_subtle).style(|s| {
                 s.size(theme::SUMMARY_GLYPH, theme::SUMMARY_GLYPH)
                     .margin_right(10.0)
                     .flex_shrink(0.0_f32)
             }),
             Label::derived(move || name.to_string()).style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::FG_MUTED)
+                    .color(theme::fg_muted())
                     .selectable(false)
             }),
         ))
@@ -311,7 +311,7 @@ fn status_row(state: ReviewState) -> impl IntoView {
                         .style(move |s| {
                             let opens = url_of(state).is_some();
                             s.font_size(theme::TEXT_META)
-                                .color(theme::FG_MUTED)
+                                .color(theme::fg_muted())
                                 .selectable(false)
                                 .apply_if(repo_of(state).is_empty(), |s| s.hide())
                                 .apply_if(opens, |s| {
@@ -321,7 +321,7 @@ fn status_row(state: ReviewState) -> impl IntoView {
                                         .padding_top(1.0)
                                         .border_bottom(1.0)
                                         .border_color(floem::peniko::Color::TRANSPARENT)
-                                        .hover(|s| s.border_color(theme::FG_MUTED))
+                                        .hover(|s| s.border_color(theme::fg_muted()))
                                 })
                         }),
                 ))
@@ -395,14 +395,14 @@ fn state_pill(state: ReviewState) -> impl IntoView {
         move || subject_state(state),
         move |s| match s {
             Some(state) => {
-                let color = icons::state_color(state);
+                let color = move || icons::state_color(state);
                 Stack::horizontal((
                     floem::views::svg(move || icons::state_icon(state))
-                        .style(move |s| s.size(14.0, 14.0).color(color).margin_right(5.0)),
+                        .style(move |s| s.size(14.0, 14.0).color(color()).margin_right(5.0)),
                     Label::derived(move || state_word(state).to_string()).style(move |s| {
                         s.font_size(theme::TEXT_SECTION)
                             .font_weight(theme::weight_emphasis())
-                            .color(color)
+                            .color(color())
                             .selectable(false)
                     }),
                 ))
@@ -412,7 +412,7 @@ fn state_pill(state: ReviewState) -> impl IntoView {
                         .height(theme::STATE_PILL_HEIGHT)
                         .padding_left(7.0)
                         .padding_right(9.0)
-                        .background(color.with_alpha(theme::STATE_WASH))
+                        .background(color().with_alpha(theme::STATE_WASH))
                         .border_radius(theme::STATE_PILL_HEIGHT / 2.0)
                         .flex_shrink(0.0_f32)
                 })
@@ -442,14 +442,14 @@ fn checks_pill(state: ReviewState) -> impl IntoView {
             let (glyph, text, failing): (floem::AnyView, &str, Option<String>) = match &checks.state
             {
                 CheckState::Passing => (
-                    sidebar_glyph(SidebarIcon::Check, theme::OPEN)
+                    sidebar_glyph(SidebarIcon::Check, theme::open)
                         .style(|s| s.size(13.0, 13.0))
                         .into_any(),
                     "Checks passed",
                     None,
                 ),
                 CheckState::Failing { workflow } => (
-                    sidebar_glyph(SidebarIcon::Close, theme::CLOSED)
+                    sidebar_glyph(SidebarIcon::Close, theme::closed)
                         .style(|s| s.size(13.0, 13.0))
                         .into_any(),
                     "Checks failed",
@@ -460,7 +460,7 @@ fn checks_pill(state: ReviewState) -> impl IntoView {
                         .style(|s| {
                             s.size(theme::EVENT_DOT, theme::EVENT_DOT)
                                 .border_radius(theme::EVENT_DOT / 2.0)
-                                .background(theme::FG_MUTED)
+                                .background(theme::fg_muted())
                         })
                         .into_any(),
                     "Checks running",
@@ -478,7 +478,7 @@ fn checks_pill(state: ReviewState) -> impl IntoView {
                 }),
                 Label::derived(move || text.to_string()).style(|s| {
                     s.font_size(theme::TEXT_BADGE)
-                        .color(theme::FG_MUTED)
+                        .color(theme::fg_muted())
                 }),
             ))
             .on_event_stop(el::Click, move |_, _| {
@@ -491,12 +491,12 @@ fn checks_pill(state: ReviewState) -> impl IntoView {
                     .items_center()
                     .height(22.0)
                     .padding_horiz(8.0)
-                    .background(theme::CANVAS)
+                    .background(theme::canvas())
                     .border(1.0)
-                    .border_color(theme::BORDER_MUTED)
+                    .border_color(theme::border_muted())
                     .border_radius(theme::RADIUS)
                     .flex_shrink(0.0_f32)
-                    .hover(|s| s.background(theme::CANVAS_HOVER))
+                    .hover(|s| s.background(theme::canvas_hover()))
             });
             let pill = pill.debug_name("checks pill");
             match failing {
@@ -540,10 +540,10 @@ fn branches(state: ReviewState) -> impl IntoView {
         .style(|s| {
             s.font_size(theme::TEXT_BADGE)
                 .font_family(theme::CODE_FONT_STACK.to_string())
-                .color(theme::FG_MUTED)
-                .background(theme::CANVAS)
+                .color(theme::fg_muted())
+                .background(theme::canvas())
                 .border(1.0)
-                .border_color(theme::BORDER_MUTED)
+                .border_color(theme::border_muted())
                 .border_radius(theme::RADIUS)
                 .padding_horiz(8.0)
                 .padding_vert(2.0)
@@ -596,7 +596,7 @@ fn directory(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
             });
 
             Stack::horizontal((
-                sidebar_glyph(SidebarIcon::Folder, theme::FG_MUTED).style(|s| {
+                sidebar_glyph(SidebarIcon::Folder, theme::fg_muted).style(|s| {
                     s.size(13.0, 13.0)
                         .margin_right(6.0)
                         .flex_shrink(0.0_f32)
@@ -605,13 +605,13 @@ fn directory(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                 Label::derived(move || name.clone()).style(|s| {
                     s.font_size(theme::TEXT_BADGE)
                         .font_family(theme::CODE_FONT_STACK.to_string())
-                        .color(theme::FG_MUTED)
+                        .color(theme::fg_muted())
                         .text_ellipsis()
                         .min_width(0.0)
                         .max_width(320.0)
                         .pointer_events_none()
                 }),
-                sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE).style(|s| {
+                sidebar_glyph(SidebarIcon::ChevronDown, theme::fg_subtle).style(|s| {
                     s.size(10.0, 10.0)
                         .margin_left(5.0)
                         .flex_shrink(0.0_f32)
@@ -624,14 +624,14 @@ fn directory(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                 s.items_center()
                     .height(22.0)
                     .padding_horiz(8.0)
-                    .background(theme::CANVAS)
+                    .background(theme::canvas())
                     .border(1.0)
-                    .border_color(theme::BORDER_MUTED)
+                    .border_color(theme::border_muted())
                     .border_radius(theme::RADIUS)
                     .min_width(0.0)
                     .selectable(false)
                     .hover(|s| {
-                        s.background(theme::CANVAS_HOVER)
+                        s.background(theme::canvas_hover())
                             .cursor(CursorStyle::Pointer)
                     })
             })
@@ -693,7 +693,7 @@ fn divergence(state: ReviewState) -> impl IntoView {
         .style(move |s| {
             s.font_size(theme::TEXT_BADGE)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::DRAFT_YELLOW)
+                .color(theme::draft_yellow())
                 .flex_shrink(0.0_f32)
                 .selectable(false)
                 .apply_if(divergence_of(state).is_none(), |s| s.hide())
@@ -746,7 +746,7 @@ fn push_button(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
             .debug_name("push-branch-error")
             .style(move |s| {
                 s.font_size(theme::TEXT_BADGE)
-                    .color(theme::CLOSED)
+                    .color(theme::closed())
                     .min_width(0.0)
                     .text_ellipsis()
                     .apply_if(state.push_error.with(Option::is_none), |s| s.hide())
@@ -768,12 +768,12 @@ fn churn_labels(
         Label::derived(move || format!("+{}", additions())).style(|s| {
             s.font_size(theme::TEXT_BADGE)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::STATUS_ADDED)
+                .color(theme::status_added())
         }),
         Label::derived(move || format!("-{}", deletions())).style(|s| {
             s.font_size(theme::TEXT_BADGE)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::STATUS_DELETED)
+                .color(theme::status_deleted())
                 .margin_left(6.0)
         }),
     ))
@@ -816,7 +816,7 @@ pub fn snapshot_banner(app: AppState, state: ReviewState, backend: Rc<Backend>) 
                 .style(|s| {
                     s.font_size(theme::TEXT_META)
                         .font_weight(theme::weight_emphasis())
-                        .color(theme::FG_MUTED)
+                        .color(theme::fg_muted())
                         .selectable(false)
                 }),
                 back_to_current(app, state, backend.clone()),
@@ -827,7 +827,7 @@ pub fn snapshot_banner(app: AppState, state: ReviewState, backend: Rc<Backend>) 
                     .items_center()
                     .gap(7.0)
                     .padding_horiz(8.0)
-                    .background(theme::BADGE_BG)
+                    .background(theme::badge_bg())
                     .border_radius(theme::RADIUS)
             })
             .into_any(),
@@ -860,8 +860,8 @@ pub fn back_to_current(app: AppState, state: ReviewState, backend: Rc<Backend>) 
                 .padding_horiz(6.0)
                 .font_size(theme::TEXT_BADGE)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG)
-                .background(theme::CANVAS)
+                .color(theme::fg())
+                .background(theme::canvas())
                 .border_radius(theme::RADIUS)
                 .flex_shrink(0.0_f32)
                 .selectable(false)
@@ -901,11 +901,11 @@ pub fn notice(state: ReviewState) -> impl IntoView {
                 return Empty::new().into_any();
             };
             Stack::horizontal((
-                sidebar_glyph(SidebarIcon::Warning, theme::NOTICE_FG)
+                sidebar_glyph(SidebarIcon::Warning, theme::notice_fg)
                     .style(|s| s.size(13.0, 13.0).margin_right(6.0).flex_shrink(0.0_f32)),
                 Label::derived(move || text.clone()).style(|s| {
                     s.font_size(theme::TEXT_BADGE)
-                        .color(theme::NOTICE_FG)
+                        .color(theme::notice_fg())
                         .text_ellipsis()
                         .min_width(0.0)
                 }),
@@ -916,9 +916,9 @@ pub fn notice(state: ReviewState) -> impl IntoView {
                     .padding_horiz(9.0)
                     .max_width(380.0)
                     .min_width(0.0)
-                    .background(theme::NOTICE_BG)
+                    .background(theme::notice_bg())
                     .border(1.0)
-                    .border_color(theme::NOTICE_BORDER)
+                    .border_color(theme::notice_border())
                     .border_radius(theme::RADIUS)
                     .selectable(false)
             })
@@ -1069,7 +1069,7 @@ fn author_view(
             .style(|s| s.margin_right(5.0)),
         name_label(
             move || Name::Login(login.clone()),
-            |s| s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED),
+            |s| s.font_size(theme::TEXT_BADGE).color(theme::fg_muted()),
         ),
         Label::derived(move || {
             opened
@@ -1079,7 +1079,7 @@ fn author_view(
         .debug_name("opened")
         .style(move |s| {
             s.font_size(theme::TEXT_BADGE)
-                .color(theme::FG_SUBTLE)
+                .color(theme::fg_subtle())
                 .margin_left(6.0)
                 .selectable(false)
                 .apply_if(opened.is_none(), |s| s.hide())
@@ -1104,7 +1104,7 @@ fn reviewers_view(
                     .style(|s| s.margin_right(5.0)),
                 name_label(
                     move || Name::Login(login.clone()),
-                    |s| s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED),
+                    |s| s.font_size(theme::TEXT_BADGE).color(theme::fg_muted()),
                 ),
                 match verdict {
                     Some(state) => {
@@ -1147,7 +1147,7 @@ fn assignees(app: AppState, logins: Vec<String>) -> impl IntoView {
                     .style(|s| s.margin_right(5.0)),
                 name_label(
                     move || Name::Login(login.clone()),
-                    |s| s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED),
+                    |s| s.font_size(theme::TEXT_BADGE).color(theme::fg_muted()),
                 ),
             ))
             .style(|s| s.items_center())
@@ -1163,7 +1163,7 @@ fn assignees(app: AppState, logins: Vec<String>) -> impl IntoView {
 fn milestone(name: String) -> impl IntoView {
     Label::derived(move || name.clone()).style(|s| {
         s.font_size(theme::TEXT_BADGE)
-            .color(theme::FG_MUTED)
+            .color(theme::fg_muted())
             .text_ellipsis()
             .max_width(320.0)
     })
@@ -1184,14 +1184,14 @@ fn chips<T: Clone + std::hash::Hash + Eq + 'static, V: IntoView + 'static>(
 /// A small pill, clickable when it leads somewhere.
 fn chip(
     text: String,
-    tint: floem::peniko::Color,
-    ink: floem::peniko::Color,
+    tint: impl theme::Ink,
+    ink: impl theme::Ink,
     on_click: Option<Rc<dyn Fn()>>,
 ) -> impl IntoView {
     let clicks = on_click.is_some();
     Container::new(
         Label::derived(move || text.clone())
-            .style(move |s| badge_text(s, ink).text_ellipsis().max_width(200.0)),
+            .style(move |s| badge_text(s, ink()).text_ellipsis().max_width(200.0)),
     )
     .on_event_stop(el::Click, move |_, _| {
         if let Some(on_click) = &on_click {
@@ -1199,9 +1199,9 @@ fn chip(
         }
     })
     .style(move |s| {
-        let base = badge_box(s, tint, None);
+        let base = badge_box(s, tint(), None);
         if clicks {
-            clickable(base).hover(|s| s.background(theme::BORDER_MUTED))
+            clickable(base).hover(|s| s.background(theme::border_muted()))
         } else {
             base.selectable(false)
         }
@@ -1212,8 +1212,8 @@ fn chip(
 fn grant_chip(backend: Rc<Backend>, id: String, label: String) -> impl IntoView {
     Stack::horizontal((
         Label::derived(move || label.clone())
-            .style(|s| badge_text(s, theme::FG_MUTED).text_ellipsis().max_width(220.0)),
-        sidebar_glyph(SidebarIcon::Close, theme::FG_SUBTLE)
+            .style(|s| badge_text(s, theme::fg_muted()).text_ellipsis().max_width(220.0)),
+        sidebar_glyph(SidebarIcon::Close, theme::fg_subtle)
             .on_event_stop(el::Click, move |_, _| backend.revoke_grant(&id))
             .debug_name("revoke-grant")
             .style(|s| {
@@ -1221,30 +1221,51 @@ fn grant_chip(backend: Rc<Backend>, id: String, label: String) -> impl IntoView 
                     .size(12.0, 12.0)
                     .margin_left(5.0)
                     .flex_shrink(0.0_f32)
-                    .hover(|s| s.color(theme::FG))
+                    .hover(|s| s.color(theme::fg()))
             }),
     ))
     .debug_name("grant-chip")
-    .style(|s| badge_box(s, theme::BADGE_BG, None))
+    .style(|s| badge_box(s, theme::badge_bg(), None))
 }
 
 /// A label as GitHub draws it: its colour as a tint behind darker text.
 /// Shared with the timeline's label lines, which draw the same pill.
 pub(crate) fn label_chip(name: String, color: String) -> impl IntoView {
-    let (tint, ink) = label_colors(&color);
-    chip(name, tint, ink, None)
+    let rgb = label_rgb(&color);
+    chip(name, move || label_colors(rgb).0, move || label_colors(rgb).1, None)
 }
 
-/// GitHub's label colour: a light wash of it behind, and a darker cut of
-/// it for the text, so every label reads on white.
-fn label_colors(hex: &str) -> (floem::peniko::Color, floem::peniko::Color) {
+/// A label's colour from GitHub's hex for it, or None when it is not one.
+fn label_rgb(hex: &str) -> Option<[u8; 3]> {
     if hex.len() != 6 {
-        return (theme::BADGE_BG, theme::FG_MUTED);
+        return None;
     }
-    let parse = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).unwrap_or(0) as f32;
-    let (r, g, b) = (parse(0), parse(2), parse(4));
-    let wash = |c: f32| (255.0 - (255.0 - c) * 0.18) as u8;
-    let ink = |c: f32| (c * 0.55) as u8;
+    let parse = |i: usize| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok();
+    Some([parse(0)?, parse(2)?, parse(4)?])
+}
+
+/// GitHub's label colour: a wash of it behind, and a cut of it for the
+/// text, so every label reads on the canvas. On light, a light wash and a
+/// darker cut; on dark, a dark wash and a lighter one, as GitHub's dark
+/// theme draws them.
+fn label_colors(rgb: Option<[u8; 3]>) -> (floem::peniko::Color, floem::peniko::Color) {
+    let Some([r, g, b]) = rgb else {
+        return (theme::badge_bg(), theme::fg_muted());
+    };
+    let [r, g, b] = [r, g, b].map(f32::from);
+    let dark = theme::appearance() == theme::Appearance::Dark;
+    // Toward the canvas for the wash, away from it for the text.
+    let wash = |c: f32| {
+        let canvas = if dark { 24.0 } else { 255.0 };
+        (canvas + (c - canvas) * 0.18) as u8
+    };
+    let ink = |c: f32| {
+        if dark {
+            (c + (255.0 - c) * 0.45) as u8
+        } else {
+            (c * 0.55) as u8
+        }
+    };
     (
         floem::peniko::Color::from_rgb8(wash(r), wash(g), wash(b)),
         floem::peniko::Color::from_rgb8(ink(r), ink(g), ink(b)),
@@ -1609,7 +1630,7 @@ mod tests {
         harness.pointer_move(c.x, c.y);
         harness.recompute_styles();
         let under = harness.get_computed_style(id);
-        assert_eq!(under.get(BorderBottomColor), Some(theme::FG_MUTED.into()));
+        assert_eq!(under.get(BorderBottomColor), Some(theme::fg_muted().into()));
         assert_eq!(under.get(Cursor), Some(CursorStyle::Pointer));
     }
 

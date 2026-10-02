@@ -11,7 +11,7 @@ use crate::icons::{self, SidebarIcon};
 use crate::state::{AppState, Checked};
 use floem::style::ObjectFit;
 
-use crate::theme;
+use crate::theme::{self, Ink};
 
 /// Open an HTTP(S) link supplied by GitHub in the user's default browser.
 ///
@@ -144,7 +144,7 @@ pub fn name_label(
                 .border_bottom(1.0)
                 .border_color(Color::TRANSPARENT);
             if name().profile_url().is_some() {
-                clickable(s).hover(|s| s.border_color(theme::FG_MUTED))
+                clickable(s).hover(|s| s.border_color(theme::fg_muted()))
             } else {
                 s
             }
@@ -250,12 +250,12 @@ pub fn editor_box(
                 .min_height(shortest)
                 .max_height(tallest)
                 .padding(theme::EDITOR_BOX_PADDING)
-                .background(theme::CANVAS)
+                .background(theme::canvas())
                 .border_radius(theme::RADIUS_LG);
             if bordered {
                 s.border(1.0)
-                    .border_color(theme::BORDER)
-                    .focus_within(|s| s.border_color(theme::ACCENT))
+                    .border_color(theme::border())
+                    .focus_within(|s| s.border_color(theme::accent()))
             } else {
                 s.border(0.0)
             }
@@ -318,14 +318,14 @@ pub fn icon_in(source: impl Fn() -> String + 'static, color: impl Fn() -> Color 
     svg(source).style(move |s| s.size(16.0, 16.0).color(color()))
 }
 
-pub fn sidebar_glyph(name: SidebarIcon, color: Color) -> impl IntoView {
-    icon_in(move || icons::sidebar_icon(name, color), move || color)
+pub fn sidebar_glyph(name: SidebarIcon, color: impl Ink) -> impl IntoView {
+    icon_in(move || icons::sidebar_icon(name, color()), color)
 }
 
 /// The pull request or issue state glyph GitHub draws, in `color`: the
 /// state's own colour on a live row, or a grey on an archived one.
-pub fn state_glyph(state: SubjectState, color: Color) -> impl IntoView {
-    icon_in(move || icons::state_icon(state), move || color)
+pub fn state_glyph(state: SubjectState, color: impl Ink) -> impl IntoView {
+    icon_in(move || icons::state_icon(state), color)
 }
 
 /// A checkbox.
@@ -344,7 +344,7 @@ pub fn checkbox(
     let box_ = Container::new(
         dyn_container(move || for_glyph(), |checked| match checked {
             Checked::Empty => Empty::new().into_any(),
-            Checked::Full => sidebar_glyph(SidebarIcon::Check, theme::CANVAS).into_any(),
+            Checked::Full => sidebar_glyph(SidebarIcon::Check, theme::canvas).into_any(),
         })
         .style(|s| s.size(12.0, 12.0).items_center().justify_center()),
     )
@@ -356,9 +356,9 @@ pub fn checkbox(
             .border_radius(4.0)
             .border(1.5);
         if checked() == Checked::Empty {
-            base.background(theme::CANVAS).border_color(theme::BORDER)
+            base.background(theme::canvas()).border_color(theme::border())
         } else {
-            base.background(theme::ACCENT).border_color(theme::ACCENT)
+            base.background(theme::accent()).border_color(theme::accent())
         }
     });
 
@@ -375,7 +375,7 @@ pub fn checkbox(
                 .size(26.0, 26.0)
                 .items_center()
                 .justify_center()
-                .hover(|s| s.background(theme::BADGE_BG))
+                .hover(|s| s.background(theme::badge_bg()))
                 .border_radius(6.0)
         })
 }
@@ -388,10 +388,10 @@ pub fn text_button(
 ) -> impl IntoView {
     Container::new(
         Stack::horizontal((
-            sidebar_glyph(glyph, theme::FG_MUTED).style(|s| s.margin_right(6.0)),
+            sidebar_glyph(glyph, theme::fg_muted).style(|s| s.margin_right(6.0)),
             Label::derived(label).style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::FG)
+                    .color(theme::fg())
                     .selectable(false)
             }),
         ))
@@ -403,11 +403,11 @@ pub fn text_button(
             .height(28.0)
             .items_center()
             .padding_horiz(10.0)
-            .background(theme::CANVAS)
+            .background(theme::canvas())
             .border(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
             .border_radius(theme::RADIUS)
-            .hover(|s| s.background(theme::CANVAS_HOVER))
+            .hover(|s| s.background(theme::canvas_hover()))
     })
 }
 
@@ -431,7 +431,7 @@ pub fn icon_button(
             .items_center()
             .justify_center()
             .border_radius(13.0)
-            .hover(|s| s.background(theme::BADGE_BG))
+            .hover(|s| s.background(theme::badge_bg()))
     })
 }
 
@@ -467,16 +467,16 @@ pub fn avatar(state: AppState, url: impl Fn() -> String + 'static, size: f64, se
                     .next()
                     .map(|c| c.to_uppercase().to_string())
                     .unwrap_or_else(|| "?".into());
-                let tint = theme::tint_for(&seed);
+                let seed = seed.clone();
                 Container::new(Label::derived(move || initial.clone()).style(move |s| {
                     s.font_size((size * 0.44) as f32)
                         .font_weight(theme::weight_strong())
-                        .color(theme::FG_MUTED)
+                        .color(theme::fg_muted())
                 }))
                 .style(move |s| {
                     s.size(size, size)
                         .border_radius(radius)
-                        .background(tint)
+                        .background(theme::tint_for(&seed))
                         .items_center()
                         .justify_center()
                 })
@@ -495,10 +495,10 @@ pub fn centered_message(
 ) -> impl IntoView {
     Container::new(
         Stack::vertical((
-            Container::new(sidebar_glyph(glyph, theme::FG_SUBTLE)).style(|s| {
+            Container::new(sidebar_glyph(glyph, theme::fg_subtle)).style(|s| {
                 s.size(48.0, 48.0)
                     .border_radius(24.0)
-                    .background(theme::CANVAS_SUBTLE)
+                    .background(theme::canvas_subtle())
                     .items_center()
                     .justify_center()
                     .margin_bottom(14.0)
@@ -506,12 +506,12 @@ pub fn centered_message(
             Label::derived(title).style(|s| {
                 s.font_size(theme::TEXT_TITLE)
                     .font_weight(theme::weight_emphasis())
-                    .color(theme::FG)
+                    .color(theme::fg())
                     .margin_bottom(6.0)
             }),
             Label::derived(body).style(|s| {
                 s.font_size(theme::TEXT_BODY)
-                    .color(theme::FG_MUTED)
+                    .color(theme::fg_muted())
                     .max_width(420.0)
             }),
         ))
@@ -550,12 +550,12 @@ pub fn badge_text(s: Style, ink: Color) -> Style {
 /// A badge of text that goes nowhere: Author, Outdated, Local.
 pub fn badge(
     text: impl Fn() -> String + 'static,
-    ink: Color,
-    fill: Color,
-    rule: Option<Color>,
+    ink: impl Ink,
+    fill: impl Ink,
+    rule: Option<fn() -> Color>,
 ) -> Container {
-    Container::new(Label::derived(text).style(move |s| badge_text(s, ink)))
-        .style(move |s| badge_box(s, fill, rule).selectable(false))
+    Container::new(Label::derived(text).style(move |s| badge_text(s, ink())))
+        .style(move |s| badge_box(s, fill(), rule.map(|rule| rule())).selectable(false))
 }
 
 /// A pill over the top of a list or a pane, saying GitHub has something
@@ -574,7 +574,7 @@ pub fn news_pill(
         Stack::horizontal((
             Label::derived(label).style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::NEWS_FG)
+                    .color(theme::news_fg())
             }),
             Label::new("Refresh").debug_name("news refresh").style(move |s| {
                 s.height(22.0)
@@ -582,8 +582,8 @@ pub fn news_pill(
                     .padding_horiz(9.0)
                     .font_size(theme::TEXT_META)
                     .font_weight(theme::weight_emphasis())
-                    .color(theme::NEWS_FG)
-                    .background(if hovered.get() { theme::NEWS_BUTTON_HOVER } else { theme::CANVAS })
+                    .color(theme::news_fg())
+                    .background(if hovered.get() { theme::news_button_hover() } else { theme::canvas() })
                     .border_radius(11.0)
             }),
         ))
@@ -602,13 +602,13 @@ pub fn news_pill(
                 .height(30.0)
                 .padding_left(13.0)
                 .padding_right(4.0)
-                .background(theme::NEWS_BG)
+                .background(theme::news_bg())
                 .border(1.0)
-                .border_color(theme::NEWS_BORDER)
+                .border_color(theme::news_border())
                 .border_radius(15.0)
                 .box_shadow_blur(18.0)
                 .box_shadow_v_offset(5.0)
-                .box_shadow_color(theme::SHADOW)
+                .box_shadow_color(theme::shadow())
                 .pointer_events_auto()
         }),
     )

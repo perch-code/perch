@@ -56,9 +56,9 @@ pub(crate) fn bar_style(s: floem::style::Style) -> floem::style::Style {
         .padding_top(1.0)
         .padding_horiz(theme::REVIEW_HEADER_PADDING)
         .gap(12.0)
-        .background(theme::CANVAS)
+        .background(theme::canvas())
         .border_bottom(1.0)
-        .border_color(theme::BORDER_MUTED)
+        .border_color(theme::border_muted())
 }
 
 /// Either side of the switch. Both let the pointer through, so a press
@@ -82,7 +82,7 @@ fn leading(app: AppState, state: ReviewState) -> impl IntoView {
             .debug_name("item title")
             .style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::FG)
+                    .color(theme::fg())
                     .text_ellipsis()
                     .min_width(0.0)
             }),
@@ -121,7 +121,7 @@ fn state_glyph(state: ReviewState) -> impl IntoView {
             Some(state) => floem::views::svg(move || icons::state_icon(state))
                 .style(move |s| s.size(16.0, 16.0).color(icons::state_color(state)))
                 .into_any(),
-            None => sidebar_glyph(SidebarIcon::Branch, theme::FG_MUTED)
+            None => sidebar_glyph(SidebarIcon::Branch, theme::fg_muted)
                 .style(|s| s.size(16.0, 16.0))
                 .into_any(),
         },
@@ -161,7 +161,7 @@ fn github_button(state: ReviewState) -> impl IntoView {
         tip(
             icon_button(
                 || SidebarIcon::External,
-                || theme::FG_MUTED,
+                theme::fg_muted,
                 move || open_in_browser(&url),
             ),
             "Open on GitHub".to_string(),
@@ -191,7 +191,7 @@ fn close_button(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl
     tip(
         icon_button(
             || SidebarIcon::Close,
-            || theme::FG_MUTED,
+            theme::fg_muted,
             move || {
                 let navigation_id = backend.close_review();
                 app.begin_close(state, navigation_id);
@@ -216,10 +216,10 @@ pub fn preparing_card(
 ) -> impl IntoView {
     Container::new(
         Stack::vertical((
-            Container::new(sidebar_glyph(SidebarIcon::Refresh, theme::ACCENT)).style(|s| {
+            Container::new(sidebar_glyph(SidebarIcon::Refresh, theme::accent)).style(|s| {
                 s.size(44.0, 44.0)
                     .border_radius(22.0)
-                    .background(theme::ACCENT_SUBTLE)
+                    .background(theme::accent_subtle())
                     .items_center()
                     .justify_center()
                     .margin_bottom(14.0)
@@ -227,12 +227,12 @@ pub fn preparing_card(
             Label::derived(|| "Preparing the checkout".to_string()).style(|s| {
                 s.font_size(theme::TEXT_SECTION_TITLE)
                     .font_weight(theme::weight_emphasis())
-                    .color(theme::FG)
+                    .color(theme::fg())
                     .margin_bottom(6.0)
             }),
             Label::derived(message).style(|s| {
                 s.font_size(theme::TEXT_BODY)
-                    .color(theme::FG_MUTED)
+                    .color(theme::fg_muted())
                     .margin_bottom(14.0)
             }),
             progress_bar(percent),
@@ -249,13 +249,13 @@ fn progress_bar(percent: impl Fn() -> Option<u8> + 'static) -> impl IntoView {
         let fraction = percent().map(|p| p as f64 / 100.0).unwrap_or(0.33);
         s.height_full()
             .width_pct(fraction * 100.0)
-            .background(theme::ACCENT)
+            .background(theme::accent())
             .border_radius(3.0)
     }))
     .style(|s| {
         s.width_full()
             .height(5.0)
-            .background(theme::BADGE_BG)
+            .background(theme::badge_bg())
             .border_radius(3.0)
     })
 }
@@ -306,6 +306,14 @@ pub(crate) mod tests {
 
     /// The whole window, 1400 by 900 with the drawer open, on an open
     /// pull request with a checkout and passing checks.
+    /// A pull request's bar and summary, all of it dark once the system is.
+    #[test]
+    fn goes_dark_with_the_system() {
+        let mut harness = pull_request_harness().0;
+        let left = crate::theme::dark_check::light_left(&mut harness);
+        assert!(left.is_empty(), "light colours left in dark:\n{}", left.join("\n"));
+    }
+
     pub(crate) fn pull_request_harness() -> (HeadlessHarness, AppState, ReviewState) {
         pull_request_harness_with(pull_request(812))
     }

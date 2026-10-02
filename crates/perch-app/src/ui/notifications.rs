@@ -41,7 +41,7 @@ pub fn notification_list(state: AppState, backend: Rc<Backend>) -> impl IntoView
                     })
                         .style(|s| {
                             s.font_size(theme::TEXT_META)
-                                .color(theme::NAV_SUBTLE)
+                                .color(theme::nav_subtle())
                                 .padding(24.0)
                         })
                         .into_any()
@@ -141,7 +141,7 @@ fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread, away:
 /// that is what most of an inbox is; a workflow run by the verdict its
 /// title announces; and a muted mark for the rest.
 fn notification_glyph(thread: &Thread) -> impl IntoView {
-    let (glyph, color) = match &thread.subject.kind {
+    let (glyph, color): (_, fn() -> floem::peniko::Color) = match &thread.subject.kind {
         SubjectKind::PullRequest | SubjectKind::Issue => {
             let open = if thread.subject.kind == SubjectKind::PullRequest {
                 SubjectState::PrOpen
@@ -152,19 +152,19 @@ fn notification_glyph(thread: &Thread) -> impl IntoView {
                 .subject_snapshot
                 .as_ref()
                 .map_or(open, |snapshot| snapshot.state);
-            return state_glyph(state, icons::state_color(state)).into_any();
+            return state_glyph(state, move || icons::state_color(state)).into_any();
         }
         SubjectKind::CheckSuite => match perch_github::announced_verdict(&thread.subject.title) {
-            Some(CheckRunState::Failure) => (SidebarIcon::Close, theme::CLOSED),
-            Some(CheckRunState::Success) => (SidebarIcon::Check, theme::OPEN),
-            Some(CheckRunState::Cancelled) => (SidebarIcon::Skip, theme::NAV_MUTED),
-            _ => (SidebarIcon::Check, theme::NAV_MUTED),
+            Some(CheckRunState::Failure) => (SidebarIcon::Close, theme::closed),
+            Some(CheckRunState::Success) => (SidebarIcon::Check, theme::open),
+            Some(CheckRunState::Cancelled) => (SidebarIcon::Skip, theme::nav_muted),
+            _ => (SidebarIcon::Check, theme::nav_muted),
         },
-        SubjectKind::Commit => (SidebarIcon::Branch, theme::NAV_MUTED),
-        SubjectKind::Discussion => (SidebarIcon::ThreadHollow, theme::NAV_MUTED),
-        SubjectKind::RepositoryVulnerabilityAlert => (SidebarIcon::Warning, theme::NAV_MUTED),
-        SubjectKind::Release => (SidebarIcon::Bookmark, theme::NAV_MUTED),
-        SubjectKind::Other(_) => (SidebarIcon::Comment, theme::NAV_MUTED),
+        SubjectKind::Commit => (SidebarIcon::Branch, theme::nav_muted),
+        SubjectKind::Discussion => (SidebarIcon::ThreadHollow, theme::nav_muted),
+        SubjectKind::RepositoryVulnerabilityAlert => (SidebarIcon::Warning, theme::nav_muted),
+        SubjectKind::Release => (SidebarIcon::Bookmark, theme::nav_muted),
+        SubjectKind::Other(_) => (SidebarIcon::Comment, theme::nav_muted),
     };
     sidebar_glyph(glyph, color).into_any()
 }
@@ -237,7 +237,7 @@ fn notification_trailing(
             let actions = if away {
                 icon_button(
                     || SidebarIcon::Undo,
-                    || theme::FG_SUBTLE,
+                    theme::fg_subtle,
                     move || done_backend.restore_notification(&done_thread.id),
                 )
                 .debug_name("move to inbox")
@@ -246,7 +246,7 @@ fn notification_trailing(
                 Stack::horizontal((
                     icon_button(
                         || SidebarIcon::Check,
-                        || theme::FG_SUBTLE,
+                        theme::fg_subtle,
                         move || done(state, &done_backend, &done_thread),
                     )
                     .debug_name("mark done"),
@@ -274,12 +274,12 @@ fn notification_trailing(
 /// "tomorrow 8:00 AM", "Sat 8:00 AM".
 fn snoozed_until_label(state: AppState, until: jiff::Timestamp) -> impl IntoView {
     Stack::horizontal((
-        nav_row::mark(SidebarIcon::Clock, theme::NAV_MUTED),
+        nav_row::mark(SidebarIcon::Clock, theme::nav_muted),
         Label::derived(move || timefmt::ahead(until, state.now.get()))
             .debug_name("snoozed until")
             .style(|s| {
                 s.font_size(theme::TEXT_BADGE)
-                    .color(theme::NAV_MUTED)
+                    .color(theme::nav_muted())
                     .flex_shrink(0.0_f32)
                     .margin_left(4.0)
             }),

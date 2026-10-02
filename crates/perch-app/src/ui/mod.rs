@@ -893,12 +893,12 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 .font_family(theme::FONT_STACK.to_string())
                 .font_size(theme::TEXT_BODY)
                 .font_weight(theme::weight_body())
-                .color(theme::FG)
-                .background(theme::CANVAS)
+                .color(theme::fg())
+                .background(theme::canvas())
                 // A selection over a label, a fenced block's or a title's,
                 // in the same blue as one over prose and in an editor.
                 .custom_style_class(|s: floem::views::LabelCustomStyle| {
-                    s.selection_color(theme::SELECTION_BG)
+                    s.selection_color(theme::selection_bg())
                 })
                 // Every scroll's bars as macOS's own: when it overlays
                 // them, there while the view scrolls and while the pointer
@@ -1052,10 +1052,10 @@ fn token_help(state: AppState) -> impl IntoView {
 
     Container::new(
         Stack::vertical((
-            Container::new(sidebar_glyph(SidebarIcon::Warning, theme::FG_SUBTLE)).style(|s| {
+            Container::new(sidebar_glyph(SidebarIcon::Warning, theme::fg_subtle)).style(|s| {
                 s.size(48.0, 48.0)
                     .border_radius(24.0)
-                    .background(theme::CANVAS_SUBTLE)
+                    .background(theme::canvas_subtle())
                     .items_center()
                     .justify_center()
                     .margin_bottom(14.0)
@@ -1063,12 +1063,12 @@ fn token_help(state: AppState) -> impl IntoView {
             Label::derived(|| "No GitHub token found".to_string()).style(|s| {
                 s.font_size(theme::TEXT_TITLE)
                     .font_weight(theme::weight_emphasis())
-                    .color(theme::FG)
+                    .color(theme::fg())
                     .margin_bottom(6.0)
             }),
             Label::derived(detail).style(|s| {
                 s.font_size(theme::TEXT_BODY)
-                    .color(theme::FG_MUTED)
+                    .color(theme::fg_muted())
                     .max_width(420.0)
                     .margin_bottom(16.0)
             }),
@@ -1079,7 +1079,7 @@ fn token_help(state: AppState) -> impl IntoView {
             .style(|s| s.gap(6.0)),
             Label::derived(|| "The token needs the notifications scope.".to_string()).style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::FG_SUBTLE)
+                    .color(theme::fg_subtle())
                     .margin_top(14.0)
             }),
         ))
@@ -1093,10 +1093,10 @@ fn code_line(text: &'static str) -> impl IntoView {
     Label::derived(move || text.to_string()).style(|s| {
         s.font_family(theme::CODE_FONT_STACK.to_string())
             .font_size(theme::CODE_FONT_SIZE)
-            .color(theme::FG)
-            .background(theme::CANVAS_SUBTLE)
+            .color(theme::fg())
+            .background(theme::canvas_subtle())
             .border(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::border_muted())
             .border_radius(theme::RADIUS)
             .padding_horiz(10.0)
             .padding_vert(5.0)
@@ -1236,7 +1236,7 @@ mod tests {
         let label = named(harness.root_id(), "Label: ").expect("no label in the window");
         assert_eq!(
             harness.get_computed_style(label).get(SelectionColor),
-            Brush::Solid(theme::SELECTION_BG)
+            Brush::Solid(theme::selection_bg())
         );
     }
 

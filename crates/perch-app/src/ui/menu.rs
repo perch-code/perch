@@ -391,14 +391,14 @@ const CROSS_SLOP: f64 = 4.0;
 /// `@` list, Cmd-P, Open…, the ways to close, the reactions. White, in a
 /// faint ring, with Codex's soft shadow under it.
 pub fn surface(s: floem::style::Style) -> floem::style::Style {
-    s.background(theme::MENU_BG)
+    s.background(theme::menu_bg())
         .border(1.0)
-        .border_color(theme::MENU_RING)
+        .border_color(theme::menu_ring())
         .border_radius(RADIUS)
         .box_shadow_blur(16.0)
         .box_shadow_v_offset(8.0)
         .box_shadow_spread(-4.0)
-        .box_shadow_color(theme::MENU_SHADOW)
+        .box_shadow_color(theme::menu_shadow())
 }
 
 /// The frame of a panel hanging from the bar, Agents, usage and Review:
@@ -408,7 +408,7 @@ pub fn panel_surface(s: floem::style::Style) -> floem::style::Style {
         .box_shadow_blur(32.0)
         .box_shadow_v_offset(16.0)
         .box_shadow_spread(-8.0)
-        .box_shadow_color(theme::PANEL_SHADOW)
+        .box_shadow_color(theme::panel_shadow())
 }
 
 /// Where a menu hangs from, in window coordinates.
@@ -819,7 +819,7 @@ fn host_view(host: Rc<Host>) -> impl View {
                 .font_family(theme::FONT_STACK.to_string())
                 .font_size(theme::TEXT_META)
                 .font_weight(theme::weight_body())
-                .color(theme::FG)
+                .color(theme::fg())
         })
 }
 
@@ -955,7 +955,7 @@ fn separator(level: &Level, index: usize) -> impl IntoView {
         })
     };
     Container::new(
-        Empty::new().style(|s| s.height(1.0).width_full().background(theme::MENU_SEPARATOR)),
+        Empty::new().style(|s| s.height(1.0).width_full().background(theme::menu_separator())),
     )
     .style(move |s| {
         removed.track();
@@ -992,7 +992,7 @@ fn row(
     };
     let removable = matches!(entry, Entry::Item(i) if i.remove.is_some());
     let enabled = entry.selectable();
-    let fg = if enabled { theme::FG } else { theme::FG_SUBTLE };
+    let fg = if enabled { theme::fg } else { theme::fg_subtle };
     let highlight = level.highlight;
     let depth = level.depth;
     let removed = level.removed;
@@ -1019,7 +1019,7 @@ fn row(
             .into_any(),
     });
     let name = Label::derived(move || label.clone()).style(move |s| {
-        s.color(fg)
+        s.color(fg())
             .text_ellipsis()
             .min_width(0.0)
             .flex_grow(1.0_f32)
@@ -1029,7 +1029,7 @@ fn row(
         let text = shortcut.label();
         Label::derived(move || text.clone()).style(|s| {
             s.font_size(theme::TEXT_BADGE)
-                .color(theme::FG_SUBTLE)
+                .color(theme::fg_subtle())
                 .margin_left(20.0)
                 .flex_shrink(0.0_f32)
                 .selectable(false)
@@ -1039,7 +1039,7 @@ fn row(
         detail.map(|text| {
             Label::derived(move || text.clone())
                 .style(|s| {
-                    s.color(theme::FG_SUBTLE)
+                    s.color(theme::fg_subtle())
                         .margin_left(20.0)
                         .flex_shrink(0.0_f32)
                         .selectable(false)
@@ -1048,7 +1048,7 @@ fn row(
         })
     });
     let chevron = submenu.then(|| {
-        sidebar_glyph(SidebarIcon::ChevronRight, theme::FG_SUBTLE)
+        sidebar_glyph(SidebarIcon::ChevronRight, theme::fg_subtle)
             .style(|s| s.size(12.0, 12.0).margin_left(16.0).flex_shrink(0.0_f32))
     });
     // Its room is kept whether it shows or not, so lighting a row does
@@ -1056,7 +1056,7 @@ fn row(
     let cross_name = format!("menu-cross:{}", entry.label());
     let cross = removable.then(|| {
         Container::new(
-            sidebar_glyph(SidebarIcon::Close, theme::FG_SUBTLE)
+            sidebar_glyph(SidebarIcon::Close, theme::fg_subtle)
                 .style(move |s| {
                     s.size(12.0, 12.0)
                         .apply_if(highlight.get() != Some(index), |s| s.hide())
@@ -1139,7 +1139,7 @@ fn row(
             .items_center()
             .padding_horiz(ROW_PADDING)
             .border_radius(ROW_RADIUS)
-            .apply_if(lit, |s| s.background(theme::MENU_HOVER))
+            .apply_if(lit, |s| s.background(theme::menu_hover()))
             .apply_if(gone, |s| s.hide())
     })
 }

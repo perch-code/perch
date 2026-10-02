@@ -193,12 +193,18 @@ pub(crate) fn glyph(item: &Item) -> impl IntoView {
     let state = state_of(item);
     let muted = item.is_archived();
     match state {
-        Some(state) => {
-            state_glyph(state, if muted { theme::NAV_SUBTLE } else { icons::state_color(state) })
-                .into_any()
+        Some(state) => state_glyph(state, move || {
+            if muted {
+                theme::nav_subtle()
+            } else {
+                icons::state_color(state)
+            }
+        })
+        .into_any(),
+        None => {
+            let color = if muted { theme::nav_subtle } else { theme::nav_muted };
+            sidebar_glyph(SidebarIcon::Branch, color).into_any()
         }
-        None => sidebar_glyph(SidebarIcon::Branch, if muted { theme::NAV_SUBTLE } else { theme::NAV_MUTED })
-            .into_any(),
     }
 }
 
@@ -257,7 +263,7 @@ fn byline(state: AppState, item: &Item) -> impl IntoView {
         nav_row::reference(item.subject.as_ref().map(|subject| subject.number())),
         Stack::horizontal((
             nav_row::chips(state, checks, review),
-            nav_row::note(item.divergence().map(|d| d.label()), theme::DRAFT_YELLOW),
+            nav_row::note(item.divergence().map(|d| d.label()), theme::draft_yellow),
         ))
         .style(|s| s.items_center().min_width(0.0)),
         nav_row::churn(churn),
@@ -285,7 +291,7 @@ fn row_trailing(
         if !hovered {
             return Stack::horizontal((
                 if pinned {
-                    nav_row::mark(SidebarIcon::Pin, theme::FG_SUBTLE).into_any()
+                    nav_row::mark(SidebarIcon::Pin, theme::fg_subtle).into_any()
                 } else {
                     Empty::new().into_any()
                 },
@@ -302,7 +308,7 @@ fn row_trailing(
         Stack::horizontal((
             icon_button(
                 move || SidebarIcon::Pin,
-                move || if pinned { theme::ACCENT } else { theme::FG_SUBTLE },
+                move || if pinned { theme::accent() } else { theme::fg_subtle() },
                 move || pin_backend.pin_item(&pin_id, !pinned),
             )
             .debug_name("row pin"),
@@ -511,9 +517,9 @@ fn rename_box(state: AppState, backend: Rc<Backend>, item: Item) -> impl IntoVie
                 .height(24.0)
                 .font_size(theme::TEXT_BODY)
                 .padding_horiz(6.0)
-                .background(theme::CANVAS)
+                .background(theme::canvas())
                 .border(1.0)
-                .border_color(theme::ACCENT)
+                .border_color(theme::accent())
                 // The one radius: the box stands in for a title inside a
                 // row drawn at it, and a tighter one read as a foreign control.
                 .border_radius(theme::RADIUS)
@@ -544,10 +550,10 @@ fn delete_confirmation(state: AppState, backend: Rc<Backend>, item: Item) -> imp
     let id = item.id.clone();
     Stack::vertical((
         Label::derived(move || format!("Delete {title}?")).style(|s| {
-            s.font_size(theme::TEXT_META).font_weight(theme::weight_emphasis()).color(theme::FG).selectable(false)
+            s.font_size(theme::TEXT_META).font_weight(theme::weight_emphasis()).color(theme::fg()).selectable(false)
         }),
         Label::derived(move || what.clone()).style(|s| {
-            s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED).text_wrap().width_full().margin_top(2.0)
+            s.font_size(theme::TEXT_BADGE).color(theme::fg_muted()).text_wrap().width_full().margin_top(2.0)
         }),
         Stack::horizontal((
             text_button(|| "Delete".to_string(), SidebarIcon::Trash, move || {
@@ -565,9 +571,9 @@ fn delete_confirmation(state: AppState, backend: Rc<Backend>, item: Item) -> imp
             .padding(10.0)
             .margin_horiz(6.0)
             .margin_bottom(4.0)
-            .background(theme::NOTICE_BG)
+            .background(theme::notice_bg())
             .border(1.0)
-            .border_color(theme::NOTICE_BORDER)
+            .border_color(theme::notice_border())
             .border_radius(theme::RADIUS)
     })
 }
@@ -604,10 +610,10 @@ fn loss_confirmation(state: AppState, backend: Rc<Backend>, title: String, promp
     let id = prompt.item_id.clone();
     Stack::vertical((
         Label::derived(move || question.clone()).style(|s| {
-            s.font_size(theme::TEXT_META).font_weight(theme::weight_emphasis()).color(theme::FG).selectable(false)
+            s.font_size(theme::TEXT_META).font_weight(theme::weight_emphasis()).color(theme::fg()).selectable(false)
         }),
         Label::derived(move || what.clone()).style(|s| {
-            s.font_size(theme::TEXT_BADGE).color(theme::FG_MUTED).text_wrap().width_full().margin_top(2.0)
+            s.font_size(theme::TEXT_BADGE).color(theme::fg_muted()).text_wrap().width_full().margin_top(2.0)
         }),
         Stack::horizontal((
             text_button(
@@ -629,9 +635,9 @@ fn loss_confirmation(state: AppState, backend: Rc<Backend>, title: String, promp
             .padding(10.0)
             .margin_horiz(6.0)
             .margin_bottom(4.0)
-            .background(theme::NOTICE_BG)
+            .background(theme::notice_bg())
             .border(1.0)
-            .border_color(theme::NOTICE_BORDER)
+            .border_color(theme::notice_border())
             .border_radius(theme::RADIUS)
     })
 }

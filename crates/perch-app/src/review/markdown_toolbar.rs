@@ -589,19 +589,19 @@ fn bar(
                     .items_center()
                     .font_size(theme::TEXT_BADGE)
                     .border_radius(6.0)
-                    .color(if on { theme::FG } else { theme::FG_MUTED })
+                    .color(if on { theme::fg() } else { theme::fg_muted() })
                     .apply_if(on, |s| {
-                        s.background(theme::CANVAS)
+                        s.background(theme::canvas())
                             .font_weight(theme::weight_emphasis())
                     })
-                    .apply_if(!on, |s| s.hover(|s| s.color(theme::FG)))
+                    .apply_if(!on, |s| s.hover(|s| s.color(theme::fg())))
             })
     };
     let icon = |glyph: SidebarIcon, name: String, tip_text: &str, action: Box<dyn Fn()>| {
         tip(
             Container::new(icon_in(
-                move || crate::icons::sidebar_icon(glyph, theme::FG_MUTED),
-                || theme::FG_MUTED,
+                move || crate::icons::sidebar_icon(glyph, theme::fg_muted()),
+                theme::fg_muted,
             ))
             .on_event_stop(floem::event::listener::Click, move |_, _| action())
             .debug_name(name)
@@ -611,7 +611,7 @@ fn bar(
                     .items_center()
                     .justify_center()
                     .border_radius(6.0)
-                    .hover(|s| s.background(theme::BADGE_BG))
+                    .hover(|s| s.background(theme::badge_bg()))
             }),
             tip_text.to_string(),
         )
@@ -648,7 +648,7 @@ fn bar(
             s.width(1.0)
                 .height(16.0)
                 .margin_horiz(4.0)
-                .background(theme::BORDER)
+                .background(theme::border())
         })
     };
     Stack::horizontal((
@@ -659,9 +659,9 @@ fn bar(
                     .flex_shrink(0.0_f32)
                     .padding(2.0)
                     .gap(2.0)
-                    .background(theme::CANVAS_SUBTLE)
+                    .background(theme::canvas_subtle())
                     .border(1.0)
-                    .border_color(theme::BORDER)
+                    .border_color(theme::border())
                     .border_radius(8.0)
             }),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
@@ -712,7 +712,7 @@ fn preview(
             let body = text();
             let content = if body.trim().is_empty() {
                 Label::new("Nothing to preview")
-                    .style(|s| s.font_size(theme::TEXT_BODY).color(theme::FG_MUTED))
+                    .style(|s| s.font_size(theme::TEXT_BODY).color(theme::fg_muted()))
                     .into_any()
             } else if let Some(original) = original.as_ref() {
                 let lines = Effect::untrack(|| original());
@@ -730,7 +730,7 @@ fn preview(
                 s.width_full()
                     .min_height(shortest)
                     .max_height(tallest.max(shortest))
-                    .background(theme::CANVAS)
+                    .background(theme::canvas())
                     .border_radius(theme::RADIUS_LG)
             })
             .into_any()

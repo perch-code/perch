@@ -56,7 +56,7 @@ pub(crate) fn icon_action(
     let action: Rc<dyn Fn()> = Rc::new(action);
     let click = action.clone();
     Container::new(
-        sidebar_glyph(icon, theme::FG_MUTED).style(|s| s.size(14.0, 14.0).pointer_events_none()),
+        sidebar_glyph(icon, theme::fg_muted).style(|s| s.size(14.0, 14.0).pointer_events_none()),
     )
     .on_event_stop(el::Click, move |_, _| click())
     .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
@@ -74,8 +74,8 @@ pub(crate) fn icon_action(
             .justify_center()
             .border_radius(theme::RADIUS)
             .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
-            .hover(|s| s.background(theme::CANVAS_HOVER))
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+            .hover(|s| s.background(theme::canvas_hover()))
     })
     .debug_name(debug)
     .into_view()
@@ -92,9 +92,9 @@ pub(super) fn text_action(
         s.font_size(theme::TEXT_BADGE)
             .font_weight(theme::weight_emphasis())
             .color(if prominent {
-                theme::ACCENT
+                theme::accent()
             } else {
-                theme::FG_MUTED
+                theme::fg_muted()
             })
             .selectable(false)
             .pointer_events_none()
@@ -115,26 +115,26 @@ pub(super) fn text_action(
             .padding_horiz(8.0)
             .border_radius(theme::RADIUS)
             .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING));
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()));
         if prominent {
-            base.background(theme::ACCENT_SUBTLE)
-                .hover(|s| s.background(theme::BADGE_BG))
+            base.background(theme::accent_subtle())
+                .hover(|s| s.background(theme::badge_bg()))
         } else {
-            base.hover(|s| s.background(theme::CANVAS_HOVER))
+            base.hover(|s| s.background(theme::canvas_hover()))
         }
     })
 }
 
-pub(super) fn status_color(status: AgentRunStatus) -> Color {
+pub(super) fn status_color(status: AgentRunStatus) -> fn() -> Color {
     match status {
-        AgentRunStatus::Running => theme::ACCENT,
-        AgentRunStatus::Completed => theme::OPEN,
-        AgentRunStatus::Failed => theme::CLOSED,
-        AgentRunStatus::Stopped => theme::FG_SUBTLE,
+        AgentRunStatus::Running => theme::accent,
+        AgentRunStatus::Completed => theme::open,
+        AgentRunStatus::Failed => theme::closed,
+        AgentRunStatus::Stopped => theme::fg_subtle,
         AgentRunStatus::Queued
         | AgentRunStatus::Starting
         | AgentRunStatus::Stopping
-        | AgentRunStatus::Interrupted => theme::DRAFT_YELLOW,
+        | AgentRunStatus::Interrupted => theme::draft_yellow,
     }
 }
 
@@ -224,12 +224,12 @@ pub(crate) fn completion_toast(
             Label::derived(move || title.clone()).style(|s| {
                 s.font_size(theme::TEXT_BODY)
                     .font_weight(theme::weight_emphasis())
-                    .color(theme::FG)
+                    .color(theme::fg())
                     .selectable(false)
             }),
             Label::derived(move || context.clone()).style(|s| {
                 s.font_size(theme::TEXT_BADGE)
-                    .color(theme::FG_SUBTLE)
+                    .color(theme::fg_subtle())
                     .text_ellipsis()
                     .min_width(0.0)
                     .selectable(false)

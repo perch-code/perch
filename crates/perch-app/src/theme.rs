@@ -1,134 +1,321 @@
 //! Every colour, size, and type choice in one place.
 //!
-//! The palette follows the warm, quiet neutrals of Codex's desktop UI. Dark
-//! mode is a later diff: add a second set here and select with floem's
-//! `dark_mode` style selector.
+//! The palette follows the warm, quiet neutrals of Codex's desktop UI, and
+//! each colour has a light and a dark value. The dark ones are Codex's dark
+//! surfaces and text, and GitHub's dark Primer for what GitHub colours: a
+//! diff, the syntax, a state, a link.
 
 use std::path::Path;
 use std::sync::Arc;
 
 use floem::peniko::{Blob, Color};
+use floem::reactive::{RwSignal, Scope, SignalGet, SignalUpdate, SignalWith};
 use floem::text::{FontStyle, FontWeight, FONT_CONTEXT};
 use fontique::{FallbackKey, FamilyId, FontInfoOverride, Script};
+
+/// Light or dark, as macOS has it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Appearance {
+    Light,
+    Dark,
+}
+
+thread_local! {
+    /// The appearance every colour is picked by. Its own scope, so no
+    /// view's going takes it with it.
+    static APPEARANCE: RwSignal<Appearance> = Scope::new().create_rw_signal(Appearance::Light);
+}
+
+/// The appearance the colours are in, tracked: a style or an effect that
+/// reads a colour runs again when the appearance changes, so a view that
+/// names its colours in its style restyles itself.
+pub fn appearance() -> Appearance {
+    APPEARANCE.with(|a| a.get())
+}
+
+/// Switches every colour, from the window's theme. A no-op when nothing
+/// changes, since every style that read a colour would run again.
+pub fn set_appearance(to: Appearance) {
+    APPEARANCE.with(|a| {
+        if a.with_untracked(|now| *now != to) {
+            a.set(to);
+        }
+    });
+}
+
+impl From<floem::window::Theme> for Appearance {
+    fn from(theme: floem::window::Theme) -> Self {
+        match theme {
+            floem::window::Theme::Light => Appearance::Light,
+            floem::window::Theme::Dark => Appearance::Dark,
+        }
+    }
+}
+
+/// A colour read where it is used rather than where it is named: a
+/// colour function, `theme::fg_muted`, or a closure that picks one. A
+/// view handed a `Color` keeps it through a change of appearance; one
+/// handed an `Ink` reads it again in its style.
+pub trait Ink: Fn() -> Color + Copy + 'static {}
+impl<T: Fn() -> Color + Copy + 'static> Ink for T {}
+
+fn pick(light: Color, dark: Color) -> Color {
+    #[cfg(test)]
+    dark_check::served(light, dark);
+    match appearance() {
+        Appearance::Light => light,
+        Appearance::Dark => dark,
+    }
+}
+
+/// A text editor's styling id, with the appearance in it. The id keys the
+/// editor's cache of laid-out lines, and the lines carry their colours, so
+/// a change of appearance lays them out again.
+pub fn styling_id(id: u64) -> u64 {
+    id.wrapping_mul(2) + u64::from(appearance() == Appearance::Dark)
+}
+
+const fn rgb(hex: u32) -> Color {
+    Color::from_rgb8((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
+const fn rgba(hex: u32, alpha: u8) -> Color {
+    Color::from_rgba8((hex >> 16) as u8, (hex >> 8) as u8, hex as u8, alpha)
+}
 
 /// How round an app's face is, as a share of its side: GitHub's 4px on
 /// a 16px bot.
 pub const APP_AVATAR_CORNER: f64 = 0.25;
 
 /// Surfaces.
-pub const CANVAS: Color = Color::from_rgb8(0xff, 0xff, 0xff);
-pub const CANVAS_SUBTLE: Color = Color::from_rgb8(0xf7, 0xf7, 0xf5);
-pub const CANVAS_HOVER: Color = Color::from_rgb8(0xee, 0xee, 0xeb);
+pub fn canvas() -> Color {
+    pick(rgb(0xffffff), rgb(0x181818))
+}
+pub fn canvas_subtle() -> Color {
+    pick(rgb(0xf7f7f5), rgb(0x1f1f1f))
+}
+pub fn canvas_hover() -> Color {
+    pick(rgb(0xeeeeeb), rgb(0x282828))
+}
 
 /// The left navigation uses Codex's quieter, neutral surface treatment.
 /// These stay separate from the shared app palette so the dock can keep its
 /// precise contrast and interaction states.
-pub const NAV_CANVAS: Color = Color::from_rgb8(0xff, 0xff, 0xff);
-pub const NAV_CONTROL_BORDER: Color = Color::from_rgb8(0xe5, 0xe4, 0xe5);
-pub const NAV_DIVIDER: Color = Color::from_rgb8(0xed, 0xed, 0xed);
-pub const NAV_HOVER: Color = Color::from_rgb8(0xf8, 0xf8, 0xf8);
-pub const NAV_SELECTED: Color = Color::from_rgb8(0xf4, 0xf4, 0xf4);
-pub const NAV_SELECTED_PRESSED: Color = Color::from_rgb8(0xee, 0xee, 0xee);
-pub const NAV_FG: Color = Color::from_rgb8(0x19, 0x1a, 0x1c);
+pub fn nav_canvas() -> Color {
+    pick(rgb(0xffffff), rgb(0x181818))
+}
+pub fn nav_control_border() -> Color {
+    pick(rgb(0xe5e4e5), rgb(0x333333))
+}
+pub fn nav_divider() -> Color {
+    pick(rgb(0xededed), rgb(0x2b2b2b))
+}
+pub fn nav_hover() -> Color {
+    pick(rgb(0xf8f8f8), rgb(0x1f1f1f))
+}
+pub fn nav_selected() -> Color {
+    pick(rgb(0xf4f4f4), rgb(0x242424))
+}
+pub fn nav_selected_pressed() -> Color {
+    pick(rgb(0xeeeeee), rgb(0x2b2b2b))
+}
+pub fn nav_fg() -> Color {
+    pick(rgb(0x191a1c), rgb(0xdfdfdf))
+}
 /// The title of a row whose notification has been read. GitHub's own
-/// inbox greys a read row, and so does this: far enough off `NAV_FG` to
-/// tell at a glance, not as far as an archived row's `NAV_SUBTLE`. The
+/// inbox greys a read row, and so does this: far enough off `nav_fg()` to
+/// tell at a glance, not as far as an archived row's `nav_subtle()`. The
 /// weight axis cannot carry this on its own, since Regular against
 /// Medium at 14px is a tenth of a pixel of stem.
-pub const NAV_READ: Color = Color::from_rgb8(0x5b, 0x5b, 0x5e);
-pub const NAV_MUTED: Color = Color::from_rgb8(0x88, 0x88, 0x8a);
-pub const NAV_SUBTLE: Color = Color::from_rgb8(0xa3, 0xa3, 0xa5);
+pub fn nav_read() -> Color {
+    pick(rgb(0x5b5b5e), rgb(0xbababa))
+}
+pub fn nav_muted() -> Color {
+    pick(rgb(0x88888a), rgb(0x8c8c8c))
+}
+pub fn nav_subtle() -> Color {
+    pick(rgb(0xa3a3a5), rgb(0x747474))
+}
 /// A row's churn: the additions and the deletions, in the quiet green and
 /// red Codex tints its figures with, softer than the diff's own colours so
 /// they sit beside the muted byline rather than shouting over it.
-pub const NAV_ADDED: Color = Color::from_rgb8(0x3b, 0x8f, 0x55);
-pub const NAV_DELETED: Color = Color::from_rgb8(0xc9, 0x4a, 0x4f);
+pub fn nav_added() -> Color {
+    pick(rgb(0x3b8f55), rgb(0x5cb877))
+}
+pub fn nav_deleted() -> Color {
+    pick(rgb(0xc94a4f), rgb(0xe5676c))
+}
 
 /// Lines.
-pub const BORDER: Color = Color::from_rgb8(0xdd, 0xdd, 0xd9);
-pub const BORDER_MUTED: Color = Color::from_rgb8(0xeb, 0xeb, 0xe8);
+pub fn border() -> Color {
+    pick(rgb(0xddddd9), rgb(0x3a3a3a))
+}
+pub fn border_muted() -> Color {
+    pick(rgb(0xebebe8), rgb(0x2b2b2b))
+}
 
 /// Text.
-pub const FG: Color = Color::from_rgb8(0x25, 0x25, 0x23);
-pub const FG_MUTED: Color = Color::from_rgb8(0x68, 0x68, 0x63);
-pub const FG_SUBTLE: Color = Color::from_rgb8(0x98, 0x98, 0x92);
+pub fn fg() -> Color {
+    pick(rgb(0x252523), rgb(0xdcdcd9))
+}
+pub fn fg_muted() -> Color {
+    pick(rgb(0x686863), rgb(0xa9a9a4))
+}
+pub fn fg_subtle() -> Color {
+    pick(rgb(0x989892), rgb(0x7c7c78))
+}
 
 /// Accents.
-pub const ACCENT: Color = Color::from_rgb8(0x32, 0x32, 0x2f);
+pub fn accent() -> Color {
+    pick(rgb(0x32322f), rgb(0xdcdcd9))
+}
 /// The dot on an unread notification: the blue GitHub's own inbox marks
 /// one with, so it reads as the same mark here.
-pub const UNREAD: Color = Color::from_rgb8(0x09, 0x69, 0xda);
+pub fn unread() -> Color {
+    pick(rgb(0x0969da), rgb(0x4493f8))
+}
 /// What is on GitHub, or will be: a draft's mark and the gutter's mark
-/// on a line that holds one. GitHub's own blue, the same as `UNREAD`.
-pub const GITHUB: Color = Color::from_rgb8(0x09, 0x69, 0xda);
+/// on a line that holds one. GitHub's own blue, the same as `unread()`.
+pub fn github() -> Color {
+    pick(rgb(0x0969da), rgb(0x4493f8))
+}
 /// A link in rendered markdown: GitHub's own link blue, so a link reads
 /// as one against the prose rather than as a darker word.
-pub const LINK: Color = Color::from_rgb8(0x09, 0x69, 0xda);
+pub fn link() -> Color {
+    pick(rgb(0x0969da), rgb(0x4493f8))
+}
 /// The wash under a Draft pill: the blue GitHub washes its own marks
-/// with, the same as `REACTED_BG`.
-pub const GITHUB_BG: Color = Color::from_rgb8(0xdd, 0xf4, 0xff);
-pub const ACCENT_SUBTLE: Color = Color::from_rgb8(0xe9, 0xe9, 0xe6);
-pub const ACCENT_RING: Color = Color::from_rgba8(0x32, 0x32, 0x2f, 0x4d);
-pub const ACTION_HOVER: Color = Color::from_rgb8(0x43, 0x43, 0x3f);
+/// with, the same as `reacted_bg()`.
+pub fn github_bg() -> Color {
+    pick(rgb(0xddf4ff), rgb(0x1c2635))
+}
+pub fn accent_subtle() -> Color {
+    pick(rgb(0xe9e9e6), rgb(0x2e2e2c))
+}
+pub fn accent_ring() -> Color {
+    pick(rgba(0x32322f, 0x4d), rgba(0xdcdcd9, 0x4d))
+}
+pub fn action_hover() -> Color {
+    pick(rgb(0x43433f), rgb(0xf0f0ed))
+}
 
 /// Subject states.
-pub const OPEN: Color = Color::from_rgb8(0x1a, 0x7f, 0x37);
-pub const MERGED: Color = Color::from_rgb8(0x82, 0x50, 0xdf);
-pub const CLOSED: Color = Color::from_rgb8(0xd1, 0x24, 0x2f);
-pub const DRAFT: Color = Color::from_rgb8(0x59, 0x63, 0x6e);
+pub fn open() -> Color {
+    pick(rgb(0x1a7f37), rgb(0x3fb950))
+}
+pub fn merged() -> Color {
+    pick(rgb(0x8250df), rgb(0xab7df8))
+}
+pub fn closed() -> Color {
+    pick(rgb(0xd1242f), rgb(0xf85149))
+}
+pub fn draft() -> Color {
+    pick(rgb(0x59636e), rgb(0x9198a1))
+}
 /// A check still running: GitHub's pending yellow.
-pub const DRAFT_YELLOW: Color = Color::from_rgb8(0xbf, 0x87, 0x00);
+pub fn draft_yellow() -> Color {
+    pick(rgb(0xbf8700), rgb(0xd29922))
+}
 
 /// Badges.
 /// A caution pill: the amber GitHub uses for an attention banner.
-pub const NOTICE_BG: Color = Color::from_rgb8(0xff, 0xf8, 0xc5);
-pub const NOTICE_BORDER: Color = Color::from_rgb8(0xd4, 0xa7, 0x2c);
-pub const NOTICE_FG: Color = Color::from_rgb8(0x7d, 0x4e, 0x00);
+pub fn notice_bg() -> Color {
+    pick(rgb(0xfff8c5), rgb(0x302816))
+}
+pub fn notice_border() -> Color {
+    pick(rgb(0xd4a72c), rgb(0x9e6a03))
+}
+pub fn notice_fg() -> Color {
+    pick(rgb(0x7d4e00), rgb(0xd29922))
+}
 
 /// GitHub's alert callouts in a blockquote: `> [!NOTE]` and its kin, each
 /// with the colour the site gives its border and title.
-pub const ALERT_NOTE: Color = Color::from_rgb8(0x09, 0x69, 0xda);
-pub const ALERT_TIP: Color = Color::from_rgb8(0x1a, 0x7f, 0x37);
-pub const ALERT_IMPORTANT: Color = Color::from_rgb8(0x82, 0x50, 0xdf);
-pub const ALERT_WARNING: Color = Color::from_rgb8(0x9a, 0x67, 0x00);
-pub const ALERT_CAUTION: Color = Color::from_rgb8(0xcf, 0x22, 0x2e);
+pub fn alert_note() -> Color {
+    pick(rgb(0x0969da), rgb(0x4493f8))
+}
+pub fn alert_tip() -> Color {
+    pick(rgb(0x1a7f37), rgb(0x3fb950))
+}
+pub fn alert_important() -> Color {
+    pick(rgb(0x8250df), rgb(0xab7df8))
+}
+pub fn alert_warning() -> Color {
+    pick(rgb(0x9a6700), rgb(0xd29922))
+}
+pub fn alert_caution() -> Color {
+    pick(rgb(0xcf222e), rgb(0xf85149))
+}
 
-pub const BADGE_BG: Color = Color::from_rgb8(0xed, 0xed, 0xea);
+pub fn badge_bg() -> Color {
+    pick(rgb(0xededea), rgb(0x2e2e2c))
+}
 /// A reaction pill the reader is among: the blue wash and rule GitHub
 /// draws its own with, so it reads as the same mark here.
-pub const REACTED_BG: Color = Color::from_rgb8(0xdd, 0xf4, 0xff);
-pub const REACTED_BORDER: Color = Color::from_rgb8(0x54, 0xae, 0xff);
+pub fn reacted_bg() -> Color {
+    pick(rgb(0xddf4ff), rgb(0x1c2635))
+}
+pub fn reacted_border() -> Color {
+    pick(rgb(0x54aeff), rgb(0x1f6feb))
+}
 /// The pill saying GitHub has something newer: GitHub's blue wash and
 /// rule, so it stands out from the grey list it floats over. Refresh sits
 /// on white inside it and deepens to the blue GitHub hovers with.
-pub const NEWS_BG: Color = Color::from_rgb8(0xdd, 0xf4, 0xff);
-pub const NEWS_BORDER: Color = Color::from_rgb8(0x54, 0xae, 0xff);
-pub const NEWS_FG: Color = Color::from_rgb8(0x09, 0x69, 0xda);
-pub const NEWS_BUTTON_HOVER: Color = Color::from_rgb8(0xb6, 0xe3, 0xff);
-pub const SHADOW: Color = Color::from_rgba8(0x20, 0x20, 0x1e, 0x12);
+pub fn news_bg() -> Color {
+    pick(rgb(0xddf4ff), rgb(0x1c2635))
+}
+pub fn news_border() -> Color {
+    pick(rgb(0x54aeff), rgb(0x1f6feb))
+}
+pub fn news_fg() -> Color {
+    pick(rgb(0x0969da), rgb(0x4493f8))
+}
+pub fn news_button_hover() -> Color {
+    pick(rgb(0xb6e3ff), rgb(0x203551))
+}
+pub fn shadow() -> Color {
+    pick(rgba(0x20201e, 0x12), rgba(0x000000, 0x40))
+}
 
 /// Menus, as Codex draws its dropdowns: a white panel in a faint ring
 /// with a soft shadow under it, a grey wash on the row under the pointer
 /// or the keyboard, and hairlines between groups.
-pub const MENU_BG: Color = Color::from_rgb8(0xff, 0xff, 0xff);
-pub const MENU_RING: Color = Color::from_rgba8(0x00, 0x00, 0x00, 0x17);
-pub const MENU_SHADOW: Color = Color::from_rgba8(0x00, 0x00, 0x00, 0x1f);
+pub fn menu_bg() -> Color {
+    pick(rgb(0xffffff), rgb(0x212121))
+}
+pub fn menu_ring() -> Color {
+    pick(rgba(0x000000, 0x17), rgba(0xffffff, 0x1a))
+}
+pub fn menu_shadow() -> Color {
+    pick(rgba(0x000000, 0x1f), rgba(0x000000, 0x66))
+}
 /// A panel's deeper shadow, Codex's `shadow-2xl`.
-pub const PANEL_SHADOW: Color = Color::from_rgba8(0x00, 0x00, 0x00, 0x30);
+pub fn panel_shadow() -> Color {
+    pick(rgba(0x000000, 0x30), rgba(0x000000, 0x80))
+}
 /// A list row under the pointer, lighter than the one the keyboard is on.
-pub const MENU_POINTED: Color = Color::from_rgb8(0xf7, 0xf7, 0xf7);
-pub const MENU_HOVER: Color = Color::from_rgb8(0xf2, 0xf2, 0xf2);
-pub const MENU_SEPARATOR: Color = Color::from_rgb8(0xed, 0xed, 0xed);
+pub fn menu_pointed() -> Color {
+    pick(rgb(0xf7f7f7), rgb(0x2a2a2a))
+}
+pub fn menu_hover() -> Color {
+    pick(rgb(0xf2f2f2), rgb(0x2f2f2f))
+}
+pub fn menu_separator() -> Color {
+    pick(rgb(0xededed), rgb(0x333333))
+}
 
 /// Avatar placeholders, cycled by name so a row is stable between launches.
-pub const AVATAR_TINTS: [Color; 6] = [
-    Color::from_rgb8(0xdd, 0xf4, 0xff),
-    Color::from_rgb8(0xdd, 0xff, 0xe6),
-    Color::from_rgb8(0xfa, 0xe7, 0xff),
-    Color::from_rgb8(0xff, 0xef, 0xdb),
-    Color::from_rgb8(0xff, 0xe3, 0xe3),
-    Color::from_rgb8(0xe7, 0xeb, 0xff),
-];
+pub fn avatar_tints() -> [Color; 6] {
+    [
+        (0xddf4ff, 0x1c2b3a),
+        (0xddffe6, 0x1b3324),
+        (0xfae7ff, 0x2e2238),
+        (0xffefdb, 0x3a2a1a),
+        (0xffe3e3, 0x3a2020),
+        (0xe7ebff, 0x23263d),
+    ]
+    .map(|(light, dark)| pick(rgb(light), rgb(dark)))
+}
 
 /// Type scale, in whole pixels, as Codex's desktop window sets it: a 14px
 /// base for a row's title, the prose and a summary's rows; a step down
@@ -244,7 +431,8 @@ pub const FONT_STACK: &str = "system-ui";
 /// A stable tint for a login, so the same person keeps the same placeholder.
 pub fn tint_for(seed: &str) -> Color {
     let sum: u32 = seed.bytes().map(u32::from).sum();
-    AVATAR_TINTS[(sum as usize) % AVATAR_TINTS.len()]
+    let tints = avatar_tints();
+    tints[(sum as usize) % tints.len()]
 }
 
 // ---------------------------------------------------------------------------
@@ -252,85 +440,135 @@ pub fn tint_for(seed: &str) -> Color {
 // ---------------------------------------------------------------------------
 
 /// Code surfaces.
-pub const CODE_BG: Color = Color::from_rgb8(0xff, 0xff, 0xff);
-pub const GUTTER_BG: Color = Color::from_rgb8(0xfc, 0xfd, 0xfd);
-pub const GUTTER_FG: Color = Color::from_rgb8(0x8c, 0x95, 0x9f);
-pub const RAIL_BG: Color = Color::from_rgb8(0xfa, 0xfb, 0xfc);
+pub fn code_bg() -> Color {
+    pick(rgb(0xffffff), rgb(0x181818))
+}
+pub fn gutter_bg() -> Color {
+    pick(rgb(0xfcfdfd), rgb(0x1a1a1a))
+}
+pub fn gutter_fg() -> Color {
+    pick(rgb(0x8c959f), rgb(0x6e7681))
+}
+pub fn rail_bg() -> Color {
+    pick(rgb(0xfafbfc), rgb(0x1b1b1b))
+}
 
 /// Diff line backgrounds, from GitHub's light diff.
-pub const DIFF_ADDED_BG: Color = Color::from_rgb8(0xe6, 0xff, 0xec);
-pub const DIFF_MODIFIED_BG: Color = Color::from_rgb8(0xe6, 0xff, 0xec);
-pub const DIFF_DELETED_BG: Color = Color::from_rgb8(0xff, 0xeb, 0xe9);
+pub fn diff_added_bg() -> Color {
+    pick(rgb(0xe6ffec), rgb(0x1b2c1e))
+}
+pub fn diff_modified_bg() -> Color {
+    pick(rgb(0xe6ffec), rgb(0x1b2c1e))
+}
+pub fn diff_deleted_bg() -> Color {
+    pick(rgb(0xffebe9), rgb(0x3a2120))
+}
 
 /// The bars drawn in the gutter beside a changed line.
-pub const DIFF_ADDED_BAR: Color = Color::from_rgb8(0x2d, 0xa4, 0x4e);
-pub const DIFF_MODIFIED_BAR: Color = Color::from_rgb8(0xbf, 0x87, 0x00);
-pub const DIFF_DELETED_BAR: Color = Color::from_rgb8(0xcf, 0x22, 0x2e);
+pub fn diff_added_bar() -> Color {
+    pick(rgb(0x2da44e), rgb(0x3fb950))
+}
+pub fn diff_modified_bar() -> Color {
+    pick(rgb(0xbf8700), rgb(0xd29922))
+}
+pub fn diff_deleted_bar() -> Color {
+    pick(rgb(0xcf222e), rgb(0xf85149))
+}
 
 /// Deleted code is dimmed, since it is context rather than the thing under
 /// review.
-pub const DIFF_DELETED_FG: Color = Color::from_rgb8(0x82, 0x5a, 0x57);
+pub fn diff_deleted_fg() -> Color {
+    pick(rgb(0x825a57), rgb(0xa8908d))
+}
 
 /// Status letters in the changed-files rail.
-pub const STATUS_ADDED: Color = Color::from_rgb8(0x1a, 0x7f, 0x37);
-pub const STATUS_MODIFIED: Color = Color::from_rgb8(0x9a, 0x67, 0x00);
-pub const STATUS_DELETED: Color = Color::from_rgb8(0xcf, 0x22, 0x2e);
-pub const STATUS_RENAMED: Color = Color::from_rgb8(0x82, 0x50, 0xdf);
+pub fn status_added() -> Color {
+    pick(rgb(0x1a7f37), rgb(0x3fb950))
+}
+pub fn status_modified() -> Color {
+    pick(rgb(0x9a6700), rgb(0xd29922))
+}
+pub fn status_deleted() -> Color {
+    pick(rgb(0xcf222e), rgb(0xf85149))
+}
+pub fn status_renamed() -> Color {
+    pick(rgb(0x8250df), rgb(0xab7df8))
+}
 
 /// Syntax colours, indexed to match `perch_syntax::CAPTURES`.
 ///
 /// GitHub's light theme, so code in Perch looks like code on the site the
 /// pull request came from.
-pub const SYNTAX_DEFAULT: Color = Color::from_rgb8(0x1f, 0x23, 0x28);
-const SYNTAX_KEYWORD: Color = Color::from_rgb8(0xcf, 0x22, 0x2e);
-pub const SYNTAX_STRING: Color = Color::from_rgb8(0x0a, 0x30, 0x69);
-const SYNTAX_COMMENT: Color = Color::from_rgb8(0x6e, 0x77, 0x81);
-const SYNTAX_FUNCTION: Color = Color::from_rgb8(0x82, 0x50, 0xdf);
-const SYNTAX_TYPE: Color = Color::from_rgb8(0x95, 0x38, 0x00);
-const SYNTAX_NUMBER: Color = Color::from_rgb8(0x05, 0x50, 0xae);
-const SYNTAX_VARIABLE: Color = Color::from_rgb8(0x1f, 0x23, 0x28);
-const SYNTAX_PUNCT: Color = Color::from_rgb8(0x57, 0x60, 0x6a);
-const SYNTAX_TAG: Color = Color::from_rgb8(0x11, 0x63, 0x29);
+pub fn syntax_default() -> Color {
+    pick(rgb(0x1f2328), rgb(0xe6edf3))
+}
+fn syntax_keyword() -> Color {
+    pick(rgb(0xcf222e), rgb(0xff7b72))
+}
+pub fn syntax_string() -> Color {
+    pick(rgb(0x0a3069), rgb(0xa5d6ff))
+}
+fn syntax_comment() -> Color {
+    pick(rgb(0x6e7781), rgb(0x8b949e))
+}
+fn syntax_function() -> Color {
+    pick(rgb(0x8250df), rgb(0xd2a8ff))
+}
+fn syntax_type() -> Color {
+    pick(rgb(0x953800), rgb(0xffa657))
+}
+fn syntax_number() -> Color {
+    pick(rgb(0x0550ae), rgb(0x79c0ff))
+}
+fn syntax_variable() -> Color {
+    pick(rgb(0x1f2328), rgb(0xe6edf3))
+}
+fn syntax_punct() -> Color {
+    pick(rgb(0x57606a), rgb(0xb1bac4))
+}
+fn syntax_tag() -> Color {
+    pick(rgb(0x116329), rgb(0x7ee787))
+}
 
 /// Colour for a capture index from `perch_syntax::CAPTURES`.
 pub fn syntax_color(capture: usize) -> Color {
     // The order here mirrors CAPTURES exactly.
-    const COLORS: &[Color] = &[
-        SYNTAX_FUNCTION, // attribute
-        SYNTAX_COMMENT,  // comment
-        SYNTAX_NUMBER,   // constant
-        SYNTAX_NUMBER,   // constant.builtin
-        SYNTAX_TYPE,     // constructor
-        SYNTAX_STRING,   // escape
-        SYNTAX_FUNCTION, // function
-        SYNTAX_FUNCTION, // function.builtin
-        SYNTAX_FUNCTION, // function.macro
-        SYNTAX_FUNCTION, // function.method
-        SYNTAX_KEYWORD,  // keyword
-        SYNTAX_TYPE,     // label
-        SYNTAX_NUMBER,   // number
-        SYNTAX_KEYWORD,  // operator
-        SYNTAX_VARIABLE, // property
-        SYNTAX_PUNCT,    // punctuation
-        SYNTAX_PUNCT,    // punctuation.bracket
-        SYNTAX_PUNCT,    // punctuation.delimiter
-        SYNTAX_STRING,   // string
-        SYNTAX_STRING,   // string.special
-        SYNTAX_TAG,      // tag
-        SYNTAX_TYPE,     // type
-        SYNTAX_TYPE,     // type.builtin
-        SYNTAX_VARIABLE, // variable
-        SYNTAX_KEYWORD,  // variable.builtin
-        SYNTAX_VARIABLE, // variable.parameter
-        SYNTAX_PUNCT,    // punctuation.special
-        SYNTAX_DEFAULT,  // text.emphasis
-        SYNTAX_STRING,   // text.literal
-        ACCENT,          // text.reference
-        SYNTAX_DEFAULT,  // text.strong
-        SYNTAX_DEFAULT,  // text.title
-        ACCENT,          // text.uri
+    const COLORS: &[fn() -> Color] = &[
+        syntax_function,   // attribute
+        syntax_comment,    // comment
+        syntax_number,     // constant
+        syntax_number,     // constant.builtin
+        syntax_type,       // constructor
+        syntax_string,     // escape
+        syntax_function,   // function
+        syntax_function,   // function.builtin
+        syntax_function,   // function.macro
+        syntax_function,   // function.method
+        syntax_keyword,    // keyword
+        syntax_type,       // label
+        syntax_number,     // number
+        syntax_keyword,    // operator
+        syntax_variable,   // property
+        syntax_punct,      // punctuation
+        syntax_punct,      // punctuation.bracket
+        syntax_punct,      // punctuation.delimiter
+        syntax_string,     // string
+        syntax_string,     // string.special
+        syntax_tag,        // tag
+        syntax_type,       // type
+        syntax_type,       // type.builtin
+        syntax_variable,   // variable
+        syntax_keyword,    // variable.builtin
+        syntax_variable,   // variable.parameter
+        syntax_punct,      // punctuation.special
+        syntax_default,    // text.emphasis
+        syntax_string,     // text.literal
+        accent,            // text.reference
+        syntax_default,    // text.strong
+        syntax_default,    // text.title
+        accent,            // text.uri
     ];
-    COLORS.get(capture).copied().unwrap_or(SYNTAX_DEFAULT)
+    COLORS.get(capture).map_or_else(syntax_default, |color| color())
 }
 
 /// Code metrics, as Codex sets its diffs: 12px at 1.8, which is 21.6 and
@@ -622,22 +860,36 @@ pub const VIEWED_ROW_HEIGHT: f64 = 28.0;
 pub const TREE_ROW_HEIGHT: f64 = 28.0;
 /// A split's filler row: a blank on the side that has no line where the
 /// other side does. Grey rather than a diff tint, because nothing is there.
-pub const DIFF_FILLER_BG: Color = Color::from_rgb8(0xf1, 0xf3, 0xf5);
+pub fn diff_filler_bg() -> Color {
+    pick(rgb(0xf1f3f5), rgb(0x212121))
+}
 /// A divider row, standing for a run of unchanged lines folded away: the
 /// blue github.com paints its hunk rows in, Primer's accent subtle.
-pub const DIFF_DIVIDER_BG: Color = Color::from_rgb8(0xdd, 0xf4, 0xff);
+pub fn diff_divider_bg() -> Color {
+    pick(rgb(0xddf4ff), rgb(0x1b2533))
+}
 /// The divider's hunk header, muted as github.com sets it, so the row
 /// reads as a seam in the file and not as a line of it.
-pub const DIFF_DIVIDER_FG: Color = FG_MUTED;
+pub fn diff_divider_fg() -> Color {
+    fg_muted()
+}
 /// A divider's expanders, in the gutter beside its row: the stronger
 /// blue of github.com's hunk number cell (Primer's blue 1, which its
 /// diff blob tokens give the cell), the glyph muted as GitHub draws it,
 /// and while the pointer is on one, GitHub's own blue under a white glyph
 /// (Primer's accent emphasis and on-emphasis), as its expanders light up.
-pub const DIFF_EXPANDER_BG: Color = Color::from_rgb8(0xb6, 0xe3, 0xff);
-pub const DIFF_EXPANDER_FG: Color = FG_MUTED;
-pub const DIFF_EXPANDER_HOVER_BG: Color = GITHUB;
-pub const DIFF_EXPANDER_HOVER_FG: Color = Color::from_rgb8(0xff, 0xff, 0xff);
+pub fn diff_expander_bg() -> Color {
+    pick(rgb(0xb6e3ff), rgb(0x254674))
+}
+pub fn diff_expander_fg() -> Color {
+    fg_muted()
+}
+pub fn diff_expander_hover_bg() -> Color {
+    pick(github(), rgb(0x1f6feb))
+}
+pub fn diff_expander_hover_fg() -> Color {
+    rgb(0xffffff)
+}
 /// The Source, Show whole, Stacked and Split tiles at the right end of
 /// the file tab bar.
 pub const LAYOUT_TILE: f64 = 22.0;
@@ -648,7 +900,9 @@ pub const TILE_RULE_GAP: f64 = 6.0;
 /// A picture, an SVG drawn in place of its markup: the wash under it, so
 /// its canvas shows and so does a shape in the pane's own white, and the
 /// room between the picture and the edges of its pane.
-pub const PICTURE_CANVAS: Color = CANVAS_SUBTLE;
+pub fn picture_canvas() -> Color {
+    canvas_subtle()
+}
 pub const PICTURE_INSET: f64 = 24.0;
 /// The references panel under the editor: its header, a file's heading
 /// row, the rows under it, and the line number column at their left.
@@ -662,19 +916,27 @@ pub const ORIGIN_CHIP_HEIGHT: f64 = 16.0;
 /// The tint behind every other use of the symbol the caret rests on: the
 /// accent at low alpha, so it reads through a diff's green and under a
 /// selection alike.
-pub const SYMBOL_HIGHLIGHT_BG: Color = Color::from_rgba8(0x32, 0x32, 0x2f, 0x1c);
+pub fn symbol_highlight_bg() -> Color {
+    pick(rgba(0x32322f, 0x1c), rgba(0xdcdcd9, 0x24))
+}
 /// The selection in an editor, the code's and the composers' alike, and
 /// over prose and a label: the system's selection blue, translucent so
 /// that a selected line keeps its diff tint, the way a selection over a
 /// diff on github.com does. floem's own default is black at half alpha
 /// in an editor and its theme's teal over a label.
-pub const SELECTION_BG: Color = Color::from_rgba8(0x00, 0x7a, 0xff, 0x4d);
+pub fn selection_bg() -> Color {
+    pick(rgba(0x007aff, 0x4d), rgba(0x267dff, 0x59))
+}
 /// The tint behind every match of the find bar's query, and the darker
 /// one behind the match the bar is on: VS Code's, orange at a third and
 /// an olive grey. The editor paints a range's tint over the selection,
 /// so the current match's has to read on its own, without the blue.
-pub const FIND_MATCH_BG: Color = Color::from_rgba8(0xea, 0x5c, 0x00, 0x55);
-pub const FIND_CURRENT_BG: Color = Color::from_rgb8(0xa8, 0xac, 0x94);
+pub fn find_match_bg() -> Color {
+    rgba(0xea5c00, 0x55)
+}
+pub fn find_current_bg() -> Color {
+    pick(rgb(0xa8ac94), rgb(0x515c6a))
+}
 /// The find bar: how tall it is, how wide its box is, and how far in
 /// from the code's right edge it hangs, as VS Code's, which hangs it
 /// two of its 14px scrollbars in.
@@ -698,7 +960,122 @@ pub const MENTION_WIDTH: f64 = 440.0;
 pub const MENTION_ROWS: usize = 10;
 /// The letters of a name that a query matched, in Cmd-P's list: blue, as
 /// VS Code draws them, and GitHub's blue so it is one Perch already uses.
-pub const MATCH_FG: Color = Color::from_rgb8(0x09, 0x69, 0xda);
+pub fn match_fg() -> Color {
+    pick(rgb(0x0969da), rgb(0x4493f8))
+}
+
+/// A test's check that a view goes dark with the system: that after a
+/// switch, nothing on screen still holds a colour only the light palette
+/// has. A view that took a `Color` when it was built, where it wanted an
+/// `Ink`, is what this catches.
+#[cfg(test)]
+pub(crate) mod dark_check {
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+
+    use floem::headless::HeadlessHarness;
+    use floem::peniko::{Brush, Color};
+    use floem::style::{
+        Background, BorderBottomColor, BorderLeftColor, BorderRightColor, BorderTopColor,
+        BoxShadowProp, OutlineColor, Style, TextColor,
+    };
+    use floem::ViewId;
+
+    use super::{set_appearance, Appearance};
+
+    type Rgba = [u8; 4];
+
+    thread_local! {
+        /// Every light and dark pair a colour has been picked from that
+        /// differ, as `pick` served them.
+        static SERVED: RefCell<HashSet<(Rgba, Rgba)>> = RefCell::new(HashSet::new());
+    }
+
+    fn rgba(color: Color) -> Rgba {
+        color.to_rgba8().to_u8_array()
+    }
+
+    pub(super) fn served(light: Color, dark: Color) {
+        let (light, dark) = (rgba(light), rgba(dark));
+        if light != dark {
+            SERVED.with(|served| served.borrow_mut().insert((light, dark)));
+        }
+    }
+
+    /// Puts the colours back to light when the test is done with them,
+    /// so a test run on the same thread after it starts in light.
+    struct Restore;
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            set_appearance(Appearance::Light);
+        }
+    }
+
+    /// Switches to dark and lists every view, by its debug names, still
+    /// holding a colour that only the light palette has.
+    pub(crate) fn light_left(harness: &mut HeadlessHarness) -> Vec<String> {
+        let _restore = Restore;
+        harness.rebuild();
+        harness.paint();
+        set_appearance(Appearance::Dark);
+        harness.rebuild();
+        harness.paint();
+        let (lights, darks): (HashSet<Rgba>, HashSet<Rgba>) =
+            SERVED.with(|served| served.borrow().iter().copied().unzip());
+        let light_only: HashSet<Rgba> = lights.difference(&darks).copied().collect();
+        let mut found = Vec::new();
+        walk(harness, harness.root_id(), &mut Vec::new(), &light_only, &mut found);
+        found
+    }
+
+    fn walk(
+        harness: &HeadlessHarness,
+        id: ViewId,
+        names: &mut Vec<String>,
+        light_only: &HashSet<Rgba>,
+        found: &mut Vec<String>,
+    ) {
+        let name = id.debug_name();
+        let named = !name.is_empty();
+        if named {
+            names.push(name);
+        }
+        for (prop, color) in colors(&harness.get_computed_style(id)) {
+            let [r, g, b, a] = rgba(color);
+            if light_only.contains(&[r, g, b, a]) {
+                let at = names.iter().rev().take(4).rev().cloned().collect::<Vec<_>>().join(" > ");
+                found.push(format!("{at} [{id:?}]: {prop} #{r:02x}{g:02x}{b:02x}{a:02x}"));
+            }
+        }
+        for child in id.children() {
+            walk(harness, child, names, light_only, found);
+        }
+        if named {
+            names.pop();
+        }
+    }
+
+    fn colors(style: &Style) -> Vec<(&'static str, Color)> {
+        let solid = |brush: Option<Brush>| match brush {
+            Some(Brush::Solid(color)) => Some(color),
+            _ => None,
+        };
+        let mut out = Vec::new();
+        let mut add = |prop, color: Option<Color>| out.extend(color.map(|c| (prop, c)));
+        add("background", solid(style.get(Background)));
+        add("color", style.get(TextColor));
+        add("border-left", solid(style.get(BorderLeftColor)));
+        add("border-top", solid(style.get(BorderTopColor)));
+        add("border-right", solid(style.get(BorderRightColor)));
+        add("border-bottom", solid(style.get(BorderBottomColor)));
+        add("outline", solid(Some(style.get(OutlineColor))));
+        for shadow in style.get(BoxShadowProp) {
+            add("shadow", Some(shadow.color));
+        }
+        out
+    }
+}
 
 #[cfg(test)]
 mod tests {

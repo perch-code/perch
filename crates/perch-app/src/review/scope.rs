@@ -275,13 +275,13 @@ pub fn button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                     Label::derived(move || name.clone()).style(|s| {
                         s.font_size(theme::TEXT_BADGE)
                             .font_family(theme::CODE_FONT_STACK.to_string())
-                            .color(theme::FG_MUTED)
+                            .color(theme::fg_muted())
                             .margin_right(7.0)
                             .flex_shrink(0.0_f32)
                     }),
                     Label::derived(move || subject.clone()).style(|s| {
                         s.font_size(theme::TEXT_META)
-                            .color(theme::FG)
+                            .color(theme::fg())
                             .text_ellipsis()
                             .min_width(0.0)
                     }),
@@ -289,13 +289,13 @@ pub fn button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                 .style(|s| s.items_center().min_width(0.0).pointer_events_none())
                 .into_any(),
                 None => Label::derived(move || name.clone())
-                    .style(|s| s.font_size(theme::TEXT_META).color(theme::FG).text_ellipsis().min_width(0.0))
+                    .style(|s| s.font_size(theme::TEXT_META).color(theme::fg()).text_ellipsis().min_width(0.0))
                     .into_any(),
             },
         )
         .style(|s| s.flex_grow(1.0_f32).min_width(0.0).pointer_events_none()),
         churn_labels(churn),
-        sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE)
+        sidebar_glyph(SidebarIcon::ChevronDown, theme::fg_subtle)
             .style(|s| s.size(10.0, 10.0).margin_left(8.0).flex_shrink(0.0_f32).pointer_events_none()),
     ))
     .on_event_cont(el::PointerEnter, {
@@ -320,9 +320,9 @@ pub fn button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
             .items_center()
             .padding_horiz(10.0)
             .border_bottom(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
             .selectable(false)
-            .hover(|s| s.background(theme::CANVAS_HOVER).cursor(CursorStyle::Pointer))
+            .hover(|s| s.background(theme::canvas_hover()).cursor(CursorStyle::Pointer))
     })
 }
 
@@ -339,9 +339,9 @@ fn churn_labels(churn: impl Fn() -> (u32, u32) + 'static + Copy) -> impl IntoVie
             }
             Stack::horizontal((
                 Label::derived(move || format!("+{}", churn().0))
-                    .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::STATUS_ADDED)),
+                    .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::status_added())),
                 Label::derived(move || format!("-{}", churn().1))
-                    .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::STATUS_DELETED).margin_left(5.0)),
+                    .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::status_deleted()).margin_left(5.0)),
             ))
             .style(|s| s.items_center())
             .into_any()

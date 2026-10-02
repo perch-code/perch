@@ -48,7 +48,7 @@ impl ComposerStyling {
 
 impl Styling for ComposerStyling {
     fn id(&self) -> u64 {
-        self.id
+        theme::styling_id(self.id)
     }
 
     fn font_size(&self, _edid: EditorId, _line: usize) -> usize {
@@ -85,10 +85,10 @@ impl Styling for ComposerStyling {
                     "text.strong" | "text.title" => a = a.weight(theme::weight_strong()),
                     "text.emphasis" => a = a.font_style(FontStyle::Italic),
                     "text.literal" => {
-                        a = a.family(&self.code_families).color(theme::SYNTAX_STRING)
+                        a = a.family(&self.code_families).color(theme::syntax_string())
                     }
-                    "text.uri" | "text.reference" => a = a.color(theme::ACCENT),
-                    "punctuation.special" | "punctuation.delimiter" => a = a.color(theme::FG_SUBTLE),
+                    "text.uri" | "text.reference" => a = a.color(theme::accent()),
+                    "punctuation.special" | "punctuation.delimiter" => a = a.color(theme::fg_subtle()),
                     _ => continue,
                 }
                 attrs.add_span(span.start..span.end, a);

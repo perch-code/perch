@@ -175,7 +175,7 @@ impl PerchStyling {
 
 impl Styling for PerchStyling {
     fn id(&self) -> u64 {
-        self.id
+        theme::styling_id(self.id)
     }
 
     fn font_size(&self, _edid: EditorId, _line: usize) -> usize {
@@ -213,7 +213,7 @@ impl Styling for PerchStyling {
         if self.is_ghost(line) {
             let span_len = self.line_len(line);
             if span_len > 0 {
-                attrs.add_span(0..span_len, default.clone().color(theme::DIFF_DELETED_FG));
+                attrs.add_span(0..span_len, default.clone().color(theme::diff_deleted_fg()));
             }
             return;
         }
@@ -241,9 +241,9 @@ impl Styling for PerchStyling {
         let uses = self
             .highlights_for(line)
             .into_iter()
-            .map(|(start, end)| (start, end, theme::SYMBOL_HIGHLIGHT_BG));
+            .map(|(start, end)| (start, end, theme::symbol_highlight_bg()));
         let matches = self.matches_for(line).into_iter().map(|(start, end, current)| {
-            let color = if current { theme::FIND_CURRENT_BG } else { theme::FIND_MATCH_BG };
+            let color = if current { theme::find_current_bg() } else { theme::find_match_bg() };
             (start, end, color)
         });
         for (start, end, color) in uses.chain(matches) {

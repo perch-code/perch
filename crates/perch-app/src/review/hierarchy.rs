@@ -209,7 +209,7 @@ fn header(state: ReviewState) -> impl IntoView {
     Stack::horizontal((
         Label::derived(heading).style(|s| {
             s.font_size(theme::TEXT_META)
-                .color(theme::FG_MUTED)
+                .color(theme::fg_muted())
                 .selectable(false)
                 .flex_shrink(0.0_f32)
         }),
@@ -217,7 +217,7 @@ fn header(state: ReviewState) -> impl IntoView {
             s.font_family(theme::CODE_FONT_STACK.to_string())
                 .font_size(theme::TEXT_BADGE)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG)
+                .color(theme::fg())
                 .margin_left(5.0)
                 .text_ellipsis()
                 .min_width(0.0)
@@ -241,7 +241,7 @@ fn toggle(state: ReviewState) -> impl IntoView {
             .padding(2.0)
             .gap(2.0)
             .border_radius(theme::RADIUS)
-            .background(theme::BADGE_BG)
+            .background(theme::badge_bg())
             .flex_shrink(0.0_f32)
     })
 }
@@ -263,9 +263,9 @@ fn toggle_pill(state: ReviewState, direction: Direction, text: &'static str) -> 
                 .items_center()
                 .border_radius(theme::RADIUS - 1.0);
             if active() {
-                s.background(theme::CANVAS).color(theme::FG)
+                s.background(theme::canvas()).color(theme::fg())
             } else {
-                s.color(theme::FG_MUTED).hover(|s| s.color(theme::FG))
+                s.color(theme::fg_muted()).hover(|s| s.color(theme::fg()))
             }
         })
 }
@@ -304,7 +304,7 @@ fn tree(state: ReviewState) -> impl IntoView {
 fn notice(depth: usize, text: String) -> impl IntoView {
     Label::derived(move || text.clone()).style(move |s| {
         s.font_size(theme::TEXT_META)
-            .color(theme::FG_SUBTLE)
+            .color(theme::fg_subtle())
             .height(theme::REFERENCES_ROW_HEIGHT)
             .items_center()
             .padding_left(indent(depth) + theme::CHEVRON_SLOT + 6.0)
@@ -340,13 +340,13 @@ fn item_row(
                 } else {
                     theme::weight_emphasis()
                 })
-                .color(if repeats { theme::FG_MUTED } else { theme::FG })
+                .color(if repeats { theme::fg_muted() } else { theme::fg() })
                 .flex_shrink(0.0_f32)
                 .selectable(false)
         }),
         Label::derived(move || place.clone()).style(|s| {
             s.font_size(theme::TEXT_BADGE)
-                .color(theme::FG_SUBTLE)
+                .color(theme::fg_subtle())
                 .margin_left(8.0)
                 .flex_shrink(0.0_f32)
                 .selectable(false)
@@ -378,7 +378,7 @@ fn item_row(
             .items_center()
             .padding_left(indent(depth))
             .padding_right(12.0)
-            .hover(|s| s.background(theme::CANVAS_HOVER))
+            .hover(|s| s.background(theme::canvas_hover()))
     })
 }
 
@@ -391,11 +391,7 @@ fn chevron(state: ReviewState, at: usize, expanded: bool, pending: bool) -> impl
     } else {
         SidebarIcon::ChevronRight
     };
-    let color = if pending {
-        theme::FG_SUBTLE
-    } else {
-        theme::FG_MUTED
-    };
+    let color = if pending { theme::fg_subtle } else { theme::fg_muted };
     Container::new(
         sidebar_glyph(glyph, color).style(|s| s.size(theme::CHEVRON_GLYPH, theme::CHEVRON_GLYPH)),
     )
@@ -413,7 +409,7 @@ fn chevron(state: ReviewState, at: usize, expanded: bool, pending: bool) -> impl
             .margin_right(6.0)
             .border_radius(3.0)
             .flex_shrink(0.0_f32)
-            .hover(|s| s.background(theme::BADGE_BG))
+            .hover(|s| s.background(theme::badge_bg()))
     })
 }
 

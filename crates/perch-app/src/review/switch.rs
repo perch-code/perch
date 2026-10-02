@@ -42,7 +42,7 @@ fn segment(state: ReviewState, which: ItemTab, name: &'static str) -> impl IntoV
             } else {
                 theme::weight_body()
             })
-            .color(if active() { theme::FG } else { theme::FG_MUTED })
+            .color(if active() { theme::fg() } else { theme::fg_muted() })
             .selectable(false)
     }))
     .debug_name(format!("{name} pill"))
@@ -56,9 +56,9 @@ fn segment(state: ReviewState, which: ItemTab, name: &'static str) -> impl IntoV
             .border_radius(9.0)
             .hover(|s| s.cursor(CursorStyle::Pointer));
         if active() {
-            base.background(theme::CANVAS_SUBTLE)
+            base.background(theme::canvas_subtle())
         } else {
-            base.hover(|s| s.background(theme::CANVAS_HOVER))
+            base.hover(|s| s.background(theme::canvas_hover()))
         }
     })
 }

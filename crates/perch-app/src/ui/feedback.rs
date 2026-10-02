@@ -57,7 +57,7 @@ fn page_of(step: Step) -> Page {
 
 /// The bug icon, and the dropdown under it while it is open.
 pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    let color = move || theme::FG_MUTED;
+    let color = move || theme::fg_muted();
     let button = Container::new(
         icon_in(
             move || icons::sidebar_icon(SidebarIcon::Bug, color()),
@@ -83,10 +83,10 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
                 .justify_center()
                 .border_radius(13.0)
                 .keyboard_navigable()
-                .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
-                .hover(|s| s.background(theme::BADGE_BG))
+                .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+                .hover(|s| s.background(theme::badge_bg()))
                 .apply_if(review.feedback_open.get(), |s| {
-                    s.background(theme::BADGE_BG)
+                    s.background(theme::badge_bg())
                 })
         })
         .debug_name("feedback-button");
@@ -442,7 +442,7 @@ fn frame(
                 .padding_horiz(16.0)
                 .padding_vert(12.0)
                 .border_top(1.0)
-                .border_color(theme::BORDER_MUTED)
+                .border_color(theme::border_muted())
         }),
     ))
     .style(|s| s.flex_col().width_full())
@@ -461,12 +461,12 @@ fn header(
 ) -> impl IntoView {
     Stack::vertical((
         Stack::horizontal((
-            sidebar_glyph(SidebarIcon::Bug, theme::FG)
+            sidebar_glyph(SidebarIcon::Bug, theme::fg)
                 .style(|s| s.size(15.0, 15.0).flex_shrink(0.0_f32)),
             Label::derived(title).style(|s| {
                 s.font_size(theme::TEXT_BODY)
                     .font_weight(theme::weight_strong())
-                    .color(theme::FG)
+                    .color(theme::fg())
                     .selectable(false)
                     .min_width(0.0)
                     .flex_grow(1.0_f32)
@@ -476,7 +476,7 @@ fn header(
         .style(|s| s.items_center().gap(8.0).width_full()),
         Label::derived(subtitle).style(|s| {
             s.font_size(theme::TEXT_META)
-                .color(theme::FG_SUBTLE)
+                .color(theme::fg_subtle())
                 .text_wrap()
                 .width_full()
                 .selectable(false)
@@ -508,15 +508,15 @@ fn kind_switch(app: AppState) -> impl IntoView {
                     .items_center()
                     .font_size(theme::TEXT_BADGE)
                     .border_radius(6.0)
-                    .color(if on { theme::FG } else { theme::FG_MUTED })
+                    .color(if on { theme::fg() } else { theme::fg_muted() })
                     .apply_if(on, |s| {
-                        s.background(theme::CANVAS)
+                        s.background(theme::canvas())
                             .font_weight(theme::weight_emphasis())
                             .box_shadow_blur(2.0)
                             .box_shadow_v_offset(1.0)
-                            .box_shadow_color(theme::SHADOW)
+                            .box_shadow_color(theme::shadow())
                     })
-                    .apply_if(!on, |s| s.hover(|s| s.color(theme::FG)))
+                    .apply_if(!on, |s| s.hover(|s| s.color(theme::fg())))
             })
             .debug_name(format!("feedback-kind-{}", kind.label()))
     };
@@ -525,9 +525,9 @@ fn kind_switch(app: AppState) -> impl IntoView {
             .padding(2.0)
             .gap(2.0)
             .flex_shrink(0.0_f32)
-            .background(theme::CANVAS_SUBTLE)
+            .background(theme::canvas_subtle())
             .border(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
             .border_radius(8.0)
     })
 }
@@ -557,11 +557,11 @@ fn title_input(
                 .height(32.0)
                 .font_size(theme::TEXT_BODY)
                 .padding_horiz(10.0)
-                .background(theme::CANVAS)
+                .background(theme::canvas())
                 .border(1.0)
-                .border_color(theme::BORDER)
+                .border_color(theme::border())
                 .border_radius(theme::RADIUS)
-                .focus(|s| s.border_color(theme::ACCENT))
+                .focus(|s| s.border_color(theme::accent()))
                 .set_disabled(disabled())
         })
 }
@@ -579,7 +579,7 @@ fn text_box(
 ) -> impl IntoView {
     let editor = text_editor(initial)
         .placeholder(placeholder)
-        .editor_style(|s| s.hide_gutter(true).selection_color(theme::SELECTION_BG));
+        .editor_style(|s| s.hide_gutter(true).selection_color(theme::selection_bg()));
     let doc = editor.editor().doc();
     let editor = editor.styling(crate::review::composer_styling::ComposerStyling::new(
         doc,
@@ -604,7 +604,7 @@ fn text_box(
 
 /// A muted line with a dot: the toast being reported, or a note.
 fn note(
-    color: floem::peniko::Color,
+    color: impl theme::Ink,
     text: impl Fn() -> String + 'static,
     debug: &'static str,
 ) -> impl IntoView {
@@ -612,7 +612,7 @@ fn note(
         crate::ui::toast::dot(color).style(|s| s.margin_top(4.0)),
         Label::derived(text).style(|s| {
             s.font_size(theme::TEXT_META)
-                .color(theme::FG_MUTED)
+                .color(theme::fg_muted())
                 .text_wrap()
                 .min_width(0.0)
                 .flex_grow(1.0_f32)
@@ -626,7 +626,7 @@ fn note(
             .width_full()
             .padding_horiz(10.0)
             .padding_vert(8.0)
-            .background(theme::CANVAS_SUBTLE)
+            .background(theme::canvas_subtle())
             .border_radius(theme::RADIUS)
     })
 }
@@ -641,9 +641,9 @@ fn form(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoVi
         draft_with(app, Clone::clone).unwrap_or_else(|| FeedbackDraft::new(FeedbackKind::Bug));
 
     let seed = start.seed.clone().map(|seed| {
-        let color = match seed.tone {
-            Tone::Error => theme::CLOSED,
-            _ => theme::DRAFT_YELLOW,
+        let color: fn() -> floem::peniko::Color = match seed.tone {
+            Tone::Error => theme::closed,
+            _ => theme::draft_yellow,
         };
         let text = seed.text.lines().next().unwrap_or("").to_string();
         note(color, move || format!("Reporting: {text}"), "feedback-seed").into_any()
@@ -659,7 +659,7 @@ fn form(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoVi
                 Label::derived(|| "You've started a report. Replace it with this one?".to_string())
                     .style(|s| {
                         s.font_size(theme::TEXT_META)
-                            .color(theme::FG)
+                            .color(theme::fg())
                             .text_wrap()
                             .min_width(0.0)
                             .flex_grow(1.0_f32)
@@ -685,9 +685,9 @@ fn form(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoVi
                     .gap(8.0)
                     .width_full()
                     .padding(10.0)
-                    .background(theme::NOTICE_BG)
+                    .background(theme::notice_bg())
                     .border(1.0)
-                    .border_color(theme::NOTICE_BORDER)
+                    .border_color(theme::notice_border())
                     .border_radius(theme::RADIUS)
             })
             .into_any()
@@ -737,7 +737,7 @@ fn form(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoVi
                 |s| {
                     s.font_size(theme::TEXT_META)
                         .font_weight(theme::weight_emphasis())
-                        .color(theme::FG)
+                        .color(theme::fg())
                         .selectable(false)
                 },
             ),
@@ -752,7 +752,7 @@ fn form(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoVi
             })
             .style(|s| {
                 s.font_size(theme::TEXT_BADGE)
-                    .color(theme::FG_SUBTLE)
+                    .color(theme::fg_subtle())
                     .text_wrap()
                     .width_full()
                     .selectable(false)
@@ -856,7 +856,7 @@ fn working(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
         Stack::horizontal((
             dyn_container(state, |(finished, current)| -> AnyView {
                 if finished {
-                    sidebar_glyph(SidebarIcon::Check, theme::OPEN)
+                    sidebar_glyph(SidebarIcon::Check, theme::open)
                         .style(|s| s.size(14.0, 14.0))
                         .into_any()
                 } else if current {
@@ -865,7 +865,7 @@ fn working(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
                             s.size(10.0, 10.0)
                                 .margin(2.0)
                                 .border_radius(5.0)
-                                .background(theme::ACCENT)
+                                .background(theme::accent())
                         })
                         .into_any()
                 } else {
@@ -875,7 +875,7 @@ fn working(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
                                 .margin(2.0)
                                 .border_radius(5.0)
                                 .border(1.5)
-                                .border_color(theme::BORDER)
+                                .border_color(theme::border())
                         })
                         .into_any()
                 }
@@ -901,11 +901,11 @@ fn working(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
                 s.font_size(theme::TEXT_META)
                     .selectable(false)
                     .color(if current {
-                        theme::FG
+                        theme::fg()
                     } else if finished {
-                        theme::FG_MUTED
+                        theme::fg_muted()
                     } else {
-                        theme::FG_SUBTLE
+                        theme::fg_subtle()
                     })
                     .apply_if(current, |s| s.font_weight(theme::weight_emphasis()))
             }),
@@ -940,7 +940,7 @@ fn working(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
             .gap(6.0)
             .width_full()
             .padding(12.0)
-            .background(theme::CANVAS_SUBTLE)
+            .background(theme::canvas_subtle())
             .border_radius(theme::RADIUS)
     })
     .debug_name("feedback-steps");
@@ -952,7 +952,7 @@ fn working(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
     })
     .style(move |s| {
         s.font_size(theme::TEXT_BADGE)
-            .color(theme::FG_SUBTLE)
+            .color(theme::fg_subtle())
             .text_wrap()
             .width_full()
             .selectable(false)
@@ -1014,7 +1014,7 @@ fn preview(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
         let n = start.caught_on_send;
         notes.push(
             note(
-                theme::DRAFT_YELLOW,
+                theme::draft_yellow,
                 move || {
                     format!(
                         "Redacted {} you added. Check it and file again.",
@@ -1029,7 +1029,7 @@ fn preview(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
         let n = start.redacted;
         notes.push(
             note(
-                theme::OPEN,
+                theme::open,
                 move || {
                     format!(
                         "Redacted {}: tokens, emails, your user name and other repositories.",
@@ -1044,7 +1044,7 @@ fn preview(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
     if let Some(why) = start.notes_error.clone() {
         notes.push(
             note(
-                theme::FG_SUBTLE,
+                theme::fg_subtle,
                 move || format!("No agent notes. {why}"),
                 "feedback-notes-error",
             )
@@ -1082,7 +1082,7 @@ fn preview(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
             };
             let forbidden = error.forbidden;
             Stack::horizontal((
-                sidebar_glyph(SidebarIcon::Warning, theme::CLOSED)
+                sidebar_glyph(SidebarIcon::Warning, theme::closed)
                     .style(|s| s.size(14.0, 14.0).margin_top(1.0).flex_shrink(0.0_f32)),
                 Label::derived(move || error.message.clone())
                     .debug_name("feedback-error")
@@ -1091,7 +1091,7 @@ fn preview(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
                             .flex_grow(1.0_f32)
                             .flex_basis(0.0)
                             .font_size(theme::TEXT_META)
-                            .color(theme::CLOSED)
+                            .color(theme::closed())
                             .text_wrap()
                     }),
                 action_button(
@@ -1141,7 +1141,7 @@ fn preview(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
         ),
         Label::derived(move || format!("Posts to {REPO} as you.")).style(|s| {
             s.font_size(theme::TEXT_BADGE)
-                .color(theme::FG_SUBTLE)
+                .color(theme::fg_subtle())
                 .min_width(0.0)
                 .flex_grow(1.0_f32)
                 .flex_basis(0.0)
@@ -1228,7 +1228,7 @@ fn similar_issues(
         .style(|s| {
             s.font_size(theme::TEXT_SECTION)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG_SUBTLE)
+                .color(theme::fg_subtle())
                 .selectable(false)
         })
         .into_any()];
@@ -1259,7 +1259,7 @@ fn similar_row(
     let title = Stack::horizontal((
         Label::derived(move || format!("#{number}")).style(|s| {
             s.font_size(theme::TEXT_META)
-                .color(theme::FG_SUBTLE)
+                .color(theme::fg_subtle())
                 .flex_shrink(0.0_f32)
                 .selectable(false)
         }),
@@ -1270,7 +1270,7 @@ fn similar_row(
         .style(|s| {
             s.font_size(theme::TEXT_META)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG)
+                .color(theme::fg())
                 .text_ellipsis()
                 .min_width(0.0)
                 .flex_grow(1.0_f32)
@@ -1289,7 +1289,7 @@ fn similar_row(
             .items_center()
             .gap(6.0)
             .width_full()
-            .hover(|s| s.color(theme::ACCENT))
+            .hover(|s| s.color(theme::accent()))
     })
     .debug_name(format!("feedback-similar-open-{number}"));
 
@@ -1322,7 +1322,7 @@ fn similar_row(
         Label::derived(|| "You +1'd this".to_string())
             .style(|s| {
                 s.font_size(theme::TEXT_BADGE)
-                    .color(theme::FG_SUBTLE)
+                    .color(theme::fg_subtle())
                     .selectable(false)
                     .flex_shrink(0.0_f32)
             })
@@ -1364,7 +1364,7 @@ fn similar_row(
         Stack::horizontal((
             Label::derived(move || meta.clone()).style(|s| {
                 s.font_size(theme::TEXT_BADGE)
-                    .color(theme::FG_SUBTLE)
+                    .color(theme::fg_subtle())
                     .min_width(0.0)
                     .flex_grow(1.0_f32)
                     .flex_basis(0.0)
@@ -1388,7 +1388,7 @@ fn similar_row(
             .width_full()
             .padding(10.0)
             .border(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
             .border_radius(theme::RADIUS)
             .apply_if(divided, |s| s)
     })

@@ -114,12 +114,12 @@ pub fn split_button(app: AppState, state: ReviewState) -> impl IntoView {
     let main = Stack::horizontal((
         dyn_container(
             move || face.get().0,
-            |subject| state_glyph(subject, icons::state_color(subject)).into_any(),
+            |subject| state_glyph(subject, move || icons::state_color(subject)).into_any(),
         )
         .style(|s| s.margin_right(6.0).pointer_events_none()),
         Label::derived(move || face.get().1).style(|s| {
             s.font_size(theme::TEXT_META)
-                .color(theme::FG)
+                .color(theme::fg())
                 .selectable(false)
                 .pointer_events_none()
         }),
@@ -135,14 +135,14 @@ pub fn split_button(app: AppState, state: ReviewState) -> impl IntoView {
             .padding_horiz(10.0)
             .set(BorderTopLeftRadius, inner)
             .set(BorderBottomLeftRadius, inner)
-            .hover(|s| s.background(theme::CANVAS_HOVER))
+            .hover(|s| s.background(theme::canvas_hover()))
     })
     .debug_name("subject-close");
 
     // The menu hangs from the whole button, which is built after the arrow.
     let whole: RwSignal<Option<floem::ViewId>> = RwSignal::new(None);
     let arrow = Container::new(
-        sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_MUTED)
+        sidebar_glyph(SidebarIcon::ChevronDown, theme::fg_muted)
             .style(|s| s.size(10.0, 10.0).pointer_events_none()),
     )
     .on_event_stop(el::Click, move |_, _| {
@@ -166,23 +166,23 @@ pub fn split_button(app: AppState, state: ReviewState) -> impl IntoView {
             .padding_horiz(8.0)
             .set(BorderTopRightRadius, inner)
             .set(BorderBottomRightRadius, inner)
-            .hover(|s| s.background(theme::CANVAS_HOVER))
+            .hover(|s| s.background(theme::canvas_hover()))
             .apply_if(state.close_menu.with(Option::is_some), |s| {
-                s.background(theme::CANVAS_HOVER)
+                s.background(theme::canvas_hover())
             })
     })
     .debug_name("subject-close-menu");
     let button = Stack::horizontal((
         main,
-        Empty::new().style(|s| s.width(1.0).height_full().background(theme::BORDER)),
+        Empty::new().style(|s| s.width(1.0).height_full().background(theme::border())),
         arrow,
     ))
     .style(|s| {
         s.height(28.0)
             .items_center()
-            .background(theme::CANVAS)
+            .background(theme::canvas())
             .border(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
             .border_radius(theme::RADIUS)
     });
     whole.set(Some(button.view_id()));
@@ -329,7 +329,7 @@ fn reasons(app: AppState, state: ReviewState) -> impl IntoView {
                 .width_full()
                 .flex_shrink(0.0_f32)
                 .margin_horiz(8.0)
-                .background(theme::MENU_SEPARATOR)
+                .background(theme::menu_separator())
         })
     };
     let reason = move || state.composer_close_reason.get();
@@ -433,28 +433,28 @@ fn row(
     Container::new(
         Stack::horizontal((
             Container::new(
-                sidebar_glyph(SidebarIcon::Check, theme::FG)
+                sidebar_glyph(SidebarIcon::Check, theme::fg)
                     .style(move |s| s.size(12.0, 12.0).apply_if(!checked(), |s| s.hide())),
             )
             .style(|s| s.width(20.0).flex_shrink(0.0_f32).items_center()),
-            state_glyph(glyph, icons::state_color(glyph))
+            state_glyph(glyph, move || icons::state_color(glyph))
                 .style(|s| s.flex_shrink(0.0_f32).margin_right(8.0)),
             Stack::vertical((
                 Label::derived(move || title.to_string()).style(|s| {
                     s.font_size(theme::TEXT_META)
                         .font_weight(theme::weight_strong())
-                        .color(theme::FG)
+                        .color(theme::fg())
                         .selectable(false)
                 }),
                 Label::derived(move || detail.to_string()).style(|s| {
                     s.font_size(theme::TEXT_BADGE)
-                        .color(theme::FG_MUTED)
+                        .color(theme::fg_muted())
                         .margin_top(2.0)
                         .selectable(false)
                 }),
             ))
             .style(|s| s.flex_col().min_width(0.0).flex_grow(1.0_f32)),
-            sidebar_glyph(SidebarIcon::ChevronRight, theme::FG_SUBTLE).style(move |s| {
+            sidebar_glyph(SidebarIcon::ChevronRight, theme::fg_subtle).style(move |s| {
                 s.size(10.0, 10.0)
                     .flex_shrink(0.0_f32)
                     .margin_left(8.0)
@@ -472,7 +472,7 @@ fn row(
             .items_center()
             .padding_right(10.0)
             .border_radius(crate::ui::menu::ROW_RADIUS)
-            .hover(|s| s.background(theme::MENU_HOVER))
+            .hover(|s| s.background(theme::menu_hover()))
     })
 }
 
@@ -527,12 +527,12 @@ fn duplicate(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                 .flex_shrink(0.0_f32)
                 .padding_horiz(8.0)
                 .font_size(theme::TEXT_META)
-                .background(theme::CANVAS)
+                .background(theme::canvas())
                 .border(1.0)
-                .border_color(theme::BORDER)
+                .border_color(theme::border())
                 .border_radius(crate::ui::menu::ROW_RADIUS)
-                .focus(|s| s.border_color(theme::ACCENT_RING))
-                .class(PlaceholderTextClass, |s| s.color(theme::FG_SUBTLE))
+                .focus(|s| s.border_color(theme::accent_ring()))
+                .class(PlaceholderTextClass, |s| s.color(theme::fg_subtle()))
         });
     // The keyboard goes to the box once it is laid out.
     let input_id = input.view_id();
@@ -553,7 +553,7 @@ fn duplicate(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                             .items_center()
                             .padding_horiz(8.0)
                             .font_size(theme::TEXT_META)
-                            .color(theme::FG_SUBTLE)
+                            .color(theme::fg_subtle())
                             .selectable(false)
                     })
                     .into_any();
@@ -588,7 +588,7 @@ fn duplicate(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                 .padding_horiz(2.0)
                 .font_size(theme::TEXT_META)
                 .font_weight(theme::weight_strong())
-                .color(theme::FG)
+                .color(theme::fg())
                 .selectable(false)
         }),
         Empty::new().style(|s| s.height(8.0)),
@@ -614,9 +614,9 @@ fn duplicate_row(
             .padding_horiz(8.0)
             .border_radius(crate::ui::menu::ROW_RADIUS);
         if selected.get() == index {
-            s.background(theme::MENU_HOVER)
+            s.background(theme::menu_hover())
         } else {
-            s.hover(|s| s.background(theme::MENU_POINTED))
+            s.hover(|s| s.background(theme::menu_pointed()))
         }
     }))
     .on_event_stop(el::Click, move |_, _| pick(index))

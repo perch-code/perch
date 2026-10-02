@@ -93,14 +93,14 @@ pub(crate) fn agents_section(
         Label::derived(|| "Agents".to_string()).style(|s| {
             s.font_size(theme::TEXT_BODY)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG)
+                .color(theme::fg())
                 .flex_shrink(0.0_f32)
         }),
         Label::derived(move || reviewers_summary(app, state))
             .debug_name("review-agents-summary")
             .style(move |s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::FG_MUTED)
+                    .color(theme::fg_muted())
                     .text_ellipsis()
                     .min_width(0.0)
                     .flex_grow(1.0_f32)
@@ -123,7 +123,7 @@ pub(crate) fn agents_section(
                     })
                     .style(|s| {
                         s.font_size(theme::TEXT_BADGE)
-                            .color(theme::FG_MUTED)
+                            .color(theme::fg_muted())
                             .selectable(false)
                             .pointer_events_none()
                     }),
@@ -146,8 +146,8 @@ pub(crate) fn agents_section(
                         .padding_horiz(8.0)
                         .border_radius(theme::RADIUS)
                         .keyboard_navigable()
-                        .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
-                        .hover(|s| s.background(theme::CANVAS_HOVER))
+                        .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+                        .hover(|s| s.background(theme::canvas_hover()))
                 })
                 .debug_name("review-agents-toggle")
                 .into_any()
@@ -206,7 +206,7 @@ pub(crate) fn agents_section(
                     Some(reason) => Label::derived(move || reason.clone())
                         .style(|s| {
                             s.font_size(theme::TEXT_SECTION)
-                                .color(theme::FG_SUBTLE)
+                                .color(theme::fg_subtle())
                                 .text_wrap()
                                 .max_width(225.0)
                         })
@@ -306,7 +306,7 @@ fn agents_status(app: AppState, state: ReviewState, expanded: Memo<bool>) -> imp
         let text = |text: String| {
             Label::derived(move || text.clone()).style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::FG_SUBTLE)
+                    .color(theme::fg_subtle())
                     .text_wrap()
                     .min_width(0.0)
                     .flex_grow(1.0_f32)
@@ -317,7 +317,7 @@ fn agents_status(app: AppState, state: ReviewState, expanded: Memo<bool>) -> imp
                 text(progress),
                 Container::new(Label::derived(|| "Show".to_string()).style(|s| {
                     s.font_size(theme::TEXT_BADGE)
-                        .color(theme::ACCENT)
+                        .color(theme::accent())
                         .selectable(false)
                         .pointer_events_none()
                 }))
@@ -331,7 +331,7 @@ fn agents_status(app: AppState, state: ReviewState, expanded: Memo<bool>) -> imp
                         .padding_horiz(6.0)
                         .padding_vert(3.0)
                         .border_radius(theme::RADIUS)
-                        .hover(|s| s.background(theme::CANVAS_HOVER))
+                        .hover(|s| s.background(theme::canvas_hover()))
                 })
                 .debug_name("review-show-agents"),
             ))
@@ -357,7 +357,7 @@ fn scope_note(state: ReviewState) -> impl IntoView {
     })
     .style(|s| {
         s.font_size(theme::TEXT_META)
-            .color(theme::FG_SUBTLE)
+            .color(theme::fg_subtle())
             .width_full()
             .text_wrap()
     })
@@ -375,7 +375,7 @@ fn reviewer_row(
             Label::derived(move || backend_label(reviewer).to_string()).style(|s| {
                 s.font_size(theme::TEXT_BODY)
                     .font_weight(theme::weight_emphasis())
-                    .color(theme::FG)
+                    .color(theme::fg())
                     .min_width(70.0)
             }),
             Empty::new().style(|s| s.flex_grow(1.0_f32)),
@@ -396,7 +396,7 @@ fn reviewer_row(
         Stack::horizontal((
             Label::derived(|| "Model".to_string()).style(|s| {
                 s.font_size(theme::TEXT_SECTION)
-                    .color(theme::FG_SUBTLE)
+                    .color(theme::fg_subtle())
                     .min_width(70.0)
             }),
             model_selector(app, state, backend, reviewer),
@@ -408,7 +408,7 @@ fn reviewer_row(
                 Some(reason) => Label::derived(move || reason.clone())
                     .style(|s| {
                         s.font_size(theme::TEXT_SECTION)
-                            .color(theme::FG_SUBTLE)
+                            .color(theme::fg_subtle())
                             .text_wrap()
                             .width_full()
                     })
@@ -422,9 +422,9 @@ fn reviewer_row(
             .width_full()
             .gap(6.0)
             .padding(10.0)
-            .background(theme::CANVAS_SUBTLE)
+            .background(theme::canvas_subtle())
             .border(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::border_muted())
             .border_radius(theme::RADIUS)
     })
     .debug_name(format!("reviewer-row:{}", reviewer.name()))
@@ -533,7 +533,7 @@ fn base_row(app: AppState, state: ReviewState) -> impl IntoView {
         Label::derived(|| "Base".to_string()).style(|s| {
             s.font_size(theme::TEXT_BODY)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG)
+                .color(theme::fg())
                 .min_width(70.0)
         }),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
@@ -615,7 +615,7 @@ fn head_row(state: ReviewState) -> impl IntoView {
         Label::derived(|| "Head".to_string()).style(|s| {
             s.font_size(theme::TEXT_BODY)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG)
+                .color(theme::fg())
                 .min_width(70.0)
         }),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
@@ -663,7 +663,7 @@ fn instructions_box(state: ReviewState, run: Rc<dyn Fn()>) -> impl IntoView {
 
     let editor = text_editor(state.review_launcher_instructions.get_untracked())
         .placeholder("Instructions for the reviewers (optional)".to_string())
-        .editor_style(|s| s.hide_gutter(true).selection_color(theme::SELECTION_BG));
+        .editor_style(|s| s.hide_gutter(true).selection_color(theme::selection_bg()));
     lay_out_every_line(editor.editor());
     let editor = editor
         .pre_command(move |cmd| {
@@ -714,7 +714,7 @@ fn launch_error(app: AppState, state: ReviewState) -> impl IntoView {
         |error| match error {
             Some(error) => Container::new(Label::derived(move || error.clone()).style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::CLOSED)
+                    .color(theme::closed())
                     .line_height(theme::PROSE_LINE_HEIGHT)
                     .text_wrap()
                     .width_full()
@@ -722,9 +722,9 @@ fn launch_error(app: AppState, state: ReviewState) -> impl IntoView {
             .style(|s| {
                 s.width_full()
                     .padding(9.0)
-                    .background(theme::CLOSED.with_alpha(0.07))
+                    .background(theme::closed().with_alpha(0.07))
                     .border(1.0)
-                    .border_color(theme::CLOSED.with_alpha(0.25))
+                    .border_color(theme::closed().with_alpha(0.25))
                     .border_radius(theme::RADIUS)
             })
             .into_any(),
@@ -834,7 +834,7 @@ pub fn history(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                     Label::derived(|| "REVIEW HISTORY".to_string()).style(|s| {
                         s.font_size(theme::TEXT_SECTION)
                             .font_weight(theme::weight_emphasis())
-                            .color(theme::FG_SUBTLE)
+                            .color(theme::fg_subtle())
                             .flex_grow(1.0_f32)
                     }),
                     latest,
@@ -868,7 +868,7 @@ pub fn history(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                     .padding_top(18.0)
                     .padding_bottom(2.0)
                     .border_top(1.0)
-                    .border_color(theme::BORDER_MUTED)
+                    .border_color(theme::border_muted())
             })
             .debug_name("review-history")
             .into_any()
@@ -916,7 +916,7 @@ fn group_card(
                     .items_center()
                     .font_size(theme::TEXT_BADGE)
                     .font_weight(theme::weight_emphasis())
-                    .color(theme::FG_SUBTLE)
+                    .color(theme::fg_subtle())
                     .selectable(false)
             })
             .into_any()
@@ -976,12 +976,12 @@ fn group_card(
                     Label::derived(move || title.clone()).style(|s| {
                         s.font_size(theme::TEXT_BODY)
                             .font_weight(theme::weight_emphasis())
-                            .color(theme::FG)
+                            .color(theme::fg())
                             .text_wrap()
                             .width_full()
                     }),
                     Label::derived(move || crate::timefmt::relative(ran_at, app.now.get()))
-                        .style(|s| s.font_size(theme::TEXT_META).color(theme::FG_MUTED))
+                        .style(|s| s.font_size(theme::TEXT_META).color(theme::fg_muted()))
                         .debug_name("review-group-when"),
                 ))
                 .style(|s| s.flex_col().gap(2.0).min_width(0.0).flex_grow(1.0_f32)),
@@ -992,13 +992,13 @@ fn group_card(
                 Some(instructions) => Label::derived(move || instructions.clone())
                     .style(|s| {
                         s.font_size(theme::TEXT_META)
-                            .color(theme::FG_MUTED)
+                            .color(theme::fg_muted())
                             .line_height(theme::PROSE_LINE_HEIGHT)
                             .text_wrap()
                             .width_full()
                             .padding_left(8.0)
                             .border_left(2.0)
-                            .border_color(theme::BORDER)
+                            .border_color(theme::border())
                     })
                     .debug_name("review-group-instructions")
                     .into_any(),
@@ -1006,7 +1006,7 @@ fn group_card(
             },
             Label::derived(move || attempts.clone()).style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::FG_MUTED)
+                    .color(theme::fg_muted())
                     .text_wrap()
                     .width_full()
             }),
@@ -1014,7 +1014,7 @@ fn group_card(
                 Some(unread) => Label::derived(move || unread.clone())
                     .style(|s| {
                         s.font_size(theme::TEXT_META)
-                            .color(theme::NOTICE_FG)
+                            .color(theme::notice_fg())
                             .text_wrap()
                             .width_full()
                     })
@@ -1024,7 +1024,7 @@ fn group_card(
             },
             Label::derived(move || counts.clone()).style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::FG_SUBTLE)
+                    .color(theme::fg_subtle())
                     .text_wrap()
                     .width_full()
             }),
@@ -1036,7 +1036,7 @@ fn group_card(
                             .style(|s| {
                                 s.font_size(theme::TEXT_SECTION)
                                     .font_weight(theme::weight_emphasis())
-                                    .color(theme::ACCENT)
+                                    .color(theme::accent())
                             })
                             .into_any()
                     } else {
@@ -1051,9 +1051,9 @@ fn group_card(
     .style(|s| {
         s.width_full()
             .padding(12.0)
-            .background(theme::CANVAS_SUBTLE)
+            .background(theme::canvas_subtle())
             .border(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::border_muted())
             .border_radius(9.0)
     })
     .debug_name(format!("review-group:{}", summary.group.id))
@@ -1457,12 +1457,12 @@ pub(crate) fn menu_button(
     Stack::horizontal((
         Label::derived(label).style(|s| {
             s.font_size(theme::TEXT_BADGE)
-                .color(theme::FG)
+                .color(theme::fg())
                 .selectable(false)
                 .pointer_events_none()
                 .margin_right(5.0)
         }),
-        sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE)
+        sidebar_glyph(SidebarIcon::ChevronDown, theme::fg_subtle)
             .style(|s| s.size(9.0, 9.0).pointer_events_none()),
     ))
     .dropdown(menu)
@@ -1471,13 +1471,13 @@ pub(crate) fn menu_button(
             .items_center()
             .height(26.0)
             .padding_horiz(8.0)
-            .background(theme::CANVAS)
+            .background(theme::canvas())
             .border(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
             .border_radius(theme::RADIUS)
             .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
-            .hover(|s| s.background(theme::CANVAS_HOVER))
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+            .hover(|s| s.background(theme::canvas_hover()))
     })
     .debug_name(debug)
     .into_view()
@@ -1489,10 +1489,10 @@ fn disabled_selector(label: &'static str) -> impl IntoView {
             .items_center()
             .padding_horiz(8.0)
             .font_size(theme::TEXT_BADGE)
-            .color(theme::FG_SUBTLE)
-            .background(theme::CANVAS_SUBTLE)
+            .color(theme::fg_subtle())
+            .background(theme::canvas_subtle())
             .border(1.0)
-            .border_color(theme::BORDER_MUTED)
+            .border_color(theme::border_muted())
             .border_radius(theme::RADIUS)
             .selectable(false)
     })
@@ -1515,9 +1515,9 @@ pub(crate) fn action_button(
         s.font_size(theme::TEXT_BADGE)
             .font_weight(theme::weight_emphasis())
             .color(if prominent {
-                theme::CANVAS
+                theme::canvas()
             } else {
-                theme::FG_MUTED
+                theme::fg_muted()
             })
             .selectable(false)
             .pointer_events_none()
@@ -1542,21 +1542,21 @@ pub(crate) fn action_button(
             .padding_horiz(10.0)
             .items_center()
             .justify_center()
-            .background(if prominent { theme::FG } else { theme::CANVAS })
+            .background(if prominent { theme::fg() } else { theme::canvas() })
             .border(1.0)
-            .border_color(if prominent { theme::FG } else { theme::BORDER })
+            .border_color(if prominent { theme::fg() } else { theme::border() })
             .border_radius(theme::RADIUS)
             .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
             .apply_if(!available, |s| {
                 s.opacity(0.45_f32).cursor(CursorStyle::Default)
             })
             .apply_if(available, |s| {
                 s.hover(move |s| {
                     s.background(if prominent {
-                        theme::ACTION_HOVER
+                        theme::action_hover()
                     } else {
-                        theme::CANVAS_HOVER
+                        theme::canvas_hover()
                     })
                 })
             })

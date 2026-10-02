@@ -67,15 +67,15 @@ pub fn toast(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
                     .padding_left(13.0)
                     .padding_right(7.0)
                     .padding_vert(9.0)
-                    .background(theme::CANVAS)
+                    .background(theme::canvas())
                     .border(1.0)
-                    .border_color(theme::BORDER)
+                    .border_color(theme::border())
                     .border_radius(8.0)
                     .box_shadow_blur(18.0)
                     .box_shadow_v_offset(5.0)
-                    .box_shadow_color(theme::SHADOW);
+                    .box_shadow_color(theme::shadow());
                 if clickable {
-                    widgets::clickable(s).hover(|s| s.background(theme::CANVAS_SUBTLE))
+                    widgets::clickable(s).hover(|s| s.background(theme::canvas_subtle()))
                 } else {
                     s
                 }
@@ -136,10 +136,10 @@ fn message(
     tone: Tone,
     reportable: bool,
 ) -> impl IntoView {
-    let color = match tone {
-        Tone::Error => theme::CLOSED,
-        Tone::Warning => theme::DRAFT,
-        Tone::Success => theme::OPEN,
+    let color: fn() -> Color = match tone {
+        Tone::Error => theme::closed,
+        Tone::Warning => theme::draft,
+        Tone::Success => theme::open,
     };
     let dismiss = agents::icon_action(SidebarIcon::Close, "Dismiss message", move || {
         state.dismiss_toast(token)
@@ -154,13 +154,13 @@ fn message(
             widgets::clickable(s)
                 .font_size(theme::TEXT_BADGE)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG_MUTED)
+                .color(theme::fg_muted())
                 .padding_horiz(7.0)
                 .height(22.0)
                 .items_center()
                 .flex_shrink(0.0_f32)
                 .border_radius(5.0)
-                .hover(|s| s.color(theme::FG).background(theme::BADGE_BG))
+                .hover(|s| s.color(theme::fg()).background(theme::badge_bg()))
                 .apply_if(!reportable, |s| s.hide())
         })
         .debug_name("Report problem");
@@ -168,7 +168,7 @@ fn message(
         dot(color),
         Label::derived(move || text.clone()).style(|s| {
             s.font_size(theme::TEXT_BODY)
-                .color(theme::FG)
+                .color(theme::fg())
                 .text_wrap()
                 .min_width(0.0)
                 .flex_grow(1.0_f32)
@@ -197,7 +197,7 @@ fn server_offer(state: AppState, backend: Rc<Backend>, token: u64, offer: Server
     })
     .style(|s| {
         s.font_size(theme::TEXT_BODY)
-            .color(theme::FG)
+            .color(theme::fg())
             .text_wrap()
             .min_width(0.0)
             .flex_grow(1.0_f32)
@@ -221,7 +221,7 @@ fn server_offer(state: AppState, backend: Rc<Backend>, token: u64, offer: Server
         state.decline_offer(token, &key)
     })
     .style(move |s| s.apply_if(installing(), |s| s.hide()));
-    Stack::horizontal((dot(theme::DRAFT), line, button, close))
+    Stack::horizontal((dot(theme::draft), line, button, close))
         .style(|s| s.items_center().width_full().gap(9.0))
 }
 
@@ -229,7 +229,7 @@ fn server_offer(state: AppState, backend: Rc<Backend>, token: u64, offer: Server
 fn offer_button(label: &'static str, on_click: impl Fn() + 'static) -> impl View {
     Container::new(Label::new(label).style(|s| {
         s.font_size(theme::TEXT_META)
-            .color(theme::FG)
+            .color(theme::fg())
             .selectable(false)
     }))
     .on_event_stop(el::Click, move |_, _| on_click())
@@ -239,21 +239,21 @@ fn offer_button(label: &'static str, on_click: impl Fn() + 'static) -> impl View
             .items_center()
             .padding_horiz(10.0)
             .flex_shrink(0.0_f32)
-            .background(theme::CANVAS)
+            .background(theme::canvas())
             .border(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
             .border_radius(theme::RADIUS)
-            .hover(|s| s.background(theme::CANVAS_HOVER))
+            .hover(|s| s.background(theme::canvas_hover()))
     })
     .debug_name(label)
 }
 
 /// The coloured dot at a toast's left.
-pub(crate) fn dot(color: Color) -> impl IntoView {
+pub(crate) fn dot(color: impl theme::Ink) -> impl IntoView {
     Empty::new().style(move |s| {
         s.size(9.0, 9.0)
             .border_radius(5.0)
-            .background(color)
+            .background(color())
             .flex_shrink(0.0_f32)
     })
 }

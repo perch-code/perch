@@ -274,9 +274,9 @@ fn panel(state: AppState) -> impl IntoView {
             && state.open_box.waiting.with(Option::is_none);
         s.font_size(theme::TEXT_META)
             .color(if failed {
-                theme::CLOSED
+                theme::closed()
             } else {
-                theme::FG_MUTED
+                theme::fg_muted()
             })
             .padding_horiz(4.0)
             .margin_top(6.0)
@@ -311,15 +311,15 @@ fn text_box(state: AppState) -> impl IntoView {
                 .height(theme::GO_TO_BOX_HEIGHT)
                 .font_size(theme::TEXT_BODY)
                 .padding_horiz(8.0)
-                .background(theme::CANVAS)
-                .hover(|s| s.background(theme::CANVAS))
+                .background(theme::canvas())
+                .hover(|s| s.background(theme::canvas()))
                 .border(1.0)
-                .border_color(theme::BORDER)
+                .border_color(theme::border())
                 .border_radius(crate::ui::menu::ROW_RADIUS)
-                .focus(|s| s.border_color(theme::ACCENT))
-                .cursor_color(theme::FG)
-                .set(SelectionColor, Brush::Solid(theme::SELECTION_BG))
-                .class(PlaceholderTextClass, |s| s.color(theme::FG_SUBTLE))
+                .focus(|s| s.border_color(theme::accent()))
+                .cursor_color(theme::fg())
+                .set(SelectionColor, Brush::Solid(theme::selection_bg()))
+                .class(PlaceholderTextClass, |s| s.color(theme::fg_subtle()))
         });
     let id = input.view_id();
     state.open_box.text_box.set(Some(id));

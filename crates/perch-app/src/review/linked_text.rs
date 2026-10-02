@@ -159,7 +159,9 @@ enum Unit {
 struct Leaf {
     id: ViewId,
     text: String,
-    attrs: AttrsList,
+    /// The text's attributes and its strikes, as the appearance has them.
+    attrs: RefCell<AttrsList>,
+    strikes: RefCell<Vec<Strike>>,
     /// The layout used for hit-testing and for the rules, and the width
     /// it was made for.
     shadow: RefCell<Option<(f32, TextLayout)>>,
@@ -302,7 +304,6 @@ pub struct LinkedText {
     id: ViewId,
     leaf: Rc<Leaf>,
     links: Vec<Link>,
-    strikes: Vec<Strike>,
     /// The link under the pointer, as an index into `links`. A signal so
     /// the cursor style can follow it.
     hovered: RwSignal<Option<usize>>,
@@ -328,26 +329,24 @@ pub struct LinkedText {
     props: SelectProps,
 }
 
-/// `text` with `attrs`, where each of `links` is a byte range of the text
-/// and where it goes, and each of `strikes` a byte range to rule through
-/// in its colour.
+/// `text`, where each of `links` is a byte range of the text and where it
+/// goes, with what `styled` gives: the attributes, and the byte ranges to
+/// rule through in their colour. `styled` runs again when the appearance
+/// changes, since the colours are in what it gives.
 pub fn linked_text(
     text: String,
-    attrs: AttrsList,
     links: Vec<(Range<usize>, Target)>,
-    strikes: Vec<Strike>,
+    styled: impl Fn() -> (AttrsList, Vec<Strike>) + 'static,
 ) -> impl IntoView {
     let id = ViewId::new();
-    let again = (text.clone(), attrs.clone());
-    let child =
-        rich_text(text.clone(), attrs.clone(), move || again.clone()).style(|s| s.width_full());
-    id.set_children([child]);
+    let (attrs, strikes) = styled();
     let hovered = RwSignal::new(None);
     let tip = Rc::new(RefCell::new(None));
     let leaf = Rc::new(Leaf {
         id,
-        text,
-        attrs,
+        text: text.clone(),
+        attrs: RefCell::new(attrs.clone()),
+        strikes: RefCell::new(strikes),
         shadow: RefCell::new(None),
         taken: RefCell::new(None),
         selectable: Cell::new(true),
@@ -357,6 +356,23 @@ pub fn linked_text(
         leaves.retain(|_, leaf| leaf.strong_count() > 0);
         leaves.insert(id, Rc::downgrade(&leaf));
     });
+    // The first run has what was just built; it reads the appearance so
+    // that a change runs it again.
+    let restyle = {
+        let leaf = leaf.clone();
+        let built = Cell::new(true);
+        move || {
+            theme::appearance();
+            if !built.replace(false) {
+                let (attrs, strikes) = styled();
+                *leaf.attrs.borrow_mut() = attrs;
+                *leaf.strikes.borrow_mut() = strikes;
+            }
+            (leaf.text.clone(), leaf.attrs.borrow().clone())
+        }
+    };
+    let child = rich_text(text, attrs, restyle).style(|s| s.width_full());
+    id.set_children([child]);
     let view = LinkedText {
         id,
         leaf,
@@ -364,7 +380,6 @@ pub fn linked_text(
             .into_iter()
             .map(|(range, target)| Link { range, target })
             .collect(),
-        strikes,
         hovered,
         pressed: None,
         pending_tip: None,
@@ -427,7 +442,7 @@ impl Leaf {
 
     /// The text laid out as the wrapped view lays it out at `width`.
     fn layout_for(&self, width: f32) -> TextLayout {
-        layout_at(&self.text, self.attrs.clone(), width)
+        layout_at(&self.text, self.attrs.borrow().clone(), width)
     }
 
     /// The byte of the text a drag from another view reaches with the
@@ -947,9 +962,9 @@ impl View for LinkedText {
                 let mut rects = Vec::new();
                 for (i, range) in ranges.iter().enumerate() {
                     let color = if Some(i) == *current {
-                        theme::FIND_CURRENT_BG
+                        theme::find_current_bg()
                     } else {
-                        theme::FIND_MATCH_BG
+                        theme::find_match_bg()
                     };
                     let selection = layout.selection_from_byte_range(range.start, range.end);
                     layout.selection_geometry_with_line_metrics(&selection, |x0, y0, x1, y1| {
@@ -986,7 +1001,7 @@ impl View for LinkedText {
                 })
                 .unwrap_or_default();
             for rect in rects {
-                cx.fill(&rect, theme::SELECTION_BG, 0.0);
+                cx.fill(&rect, theme::selection_bg(), 0.0);
             }
         }
         // The link under the pointer is underlined in its own colour, as
@@ -996,17 +1011,18 @@ impl View for LinkedText {
             .get_untracked()
             .and_then(|i| self.links.get(i))
             .map(|link| {
-                let ink = self.leaf.attrs.get_span(link.range.start).get_color();
-                vec![(link.range.clone(), ink.unwrap_or(theme::LINK))]
+                let ink = self.leaf.attrs.borrow().get_span(link.range.start).get_color();
+                vec![(link.range.clone(), ink.unwrap_or(theme::link()))]
             })
             .unwrap_or_default();
-        if self.strikes.is_empty() && underline.is_empty() {
+        let strikes = self.leaf.strikes.borrow();
+        if strikes.is_empty() && underline.is_empty() {
             return;
         }
         let len = self.leaf.text.len();
         let rules = self
             .with_shadow(|layout, origin| {
-                let mut out = rules(layout, len, &self.strikes, Rule::Strike);
+                let mut out = rules(layout, len, &strikes, Rule::Strike);
                 out.extend(rules(layout, len, &underline, Rule::Underline));
                 out.into_iter()
                     .map(|(rule, color)| (rule + origin.to_vec2(), color))
@@ -1439,7 +1455,7 @@ mod tests {
             selectable: bool,
         ) -> (HeadlessHarness, ViewId) {
             let root = TestRoot::new();
-            let view = Container::new(linked_text(TEXT.into(), prose(15.0), links, Vec::new()))
+            let view = Container::new(linked_text(TEXT.into(), links, || (prose(15.0), Vec::new())))
                 .style(move |s| s.width(WIDTH).padding(0.0).selectable(selectable));
             let mut harness = HeadlessHarness::new_with_size(root, view, WIDTH, 400.0);
             harness.rebuild();

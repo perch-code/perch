@@ -270,7 +270,7 @@ pub fn composer_view(
     let draft = state.composer_draft.get_untracked();
     let editor = text_editor(draft.clone())
         .placeholder(placeholder)
-        .editor_style(|s| s.hide_gutter(true).selection_color(theme::SELECTION_BG));
+        .editor_style(|s| s.hide_gutter(true).selection_color(theme::selection_bg()));
     // Markdown as it is typed: bold, italics, code and links take their
     // styles in the box, the way they will in the thread.
     let styling_doc = editor.editor().doc();
@@ -583,12 +583,12 @@ pub fn composer_view(
 
     let whole_box = Stack::vertical((
         Stack::horizontal((
-            sidebar_glyph(SidebarIcon::Thread, theme::ACCENT)
+            sidebar_glyph(SidebarIcon::Thread, theme::accent)
                 .style(|s| s.size(13.0, 13.0).margin_right(6.0)),
             Label::derived(move || anchor_label.clone()).style(|s| {
                 s.font_size(theme::TEXT_BADGE)
                     .font_family(theme::CODE_FONT_STACK.to_string())
-                    .color(theme::FG_MUTED)
+                    .color(theme::fg_muted())
                     .text_ellipsis()
                     .min_width(0.0)
                     .selectable(false)
@@ -601,7 +601,7 @@ pub fn composer_view(
             // the comment goes there is no putting it away.
             icon_button(
                 || SidebarIcon::Close,
-                || theme::FG_SUBTLE,
+                theme::fg_subtle,
                 move || {
                     if !posting_here_now() {
                         state.close_composer();
@@ -630,19 +630,19 @@ pub fn composer_view(
         let base = match face {
             ThreadFace::Card => base
                 .width_full()
-                .background(theme::CANVAS_SUBTLE)
-                .border_color(theme::BORDER_MUTED),
+                .background(theme::canvas_subtle())
+                .border_color(theme::border_muted()),
             // A card in the code is placed by its edges, and its width
             // follows from them.
             ThreadFace::Inline => base
-                .background(theme::CANVAS)
-                .border_color(theme::ACCENT_RING),
+                .background(theme::canvas())
+                .border_color(theme::accent_ring()),
         };
         // Under a thread it is the thread's reply form, as GitHub's is:
         // white, in the thread's rule, with a box's corners.
         base.apply_if(follow_up, |s| {
-            s.background(theme::CANVAS)
-                .border_color(theme::BORDER)
+            s.background(theme::canvas())
+                .border_color(theme::border())
                 .border_radius(theme::RADIUS)
         })
     });
@@ -736,9 +736,9 @@ fn resize_handle(grip: Grip, box_id: floem::ViewId) -> impl IntoView {
                 .border_radius(theme::COMPOSER_GRIP_MARK / 2.0)
                 .pointer_events_none()
                 .background(match (grip.resizing.get(), hovered.get()) {
-                    (true, _) => theme::ACCENT,
-                    (false, true) => theme::FG_SUBTLE,
-                    (false, false) => theme::BORDER,
+                    (true, _) => theme::accent(),
+                    (false, true) => theme::fg_subtle(),
+                    (false, false) => theme::border(),
                 })
         }),
     )
@@ -844,7 +844,7 @@ fn composer_error_line(state: ReviewState) -> impl IntoView {
                 .style(|s| {
                     s.width_full()
                         .font_size(theme::TEXT_BADGE)
-                        .color(theme::CLOSED)
+                        .color(theme::closed())
                         .text_wrap()
                         .margin_top(6.0)
                 })
@@ -884,7 +884,7 @@ fn composer_footer(
             Label::derived(|| "The agent reads this after its current step".to_string()).style(
                 |s| {
                     s.font_size(theme::TEXT_META)
-                        .color(theme::FG_SUBTLE)
+                        .color(theme::fg_subtle())
                         .text_ellipsis()
                         .min_width(0.0)
                         .selectable(false)
@@ -977,7 +977,7 @@ fn composer_footer(
             .style(|s| {
                 s.font_size(theme::TEXT_META)
                     .font_weight(theme::weight_emphasis())
-                    .color(theme::FG)
+                    .color(theme::fg())
                     .text_ellipsis()
                     .min_width(0.0)
                     .selectable(false)
@@ -1017,7 +1017,7 @@ fn composer_footer(
             })
                 .style(|s| {
                     s.font_size(theme::TEXT_META)
-                        .color(theme::FG_MUTED)
+                        .color(theme::fg_muted())
                         .selectable(false)
                 })
                 .debug_name("composer-posting"),
@@ -1150,12 +1150,12 @@ fn mode_switch(app: AppState, state: ReviewState) -> impl IntoView {
                     .items_center()
                     .font_size(theme::TEXT_BADGE)
                     .border_radius(6.0)
-                    .color(if on { theme::FG } else { theme::FG_MUTED })
+                    .color(if on { theme::fg() } else { theme::fg_muted() })
                     .apply_if(on, |s| {
-                        s.background(theme::CANVAS)
+                        s.background(theme::canvas())
                             .font_weight(theme::weight_emphasis())
                     })
-                    .apply_if(!on, |s| s.hover(|s| s.color(theme::FG)))
+                    .apply_if(!on, |s| s.hover(|s| s.color(theme::fg())))
             })
     };
     dyn_container(shown, move |shown| {
@@ -1166,9 +1166,9 @@ fn mode_switch(app: AppState, state: ReviewState) -> impl IntoView {
                     s.items_center()
                         .padding(2.0)
                         .gap(2.0)
-                        .background(theme::CANVAS_SUBTLE)
+                        .background(theme::canvas_subtle())
                         .border(1.0)
-                        .border_color(theme::BORDER)
+                        .border_color(theme::border())
                         .border_radius(8.0)
                 })
                 .into_any()
@@ -1201,11 +1201,11 @@ fn send_button(label: impl Fn() -> String + 'static, on_click: Rc<dyn Fn()>) -> 
             Label::derived(label).style(|s| {
                 s.font_size(theme::TEXT_META)
                     .font_weight(theme::weight_emphasis())
-                    .color(theme::CANVAS)
+                    .color(theme::canvas())
                     .margin_right(6.0)
                     .selectable(false)
             }),
-            sidebar_glyph(SidebarIcon::ChevronRight, theme::CANVAS).style(|s| s.size(13.0, 13.0)),
+            sidebar_glyph(SidebarIcon::ChevronRight, theme::canvas).style(|s| s.size(13.0, 13.0)),
         ))
         .style(|s| s.items_center()),
     )
@@ -1215,9 +1215,9 @@ fn send_button(label: impl Fn() -> String + 'static, on_click: Rc<dyn Fn()>) -> 
             .height(30.0)
             .items_center()
             .padding_horiz(12.0)
-            .background(theme::FG)
+            .background(theme::fg())
             .border_radius(9.0)
-            .hover(|s| s.background(theme::ACTION_HOVER))
+            .hover(|s| s.background(theme::action_hover()))
     })
 }
 
@@ -1426,12 +1426,12 @@ fn menu_button(
     Stack::horizontal((
         Label::derived(label).style(|s| {
             s.font_size(theme::TEXT_BADGE)
-                .color(theme::FG)
+                .color(theme::fg())
                 .selectable(false)
                 .pointer_events_none()
                 .margin_right(5.0)
         }),
-        sidebar_glyph(SidebarIcon::ChevronDown, theme::FG_SUBTLE)
+        sidebar_glyph(SidebarIcon::ChevronDown, theme::fg_subtle)
             .style(|s| s.size(10.0, 10.0).pointer_events_none()),
     ))
     .dropdown(menu)
@@ -1439,13 +1439,13 @@ fn menu_button(
         s.items_center()
             .height(26.0)
             .padding_horiz(8.0)
-            .background(theme::CANVAS)
+            .background(theme::canvas())
             .border(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
             .border_radius(theme::RADIUS)
             .selectable(false)
             .hover(|s| {
-                s.background(theme::CANVAS_SUBTLE)
+                s.background(theme::canvas_subtle())
                     .cursor(CursorStyle::Pointer)
             })
     })
@@ -1458,9 +1458,9 @@ pub fn outdated_pill(outdated: bool) -> impl IntoView {
     }
     badge(
         || "Outdated".to_string(),
-        theme::NOTICE_FG,
-        theme::NOTICE_BG,
-        Some(theme::NOTICE_BORDER),
+        theme::notice_fg,
+        theme::notice_bg,
+        Some(theme::notice_border),
     )
     .style(|s| s.margin_left(8.0))
     .into_any()
@@ -1520,9 +1520,9 @@ pub fn thread_card(
                         - 2.0 * theme::COLLAPSED_CARD_INSET,
                 )
             })
-            .background(theme::CANVAS)
+            .background(theme::canvas())
             .border_radius(theme::RADIUS)
-            .border_color(if flashing.get() { theme::ACCENT } else { theme::BORDER });
+            .border_color(if flashing.get() { theme::accent() } else { theme::border() });
         match origin {
             ThreadOrigin::Local => {
                 base.border(floem::kurbo::Stroke::new(1.0).with_dashes(0.0, theme::THREAD_DASH))
@@ -1619,7 +1619,7 @@ fn inline_header(
             .height(theme::INLINE_THREAD_HEADER)
             .padding_horiz(theme::COLLAPSED_CARD_PADDING)
             .border_bottom(1.0)
-            .border_color(theme::BORDER)
+            .border_color(theme::border())
     })
 }
 
@@ -1649,14 +1649,14 @@ fn lines_heading(app: AppState, state: ReviewState, thread: &CommentThread) -> f
     };
     let muted = |s: floem::style::Style| {
         s.font_size(theme::TEXT_META)
-            .color(theme::FG_MUTED)
+            .color(theme::fg_muted())
             .selectable(false)
             .flex_shrink(0.0_f32)
     };
     let strong = |s: floem::style::Style| {
         s.font_size(theme::TEXT_META)
             .font_weight(theme::weight_strong())
-            .color(theme::FG)
+            .color(theme::fg())
             .selectable(false)
             .margin_left(4.0)
             .flex_shrink(0.0_f32)
@@ -1689,7 +1689,7 @@ pub(crate) fn local_chip(shown: bool) -> floem::AnyView {
         return Empty::new().into_any();
     }
     cards::tip(
-        badge(|| "Local".to_string(), theme::FG_MUTED, theme::BADGE_BG, None)
+        badge(|| "Local".to_string(), theme::fg_muted, theme::badge_bg, None)
             .style(|s| s.margin_left(8.0)),
         "This thread is on this machine and is not on GitHub.".to_string(),
     )
@@ -1720,9 +1720,9 @@ pub(crate) fn resolved_toggle(
                 } else {
                     SidebarIcon::Fold
                 };
-                crate::icons::sidebar_icon(icon, theme::FG_MUTED)
+                crate::icons::sidebar_icon(icon, theme::fg_muted())
             },
-            || theme::FG_MUTED,
+            theme::fg_muted,
         )
         .style(|s| s.size(14.0, 14.0).margin_right(4.0)),
         Label::derived(move || {
@@ -1732,7 +1732,7 @@ pub(crate) fn resolved_toggle(
                 "Hide resolved".to_string()
             }
         })
-        .style(move |s| s.font_size(size).color(theme::FG).selectable(false)),
+        .style(move |s| s.font_size(size).color(theme::fg()).selectable(false)),
     ))
     .on_event_stop(el::Click, move |_, _| toggle())
     .debug_name("resolved-toggle")
@@ -1743,7 +1743,7 @@ pub(crate) fn resolved_toggle(
             .padding_horiz(6.0)
             .border_radius(theme::RADIUS)
             .flex_shrink(0.0_f32)
-            .hover(|s| s.background(theme::BADGE_BG))
+            .hover(|s| s.background(theme::badge_bg()))
             .apply_if(!resolved.get(), |s| s.hide())
     })
 }
@@ -1842,14 +1842,14 @@ pub(crate) fn collapsed_card_row(
         name_label(author, |s| {
             s.font_size(theme::TEXT_META)
                 .font_weight(theme::weight_strong())
-                .color(theme::FG)
+                .color(theme::fg())
                 .selectable(false)
                 .margin_left(6.0)
                 .flex_shrink(0.0_f32)
         }),
         Label::derived(move || line.clone()).style(|s| {
             s.font_size(theme::TEXT_META)
-                .color(theme::FG_MUTED)
+                .color(theme::fg_muted())
                 .selectable(false)
                 .margin_left(6.0)
                 .text_ellipsis()
@@ -1931,14 +1931,14 @@ fn viewer_login(app: AppState) -> Option<String> {
 /// An agent's mark in place of a face: its glyph on a grey disc.
 fn agent_avatar(size: f64) -> impl IntoView {
     Container::new(
-        sidebar_glyph(SidebarIcon::Agents, theme::FG_MUTED)
+        sidebar_glyph(SidebarIcon::Agents, theme::fg_muted)
             .style(move |s| s.size(size * 0.6, size * 0.6)),
     )
     .debug_name("agent-avatar")
     .style(move |s| {
         s.size(size, size)
             .border_radius(size / 2.0)
-            .background(theme::BADGE_BG)
+            .background(theme::badge_bg())
             .items_center()
             .justify_center()
             .flex_shrink(0.0_f32)
@@ -1951,7 +1951,7 @@ fn more_pill(more: usize) -> impl IntoView {
     if more == 0 {
         return Empty::new().into_any();
     }
-    badge(move || format!("{more} more"), theme::FG_SUBTLE, theme::BADGE_BG, None)
+    badge(move || format!("{more} more"), theme::fg_subtle, theme::badge_bg, None)
         .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP))
         .into_any()
 }
@@ -1981,9 +1981,9 @@ pub(crate) fn chevron_button(
     let hovered = RwSignal::new(false);
     let color = move || {
         if hovered.get() {
-            theme::ACCENT
+            theme::accent()
         } else {
-            theme::FG_SUBTLE
+            theme::fg_subtle()
         }
     };
     Container::new(
@@ -2011,7 +2011,7 @@ pub(crate) fn chevron_button(
             .justify_center()
             .border_radius(if slot > theme::CHEVRON_SLOT { theme::RADIUS } else { 3.0 })
             .flex_shrink(0.0_f32)
-            .hover(|s| s.background(theme::BADGE_BG))
+            .hover(|s| s.background(theme::badge_bg()))
     })
 }
 
@@ -2052,13 +2052,13 @@ pub fn delete_confirmation(
                 Label::derived(move || title.to_string()).style(|s| {
                     s.font_size(theme::TEXT_META)
                         .font_weight(theme::weight_emphasis())
-                        .color(theme::FG)
+                        .color(theme::fg())
                         .selectable(false)
                 }),
                 Label::derived(move || copy.to_string())
                 .style(|s| {
                     s.font_size(theme::TEXT_BADGE)
-                        .color(theme::FG_MUTED)
+                        .color(theme::fg_muted())
                         .text_wrap()
                         .width_full()
                         .margin_top(2.0)
@@ -2091,9 +2091,9 @@ pub fn delete_confirmation(
                 s.flex_col()
                     .width_full()
                     .padding(10.0)
-                    .background(theme::NOTICE_BG)
+                    .background(theme::notice_bg())
                     .border(1.0)
-                    .border_color(theme::NOTICE_BORDER)
+                    .border_color(theme::notice_border())
                     .border_radius(theme::RADIUS)
             })
             .into_any()
@@ -2126,7 +2126,7 @@ pub fn thread_menu(
     let thread_id = thread.id.clone();
     let open = Rc::new(open);
     Container::new(
-        sidebar_glyph(SidebarIcon::Ellipsis, theme::FG_SUBTLE).style(|s| s.pointer_events_none()),
+        sidebar_glyph(SidebarIcon::Ellipsis, theme::fg_subtle).style(|s| s.pointer_events_none()),
     )
     .dropdown(move || {
         let id = thread_id.clone();
@@ -2155,7 +2155,7 @@ pub fn thread_menu(
             .justify_center()
             .border_radius(size / 2.0)
             .flex_shrink(0.0_f32)
-            .hover(|s| s.background(theme::BADGE_BG))
+            .hover(|s| s.background(theme::badge_bg()))
     })
     .into_any()
 }
@@ -2407,9 +2407,9 @@ pub fn follow_up(
                 .width_full()
                 .padding_vert(8.0)
                 .padding_horiz(theme::THREAD_INSET)
-                .background(theme::CANVAS_SUBTLE)
+                .background(theme::canvas_subtle())
                 .border_top(1.0)
-                .border_color(theme::BORDER)
+                .border_color(theme::border())
                 .set(BorderBottomLeftRadius, radius)
                 .set(BorderBottomRightRadius, radius)
                 .apply_if(empty.get(), |s| s.hide())
@@ -2494,7 +2494,7 @@ fn resolve_foot(
             .debug_name(name)
             .style(move |s| {
                 s.apply_if(state.is_resolving(&busy_id), |s| {
-                    s.color(theme::FG_SUBTLE).cursor(CursorStyle::Default)
+                    s.color(theme::fg_subtle()).cursor(CursorStyle::Default)
                 })
             })
             .into_any()
@@ -2507,7 +2507,7 @@ fn resolve_foot(
                 .padding_vert(8.0)
                 .padding_horiz(face.inset())
                 .border_top(1.0)
-                .border_color(theme::BORDER)
+                .border_color(theme::border())
                 .apply_if(hidden.get(), |s| s.hide())
         })
 }
@@ -2528,12 +2528,12 @@ fn foot_button(label: &'static str, face: ThreadFace, action: impl Fn() + 'stati
                 .items_center()
                 .font_size(size)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG)
-                .background(theme::CANVAS_SUBTLE)
+                .color(theme::fg())
+                .background(theme::canvas_subtle())
                 .border(1.0)
-                .border_color(theme::BORDER)
+                .border_color(theme::border())
                 .border_radius(theme::RADIUS)
-                .hover(|s| s.background(theme::CANVAS_HOVER))
+                .hover(|s| s.background(theme::canvas_hover()))
         })
 }
 
@@ -2645,7 +2645,7 @@ fn comment_frame(
 fn connector(shown: bool) -> impl IntoView {
     Empty::new().style(move |s| {
         s.width(theme::THREAD_CONNECTOR)
-            .apply_if(shown, |s| s.background(theme::BORDER_MUTED))
+            .apply_if(shown, |s| s.background(theme::border_muted()))
     })
 }
 
@@ -2675,7 +2675,7 @@ fn name_style(s: floem::style::Style, face: ThreadFace) -> floem::style::Style {
     };
     s.font_size(size)
         .font_weight(theme::weight_strong())
-        .color(theme::FG)
+        .color(theme::fg())
         .flex_shrink(0.0_f32)
 }
 
@@ -2694,7 +2694,7 @@ fn when_label(
                 ThreadFace::Inline => theme::TEXT_BADGE,
             };
             s.font_size(size)
-                .color(theme::FG_MUTED)
+                .color(theme::fg_muted())
                 .margin_left(6.0)
                 .text_ellipsis()
                 .min_width(0.0)
@@ -2706,9 +2706,9 @@ fn when_label(
 fn byline_label(text: &'static str, name: &'static str) -> Container {
     badge(
         move || text.to_string(),
-        theme::FG_MUTED,
-        floem::peniko::Color::TRANSPARENT,
-        Some(theme::BORDER),
+        theme::fg_muted,
+        || floem::peniko::Color::TRANSPARENT,
+        Some(theme::border),
     )
     .debug_name(name)
     .style(|s| s.margin_left(6.0))
@@ -3183,7 +3183,7 @@ fn message_body(
 /// going there, and is not there yet.
 pub fn draft_pill() -> impl IntoView {
     cards::tip(
-        badge(|| "Draft".to_string(), theme::GITHUB, theme::GITHUB_BG, None)
+        badge(|| "Draft".to_string(), theme::github, theme::github_bg, None)
             .debug_name("draft-pill")
             .style(|s| s.margin_left(8.0)),
         "Not on GitHub until the review is submitted.".to_string(),
@@ -3328,12 +3328,12 @@ fn approval_card(
     let (once, always, deny) = (answer.clone(), answer.clone(), answer);
     Stack::vertical((
         Stack::horizontal((
-            sidebar_glyph(SidebarIcon::Warning, theme::DRAFT_YELLOW)
+            sidebar_glyph(SidebarIcon::Warning, theme::draft_yellow)
                 .style(|s| s.size(14.0, 14.0).margin_right(6.0).flex_shrink(0.0_f32)),
             Label::derived(move || title.clone()).style(|s| {
                 s.font_size(theme::TEXT_META)
                     .font_weight(theme::weight_emphasis())
-                    .color(theme::FG)
+                    .color(theme::fg())
                     .min_width(0.0)
                     .text_wrap()
             }),
@@ -3344,11 +3344,11 @@ fn approval_card(
                 .style(|s| {
                     s.font_family(theme::CODE_FONT_STACK.to_string())
                         .font_size(theme::TEXT_BADGE)
-                        .color(theme::FG)
+                        .color(theme::fg())
                         .text_wrap()
                         .width_full()
                         .padding(6.0)
-                        .background(theme::CANVAS)
+                        .background(theme::canvas())
                         .border_radius(theme::RADIUS)
                 })
                 .debug_name("approval-command")
@@ -3359,7 +3359,7 @@ fn approval_card(
             Some(detail) => Label::derived(move || detail.clone())
                 .style(|s| {
                     s.font_size(theme::TEXT_BADGE)
-                        .color(theme::FG_MUTED)
+                        .color(theme::fg_muted())
                         .text_wrap()
                         .width_full()
                 })
@@ -3381,9 +3381,9 @@ fn approval_card(
             .gap(6.0)
             .width_full()
             .padding(10.0)
-            .background(theme::NOTICE_BG)
+            .background(theme::notice_bg())
             .border(1.0)
-            .border_color(theme::NOTICE_BORDER)
+            .border_color(theme::notice_border())
             .border_radius(theme::RADIUS)
     })
 }
@@ -3432,8 +3432,8 @@ fn work_changes(state: ReviewState, backend: Rc<Backend>, run: &RunRecord) -> fl
                     clickable(s)
                         .margin_top(8.0)
                         .font_size(theme::TEXT_BADGE)
-                        .color(theme::ACCENT)
-                        .hover(|s| s.color(theme::FG))
+                        .color(theme::accent())
+                        .hover(|s| s.color(theme::fg()))
                 })
                 .into_any()
         },
@@ -3467,7 +3467,7 @@ fn run_footer(backend: Rc<Backend>, run: RunRecord) -> floem::AnyView {
         })
         .style(|s| {
             s.font_size(theme::TEXT_SECTION)
-                .color(theme::FG_SUBTLE)
+                .color(theme::fg_subtle())
                 .selectable(false)
         })
         .into_any(),
@@ -3477,7 +3477,7 @@ fn run_footer(backend: Rc<Backend>, run: RunRecord) -> floem::AnyView {
             Stack::horizontal((
                 Label::derived(move || error.clone()).style(|s| {
                     s.font_size(theme::TEXT_BADGE)
-                        .color(theme::CLOSED)
+                        .color(theme::closed())
                         .text_wrap()
                         .min_width(0.0)
                         .flex_grow(1.0_f32)
@@ -3627,17 +3627,17 @@ pub fn reply_line(
                 ThreadFace::Inline => (theme::THREAD_CONTROL - 4.0, theme::TEXT_META),
             };
             s.font_size(size)
-                .color(theme::FG_SUBTLE)
+                .color(theme::fg_subtle())
                 .width_full()
                 .height(height)
                 .padding_horiz(12.0)
                 .items_center()
-                .background(theme::CANVAS)
+                .background(theme::canvas())
                 .border(1.0)
-                .border_color(theme::BORDER)
+                .border_color(theme::border())
                 .border_radius(theme::RADIUS)
                 .selectable(false)
-                .hover(|s| s.border_color(theme::FG_SUBTLE).cursor(CursorStyle::Text))
+                .hover(|s| s.border_color(theme::fg_subtle()).cursor(CursorStyle::Text))
         })
         .into_any()
 }
@@ -6870,7 +6870,7 @@ mod tests {
             harness
                 .get_computed_style(text_box)
                 .get(floem::style::BorderLeftColor),
-            Some(theme::ACCENT.into()),
+            Some(theme::accent().into()),
             "the border follows the keyboard into the box"
         );
     }

@@ -48,7 +48,7 @@ floem::style_class!(
 /// darker; any other row lights only under the pointer.
 pub fn row_style(s: Style, selected: bool) -> Style {
     let base = clickable(s)
-        .class(FaceRing, |s| s.background(theme::NAV_CANVAS))
+        .class(FaceRing, |s| s.background(theme::nav_canvas()))
         .width_full()
         .height(theme::ROW_HEIGHT)
         .items_center()
@@ -56,16 +56,16 @@ pub fn row_style(s: Style, selected: bool) -> Style {
         .padding_right(13.0)
         .border_radius(theme::NAV_ROW_RADIUS);
     if selected {
-        base.background(theme::NAV_SELECTED)
-            .class(FaceRing, |s| s.background(theme::NAV_SELECTED))
+        base.background(theme::nav_selected())
+            .class(FaceRing, |s| s.background(theme::nav_selected()))
             .hover(|s| {
-                s.background(theme::NAV_SELECTED_PRESSED)
-                    .class(FaceRing, |s| s.background(theme::NAV_SELECTED_PRESSED))
+                s.background(theme::nav_selected_pressed())
+                    .class(FaceRing, |s| s.background(theme::nav_selected_pressed()))
             })
     } else {
         base.hover(|s| {
-            s.background(theme::NAV_HOVER)
-                .class(FaceRing, |s| s.background(theme::NAV_HOVER))
+            s.background(theme::nav_hover())
+                .class(FaceRing, |s| s.background(theme::nav_hover()))
         })
     }
 }
@@ -147,11 +147,11 @@ pub fn title_label(
                 theme::weight_read()
             })
             .color(if muted {
-                theme::NAV_SUBTLE
+                theme::nav_subtle()
             } else if unread {
-                theme::NAV_FG
+                theme::nav_fg()
             } else {
-                theme::NAV_READ
+                theme::nav_read()
             })
             .text_ellipsis()
             .max_width_full()
@@ -230,7 +230,7 @@ pub fn byline(
 ) -> impl IntoView {
     let muted_text = |s: Style| {
         s.font_size(theme::TEXT_BADGE)
-            .color(theme::NAV_MUTED)
+            .color(theme::nav_muted())
             .text_ellipsis()
             .min_width(0.0)
             .flex_shrink(1.0_f32)
@@ -260,13 +260,13 @@ pub fn byline(
 /// A few words after the chips, in the byline's size: how a worktree
 /// stands against its pull request, or what an agent last did there.
 /// Nothing when there's nothing to say.
-pub fn note(text: Option<String>, color: floem::peniko::Color) -> impl IntoView {
+pub fn note(text: Option<String>, color: impl theme::Ink) -> impl IntoView {
     match text {
         Some(text) => Label::derived(move || text.clone())
             .debug_name("row note")
             .style(move |s| {
                 s.font_size(theme::TEXT_BADGE)
-                    .color(color)
+                    .color(color())
                     .margin_left(8.0)
                     .text_ellipsis()
                     .min_width(0.0)
@@ -283,14 +283,14 @@ pub fn age(state: AppState, at: Timestamp) -> impl IntoView {
         .debug_name("row age")
         .style(|s| {
             s.font_size(theme::TEXT_BADGE)
-                .color(theme::NAV_MUTED)
+                .color(theme::nav_muted())
                 .flex_shrink(0.0_f32)
                 .margin_left(8.0)
         })
 }
 
 /// A small glyph beside the age: the pin, the bookmark.
-pub fn mark(glyph: SidebarIcon, color: floem::peniko::Color) -> impl IntoView {
+pub fn mark(glyph: SidebarIcon, color: impl theme::Ink) -> impl IntoView {
     sidebar_glyph(glyph, color).style(|s| s.size(11.0, 11.0).flex_shrink(0.0_f32).margin_left(6.0))
 }
 
@@ -301,7 +301,7 @@ pub fn unread_dot(unread: impl Fn() -> bool + 'static) -> impl IntoView {
     Empty::new().debug_name("unread dot").style(move |s| {
         s.size(7.0, 7.0)
             .border_radius(4.0)
-            .background(theme::UNREAD)
+            .background(theme::unread())
             .flex_shrink(0.0_f32)
             .margin_left(6.0)
             .apply_if(!unread(), |s| s.hide())
@@ -333,17 +333,17 @@ pub fn chips(
             }
             Stack::horizontal((
                 match checks {
-                    Some(CheckStatus::Success) => sidebar_glyph(SidebarIcon::Check, theme::OPEN)
+                    Some(CheckStatus::Success) => sidebar_glyph(SidebarIcon::Check, theme::open)
                         .style(|s| s.size(11.0, 11.0))
                         .into_any(),
-                    Some(CheckStatus::Failure) => sidebar_glyph(SidebarIcon::Close, theme::CLOSED)
+                    Some(CheckStatus::Failure) => sidebar_glyph(SidebarIcon::Close, theme::closed)
                         .style(|s| s.size(11.0, 11.0))
                         .into_any(),
                     Some(CheckStatus::Pending) => Empty::new()
                         .style(|s| {
                             s.size(7.0, 7.0)
                                 .border_radius(4.0)
-                                .background(theme::DRAFT_YELLOW)
+                                .background(theme::draft_yellow())
                         })
                         .into_any(),
                     None => Empty::new().into_any(),
@@ -352,9 +352,9 @@ pub fn chips(
                     Some(r) => Label::derived(move || r.label().to_string())
                         .style(move |s| {
                             let color = match r {
-                                ReviewDecision::Approved => theme::OPEN,
-                                ReviewDecision::ChangesRequested => theme::CLOSED,
-                                ReviewDecision::ReviewRequested => theme::FG_MUTED,
+                                ReviewDecision::Approved => theme::open(),
+                                ReviewDecision::ChangesRequested => theme::closed(),
+                                ReviewDecision::ReviewRequested => theme::fg_muted(),
                             };
                             s.font_size(theme::TEXT_SECTION)
                                 .color(color)
@@ -394,12 +394,12 @@ fn churn_figures(added: u32, deleted: u32) -> impl IntoView {
     Stack::horizontal((
         Label::derived(move || added.clone()).style(|s| {
             s.font_size(theme::TEXT_BADGE)
-                .color(theme::NAV_ADDED)
+                .color(theme::nav_added())
                 .flex_shrink(0.0_f32)
         }),
         Label::derived(move || deleted.clone()).style(|s| {
             s.font_size(theme::TEXT_BADGE)
-                .color(theme::NAV_DELETED)
+                .color(theme::nav_deleted())
                 .flex_shrink(0.0_f32)
                 .margin_left(5.0)
         }),
@@ -428,7 +428,7 @@ pub fn more_button(menu: impl Fn() -> Menu + 'static) -> impl IntoView {
 /// A round button at a row's end that drops `menu` down.
 pub fn menu_button(glyph: SidebarIcon, name: &'static str, menu: impl Fn() -> Menu + 'static) -> impl IntoView {
     Container::new(
-        sidebar_glyph(glyph, theme::FG_SUBTLE)
+        sidebar_glyph(glyph, theme::fg_subtle)
             .style(|s| s.pointer_events_none()),
     )
     .dropdown(menu)
@@ -441,7 +441,7 @@ pub fn menu_button(glyph: SidebarIcon, name: &'static str, menu: impl Fn() -> Me
             .items_center()
             .justify_center()
             .border_radius(13.0)
-            .hover(|s| s.background(theme::BADGE_BG).cursor(CursorStyle::Pointer))
+            .hover(|s| s.background(theme::badge_bg()).cursor(CursorStyle::Pointer))
     })
 }
 

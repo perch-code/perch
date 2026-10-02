@@ -128,7 +128,7 @@ pub fn view(
                     // Hidden rather than absent, so it takes no share of the
                     // column's gap while there is something here.
                     s.font_size(theme::TEXT_BODY)
-                        .color(theme::FG_SUBTLE)
+                        .color(theme::fg_subtle())
                         .width_full()
                         .text_align(floem::text::Alignment::Center)
                         .padding_vert(28.0)
@@ -204,7 +204,7 @@ pub fn view(
     .style(|s| {
         s.size_full()
             .min_height(0.0)
-            .background(theme::CANVAS)
+            .background(theme::canvas())
             .focusable()
     });
 
@@ -274,13 +274,13 @@ fn finding_filters(app: AppState, state: ReviewState) -> impl IntoView {
                     Label::derived(move || format!("Review findings · {open} open")).style(|s| {
                         s.font_size(theme::TEXT_META)
                             .font_weight(theme::weight_emphasis())
-                            .color(theme::FG_MUTED)
+                            .color(theme::fg_muted())
                             .margin_right(4.0)
                     }),
                     finding_filter_button("Open", ReviewFindingFilter::Open, state, open_findings),
                     finding_filter_button("All", ReviewFindingFilter::All, state, all_findings),
                     Label::derived(move || format!("{total} total"))
-                        .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::FG_SUBTLE)),
+                        .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::fg_subtle())),
                 ))
                 .debug_name(format!("review-finding-filters:{item_id}"))
                 .style(|s| {
@@ -288,7 +288,7 @@ fn finding_filters(app: AppState, state: ReviewState) -> impl IntoView {
                         .gap(6.0)
                         .padding_bottom(theme::CONVERSATION_ENTRY_PADDING)
                         .border_bottom(1.0)
-                        .border_color(theme::BORDER_MUTED)
+                        .border_color(theme::border_muted())
                 })
                 .into_any()
             }
@@ -314,14 +314,14 @@ fn finding_filter_button(
                 .items_center()
                 .font_size(theme::TEXT_BADGE)
                 .color(if state.review_finding_filter.get() == filter {
-                    theme::FG
+                    theme::fg()
                 } else {
-                    theme::FG_MUTED
+                    theme::fg_muted()
                 })
                 .background(if state.review_finding_filter.get() == filter {
-                    theme::BADGE_BG
+                    theme::badge_bg()
                 } else {
-                    theme::CANVAS
+                    theme::canvas()
                 })
                 .border_radius(theme::RADIUS)
                 .cursor(CursorStyle::Pointer)
@@ -352,7 +352,7 @@ fn conversation_title(state: ReviewState) -> impl IntoView {
                 .font_size(theme::TEXT_PAGE_TITLE)
                 .font_weight(theme::weight_emphasis())
                 .line_height(theme::PAGE_TITLE_LINE_HEIGHT)
-                .color(theme::FG)
+                .color(theme::fg())
                 .padding_bottom(theme::CONVERSATION_TITLE_GAP)
         })
 }
@@ -647,6 +647,14 @@ mod tests {
                 ),
             ],
         }
+    }
+
+    /// Conversation, with its timeline and a thread, all of it dark once the system is.
+    #[test]
+    fn goes_dark_with_the_system() {
+        let mut harness = app_harness().0;
+        let left = crate::theme::dark_check::light_left(&mut harness);
+        assert!(left.is_empty(), "light colours left in dark:\n{}", left.join("\n"));
     }
 
     fn app_harness() -> (HeadlessHarness, AppState, ReviewState) {
@@ -1522,7 +1530,7 @@ mod tests {
         harness.pointer_move(c.x, c.y);
         harness.recompute_styles();
         let linked = harness.get_computed_style(me);
-        assert_eq!(linked.get(BorderBottomColor), Some(theme::FG_MUTED.into()));
+        assert_eq!(linked.get(BorderBottomColor), Some(theme::fg_muted().into()));
         assert_eq!(linked.get(Cursor), Some(CursorStyle::Pointer));
         click(&mut harness, me);
         assert_eq!(opened(), vec!["https://github.com/me".to_string()]);

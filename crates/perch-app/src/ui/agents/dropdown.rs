@@ -44,7 +44,7 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
     // The glyph alone, as the gauge beside it, with the count and the dot
     // pinned to its corners.
     let button = Stack::new((
-        sidebar_glyph(SidebarIcon::Agents, theme::FG_MUTED).style(|s| s.pointer_events_none()),
+        sidebar_glyph(SidebarIcon::Agents, theme::fg_muted).style(|s| s.pointer_events_none()),
         Label::derived(move || count().to_string())
             .debug_name("agents count")
             .style(move |s| {
@@ -53,14 +53,14 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
                     .inset_right(-5.0)
                     .font_size(10.0)
                     .font_weight(theme::weight_emphasis())
-                    .color(theme::FG_MUTED)
+                    .color(theme::fg_muted())
                     .height(15.0)
                     .min_width(15.0)
                     .padding_horiz(3.0)
                     .border(1.5)
-                    .border_color(theme::CANVAS)
+                    .border_color(theme::canvas())
                     .border_radius(7.5)
-                    .background(theme::BADGE_BG)
+                    .background(theme::badge_bg())
                     .items_center()
                     .justify_center()
                     .selectable(false)
@@ -73,9 +73,9 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
                 .inset_right(1.0)
                 .size(8.0, 8.0)
                 .border(1.5)
-                .border_color(theme::CANVAS)
+                .border_color(theme::canvas())
                 .border_radius(4.0)
-                .background(theme::ACCENT)
+                .background(theme::accent())
                 .pointer_events_none()
                 .apply_if(!waiting(), |s| s.hide())
         }),
@@ -102,9 +102,9 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
                 .justify_center()
                 .border_radius(13.0)
                 .keyboard_navigable()
-                .focus_visible(|s| s.outline(2.0).outline_color(theme::ACCENT_RING))
-                .hover(|s| s.background(theme::BADGE_BG))
-                .apply_if(review.agents_dropdown_open.get(), |s| s.background(theme::BADGE_BG))
+                .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+                .hover(|s| s.background(theme::badge_bg()))
+                .apply_if(review.agents_dropdown_open.get(), |s| s.background(theme::badge_bg()))
         })
         .debug_name("agents-button");
 
@@ -279,7 +279,7 @@ fn popover(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
                 return Label::derived(|| "No agent runs yet".to_string())
                     .style(|s| {
                         s.font_size(theme::TEXT_META)
-                            .color(theme::FG_SUBTLE)
+                            .color(theme::fg_subtle())
                             .padding(16.0)
                             .selectable(false)
                     })
@@ -369,7 +369,7 @@ fn heading(text: &'static str) -> impl IntoView {
     Label::derived(move || text.to_uppercase()).style(|s| {
         s.font_size(theme::TEXT_SECTION)
             .font_weight(theme::weight_emphasis())
-            .color(theme::FG_SUBTLE)
+            .color(theme::fg_subtle())
             .padding_horiz(14.0)
             .padding_top(8.0)
             .padding_bottom(4.0)
@@ -381,7 +381,7 @@ fn item_heading(title: String) -> impl IntoView {
     Label::derived(move || title.clone()).style(|s| {
         s.font_size(theme::TEXT_BADGE)
             .font_weight(theme::weight_emphasis())
-            .color(theme::FG_MUTED)
+            .color(theme::fg_muted())
             .text_ellipsis()
             .width_full()
             .padding_horiz(14.0)
@@ -450,21 +450,21 @@ fn row(
         Empty::new().style(move |s| {
             s.size(7.0, 7.0)
                 .border_radius(4.0)
-                .background(color)
+                .background(color())
                 .margin_top(6.0)
                 .flex_shrink(0.0_f32)
         }),
         Stack::vertical((
             Label::derived(move || subject.clone()).style(|s| {
                 s.font_size(theme::TEXT_META)
-                    .color(theme::FG)
+                    .color(theme::fg())
                     .text_ellipsis()
                     .width_full()
                     .selectable(false)
             }),
             Label::derived(detail).style(|s| {
                 s.font_size(theme::TEXT_BADGE)
-                    .color(theme::FG_SUBTLE)
+                    .color(theme::fg_subtle())
                     .text_ellipsis()
                     .width_full()
                     .selectable(false)
@@ -494,9 +494,9 @@ fn row(
             .padding_horiz(14.0)
             .padding_vert(7.0)
             .keyboard_navigable()
-            .focus(|s| s.background(theme::CANVAS_HOVER));
+            .focus(|s| s.background(theme::canvas_hover()));
         if available {
-            clickable(base).hover(|s| s.background(theme::CANVAS_HOVER))
+            clickable(base).hover(|s| s.background(theme::canvas_hover()))
         } else {
             base.opacity(0.6_f32)
         }

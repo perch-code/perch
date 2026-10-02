@@ -53,7 +53,7 @@ pub fn button(app: AppState, state: ReviewState) -> impl IntoView {
             tip(
                 icon_button(
                     || SidebarIcon::Branch,
-                    || theme::FG_MUTED,
+                    theme::fg_muted,
                     move || ask(app, Pending::Item(id.clone())),
                 ),
                 "Start work".to_string(),
@@ -200,12 +200,12 @@ fn panel(app: AppState, backend: Rc<Backend>) -> impl IntoView {
         Label::new("Create a new worktree from this item?").style(|s| {
             s.font_size(theme::TEXT_BODY)
                 .font_weight(theme::weight_emphasis())
-                .color(theme::FG)
+                .color(theme::fg())
                 .selectable(false)
         }),
         Label::new(title).style(move |s| {
             s.font_size(theme::TEXT_META)
-                .color(theme::FG_MUTED)
+                .color(theme::fg_muted())
                 .text_wrap()
                 .width_full()
                 .margin_top(4.0)

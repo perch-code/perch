@@ -185,7 +185,7 @@ pub fn review_view(
         s.size_full()
             .flex_col()
             .min_height(0.0)
-            .background(theme::CANVAS)
+            .background(theme::canvas())
     })
 }
 
