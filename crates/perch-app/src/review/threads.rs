@@ -2314,13 +2314,16 @@ pub(crate) fn notices(
     let finding_id = thread.id.clone();
     let finding = Memo::new(move |_| cards::finding_of(app, state, &finding_id).is_some());
     Stack::vertical((
-        Container::new(cards::finding_controls(app, state, backend.clone(), thread.id.clone()))
-            .style(move |s| {
-                s.width_full()
-                    .padding_top(inset)
-                    .padding_horiz(inset)
-                    .apply_if(!finding.get(), |s| s.hide())
-            }),
+        // A finding's band runs from one side of the box to the other,
+        // so it sets its own room in from them.
+        Container::new(cards::finding_controls(
+            app,
+            state,
+            backend.clone(),
+            thread.id.clone(),
+            inset,
+        ))
+        .style(move |s| s.width_full().apply_if(!finding.get(), |s| s.hide())),
         delete_confirmation(state, backend, thread.id.clone(), thread.is_github_bound())
             .style(move |s| s.padding_top(inset).padding_horiz(inset)),
     ))

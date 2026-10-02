@@ -1954,6 +1954,7 @@ pub(crate) fn finding_controls(
     state: ReviewState,
     backend: Rc<Backend>,
     thread_id: String,
+    inset: f64,
 ) -> impl IntoView {
     dyn_container(
         move || {
@@ -1980,28 +1981,38 @@ pub(crate) fn finding_controls(
         move |summary| match summary {
             Some((summary, historical, original_group)) => {
                 let finding = &summary.finding;
+                // "Claude Code · Opus", as the Agents section names a run.
+                let name = |backend: &str, model: &str| {
+                    format!(
+                        "{} \u{b7} {}",
+                        crate::review::review_launch::backend_label_from_name(backend),
+                        threads::model_label(model)
+                    )
+                };
                 let reviewer = if summary.attributions.is_empty() {
                     match (&summary.backend, &summary.model) {
-                        (Some(backend), Some(model)) => format!("{backend} / {model}"),
-                        (Some(backend), None) => backend.clone(),
+                        (Some(backend), Some(model)) => name(backend, model),
+                        (Some(backend), None) => {
+                            crate::review::review_launch::backend_label_from_name(backend).to_string()
+                        }
                         _ => "reviewer unavailable".to_string(),
                     }
                 } else {
                     summary
                         .attributions
                         .iter()
-                        .map(|(backend, model)| format!("{backend} / {model}"))
+                        .map(|(backend, model)| name(backend, model))
                         .collect::<Vec<_>>()
                         .join(", ")
                 };
                 let seen = if summary.seen_in_reviews.is_empty() {
                     summary
                         .original_review_number
-                        .map(|number| format!("review #{number}"))
+                        .map(|number| format!("found in review #{number}"))
                         .unwrap_or_else(|| "original review unavailable".into())
                 } else {
                     format!(
-                        "seen in {}",
+                        "found in {}",
                         summary
                             .seen_in_reviews
                             .iter()
@@ -2010,37 +2021,20 @@ pub(crate) fn finding_controls(
                             .join(", ")
                     )
                 };
-                let verified = finding
-                    .last_verified_head_sha
-                    .as_deref()
-                    .map(|sha| format!("verified at {}", short_revision(sha)))
-                    .unwrap_or_else(|| "not yet verified".into());
-                let metadata = format!(
-                    "{} · {reviewer} · {seen} · {verified}",
-                    finding_severity_label(summary.severity)
-                );
-                let status = if let Some(canonical) = finding.duplicate_of.as_deref() {
-                    format!("Linked duplicate of {}", short_finding(canonical))
-                } else if let Some(candidate) = finding.possible_duplicate_of.as_deref() {
-                    format!("Possible duplicate of {}", short_finding(candidate))
-                } else if finding.disposition == perch_github::FindingDisposition::Dismissed {
-                    format!(
-                        "Dismissed · {}",
-                        finding
-                            .dismissal_reason
-                            .as_deref()
-                            .unwrap_or("No reason recorded")
-                    )
-                } else if finding.verification == perch_github::FindingVerification::Fixed {
-                    "Verified fixed".to_string()
+                let checked = finding.last_verified_head_sha.clone();
+                let checked_word = if finding.verification == perch_github::FindingVerification::Fixed
+                    || finding.disposition == perch_github::FindingDisposition::VerifiedFixed
+                {
+                    "fixed at"
                 } else {
-                    format!(
-                        "{} · {}",
-                        finding.disposition.name(),
-                        finding.verification.name()
-                    )
+                    "checked at"
                 };
-
+                let status = finding_status(finding);
+                let reason = (finding.disposition == perch_github::FindingDisposition::Dismissed)
+                    .then(|| finding.dismissal_reason.clone())
+                    .flatten();
+                let (severity_ink, severity_fill) = severity_inks(summary.severity);
+                let severity = finding_severity_label(summary.severity);
                 let finding_id = finding.id.clone();
                 let dismiss_backend = backend.clone();
                 let dismiss = if finding.disposition == perch_github::FindingDisposition::Open
@@ -2054,7 +2048,7 @@ pub(crate) fn finding_controls(
                     })
                     .into_any()
                 } else {
-                    Empty::new().into_any()
+                    absent()
                 };
 
                 let finding_id = finding.id.clone();
@@ -2067,7 +2061,7 @@ pub(crate) fn finding_controls(
                     })
                     .into_any()
                 } else {
-                    Empty::new().into_any()
+                    absent()
                 };
 
                 let finding_id = finding.id.clone();
@@ -2083,7 +2077,7 @@ pub(crate) fn finding_controls(
                         })
                         .into_any()
                     }
-                    _ => Empty::new().into_any(),
+                    _ => absent(),
                 };
 
                 let finding_id = finding.id.clone();
@@ -2094,7 +2088,7 @@ pub(crate) fn finding_controls(
                     })
                     .into_any()
                 } else {
-                    Empty::new().into_any()
+                    absent()
                 };
 
                 let original_backend = backend.clone();
@@ -2102,48 +2096,182 @@ pub(crate) fn finding_controls(
                     Some(group) if !historical => {
                         let group_id = group.group.id.clone();
                         let item_id = group.group.item_id.clone();
-                        thread_action("View original", move || {
+                        quiet_action("View original", move || {
                             let request_id =
                                 original_backend.open_review_snapshot(&item_id, &group_id);
                             app.begin_historical_review(state, group.clone(), request_id);
                         })
                         .into_any()
                     }
-                    _ => Empty::new().into_any(),
+                    _ => absent(),
                 };
 
+                let sha_backend = backend.clone();
+                let provenance = Stack::horizontal((
+                    sidebar_glyph(SidebarIcon::Agents, theme::fg_subtle)
+                        .style(|s| s.size(12.0, 12.0).flex_shrink(0.0_f32)),
+                    Label::derived(move || reviewer.clone())
+                        .style(|s| finding_meta(s).color(theme::fg_muted())),
+                    Label::derived(move || format!("\u{b7} {seen}")).style(finding_meta),
+                    match checked {
+                        Some(sha) => Stack::horizontal((
+                            Label::derived(move || format!("\u{b7} {checked_word}"))
+                                .style(finding_meta),
+                            {
+                                let open = sha.clone();
+                                Label::derived(move || short_sha(&sha).to_string())
+                                    .debug_name("finding-checked-sha")
+                                    .on_event_stop(el::Click, move |_, _| {
+                                        open_commit(state, &sha_backend, &open)
+                                    })
+                                    .style(|s| {
+                                        underlined_link(
+                                            finding_meta(s)
+                                                .font_family(theme::CODE_FONT_STACK.to_string())
+                                                .color(theme::link()),
+                                        )
+                                    })
+                            },
+                        ))
+                        .style(|s| s.items_center().gap(4.0))
+                        .into_any(),
+                        None => Label::derived(|| "\u{b7} not yet checked".to_string())
+                            .style(finding_meta)
+                            .into_any(),
+                    },
+                ))
+                .style(|s| s.items_center().gap(4.0).flex_wrap(floem::style::FlexWrap::Wrap));
                 Stack::vertical((
-                    Label::derived(move || metadata.clone()).style(|s| {
-                        s.font_size(theme::TEXT_BADGE)
-                            .font_weight(theme::weight_emphasis())
-                            .color(theme::fg_muted())
-                            .text_wrap()
-                    }),
                     Stack::horizontal((
-                        Label::derived(move || status.clone())
-                            .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::fg_subtle())),
-                        Empty::new().style(|s| s.flex_grow(1.0_f32)),
+                        crate::ui::widgets::badge(
+                            move || severity.to_string(),
+                            severity_ink,
+                            severity_fill,
+                            None,
+                        ),
+                        Label::derived(|| "Review finding".to_string()).style(|s| {
+                            s.font_size(theme::TEXT_META)
+                                .font_weight(theme::weight_emphasis())
+                                .color(theme::fg())
+                                .flex_shrink(0.0_f32)
+                                .selectable(false)
+                        }),
+                        crate::ui::widgets::badge(move || status.0.clone(), status.1, status.2, None)
+                            .debug_name("finding-status"),
+                        match reason {
+                            Some(reason) => Label::derived(move || reason.clone())
+                                .style(|s| finding_meta(s).text_ellipsis().min_width(0.0).flex_shrink(1.0_f32))
+                                .into_any(),
+                            None => absent(),
+                        },
+                        Empty::new().style(|s| s.flex_grow(1.0_f32).min_width(8.0)),
+                        view_original,
                         dismiss,
                         reopen,
                         link,
                         unlink,
-                        view_original,
                     ))
-                    .style(|s| s.items_center().gap(6.0).width_full()),
+                    .style(|s| s.items_center().gap(6.0).width_full().min_height(24.0)),
+                    provenance,
                 ))
-                .style(|s| {
+                .debug_name("finding-band")
+                // Perch's own note on a thread, so on Perch's grey, from
+                // one side of the box to the other as the reader's asks
+                // are.
+                .style(move |s| {
                     s.flex_col()
                         .width_full()
-                        .gap(5.0)
-                        .padding(8.0)
-                        .background(theme::canvas_subtle())
-                        .border_radius(theme::RADIUS)
+                        .gap(6.0)
+                        .padding_vert(10.0)
+                        .padding_horiz(inset)
+                        .background(theme::perch_bg())
+                        .border_bottom(1.0)
+                        .border_color(theme::border_muted())
                 })
                 .into_any()
             }
             None => Empty::new().into_any(),
         },
     )
+    .style(|s| s.width_full())
+}
+
+/// A chip's ink or fill, read as it is drawn so it follows the appearance.
+type ChipInk = fn() -> Color;
+
+/// What a finding's status chip says, and its ink and fill: fixed in
+/// green, a duplicate in GitHub's blue, disputed in the notice's yellow,
+/// and the rest grey.
+fn finding_status(finding: &perch_github::Finding) -> (String, ChipInk, ChipInk) {
+    use perch_github::{FindingDisposition, FindingVerification};
+    if let Some(canonical) = finding.duplicate_of.as_deref() {
+        let text = format!("Duplicate of {}", short_finding(canonical));
+        return (text, theme::news_fg, theme::news_bg);
+    }
+    if let Some(candidate) = finding.possible_duplicate_of.as_deref() {
+        let text = format!("Possible duplicate of {}", short_finding(candidate));
+        return (text, theme::news_fg, theme::news_bg);
+    }
+    if finding.disposition == FindingDisposition::Dismissed {
+        return ("Dismissed".into(), theme::fg_muted, theme::badge_bg);
+    }
+    if finding.verification == FindingVerification::Fixed
+        || finding.disposition == FindingDisposition::VerifiedFixed
+    {
+        return ("\u{2713} Verified fixed".into(), theme::open, theme::diff_added_bg);
+    }
+    match finding.verification {
+        FindingVerification::Present => ("Still present".into(), theme::fg_muted, theme::badge_bg),
+        FindingVerification::Disputed => ("Disputed".into(), theme::notice_fg, theme::notice_bg),
+        FindingVerification::NotVerified => {
+            ("Couldn't verify".into(), theme::fg_muted, theme::badge_bg)
+        }
+        _ => ("Not yet checked".into(), theme::fg_muted, theme::badge_bg),
+    }
+}
+
+/// A severity chip's ink and fill: High and Critical in red, Medium in
+/// the notice's yellow, the rest grey.
+fn severity_inks(severity: perch_github::FindingSeverity) -> (ChipInk, ChipInk) {
+    use perch_github::FindingSeverity;
+    match severity {
+        FindingSeverity::Critical | FindingSeverity::High => (theme::closed, theme::diff_deleted_bg),
+        FindingSeverity::Medium => (theme::notice_fg, theme::notice_bg),
+        _ => (theme::fg_muted, theme::badge_bg),
+    }
+}
+
+/// What stands in for an action a finding does not offer: hidden, so it
+/// takes no share of the row's gap, which would push the rest in from
+/// the band's edge.
+fn absent() -> floem::AnyView {
+    Empty::new().style(|s| s.hide()).into_any()
+}
+
+/// The finding band's quiet second line.
+fn finding_meta(s: floem::style::Style) -> floem::style::Style {
+    s.font_size(theme::TEXT_BADGE)
+        .color(theme::fg_subtle())
+        .flex_shrink(0.0_f32)
+        .selectable(false)
+}
+
+/// An action said in a word, not a button: the one a finding offers
+/// besides what is done to it.
+fn quiet_action(label: &'static str, action: impl Fn() + 'static) -> Label {
+    Label::derived(move || label.to_string())
+        .on_event_stop(el::Click, move |_, _| action())
+        .style(|s| {
+            clickable(s)
+                .font_size(theme::TEXT_BADGE)
+                .color(theme::fg_muted())
+                .padding_horiz(6.0)
+                .height(24.0)
+                .items_center()
+                .border_radius(theme::RADIUS)
+                .selectable(false)
+                .hover(|s| s.color(theme::fg()).background(theme::canvas_hover()))
+        })
 }
 
 /// A small bordered button for what can be done to a thread: a finding's
@@ -2176,10 +2304,6 @@ fn finding_severity_label(severity: perch_github::FindingSeverity) -> &'static s
         perch_github::FindingSeverity::High => "High",
         perch_github::FindingSeverity::Critical => "Critical",
     }
-}
-
-fn short_revision(value: &str) -> &str {
-    &value[..value.len().min(8)]
 }
 
 fn short_finding(value: &str) -> String {

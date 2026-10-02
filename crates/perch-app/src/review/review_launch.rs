@@ -1436,7 +1436,7 @@ fn backend_label(backend: perch_agent::Backend) -> &'static str {
     }
 }
 
-fn backend_label_from_name(backend: &str) -> &'static str {
+pub(crate) fn backend_label_from_name(backend: &str) -> &'static str {
     perch_agent::Backend::parse(backend)
         .map(backend_label)
         .unwrap_or("Reviewer")
