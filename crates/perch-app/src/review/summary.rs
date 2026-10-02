@@ -18,7 +18,7 @@ use perch_github::{CheckState, Item, ItemKind, ItemSubject, SubjectState};
 use crate::backend::Backend;
 use crate::icons::{self, SidebarIcon};
 use crate::review::cards::{avatar_url_for, tip, verdict_glyph};
-use crate::review::model::{ItemTab, ReviewState};
+use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
@@ -870,10 +870,12 @@ pub fn back_to_current(app: AppState, state: ReviewState, backend: Rc<Backend>) 
 
 /// Why the files on screen may not be the pull request's latest.
 ///
-/// Three cases, one shape: the pull request moved while the worktree had
-/// work in it, the pull request could not be fetched at all, or Files is
-/// showing a commit or the index rather than the disk. None offers a
+/// Two cases, one shape: the pull request moved while the worktree had
+/// work in it, or it could not be fetched at all. Neither offers a
 /// button. Reading what is on screen is the right answer today.
+///
+/// A commit, the index or a run on Code is no case: the language servers
+/// are given each file as it shows.
 fn notice_text(state: ReviewState) -> Option<String> {
     if let Some(head) = state.stale_head.get() {
         let short: String = head.chars().take(7).collect();
@@ -883,28 +885,6 @@ fn notice_text(state: ReviewState) -> Option<String> {
     }
     if state.offline.get() {
         return Some("Offline; showing the checkout as it was last left".to_string());
-    }
-    // Under a commit or the index the files on Code are not the
-    // disk's, which is what rust-analyzer reads, so hover and
-    // definition can be off by the lines that differ.
-    if state.tab.get() == ItemTab::Code {
-        match state.scope.get() {
-            perch_git::Scope::Commit { sha } => {
-                let short: String = sha.chars().take(7).collect();
-                return Some(format!(
-                    "Showing {short}; the language servers see the working tree"
-                ));
-            }
-            perch_git::Scope::Staged => {
-                return Some("Showing the index; the language servers see the working tree".to_string());
-            }
-            perch_git::Scope::Run { .. } => {
-                return Some(
-                    "Showing what a run changed; the language servers see the working tree".to_string(),
-                );
-            }
-            _ => {}
-        }
     }
     None
 }

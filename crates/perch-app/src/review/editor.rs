@@ -2416,7 +2416,7 @@ mod window {
 
         let mut asked = || {
             std::iter::from_fn(|| commands.try_recv().ok())
-                .filter(|c| matches!(c, crate::backend::Command::DocumentSymbols { path } if path == "src/x.rs"))
+                .filter(|c| matches!(c, crate::backend::Command::DocumentSymbols { path, .. } if path == "src/x.rs"))
                 .count()
         };
         assert_eq!(asked(), 0, "nothing is asked of a server that is not there");

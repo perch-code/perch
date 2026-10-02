@@ -358,9 +358,11 @@ pub enum Command {
     },
     /// A file's outline, as the blocks its first lines pin over the code
     /// while the rest of them scrolls under. Opening a file asks for its
-    /// own; this is for the files open before the server came up.
+    /// own; this is for the files open before the server came up, which
+    /// is given `text`, the file as it shows, first.
     DocumentSymbols {
         path: String,
+        text: String,
     },
     /// The outline of a deleted file's removed lines, `text`, which is on
     /// no disk for the server to read.
@@ -2837,9 +2839,10 @@ impl Backend {
         });
     }
 
-    pub fn document_symbols(&self, path: &str) {
+    pub fn document_symbols(&self, path: &str, text: String) {
         let _ = self.commands.send(Command::DocumentSymbols {
             path: path.to_string(),
+            text,
         });
     }
 
@@ -4621,7 +4624,7 @@ async fn run(
                 let navigation_requests = ctx.navigation_requests.clone();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    if open_file(
+                    if let Some(shown) = open_file(
                         preparer,
                         checkout.clone(),
                         events.clone(),
@@ -4641,6 +4644,7 @@ async fn run(
                             events,
                             path,
                             navigation_id,
+                            Some(shown),
                         )
                         .await;
                     }
@@ -4672,6 +4676,7 @@ async fn run(
                             events,
                             path,
                             navigation_id,
+                            None,
                         )
                         .await;
                     }
@@ -4834,7 +4839,7 @@ async fn run(
                     let _ = events.send(Event::LspDocumentHighlight { token, ranges });
                 });
             }
-            Command::DocumentSymbols { path } => {
+            Command::DocumentSymbols { path, text } => {
                 let checkout = checkout.clone();
                 let language_servers = language_servers.clone();
                 let events = events.clone();
@@ -4843,10 +4848,15 @@ async fn run(
                     else {
                         return;
                     };
-                    // Not announced, so the server answers from the file on
-                    // disk.
-                    let Ok(text) = tokio::fs::read_to_string(&full).await else {
-                        return;
+                    // A file opened before the server was there to be given
+                    // it is given it now, as the open would have. One the
+                    // open did give keeps what it was given.
+                    let text = match client.given(&full) {
+                        Some(given) => given.to_string(),
+                        None => {
+                            client.did_open(&full, &text).await;
+                            text
+                        }
                     };
                     send_outline(&client, &full, &text, path, &events).await;
                 });
@@ -10472,6 +10482,11 @@ async fn set_scope(
                 return;
             }
         };
+        // Under the new scope a file shows other text, which it is given
+        // as it loads again; one that does not would keep the old scope's.
+        // Taken back before the scope is the open one, so no load under it
+        // gives a server anything first.
+        close_given_files(&ctx.language_servers, &checkout.worktree).await;
         let committed = ctx
             .navigation_requests
             .with_current(navigation_id, || {
@@ -15876,7 +15891,19 @@ async fn reopen_from_disk(
     })
 }
 
-/// The pull request's file list, from a local diff rather than the API.
+/// What a file load leaves for its language server: the text the file
+/// shows, which the server is to answer about.
+struct Shown {
+    /// The head side as the scope has it: under a commit, the index or a
+    /// run, not the disk's. `None` for a deletion, or a file of a language
+    /// no server reads.
+    text: Option<String>,
+    /// The scope generation it was loaded under.
+    scope_gen: u64,
+}
+
+/// Load one file of the open checkout under its scope and send it to the
+/// window. `None` when nothing was sent, or the load is no longer wanted.
 async fn open_file(
     preparer: Arc<Preparer>,
     slot: Arc<std::sync::Mutex<Option<ReviewContext>>>,
@@ -15884,8 +15911,8 @@ async fn open_file(
     navigation_requests: Arc<NavigationRequests>,
     path: String,
     navigation_id: u64,
-) -> bool {
-    let Some((checkout, changed, scope, item_id, scope_gen)) = navigation_requests
+) -> Option<Shown> {
+    let (checkout, changed, scope, item_id, scope_gen) = navigation_requests
         .with_current(navigation_id, || {
             slot.lock().ok().and_then(|guard| {
                 guard
@@ -15902,10 +15929,7 @@ async fn open_file(
                     })
             })
         })
-        .flatten()
-    else {
-        return false;
-    };
+        .flatten()?;
 
     let entry = changed.iter().find(|f| f.path == path).cloned();
     let (base_rev, head_rev) = scope.sides(&checkout.merge_base, &checkout.head_sha);
@@ -15934,7 +15958,7 @@ async fn open_file(
                         message: "file is too large to display".into(),
                     },
                 );
-                return false;
+                return None;
             }
             Ok(Some(text)) => text,
             Ok(None) => {
@@ -15953,7 +15977,7 @@ async fn open_file(
                         message: "file is not there".into(),
                     },
                 );
-                return false;
+                return None;
             }
             Err(e) => {
                 send_file_event_if_current(
@@ -15971,7 +15995,7 @@ async fn open_file(
                         message: e.to_string(),
                     },
                 );
-                return false;
+                return None;
             }
         },
         None => match tokio::fs::read(checkout.worktree.join(&path)).await {
@@ -15991,7 +16015,7 @@ async fn open_file(
                         message: "file is too large to display".into(),
                     },
                 );
-                return false;
+                return None;
             }
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(text) => text,
@@ -16011,7 +16035,7 @@ async fn open_file(
                             message: "file is not text".into(),
                         },
                     );
-                    return false;
+                    return None;
                 }
             },
             Err(e) => {
@@ -16030,7 +16054,7 @@ async fn open_file(
                         message: e.to_string(),
                     },
                 );
-                return false;
+                return None;
             }
         },
     };
@@ -16060,6 +16084,13 @@ async fn open_file(
         .as_ref()
         .and_then(|f| f.head_blob.clone())
         .unwrap_or_default();
+    // A deletion shows no head, and a file no server reads needs none.
+    let shown = Shown {
+        text: (status != Some(perch_git::ChangeStatus::Deleted)
+            && perch_lsp::ServerKind::for_path(&path).is_some())
+        .then(|| head.clone()),
+        scope_gen,
+    };
 
     // Parsing and diffing are CPU work; keep them off the async runtime's
     // reactor threads.
@@ -16092,10 +16123,11 @@ async fn open_file(
                 file: Arc::new(file),
                 },
             )
+            .then_some(shown)
         }
         Err(e) => {
             tracing::warn!(error = %e, "file load panicked");
-            false
+            None
         }
     }
 }
@@ -16608,6 +16640,14 @@ fn send_if_current(
 /// Tell the language server about a file the user just opened, and ask
 /// it for the file's outline straight after, so the answer is about the
 /// text it was just given.
+///
+/// The text is the file as it shows: under a commit, the index or a run
+/// that is not the disk's, and every position asked about it is counted
+/// in it. `shown` is what the load put on screen, and the scope it was
+/// loaded under, which must still be the open one: a load the scope has
+/// moved past would give the server text nobody sees. Without a shown
+/// text, a deletion's or a file outside the checkout's, the disk's is
+/// given.
 async fn announce_file(
     checkout: Arc<std::sync::Mutex<Option<ReviewContext>>>,
     slot: Servers,
@@ -16615,6 +16655,7 @@ async fn announce_file(
     events: EventSender<Event>,
     path: String,
     navigation_id: u64,
+    shown: Option<Shown>,
 ) {
     let Some(worktree) = navigation_requests
         .with_current(navigation_id, || {
@@ -16636,26 +16677,51 @@ async fn announce_file(
         return;
     };
     let full = worktree.join(&path);
-    if let Ok(text) = tokio::fs::read_to_string(&full).await {
-        let still_current = navigation_requests
-            .with_current(navigation_id, || {
-                checkout.lock().ok().is_some_and(|guard| {
-                    guard
-                        .as_ref()
-                        .is_some_and(|context| context.navigation_id == navigation_id)
+    let scope_gen = shown.as_ref().map(|s| s.scope_gen);
+    let text = match shown.and_then(|s| s.text) {
+        Some(text) => text,
+        None => match tokio::fs::read_to_string(&full).await {
+            Ok(text) => text,
+            Err(_) => return,
+        },
+    };
+    let still_current = navigation_requests
+        .with_current(navigation_id, || {
+            checkout.lock().ok().is_some_and(|guard| {
+                guard.as_ref().is_some_and(|context| {
+                    context.navigation_id == navigation_id
+                        && scope_gen.is_none_or(|g| g == context.scope_gen)
                 })
             })
-            .unwrap_or(false);
-        if still_current {
-            client.did_open(&full, &text).await;
-            send_outline(&client, &full, &text, path, &events).await;
-        }
+        })
+        .unwrap_or(false);
+    if still_current {
+        client.did_open(&full, &text).await;
+        send_outline(&client, &full, &text, path, &events).await;
+    }
+}
+
+/// Take back every file the servers running for `worktree` were given,
+/// so they read the disk again until the files on screen are given to
+/// them anew: for a scope change, after which every loaded file loads
+/// again under the new scope, and one no longer loaded would keep the
+/// old scope's text.
+async fn close_given_files(slot: &Servers, worktree: &Path) {
+    let clients: Vec<Arc<perch_lsp::Client>> = slot
+        .lock()
+        .await
+        .values()
+        .filter(|client| client.root() == worktree)
+        .cloned()
+        .collect();
+    for client in clients {
+        client.close_documents().await;
     }
 }
 
 /// Ask the server for a file's outline and send it on with a hash of the
 /// lines it is counted in, `text`, the file as the server has it: a head
-/// of other text, a commit's, takes none of it.
+/// of other text takes none of it.
 async fn send_outline(
     client: &perch_lsp::Client,
     full: &Path,
@@ -16746,8 +16812,13 @@ async fn read_locations(
             ),
         };
         if !texts.contains_key(&target) {
-            let lines = tokio::fs::read_to_string(&target)
-                .await
+            // The server counts lines in the text it was given, which for
+            // a file shown under a commit is not the disk's.
+            let text = match client.and_then(|c| c.given(&target)) {
+                Some(given) => Some(given.to_string()),
+                None => tokio::fs::read_to_string(&target).await.ok(),
+            };
+            let lines = text
                 .map(|t| t.lines().map(str::to_string).collect())
                 .unwrap_or_default();
             texts.insert(target.clone(), lines);
@@ -18822,6 +18893,107 @@ while True:
             Some(format!("// {uri}").as_str())
         );
         jdtls.shutdown().await;
+    }
+
+    /// Under a commit a file is given to its server as it shows, not as the
+    /// disk has it, so every position asked about it, and every line read
+    /// back, is the commit's. A load the scope has moved past gives nothing,
+    /// and the files given are taken back for a scope change.
+    #[tokio::test]
+    async fn a_file_under_a_commit_is_given_to_its_server_as_it_shows() {
+        use perch_lsp::ServerKind;
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let tree = tempfile::tempdir().unwrap();
+        let worktree = std::fs::canonicalize(tree.path()).unwrap();
+        git(&worktree, &["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(worktree.join("src")).unwrap();
+        let commit = |text: &str| {
+            std::fs::write(worktree.join("src/lib.rs"), text).unwrap();
+            git(&worktree, &["add", "."]);
+            git(&worktree, &["commit", "-q", "-m", text.trim()]);
+            git(&worktree, &["rev-parse", "HEAD"])
+        };
+        let base = commit("fn base() {}\n");
+        let shown = commit("fn shown() {}\n");
+        let head = commit("fn head() {}\n");
+
+        let item = store_pull(&ctx, 10);
+        open_in_slot(&ctx, &item);
+        let navigation_id = ctx.navigation_requests.begin_current();
+        let scope = perch_git::Scope::Commit { sha: shown.clone() };
+        let checkout = perch_git::Checkout {
+            worktree: worktree.clone(),
+            bare: worktree.clone(),
+            branch: "main".into(),
+            head_sha: head,
+            stale: None,
+            merge_base: base,
+        };
+        let files = scoped_files(&ctx.preparer, &checkout, &scope).await.unwrap();
+        if let Some(open) = ctx.slot.lock().unwrap().as_mut() {
+            open.checkout = checkout;
+            open.files = Arc::new(files);
+            open.scope = scope;
+            open.navigation_id = navigation_id;
+        }
+        let rust = named_server(&worktree, ServerKind::RustAnalyzer, "-").await;
+        ctx.language_servers
+            .lock()
+            .await
+            .insert(ServerKind::RustAnalyzer, rust.clone());
+
+        let path = "src/lib.rs".to_string();
+        let full = worktree.join(&path);
+        let loaded = open_file(
+            ctx.preparer.clone(),
+            ctx.slot.clone(),
+            ctx.events.clone(),
+            ctx.navigation_requests.clone(),
+            path.clone(),
+            navigation_id,
+        )
+        .await
+        .expect("the file loads");
+        let announce = |shown| {
+            announce_file(
+                ctx.slot.clone(),
+                ctx.language_servers.clone(),
+                ctx.navigation_requests.clone(),
+                ctx.events.clone(),
+                path.clone(),
+                navigation_id,
+                Some(shown),
+            )
+        };
+        announce(loaded).await;
+        assert_eq!(rust.given(&full).as_deref(), Some("fn shown() {}\n"), "the commit's, not the disk's");
+
+        let stale = Shown {
+            text: Some("fn other() {}\n".into()),
+            scope_gen: 99,
+        };
+        announce(stale).await;
+        assert_eq!(rust.given(&full).as_deref(), Some("fn shown() {}\n"), "a stale load gives nothing");
+
+        let at = perch_lsp::lsp_types::Position {
+            line: 0,
+            character: 3,
+        };
+        let location = perch_lsp::lsp_types::Location {
+            uri: perch_lsp::client::path_to_uri(&full).unwrap(),
+            range: perch_lsp::lsp_types::Range { start: at, end: at },
+        };
+        let located = read_locations(&worktree, std::slice::from_ref(&location), Some(&rust)).await;
+        assert_eq!(located[0].text, "fn shown() {}", "a line is read as the server counts it");
+
+        close_given_files(&ctx.language_servers, Path::new("/elsewhere")).await;
+        assert!(rust.given(&full).is_some(), "another worktree's servers are not this one's");
+        close_given_files(&ctx.language_servers, &worktree).await;
+        assert_eq!(rust.given(&full), None, "read from disk again");
+        let located = read_locations(&worktree, &[location], Some(&rust)).await;
+        assert_eq!(located[0].text, "fn head() {}");
+        rust.shutdown().await;
     }
 
     /// Two Installs of one server run one command, and every window hears

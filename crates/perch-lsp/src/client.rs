@@ -95,8 +95,8 @@ pub struct Client {
     /// both, so a status told again lands in its place among the rest.
     told: std::sync::Mutex<(mpsc::UnboundedSender<ServerEvent>, Status)>,
     /// The files given to the server, by URI: the version each is at and
-    /// a hash of the text it was given.
-    documents: std::sync::Mutex<HashMap<String, (i32, u64)>>,
+    /// the text it was given, which it reads in place of the disk's.
+    documents: std::sync::Mutex<HashMap<String, (i32, Arc<str>)>>,
     /// The class files jdtls named, by the URI without its query, which is
     /// how Perch knows them, to the URI jdtls gave.
     class_files: std::sync::Mutex<HashMap<String, String>>,
@@ -362,23 +362,17 @@ impl Client {
     /// disk until the file is closed. The same text is not sent twice.
     pub async fn did_open(&self, path: &Path, text: &str) {
         let Some(uri) = self.uri_for(path) else { return };
-        let hash = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            text.hash(&mut hasher);
-            hasher.finish()
-        };
         let changed = {
             let Ok(mut documents) = self.documents.lock() else { return };
             match documents.get_mut(&uri.to_string()) {
-                Some((_, given)) if *given == hash => return,
+                Some((_, given)) if **given == *text => return,
                 Some((version, given)) => {
                     *version += 1;
-                    *given = hash;
+                    *given = Arc::from(text);
                     Some(*version)
                 }
                 None => {
-                    documents.insert(uri.to_string(), (1, hash));
+                    documents.insert(uri.to_string(), (1, Arc::from(text)));
                     None
                 }
             }
@@ -416,6 +410,14 @@ impl Client {
             serde_json::to_value(params).unwrap_or(Value::Null),
         )
         .await;
+    }
+
+    /// The text the server was given for a file, which its answers about
+    /// the file count lines in. `None` for a file it reads from disk.
+    pub fn given(&self, path: &Path) -> Option<Arc<str>> {
+        let uri = self.uri_for(path)?;
+        let documents = self.documents.lock().ok()?;
+        documents.get(&uri.to_string()).map(|(_, text)| text.clone())
     }
 
     /// Tell the server a file it was given is gone: the text of a deleted
@@ -1299,12 +1301,16 @@ while True:
         assert_eq!(client.binary(), Path::new("python3"));
 
         let file = dir.join("lib.rs");
+        assert_eq!(client.given(&file), None, "read from disk until given");
         client.did_open(&file, "one").await;
         client.did_open(&file, "one").await;
         client.did_open(&file, "two").await;
+        assert_eq!(client.given(&file).as_deref(), Some("two"), "the text it was last given");
         client.close_documents().await;
+        assert_eq!(client.given(&file), None, "read from disk again once closed");
         client.did_close(&file).await;
         client.did_open(&file, "two").await;
+        assert_eq!(client.given(&file).as_deref(), Some("two"));
         client.tell_status_again();
         client.shutdown().await;
 

@@ -255,9 +255,16 @@ pub(crate) fn layer(
             if !usable {
                 return false;
             }
+            let text = || {
+                live_file.with_untracked(|f| {
+                    let mut text = outline_lines(f).collect::<Vec<_>>().join("\n");
+                    text.push('\n');
+                    text
+                })
+            };
             if !base {
                 if was == Some(false) {
-                    backend.document_symbols(&path);
+                    backend.document_symbols(&path, text());
                 }
                 return true;
             }
@@ -266,12 +273,7 @@ pub(crate) fn layer(
                 .symbols
                 .with_untracked(|s| s.get(&path).is_some_and(|o| o.lines == hash));
             if was != Some(true) && !known {
-                let text = live_file.with_untracked(|f| {
-                    let mut text = outline_lines(f).collect::<Vec<_>>().join("\n");
-                    text.push('\n');
-                    text
-                });
-                backend.removed_symbols(&path, text);
+                backend.removed_symbols(&path, text());
             }
             true
         });
