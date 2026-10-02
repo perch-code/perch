@@ -170,13 +170,13 @@ impl std::fmt::Display for WorktreeView {
 /// Browse's View: one of GitHub's searches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BrowseView {
-    #[default]
     ReviewRequested,
     Yours,
     Assigned,
     Mentioned,
     /// Everything in the declared repositories, or in the one Repository
     /// picks.
+    #[default]
     All,
 }
 
@@ -501,7 +501,7 @@ pub struct BrowseFilters {
 
 impl Default for BrowseFilters {
     fn default() -> Self {
-        Self { view: BrowseView::ReviewRequested, state: StateFilter::Open, order: Order::BROWSE }
+        Self { view: BrowseView::All, state: StateFilter::Open, order: Order::BROWSE }
     }
 }
 
@@ -1396,7 +1396,7 @@ mod tests {
         let filters = ItemFilters::parse(old).unwrap();
         assert_eq!(filters.tab, SidebarTab::Worktrees);
         assert_eq!(filters.worktrees.view, WorktreeView::Recent);
-        assert_eq!(filters.browse.view, BrowseView::ReviewRequested);
+        assert_eq!(filters.browse.view, BrowseView::All);
         assert_eq!(filters.repository.as_deref(), Some("org/inbox"), "not By repository's");
         assert_eq!(filters.browse.state, StateFilter::Open);
 
@@ -1534,7 +1534,8 @@ mod tests {
         filters.tab = SidebarTab::Browse;
         assert_eq!(
             filters.browse_query(&github).as_deref(),
-            Some("is:pr review-requested:@me is:open archived:false")
+            Some("repo:criccomini/perch repo:slatedb/slatedb repo:x/empty is:open archived:false"),
+            "All is Browse's default"
         );
     }
 

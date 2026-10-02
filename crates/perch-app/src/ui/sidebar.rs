@@ -1124,7 +1124,7 @@ mod tests {
         );
         assert_eq!(
             menu.submenu_named("View").unwrap().outline(),
-            ["✓ Review requested", "Yours", "Assigned", "Mentioned", "All"]
+            ["Review requested", "Yours", "Assigned", "Mentioned", "✓ All"]
         );
         assert_eq!(
             menu.submenu_named("State").unwrap().outline(),
@@ -1186,7 +1186,7 @@ mod tests {
         set_filters(state, |f| f.inbox.view = InboxView::Done);
         assert_eq!(state.item_filters.get().view_label(), "Done");
         set_filters(state, |f| f.tab = SidebarTab::Browse);
-        assert_eq!(state.item_filters.get().view_label(), "Review requested");
+        assert_eq!(state.item_filters.get().view_label(), "All");
         repaint(&mut harness);
         let shown = find(harness.root_id(), "sidebar search placeholder").unwrap();
         let rect = shown.get_visual_rect_no_clip();
