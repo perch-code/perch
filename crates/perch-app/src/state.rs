@@ -1303,6 +1303,7 @@ impl AppState {
                 review.stale_head.set(stale_head);
                 review.offline.set(offline);
                 review.upstream_changed.set(false);
+                review.head_moved.set(None);
                 review.pull_request.set(pull_request);
                 review.pull_request_overview_loading.set(overview_loading);
                 review.issue.set(None);
@@ -1364,6 +1365,7 @@ impl AppState {
                 review.stale_head.set(None);
                 review.offline.set(false);
                 review.upstream_changed.set(false);
+                review.head_moved.set(None);
                 review.pull_request_overview_loading.set(pull_request.is_open());
                 review.pull_request.set(Some(pull_request));
                 review.issue.set(None);
@@ -1406,6 +1408,7 @@ impl AppState {
                 review.stale_head.set(None);
                 review.offline.set(offline);
                 review.upstream_changed.set(false);
+                review.head_moved.set(None);
                 review.install_issue_reactions(&issue, &comments);
                 if fresh {
                     review.issue_closable.set(None);
@@ -2078,6 +2081,7 @@ impl AppState {
                 head_sha,
                 status_generation,
                 message,
+                moved_to,
             } => {
                 let is_current_subject = review.pull_request.with(|pull| {
                     pull.as_ref().is_some_and(|pull| {
@@ -2095,6 +2099,9 @@ impl AppState {
                     review.pull_request_overview.set(None);
                     review.pull_request_overview_loading.set(false);
                     review.pull_request_overview_error.set(Some(message));
+                    if moved_to.is_some() {
+                        review.head_moved.set(moved_to);
+                    }
                 }
             }
             Event::PullRequestUpdated {
@@ -2114,6 +2121,13 @@ impl AppState {
                     } else {
                         item
                     };
+                    let moved = review.pull_request.with_untracked(|pull| {
+                        pull.as_ref()
+                            .is_some_and(|pull| pull.head_sha != pull_request.head_sha)
+                    });
+                    if moved {
+                        review.head_moved.set(Some(pull_request.head_sha.clone()));
+                    }
                     review.item.set(Some(item));
                     review.pull_request.set(Some(pull_request.clone()));
                     review.checks.set(None);
@@ -4639,6 +4653,7 @@ mod tests {
                 head_sha: "head".into(),
                 status_generation: 1,
                 message: "stale failure".into(),
+                moved_to: None,
             },
             review,
         );
@@ -4674,6 +4689,7 @@ mod tests {
                 head_sha: "head".into(),
                 status_generation: 4,
                 message: "status unavailable".into(),
+                moved_to: None,
             },
             review,
         );
@@ -4685,6 +4701,72 @@ mod tests {
             Some("status unavailable")
         );
         assert_eq!(review.pull_request_status_generation.get(), 4);
+    }
+
+    #[test]
+    fn a_head_github_moved_to_is_kept_until_the_item_opens_again() {
+        let app = AppState::new();
+        let review = review_of_pull("wt", 7, "head");
+
+        app.apply_with_review(
+            Event::PullRequestOverviewFailed {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                head_sha: "head".into(),
+                status_generation: 1,
+                message: "could not refresh".into(),
+                moved_to: None,
+            },
+            review,
+        );
+        assert_eq!(review.head_moved.get(), None);
+
+        app.apply_with_review(
+            Event::PullRequestOverviewFailed {
+                item_id: "wt".into(),
+                repo_full_name: "slatedb/slatedb".into(),
+                number: 7,
+                head_sha: "head".into(),
+                status_generation: 2,
+                message: "moved".into(),
+                moved_to: Some("newer".into()),
+            },
+            review,
+        );
+        assert_eq!(review.head_moved.get().as_deref(), Some("newer"));
+
+        review.begin("Reading the pull request");
+        assert_eq!(review.head_moved.get(), None);
+    }
+
+    #[test]
+    fn a_refreshed_pull_request_on_another_head_marks_it_moved() {
+        let app = AppState::new();
+        let review = review_of_pull("wt", 7, "head");
+        let item = review.item.get().unwrap();
+
+        app.apply_with_review(
+            Event::PullRequestUpdated {
+                item_id: "wt".into(),
+                item: item.clone(),
+                pull_request: Arc::new(pull_request(7, "head", "open")),
+                merge_attempt_id: None,
+            },
+            review,
+        );
+        assert_eq!(review.head_moved.get(), None);
+
+        app.apply_with_review(
+            Event::PullRequestUpdated {
+                item_id: "wt".into(),
+                item,
+                pull_request: Arc::new(pull_request(7, "newer", "open")),
+                merge_attempt_id: None,
+            },
+            review,
+        );
+        assert_eq!(review.head_moved.get().as_deref(), Some("newer"));
     }
 
     #[test]

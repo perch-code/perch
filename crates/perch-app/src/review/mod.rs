@@ -197,6 +197,21 @@ fn showing_code(state: ReviewState) -> bool {
         && state.has_files()
 }
 
+/// The head the pull request moved to that the files on screen are not
+/// at, unless it is the one a dirty worktree was already left behind by,
+/// which opening again would not change. None while the files are still
+/// on their way. Tracked.
+fn moved_head(state: ReviewState) -> Option<String> {
+    let head = state.head_moved.get()?;
+    let behind = state.item.with(|item| {
+        item.as_ref()
+            .and_then(|item| item.checkout.as_ref())
+            .is_some_and(|checkout| checkout.head_sha != head)
+    });
+    let left_behind = state.stale_head.with(|stale| stale.as_deref() == Some(head.as_str()));
+    (behind && !left_behind).then_some(head)
+}
+
 /// What the switch has picked. Threads anchored in the open file are
 /// drawn inline in the code; the whole conversation is Conversation's,
 /// and the files are a tree in the drawer on the right.
@@ -263,16 +278,35 @@ fn item_view(
         )
         .style(|s| s.size_full().min_height(0.0)),
         // GitHub has news about the item: offered, not applied, so what is
-        // being read stays put.
+        // being read stays put. A moved head is opened again, which checks
+        // the new head out; other news is only fetched.
         crate::ui::widgets::news_pill(
-            || "New activity on GitHub".to_string(),
-            move || state.upstream_changed.get(),
+            move || match moved_head(state) {
+                Some(head) => {
+                    format!("Pull request moved to {}", head.chars().take(7).collect::<String>())
+                }
+                None => "New activity on GitHub".to_string(),
+            },
+            move || moved_head(state).is_some() || state.upstream_changed.get(),
             move || {
-                state.upstream_changed.set(false);
-                if let Some(item_id) = state
+                let Some(item_id) = state
                     .item
                     .with_untracked(|item| item.as_ref().map(|item| item.id.clone()))
-                {
+                else {
+                    return;
+                };
+                let moved = moved_head(state).is_some();
+                state.upstream_changed.set(false);
+                state.head_moved.set(None);
+                if moved {
+                    let navigation_id = refresh_backend.open_item(&item_id);
+                    app.begin_item_review(
+                        state,
+                        "Reading the pull request",
+                        &item_id,
+                        navigation_id,
+                    );
+                } else {
                     refresh_backend.refresh_open_item(&item_id);
                 }
             },

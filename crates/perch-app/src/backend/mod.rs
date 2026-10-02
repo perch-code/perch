@@ -1201,6 +1201,8 @@ pub enum Event {
         head_sha: String,
         status_generation: u64,
         message: String,
+        /// The head GitHub has now, when it is past `head_sha`.
+        moved_to: Option<String>,
     },
     /// A fresh pull request and its durable item after a remote mutation or
     /// notification refresh.
@@ -8659,6 +8661,7 @@ async fn fetch_checks(
                     head_sha: head.to_string(),
                     status_generation,
                     message,
+                    moved_to: Some(overview.head_sha.clone()),
                 });
             }
             true
@@ -8673,6 +8676,7 @@ async fn fetch_checks(
                     head_sha: head.to_string(),
                     status_generation,
                     message: format!("Could not refresh checks and merge status: {error}"),
+                    moved_to: None,
                 });
             }
             false

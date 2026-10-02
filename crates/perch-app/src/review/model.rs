@@ -1343,6 +1343,9 @@ pub struct ReviewState {
     /// GitHub has news about the item that the view has not fetched. Set
     /// by a notification, cleared by opening the item or asking for it.
     pub upstream_changed: RwSignal<bool>,
+    /// The head GitHub says the pull request moved to after the view
+    /// opened. Opening it again checks it out.
+    pub head_moved: RwSignal<Option<String>>,
     /// True from the click until the review view is left, so the progress
     /// card can show before the pull request itself has resolved.
     pub opening: RwSignal<bool>,
@@ -1898,6 +1901,7 @@ impl ReviewState {
             stale_head: RwSignal::new(None),
             offline: RwSignal::new(false),
             upstream_changed: RwSignal::new(false),
+            head_moved: RwSignal::new(None),
             opening: RwSignal::new(false),
             phase: RwSignal::new(Phase::Preparing),
             preparing: RwSignal::new(Preparing::Idle),
@@ -2120,6 +2124,7 @@ impl ReviewState {
         self.files_reload.set(Vec::new());
         self.pull_request.set(None);
         self.upstream_changed.set(false);
+        self.head_moved.set(None);
         self.ready.set(false);
         self.issue.set(None);
         self.issue_comments.set(Arc::new(Vec::new()));
