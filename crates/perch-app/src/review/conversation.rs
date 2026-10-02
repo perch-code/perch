@@ -40,8 +40,8 @@ pub fn view(
     let summary_backend = backend.clone();
     let composer_backend = backend.clone();
     // Each card with the room above it: cards sit the standard gap apart,
-    // and an event line is pulled in toward whatever is on either side of
-    // it. The gap is in the key, so a card whose neighbour changes kind
+    // and an event line, which has no box, a little closer to whatever is
+    // on either side of it. The gap is in the key, so a card whose neighbour changes kind
     // is laid out again.
     let cards = move || {
         let pull = state.pull_request.get();
@@ -118,11 +118,13 @@ pub fn view(
                 },
             )
             .style(|s| s.flex_col().width_full()),
-            crate::ui::agents::section::section(app, state, summary_backend),
-            crate::review::review_launch::history(app, state, backend.clone()),
+            // What GitHub says of the item, white, then what Perch has
+            // done about it, grey, over the ask box, which is grey too.
             crate::review::merge::surface(state, backend.clone()),
             crate::review::open_pull::surface(app, state, backend.clone()),
             crate::review::close_as_issue::surface(app, state, backend.clone()),
+            crate::ui::agents::section::section(app, state, summary_backend),
+            crate::review::review_launch::history(app, state, backend.clone()),
             Label::derived(|| "Nothing here yet. Ask about the worktree below.".to_string()).style(
                 move |s| {
                     // Hidden rather than absent, so it takes no share of the
@@ -1246,7 +1248,7 @@ mod tests {
         for expected in [
             "Thanks",
             "approved",
-            "Local",
+            "Perch only",
             "You",
             "merged",
             "Label: \"src/manifest.rs\"",

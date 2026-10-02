@@ -17,7 +17,7 @@ use std::rc::Rc;
 
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::style::{BorderBottomLeftRadius, BorderBottomRightRadius, CursorStyle};
+use floem::style::CursorStyle;
 use floem::views::{
     dyn_container, dyn_stack, text_editor, Container, Decorators, Empty, Label, Stack,
 };
@@ -1520,15 +1520,16 @@ pub fn thread_card(
                         - 2.0 * theme::COLLAPSED_CARD_INSET,
                 )
             })
-            .background(theme::canvas())
-            .border_radius(theme::RADIUS)
-            .border_color(if flashing.get() { theme::accent() } else { theme::border() });
-        match origin {
-            ThreadOrigin::Local => {
-                base.border(floem::kurbo::Stroke::new(1.0).with_dashes(0.0, theme::THREAD_DASH))
-            }
-            ThreadOrigin::GitHub => base.border(1.0),
-        }
+            .border(1.0)
+            .border_radius(theme::RADIUS);
+        // White and framed is GitHub's; grey and framed a step quieter
+        // is Perch's own, as on Conversation.
+        let (background, border) = match origin {
+            ThreadOrigin::Local => (theme::perch_bg(), theme::border_muted()),
+            ThreadOrigin::GitHub => (theme::canvas(), theme::border()),
+        };
+        base.background(background)
+            .border_color(if flashing.get() { theme::accent() } else { border })
     });
 
     // The editor layer scrolls to inline cards before asking them to flash.
@@ -1689,7 +1690,7 @@ pub(crate) fn local_chip(shown: bool) -> floem::AnyView {
         return Empty::new().into_any();
     }
     cards::tip(
-        badge(|| "Local".to_string(), theme::fg_muted, theme::badge_bg, None)
+        badge(|| "Perch only".to_string(), theme::fg_muted, theme::canvas, None)
             .style(|s| s.margin_left(8.0)),
         "This thread is on this machine and is not on GitHub.".to_string(),
     )
@@ -1795,10 +1796,24 @@ fn collapsed_row(app: AppState, state: ReviewState, thread: CommentThread) -> im
         .unwrap_or_default();
     let card_id = CardId::Thread(thread.id.clone());
     let open_id = card_id.clone();
+    // A thread on GitHub that holds the reader's asks says how many, in
+    // Perch's grey, so folding it does not hide that they are there.
+    let private = if thread.has_github_message() {
+        thread.messages.iter().filter(|m| m.is_private()).count()
+    } else {
+        0
+    };
     // Set off from the pill before it as the pills are from what is
     // before them: the pill's fill and the menu's hover fill are one
     // colour, and would touch.
     let trailing = Stack::horizontal((
+        match private {
+            0 => Empty::new().into_any(),
+            n => badge(move || format!("{n} Perch only"), theme::fg_muted, theme::perch_bg, None)
+                .debug_name("perch-only-count")
+                .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP))
+                .into_any(),
+        },
         crate::review::run_view::running_mark(state, thread.id.clone()),
         thread_menu(state, &thread, theme::COLLAPSED_CARD_MENU, move || {
             state.expand_card(&open_id)
@@ -2247,6 +2262,7 @@ pub fn messages_view(
                     )
                     .style(move |s| {
                         s.width_full()
+                            .padding_horiz(face.inset())
                             .padding_top(face.comment_space())
                             .padding_bottom(if place.last {
                                 face.inset()
@@ -2257,21 +2273,25 @@ pub fn messages_view(
                     .into_any(),
                     None => Empty::new().into_any(),
                 },
-                (Some(thread), None) => {
-                    message_view(app, state, backend.clone(), thread, m, face, lane).into_any()
-                }
+                // A message only Perch has, in a thread on GitHub, is on
+                // a grey band from one side of the box to the other, so
+                // what a colleague can see is the white.
+                (Some(thread), None) => Container::new(
+                    message_view(app, state, backend.clone(), thread, m, face, lane),
+                )
+                .debug_name(if lane == Lane::Flush { "message-row" } else { "private-band" })
+                .style(move |s| {
+                    s.width_full()
+                        .padding_horiz(face.inset())
+                        .apply_if(lane != Lane::Flush, |s| s.background(theme::perch_bg()))
+                })
+                .into_any(),
                 (None, _) => Empty::new().into_any(),
             }
         },
     )
     .debug_name("thread-messages")
-    .style(move |s| {
-        let s = s.flex_col().width_full();
-        match face {
-            ThreadFace::Card => s.padding_horiz(theme::THREAD_INSET),
-            ThreadFace::Inline => s.padding_horiz(theme::INLINE_THREAD_INSET),
-        }
-    })
+    .style(|s| s.flex_col().width_full())
 }
 
 /// What is said about a thread before its comments, each set in from its
@@ -2397,21 +2417,14 @@ pub fn follow_up(
         ))
         .debug_name("reply-bar")
         .style(move |s| {
-            // The box's corners, while nothing is under the bar.
-            let radius = if foot_hidden.get() {
-                theme::RADIUS - 1.0
-            } else {
-                0.0
-            };
+            // On the box's own colour, as its header is: a grey strip
+            // would read as Perch's on a GitHub thread.
             s.items_center()
                 .width_full()
                 .padding_vert(8.0)
                 .padding_horiz(theme::THREAD_INSET)
-                .background(theme::canvas_subtle())
                 .border_top(1.0)
-                .border_color(theme::border())
-                .set(BorderBottomLeftRadius, radius)
-                .set(BorderBottomRightRadius, radius)
+                .border_color(theme::border_muted())
                 .apply_if(empty.get(), |s| s.hide())
         })
         .into_any(),
@@ -5622,6 +5635,14 @@ mod tests {
             assert_eq!(rows.len(), 4, "{face:?}: a row per message");
             let labelled: Vec<bool> = rows.iter().map(|r| find(*r, "perch-only").is_some()).collect();
             assert_eq!(labelled, [false, true, true, false], "{face:?}: the question and the answer");
+            // And on a grey band from one side of the box to the other,
+            // so what a colleague can see is the white.
+            let banded: Vec<bool> =
+                rows.iter().map(|r| r.debug_name().contains("private-band")).collect();
+            assert_eq!(banded, [false, true, true, false], "{face:?}: banded");
+            let band = rows[1].get_visual_rect_no_clip();
+            let messages = stack.get_visual_rect_no_clip();
+            assert_eq!((band.x0, band.x1), (messages.x0, messages.x1), "{face:?}: edge to edge");
             for label in find_all(root_id, "perch-only") {
                 assert!(harness.get_layout_rect(label).width() > 0.0, "{face:?}: the label is drawn");
             }
@@ -5656,6 +5677,42 @@ mod tests {
                 assert_eq!(find(*row, "comment-rail").is_some(), !flush, "{face:?}: row {i}'s rail");
             }
         }
+    }
+
+    /// Folded, a GitHub thread that holds the reader's asks says how many,
+    /// so folding it does not hide them; one of the reader's own says
+    /// nothing, since all of it is.
+    #[test]
+    fn a_folded_github_thread_counts_the_messages_only_perch_has() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_item();
+        let theirs = github_thread_with_private_messages();
+        let mut ours = theirs.clone();
+        ours.id = "t-ours".into();
+        ours.origin = ThreadOrigin::Local;
+        ours.github_id = None;
+        ours.messages.remove(0);
+        for thread in [&theirs, &ours] {
+            state.toggle_card(&CardId::Thread(thread.id.clone()));
+        }
+        state.comment_threads.set(Arc::new(vec![theirs.clone(), ours.clone()]));
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let backend = Rc::new(backend);
+        let view = floem::views::Stack::vertical((
+            thread_card(app, state, backend.clone(), theirs).debug_name("theirs"),
+            thread_card(app, state, backend, ours).debug_name("ours"),
+        ))
+        .style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+
+        let theirs = find(harness.root_id(), "theirs").unwrap();
+        let count = find(theirs, "perch-only-count").expect("the asks are counted");
+        assert_eq!(texts(count).join(" "), "2 Perch only");
+        let ours = find(harness.root_id(), "ours").unwrap();
+        assert!(find(ours, "perch-only-count").is_none(), "nothing to count");
     }
 
     /// A thread that is wholly Perch's, as every thread was before drafts,
@@ -6120,7 +6177,7 @@ mod tests {
         let ours = find(harness.root_id(), "ours").unwrap();
         let heading = find(ours, "lines-heading").expect("the reader's thread is open");
         assert_eq!(texts(heading).join(" "), "Question on lines R5 to R7");
-        assert!(find(ours, "Label: \"Local\"").is_some(), "marked as the reader's own");
+        assert!(find(ours, "Label: \"Perch only\"").is_some(), "marked as the reader's own");
 
         let theirs = find(harness.root_id(), "theirs").unwrap();
         let row = find(theirs, "resolved-row").expect("resolved, so collapsed to its row");

@@ -95,28 +95,7 @@ fn section_header(app: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     let counts = Memo::new(move |_| RunCounts::of(&runs_of(app, review), &waiting(review)));
     let toggle = move || review.agents_unfolded.update(|open| *open = !*open);
     Stack::horizontal((
-        dyn_container(
-            move || review.agents_unfolded.get(),
-            |open| {
-                sidebar_glyph(
-                    if open {
-                        SidebarIcon::ChevronDown
-                    } else {
-                        SidebarIcon::ChevronRight
-                    },
-                    theme::fg_subtle,
-                )
-                .style(|s| s.size(10.0, 10.0))
-            },
-        )
-        .style(|s| s.margin_right(6.0)),
-        Label::derived(|| "AGENTS".to_string()).style(|s| {
-            s.font_size(theme::TEXT_SECTION)
-                .font_weight(theme::weight_emphasis())
-                .color(theme::fg_subtle())
-                .selectable(false)
-                .flex_grow(1.0_f32)
-        }),
+        crate::review::cards::section_title("Agents"),
         Empty::new().style(move |s| {
             let counts = counts.get();
             let color = if counts.running > 0 {
@@ -127,20 +106,36 @@ fn section_header(app: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             s.size(7.0, 7.0)
                 .border_radius(4.0)
                 .background(color())
-                .margin_right(7.0)
                 .flex_shrink(0.0_f32)
                 .apply_if(!counts.active(), |s| s.hide())
         }),
         Label::derived(move || counts.get().label()).style(move |s| {
             let counts = counts.get();
-            s.font_size(theme::TEXT_BADGE)
+            s.font_size(theme::TEXT_META)
                 .color(if !counts.active() && counts.last_failed {
                     theme::closed()
                 } else {
                     theme::fg_muted()
                 })
+                .text_ellipsis()
+                .min_width(0.0)
                 .selectable(false)
         }),
+        Empty::new().style(|s| s.flex_grow(1.0_f32)),
+        dyn_container(
+            move || review.agents_unfolded.get(),
+            |open| {
+                sidebar_glyph(
+                    if open {
+                        SidebarIcon::ChevronUp
+                    } else {
+                        SidebarIcon::ChevronDown
+                    },
+                    theme::fg_subtle,
+                )
+                .style(|s| s.size(12.0, 12.0))
+            },
+        ),
     ))
     .on_event_stop(el::Click, move |_, _| toggle())
     .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
@@ -153,11 +148,7 @@ fn section_header(app: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     })
     .debug_name("agents header")
     .style(|s| {
-        clickable(s)
-            .items_center()
-            .width_full()
-            .height(22.0)
-            .border_radius(theme::RADIUS)
+        crate::review::cards::section_header_style(clickable(s))
             .keyboard_navigable()
             .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
     })
@@ -195,19 +186,15 @@ fn entry_key(entry: &AgentRunEntry) -> String {
     }
 }
 
-/// The Agents section, over REVIEW HISTORY: its header, and the list
+/// The Agents section, over Reviews: its header, and the list
 /// under it while unfolded. Absent until the item has had a run.
 pub fn section(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     Stack::vertical((section_header(app, review, backend.clone()), list(app, review, backend)))
         .debug_name("agents section")
+        // Perch's own runs, so on Perch's grey, as the reader's threads are.
         .style(move |s| {
-            s.flex_col()
-                .width_full()
-                .gap(10.0)
-                .padding_top(18.0)
-                .padding_bottom(18.0)
-                .border_top(1.0)
-                .border_color(theme::border_muted())
+            crate::review::cards::perch_surface(s.flex_col().width_full())
+                .margin_top(theme::CARD_GAP)
                 .apply_if(!present(app, review), |s| s.hide())
         })
 }
@@ -291,13 +278,7 @@ fn list(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoVi
     .debug_name("agents list")
     .style(move |s| {
         let shown = review.agents_unfolded.get() && entries.with(|e| !e.is_empty());
-        s.flex_col()
-            .width_full()
-            .border(1.0)
-            .border_color(theme::border_muted())
-            .border_radius(theme::RADIUS)
-            .background(theme::canvas())
-            .apply_if(!shown, |s| s.hide())
+        s.flex_col().width_full().apply_if(!shown, |s| s.hide())
     })
 }
 
@@ -433,7 +414,7 @@ fn run_row(
         .style(|s| {
             s.flex_col()
                 .width_full()
-                .border_bottom(1.0)
+                .border_top(1.0)
                 .border_color(theme::border_muted())
         });
     // Brought into view, it scrolls the page to put itself at the top: a
@@ -558,8 +539,8 @@ fn header(
             .width_full()
             .gap(6.0)
             .padding_vert(10.0)
-            .padding_left(14.0)
-            .padding_right(10.0)
+            .padding_left(theme::CARD_PADDING)
+            .padding_right(theme::CARD_PADDING)
     })
 }
 
@@ -686,7 +667,7 @@ fn review_group_row(
         }
     };
     let key_toggle = toggle.clone();
-    // The snapshot the review read, as REVIEW HISTORY's card opens it.
+    // The snapshot the review read, as Reviews' card opens it.
     let snapshot = match group.runs.first().and_then(|run| {
         Some((run.item_id.clone()?, run.review_attempt_id.clone()?))
     }) {
@@ -764,11 +745,10 @@ fn review_group_row(
             .min_height(48.0)
             .items_center()
             .gap(9.0)
-            .padding_left(14.0)
-            .padding_right(10.0)
+            .padding_left(theme::CARD_PADDING)
+            .padding_right(theme::CARD_PADDING)
             .padding_vert(8.0)
-            .background(theme::canvas_subtle())
-            .border_bottom(1.0)
+            .border_top(1.0)
             .border_color(theme::border_muted())
             .keyboard_navigable()
             .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
@@ -790,10 +770,7 @@ fn review_group_row(
                 move |run| run_row(app, review, backend.clone(), run),
             )
             .style(|s| {
-                s.flex_col()
-                    .width_full()
-                    .padding_left(12.0)
-                    .background(theme::canvas_subtle())
+                s.flex_col().width_full().padding_left(12.0)
             })
             .into_any()
         },
@@ -863,7 +840,7 @@ mod tests {
 
     /// The section is absent until the item has had a run. Its header
     /// says what the runs are doing, and folds and unfolds the list,
-    /// working first, then finished. It sits over REVIEW HISTORY, not in
+    /// working first, then finished. It sits over Reviews, not in
     /// the summary's rows.
     #[test]
     fn the_agents_section_comes_with_a_run_and_its_header_unfolds_the_list() {

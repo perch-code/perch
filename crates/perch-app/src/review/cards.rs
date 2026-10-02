@@ -1,14 +1,18 @@
 //! The entries on Conversation: the description, each comment and review
 //! from GitHub, a line for each event, and each thread, the reader's own
-//! and GitHub's review threads alike. Conversation is a flat reading
-//! surface; its hierarchy comes from type, whitespace and hairlines rather
-//! than a stack of framed cards.
+//! and GitHub's review threads alike.
 //!
-//! A thread is drawn as github.com draws one, a box with a grey header,
-//! on Conversation and in the code alike. A local thread and a GitHub
-//! thread must never look like one: nothing local reaches GitHub, so a
-//! local thread's box is dashed and its header says Local, where
-//! GitHub's is solid.
+//! Everything said is a card, and every card is one of two boxes: white
+//! and framed for what is on GitHub, Codex's grey for what only Perch
+//! has (`github_surface`, `perch_surface`). What kind of thing a card is,
+//! a comment, a review, a thread on a line, is said by its header, never
+//! by its box. What happened, a push or a merge, is a line between the
+//! cards with no box at all.
+//!
+//! A local thread and a GitHub thread must never look like one: nothing
+//! local reaches GitHub, so a local thread is grey and its header says
+//! Perch only, and the reader's asks inside a GitHub thread are a grey
+//! band across its white.
 //!
 //! What a GitHub entry does carry of the reader's is its reactions: the
 //! pills under its text, and the face in its byline that opens the
@@ -115,33 +119,66 @@ pub(crate) fn body_hash(body: &str) -> u64 {
 // Chrome
 // ---------------------------------------------------------------------
 
-/// One flat Conversation entry: a compact byline, then the text, with a
-/// single hairline separating it from the next entry.
-pub fn card(header: impl IntoView + 'static, body: floem::AnyView) -> impl IntoView {
-    Stack::vertical((
-        header,
-        Container::new(body).style(|s| {
-            s.width_full()
-                .padding_top(10.0)
-                .padding_bottom(theme::CONVERSATION_ENTRY_PADDING)
-        }),
-    ))
-    .style(|s| {
-        s.width_full()
-            .flex_col()
-            .background(theme::canvas())
-            .border_bottom(1.0)
-            .border_color(theme::border_muted())
+/// A box of what is on GitHub: white, framed.
+pub fn github_surface(s: floem::style::Style) -> floem::style::Style {
+    s.background(theme::canvas())
+        .border(1.0)
+        .border_color(theme::border())
+        .border_radius(theme::CARD_RADIUS)
+}
+
+/// A box of what only Perch has: Codex's grey, framed a step quieter.
+pub fn perch_surface(s: floem::style::Style) -> floem::style::Style {
+    s.background(theme::perch_bg())
+        .border(1.0)
+        .border_color(theme::border_muted())
+        .border_radius(theme::CARD_RADIUS)
+}
+
+/// The header of a section after the timeline, Checks, Agents or
+/// Reviews: one height and the cards' room at its sides on each, its
+/// title first and a fold's chevron, if it has one, last.
+pub fn section_header_style(s: floem::style::Style) -> floem::style::Style {
+    s.items_center()
+        .width_full()
+        .height(theme::SECTION_HEADER_HEIGHT)
+        .padding_horiz(theme::CARD_PADDING)
+        .gap(8.0)
+}
+
+/// A section's title, set as a byline's name is but a step larger.
+pub fn section_title(text: &'static str) -> Label {
+    Label::derived(move || text.to_string()).style(|s| {
+        s.font_size(theme::TEXT_BODY)
+            .font_weight(theme::weight_emphasis())
+            .color(theme::fg())
+            .flex_shrink(0.0_f32)
+            .selectable(false)
     })
 }
 
-/// The compact metadata row at the top of a flat entry.
+/// One GitHub entry on Conversation: its byline, then its text, if it
+/// has any, in a white box.
+pub fn card(header: impl IntoView + 'static, body: Option<floem::AnyView>) -> impl IntoView {
+    let body = match body {
+        Some(body) => Container::new(body)
+            .style(|s| s.width_full().padding_top(4.0).padding_bottom(8.0))
+            .into_any(),
+        None => Empty::new().into_any(),
+    };
+    Stack::vertical((header, body)).style(|s| {
+        github_surface(s.width_full().flex_col())
+            .padding_horiz(theme::CARD_PADDING)
+            .padding_vert(6.0)
+    })
+}
+
+/// The byline row at the top of an entry.
 fn byline_strip(content: impl IntoView + 'static) -> impl IntoView {
     Container::new(content).style(|s| {
         s.items_center()
             .width_full()
             .height(theme::BYLINE_HEIGHT)
-            .background(theme::canvas())
     })
 }
 
@@ -170,6 +207,10 @@ pub(crate) fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> im
         when,
     } = who;
     let seed = login.clone();
+    let verb_empty = verb.is_empty();
+    // A verdict's words take its glyph's colour, so Changes requested
+    // reads as red as its mark does; a comment's are muted.
+    let verb_color = glyph.map(|(_, color)| color);
     Stack::horizontal((
         avatar(app, avatar_url, avatar_size, seed)
             .style(|s| s.margin_right(9.0).flex_shrink(0.0_f32)),
@@ -187,17 +228,24 @@ pub(crate) fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> im
                     .color(theme::fg())
             },
         ),
-        Label::derived(move || match when {
-            Some(at) if verb.is_empty() => timefmt::relative(at, app.now.get()),
-            Some(at) => format!("{verb} {}", timefmt::relative(at, app.now.get())),
-            None => verb.clone(),
+        Label::derived(move || verb.clone()).style(move |s| {
+            s.font_size(theme::TEXT_META)
+                .color(verb_color.map_or_else(theme::fg_muted, |color| color()))
+                .margin_left(6.0)
+                .flex_shrink(0.0_f32)
+                .apply_if(verb_empty, |s| s.hide())
+        }),
+        Label::derived(move || {
+            when.map(|at| timefmt::relative(at, app.now.get()))
+                .unwrap_or_default()
         })
-        .style(|s| {
+        .style(move |s| {
             s.font_size(theme::TEXT_META)
                 .color(theme::fg_muted())
-                .margin_left(6.0)
+                .margin_left(if verb_empty { 6.0 } else { 4.0 })
                 .text_ellipsis()
                 .min_width(0.0)
+                .apply_if(when.is_none(), |s| s.hide())
         }),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
         trailing,
@@ -1055,7 +1103,7 @@ pub fn description_card(
             byline_strip(
                 Stack::horizontal((
                     Label::derived(|| "Description".to_string()).style(|s| {
-                        s.font_size(theme::TEXT_SECTION_TITLE)
+                        s.font_size(theme::TEXT_META)
                             .font_weight(theme::weight_emphasis())
                             .color(theme::fg())
                     }),
@@ -1064,9 +1112,11 @@ pub fn description_card(
                 ))
                 .style(|s| s.items_center().width_full().min_width(0.0)),
             ),
-            Stack::vertical((description, reactions))
-            .style(|s| s.flex_col().width_full())
-            .into_any(),
+            Some(
+                Stack::vertical((description, reactions))
+                    .style(|s| s.flex_col().width_full())
+                    .into_any(),
+            ),
         ),
         hovered,
     )
@@ -1105,9 +1155,11 @@ pub fn comment_card(
                 who,
                 actions(state, backend, hovered, Some(quote), Some(ask), react, comment.html_url.clone()),
             )),
-            Stack::vertical((text, reactions))
-                .style(|s| s.flex_col().width_full())
-                .into_any(),
+            Some(
+                Stack::vertical((text, reactions))
+                    .style(|s| s.flex_col().width_full())
+                    .into_any(),
+            ),
         ),
         hovered,
     )
@@ -1158,15 +1210,14 @@ pub fn review_card(
     // but there would be nothing to draw the pills under.
     let react = summary.as_ref().and_then(|_| reactable(&review.node_id));
 
-    let body = match text {
-        Some(text) => Stack::vertical((
+    let body = text.map(|text| {
+        Stack::vertical((
             text,
             reactions_under(app, state, backend.clone(), &react),
         ))
         .style(|s| s.flex_col().width_full())
-        .into_any(),
-        None => Empty::new().into_any(),
-    };
+        .into_any()
+    });
 
     track_hover(
         card(
@@ -1508,9 +1559,9 @@ pub fn event_row(
     let at = event.at;
     let pieces = event_pieces(&event);
     let link = link.filter(|_| event.kind == PullEventKind::Opened);
-    // Half an avatar puts the dot under the byline avatars; the text then
-    // starts where their logins do.
-    let dot_left = theme::CARD_AVATAR / 2.0 - theme::EVENT_DOT / 2.0;
+    // A card's padding and half an avatar puts the dot under the byline
+    // avatars; the text then starts where their logins do.
+    let dot_left = theme::CARD_PADDING + theme::CARD_AVATAR / 2.0 - theme::EVENT_DOT / 2.0;
     let text_gap = theme::CARD_AVATAR / 2.0 - theme::EVENT_DOT / 2.0 + 9.0;
     Stack::horizontal((
         Empty::new().style(move |s| {
@@ -1568,8 +1619,7 @@ pub fn event_row(
             .width_full()
             .height(theme::EVENT_HEIGHT)
             .padding_left(dot_left)
-            .border_bottom(1.0)
-            .border_color(theme::border_muted())
+            .padding_right(theme::CARD_PADDING)
     })
 }
 
@@ -1806,35 +1856,28 @@ pub fn thread_card(
     )
     .style(|s| s.width_full());
     Stack::vertical((header, body)).style(move |s| {
-        let base = s
-            .flex_col()
-            .width_full()
-            .background(theme::canvas())
-            .border_radius(theme::RADIUS)
-            .border_color(theme::border());
+        let s = s.flex_col().width_full();
         if local {
-            base.border(floem::kurbo::Stroke::new(1.0).with_dashes(0.0, theme::THREAD_DASH))
+            perch_surface(s)
         } else {
-            base.border(1.0)
+            github_surface(s)
         }
     })
 }
 
-/// The header across a thread on Conversation, grey as GitHub's is: the
-/// chevron that folds the thread, the file it is on, Outdated, Local on
-/// one of Perch's own, then Show resolved or Hide resolved on one that is
-/// resolved, and the thread's `...` menu. A thread about the item as a
-/// whole says so where a file would be. It has the box's corners at its
-/// top, and at its foot too while the thread is folded.
+/// The header across a thread on Conversation: the chevron that folds
+/// the thread, the file it is on, Outdated, Perch only on one of Perch's
+/// own, then Show resolved or Hide resolved on one that is resolved, and
+/// the thread's `...` menu. A thread about the item as a whole says so
+/// where a file would be. It is on the box's own colour, with a hairline
+/// under it while the thread is open: a grey strip would read as Perch's
+/// on a GitHub thread.
 fn thread_header(
     state: ReviewState,
     open_file: OpenFile,
     thread: &CommentThread,
     folded: Memo<bool>,
 ) -> impl IntoView {
-    use floem::style::{
-        BorderBottomLeftRadius, BorderBottomRightRadius, BorderTopLeftRadius, BorderTopRightRadius,
-    };
     let location = match thread.anchor.clone() {
         Some(anchor) => path_link(state, open_file, anchor).into_any(),
         None => Label::derived(move || format!("This {}", threads::subject_word(state)))
@@ -1875,16 +1918,12 @@ fn thread_header(
     ))
     .debug_name("thread-header")
     .style(move |s| {
-        let radius = theme::RADIUS - 1.0;
-        let foot = if folded.get() { radius } else { 0.0 };
         s.items_center()
             .width_full()
             .padding(theme::THREAD_HEADER_PADDING)
-            .background(theme::canvas_subtle())
-            .set(BorderTopLeftRadius, radius)
-            .set(BorderTopRightRadius, radius)
-            .set(BorderBottomLeftRadius, foot)
-            .set(BorderBottomRightRadius, foot)
+            .apply_if(!folded.get(), |s| {
+                s.border_bottom(1.0).border_color(theme::border_muted())
+            })
     })
 }
 
@@ -2246,7 +2285,7 @@ pub fn ask_box(app: AppState, state: ReviewState) -> impl IntoView {
             .width_full()
             .height(theme::ASK_BOX_HEIGHT)
             .padding_horiz(18.0)
-            .background(theme::canvas_subtle())
+            .background(theme::perch_bg())
             .border(1.0)
             .border_color(theme::border_muted())
             .border_radius(14.0)

@@ -97,6 +97,12 @@ pub fn canvas_subtle() -> Color {
 pub fn canvas_hover() -> Color {
     pick(rgb(0xeeeeeb), rgb(0x282828))
 }
+/// What only Perch has, set off from GitHub's white as Codex sets off
+/// its own: the reader's asks and an agent's answers, a local thread,
+/// the Agents and Reviews sections. White is what GitHub has.
+pub fn perch_bg() -> Color {
+    pick(rgb(0xf4f4f2), rgb(0x212121))
+}
 
 /// The left navigation uses Codex's quieter, neutral surface treatment.
 /// These stay separate from the shared app palette so the dock can keep its
@@ -737,12 +743,20 @@ pub const CHIP_PADDING: f64 = 7.0;
 /// How wide the reading column is. Prose past this is hard to follow.
 pub const CONVERSATION_WIDTH: f64 = 845.0;
 pub const CONVERSATION_PADDING: f64 = 40.0;
-/// Breathing room under the in-page title and around a flat timeline entry.
+/// Breathing room under the in-page title, and between the timeline and
+/// the sections after it.
 pub const CONVERSATION_TITLE_GAP: f64 = 28.0;
 pub const CONVERSATION_ENTRY_PADDING: f64 = 24.0;
-/// Room within entries, and between an event line and its neighbours.
+/// Room between two cards, and between an event line and its neighbours.
 pub const CARD_GAP: f64 = 12.0;
-pub const EVENT_GAP: f64 = 4.0;
+pub const EVENT_GAP: f64 = 6.0;
+/// Every box on Conversation, a comment's, a thread's, a section's, has
+/// these corners and this room at its sides. See `cards::github_surface`
+/// and `cards::perch_surface`.
+pub const CARD_RADIUS: f64 = RADIUS_LG;
+pub const CARD_PADDING: f64 = 16.0;
+/// The header of a section after the timeline: Checks, Agents, Reviews.
+pub const SECTION_HEADER_HEIGHT: f64 = 44.0;
 /// The compact byline at the top of a Conversation entry.
 pub const BYLINE_HEIGHT: f64 = 32.0;
 /// A reaction pill under a comment, and the room above the row of them.
@@ -761,9 +775,6 @@ pub const CODE_ROW_NUMBER_WIDTH: f64 = 50.0;
 /// many of a thread's anchor before the rest are counted instead.
 pub const HUNK_LINES: usize = 4;
 pub const ANCHOR_LINES: usize = 8;
-/// A local thread's border is dashed, so it cannot be taken for a
-/// GitHub comment's.
-pub const THREAD_DASH: [f64; 2] = [4.0, 3.0];
 /// A thread as github.com draws one, on Conversation and in the code: a
 /// box with a header, the comments, the reply and a foot with Resolve.
 /// The avatar beside each comment, smaller in the code, and the room

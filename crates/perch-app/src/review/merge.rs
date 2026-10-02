@@ -214,13 +214,10 @@ pub fn surface(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                 .style(|s| s.flex_col().width_full()),
             )
             .debug_name("pull-request-checks-and-merge")
+            // GitHub's, so white and framed, as its comments are.
             .style(|s| {
-                s.width_full()
+                crate::review::cards::github_surface(s.width_full())
                     .margin_top(theme::CONVERSATION_ENTRY_PADDING)
-                    .background(theme::canvas())
-                    .border(1.0)
-                    .border_color(theme::border())
-                    .border_radius(theme::RADIUS_LG)
             })
             .into_any()
         },
@@ -229,14 +226,7 @@ pub fn surface(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
 
 fn checks_section(state: ReviewState, expanded: RwSignal<bool>) -> impl IntoView {
     let header = Stack::horizontal((
-        Label::derived(|| "Checks".to_string()).style(|s| {
-            s.font_size(theme::TEXT_BODY)
-                .font_weight(theme::weight_emphasis())
-                .color(theme::fg())
-                .selectable(false)
-                .pointer_events_none()
-        }),
-        Empty::new().style(|s| s.flex_grow(1.0_f32)),
+        crate::review::cards::section_title("Checks").style(|s| s.pointer_events_none()),
         Label::derived(move || {
             current_checks(state)
                 .as_deref()
@@ -249,13 +239,22 @@ fn checks_section(state: ReviewState, expanded: RwSignal<bool>) -> impl IntoView
                     }
                 })
         })
-        .style(|s| {
+        // In the colour of how the checks stand, as the summary's pill is.
+        .style(move |s| {
+            let color = match current_checks(state).map(|checks| checks.state.clone()) {
+                Some(CheckState::Failing { .. }) => theme::closed(),
+                Some(CheckState::Running) => theme::draft_yellow(),
+                Some(CheckState::Passing) => theme::open(),
+                _ => theme::fg_subtle(),
+            };
             s.font_size(theme::TEXT_META)
-                .color(theme::fg_subtle())
+                .color(color)
+                .text_ellipsis()
+                .min_width(0.0)
                 .selectable(false)
                 .pointer_events_none()
-                .margin_right(8.0)
         }),
+        Empty::new().style(|s| s.flex_grow(1.0_f32)),
         dyn_container(
             move || expanded.get(),
             |is_expanded| {
@@ -283,14 +282,9 @@ fn checks_section(state: ReviewState, expanded: RwSignal<bool>) -> impl IntoView
         }
     })
     .style(|s| {
-        clickable(s)
-            .width_full()
-            .height(48.0)
-            .items_center()
-            .padding_horiz(16.0)
+        crate::review::cards::section_header_style(clickable(s))
             .keyboard_navigable()
             .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
-            .hover(|s| s.background(theme::canvas_subtle()))
     });
 
     let body = dyn_container(

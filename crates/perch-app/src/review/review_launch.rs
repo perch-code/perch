@@ -831,15 +831,11 @@ pub fn history(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
             let cards_backend = backend.clone();
             Stack::vertical((
                 Stack::horizontal((
-                    Label::derived(|| "REVIEW HISTORY".to_string()).style(|s| {
-                        s.font_size(theme::TEXT_SECTION)
-                            .font_weight(theme::weight_emphasis())
-                            .color(theme::fg_subtle())
-                            .flex_grow(1.0_f32)
-                    }),
+                    crate::review::cards::section_title("Reviews"),
+                    Empty::new().style(|s| s.flex_grow(1.0_f32)),
                     latest,
                 ))
-                .style(|s| s.items_center().width_full()),
+                .style(crate::review::cards::section_header_style),
                 dyn_stack(
                     move || groups.as_ref().clone(),
                     |summary| {
@@ -859,16 +855,12 @@ pub fn history(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                     },
                     move |summary| group_card(app, state, cards_backend.clone(), summary),
                 )
-                .style(|s| s.flex_col().width_full().gap(10.0)),
+                .style(|s| s.flex_col().width_full()),
             ))
+            // The reader's own reviews, so on Perch's grey, as Agents is.
             .style(|s| {
-                s.flex_col()
-                    .width_full()
-                    .gap(10.0)
-                    .padding_top(18.0)
-                    .padding_bottom(2.0)
-                    .border_top(1.0)
-                    .border_color(theme::border_muted())
+                crate::review::cards::perch_surface(s.flex_col().width_full())
+                    .margin_top(theme::CARD_GAP)
             })
             .debug_name("review-history")
             .into_any()
@@ -887,7 +879,6 @@ fn group_card(
     let instructions = summary.group.instructions.clone();
     let attempts = attempt_summary(&summary);
     let unread = unread_summary(&summary);
-    let counts = count_summary(&summary);
     let newer_summary = summary.clone();
     let open_summary = summary.clone();
     let open_backend = backend.clone();
@@ -1022,12 +1013,7 @@ fn group_card(
                     .into_any(),
                 None => Empty::new().into_any(),
             },
-            Label::derived(move || counts.clone()).style(|s| {
-                s.font_size(theme::TEXT_META)
-                    .color(theme::fg_subtle())
-                    .text_wrap()
-                    .width_full()
-            }),
+            count_chips(&summary),
             dyn_container(
                 move || newer_changes(state, &newer_summary),
                 |newer| {
@@ -1050,13 +1036,36 @@ fn group_card(
     )
     .style(|s| {
         s.width_full()
-            .padding(12.0)
-            .background(theme::canvas_subtle())
-            .border(1.0)
+            .padding_vert(12.0)
+            .padding_horiz(theme::CARD_PADDING)
+            .border_top(1.0)
             .border_color(theme::border_muted())
-            .border_radius(9.0)
     })
     .debug_name(format!("review-group:{}", summary.group.id))
+}
+
+/// A review's findings, a chip for each kind it has: new in the notice's
+/// yellow, fixed in green, and the rest grey. A kind with none has no
+/// chip.
+fn count_chips(summary: &ReviewGroupSummary) -> impl IntoView {
+    type Ink = fn() -> floem::peniko::Color;
+    let group = &summary.group;
+    let kinds: [(u64, &str, Ink, Ink); 4] = [
+        (group.new_findings, "new", theme::notice_fg, theme::notice_bg),
+        (group.still_present, "still present", theme::fg_muted, theme::badge_bg),
+        (group.verified_fixed, "verified fixed", theme::open, theme::diff_added_bg),
+        (group.not_verified, "not verified", theme::fg_subtle, theme::badge_bg),
+    ];
+    let chips = kinds
+        .into_iter()
+        .filter(|(count, ..)| *count > 0)
+        .map(|(count, words, ink, fill)| {
+            crate::ui::widgets::badge(move || format!("{count} {words}"), ink, fill, None).into_any()
+        })
+        .collect::<Vec<_>>();
+    Stack::horizontal_from_iter(chips)
+        .debug_name("review-group-counts")
+        .style(|s| s.items_center().flex_wrap(floem::style::FlexWrap::Wrap).gap(6.0))
 }
 
 fn build_draft(app: AppState, state: ReviewState, item_id: &str) -> Option<ReviewLaunchDraft> {
