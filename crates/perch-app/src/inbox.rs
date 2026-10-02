@@ -1,26 +1,30 @@
-//! The Notifications list's filters: GitHub's threads under the
-//! repository, reason and search the sidebar has picked. GitHub's order is
-//! kept; filtering only removes rows from it.
+//! The Inbox list's filters: GitHub's threads under the repository,
+//! reason, State, Unread Only and search the sidebar has picked. GitHub's
+//! order is kept, or turned over for Oldest first; filtering only removes
+//! rows from it.
 
-use perch_github::Thread;
+use perch_github::{SubjectState, Thread};
 
-/// The threads under the Show, repository, reason and search filters, in
-/// order.
+use crate::items::{Direction, InboxFilters};
+
+/// The threads under the menu's narrowing and the search, in order.
+/// The view, which list the threads come from, is the caller's.
 pub fn filter(
     threads: &[Thread],
-    unread_only: bool,
+    filters: &InboxFilters,
     repository: Option<&str>,
     reason: Option<&str>,
     query: &str,
 ) -> Vec<Thread> {
     let query = query.trim().to_lowercase();
-    threads
+    let mut rows: Vec<Thread> = threads
         .iter()
-        .filter(|thread| !unread_only || thread.unread)
+        .filter(|thread| !filters.unread_only || thread.unread)
         .filter(|thread| {
             repository.is_none_or(|repo| thread.repository.full_name.eq_ignore_ascii_case(repo))
         })
         .filter(|thread| reason.is_none_or(|reason| thread.reason.wire() == reason))
+        .filter(|thread| filters.state.admits(closed(thread)))
         .filter(|thread| {
             query.is_empty()
                 || thread.subject.title.to_lowercase().contains(&query)
@@ -32,7 +36,26 @@ pub fn filter(
                     .is_some_and(|number| number.to_string().contains(&query))
         })
         .cloned()
-        .collect()
+        .collect();
+    if filters.direction == Direction::Oldest {
+        rows.reverse();
+    }
+    rows
+}
+
+/// Whether a look has found the thread's pull request merged or closed,
+/// or its issue closed. A thread not yet looked at, or with nothing to
+/// look at, is open.
+pub fn closed(thread: &Thread) -> bool {
+    thread.subject_snapshot.as_ref().is_some_and(|snapshot| {
+        matches!(
+            snapshot.state,
+            SubjectState::PrMerged
+                | SubjectState::PrClosed
+                | SubjectState::IssueClosed
+                | SubjectState::IssueNotPlanned
+        )
+    })
 }
 
 /// Repository choices for the filter: every thread's, once, by name.
@@ -129,7 +152,7 @@ mod tests {
                 true,
             ),
         ];
-        let visible = filter(&threads, false, None, None, "");
+        let visible = filter(&threads, &InboxFilters::default(), None, None, "");
         assert_eq!(
             visible
                 .iter()
@@ -139,8 +162,9 @@ mod tests {
         );
         assert!(!visible[0].unread);
 
-        // Show › Unread leaves the read one out, in the same order.
-        let unread = filter(&threads, true, None, None, "");
+        // Unread Only leaves the read one out, in the same order.
+        let unread_only = InboxFilters { unread_only: true, ..Default::default() };
+        let unread = filter(&threads, &unread_only, None, None, "");
         assert_eq!(
             unread
                 .iter()
@@ -178,7 +202,7 @@ mod tests {
                 true,
             ),
         ];
-        let visible = filter(&threads, false, Some("ORG/ONE"), Some("mention"), "manifest");
+        let visible = filter(&threads, &InboxFilters::default(), Some("ORG/ONE"), Some("mention"), "manifest");
         assert_eq!(
             visible
                 .iter()
@@ -194,5 +218,42 @@ mod tests {
                 ("review_requested".into(), "review requested".into())
             ]
         );
+    }
+
+    /// State goes by what a look found; a thread not yet looked at, or a
+    /// kind with nothing to look at, is open. Oldest first turns GitHub's
+    /// order over.
+    #[test]
+    fn state_narrows_on_the_look_and_oldest_first_turns_the_order_over() {
+        use crate::items::StateFilter;
+        let snapshot = |state| perch_github::SubjectSnapshot {
+            author_login: String::new(),
+            author_avatar_url: String::new(),
+            state,
+            churn: None,
+            review_requested: false,
+            participants: None,
+            at: "2026-09-19T12:00:00Z".parse().unwrap(),
+        };
+        let mut merged = thread("4", "org/one", "Merged", SubjectKind::PullRequest, Reason::Author, false);
+        merged.subject_snapshot = Some(snapshot(SubjectState::PrMerged));
+        let mut not_planned = thread("3", "org/one", "Not planned", SubjectKind::Issue, Reason::Author, false);
+        not_planned.subject_snapshot = Some(snapshot(SubjectState::IssueNotPlanned));
+        let mut open = thread("2", "org/one", "Open", SubjectKind::PullRequest, Reason::Author, false);
+        open.subject_snapshot = Some(snapshot(SubjectState::PrDraft));
+        let unlooked = thread("1", "org/one", "Unlooked", SubjectKind::Release, Reason::Author, false);
+        let threads = vec![merged, not_planned, open, unlooked];
+        let ids = |filters: &InboxFilters| {
+            filter(&threads, filters, None, None, "")
+                .into_iter()
+                .map(|thread| thread.id)
+                .collect::<Vec<_>>()
+        };
+        let closed = InboxFilters { state: StateFilter::Closed, ..Default::default() };
+        assert_eq!(ids(&closed), ["4", "3"]);
+        let open_only = InboxFilters { state: StateFilter::Open, ..Default::default() };
+        assert_eq!(ids(&open_only), ["2", "1"]);
+        let oldest = InboxFilters { direction: Direction::Oldest, ..Default::default() };
+        assert_eq!(ids(&oldest), ["1", "2", "3", "4"]);
     }
 }

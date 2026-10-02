@@ -1,12 +1,14 @@
-//! `perch --items ["tab=browse;browse=recent;query=fence"]`
+//! `perch --items ["worktrees=recent;query=fence"]`
 //!
-//! Prints a sidebar tab's local list from the cache the app uses, with
-//! pinned items first: Worktrees unless `tab` says otherwise, or Browse ›
-//! Recent, which is everything opened. The keys are the filter menu's, in `ItemFilters::to_meta`'s
-//! form: `tab` (`worktrees` or `browse`), `browse` (`recent`),
-//! `repository`, `sort`, `show_pr_status` and `direction`, plus `query`
-//! for the search box. It is how `items::local_items` is checked against
-//! real data without a window.
+//! Prints Worktrees' list from the cache the app uses, with pinned items
+//! first: the worktrees on disk, or with `worktrees=recent` everything
+//! opened. The keys are the filter menu's, in `ItemFilters::to_meta`'s
+//! form: `worktrees` (`worktrees` or `recent`), `repository`,
+//! `worktrees_state` (`any`, `open`, `closed`), `worktrees_unread`, `sort`
+//! and `direction` for Worktrees, `recent_sort` and `recent_direction` for
+//! Recent, and `show_pr_status`, plus `query` for the search box. It is
+//! how `items::local_items` is checked against real data without a
+//! window.
 
 use perch_github::{Cache, CheckStatus, Item, ItemSubject};
 
@@ -20,8 +22,9 @@ pub fn run(args: &[String]) {
             Err(e) => {
                 eprintln!("bad filters: {e}");
                 eprintln!(
-                    "keys: tab (worktrees, browse), browse (recent), repository, sort, \
-                     show_pr_status, direction (newest, oldest), query"
+                    "keys: worktrees (worktrees, recent), repository, worktrees_state (any, open, closed), \
+                     worktrees_unread, sort, direction (newest, oldest), recent_sort, recent_direction, \
+                     show_pr_status, query"
                 );
                 std::process::exit(2);
             }
@@ -63,7 +66,17 @@ fn print(filters: &ItemFilters) -> Result<(), String> {
     }
     let (cache, _) = Cache::open_with_outcome(&path, None).map_err(|e| e.to_string())?;
     let items = cache.load_items().map_err(|e| e.to_string())?;
-    let visible = items::local_items(&items, filters);
+    // What Unread Only goes by: an unread notification about the item, as
+    // the window's dot has it.
+    let threads = cache.load_threads().map_err(|e| e.to_string())?;
+    let unread = |item: &Item| {
+        item.subject.as_ref().is_some_and(|subject| {
+            threads.iter().any(|thread| {
+                thread.unread && thread.is_about(subject.repo_full_name(), subject.kind(), subject.number())
+            })
+        })
+    };
+    let visible = items::local_items(&items, filters, &unread);
 
     // What the list below was made under, on stderr so stdout stays the
     // sidebar alone.
@@ -198,7 +211,7 @@ mod tests {
     }
 
     fn text(filters: &ItemFilters) -> String {
-        let visible = items::local_items(&fixture(), filters);
+        let visible = items::local_items(&fixture(), filters, &|_| false);
         let mut out = String::new();
         render(&mut out, &visible, filters);
         out
@@ -211,15 +224,20 @@ mod tests {
             "  B  perch/issue-42  [criccomini/perch · perch/issue-42]  pinned\n"
         );
         assert_eq!(
-            text(&worktrees("tab=browse;browse=recent")),
+            text(&worktrees("worktrees=recent")),
             "  B  perch/issue-42  [criccomini/perch · perch/issue-42]  pinned\n  P  Fence the manifest  [criccomini/perch #57 · fence]  ci:failure review requested\n"
+        );
+        assert_eq!(
+            text(&worktrees("tab=browse;browse=recent")),
+            text(&worktrees("worktrees=recent")),
+            "as saved while Browse showed Recent"
         );
         assert_eq!(text(&worktrees("tab=inbox")), "", "the inbox lists no items");
     }
 
     #[test]
     fn chips_go_when_pr_status_is_off_and_the_row_still_names_its_repository() {
-        let got = text(&worktrees("tab=browse;show_pr_status=0;query=fence"));
+        let got = text(&worktrees("worktrees=recent;show_pr_status=0;query=fence"));
         assert_eq!(got, "  P  Fence the manifest  [criccomini/perch #57 · fence]\n");
     }
 

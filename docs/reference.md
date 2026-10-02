@@ -45,7 +45,7 @@ still GitHub's.
   clears the local mark and lets the thread return.
 - **Unsubscribe** ignores future activity on the thread, marks its current
   notification done, and remembers it the same way.
-- **Show › Done**, in the Inbox's filter menu, lists the threads marked Done
+- **View › Done**, in the Inbox's filter menu, lists the threads marked Done
   in Perch that GitHub still lists. **Move to Inbox**, on the row or its menu,
   drops the local mark and puts the thread back. GitHub's public API has no
   way to undo Done, so github.com keeps it under Done.
@@ -53,12 +53,43 @@ still GitHub's.
   thread until later today (6 PM), tomorrow, later this week, this weekend or
   next week (8 AM), as Gmail offers them. It comes back sooner if newer
   activity arrives that GitHub reports unread. When the time comes it
-  returns to its place in the inbox, as read or unread as it was snoozed. **Show › Snoozed** lists the
+  returns to its place in the inbox, as read or unread as it was snoozed. **View › Snoozed** lists the
   snoozed threads with when each returns, and **Move to Inbox** ends a snooze
   early. GitHub has no snooze, so the mark lives only in Perch and
   github.com still lists the thread.
+- **State › Merged or Closed** narrows the inbox to threads whose pull
+  request has been merged or closed, or whose issue has been closed. A thread
+  whose subject Perch has not looked up yet counts as open, and so do kinds
+  with no state, such as releases and CI runs.
+- **Mark N Done**, at the foot of the filter menu, marks every thread the
+  inbox is showing Done, one GitHub request after another, and reports any
+  failures in a single notice. Filtering to State › Merged or Closed first
+  clears the finished pull requests in one go. On View › Done and View ›
+  Snoozed the same item reads **Move N to Inbox**.
 - Pull requests and issues open inside Perch. Other notification types remain
   first-class inbox rows and open on GitHub.
+
+### The sidebar's filter menus
+
+Each tab has one filter menu, laid out the same way: View, then what the
+list is narrowed to, then Sort By, then display settings and actions. A
+section is left out only where it cannot apply. The button lights up while
+the tab's list differs from its defaults, and the search box names the view
+it searches.
+
+- **Inbox**: View (Inbox, Snoozed, Done), Repository, Reason, State, Sort By
+  (Newest or Oldest first), Unread Only, Show PR Status, Mark N Done.
+- **Worktrees**: View (Worktrees, or Recent: everything opened, worktree or
+  not), Repository, State, Sort By (Last activity, Last opened, Created; each
+  view keeps its own), Unread Only, Show PR Status.
+- **Browse**: View (Review requested, Yours, Assigned, Mentioned, All),
+  Repository, State, Sort By (Last activity or Created, sorted by GitHub's
+  search), Show PR Status. All searches the repository picked, or every
+  declared repository on GitHub.
+
+Repository and Show PR Status are shared by all three tabs. State is Any,
+Open, or Merged or Closed everywhere; it defaults to Any on Inbox and
+Worktrees and to Open on Browse.
 
 GitHub's public REST notification payload does not expose whether a thread is
 currently in the web Inbox or Done, and `all=true` can include Done history.

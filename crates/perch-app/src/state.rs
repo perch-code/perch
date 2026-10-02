@@ -13,7 +13,7 @@ use jiff::Timestamp;
 use perch_github::{AgentConfig, DeclaredRepo, Item, Thread};
 
 use crate::backend::{Event, Status};
-use crate::items::{BrowseView, InboxShow, SidebarTab};
+use crate::items::{InboxView, SidebarTab};
 use crate::ui::agents::model::AgentRunSummary;
 
 /// Whether a box is checked.
@@ -160,10 +160,10 @@ pub struct AppState {
     /// Done watermarks have been applied.
     pub notifications: RwSignal<Vec<Thread>>,
     /// The threads marked Done in Perch that GitHub still lists, newest
-    /// first: Inbox's Show › Done.
+    /// first: Inbox's View › Done.
     pub done_notifications: RwSignal<Vec<Thread>>,
     /// The threads snoozed in Perch that GitHub still lists, soonest back
-    /// first: Inbox's Show › Snoozed.
+    /// first: Inbox's View › Snoozed.
     pub snoozed_notifications: RwSignal<Vec<Thread>>,
     /// A poll's items the drawer is holding back because they would move
     /// its rows, until the reader asks for them or does something that
@@ -3000,12 +3000,10 @@ impl AppState {
         })
     }
 
-    /// Whether the drawer is showing local items: Worktrees, or Browse ›
-    /// Recent.
+    /// Whether the drawer is showing local items: either of Worktrees'
+    /// views.
     fn shows_items(&self) -> bool {
-        self.item_filters.with_untracked(|f| {
-            f.tab == SidebarTab::Worktrees || (f.tab == SidebarTab::Browse && f.browse == BrowseView::Recent)
-        })
+        self.item_filters.with_untracked(|f| f.tab == SidebarTab::Worktrees)
     }
 
     /// Whether a poll's items would change which rows the drawer shows,
@@ -3027,40 +3025,49 @@ impl AppState {
     }
 
     /// GitHub's threads under the drawer's filters: the inbox's, or under
-    /// Show › Done and Show › Snoozed the ones put away so.
+    /// View › Done and View › Snoozed the ones put away so.
     pub fn visible_inbox(&self) -> Vec<Thread> {
-        let (show, repository) = self.item_filters.with(|f| (f.inbox_show, f.repository.clone()));
+        let (inbox, repository) = self.item_filters.with(|f| (f.inbox.clone(), f.repository.clone()));
         let reason = self.notification_reason.get();
         let query = self.item_query.get();
-        self.inbox_source(show).with(|threads| {
-            crate::inbox::filter(threads, show == InboxShow::Unread, repository.as_deref(), reason.as_deref(), &query)
+        self.inbox_source(inbox.view).with(|threads| {
+            crate::inbox::filter(threads, &inbox, repository.as_deref(), reason.as_deref(), &query)
         })
     }
 
-    /// The list Inbox's Show draws from.
-    pub fn inbox_source(&self, show: InboxShow) -> RwSignal<Vec<Thread>> {
-        match show {
-            InboxShow::Done => self.done_notifications,
-            InboxShow::Snoozed => self.snoozed_notifications,
-            InboxShow::All | InboxShow::Unread => self.notifications,
+    /// The list Inbox's View draws from.
+    pub fn inbox_source(&self, view: InboxView) -> RwSignal<Vec<Thread>> {
+        match view {
+            InboxView::Done => self.done_notifications,
+            InboxView::Snoozed => self.snoozed_notifications,
+            InboxView::Inbox => self.notifications,
         }
     }
 
     /// The ids of the threads `threads` would give under the drawer's
-    /// filters, in order. None under Show › Done or Snoozed, which a poll
+    /// filters, in order. None under View › Done or Snoozed, which a poll
     /// of the inbox does not move.
     fn visible_thread_ids(&self, threads: &[Thread]) -> Vec<String> {
-        let (show, repository) = self.item_filters.with_untracked(|f| (f.inbox_show, f.repository.clone()));
-        if show.is_put_away() {
+        let (inbox, repository) = self.item_filters.with_untracked(|f| (f.inbox.clone(), f.repository.clone()));
+        if inbox.view.is_put_away() {
             return Vec::new();
         }
-        let unread = show == InboxShow::Unread;
         let reason = self.notification_reason.get_untracked();
         let query = self.item_query.get_untracked();
-        crate::inbox::filter(threads, unread, repository.as_deref(), reason.as_deref(), &query)
+        crate::inbox::filter(threads, &inbox, repository.as_deref(), reason.as_deref(), &query)
             .into_iter()
             .map(|thread| thread.id)
             .collect()
+    }
+
+    /// Whether the inbox has an unread notification about the item's pull
+    /// request or issue: what bolds its title, draws its dot, and keeps it
+    /// under Unread Only. A branch with no subject has nothing to be
+    /// unread.
+    pub fn item_unread(&self, item: &Item) -> bool {
+        item.subject
+            .as_ref()
+            .is_some_and(|subject| self.subject_unread(subject.repo_full_name(), subject.kind(), subject.number()))
     }
 
     /// The ids of the rows `items` would give on the drawer's tab, in
@@ -3068,14 +3075,21 @@ impl AppState {
     fn visible_item_ids(&self, items: &[Item]) -> Vec<String> {
         let mut filters = self.item_filters.get_untracked();
         filters.query = self.item_query.get_untracked();
-        crate::items::local_items(items, &filters).into_iter().map(|item| item.id).collect()
+        let unread = |item: &Item| self.item_unread(item);
+        crate::items::local_items(items, &filters, &unread).into_iter().map(|item| item.id).collect()
+    }
+
+    /// The search Browse is showing, if it is the tab and has one.
+    pub fn browse_query(&self) -> Option<String> {
+        let github = self.repos.with(|repos| crate::items::github_repositories(repos));
+        self.item_filters.with(|f| f.browse_query(&github))
     }
 
     /// What the drawer's pill says while a poll is held back for the list
     /// it shows: how many rows are new, or that there is activity when
     /// the rows only moved. `None` when nothing is held back.
     pub fn held_back_news(&self) -> Option<String> {
-        let (new, noun) = if let Some(query) = self.item_filters.with(|f| f.browse_query()) {
+        let (new, noun) = if let Some(query) = self.browse_query() {
             let held = self.browse.with(|all| all.get(&query).and_then(|page| page.held.clone()))?;
             let shown: HashSet<(String, u64)> = self.browse.with_untracked(|all| {
                 all.get(&query)
@@ -3084,7 +3098,7 @@ impl AppState {
             });
             (held.0.iter().filter(|hit| !shown.contains(&hit_key(hit))).count(), "result")
         } else if self.item_filters.with(|f| f.tab) == SidebarTab::Inbox {
-            if self.item_filters.with(|f| f.inbox_show).is_put_away() {
+            if self.item_filters.with(|f| f.inbox.view).is_put_away() {
                 return None;
             }
             let incoming = self.pending_notifications.get()?;
@@ -3115,7 +3129,7 @@ impl AppState {
     /// Put up whatever the drawer's pill is holding back for the list it
     /// shows.
     pub fn show_held_back(&self) {
-        if let Some(query) = self.item_filters.with_untracked(|f| f.browse_query()) {
+        if let Some(query) = floem::reactive::Effect::untrack(|| self.browse_query()) {
             self.browse.update(|all| {
                 if let Some(page) = all.get_mut(&query) {
                     page.show_held();
@@ -3147,11 +3161,12 @@ impl AppState {
     }
 
     /// The local rows the drawer shows on its tab, under its filters and
-    /// search: Worktrees, or Browse › Recent.
+    /// search: Worktrees' view.
     pub fn visible_items(&self) -> Vec<Item> {
         let mut filters = self.item_filters.get();
         filters.query = self.item_query.get();
-        self.items.with(|items| crate::items::local_items(items, &filters))
+        let unread = |item: &Item| self.item_unread(item);
+        self.items.with(|items| crate::items::local_items(items, &filters, &unread))
     }
 
     pub fn avatar_for(&self, url: &str) -> Option<Arc<Vec<u8>>> {
@@ -3591,9 +3606,9 @@ mod tests {
         let app = AppState::new();
         app.item_filters.update(|f| {
             f.tab = SidebarTab::Browse;
-            f.browse = BrowseView::Yours;
+            f.browse.view = crate::items::BrowseView::Yours;
         });
-        let query = app.item_filters.with(|f| f.browse_query()).unwrap();
+        let query = app.browse_query().unwrap();
         let result = |hits, poll| Event::BrowseResults { query: query.clone(), page: 1, poll, result: found(hits, false) };
         app.apply(result(vec![hit(1, "one")], false));
         assert_eq!(app.held_back_news(), None);
@@ -3612,8 +3627,11 @@ mod tests {
             item
         };
         let app = AppState::new();
-        // Browse › Recent, where items with no worktree are.
-        app.item_filters.update(|f| f.tab = SidebarTab::Browse);
+        // Worktrees › Recent, where items with no worktree are.
+        app.item_filters.update(|f| {
+            f.tab = SidebarTab::Worktrees;
+            f.worktrees.view = crate::items::WorktreeView::Recent;
+        });
         app.apply(Event::Items(vec![item("a")]));
 
         app.apply(Event::ItemsPolled(vec![item("a"), item("b")]));

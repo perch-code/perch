@@ -1359,7 +1359,9 @@ impl GitHub {
     }
 
     /// One page of GitHub's issue search, which finds pull requests too,
-    /// most recently updated first. `page` counts from 1.
+    /// most recently updated first unless the query says otherwise with
+    /// a `sort:` qualifier, as github.com's search box takes one. `page`
+    /// counts from 1.
     ///
     /// The search API has a window of its own. A search that finds it
     /// spent is refused until GitHub's reset, without asking, and no
@@ -1370,8 +1372,9 @@ impl GitHub {
         page: u32,
         per_page: u32,
     ) -> Result<crate::search::SearchPage, Error> {
-        let q = percent_encoding::utf8_percent_encode(query, percent_encoding::NON_ALPHANUMERIC);
-        let path = format!("/search/issues?q={q}&sort=updated&order=desc&per_page={per_page}&page={page}");
+        let (query, sort, order) = search_sort(query);
+        let q = percent_encoding::utf8_percent_encode(&query, percent_encoding::NON_ALPHANUMERIC);
+        let path = format!("/search/issues?q={q}&sort={sort}&order={order}&per_page={per_page}&page={page}");
         let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let until = self.search_limit_until.load(Ordering::SeqCst);
@@ -2112,6 +2115,33 @@ fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
 
 /// Requests remaining, the primary-window reset epoch, and a secondary-limit
 /// delay. Any value is `None` when its header is absent or unreadable.
+/// The query without its `sort:` qualifier, and the sort and order it
+/// asked for. The API reads the order from parameters, not the query;
+/// without a qualifier, or with one it does not know, it is most recently
+/// updated first.
+fn search_sort(query: &str) -> (String, &'static str, &'static str) {
+    let mut sort = ("updated", "desc");
+    let rest: Vec<&str> = query
+        .split_whitespace()
+        .filter(|term| {
+            let Some(value) = term.strip_prefix("sort:") else {
+                return true;
+            };
+            let (field, order) = value.rsplit_once('-').unwrap_or((value, "desc"));
+            let field = match field {
+                "updated" => "updated",
+                "created" => "created",
+                "comments" => "comments",
+                _ => return false,
+            };
+            let order = if order == "asc" { "asc" } else { "desc" };
+            sort = (field, order);
+            false
+        })
+        .collect();
+    (rest.join(" "), sort.0, sort.1)
+}
+
 fn rate_headers(headers: &HeaderMap) -> (Option<i64>, Option<i64>, Option<u64>) {
     let remaining =
         header_str(headers, "x-ratelimit-remaining").and_then(|v| v.parse::<i64>().ok());
@@ -2177,6 +2207,20 @@ fn map_octocrab_error(e: octocrab::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sort_qualifier_becomes_the_search_s_parameters() {
+        assert_eq!(
+            search_sort("author:@me is:open archived:false"),
+            ("author:@me is:open archived:false".to_string(), "updated", "desc")
+        );
+        assert_eq!(
+            search_sort("author:@me sort:created-asc is:open"),
+            ("author:@me is:open".to_string(), "created", "asc")
+        );
+        assert_eq!(search_sort("repo:a/b sort:updated"), ("repo:a/b".to_string(), "updated", "desc"));
+        assert_eq!(search_sort("repo:a/b sort:bogus-asc"), ("repo:a/b".to_string(), "updated", "desc"));
+    }
 
     #[test]
     fn avatar_urls_gain_a_size_parameter() {

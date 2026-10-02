@@ -124,6 +124,11 @@ pub enum Command {
     DoneNotification {
         thread_id: String,
     },
+    /// Mark N Done: remove each of them, one after another, and say once
+    /// how many could not be.
+    DoneNotifications {
+        thread_ids: Vec<String>,
+    },
     /// Take a Done back: the thread returns to Perch's inbox. GitHub's
     /// public API has no way back, so github.com still files it as Done.
     RestoreNotification {
@@ -848,10 +853,10 @@ pub enum Event {
     /// rather than something the reader did.
     NotificationsPolled(Vec<Thread>),
     /// The threads marked Done in Perch that GitHub still lists, newest
-    /// first: Inbox's Show › Done.
+    /// first: Inbox's View › Done.
     DoneNotifications(Vec<Thread>),
     /// The threads snoozed in Perch that GitHub still lists, soonest back
-    /// first: Inbox's Show › Snoozed.
+    /// first: Inbox's View › Snoozed.
     SnoozedNotifications(Vec<Thread>),
     /// GitHub has news about the open item that is not on screen yet.
     /// The view offers to fetch it rather than moving under the reader.
@@ -2526,6 +2531,13 @@ impl Backend {
         });
     }
 
+    pub fn done_notifications(&self, thread_ids: Vec<String>) {
+        if thread_ids.is_empty() {
+            return;
+        }
+        let _ = self.commands.send(Command::DoneNotifications { thread_ids });
+    }
+
     pub fn restore_notification(&self, thread_id: &str) {
         let _ = self.commands.send(Command::RestoreNotification {
             thread_id: thread_id.to_string(),
@@ -4004,6 +4016,19 @@ async fn run(
                             ctx.notice(format!("Could not mark the notification done: {e}"));
                         }
                     }
+                } else {
+                    ctx.notice("A GitHub token is required to change notifications");
+                }
+            }
+            Command::DoneNotifications { thread_ids } => {
+                ctx.clear_notice();
+                if let Some(github) = ctx.github() {
+                    // Beside the loop, not in it: a few dozen requests
+                    // would hold up every command behind them. A rate
+                    // limit they run into gates the next poll through the
+                    // client.
+                    let ctx = ctx.clone();
+                    tokio::spawn(async move { done_notifications(&ctx, &github, &thread_ids).await });
                 } else {
                     ctx.notice("A GitHub token is required to change notifications");
                 }
@@ -6080,7 +6105,7 @@ impl Ctx {
         self.send_marked_notifications();
     }
 
-    /// Show › Done and Show › Snoozed, as the marks now stand.
+    /// View › Done and View › Snoozed, as the marks now stand.
     fn send_marked_notifications(&self) {
         match self.with_cache(|cache| cache.load_done_threads()) {
             Some(Ok(threads)) => {
@@ -12633,6 +12658,34 @@ async fn browse(ctx: &Ctx, query: &str, page: u32) -> Result<perch_github::Searc
             ))
         }
         Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Mark each thread Done in turn. Once GitHub is out of reach or out of
+/// requests the rest would fail the same way, so they are not tried.
+async fn done_notifications(ctx: &Ctx, github: &GitHub, thread_ids: &[String]) {
+    let mut failure = None;
+    let mut done = 0;
+    for thread_id in thread_ids {
+        match github.mark_thread_done(thread_id).await {
+            Ok(()) => {
+                ctx.dismiss_notification(thread_id);
+                done += 1;
+            }
+            Err(e) => {
+                tracing::warn!(thread = %thread_id, error = %e, "could not mark notification done");
+                let stop = matches!(e, perch_github::Error::RateLimited { .. } | perch_github::Error::Network(_));
+                failure = Some(e);
+                if stop {
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(e) = failure {
+        let left = thread_ids.len() - done;
+        let noun = if left == 1 { "notification" } else { "notifications" };
+        ctx.notice(format!("Could not mark {left} {noun} done: {e}"));
     }
 }
 

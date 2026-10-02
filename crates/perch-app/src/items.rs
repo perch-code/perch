@@ -3,6 +3,11 @@
 //!
 //! Everything here runs in memory. Changing a setting never refetches, and
 //! the sidebar is paintable from the cache alone.
+//!
+//! Every tab has one filter menu of the same shape: View, then what the
+//! list is narrowed to (Repository, Reason, State), then Sort By, then
+//! what is shown and done. A section is left out only where it cannot
+//! apply.
 
 use std::collections::HashSet;
 
@@ -37,15 +42,16 @@ impl RowKind {
     }
 }
 
-/// The three tabs at the top of the sidebar.
+/// The three tabs at the top of the sidebar, one source each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SidebarTab {
     /// GitHub's notifications.
     #[default]
     Inbox,
-    /// Every worktree on disk.
+    /// Perch's local items: the worktrees on disk, or what was opened
+    /// lately.
     Worktrees,
-    /// GitHub's fixed views, and what was opened lately.
+    /// GitHub's searches.
     Browse,
 }
 
@@ -79,63 +85,108 @@ impl std::fmt::Display for SidebarTab {
     }
 }
 
-/// Inbox's Show: every thread, the unread ones, or the ones marked Done
-/// or snoozed, to move back.
+/// Inbox's View: the inbox, or the threads put out of it, to move back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum InboxShow {
+pub enum InboxView {
     #[default]
-    All,
-    Unread,
-    Done,
+    Inbox,
     Snoozed,
+    Done,
 }
 
-impl InboxShow {
+impl InboxView {
+    pub const ALL: [InboxView; 3] = [InboxView::Inbox, InboxView::Snoozed, InboxView::Done];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            InboxView::Inbox => "Inbox",
+            InboxView::Snoozed => "Snoozed",
+            InboxView::Done => "Done",
+        }
+    }
+
     fn key(self) -> &'static str {
         match self {
-            InboxShow::All => "all",
-            InboxShow::Unread => "unread",
-            InboxShow::Done => "done",
-            InboxShow::Snoozed => "snoozed",
+            InboxView::Inbox => "inbox",
+            InboxView::Snoozed => "snoozed",
+            InboxView::Done => "done",
         }
     }
 
     fn from_key(s: &str) -> Option<Self> {
-        [InboxShow::All, InboxShow::Unread, InboxShow::Done, InboxShow::Snoozed]
-            .into_iter()
-            .find(|v| v.key() == s)
+        Self::ALL.into_iter().find(|v| v.key() == s)
     }
 
-    /// Whether Show lists threads put out of the inbox, Done or snoozed,
-    /// rather than the inbox itself.
+    /// Whether the view lists threads put out of the inbox, Done or
+    /// snoozed, rather than the inbox itself.
     pub fn is_put_away(self) -> bool {
-        matches!(self, InboxShow::Done | InboxShow::Snoozed)
+        matches!(self, InboxView::Done | InboxView::Snoozed)
     }
 }
 
-/// What Browse lists: one of GitHub's fixed views, or Recent.
+impl std::fmt::Display for InboxView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// Worktrees' View: the worktrees on disk, or everything opened lately,
+/// worktree or not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorktreeView {
+    #[default]
+    Worktrees,
+    Recent,
+}
+
+impl WorktreeView {
+    pub const ALL: [WorktreeView; 2] = [WorktreeView::Worktrees, WorktreeView::Recent];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            WorktreeView::Worktrees => "Worktrees",
+            WorktreeView::Recent => "Recent",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            WorktreeView::Worktrees => "worktrees",
+            WorktreeView::Recent => "recent",
+        }
+    }
+
+    fn from_key(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.key() == s)
+    }
+}
+
+impl std::fmt::Display for WorktreeView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// Browse's View: one of GitHub's searches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BrowseView {
+    #[default]
     ReviewRequested,
     Yours,
     Assigned,
     Mentioned,
-    /// The open pull requests and issues of the repository picked beside
-    /// it.
-    Repository,
-    /// What was opened lately, worktree or not. Local.
-    #[default]
-    Recent,
+    /// Everything in the declared repositories, or in the one Repository
+    /// picks.
+    All,
 }
 
 impl BrowseView {
-    pub const ALL: [BrowseView; 6] = [
+    pub const ALL: [BrowseView; 5] = [
         BrowseView::ReviewRequested,
         BrowseView::Yours,
         BrowseView::Assigned,
         BrowseView::Mentioned,
-        BrowseView::Repository,
-        BrowseView::Recent,
+        BrowseView::All,
     ];
 
     pub fn label(self) -> &'static str {
@@ -144,25 +195,55 @@ impl BrowseView {
             BrowseView::Yours => "Yours",
             BrowseView::Assigned => "Assigned",
             BrowseView::Mentioned => "Mentioned",
-            BrowseView::Repository => "By repository",
-            BrowseView::Recent => "Recent",
+            BrowseView::All => "All",
         }
     }
 
-    /// The search a GitHub view runs, open or closed, leaving out archived
-    /// repositories. `None` for Recent, which is local, and for By
-    /// repository with none picked.
-    pub fn query(self, repository: Option<&str>, closed: bool) -> Option<String> {
-        let what = match self {
-            BrowseView::ReviewRequested => "is:pr review-requested:@me".to_string(),
-            BrowseView::Yours => "author:@me".to_string(),
-            BrowseView::Assigned => "assignee:@me".to_string(),
-            BrowseView::Mentioned => "mentions:@me".to_string(),
-            BrowseView::Repository => format!("repo:{}", repository?),
-            BrowseView::Recent => return None,
-        };
-        let state = if closed { "is:closed" } else { "is:open" };
-        Some(format!("{what} {state} archived:false"))
+    /// The search the view runs, leaving out archived repositories.
+    /// `repository` narrows it to one; without it, All searches every
+    /// repository in `github_repositories`. The sort is left out at
+    /// GitHub's default, most recently updated first, so the search reads
+    /// as it always has.
+    ///
+    /// `None` when there is nothing to search: a repository that is not
+    /// on GitHub, All with no repositories, or a search longer than the
+    /// 256 characters GitHub takes.
+    pub fn query(
+        self,
+        repository: Option<&str>,
+        github_repositories: &[String],
+        state: StateFilter,
+        order: Order,
+    ) -> Option<String> {
+        let mut parts: Vec<String> = Vec::new();
+        match self {
+            BrowseView::ReviewRequested => parts.push("is:pr review-requested:@me".into()),
+            BrowseView::Yours => parts.push("author:@me".into()),
+            BrowseView::Assigned => parts.push("assignee:@me".into()),
+            BrowseView::Mentioned => parts.push("mentions:@me".into()),
+            BrowseView::All => {}
+        }
+        match repository {
+            Some(repo) if perch_github::is_local(repo) => return None,
+            Some(repo) => parts.push(format!("repo:{repo}")),
+            None if self == BrowseView::All => {
+                if github_repositories.is_empty() {
+                    return None;
+                }
+                parts.extend(github_repositories.iter().map(|repo| format!("repo:{repo}")));
+            }
+            None => {}
+        }
+        match state {
+            StateFilter::Any => {}
+            StateFilter::Open => parts.push("is:open".into()),
+            StateFilter::Closed => parts.push("is:closed".into()),
+        }
+        parts.push("archived:false".into());
+        if order != Order::BROWSE {
+            parts.push(format!("sort:{}-{}", order.sort.search_key(), order.direction.search_key()));
+        }
+        Some(parts.join(" ")).filter(|query| query.len() <= 256)
     }
 
     fn key(self) -> &'static str {
@@ -171,8 +252,7 @@ impl BrowseView {
             BrowseView::Yours => "yours",
             BrowseView::Assigned => "assigned",
             BrowseView::Mentioned => "mentioned",
-            BrowseView::Repository => "repository",
-            BrowseView::Recent => "recent",
+            BrowseView::All => "all",
         }
     }
 
@@ -182,6 +262,56 @@ impl BrowseView {
 }
 
 impl std::fmt::Display for BrowseView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// State: a pull request's or an issue's, whatever the row is. Merged,
+/// closed and not planned are all Merged or Closed. A row with no state
+/// to go by, a branch, a release, or a thread not yet looked at, counts as
+/// Open, so nothing goes missing for want of a look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateFilter {
+    Any,
+    Open,
+    Closed,
+}
+
+impl StateFilter {
+    pub const ALL: [StateFilter; 3] = [StateFilter::Any, StateFilter::Open, StateFilter::Closed];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            StateFilter::Any => "Any",
+            StateFilter::Open => "Open",
+            StateFilter::Closed => "Merged or Closed",
+        }
+    }
+
+    /// Whether a row that is `closed` or not passes.
+    pub fn admits(self, closed: bool) -> bool {
+        match self {
+            StateFilter::Any => true,
+            StateFilter::Open => !closed,
+            StateFilter::Closed => closed,
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            StateFilter::Any => "any",
+            StateFilter::Open => "open",
+            StateFilter::Closed => "closed",
+        }
+    }
+
+    fn from_key(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.key() == s)
+    }
+}
+
+impl std::fmt::Display for StateFilter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.label())
     }
@@ -197,6 +327,8 @@ pub enum ItemSort {
 
 impl ItemSort {
     pub const ALL: [ItemSort; 3] = [ItemSort::LastActivity, ItemSort::LastOpened, ItemSort::Created];
+    /// What GitHub's search can order by. Last opened is Perch's own.
+    pub const BROWSE: [ItemSort; 2] = [ItemSort::LastActivity, ItemSort::Created];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -212,6 +344,15 @@ impl ItemSort {
             ItemSort::LastActivity => item.last_activity(),
             ItemSort::LastOpened => item.last_opened_at,
             ItemSort::Created => item.created_at,
+        }
+    }
+
+    /// GitHub's search's name for it. Last opened has none and searches
+    /// as Last activity.
+    fn search_key(self) -> &'static str {
+        match self {
+            ItemSort::LastActivity | ItemSort::LastOpened => "updated",
+            ItemSort::Created => "created",
         }
     }
 
@@ -252,6 +393,13 @@ impl Direction {
         }
     }
 
+    fn search_key(self) -> &'static str {
+        match self {
+            Direction::Newest => "desc",
+            Direction::Oldest => "asc",
+        }
+    }
+
     fn key(self) -> &'static str {
         match self {
             Direction::Newest => "newest",
@@ -270,22 +418,106 @@ impl std::fmt::Display for Direction {
     }
 }
 
+/// A list's Sort By: what it orders by, and from which end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Order {
+    pub sort: ItemSort,
+    pub direction: Direction,
+}
+
+impl Order {
+    pub const WORKTREES: Order = Order { sort: ItemSort::LastActivity, direction: Direction::Newest };
+    pub const RECENT: Order = Order { sort: ItemSort::LastOpened, direction: Direction::Newest };
+    pub const BROWSE: Order = Order { sort: ItemSort::LastActivity, direction: Direction::Newest };
+}
+
+/// Inbox's menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxFilters {
+    pub view: InboxView,
+    pub unread_only: bool,
+    pub state: StateFilter,
+    /// GitHub's order, newest first, or turned over.
+    pub direction: Direction,
+}
+
+impl Default for InboxFilters {
+    fn default() -> Self {
+        Self {
+            view: InboxView::Inbox,
+            unread_only: false,
+            state: StateFilter::Any,
+            direction: Direction::Newest,
+        }
+    }
+}
+
+/// Worktrees' menu. Each view keeps its own Sort By.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeFilters {
+    pub view: WorktreeView,
+    pub unread_only: bool,
+    pub state: StateFilter,
+    pub worktrees: Order,
+    pub recent: Order,
+}
+
+impl WorktreeFilters {
+    /// The Sort By of the view showing.
+    pub fn order(&self) -> Order {
+        match self.view {
+            WorktreeView::Worktrees => self.worktrees,
+            WorktreeView::Recent => self.recent,
+        }
+    }
+
+    pub fn order_mut(&mut self) -> &mut Order {
+        match self.view {
+            WorktreeView::Worktrees => &mut self.worktrees,
+            WorktreeView::Recent => &mut self.recent,
+        }
+    }
+}
+
+impl Default for WorktreeFilters {
+    fn default() -> Self {
+        Self {
+            view: WorktreeView::Worktrees,
+            unread_only: false,
+            state: StateFilter::Any,
+            worktrees: Order::WORKTREES,
+            recent: Order::RECENT,
+        }
+    }
+}
+
+/// Browse's menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowseFilters {
+    pub view: BrowseView,
+    pub state: StateFilter,
+    pub order: Order,
+}
+
+impl Default for BrowseFilters {
+    fn default() -> Self {
+        Self { view: BrowseView::ReviewRequested, state: StateFilter::Open, order: Order::BROWSE }
+    }
+}
+
 /// Everything the tabs, their filter menus and the search box hold.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemFilters {
     pub tab: SidebarTab,
-    /// Repository identity for Inbox and Worktrees; `None` includes every
-    /// repository.
+    /// Repository identity, shared by the three tabs; `None` includes
+    /// every repository.
     pub repository: Option<String>,
-    pub sort: ItemSort,
+    /// Shared too: the CI chip and the review pill on every row that has
+    /// them.
     pub show_pr_status: bool,
-    pub direction: Direction,
-    pub inbox_show: InboxShow,
-    pub browse: BrowseView,
-    /// The repository Browse › By repository lists, last picked.
-    pub browse_repository: Option<String>,
-    /// Browse's Open · Closed toggle.
-    pub browse_closed: bool,
+    pub inbox: InboxFilters,
+    pub worktrees: WorktreeFilters,
+    pub browse: BrowseFilters,
     pub query: String,
 }
 
@@ -294,13 +526,10 @@ impl Default for ItemFilters {
         Self {
             tab: SidebarTab::Inbox,
             repository: None,
-            sort: ItemSort::LastActivity,
             show_pr_status: true,
-            direction: Direction::Newest,
-            inbox_show: InboxShow::All,
-            browse: BrowseView::Recent,
-            browse_repository: None,
-            browse_closed: false,
+            inbox: InboxFilters::default(),
+            worktrees: WorktreeFilters::default(),
+            browse: BrowseFilters::default(),
             query: String::new(),
         }
     }
@@ -310,26 +539,58 @@ impl ItemFilters {
     /// The form kept in the `meta` table: `key=value;` pairs. Search is
     /// deliberately transient. Repository identities are percent-encoded
     /// so local names can contain delimiters, percent signs, or spaces.
+    ///
+    /// `sort` and `direction` are Worktrees', as they were when it had
+    /// the only Sort By.
     pub fn to_meta(&self) -> String {
+        let (inbox, worktrees, browse) = (&self.inbox, &self.worktrees, &self.browse);
         format!(
-            "tab={};repository={};sort={};show_pr_status={};direction={};inbox={};browse={};browse_repository={};closed={}",
+            "tab={};repository={};show_pr_status={};\
+             inbox={};inbox_unread={};inbox_state={};inbox_direction={};\
+             worktrees={};worktrees_unread={};worktrees_state={};sort={};direction={};\
+             recent_sort={};recent_direction={};\
+             browse={};browse_state={};browse_sort={};browse_direction={}",
             self.tab.key(),
             self.repository.as_deref().map(encode_meta_value).unwrap_or_default(),
-            self.sort.key(),
             u8::from(self.show_pr_status),
-            self.direction.key(),
-            self.inbox_show.key(),
-            self.browse.key(),
-            self.browse_repository.as_deref().map(encode_meta_value).unwrap_or_default(),
-            u8::from(self.browse_closed),
+            inbox.view.key(),
+            u8::from(inbox.unread_only),
+            inbox.state.key(),
+            inbox.direction.key(),
+            worktrees.view.key(),
+            u8::from(worktrees.unread_only),
+            worktrees.state.key(),
+            worktrees.worktrees.sort.key(),
+            worktrees.worktrees.direction.key(),
+            worktrees.recent.sort.key(),
+            worktrees.recent.direction.key(),
+            browse.view.key(),
+            browse.state.key(),
+            browse.order.sort.key(),
+            browse.order.direction.key(),
         )
     }
 
-    /// Missing keys keep their defaults. The old scopes map onto the tabs:
-    /// All is Worktrees, Notifications is Inbox, and Authored is Browse ›
-    /// Yours. Settings that have gone are validated and ignored.
+    /// Missing keys keep their defaults. Older forms map onto the menus
+    /// as they are now:
+    ///
+    /// - the old scopes onto the tabs: All is Worktrees, Notifications is
+    ///   Inbox, and Authored is Browse › Yours;
+    /// - Show's `inbox=all` and `inbox=unread` onto the Inbox view, the
+    ///   second with Unread Only;
+    /// - `browse=recent` onto Worktrees › Recent while Browse was the tab.
+    ///   It was Browse's default, written whether or not anyone chose it,
+    ///   so otherwise Worktrees keeps its own view;
+    /// - `browse=repository` onto Browse › All, narrowed to the repository
+    ///   it listed while Browse is the tab;
+    /// - Open · Closed's `closed` onto Browse's State.
+    ///
+    /// Settings that have gone are validated and ignored.
     pub fn parse(s: &str) -> Result<Self, String> {
         let mut out = Self::default();
+        let mut browse_recent = false;
+        let mut browse_repository_view = false;
+        let mut browse_repository = None;
         for pair in s.split(';').map(str::trim).filter(|p| !p.is_empty()) {
             let (key, value) =
                 pair.split_once('=').ok_or_else(|| format!("expected key=value, got {pair:?}"))?;
@@ -342,6 +603,10 @@ impl ItemFilters {
                     decode_meta_value(value).map(Some).ok_or_else(bad)
                 }
             };
+            let flag = || parse_flag(value).ok_or_else(bad);
+            let state = || StateFilter::from_key(value).ok_or_else(bad);
+            let sort = || ItemSort::from_key(value).ok_or_else(bad);
+            let direction = || Direction::from_key(value).ok_or_else(bad);
             match key {
                 "tab" => out.tab = SidebarTab::from_key(value).ok_or_else(bad)?,
                 "scope" => match value {
@@ -349,7 +614,7 @@ impl ItemFilters {
                     "notifications" => out.tab = SidebarTab::Inbox,
                     "authored" => {
                         out.tab = SidebarTab::Browse;
-                        out.browse = BrowseView::Yours;
+                        out.browse.view = BrowseView::Yours;
                     }
                     _ => return Err(bad()),
                 },
@@ -369,40 +634,111 @@ impl ItemFilters {
                 "group" if matches!(value, "repo" | "owner" | "date") => {}
                 "group" => return Err(bad()),
                 "show_empty" | "saved" => {
-                    parse_flag(value).ok_or_else(bad)?;
+                    flag()?;
                 }
-                "sort" => out.sort = ItemSort::from_key(value).ok_or_else(bad)?,
-                "show_pr_status" => out.show_pr_status = parse_flag(value).ok_or_else(bad)?,
-                "direction" => out.direction = Direction::from_key(value).ok_or_else(bad)?,
-                "inbox" => out.inbox_show = InboxShow::from_key(value).ok_or_else(bad)?,
+                "show_pr_status" => out.show_pr_status = flag()?,
+                "inbox" => match value {
+                    "all" => out.inbox.view = InboxView::Inbox,
+                    "unread" => {
+                        out.inbox.view = InboxView::Inbox;
+                        out.inbox.unread_only = true;
+                    }
+                    _ => out.inbox.view = InboxView::from_key(value).ok_or_else(bad)?,
+                },
                 // Before Done, Show was only ever Unread or All.
-                "unread" => {
-                    out.inbox_show =
-                        if parse_flag(value).ok_or_else(bad)? { InboxShow::Unread } else { InboxShow::All }
+                "unread" | "inbox_unread" => out.inbox.unread_only = flag()?,
+                "inbox_state" => out.inbox.state = state()?,
+                "inbox_direction" => out.inbox.direction = direction()?,
+                "worktrees" => out.worktrees.view = WorktreeView::from_key(value).ok_or_else(bad)?,
+                "worktrees_unread" => out.worktrees.unread_only = flag()?,
+                "worktrees_state" => out.worktrees.state = state()?,
+                "sort" => out.worktrees.worktrees.sort = sort()?,
+                "direction" => out.worktrees.worktrees.direction = direction()?,
+                "recent_sort" => out.worktrees.recent.sort = sort()?,
+                "recent_direction" => out.worktrees.recent.direction = direction()?,
+                "browse" => match value {
+                    "recent" => browse_recent = true,
+                    "repository" => browse_repository_view = true,
+                    _ => out.browse.view = BrowseView::from_key(value).ok_or_else(bad)?,
+                },
+                "browse_repository" => browse_repository = repository(value)?,
+                "closed" => {
+                    out.browse.state = if flag()? { StateFilter::Closed } else { StateFilter::Open }
                 }
-                "browse" => out.browse = BrowseView::from_key(value).ok_or_else(bad)?,
-                "browse_repository" => out.browse_repository = repository(value)?,
-                "closed" => out.browse_closed = parse_flag(value).ok_or_else(bad)?,
+                "browse_state" => out.browse.state = state()?,
+                "browse_sort" => {
+                    out.browse.order.sort =
+                        sort().ok().filter(|sort| ItemSort::BROWSE.contains(sort)).ok_or_else(bad)?
+                }
+                "browse_direction" => out.browse.order.direction = direction()?,
                 "query" => out.query = value.to_string(),
                 _ => return Err(format!("unknown key {key:?}")),
+            }
+        }
+        if browse_recent && out.tab == SidebarTab::Browse {
+            out.worktrees.view = WorktreeView::Recent;
+            out.tab = SidebarTab::Worktrees;
+        }
+        if browse_repository_view {
+            out.browse.view = BrowseView::All;
+            if out.tab == SidebarTab::Browse && browse_repository.is_some() {
+                out.repository = browse_repository;
             }
         }
         Ok(out)
     }
 
-    /// The search Browse is showing, while it shows one of GitHub's views.
-    pub fn browse_query(&self) -> Option<String> {
+    /// The search Browse is showing, given the repositories on GitHub
+    /// that All searches without one picked.
+    pub fn browse_query(&self, github_repositories: &[String]) -> Option<String> {
         if self.tab != SidebarTab::Browse {
             return None;
         }
-        self.browse.query(self.browse_repository.as_deref(), self.browse_closed)
+        let browse = &self.browse;
+        browse.view.query(self.repository.as_deref(), github_repositories, browse.state, browse.order)
     }
 
-    /// The repository Browse is listing, while it shows By repository.
+    /// The repository on GitHub Browse is narrowed to, while it is the
+    /// tab.
     pub fn browse_repository(&self) -> Option<&str> {
-        (self.tab == SidebarTab::Browse && self.browse == BrowseView::Repository)
-            .then_some(self.browse_repository.as_deref())
+        (self.tab == SidebarTab::Browse)
+            .then_some(self.repository.as_deref())
             .flatten()
+            .filter(|repo| !perch_github::is_local(repo))
+    }
+
+    /// Whether the tab's menu is anywhere but its defaults, which lights
+    /// the filter button. Reason is Inbox's alone and lives outside
+    /// these filters, so the caller adds it.
+    pub fn narrowed(&self) -> bool {
+        let d = Self::default();
+        self.repository.is_some()
+            || self.show_pr_status != d.show_pr_status
+            || match self.tab {
+                SidebarTab::Inbox => self.inbox != d.inbox,
+                SidebarTab::Worktrees => {
+                    let w = &self.worktrees;
+                    let order = match w.view {
+                        WorktreeView::Worktrees => Order::WORKTREES,
+                        WorktreeView::Recent => Order::RECENT,
+                    };
+                    w.view != d.worktrees.view
+                        || w.unread_only != d.worktrees.unread_only
+                        || w.state != d.worktrees.state
+                        || w.order() != order
+                }
+                SidebarTab::Browse => self.browse != d.browse,
+            }
+    }
+
+    /// The name of the list the tab shows, for the search box to say what
+    /// it searches.
+    pub fn view_label(&self) -> &'static str {
+        match self.tab {
+            SidebarTab::Inbox => self.inbox.view.label(),
+            SidebarTab::Worktrees => self.worktrees.view.label(),
+            SidebarTab::Browse => self.browse.view.label(),
+        }
     }
 }
 
@@ -467,23 +803,30 @@ pub fn in_worktrees(item: &Item) -> bool {
     !item.is_archived() && item.checkout.as_ref().is_some_and(|c| c.on_disk)
 }
 
-/// Worktrees: every worktree on disk under the repository filter and the
+/// Whether the item passes Worktrees' narrowing: the repository, State,
+/// Unread Only and the search. `unread` says whether the inbox has an
+/// unread notification about it, as its row's dot does.
+fn narrowed_to(item: &Item, filters: &ItemFilters, unread: &dyn Fn(&Item) -> bool) -> bool {
+    let w = &filters.worktrees;
+    filters
+        .repository
+        .as_ref()
+        .is_none_or(|repo| repo.eq_ignore_ascii_case(&item.repo_full_name))
+        && w.state.admits(item.is_closed())
+        && (!w.unread_only || unread(item))
+        && matches_query(item, &filters.query)
+}
+
+/// Worktrees › Worktrees: every worktree on disk under the menu and the
 /// search, most recently pinned first and then by the sort.
-pub fn worktree_items(items: &[Item], filters: &ItemFilters) -> Vec<Item> {
+pub fn worktree_items(items: &[Item], filters: &ItemFilters, unread: &dyn Fn(&Item) -> bool) -> Vec<Item> {
     let rows: Vec<&Item> = items
         .iter()
-        .filter(|item| {
-            in_worktrees(item)
-                && matches_query(item, &filters.query)
-                && filters
-                    .repository
-                    .as_ref()
-                    .is_none_or(|repo| repo.eq_ignore_ascii_case(&item.repo_full_name))
-        })
+        .filter(|item| in_worktrees(item) && narrowed_to(item, filters, unread))
         .collect();
     let (mut pinned, mut rest): (Vec<&Item>, Vec<&Item>) = rows.into_iter().partition(|item| item.is_pinned());
     sort_pins(&mut pinned);
-    sort_items(&mut rest, filters.sort, filters.direction);
+    sort_items(&mut rest, filters.worktrees.worktrees);
     pinned.into_iter().chain(rest).cloned().collect()
 }
 
@@ -499,30 +842,31 @@ fn opened(item: &Item) -> bool {
     item.checkout.as_ref().is_none_or(|c| c.owned) || item.last_opened_at > item.created_at
 }
 
-/// Recent: everything opened, worktree or not, pinned first, then the
-/// `RECENT_LIMIT` most recently opened. A worktree is in Worktrees as
-/// well. The search narrows what is shown; an older row is found by
+/// Worktrees › Recent: everything opened, worktree or not, pinned first,
+/// then the `RECENT_LIMIT` most recently opened in the view's sort. The
+/// menu and the search narrow what is shown; an older row is found by
 /// opening it again, which brings it back.
-pub fn recent_items(items: &[Item], query: &str) -> Vec<Item> {
+pub fn recent_items(items: &[Item], filters: &ItemFilters, unread: &dyn Fn(&Item) -> bool) -> Vec<Item> {
     let (mut pinned, mut rest): (Vec<&Item>, Vec<&Item>) =
         items.iter().filter(|item| opened(item)).partition(|item| item.is_pinned());
     sort_pins(&mut pinned);
     rest.sort_by(|a, b| b.last_opened_at.cmp(&a.last_opened_at).then_with(|| a.id.cmp(&b.id)));
     rest.truncate(RECENT_LIMIT);
+    sort_items(&mut rest, filters.worktrees.recent);
     pinned
         .into_iter()
         .chain(rest)
-        .filter(|item| matches_query(item, query))
+        .filter(|item| narrowed_to(item, filters, unread))
         .cloned()
         .collect()
 }
 
-/// The local items the tab in `filters` lists: Worktrees, Browse ›
-/// Recent, or none, for Inbox and Browse's GitHub views.
-pub fn local_items(items: &[Item], filters: &ItemFilters) -> Vec<Item> {
-    match (filters.tab, filters.browse) {
-        (SidebarTab::Worktrees, _) => worktree_items(items, filters),
-        (SidebarTab::Browse, BrowseView::Recent) => recent_items(items, &filters.query),
+/// The local items the tab in `filters` lists: Worktrees' view, or none,
+/// for Inbox and Browse.
+pub fn local_items(items: &[Item], filters: &ItemFilters, unread: &dyn Fn(&Item) -> bool) -> Vec<Item> {
+    match (filters.tab, filters.worktrees.view) {
+        (SidebarTab::Worktrees, WorktreeView::Worktrees) => worktree_items(items, filters, unread),
+        (SidebarTab::Worktrees, WorktreeView::Recent) => recent_items(items, filters, unread),
         _ => Vec::new(),
     }
 }
@@ -577,6 +921,16 @@ pub fn repository_options(declared: &[DeclaredRepo], items: &[Item]) -> Vec<Stri
     repositories
 }
 
+/// The declared repositories on GitHub, in the file's order: what
+/// Browse's Repository offers, and what All searches with none picked.
+pub fn github_repositories(declared: &[DeclaredRepo]) -> Vec<String> {
+    declared
+        .iter()
+        .filter(|repo| !perch_github::is_local(&repo.identity))
+        .map(|repo| repo.identity.clone())
+        .collect()
+}
+
 /// Most recently pinned first, ties by id.
 fn sort_pins(items: &mut [&Item]) {
     items.sort_by(|a, b| b.pinned_at.cmp(&a.pinned_at).then_with(|| a.id.cmp(&b.id)));
@@ -586,9 +940,9 @@ fn sort_pins(items: &mut [&Item]) {
 /// then the whole thing turned over for Oldest first. Reversing after the
 /// sort rather than flipping the comparison keeps one ordering to reason
 /// about, and the reversed tiebreak is the price.
-fn sort_items(items: &mut [&Item], sort: ItemSort, direction: Direction) {
-    items.sort_by(|a, b| sort.time(b).cmp(&sort.time(a)).then_with(|| a.id.cmp(&b.id)));
-    if direction == Direction::Oldest {
+fn sort_items(items: &mut [&Item], order: Order) {
+    items.sort_by(|a, b| order.sort.time(b).cmp(&order.sort.time(a)).then_with(|| a.id.cmp(&b.id)));
+    if order.direction == Direction::Oldest {
         items.reverse();
     }
 }
@@ -747,6 +1101,20 @@ mod tests {
         (declared, vec![wanted, closed, merged, bug, archived, branch, other])
     }
 
+    fn worktrees_of(items: &[Item], filters: &ItemFilters) -> Vec<Item> {
+        worktree_items(items, filters, &|_| false)
+    }
+
+    fn recent_of(items: &[Item], query: &str) -> Vec<Item> {
+        recent_items(items, &ItemFilters { query: query.into(), ..Default::default() }, &|_| false)
+    }
+
+    fn sorted(sort: ItemSort, direction: Direction) -> ItemFilters {
+        let mut filters = ItemFilters::default();
+        filters.worktrees.worktrees = Order { sort, direction };
+        filters
+    }
+
     fn ids(items: &[Item]) -> Vec<&str> {
         items.iter().map(|i| i.id.as_str()).collect()
     }
@@ -754,11 +1122,11 @@ mod tests {
     #[test]
     fn worktrees_are_the_checkouts_on_disk_and_recent_is_everything_opened() {
         let (_, items) = fixture();
-        assert_eq!(ids(&worktree_items(&items, &ItemFilters::default())), ["pr-wanted", "branch"]);
+        assert_eq!(ids(&worktrees_of(&items, &ItemFilters::default())), ["pr-wanted", "branch"]);
         // By when each was last opened, which the fixture leaves at when
         // it was made. The worktrees are in both.
         assert_eq!(
-            ids(&recent_items(&items, "")),
+            ids(&recent_of(&items, "")),
             ["branch", "slatedb-pr", "issue", "pr-closed", "pr-wanted", "pr-merged", "branch-archived"]
         );
     }
@@ -767,13 +1135,13 @@ mod tests {
     fn a_worktree_that_goes_leaves_worktrees_and_stays_in_recent() {
         let (_, mut items) = fixture();
         items[5].checkout.as_mut().unwrap().on_disk = false;
-        assert_eq!(ids(&worktree_items(&items, &ItemFilters::default())), ["pr-wanted"]);
-        assert!(ids(&recent_items(&items, "")).contains(&"branch"));
+        assert_eq!(ids(&worktrees_of(&items, &ItemFilters::default())), ["pr-wanted"]);
+        assert!(ids(&recent_of(&items, "")).contains(&"branch"));
 
         let (_, mut items) = fixture();
         items[0].archived_at = Some(at("2026-09-18T10:00:00Z"));
-        assert_eq!(ids(&worktree_items(&items, &ItemFilters::default())), ["branch"]);
-        assert!(ids(&recent_items(&items, "")).contains(&"pr-wanted"));
+        assert_eq!(ids(&worktrees_of(&items, &ItemFilters::default())), ["branch"]);
+        assert!(ids(&recent_of(&items, "")).contains(&"pr-wanted"));
     }
 
     /// A worktree the root scan found is the reader's checkout, noticed:
@@ -782,29 +1150,75 @@ mod tests {
     fn a_scanned_worktree_is_recent_once_opened() {
         let (_, mut items) = fixture();
         items[5].checkout.as_mut().unwrap().owned = false;
-        assert!(ids(&worktree_items(&items, &ItemFilters::default())).contains(&"branch"));
-        assert!(!ids(&recent_items(&items, "")).contains(&"branch"), "found, not opened");
+        assert!(ids(&worktrees_of(&items, &ItemFilters::default())).contains(&"branch"));
+        assert!(!ids(&recent_of(&items, "")).contains(&"branch"), "found, not opened");
         items[5].last_opened_at = at("2026-09-20T10:00:00Z");
-        assert_eq!(ids(&recent_items(&items, ""))[0], "branch", "opened");
+        assert_eq!(ids(&recent_of(&items, ""))[0], "branch", "opened");
     }
 
     #[test]
     fn worktrees_sort_and_pin_and_filter_by_repository() {
         let (_, mut items) = fixture();
-        let filters = ItemFilters { sort: ItemSort::Created, ..Default::default() };
-        assert_eq!(ids(&worktree_items(&items, &filters)), ["branch", "pr-wanted"]);
-        let filters = ItemFilters { direction: Direction::Oldest, ..filters };
-        assert_eq!(ids(&worktree_items(&items, &filters)), ["pr-wanted", "branch"]);
+        let filters = sorted(ItemSort::Created, Direction::Newest);
+        assert_eq!(ids(&worktrees_of(&items, &filters)), ["branch", "pr-wanted"]);
+        let filters = sorted(ItemSort::Created, Direction::Oldest);
+        assert_eq!(ids(&worktrees_of(&items, &filters)), ["pr-wanted", "branch"]);
 
         items[0].pinned_at = Some(at("2026-09-18T10:00:00Z"));
-        let filters = ItemFilters { sort: ItemSort::Created, ..Default::default() };
-        assert_eq!(ids(&worktree_items(&items, &filters)), ["pr-wanted", "branch"], "the pin leads");
+        let filters = sorted(ItemSort::Created, Direction::Newest);
+        assert_eq!(ids(&worktrees_of(&items, &filters)), ["pr-wanted", "branch"], "the pin leads");
 
         items[0].repo_full_name = "chris/perch".into();
         let filters = ItemFilters { repository: Some("CHRIS/Perch".into()), ..Default::default() };
-        assert_eq!(ids(&worktree_items(&items, &filters)), ["pr-wanted"]);
+        assert_eq!(ids(&worktrees_of(&items, &filters)), ["pr-wanted"]);
         let filters = ItemFilters { repository: Some("missing/repo".into()), ..Default::default() };
-        assert!(worktree_items(&items, &filters).is_empty());
+        assert!(worktrees_of(&items, &filters).is_empty());
+    }
+
+    /// State narrows on the pull request's or the issue's own state; a
+    /// branch with neither counts as open. Unread Only keeps the rows the
+    /// inbox has unread news about.
+    #[test]
+    fn worktrees_narrow_to_a_state_and_to_the_unread() {
+        let (_, mut items) = fixture();
+        items[1].checkout = Some(checkout("spans"));
+        items[2].checkout = Some(checkout("old"));
+        let mut filters = ItemFilters::default();
+        assert_eq!(ids(&worktrees_of(&items, &filters)), ["pr-wanted", "pr-closed", "branch", "pr-merged"]);
+        filters.worktrees.state = StateFilter::Closed;
+        assert_eq!(ids(&worktrees_of(&items, &filters)), ["pr-closed", "pr-merged"]);
+        filters.worktrees.state = StateFilter::Open;
+        assert_eq!(ids(&worktrees_of(&items, &filters)), ["pr-wanted", "branch"], "a branch is open");
+
+        filters.worktrees.state = StateFilter::Any;
+        filters.worktrees.unread_only = true;
+        let unread = |item: &Item| item.id == "pr-merged";
+        assert_eq!(ids(&worktree_items(&items, &filters, &unread)), ["pr-merged"]);
+    }
+
+    /// Recent keeps its own Sort By, applied to the fifty last opened;
+    /// the repository and State narrow it as they do Worktrees.
+    #[test]
+    fn recent_sorts_and_narrows_like_worktrees() {
+        let (_, items) = fixture();
+        let mut filters = ItemFilters { tab: SidebarTab::Worktrees, ..Default::default() };
+        filters.worktrees.view = WorktreeView::Recent;
+        filters.worktrees.recent = Order { sort: ItemSort::LastActivity, direction: Direction::Newest };
+        assert_eq!(
+            ids(&local_items(&items, &filters, &|_| false)),
+            ["pr-wanted", "pr-closed", "issue", "branch", "slatedb-pr", "pr-merged", "branch-archived"]
+        );
+        filters.worktrees.state = StateFilter::Closed;
+        assert_eq!(ids(&local_items(&items, &filters, &|_| false)), ["pr-closed", "pr-merged"]);
+        filters.worktrees.state = StateFilter::Any;
+        filters.repository = Some("slatedb/slatedb".into());
+        assert_eq!(ids(&local_items(&items, &filters, &|_| false)), ["slatedb-pr"]);
+
+        filters.worktrees.view = WorktreeView::Worktrees;
+        filters.repository = None;
+        assert_eq!(ids(&local_items(&items, &filters, &|_| false)), ["pr-wanted", "branch"]);
+        filters.tab = SidebarTab::Inbox;
+        assert!(local_items(&items, &filters, &|_| false).is_empty());
     }
 
     #[test]
@@ -821,7 +1235,7 @@ mod tests {
         // The oldest two, pinned: they stay, however old.
         items[0].pinned_at = Some(at("2026-09-20T00:00:00Z"));
         items[1].pinned_at = Some(at("2026-09-21T00:00:00Z"));
-        let rows = recent_items(&items, "");
+        let rows = recent_of(&items, "");
         assert_eq!(rows.len(), 2 + RECENT_LIMIT);
         assert_eq!(ids(&rows)[..4], ["r01", "r00", "r59", "r58"]);
         assert!(!ids(&rows).contains(&"r09"), "fifty after the pins, the rest not shown");
@@ -829,7 +1243,7 @@ mod tests {
 
         // Opening an old one brings it back to the top.
         items[5].last_opened_at = at("2026-09-25T00:00:00Z");
-        assert_eq!(ids(&recent_items(&items, ""))[2], "r05");
+        assert_eq!(ids(&recent_of(&items, ""))[2], "r05");
     }
 
     #[test]
@@ -838,7 +1252,7 @@ mod tests {
         items[0].name = Some("the fence one".into());
         // Recent has every row of the fixture; the worktrees are opened
         // Perch-made ones.
-        let everything = |query: &str| recent_items(&items, query);
+        let everything = |query: &str| recent_of(&items, query);
         assert_eq!(ids(&everything("#57")), ["pr-wanted"]);
         assert_eq!(ids(&everything("57")), ["pr-wanted"]);
         assert_eq!(ids(&everything("fence the manifest")), ["pr-wanted"]);
@@ -919,19 +1333,33 @@ mod tests {
         let filters = ItemFilters {
             tab: SidebarTab::Browse,
             repository: Some("local/notes;scope=all% ☃ ".into()),
-            sort: ItemSort::LastOpened,
             show_pr_status: false,
-            direction: Direction::Oldest,
-            inbox_show: InboxShow::Done,
-            browse: BrowseView::Repository,
-            browse_repository: Some("slatedb/slatedb".into()),
-            browse_closed: true,
+            inbox: InboxFilters {
+                view: InboxView::Done,
+                unread_only: true,
+                state: StateFilter::Closed,
+                direction: Direction::Oldest,
+            },
+            worktrees: WorktreeFilters {
+                view: WorktreeView::Recent,
+                unread_only: true,
+                state: StateFilter::Open,
+                worktrees: Order { sort: ItemSort::Created, direction: Direction::Oldest },
+                recent: Order { sort: ItemSort::LastActivity, direction: Direction::Oldest },
+            },
+            browse: BrowseFilters {
+                view: BrowseView::All,
+                state: StateFilter::Any,
+                order: Order { sort: ItemSort::Created, direction: Direction::Oldest },
+            },
             query: String::new(),
         };
         let meta = filters.to_meta();
         assert!(meta.contains("repository=local/notes%3Bscope%3Dall%25%20%E2%98%83%20;"));
         assert_eq!(ItemFilters::parse(&meta).unwrap(), filters);
-        assert_eq!(filters.browse_repository(), Some("slatedb/slatedb"));
+        assert_eq!(filters.browse_repository(), None, "not on GitHub");
+        let github = ItemFilters { repository: Some("slatedb/slatedb".into()), ..filters.clone() };
+        assert_eq!(github.browse_repository(), Some("slatedb/slatedb"));
         assert_eq!(ItemFilters::parse("").unwrap(), ItemFilters::default());
         assert_eq!(ItemFilters::parse(&ItemFilters::default().to_meta()).unwrap(), ItemFilters::default());
         assert_eq!(ItemFilters::default().tab, SidebarTab::Inbox, "Inbox is where it opens");
@@ -940,33 +1368,77 @@ mod tests {
             Some("owner/repo")
         );
         assert_eq!(ItemFilters::parse("repository=").unwrap().repository, None);
-        assert_eq!(ItemFilters::parse("unread=1").unwrap().inbox_show, InboxShow::Unread, "as saved before Done");
-        assert_eq!(ItemFilters::parse("unread=0").unwrap().inbox_show, InboxShow::All);
-        assert_eq!(ItemFilters::parse("inbox=snoozed").unwrap().inbox_show, InboxShow::Snoozed);
-        for gone in [";group=", ";show_empty=", ";status=", ";kinds=", ";saved=", ";scope="] {
+        let gone = [";group=", ";show_empty=", ";status=", ";kinds=", ";saved=", ";scope=", ";closed=", ";browse_repository="];
+        for gone in gone {
             assert!(!meta.contains(gone), "{gone}");
         }
     }
 
+    /// Show's Unread and All are the Inbox view, the first with Unread
+    /// Only; Done and Snoozed are views of their own.
     #[test]
-    fn the_old_scopes_map_onto_the_tabs_and_gone_settings_are_ignored() {
-        let old = "status=closed;kinds=pr;scope=all;group=owner;sort=created;show_empty=1;show_pr_status=0;saved=1;direction=oldest";
+    fn inbox_show_becomes_the_view_and_unread_only() {
+        let inbox = |s: &str| ItemFilters::parse(s).unwrap().inbox;
+        assert_eq!(inbox("inbox=unread"), InboxFilters { unread_only: true, ..Default::default() });
+        assert_eq!(inbox("inbox=all"), InboxFilters::default());
+        assert_eq!(inbox("inbox=snoozed").view, InboxView::Snoozed);
+        assert_eq!(inbox("inbox=done").view, InboxView::Done);
+        assert!(inbox("unread=1").unread_only, "as saved before Done");
+        assert!(!inbox("unread=0").unread_only);
+    }
+
+    /// Browse › Recent moves to Worktrees when Browse was showing it; By
+    /// repository becomes All narrowed to the repository it listed; Open ·
+    /// Closed becomes State.
+    #[test]
+    fn browse_s_old_views_move_onto_the_menus() {
+        let old = "tab=browse;repository=org/inbox;browse=recent;browse_repository=a/b;closed=0";
         let filters = ItemFilters::parse(old).unwrap();
         assert_eq!(filters.tab, SidebarTab::Worktrees);
-        assert_eq!(filters.sort, ItemSort::Created);
-        assert!(!filters.show_pr_status);
-        assert_eq!(filters.direction, Direction::Oldest);
+        assert_eq!(filters.worktrees.view, WorktreeView::Recent);
+        assert_eq!(filters.browse.view, BrowseView::ReviewRequested);
+        assert_eq!(filters.repository.as_deref(), Some("org/inbox"), "not By repository's");
+        assert_eq!(filters.browse.state, StateFilter::Open);
 
-        assert_eq!(ItemFilters::parse("scope=notifications").unwrap().tab, SidebarTab::Inbox);
-        let authored = ItemFilters::parse("scope=authored").unwrap();
-        assert_eq!((authored.tab, authored.browse), (SidebarTab::Browse, BrowseView::Yours));
-        for group in ["repo", "owner", "date"] {
-            assert_eq!(
-                ItemFilters::parse(&format!("group={group};show_empty=0")).unwrap(),
-                ItemFilters::default()
-            );
-        }
-        assert_eq!(ItemFilters::parse("kinds=").unwrap(), ItemFilters::default());
+        // Recent was Browse's default, saved whether or not it was chosen.
+        let filters = ItemFilters::parse("tab=inbox;browse=recent").unwrap();
+        assert_eq!((filters.tab, filters.worktrees.view), (SidebarTab::Inbox, WorktreeView::Worktrees));
+
+        let filters =
+            ItemFilters::parse("tab=browse;repository=org/inbox;browse=repository;browse_repository=a/b;closed=1").unwrap();
+        assert_eq!((filters.tab, filters.browse.view), (SidebarTab::Browse, BrowseView::All));
+        assert_eq!(filters.repository.as_deref(), Some("a/b"), "the one it was listing");
+        assert_eq!(filters.browse.state, StateFilter::Closed);
+
+        let filters =
+            ItemFilters::parse("tab=worktrees;repository=org/inbox;browse=repository;browse_repository=a/b").unwrap();
+        assert_eq!(filters.browse.view, BrowseView::All);
+        assert_eq!(filters.repository.as_deref(), Some("org/inbox"), "the tab showing keeps its own");
+    }
+
+    /// The button lights for whatever the tab showing is narrowed or
+    /// ordered by, and for nothing on the other tabs.
+    #[test]
+    fn the_filter_button_lights_for_the_tab_showing() {
+        let mut filters = ItemFilters::default();
+        assert!(!filters.narrowed());
+        filters.worktrees.state = StateFilter::Closed;
+        assert!(!filters.narrowed(), "Worktrees' own");
+        filters.tab = SidebarTab::Worktrees;
+        assert!(filters.narrowed());
+        filters.worktrees.state = StateFilter::Any;
+        filters.worktrees.view = WorktreeView::Recent;
+        assert!(filters.narrowed(), "a view other than the first");
+        filters.worktrees.view = WorktreeView::Worktrees;
+        assert!(!filters.narrowed());
+        filters.worktrees.recent.direction = Direction::Oldest;
+        assert!(!filters.narrowed(), "the order of a view not showing");
+        filters.tab = SidebarTab::Browse;
+        filters.browse.state = StateFilter::Any;
+        assert!(filters.narrowed());
+        filters.browse.state = StateFilter::Open;
+        filters.repository = Some("a/b".into());
+        assert!(filters.narrowed(), "the repository, on every tab");
     }
 
     #[test]
@@ -993,6 +1465,11 @@ mod tests {
             ("scope=reviewing", "scope"),
             ("tab=elsewhere", "tab"),
             ("browse=everything", "browse"),
+            ("inbox=everything", "inbox"),
+            ("worktrees=everything", "worktrees"),
+            ("inbox_state=merged", "inbox_state"),
+            ("browse_sort=last_opened", "browse_sort"),
+            ("recent_direction=up", "recent_direction"),
             ("repository=local/%", "repository"),
             ("repository=%ZZ", "repository"),
             ("browse_repository=%FF", "browse_repository"),
@@ -1003,34 +1480,62 @@ mod tests {
     }
 
     #[test]
-    fn each_github_view_is_a_search_open_or_closed() {
+    fn each_github_view_is_a_search() {
+        let open = StateFilter::Open;
+        let newest = Order::BROWSE;
+        let none: &[String] = &[];
         assert_eq!(
-            BrowseView::ReviewRequested.query(None, false).as_deref(),
+            BrowseView::ReviewRequested.query(None, none, open, newest).as_deref(),
             Some("is:pr review-requested:@me is:open archived:false")
         );
         assert_eq!(
-            BrowseView::Yours.query(None, true).as_deref(),
+            BrowseView::Yours.query(None, none, StateFilter::Closed, newest).as_deref(),
             Some("author:@me is:closed archived:false")
         );
         assert_eq!(
-            BrowseView::Assigned.query(None, false).as_deref(),
-            Some("assignee:@me is:open archived:false")
+            BrowseView::Assigned.query(None, none, StateFilter::Any, newest).as_deref(),
+            Some("assignee:@me archived:false")
         );
         assert_eq!(
-            BrowseView::Mentioned.query(None, false).as_deref(),
-            Some("mentions:@me is:open archived:false")
+            BrowseView::Mentioned.query(Some("a/b"), none, open, newest).as_deref(),
+            Some("mentions:@me repo:a/b is:open archived:false"),
+            "any view narrows to a repository"
+        );
+        let oldest_created = Order { sort: ItemSort::Created, direction: Direction::Oldest };
+        assert_eq!(
+            BrowseView::Yours.query(None, none, open, oldest_created).as_deref(),
+            Some("author:@me is:open archived:false sort:created-asc")
+        );
+        assert_eq!(BrowseView::Yours.query(Some("local/notes"), none, open, newest), None, "not on GitHub");
+    }
+
+    /// All searches the repository picked, or every declared one on
+    /// GitHub; with none, or more than a search holds, there is nothing
+    /// to search.
+    #[test]
+    fn all_searches_the_declared_repositories() {
+        let (declared, _) = fixture();
+        let github = github_repositories(&declared);
+        let open = StateFilter::Open;
+        assert_eq!(
+            BrowseView::All.query(None, &github, open, Order::BROWSE).as_deref(),
+            Some("repo:criccomini/perch repo:slatedb/slatedb repo:x/empty is:open archived:false")
         );
         assert_eq!(
-            BrowseView::Repository.query(Some("slatedb/slatedb"), false).as_deref(),
+            BrowseView::All.query(Some("slatedb/slatedb"), &github, open, Order::BROWSE).as_deref(),
             Some("repo:slatedb/slatedb is:open archived:false")
         );
-        assert_eq!(BrowseView::Repository.query(None, false), None, "none picked");
-        assert_eq!(BrowseView::Recent.query(Some("a/b"), false), None, "local");
+        assert_eq!(BrowseView::All.query(None, &[], open, Order::BROWSE), None);
+        let many: Vec<String> = (0..20).map(|n| format!("organisation/repository-{n}")).collect();
+        assert_eq!(BrowseView::All.query(None, &many, open, Order::BROWSE), None, "too long");
 
-        let mut filters = ItemFilters { browse: BrowseView::Yours, ..Default::default() };
-        assert_eq!(filters.browse_query(), None, "not while Browse is not showing");
+        let mut filters = ItemFilters::default();
+        assert_eq!(filters.browse_query(&github), None, "not while Browse is not showing");
         filters.tab = SidebarTab::Browse;
-        assert_eq!(filters.browse_query().as_deref(), Some("author:@me is:open archived:false"));
+        assert_eq!(
+            filters.browse_query(&github).as_deref(),
+            Some("is:pr review-requested:@me is:open archived:false")
+        );
     }
 
     #[test]
@@ -1041,6 +1546,18 @@ mod tests {
         }
         for value in BrowseView::ALL {
             assert_eq!(BrowseView::from_key(value.key()), Some(value));
+            assert_eq!(value.to_string(), value.label());
+        }
+        for value in InboxView::ALL {
+            assert_eq!(InboxView::from_key(value.key()), Some(value));
+            assert_eq!(value.to_string(), value.label());
+        }
+        for value in WorktreeView::ALL {
+            assert_eq!(WorktreeView::from_key(value.key()), Some(value));
+            assert_eq!(value.to_string(), value.label());
+        }
+        for value in StateFilter::ALL {
+            assert_eq!(StateFilter::from_key(value.key()), Some(value));
             assert_eq!(value.to_string(), value.label());
         }
         for value in ItemSort::ALL {

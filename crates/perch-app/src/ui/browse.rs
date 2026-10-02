@@ -1,214 +1,32 @@
-//! Browse: GitHub's fixed views, and Recent.
+//! Browse: GitHub's searches.
 //!
-//! A chip picks the view, a second the repository By repository lists,
-//! and Open · Closed which of its pull requests and issues. A GitHub view
-//! is searched when it is picked, and again after each poll while it is
-//! on screen; its results live in `AppState::browse`, never in the
-//! database. Recent is the local list of what was opened lately.
+//! The filter menu picks the view, the repository, the state and the
+//! order. A view is searched when it is picked, and again after each poll
+//! while it is on screen; its results live in `AppState::browse`, never in
+//! the database.
 
 use std::rc::Rc;
 
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, SignalGet, SignalWith};
-use floem::views::{
-    dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack,
-};
+use floem::views::{dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack};
 use perch_github::{ItemKind, SearchHit, SubjectState};
 
 use crate::backend::Backend;
 use crate::icons::{self, SidebarIcon};
-use crate::items::BrowseView;
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::items::OpenItem;
 use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::nav_row;
-use crate::ui::sidebar::{local_item_list, set_filters};
 use crate::ui::widgets::{open_in_browser, sidebar_glyph, state_glyph};
 
-/// The Browse tab: its chips over the view's list.
-pub fn browse(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl IntoView {
-    let search_backend = backend.clone();
-    // A memo, so a change of repository or of Open · Closed does not
-    // build the list again: the list follows its search itself.
-    let recent = Memo::new(move |_| state.item_filters.with(|f| f.browse == BrowseView::Recent));
+/// The Browse tab: the row Open… would take, over the view's results.
+pub fn browse(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     Stack::vertical((
-        bar(state),
         open_row(state, backend.clone()),
-        dyn_container(
-            move || recent.get(),
-            move |recent| {
-                if recent {
-                    local_item_list(
-                        state,
-                        backend.clone(),
-                        on_open.clone(),
-                        "Nothing opened yet",
-                    )
-                    .into_any()
-                } else {
-                    search_list(state, search_backend.clone()).into_any()
-                }
-            },
-        )
-        .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0)),
+        search_list(state, backend).style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0)),
     ))
     .style(|s| s.flex_col().width_full().flex_grow(1.0_f32).min_height(0.0))
-}
-
-/// The view chip, the repository chip while By repository is picked, and
-/// Open · Closed for GitHub's views.
-fn bar(state: AppState) -> impl IntoView {
-    let view = move || state.item_filters.with(|f| f.browse);
-    Stack::horizontal((
-        chip(
-            move || view().label().to_string(),
-            move || view_menu(state),
-            "browse view",
-        ),
-        chip(
-            move || {
-                state
-                    .item_filters
-                    .with(|f| f.browse_repository.clone())
-                    .unwrap_or_else(|| "Pick a repository".to_string())
-            },
-            move || repository_menu(state),
-            "browse repository",
-        )
-        .style(move |s| s.apply_if(view() != BrowseView::Repository, |s| s.hide())),
-        Empty::new().style(|s| s.flex_grow(1.0_f32)),
-        open_closed(state).style(move |s| s.apply_if(view() == BrowseView::Recent, |s| s.hide())),
-    ))
-    .style(|s| {
-        s.items_center()
-            .width_full()
-            .gap(6.0)
-            .padding_horiz(theme::NAV_GUTTER)
-            .padding_top(12.0)
-    })
-}
-
-/// A chip that opens a menu, in the drawer's colours.
-fn chip(
-    label: impl Fn() -> String + 'static,
-    menu: impl Fn() -> Menu + 'static,
-    name: &'static str,
-) -> impl View {
-    Stack::horizontal((
-        Label::derived(label).style(|s| {
-            s.font_size(theme::TEXT_META)
-                .color(theme::NAV_FG)
-                .selectable(false)
-                .pointer_events_none()
-                .text_ellipsis()
-                .min_width(0.0)
-                .margin_right(5.0)
-        }),
-        sidebar_glyph(SidebarIcon::ChevronDown, theme::NAV_MUTED)
-            .style(|s| s.size(9.0, 9.0).flex_shrink(0.0_f32).pointer_events_none()),
-    ))
-    .dropdown(menu)
-    .debug_name(name)
-    .style(|s| {
-        crate::ui::widgets::clickable(s)
-            .items_center()
-            .height(28.0)
-            .min_width(0.0)
-            .padding_horiz(10.0)
-            .background(theme::NAV_SELECTED)
-            .border_radius(14.0)
-            .hover(|s| s.background(theme::NAV_SELECTED_PRESSED))
-    })
-}
-
-fn view_menu(state: AppState) -> Menu {
-    let current = state.item_filters.with_untracked(|f| f.browse);
-    let mut menu = Menu::new();
-    for view in BrowseView::ALL {
-        if view == BrowseView::Recent {
-            menu = menu.separator();
-        }
-        menu = menu.item(view.label(), move |m| {
-            m.checked(view == current).action(move || {
-                let first = github_repositories(state).into_iter().next();
-                set_filters(state, move |f| {
-                    f.browse = view;
-                    // By repository opens on the last one picked, else
-                    // the first there is.
-                    if view == BrowseView::Repository && f.browse_repository.is_none() {
-                        f.browse_repository = first;
-                    }
-                })
-            })
-        });
-    }
-    menu
-}
-
-/// The configured repositories on GitHub, in the file's order.
-fn github_repositories(state: AppState) -> Vec<String> {
-    state.repos.with_untracked(|repos| {
-        repos
-            .iter()
-            .filter(|repo| !perch_github::is_local(&repo.identity))
-            .map(|repo| repo.identity.clone())
-            .collect()
-    })
-}
-
-fn repository_menu(state: AppState) -> Menu {
-    let current = state
-        .item_filters
-        .with_untracked(|f| f.browse_repository.clone());
-    let mut menu = Menu::new();
-    for repo in github_repositories(state) {
-        let checked = current
-            .as_deref()
-            .is_some_and(|c| c.eq_ignore_ascii_case(&repo));
-        menu = menu.item(repo.clone(), move |m| {
-            let repo = repo.clone();
-            m.checked(checked).action(move || {
-                let repo = repo.clone();
-                set_filters(state, move |f| f.browse_repository = Some(repo))
-            })
-        });
-    }
-    menu
-}
-
-/// Open · Closed, two halves of one control.
-fn open_closed(state: AppState) -> impl View {
-    let half = move |label: &'static str, closed: bool| {
-        Label::new(label)
-            .on_event_stop(el::Click, move |_, _| {
-                set_filters(state, move |f| f.browse_closed = closed)
-            })
-            .debug_name(format!("browse {}", label.to_lowercase()))
-            .style(move |s| {
-                let on = state.item_filters.with(|f| f.browse_closed == closed);
-                crate::ui::widgets::clickable(s)
-                    .font_size(theme::TEXT_BADGE)
-                    .height(24.0)
-                    .items_center()
-                    .padding_horiz(8.0)
-                    .border_radius(12.0)
-                    .color(if on { theme::NAV_FG } else { theme::NAV_MUTED })
-                    .background(if on {
-                        theme::NAV_CANVAS
-                    } else {
-                        theme::NAV_SELECTED
-                    })
-                    .selectable(false)
-            })
-    };
-    Stack::horizontal((half("Open", false), half("Closed", true))).style(|s| {
-        s.items_center()
-            .padding(2.0)
-            .border_radius(14.0)
-            .background(theme::NAV_SELECTED)
-            .flex_shrink(0.0_f32)
-    })
 }
 
 /// The first row while the search box holds something Open… reads: a
@@ -258,7 +76,7 @@ fn open_row(state: AppState, backend: Rc<Backend>) -> impl IntoView {
 /// A GitHub view's results, searched when the view is picked and again
 /// after each poll while it is on screen.
 fn search_list(state: AppState, backend: Rc<Backend>) -> impl IntoView {
-    let query = Memo::new(move |_| state.item_filters.with(|f| f.browse_query()));
+    let query = Memo::new(move |_| state.browse_query());
     {
         let backend = backend.clone();
         Effect::new(move |_| {
@@ -305,7 +123,10 @@ fn search_list(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             }),
         Label::derived(move || {
             if query.get().is_none() {
-                return "Pick a repository".to_string();
+                let local = state
+                    .item_filters
+                    .with(|f| f.repository.as_deref().is_some_and(perch_github::is_local));
+                return if local { "Not a repository on GitHub" } else { "Pick a repository" }.to_string();
             }
             match page() {
                 None => "Loading…".to_string(),
@@ -454,7 +275,7 @@ fn search_row(state: AppState, backend: Rc<Backend>, hit: SearchHit) -> impl Int
 mod tests {
     use super::*;
     use crate::backend::{Command, Event};
-    use crate::items::SidebarTab;
+    use crate::items::{BrowseView, ItemSort, SidebarTab, StateFilter};
     use floem::headless::{HeadlessHarness, TestRoot};
     use floem::reactive::SignalUpdate;
     use perch_github::DeclaredRepo;
@@ -507,8 +328,8 @@ mod tests {
     }
 
     /// Picking a GitHub view searches it; the results are rows; Show more
-    /// asks for the next page, Closed for the closed ones, and a poll for
-    /// the view again. By repository shows its repository chip.
+    /// asks for the next page, and a poll for the view again. The menu's
+    /// State, Repository and Sort By each search anew.
     #[test]
     fn a_github_view_is_searched_listed_and_searched_again() {
         let root = TestRoot::new();
@@ -521,7 +342,7 @@ mod tests {
         }]);
         state.item_filters.update(|f| {
             f.tab = SidebarTab::Browse;
-            f.browse = BrowseView::Yours;
+            f.browse.view = BrowseView::Yours;
         });
         let (backend, mut commands) = Backend::recording();
         let view = crate::ui::sidebar::sidebar(state, Rc::new(backend), Rc::new(|_| {}));
@@ -532,8 +353,7 @@ mod tests {
         let query = "author:@me is:open archived:false".to_string();
         assert_eq!(searches(&mut commands), [(query.clone(), 1, false)]);
         assert!(shown(&harness, "browse empty"), "loading");
-        assert!(!shown(&harness, "browse repository"));
-        assert!(shown(&harness, "browse open"));
+        assert!(shown(&harness, "sidebar filter"), "Browse has the menu every tab has");
 
         state.apply(Event::BrowseResults {
             query: query.clone(),
@@ -566,10 +386,7 @@ mod tests {
             "the poll asks again"
         );
 
-        let closed = find(harness.root_id(), "browse closed")
-            .unwrap()
-            .get_visual_rect_no_clip();
-        harness.click(closed.center().x, closed.center().y);
+        crate::ui::sidebar::set_filters(state, |f| f.browse.state = StateFilter::Closed);
         repaint(&mut harness);
         assert_eq!(
             searches(&mut commands),
@@ -577,23 +394,20 @@ mod tests {
         );
 
         crate::ui::sidebar::set_filters(state, |f| {
-            f.browse = BrowseView::Repository;
-            f.browse_repository = Some("a/b".into());
+            f.browse.view = BrowseView::All;
+            f.browse.order.sort = ItemSort::Created;
         });
         repaint(&mut harness);
-        assert!(shown(&harness, "browse repository"));
         assert_eq!(
             searches(&mut commands),
-            [("repo:a/b is:closed archived:false".to_string(), 1, false)]
+            [("repo:a/b is:closed archived:false sort:created-desc".to_string(), 1, false)]
         );
 
-        crate::ui::sidebar::set_filters(state, |f| f.browse = BrowseView::Recent);
+        // A repository that is not on GitHub has nothing to search.
+        crate::ui::sidebar::set_filters(state, |f| f.repository = Some("local/notes".into()));
         repaint(&mut harness);
-        assert!(
-            !shown(&harness, "browse open"),
-            "Recent has no Open · Closed"
-        );
-        assert!(searches(&mut commands).is_empty(), "Recent is local");
+        assert!(searches(&mut commands).is_empty());
+        assert!(find(harness.root_id(), "Not a repository on GitHub").is_some());
     }
 
     /// A reference in the search box is the first row, and Enter opens it

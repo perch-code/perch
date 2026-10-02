@@ -15,7 +15,7 @@ use perch_github::{CheckRunState, SubjectKind, SubjectState, Thread};
 
 use crate::backend::Backend;
 use crate::icons::{self, SidebarIcon};
-use crate::items::InboxShow;
+use crate::items::InboxView;
 use crate::review::start_work;
 use crate::state::AppState;
 use crate::theme;
@@ -28,16 +28,16 @@ use crate::ui::widgets::{icon_button, open_in_browser, sidebar_glyph, state_glyp
 /// The notification list under the current search, repository, and reason
 /// filters. GitHub's ordering is retained.
 pub fn notification_list(state: AppState, backend: Rc<Backend>) -> impl IntoView {
-    let show = move || state.item_filters.with(|f| f.inbox_show);
+    let show = move || state.item_filters.with(|f| f.inbox.view);
     Stack::vertical((
         dyn_container(
             move || (visible_notifications(state).is_empty(), show()),
             |(empty, show)| {
                 if empty {
                     Label::new(match show {
-                        InboxShow::Done => "No notifications marked Done",
-                        InboxShow::Snoozed => "No snoozed notifications",
-                        InboxShow::All | InboxShow::Unread => "No matching notifications",
+                        InboxView::Done => "No notifications marked Done",
+                        InboxView::Snoozed => "No snoozed notifications",
+                        InboxView::Inbox => "No matching notifications",
                     })
                         .style(|s| {
                             s.font_size(theme::TEXT_META)
@@ -81,7 +81,7 @@ pub fn visible_notifications(state: AppState) -> Vec<Thread> {
     state.visible_inbox()
 }
 
-/// A row of the inbox, or with `away` of Show › Done or Snoozed, where
+/// A row of the inbox, or with `away` of View › Done or Snoozed, where
 /// the row's action moves it back instead.
 fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread, away: bool) -> impl IntoView {
     let hovered = RwSignal::new(false);
@@ -293,6 +293,15 @@ fn snoozed_until_label(state: AppState, until: jiff::Timestamp) -> impl IntoView
 fn done(state: AppState, backend: &Backend, thread: &Thread) {
     backend.done_notification(&thread.id);
     close_if_viewing(state, backend, thread);
+}
+
+/// Mark N Done: every thread given, as each row's Done would, in one
+/// request to the backend so a failure is told once.
+pub(crate) fn done_all(state: AppState, backend: &Backend, threads: &[Thread]) {
+    backend.done_notifications(threads.iter().map(|thread| thread.id.clone()).collect());
+    if let Some(viewing) = threads.iter().find(|thread| state.is_viewing_thread(thread)) {
+        close_if_viewing(state, backend, viewing);
+    }
 }
 
 /// Snooze the thread until `until`. The reader has put it off, so its

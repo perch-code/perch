@@ -177,6 +177,31 @@ impl Menu {
             })
             .collect()
     }
+
+    /// The submenu under `label`.
+    #[cfg(test)]
+    pub fn submenu_named(&self, label: &str) -> Option<Rc<Menu>> {
+        self.entries.iter().find_map(|e| match e {
+            Entry::Submenu { label: l, menu } if l == label => Some(menu.clone()),
+            _ => None,
+        })
+    }
+
+    /// Pick the row named `label`, as a click on it would. Panics when
+    /// there is none, or it is greyed.
+    #[cfg(test)]
+    pub fn choose(&self, label: &str) {
+        let item = self
+            .entries
+            .iter()
+            .find_map(|e| match e {
+                Entry::Item(i) if i.label == label => Some(i),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no {label:?} in {:?}", self.outline()));
+        assert!(item.enabled, "{label:?} is greyed");
+        (item.action.as_ref().expect("no action"))();
+    }
 }
 
 impl Item {

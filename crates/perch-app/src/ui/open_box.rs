@@ -86,7 +86,7 @@ pub fn close(state: AppState, restore_focus: bool) {
 }
 
 /// The repository a bare `#57` is in: the open item's, else the one
-/// Browse › By repository is showing, else the only GitHub repository
+/// Browse is narrowed to, else the only GitHub repository
 /// configured.
 pub fn default_repo(state: AppState) -> Option<String> {
     let open = state.review.get_untracked().and_then(|review| {
@@ -380,8 +380,7 @@ mod tests {
 
         state.item_filters.update(|f| {
             f.tab = crate::items::SidebarTab::Browse;
-            f.browse = crate::items::BrowseView::Repository;
-            f.browse_repository = Some("c/picked".into());
+            f.repository = Some("c/picked".into());
         });
         assert_eq!(target(state, "#5").unwrap().0, "c/picked", "the one Browse is showing");
 
