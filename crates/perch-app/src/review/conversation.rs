@@ -285,13 +285,9 @@ fn finding_filters(app: AppState, state: ReviewState) -> impl IntoView {
                         .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::fg_subtle())),
                 ))
                 .debug_name(format!("review-finding-filters:{item_id}"))
-                .style(|s| {
-                    s.items_center()
-                        .gap(6.0)
-                        .padding_bottom(theme::CONVERSATION_ENTRY_PADDING)
-                        .border_bottom(1.0)
-                        .border_color(theme::border_muted())
-                })
+                // Space, not a rule, under it: the cards have their own
+                // borders, and a rule would lie on the first one's.
+                .style(|s| s.items_center().gap(6.0).padding_bottom(theme::CARD_GAP))
                 .into_any()
             }
             None => Empty::new().into_any(),
