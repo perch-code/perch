@@ -142,9 +142,8 @@ impl ThreadFace {
     }
 }
 
-/// Where a message is in its thread: the first, which in the code sits
-/// flush at the card's left, and the last, under which the line down the
-/// avatars stops.
+/// Where a message is in its thread: the first, over which the line down
+/// the avatars starts, and the last, under which it stops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Place {
     pub first: bool,
@@ -2284,6 +2283,13 @@ pub fn messages_view(
                     s.width_full()
                         .padding_horiz(face.inset())
                         .apply_if(lane != Lane::Flush, |s| s.background(theme::perch_bg()))
+                        // Each row paints its own grey, and two meeting
+                        // on a fractional y leave a hairline of their
+                        // blended edges. One under another reaches a
+                        // pixel up over the first, which its grey covers.
+                        .apply_if(lane == Lane::PrivateContinue, |s| {
+                            s.margin_top(-1.0).padding_top(1.0)
+                        })
                 })
                 .into_any(),
                 (None, _) => Empty::new().into_any(),
@@ -2592,9 +2598,9 @@ const COMMENT_BODY_GAP: f64 = 6.0;
 /// A message laid out as github.com lays out a comment: the avatar at the
 /// left of its byline, and its text under the byline, indented past the
 /// avatar, with a line down the avatars from each message to the next.
-/// The first message in the code has its text flush under its avatar
-/// instead, as Files changed sets the comment a thread opens with, and
-/// the line starts under it.
+/// The first is laid out as the rest are, in the code too: set flush, as
+/// Files changed sets the comment a thread opens with, it sat apart from
+/// the replies and from a grey band under it.
 fn comment_frame(
     face: ThreadFace,
     place: Place,
@@ -2604,24 +2610,6 @@ fn comment_frame(
 ) -> floem::AnyView {
     let space = face.comment_space();
     let top = if place.first { face.inset() } else { space };
-    if face == ThreadFace::Inline && place.first {
-        return Stack::vertical((
-            Stack::horizontal((
-                avatar.style(|s| s.margin_right(theme::THREAD_AVATAR_GAP).flex_shrink(0.0_f32)),
-                byline,
-            ))
-            .style(|s| s.items_center().width_full().min_width(0.0)),
-            body,
-        ))
-        .style(move |s| {
-            s.flex_col()
-                .width_full()
-                .gap(COMMENT_BODY_GAP)
-                .padding_top(top)
-                .padding_bottom(space)
-        })
-        .into_any();
-    }
     let rail = Stack::vertical((
         connector(!place.first).style(move |s| s.height(top).flex_shrink(0.0_f32)),
         Container::new(avatar).style(|s| {
@@ -5610,8 +5598,7 @@ mod tests {
     /// draft say nothing of the kind. Every message is laid out as GitHub
     /// lays out a comment, its text under its byline: on Conversation
     /// each is indented past its avatar, with the line down the avatars
-    /// between them, and in the code the first sits flush under its
-    /// avatar and the replies are indented under the line.
+    /// between them, and in the code alike.
     #[test]
     fn private_messages_under_a_github_comment_are_labelled_perch_only_in_their_bylines() {
         for face in [ThreadFace::Card, ThreadFace::Inline] {
@@ -5649,9 +5636,9 @@ mod tests {
             assert!(find(rows[3], "draft-pill").is_some(), "{face:?}: the draft is last");
             assert!(find(rows[0], "ask-about").is_some(), "{face:?}: rohan's comment");
 
-            // Every byline starts at one place, past the avatar; the text
-            // under it starts there too, but for the first message in the
-            // code, which is flush with its avatar.
+            // Every byline starts at one place, past the avatar, and the
+            // text under it starts there too, the first message's in the
+            // code as well.
             let left = stack.get_visual_rect_no_clip().x0;
             let inset = match face {
                 ThreadFace::Card => theme::THREAD_INSET,
@@ -5669,12 +5656,9 @@ mod tests {
                     .or_else(|| find(*row, "RichText"))
                     .expect("the message's text")
                     .get_visual_rect_no_clip();
-                let flush = face == ThreadFace::Inline && i == 0;
-                let expected = if flush { inset } else { past_avatar };
-                assert_eq!(text.x0 - left, expected, "{face:?}: row {i}'s text");
-                // The line down the avatars runs beside every message
-                // indented under it.
-                assert_eq!(find(*row, "comment-rail").is_some(), !flush, "{face:?}: row {i}'s rail");
+                assert_eq!(text.x0 - left, past_avatar, "{face:?}: row {i}'s text");
+                // The line down the avatars runs beside every message.
+                assert!(find(*row, "comment-rail").is_some(), "{face:?}: row {i}'s rail");
             }
         }
     }
