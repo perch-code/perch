@@ -428,6 +428,10 @@ pub enum Command {
     AddRepository {
         path: PathBuf,
     },
+    /// Take a repository's `[[repo]]` out of the config.
+    RemoveRepository {
+        identity: String,
+    },
     /// The reader's answer to a Work run's request.
     AnswerApproval {
         run_id: String,
@@ -2964,6 +2968,12 @@ impl Backend {
         let _ = self.commands.send(Command::AddRepository { path });
     }
 
+    pub fn remove_repository(&self, identity: &str) {
+        let _ = self.commands.send(Command::RemoveRepository {
+            identity: identity.to_string(),
+        });
+    }
+
     pub fn answer_approval(&self, run_id: &str, approval_id: &str, answer: ApprovalAnswer) {
         let _ = self.commands.send(Command::AnswerApproval {
             run_id: run_id.to_string(),
@@ -4297,6 +4307,20 @@ async fn run(
                         Err(message) => {
                             let _ = ctx.events.send(Event::Notice(message));
                         }
+                    }
+                });
+            }
+            Command::RemoveRepository { identity } => {
+                ctx.clear_notice();
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let Some(config) = perch_github::config::config_path() else {
+                        return;
+                    };
+                    if let Err(message) = remove_repository(&ctx, &identity, &config).await {
+                        // The list took it out before asking; put it back.
+                        let _ = ctx.events.send(Event::Repos(ctx.config().declared_repos()));
+                        let _ = ctx.events.send(Event::Notice(message));
                     }
                 });
             }
@@ -10820,8 +10844,7 @@ async fn add_repository(ctx: &Ctx, folder: &Path, path: &Path) -> Result<String,
     }
     perch_github::append_repo(path, &root).map_err(|e| format!("Could not write {}: {e}", path.display()))?;
 
-    let mut reloaded = Config::load_from(path);
-    crate::repos::resolve(&mut reloaded, &perch_git::cmd::Git::new(None)).await;
+    let reloaded = take_up_config(ctx, path).await;
     let identity = reloaded
         .repo
         .iter()
@@ -10841,12 +10864,48 @@ async fn add_repository(ctx: &Ctx, folder: &Path, path: &Path) -> Result<String,
                 .cloned()
                 .unwrap_or_else(|| format!("{} was added to {} but not taken up", root.display(), path.display()))
         })?;
-    ctx.replace_repos(reloaded.repo.clone());
-    let _ = ctx.events.send(Event::Repos(ctx.config().declared_repos()));
     if scan_roots(ctx).await {
         ctx.send_items();
     }
     Ok(identity)
+}
+
+/// Take a repository's `[[repo]]` out of the config file and drop it from
+/// the sidebar without a restart. Its items stay, as any item in a
+/// repository nobody declared does, and nothing on disk is touched: its
+/// checkouts, worktrees and clone are the reader's to keep or delete.
+async fn remove_repository(ctx: &Ctx, identity: &str, path: &Path) -> Result<(), String> {
+    let config = ctx.config();
+    let Some(entry) = config
+        .repo
+        .iter()
+        .find(|r| r.identity().is_some_and(|i| i.eq_ignore_ascii_case(identity)))
+    else {
+        return Ok(());
+    };
+    match perch_github::remove_repo(path, entry) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(format!(
+                "{} has no [[repo]] for {}",
+                path.display(),
+                entry.display_name()
+            ))
+        }
+        Err(e) => return Err(format!("Could not write {}: {e}", path.display())),
+    }
+    take_up_config(ctx, path).await;
+    Ok(())
+}
+
+/// Read the `[[repo]]` entries again and resolve them as at startup, and
+/// tell the sidebar. The rest of the file waits for a restart.
+async fn take_up_config(ctx: &Ctx, path: &Path) -> Config {
+    let mut reloaded = Config::load_from(path);
+    crate::repos::resolve(&mut reloaded, &perch_git::cmd::Git::new(None)).await;
+    ctx.replace_repos(reloaded.repo.clone());
+    let _ = ctx.events.send(Event::Repos(ctx.config().declared_repos()));
+    reloaded
 }
 
 /// The `base` setting of a repository's `[[repo]]` entry.
@@ -23207,6 +23266,40 @@ read eof || true
         assert!(again.contains("is already a root of notes"), "{again}");
         let elsewhere = add_repository(&ctx, dir.path(), &config).await.unwrap_err();
         assert!(elsewhere.contains("is not in a git repository"), "{elsewhere}");
+    }
+
+    #[tokio::test]
+    async fn removing_a_repository_takes_out_its_table_and_leaves_its_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx_declaring(dir.path(), &nowhere(), Vec::new());
+        let notes = dir.path().join("notes");
+        root_with_branch(&notes, "feature");
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "# mine\npoll_interval_secs = 30\n").unwrap();
+        add_repository(&ctx, &notes, &config).await.unwrap();
+
+        remove_repository(&ctx, "LOCAL/notes", &config).await.unwrap();
+
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "# mine\npoll_interval_secs = 30\n");
+        assert!(ctx.config().declared().is_empty());
+        let repos: Vec<_> = received
+            .try_iter()
+            .filter_map(|e| match e {
+                Event::Repos(repos) => Some(repos),
+                _ => None,
+            })
+            .collect();
+        assert!(repos.last().unwrap().is_empty());
+        let items = ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
+        assert_eq!(items.len(), 1, "the root's row stays: {items:?}");
+        assert!(notes.join(".git").exists(), "nothing on disk is touched");
+
+        // Taken out by hand meanwhile: said so, and the file left alone.
+        add_repository(&ctx, &notes, &config).await.unwrap();
+        std::fs::write(&config, "# mine\n").unwrap();
+        let gone = remove_repository(&ctx, "local/notes", &config).await.unwrap_err();
+        assert!(gone.contains("has no [[repo]] for notes"), "{gone}");
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "# mine\n");
     }
 
     #[tokio::test]

@@ -70,6 +70,8 @@ roots = ["~/Code/side-project"] # a local-only repo works too
 ```
 
 You can also add one from the new-work (the `+`) view with **Add repository…**.
+Hover a repository in that menu and click its × to take its `[[repo]]` back out;
+its checkouts and Perch's worktrees stay on disk.
 
 ### Agents
 

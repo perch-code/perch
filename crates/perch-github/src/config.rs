@@ -336,6 +336,105 @@ pub fn append_repo(config: &Path, root: &Path) -> std::io::Result<()> {
         .write_all(add.as_bytes())
 }
 
+/// Take out the `[[repo]]` that reads as `entry`, with the `[repo.*]`
+/// tables under it and the comment lines just above it. The rest of the
+/// file's text stays as the reader left it. False when no table in the
+/// file reads as `entry`. The file is replaced whole, keeping its
+/// permissions, and only once what is left still loads with one
+/// repository fewer.
+pub fn remove_repo(config: &Path, entry: &RepoConfig) -> std::io::Result<bool> {
+    let text = std::fs::read_to_string(config)?;
+    let Some(cut) = repo_table(&text, entry) else {
+        return Ok(false);
+    };
+    let mut left = format!("{}{}", &text[..cut.start], &text[cut.end..]);
+    if cut.end == text.len() {
+        left.truncate(left.trim_end().len());
+        if !left.is_empty() {
+            left.push('\n');
+        }
+    }
+    let had = Config::parse(&text).map(|c| c.repo.len()).unwrap_or(0);
+    match Config::parse(&left) {
+        Ok(c) if c.repo.len() + 1 == had => {}
+        _ => {
+            return Err(std::io::Error::other(
+                "the file would not have read as one repository fewer, so it was left alone",
+            ))
+        }
+    }
+    let temp = config.with_extension("toml.removing");
+    std::fs::write(&temp, &left)?;
+    std::fs::set_permissions(&temp, std::fs::metadata(config)?.permissions())?;
+    std::fs::rename(&temp, config)?;
+    Ok(true)
+}
+
+/// Where the first `[[repo]]` that reads as `entry` sits in the file's
+/// text: from the comments over its header to the comments over the next
+/// table that is not one of its own `[repo.*]`.
+fn repo_table(text: &str, entry: &RepoConfig) -> Option<std::ops::Range<usize>> {
+    struct Line {
+        start: usize,
+        /// A header's table name, and whether it is `[[..]]`.
+        header: Option<(String, bool)>,
+        comment: bool,
+    }
+    let mut lines: Vec<Line> = Vec::new();
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        let name = |s: &str| s.replace(char::is_whitespace, "");
+        let header = if let Some(rest) = trimmed.strip_prefix("[[") {
+            rest.split_once("]]").map(|(n, _)| (name(n), true))
+        } else if let Some(rest) = trimmed.strip_prefix('[') {
+            rest.split_once(']').map(|(n, _)| (name(n), false))
+        } else {
+            None
+        };
+        lines.push(Line {
+            start: at,
+            header,
+            comment: trimmed.starts_with('#'),
+        });
+        at += line.len();
+    }
+    // Where the comment lines with no gap above line `i` start.
+    let comments_over = |i: usize| {
+        let mut top = i;
+        while top > 0 && lines[top - 1].comment {
+            top -= 1;
+        }
+        lines[top].start
+    };
+    let is_repo = |header: &Option<(String, bool)>| matches!(header, Some((name, true)) if name == "repo");
+    for i in 0..lines.len() {
+        if !is_repo(&lines[i].header) {
+            continue;
+        }
+        // The next table that is not one of this entry's `[repo.*]`.
+        let next = (i + 1..lines.len()).find(|&j| match &lines[j].header {
+            Some((name, _)) => is_repo(&lines[j].header) || !name.starts_with("repo."),
+            None => false,
+        });
+        let start = comments_over(i);
+        let end = next.map_or(text.len(), comments_over);
+        let block = &text[lines[i].start..end];
+        let reads_as = Config::parse(block).is_ok_and(|c| match c.repo.as_slice() {
+            [r] => {
+                r.github.as_deref().map(str::to_lowercase) == entry.github.as_deref().map(str::to_lowercase)
+                    && r.roots == entry.roots
+                    && r.name == entry.name
+            }
+            _ => false,
+        });
+        if reads_as {
+            return Some(start..end);
+        }
+    }
+    None
+}
+
 /// A repository the reader follows. Its identity is `owner/repo` on
 /// GitHub, or `local/<name>` for one that lives only on this machine;
 /// either way it is compared without regard to case, and everything
@@ -745,6 +844,45 @@ mod tests {
         assert_eq!(config.agent.model, "opus");
         assert_eq!(config.repo.len(), 1);
         assert_eq!(config.repo[0].root_paths(), [home_dir().join("Code").join("wid\"gets")]);
+    }
+
+    #[test]
+    fn a_repository_is_taken_out_with_its_tables_and_comments_and_the_rest_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let text = "# mine\npoll_interval_secs = 30\n\n[[repo]]\ngithub = \"a/one\"\n\n# the notes\n[[repo]]\nroots = [\"/srv/notes\"]\n[repo.work]\napprovals = \"ask\"\n\n# about two\n[[repo]]\ngithub = \"a/two\"\n\n[agent]\nmodel = \"opus\"\n";
+        std::fs::write(&path, text).unwrap();
+        let notes = Config::parse(text).unwrap().repo[1].clone();
+
+        assert!(remove_repo(&path, &notes).unwrap());
+        let left = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            left,
+            "# mine\npoll_interval_secs = 30\n\n[[repo]]\ngithub = \"a/one\"\n\n# about two\n[[repo]]\ngithub = \"a/two\"\n\n[agent]\nmodel = \"opus\"\n"
+        );
+        let config = Config::parse(&left).unwrap();
+        assert_eq!(config.declared(), ["a/one", "a/two"]);
+        assert_eq!(config.agent.model, "opus");
+
+        // Gone already: nothing reads as it, and the file is left alone.
+        assert!(!remove_repo(&path, &notes).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), left);
+    }
+
+    #[test]
+    fn the_last_repository_goes_without_leaving_blank_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[[repo]]\ngithub = \"a/one\"\n\n[[repo]]\nname = \"a/two\"\n\n").unwrap();
+        // A `name = "owner/repo"` from before `github` reads as the github.
+        let two = Config::parse(&std::fs::read_to_string(&path).unwrap()).unwrap().repo[1].clone();
+        assert_eq!(two.github.as_deref(), Some("a/two"));
+
+        assert!(remove_repo(&path, &two).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[[repo]]\ngithub = \"a/one\"\n");
+        let one = Config::parse("[[repo]]\ngithub = \"A/One\"\n").unwrap().repo[0].clone();
+        assert!(remove_repo(&path, &one).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
     }
 
     #[test]

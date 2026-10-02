@@ -40,7 +40,7 @@ pub use comments::{
     ThreadOrigin,
 };
 pub use config::{
-    append_repo, is_local, AgentConfig, Approvals, CodexConfig, Config, DeclaredRepo, RepoConfig, RepoWork,
+    append_repo, is_local, remove_repo, AgentConfig, Approvals, CodexConfig, Config, DeclaredRepo, RepoConfig, RepoWork,
     WorkDefaults, CLAUDE_CODE, CODEX, CODEX_DEFAULT_MODEL, LOCAL_OWNER,
 };
 pub use discussion::{

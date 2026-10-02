@@ -12,7 +12,9 @@
 //! Right and Left open and shut a submenu, Enter or Space picks, Escape
 //! backs out, a letter goes to the next row it starts, and a row's
 //! shortcut picks that row. Picking puts the menu away first and gives
-//! the keyboard back to whatever had it, then runs the row.
+//! the keyboard back to whatever had it, then runs the row. A row that
+//! can be taken out of its list shows a × while it is lit; the × or
+//! Delete takes the row out and leaves the menu up.
 //!
 //! One menu is up at a time, app-wide, as with native menus.
 
@@ -60,6 +62,10 @@ pub struct Item {
     /// snooze ends.
     detail: Option<String>,
     action: Option<Rc<dyn Fn()>>,
+    /// What the row's × does, for a row that can be taken out of its list.
+    remove: Option<Rc<dyn Fn()>>,
+    /// Taken out while the menu is up.
+    gone: Cell<bool>,
 }
 
 impl Default for Menu {
@@ -87,6 +93,8 @@ impl Menu {
             shortcut: None,
             detail: None,
             action: None,
+            remove: None,
+            gone: Cell::new(false),
         };
         self.entries.push(Entry::Item(build(item)));
         self
@@ -208,8 +216,16 @@ impl Item {
         self
     }
 
+    /// A × at the row's end while it is lit, as a list of recent things
+    /// has: it takes the row out of the menu, which stays up, and runs
+    /// `remove`. Delete does the same for the row the keyboard is on.
+    pub fn removable(mut self, remove: impl Fn() + 'static) -> Self {
+        self.remove = Some(Rc::new(remove));
+        self
+    }
+
     fn selectable(&self) -> bool {
-        self.enabled
+        self.enabled && !self.gone.get()
     }
 }
 
@@ -233,6 +249,7 @@ impl Entry {
     fn height(&self) -> f64 {
         match self {
             Entry::Separator => SEPARATOR_HEIGHT,
+            Entry::Item(i) if i.gone.get() => 0.0,
             _ => ROW_HEIGHT,
         }
     }
@@ -342,6 +359,8 @@ const SUBMENU_GRACE: Duration = Duration::from_millis(300);
 /// where it pressed, is the end of the press that opened it, not a pick:
 /// a menu can open over the view it hangs from.
 const RELEASE_GRACE: Duration = Duration::from_millis(300);
+/// How far past a row's × a release still counts as on it.
+const CROSS_SLOP: f64 = 4.0;
 
 /// The frame of a menu, and of every list that pops up as one does: the
 /// `@` list, Cmd-P, Open…, the ways to close, the reactions. White, in a
@@ -430,6 +449,8 @@ struct Level {
     /// Its size as first laid out, before it was placed.
     measured: RwSignal<Option<Size>>,
     rows: Rc<RefCell<Vec<Option<ViewId>>>>,
+    /// How many rows have been taken out, for the views to redraw by.
+    removed: RwSignal<usize>,
 }
 
 /// The menu while it is up.
@@ -445,6 +466,8 @@ struct Host {
     /// What had the keyboard before, to have it back.
     restore: Option<ViewId>,
     overlay: Cell<Option<ViewId>>,
+    /// The view that has the keyboard while the menu is up.
+    keys: Cell<Option<ViewId>>,
     next_key: Cell<u64>,
     closed: Cell<bool>,
 }
@@ -500,6 +523,7 @@ fn open(anchor: Anchor, menu: Menu, min_width: f64, keyboard: bool, restore: Opt
             moved: Cell::new(false),
             restore,
             overlay: Cell::new(None),
+            keys: Cell::new(None),
             next_key: Cell::new(0),
             closed: Cell::new(false),
         })
@@ -555,6 +579,7 @@ impl Host {
             highlight: RwSignal::new(None),
             measured: RwSignal::new(None),
             rows: Rc::new(RefCell::new(rows)),
+            removed: RwSignal::new(0),
         })
     }
 
@@ -635,6 +660,33 @@ impl Host {
         }
     }
 
+    /// Take row `index` of the panel `depth` deep out of the menu and run
+    /// its `remove`. `keyboard` lights the next row in its place.
+    fn remove(&self, depth: usize, index: usize, keyboard: bool) {
+        let Some(level) = self.levels.with_untracked(|l| l.get(depth).cloned()) else {
+            return;
+        };
+        let Some(Entry::Item(item)) = level.menu.entries.get(index) else {
+            return;
+        };
+        let Some(remove) = item.remove.clone() else {
+            return;
+        };
+        if !item.selectable() {
+            return;
+        }
+        item.gone.set(true);
+        level.removed.update(|n| *n += 1);
+        // The press on the × took the keyboard from the menu.
+        if let Some(keys) = self.keys.get() {
+            keys.request_focus();
+        }
+        level
+            .highlight
+            .set(if keyboard { level.menu.step(Some(index), 1) } else { None });
+        remove();
+    }
+
     fn key_down(&self, key: &KeyboardEvent) {
         let Some(level) = self.levels.with_untracked(|l| l.last().cloned()) else {
             return;
@@ -657,6 +709,11 @@ impl Host {
             Code::Enter | Code::NumpadEnter | Code::Space if plain => {
                 if let Some(at) = at {
                     self.activate(depth, at, true);
+                }
+            }
+            Code::Backspace | Code::Delete if plain || key.modifiers == Modifiers::META => {
+                if let Some(at) = at {
+                    self.remove(depth, at, true);
                 }
             }
             _ => {
@@ -709,6 +766,7 @@ fn host_view(host: Rc<Host>) -> impl View {
         move |level| panel(panel_host.clone(), level),
     );
     let root_id = root.id();
+    host.keys.set(Some(root_id));
     root.on_event_stop(el::PointerDown, move |_, _| press_host.close())
         .on_event_stop(el::PointerWheel, move |_, _| wheel_host.close())
         .on_event_cont(el::PointerMove, move |_, _| move_host.moved.set(true))
@@ -757,7 +815,7 @@ fn panel(host: Rc<Host>, level: Level) -> impl IntoView {
         .iter()
         .enumerate()
         .map(|(index, entry)| match entry {
-            Entry::Separator => separator().into_any(),
+            Entry::Separator => separator(&level, index).into_any(),
             _ => row(host.clone(), &level, index, entry, checks, icons).into_any(),
         })
         .collect::<Vec<_>>();
@@ -860,15 +918,28 @@ fn panel(host: Rc<Host>, level: Level) -> impl IntoView {
         })
 }
 
-fn separator() -> impl IntoView {
+/// The line at `index`, gone with every row on one side of it.
+fn separator(level: &Level, index: usize) -> impl IntoView {
+    let menu = level.menu.clone();
+    let removed = level.removed;
+    let shown = move |entries: &[Entry]| {
+        entries.iter().any(|e| match e {
+            Entry::Item(i) => !i.gone.get(),
+            Entry::Submenu { .. } => true,
+            Entry::Separator => false,
+        })
+    };
     Container::new(
         Empty::new().style(|s| s.height(1.0).width_full().background(theme::MENU_SEPARATOR)),
     )
-    .style(|s| {
+    .style(move |s| {
+        removed.track();
+        let alone = !shown(&menu.entries[..index]) || !shown(&menu.entries[index + 1..]);
         s.height(SEPARATOR_HEIGHT)
             .flex_shrink(0.0_f32)
             .items_center()
             .padding_horiz(ROW_PADDING)
+            .apply_if(alone, |s| s.hide())
     })
 }
 
@@ -894,10 +965,13 @@ fn row(
         Entry::Submenu { label, menu } => (label.clone(), menu.icon, false, None, None, true),
         Entry::Separator => unreachable!("a separator is not a row"),
     };
+    let removable = matches!(entry, Entry::Item(i) if i.remove.is_some());
     let enabled = entry.selectable();
     let fg = if enabled { theme::FG } else { theme::FG_SUBTLE };
     let highlight = level.highlight;
     let depth = level.depth;
+    let removed = level.removed;
+    let menu = level.menu.clone();
 
     let check = checks.then(|| {
         Container::new(
@@ -952,6 +1026,27 @@ fn row(
         sidebar_glyph(SidebarIcon::ChevronRight, theme::FG_SUBTLE)
             .style(|s| s.size(12.0, 12.0).margin_left(16.0).flex_shrink(0.0_f32))
     });
+    // Its room is kept whether it shows or not, so lighting a row does
+    // not cut its name short.
+    let cross_name = format!("menu-cross:{}", entry.label());
+    let cross = removable.then(|| {
+        Container::new(
+            sidebar_glyph(SidebarIcon::Close, theme::FG_SUBTLE)
+                .style(move |s| {
+                    s.size(12.0, 12.0)
+                        .apply_if(highlight.get() != Some(index), |s| s.hide())
+                })
+                .debug_name(cross_name),
+        )
+        .style(|s| {
+            s.size(16.0, 16.0)
+                .margin_left(12.0)
+                .flex_shrink(0.0_f32)
+                .items_center()
+                .justify_center()
+        })
+    });
+    let cross_id = cross.as_ref().map(|c| c.id());
 
     let content = Stack::horizontal((
         check
@@ -961,6 +1056,9 @@ fn row(
         name,
         keys.unwrap_or_else(|| Empty::new().into_any()),
         chevron
+            .map(|c| c.into_any())
+            .unwrap_or_else(|| Empty::new().into_any()),
+        cross
             .map(|c| c.into_any())
             .unwrap_or_else(|| Empty::new().into_any()),
     ))
@@ -988,22 +1086,36 @@ fn row(
             schedule_collapse(enter_host.clone(), depth, Some(index));
         }
     })
-    .on_event_stop(el::PointerUp, move |_, _| {
+    .on_event_stop(el::PointerUp, move |cx, up: &PointerButtonEvent| {
         let dragged = up_host.moved.get() && up_host.opened.elapsed() >= RELEASE_GRACE;
         let released = up_host.pressed_inside.get() || dragged;
-        if enabled && released {
+        if !(enabled && released) {
+            return;
+        }
+        let at = cx.world_transform.inverse() * up.state.logical_point();
+        let on_cross = cross_id.is_some_and(|id| {
+            id.get_visual_rect_no_clip()
+                .inflate(CROSS_SLOP, CROSS_SLOP)
+                .contains(at)
+        });
+        if on_cross {
+            up_host.remove(depth, index, false);
+        } else {
             up_host.activate(depth, index, false);
         }
     })
     .debug_name(format!("menu-row:{}", entry.label()))
     .style(move |s| {
         let lit = enabled && highlight.get() == Some(index);
+        removed.track();
+        let gone = matches!(&menu.entries[index], Entry::Item(i) if i.gone.get());
         s.height(ROW_HEIGHT)
             .flex_shrink(0.0_f32)
             .items_center()
             .padding_horiz(ROW_PADDING)
             .border_radius(ROW_RADIUS)
             .apply_if(lit, |s| s.background(theme::MENU_HOVER))
+            .apply_if(gone, |s| s.hide())
     })
 }
 
@@ -1310,6 +1422,67 @@ mod tests {
         harness.dispatch_event(named_key(Code::Enter, NamedKey::Enter));
         settle(&mut harness);
         assert_eq!(*log.borrow(), vec!["terminal"]);
+        assert!(!is_open());
+    }
+
+    fn recent(log: Rc<RefCell<Vec<String>>>) -> Menu {
+        Menu::new()
+            .item("perch", |i| {
+                i.action(logs(&log, "perch"))
+                    .removable(logs(&log, "x perch"))
+            })
+            .item("slatedb", |i| {
+                i.action(logs(&log, "slatedb"))
+                    .removable(logs(&log, "x slatedb"))
+            })
+            .separator()
+            .item("Add…", |i| i.action(logs(&log, "add")))
+    }
+
+    #[test]
+    fn a_lit_rows_cross_takes_it_out_and_leaves_the_menu_up() {
+        let (mut harness, log) = window_with((40.0, 30.0), (600.0, 400.0), recent);
+        open_it(&mut harness);
+        let first = rect(&harness, "menu-row:perch");
+        assert!(rect(&harness, "menu-cross:perch").is_zero_area(), "hidden until lit");
+        harness.pointer_move(first.center().x, first.center().y);
+        settle(&mut harness);
+        let cross = rect(&harness, "menu-cross:perch");
+        assert!(!cross.is_zero_area(), "lit, it shows");
+        assert!(cross.x1 <= first.x1 && cross.x0 > first.center().x, "at the row's end");
+
+        harness.click(cross.center().x, cross.center().y);
+        settle(&mut harness);
+        assert_eq!(*log.borrow(), vec!["x perch"]);
+        assert!(is_open());
+        assert_eq!(rect(&harness, "menu-row:slatedb").y0, first.y0, "the next row takes its place");
+        assert!(
+            !rect(&harness, "menu-cross:slatedb").is_zero_area(),
+            "under the pointer now, it is lit"
+        );
+
+        // Delete takes out the lit row and lights the next; with nothing
+        // left above it, the line goes too.
+        harness.dispatch_event(named_key(Code::Backspace, NamedKey::Backspace));
+        settle(&mut harness);
+        assert_eq!(*log.borrow(), vec!["x perch", "x slatedb"]);
+        assert_eq!(rect(&harness, "menu-row:Add…").y0, first.y0);
+        harness.dispatch_event(named_key(Code::Enter, NamedKey::Enter));
+        settle(&mut harness);
+        assert_eq!(*log.borrow(), vec!["x perch", "x slatedb", "add"]);
+        assert!(!is_open());
+    }
+
+    #[test]
+    fn a_click_off_the_cross_picks_the_row() {
+        let (mut harness, log) = window_with((40.0, 30.0), (600.0, 400.0), recent);
+        open_it(&mut harness);
+        let row = rect(&harness, "menu-row:slatedb");
+        harness.pointer_move(row.x0 + 20.0, row.center().y);
+        settle(&mut harness);
+        harness.click(row.x0 + 20.0, row.center().y);
+        settle(&mut harness);
+        assert_eq!(*log.borrow(), vec!["slatedb"]);
         assert!(!is_open());
     }
 

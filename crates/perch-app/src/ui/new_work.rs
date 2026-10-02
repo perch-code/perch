@@ -152,6 +152,28 @@ pub fn choose_repo(state: AppState, backend: &Backend, repo: &str) {
     backend.list_bases(repo);
 }
 
+/// Take a repository out of the config. The list loses it now rather
+/// than when the backend says, so taking out several in a row chooses
+/// from what is left; when it was the one chosen, the first left is.
+fn remove_repo(state: AppState, backend: &Backend, identity: &str) {
+    backend.remove_repository(identity);
+    state
+        .repos
+        .update(|repos| repos.retain(|r| !r.identity.eq_ignore_ascii_case(identity)));
+    let nw = state.new_work;
+    if !nw.repo.get_untracked().is_some_and(|r| r.eq_ignore_ascii_case(identity)) {
+        return;
+    }
+    match state.repos.with_untracked(|repos| repos.first().map(|r| r.identity.clone())) {
+        Some(next) => choose_repo(state, backend, &next),
+        None => {
+            nw.repo.set(None);
+            nw.base.set(None);
+            nw.bases.set(BaseList::Unasked);
+        }
+    }
+}
+
 /// Words that say nothing in a branch name.
 const FILLER: &[&str] = &["a", "an", "the", "please"];
 
@@ -517,7 +539,8 @@ fn message_box(state: AppState, start: Rc<dyn Fn()>) -> impl IntoView {
     editor_box(editor, || (120.0, 320.0), true)
 }
 
-/// The repository chip: every `[[repo]]`, then Add repository….
+/// The repository chip: every `[[repo]]`, each with a × to take it out,
+/// then Add repository….
 fn repo_chip(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     let nw = state.new_work;
     menu_button(
@@ -551,10 +574,11 @@ fn repo_chip(state: AppState, backend: Rc<Backend>) -> impl IntoView {
                 let backend = backend.clone();
                 let identity = repo.identity.clone();
                 menu = menu.item(label, move |item| {
-                    let backend = backend.clone();
-                    let identity = identity.clone();
+                    let (pick, remove) = (backend.clone(), backend.clone());
+                    let (picked, removed) = (identity.clone(), identity.clone());
                     item.checked(checked)
-                        .action(move || choose_repo(state, &backend, &identity))
+                        .action(move || choose_repo(state, &pick, &picked))
+                        .removable(move || remove_repo(state, &remove, &removed))
                 });
             }
             menu = menu.separator();
