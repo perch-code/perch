@@ -797,6 +797,23 @@ pub fn toml_string(s: &str) -> String {
     out
 }
 
+/// `path` as a prompt names it: `~/…` when it is under the home directory.
+/// An agent retypes a path it is given, and retyping the user's name in
+/// full got it wrong (`kumarujjawwal` for `kumarujjawal`, so `cat` found
+/// nothing). Both agents' shells and Claude's file tools expand the `~`.
+pub fn prompt_path(path: &std::path::Path) -> String {
+    prompt_path_in(path, std::env::var_os("HOME").map(PathBuf::from).as_deref())
+}
+
+/// `prompt_path` with the home passed in, so it can be tested.
+pub fn prompt_path_in(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    match home.filter(|h| h.is_absolute()).and_then(|h| path.strip_prefix(h).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
 /// One parser per backend. Claude associates an explicit permission denial
 /// with the terminal result it caused; Codex remembers the thread and which
 /// commands have begun.
@@ -2701,5 +2718,20 @@ mod tests {
         assert_eq!(toml_string("a\tb"), r#""a\tb""#);
         assert_eq!(toml_string("a\r\n\u{7}"), r#""a\r\n\u0007""#);
         assert_eq!(toml_string(""), r#""""#);
+    }
+
+    #[test]
+    fn prompt_paths_name_the_home_as_a_tilde() {
+        let home = std::path::Path::new("/Users/kumarujjawal");
+        let named = |path: &str, home| prompt_path_in(std::path::Path::new(path), home);
+        assert_eq!(
+            named("/Users/kumarujjawal/.perch/context/review-1", Some(home)),
+            "~/.perch/context/review-1"
+        );
+        assert_eq!(named("/Users/kumarujjawal", Some(home)), "~");
+        assert_eq!(named("/Users/kumarujjawalx/.perch", Some(home)), "/Users/kumarujjawalx/.perch");
+        assert_eq!(named("/srv/perch/context/r1", Some(home)), "/srv/perch/context/r1");
+        assert_eq!(named("/Users/kumarujjawal/.perch", None), "/Users/kumarujjawal/.perch");
+        assert_eq!(named("/x/.perch", Some(std::path::Path::new(""))), "/x/.perch");
     }
 }

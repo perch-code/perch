@@ -558,13 +558,14 @@ pub fn since(
     (!out.is_empty()).then(|| format!("Since your last answer:\n{out}"))
 }
 
-/// The line that names the directory. Perch chose the path, so it is not
-/// quoted; `now` says it replaces one named earlier in the session.
+/// The line that names the directory, with the home as `~`. Perch chose
+/// the path, so it is not quoted; `now` says it replaces one named earlier
+/// in the session.
 pub fn directory_line(dir: &Path, now: bool) -> String {
     format!(
         "The whole discussion {} in {}/, INDEX.md first.\n",
         if now { "is now" } else { "is" },
-        dir.display()
+        perch_agent::prompt_path(dir)
     )
 }
 
