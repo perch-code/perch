@@ -118,8 +118,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .unwrap_or(false);
 
     eprintln!("\nready: {ready} after {:.1}s", started.elapsed().as_secs_f32());
-    // The first "ready" comes before the server says whether it loaded the
-    // workspace, so what it says after is printed as it comes.
+    // What it says after, a warning about its build scripts say, is
+    // printed as it comes.
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
             match event {
@@ -175,7 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             print_locations(&root, &found.unwrap_or_default());
         }
         Request::References => {
-            let found = poll(|| nonempty(client.references(&file, line, col))).await;
+            let found = poll(|| answered(client.references(&file, line, col))).await;
             print_locations(&root, &found.unwrap_or_default());
         }
         Request::DocumentHighlight => {
@@ -195,7 +195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             print_locations(&root, &locations);
         }
         Request::Callers | Request::Callees => {
-            let items = poll(|| nonempty(client.prepare_call_hierarchy(&file, line, col))).await;
+            let items = poll(|| answered(client.prepare_call_hierarchy(&file, line, col))).await;
             let Some(item) = items.and_then(|items| items.into_iter().next()) else {
                 eprintln!("\nnothing at {line}:{col} has a call hierarchy");
                 client.shutdown().await;
@@ -206,7 +206,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // place the call is made, which is how the panel lists them.
             // Polled like the rest: the calls index later than the item.
             let locations: Vec<Location> = if mode == Request::Callers {
-                poll(|| nonempty(client.incoming_calls(item.clone())))
+                poll(|| answered(client.incoming_calls(item.clone())))
                     .await
                     .unwrap_or_default()
                     .into_iter()
@@ -218,7 +218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     })
                     .collect()
             } else {
-                poll(|| nonempty(client.outgoing_calls(item.clone())))
+                poll(|| answered(client.outgoing_calls(item.clone())))
                     .await
                     .unwrap_or_default()
                     .into_iter()
@@ -267,9 +267,9 @@ async fn search(root: &Path, query: &str) -> Result<(), Box<dyn std::error::Erro
 
 /// Ask until the server answers.
 ///
-/// rust-analyzer reports "end" for each of several progress tasks, and the
-/// first of them finishes long before the workspace is loaded, so the first
-/// asks after "ready" come back empty.
+/// rust-analyzer is ready once it says it is quiescent, but its first
+/// answers after that can take longer than a hover waits, and a server
+/// without a status of its own is ready before it has loaded anything.
 async fn poll<T, F, Fut>(ask: F) -> Option<T>
 where
     F: Fn() -> Fut,
@@ -291,7 +291,8 @@ async fn nonempty<T>(ask: impl Future<Output = Vec<T>>) -> Option<Vec<T>> {
     (!found.is_empty()).then_some(found)
 }
 
-/// A goto's answer for `poll`: an error is printed, and no answer yet.
+/// An answer for `poll`: an error is printed, and no answer yet, as is
+/// an empty list.
 async fn answered<T>(
     ask: impl Future<Output = Result<Vec<T>, perch_lsp::Error>>,
 ) -> Option<Vec<T>> {

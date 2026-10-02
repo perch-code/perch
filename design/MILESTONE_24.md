@@ -127,6 +127,18 @@ others don't, so:
 - `$/progress` still gives `Indexing { percent }` for every server. gopls
   and jdtls report it. typescript-language-server mostly doesn't, and is
   `Ready` once initialized.
+- rust-analyzer is `Indexing` until its server status says `quiescent`,
+  however its progress ends: the first of a dozen ends comes within a
+  second, and until it is quiescent it answers nothing, or fails the ask
+  as "content modified". A goto, references or call hierarchy request
+  asked while a server is `Starting` or `Indexing` that comes back empty
+  is asked again if the server has settled since, and otherwise fails
+  as still loading: ``No definition found for `x` (rust-analyzer is
+  still loading)``, `None found (…).` in the references panel, `No
+  callers (…).` under a hierarchy row, ``No call hierarchy for `x`
+  (…)`` for a hierarchy that could not open. The panels' failed asks,
+  and the hover and the uses of the symbol at the caret if they came
+  back empty, are asked again when the server turns `Ready`.
 
 ### Finding a server
 

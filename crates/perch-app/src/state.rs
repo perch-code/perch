@@ -1812,7 +1812,13 @@ impl AppState {
                     if let perch_lsp::Status::Missing(missing) = &status {
                         self.offer_server(ServerOffer::missing(missing, None), false);
                     }
+                    let ready = status == perch_lsp::Status::Ready;
                     review.set_server_status(kind, status);
+                    // After it, so the hover and the uses asked again are
+                    // asked of a server that is ready.
+                    if ready {
+                        review.pending_ready.update(|kinds| kinds.push(kind));
+                    }
                 }
             }
             Event::LspInstalled { kind, install } => {
@@ -2554,16 +2560,7 @@ impl AppState {
                 });
             }
             Event::LspReferences { token, locations } => {
-                // Matched against the panel's own token: the shared counter
-                // moves on with every hover while the answer is on its way.
-                review.references.update(|r| {
-                    if let Some(r) = r.as_mut().filter(|r| r.token == token) {
-                        let mut open = (**r).clone();
-                        open.locations = locations;
-                        open.pending = false;
-                        *r = Arc::new(open);
-                    }
-                });
+                review.finish_references(token, locations);
             }
             other => self.apply(other),
         }
@@ -4177,7 +4174,11 @@ mod tests {
 
         app.apply_with_review(status(perch_lsp::Status::Ready), review);
         assert_eq!(app.notice(), None);
+        // Ready: what came back empty is asked again by the root view.
+        assert_eq!(review.pending_ready.get(), [perch_lsp::ServerKind::RustAnalyzer]);
+        review.pending_ready.set(Vec::new());
         app.apply_with_review(status(unhealthy.clone()), review);
+        assert!(review.pending_ready.get().is_empty());
         assert_eq!(
             app.notice().as_deref(),
             Some("rust-analyzer: Failed to load workspaces")

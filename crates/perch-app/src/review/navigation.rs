@@ -807,6 +807,66 @@ mod tests {
         );
     }
 
+    /// The hover and the uses asked while rust-analyzer loaded came back
+    /// with nothing; once it is ready they are asked again, while the
+    /// pointer and the caret still rest where they were. An answer that
+    /// came, and another server's readiness, ask nothing.
+    #[test]
+    fn what_came_back_empty_while_the_server_loaded_is_asked_again_once_ready() {
+        let state = ReviewState::new();
+        state.set_server_status(
+            perch_lsp::ServerKind::RustAnalyzer,
+            perch_lsp::Status::Indexing { percent: None },
+        );
+        let alpha = Symbol {
+            path: "src/x.rs".into(),
+            line: 0,
+            column: 3,
+            end: 8,
+            text: "alpha".into(),
+        };
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let mut sent = move || {
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .map(|c| match c {
+                    Command::Hover { line, character, .. } => format!("hover {line}:{character}"),
+                    Command::DocumentHighlight { line, character, .. } => {
+                        format!("highlight {line}:{character}")
+                    }
+                    other => format!("{other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        state.pointer_symbol.set(Some(alpha.clone()));
+        state.ask_hover(&backend, alpha.clone());
+        state.ask_highlights(&backend, alpha.clone());
+        let token = state.highlight_ask.get().unwrap().0;
+        state.finish_highlights(token, Vec::new());
+        assert_eq!(sent(), ["hover 0:3", "highlight 0:3"]);
+
+        state.ask_again(&backend, perch_lsp::ServerKind::Gopls);
+        assert_eq!(sent(), Vec::<String>::new(), "not its server");
+
+        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
+        state.ask_again(&backend, perch_lsp::ServerKind::RustAnalyzer);
+        assert_eq!(sent(), ["highlight 0:3", "hover 0:3"]);
+        assert_ne!(state.highlight_ask.get().unwrap().0, token, "a new ask");
+        let hover = state.hover.get().unwrap();
+        assert_eq!(hover.symbol, alpha);
+
+        // Answered this time: ready again asks nothing.
+        state.finish_highlights(state.highlight_ask.get().unwrap().0, vec![(0, 3, 8)]);
+        state.hover.update(|h| h.as_mut().unwrap().markdown = "fn alpha()".into());
+        state.ask_again(&backend, perch_lsp::ServerKind::RustAnalyzer);
+        assert_eq!(sent(), Vec::<String>::new());
+
+        // Nor for a pointer that has moved off.
+        state.hover.update(|h| h.as_mut().unwrap().markdown.clear());
+        state.pointer_symbol.set(None);
+        state.ask_again(&backend, perch_lsp::ServerKind::RustAnalyzer);
+        assert_eq!(sent(), Vec::<String>::new());
+    }
+
     /// A primary button going down and up at a window point with the
     /// command key held, as the window receives a Cmd-click.
     fn cmd_click_at(harness: &mut HeadlessHarness, x: f64, y: f64) {
@@ -966,6 +1026,20 @@ mod tests {
         assert_eq!(
             app.notice().as_deref(),
             Some("No definition found for `alpha` (the language server reported: content modified)")
+        );
+
+        // Asked while it was loading, it says so, rather than reading as
+        // a miss.
+        app.notify("", crate::state::Tone::Error);
+        cmd_click_at(&mut harness, x, y);
+        harness.rebuild();
+        let ask = state.goto.get().expect("a definition is on its way");
+        let loading = perch_lsp::Error::Loading { server: "rust-analyzer" };
+        state.finish_goto(ask.token, Err(loading.to_string()));
+        harness.rebuild();
+        assert_eq!(
+            app.notice().as_deref(),
+            Some("No definition found for `alpha` (rust-analyzer is still loading)")
         );
     }
 

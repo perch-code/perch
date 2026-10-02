@@ -166,6 +166,12 @@ impl Status {
     pub fn is_usable(&self) -> bool {
         matches!(self, Status::Indexing { .. } | Status::Ready)
     }
+
+    /// Whether the server has yet to read the workspace: what it answers
+    /// with nothing now may be there once it has.
+    pub fn is_loading(&self) -> bool {
+        matches!(self, Status::Starting | Status::Indexing { .. })
+    }
 }
 
 /// Where `find` looks, apart from the checkout: the `PATH` to search, the
@@ -1473,5 +1479,14 @@ mod tests {
         })
         .is_usable());
         assert!(!Status::Unhealthy { message: "no workspace".into() }.is_usable());
+    }
+
+    #[test]
+    fn a_server_is_loading_until_it_is_ready_or_broken() {
+        assert!(Status::Starting.is_loading());
+        assert!(Status::Indexing { percent: None }.is_loading());
+        assert!(!Status::Ready.is_loading());
+        assert!(!Status::Unhealthy { message: "no workspace".into() }.is_loading());
+        assert!(!Status::Failed { reason: "exited".into() }.is_loading());
     }
 }

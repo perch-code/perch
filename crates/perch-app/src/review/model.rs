@@ -308,6 +308,13 @@ pub struct References {
     /// The request's token. The answer is matched against this, not the
     /// shared counter, which every hover moves on.
     pub token: u64,
+    /// The server's error, when it answered with one: that it is still
+    /// loading, say. The panel says it beside "None found".
+    pub failed: Option<String>,
+    /// The symbol asked about, so an ask the server failed can be asked
+    /// again once it is ready. `None` for a list that was not asked for
+    /// as one: a goto's several answers.
+    pub asked: Option<Symbol>,
 }
 
 /// What the chip on an outside file's tab says about where the file is
@@ -473,11 +480,16 @@ impl Direction {
     }
 
     /// "No callers.", "No callees.": the row under a function nothing
-    /// calls, or that calls nothing.
-    pub fn none(self) -> &'static str {
-        match self {
-            Direction::Callers => "No callers.",
-            Direction::Callees => "No callees.",
+    /// calls, or that calls nothing. With the server's error when it
+    /// failed the ask: "No callers (rust-analyzer is still loading)."
+    pub fn none(self, failed: Option<&str>) -> String {
+        let none = match self {
+            Direction::Callers => "No callers",
+            Direction::Callees => "No callees",
+        };
+        match failed {
+            Some(error) => format!("{none} ({error})."),
+            None => format!("{none}."),
         }
     }
 }
@@ -510,6 +522,9 @@ pub struct HierarchyRow {
     /// True when the same function is open above this row: a recursive
     /// call, which expands to nothing.
     pub repeats: bool,
+    /// The server's error for the ask for this row's children, when it
+    /// answered with one, until the row is asked again.
+    pub failed: Option<String>,
 }
 
 impl HierarchyRow {
@@ -548,6 +563,7 @@ impl Hierarchy {
             expanded: false,
             pending: Some(token),
             repeats: false,
+            failed: None,
         }];
         Self {
             root,
@@ -584,15 +600,29 @@ impl Hierarchy {
                     expanded: false,
                     pending: None,
                     repeats,
+                    failed: None,
                 }
             })
             .collect();
         let row = &mut self.rows[at];
         row.pending = None;
         row.expanded = true;
+        row.failed = None;
         let count = children.len();
         self.rows.splice(at + 1..at + 1, children);
         Some(count)
+    }
+
+    /// The ask for a row's children under `token` failed: the row is open
+    /// with nothing under it, and says why. `None` when no row was
+    /// waiting on the token.
+    pub fn fail(&mut self, token: u64, error: String) -> Option<usize> {
+        let at = self.rows.iter().position(|r| r.pending == Some(token))?;
+        let row = &mut self.rows[at];
+        row.pending = None;
+        row.expanded = true;
+        row.failed = Some(error);
+        Some(at)
     }
 
     /// The row and every ancestor of it, root first.
@@ -1812,6 +1842,10 @@ pub struct ReviewState {
     /// The servers to start again, as their installs land, drained by the
     /// root view, which holds the backend.
     pub pending_server_starts: RwSignal<Vec<perch_lsp::ServerKind>>,
+    /// The servers that have just said they are ready, drained by the
+    /// root view, which asks again what they answered with nothing while
+    /// they loaded. See `ask_again`.
+    pub pending_ready: RwSignal<Vec<perch_lsp::ServerKind>>,
     /// A head line to scroll to once the file it belongs to is loaded.
     pub jump_to_line: RwSignal<Option<usize>>,
     /// Where the caret lands after `jump_to_line`, as the head line and a
@@ -2037,6 +2071,7 @@ impl ReviewState {
             pending_notice: RwSignal::new(None),
             pending_offer: RwSignal::new(None),
             pending_server_starts: RwSignal::new(Vec::new()),
+            pending_ready: RwSignal::new(Vec::new()),
             jump_to_line: RwSignal::new(None),
             jump_caret: RwSignal::new(None),
             paging: RwSignal::new(None),
@@ -2654,6 +2689,67 @@ impl ReviewState {
         self.highlight_ask.set(Some((token, symbol)));
     }
 
+    /// The server of `kind` is ready, or ready again. The hover under the
+    /// pointer and the uses of the symbol at the caret were answered with
+    /// nothing if they were asked while it loaded, and nothing asks them
+    /// again until the pointer or the caret moves, so whichever of them
+    /// it answered with nothing is asked again here. So is what the panel
+    /// under the editor shows the server's error for: the references, or
+    /// a row of the call hierarchy.
+    pub fn ask_again(&self, backend: &crate::backend::Backend, kind: perch_lsp::ServerKind) {
+        let served = |symbol: &Symbol| perch_lsp::ServerKind::for_path(&symbol.path) == Some(kind);
+        let references = self
+            .references
+            .get_untracked()
+            .filter(|r| r.failed.is_some() && !r.pending)
+            .and_then(|r| Some((r.asked.clone().filter(served)?, r.kind)));
+        if let Some((symbol, asked_for)) = references {
+            crate::review::references::find(*self, backend, &symbol, asked_for);
+        }
+        if let Some(hierarchy) = self.hierarchy.get_untracked() {
+            let served_item = |item: &perch_lsp::lsp_types::CallHierarchyItem| {
+                perch_lsp::client::uri_to_path(item.uri.as_str())
+                    .and_then(|path| perch_lsp::ServerKind::for_path(&path.to_string_lossy()))
+                    == Some(kind)
+            };
+            let failed: Vec<usize> = (0..hierarchy.rows.len())
+                .filter(|&at| {
+                    let row = &hierarchy.rows[at];
+                    row.failed.is_some()
+                        && row.expanded
+                        && row.pending.is_none()
+                        && served_item(&row.item)
+                })
+                .collect();
+            if !failed.is_empty() {
+                let mut open = (*hierarchy).clone();
+                for at in failed {
+                    let token = self.ask_calls(open.rows[at].item.clone(), open.direction);
+                    open.expanding(at, token);
+                }
+                self.hierarchy.set(Some(Arc::new(open)));
+            }
+        }
+        let highlight = self
+            .highlight_ask
+            .get_untracked()
+            .map(|(_, symbol)| symbol)
+            .filter(|symbol| served(symbol) && self.highlights.with_untracked(|h| h.is_empty()));
+        if let Some(symbol) = highlight {
+            self.ask_highlights(backend, symbol);
+        }
+        let hover = self.hover.get_untracked().filter(|h| {
+            h.markdown.is_empty()
+                && served(&h.symbol)
+                && self.pointer_symbol.with_untracked(|p| p.as_ref() == Some(&h.symbol))
+        });
+        if let Some(hover) = hover {
+            // The slot is let go first: a symbol with one is not asked.
+            self.hover.set(None);
+            self.ask_hover(backend, hover.symbol);
+        }
+    }
+
     /// The uses arrived. Kept only for the ask still waiting: the caret
     /// may have moved on since.
     pub fn finish_highlights(&self, token: u64, ranges: Vec<(usize, usize, usize)>) {
@@ -2767,6 +2863,8 @@ impl ReviewState {
                 locations: several.to_vec(),
                 pending: false,
                 token: self.next_token(),
+                failed: None,
+                asked: None,
             }),
         }
     }
@@ -2845,6 +2943,8 @@ impl ReviewState {
                 locations,
                 pending: false,
                 token,
+                failed: None,
+                asked: None,
             }),
         }
     }
@@ -2872,18 +2972,29 @@ impl ReviewState {
 
     /// The server named what a call hierarchy can start from. Nothing
     /// named opens nothing; the first item opens the panel as its callers,
-    /// with the calls on their way.
+    /// with the calls on their way. The server's error, that it is still
+    /// loading say, is said in a notice, as a goto's is.
     pub fn finish_prepare_hierarchy(
         &self,
         token: u64,
-        items: Vec<perch_lsp::lsp_types::CallHierarchyItem>,
+        items: Result<Vec<perch_lsp::lsp_types::CallHierarchyItem>, String>,
         place: Option<Located>,
     ) {
         let ask = self
             .hierarchy_ask
             .try_update(|a| a.take_if(|a| a.token == token))
             .flatten();
-        let Some(_) = ask else { return };
+        let Some(ask) = ask else { return };
+        let items = match items {
+            Ok(items) => items,
+            Err(error) => {
+                self.pending_notice.set(Some(format!(
+                    "No call hierarchy for `{}` ({error})",
+                    ask.symbol
+                )));
+                return;
+            }
+        };
         let Some(root) = items.into_iter().next() else { return };
         let place = place.unwrap_or_else(|| Located {
             path: root.uri.as_str().to_string(),
@@ -2939,14 +3050,35 @@ impl ReviewState {
         self.hierarchy.set(Some(Arc::new(hierarchy.turned(direction, token))));
     }
 
-    /// The calls under a row arrived.
-    pub fn finish_calls(&self, token: u64, calls: Vec<Call>) {
+    /// The calls under a row arrived, or the server's error did.
+    pub fn finish_calls(&self, token: u64, calls: Result<Vec<Call>, String>) {
         self.hierarchy.update(|h| {
             if let Some(h) = h.as_mut() {
                 let mut open = (**h).clone();
-                if open.fill(token, calls).is_some() {
+                let filled = match calls {
+                    Ok(calls) => open.fill(token, calls),
+                    Err(error) => open.fail(token, error),
+                };
+                if filled.is_some() {
                     *h = Arc::new(open);
                 }
+            }
+        });
+    }
+
+    /// The references asked for under `token` arrived, or the server's
+    /// error did. Matched against the panel's own token: the shared
+    /// counter moves on with every hover while the answer is on its way.
+    pub fn finish_references(&self, token: u64, locations: Result<Vec<Located>, String>) {
+        self.references.update(|r| {
+            if let Some(r) = r.as_mut().filter(|r| r.token == token) {
+                let mut open = (**r).clone();
+                match locations {
+                    Ok(locations) => open.locations = locations,
+                    Err(error) => open.failed = Some(error),
+                }
+                open.pending = false;
+                *r = Arc::new(open);
             }
         });
     }

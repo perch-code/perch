@@ -1429,10 +1429,10 @@ pub enum Event {
         locations: Result<Vec<crate::review::model::Located>, String>,
     },
     /// Every use of a symbol, with the line's text, those outside the
-    /// worktree among them.
+    /// worktree among them, or the server's error.
     LspReferences {
         token: u64,
-        locations: Vec<crate::review::model::Located>,
+        locations: Result<Vec<crate::review::model::Located>, String>,
     },
     /// Every use in its file of a symbol: head line, start column, end
     /// column, as the protocol counts them.
@@ -1445,16 +1445,18 @@ pub enum Event {
         path: String,
         outline: Arc<crate::review::model::Outline>,
     },
-    /// The items a call hierarchy can start from, with where the first is.
+    /// The items a call hierarchy can start from, with where the first
+    /// is, or the server's error.
     LspCallHierarchy {
         token: u64,
-        items: Vec<perch_lsp::lsp_types::CallHierarchyItem>,
+        items: Result<Vec<perch_lsp::lsp_types::CallHierarchyItem>, String>,
         place: Option<crate::review::model::Located>,
     },
-    /// The calls under an item, each with its item and where the call is.
+    /// The calls under an item, each with its item and where the call is,
+    /// or the server's error.
     LspCalls {
         token: u64,
-        calls: Vec<crate::review::model::Call>,
+        calls: Result<Vec<crate::review::model::Call>, String>,
     },
     /// What each name asked about means, by the name as written: the
     /// definitions of as much of it as the search found, or nothing.
@@ -4824,8 +4826,10 @@ async fn run(
                         .ok()
                         .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()));
                     let Some(worktree) = worktree else { return };
-                    let locations = client.references(&full, line, character).await;
-                    let locations = read_locations(&worktree, &locations, Some(&client)).await;
+                    let locations = match client.references(&full, line, character).await {
+                        Ok(found) => Ok(read_locations(&worktree, &found, Some(&client)).await),
+                        Err(e) => Err(e.to_string()),
+                    };
                     let _ = events.send(Event::LspReferences { token, locations });
                 });
             }
@@ -4926,10 +4930,13 @@ async fn run(
                         .ok()
                         .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()));
                     let Some(worktree) = worktree else { return };
-                    let items = client.prepare_call_hierarchy(&full, line, character).await;
+                    let items = client
+                        .prepare_call_hierarchy(&full, line, character)
+                        .await
+                        .map_err(|e| e.to_string());
                     // Where the first item is, read as a location is, so the
                     // root row has its path, line and text.
-                    let place = match items.first() {
+                    let place = match items.as_deref().unwrap_or_default().first() {
                         Some(item) => read_locations(
                             &worktree,
                             &[perch_lsp::lsp_types::Location {
@@ -5211,23 +5218,24 @@ fn spawn_calls(
         let Some(worktree) = worktree else { return };
 
         // Each call as its item and the location of its first call site.
-        let named: Vec<(perch_lsp::lsp_types::CallHierarchyItem, perch_lsp::lsp_types::Location)> =
-            match direction {
-                Direction::Callers => client
-                    .incoming_calls(item)
-                    .await
+        let named: Result<
+            Vec<(perch_lsp::lsp_types::CallHierarchyItem, perch_lsp::lsp_types::Location)>,
+            perch_lsp::Error,
+        > = match direction {
+            Direction::Callers => client.incoming_calls(item).await.map(|calls| {
+                calls
                     .into_iter()
                     .filter_map(|c| {
                         let range = *c.from_ranges.first()?;
                         let uri = c.from.uri.clone();
                         Some((c.from, perch_lsp::lsp_types::Location { uri, range }))
                     })
-                    .collect(),
-                Direction::Callees => {
-                    let uri = item.uri.clone();
-                    client
-                        .outgoing_calls(item)
-                        .await
+                    .collect()
+            }),
+            Direction::Callees => {
+                let uri = item.uri.clone();
+                client.outgoing_calls(item).await.map(|calls| {
+                    calls
                         .into_iter()
                         .filter_map(|c| {
                             let range = *c.from_ranges.first()?;
@@ -5240,8 +5248,16 @@ fn spawn_calls(
                             ))
                         })
                         .collect()
-                }
-            };
+                })
+            }
+        };
+        let named = match named {
+            Ok(named) => named,
+            Err(e) => {
+                let _ = events.send(Event::LspCalls { token, calls: Err(e.to_string()) });
+                return;
+            }
+        };
         let mut calls = Vec::with_capacity(named.len());
         for (call_item, location) in named {
             let Some(site) = read_locations(&worktree, &[location], Some(&client))
@@ -5266,7 +5282,7 @@ fn spawn_calls(
                 .then_with(|| a.site.path.cmp(&b.site.path))
                 .then(a.site.line.cmp(&b.site.line))
         });
-        let _ = events.send(Event::LspCalls { token, calls });
+        let _ = events.send(Event::LspCalls { token, calls: Ok(calls) });
     });
 }
 

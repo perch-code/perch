@@ -28,6 +28,10 @@ pub enum Error {
     ExitedSaying(String),
     #[error("the language server did not answer in time")]
     Timeout,
+    /// Asked before the server had read the workspace, and answered with
+    /// nothing, or not at all, before it had.
+    #[error("{server} is still loading")]
+    Loading { server: &'static str },
     #[error("the language server reported: {0}")]
     Server(String),
 }

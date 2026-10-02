@@ -70,7 +70,7 @@ pub fn symbol_at_cursor(state: ReviewState) -> Option<Symbol> {
 /// answer comes back with the same token. Nothing while the server is not
 /// there.
 pub fn find(state: ReviewState, backend: &Backend, symbol: &Symbol, kind: Locations) {
-    if !state.lsp_status.with(|s| s.usable_for(&symbol.path)) {
+    if !state.lsp_status.with_untracked(|s| s.usable_for(&symbol.path)) {
         return;
     }
     let token = state.next_token();
@@ -80,6 +80,8 @@ pub fn find(state: ReviewState, backend: &Backend, symbol: &Symbol, kind: Locati
         locations: Vec::new(),
         pending: true,
         token,
+        failed: None,
+        asked: Some(symbol.clone()),
     });
     let (line, character) = (symbol.line as u32, symbol.column as u32);
     match kind {
@@ -218,10 +220,10 @@ enum Row {
 fn rows(references: &References) -> Vec<Row> {
     let groups = group_by_file(&references.locations);
     if groups.is_empty() {
-        let text = if references.pending {
-            "Looking\u{2026}".to_string()
-        } else {
-            "None found.".to_string()
+        let text = match (references.pending, &references.failed) {
+            (true, _) => "Looking\u{2026}".to_string(),
+            (false, Some(error)) => format!("None found ({error})."),
+            (false, None) => "None found.".to_string(),
         };
         return vec![Row::Notice(text)];
     }
@@ -639,7 +641,15 @@ mod tests {
     }
 
     fn references(symbol: &str, locations: Vec<Located>, pending: bool) -> References {
-        References { kind: Locations::References, symbol: symbol.into(), locations, pending, token: 0 }
+        References {
+            kind: Locations::References,
+            symbol: symbol.into(),
+            locations,
+            pending,
+            token: 0,
+            failed: None,
+            asked: None,
+        }
     }
 
     #[test]
@@ -728,6 +738,16 @@ mod tests {
         let none = references("s", vec![], false);
         assert_eq!(rows(&none), vec![Row::Notice("None found.".into())]);
 
+        // The server's error is said beside it: not a miss.
+        let loading = References {
+            failed: Some("rust-analyzer is still loading".into()),
+            ..references("s", vec![], false)
+        };
+        assert_eq!(
+            rows(&loading),
+            vec![Row::Notice("None found (rust-analyzer is still loading).".into())]
+        );
+
         let away = references("s", vec![outside("/r/x-1.0.0/src/lib.rs", "x 1.0.0", 1, ""), outside("/r/x-1.0.0/src/lib.rs", "x 1.0.0", 2, "")], false);
         assert_eq!(summary(&away), "2 elsewhere");
     }
@@ -776,6 +796,65 @@ mod tests {
         let a = rows(&references("a", locations.clone(), false));
         let b = rows(&references("b", locations, false));
         assert_ne!(a[1], b[1]);
+    }
+
+    /// References the server said it was still loading for say so, and are
+    /// asked again, about the same symbol, once it is ready; another
+    /// server's readiness asks nothing.
+    #[test]
+    fn references_asked_while_the_server_loads_are_asked_again_once_ready() {
+        use crate::backend::Command;
+        let state = ReviewState::new();
+        state.set_server_status(
+            perch_lsp::ServerKind::RustAnalyzer,
+            perch_lsp::Status::Indexing { percent: None },
+        );
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let mut asked = move || {
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .filter_map(|c| match c {
+                    Command::References { token, path, line, character } => {
+                        Some((token, path, line, character))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let symbol = Symbol {
+            path: "src/x.rs".into(),
+            line: 2,
+            column: 4,
+            end: 9,
+            text: "alpha".into(),
+        };
+        find(state, &backend, &symbol, Locations::References);
+        let first = asked();
+        assert_eq!(first.len(), 1);
+        state.finish_references(first[0].0, Err("rust-analyzer is still loading".into()));
+        let open = state.references.get().unwrap();
+        assert!(!open.pending);
+        assert_eq!(
+            rows(&open),
+            vec![Row::Notice("None found (rust-analyzer is still loading).".into())]
+        );
+
+        state.ask_again(&backend, perch_lsp::ServerKind::Gopls);
+        assert!(asked().is_empty(), "not its server");
+
+        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
+        state.ask_again(&backend, perch_lsp::ServerKind::RustAnalyzer);
+        let again = asked();
+        assert_eq!(again.len(), 1);
+        let (token, path, line, character) = again[0].clone();
+        assert_eq!((path.as_str(), line, character), ("src/x.rs", 2, 4));
+        assert_ne!(token, first[0].0);
+        assert!(state.references.get().unwrap().pending, "looking again");
+
+        state.finish_references(token, Ok(vec![reference("src/x.rs", 3, 4, "alpha();")]));
+        let open = state.references.get().unwrap();
+        assert_eq!((open.locations.len(), open.failed.as_deref()), (1, None));
+        state.ask_again(&backend, perch_lsp::ServerKind::RustAnalyzer);
+        assert!(asked().is_empty(), "answered: nothing to ask again");
     }
 }
 
@@ -924,6 +1003,8 @@ mod window {
             ],
             pending: false,
             token: 0,
+            failed: None,
+            asked: None,
         })
     }
 

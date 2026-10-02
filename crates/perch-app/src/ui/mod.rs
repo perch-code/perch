@@ -140,6 +140,23 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             }
         });
     }
+    {
+        let backend = backend.clone();
+        floem::reactive::Effect::new(move |_| {
+            let ready = review.pending_ready.get();
+            if ready.is_empty() {
+                return;
+            }
+            review.pending_ready.set(Vec::new());
+            // The asks read signals of their own; this effect is the
+            // queue's alone.
+            floem::reactive::Effect::untrack(|| {
+                for kind in ready {
+                    review.ask_again(&backend, kind);
+                }
+            });
+        });
+    }
     // And the runs the reader opened out of a fold, or folded again, go
     // to the store from here too. The item is read as the write is sent:
     // the effect runs on the write, before anything else can open another.

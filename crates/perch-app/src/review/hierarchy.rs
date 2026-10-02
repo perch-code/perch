@@ -133,7 +133,7 @@ pub(crate) fn rows(hierarchy: &Hierarchy) -> Vec<Row> {
             Some(if row.repeats {
                 "Already open above.".to_string()
             } else {
-                hierarchy.direction.none().to_string()
+                hierarchy.direction.none(row.failed.as_deref())
             })
         } else {
             None
@@ -593,7 +593,7 @@ mod tests {
         ));
 
         // A struct: nothing named, nothing opens.
-        state.finish_prepare_hierarchy(token, vec![], None);
+        state.finish_prepare_hierarchy(token, Ok(vec![]), None);
         assert!(state.hierarchy.get().is_none());
         assert!(state.hierarchy_ask.get().is_none());
 
@@ -608,9 +608,11 @@ mod tests {
                 locations: vec![],
                 pending: false,
                 token: 0,
+                failed: None,
+                asked: None,
             },
         )));
-        state.finish_prepare_hierarchy(token, vec![item("run", 0)], Some(root_place()));
+        state.finish_prepare_hierarchy(token, Ok(vec![item("run", 0)]), Some(root_place()));
         let open = state.hierarchy.get().expect("the panel opened");
         assert_eq!(open.direction, Direction::Callers);
         assert_eq!(open.rows.len(), 1);
@@ -623,7 +625,7 @@ mod tests {
         );
 
         // The calls land, one row is expanded, and the direction turns.
-        state.finish_calls(queued[0].0, vec![call("main", 10, "run();")]);
+        state.finish_calls(queued[0].0, Ok(vec![call("main", 10, "run();")]));
         assert_eq!(state.hierarchy.get().unwrap().rows.len(), 2);
         state.expand_hierarchy_row(1);
         let asked = state.pending_calls.get();
@@ -642,5 +644,66 @@ mod tests {
         assert!(state.panel_open());
         state.close_panel();
         assert!(!state.panel_open());
+    }
+
+    /// Asked while the server loads: the prepare says so in a notice, as a
+    /// goto does, and a row's calls say so under it, and are asked again
+    /// once the server is ready.
+    #[test]
+    fn a_hierarchy_asked_while_the_server_loads_says_so_and_asks_again() {
+        let state = ReviewState::new();
+        state.set_server_status(
+            perch_lsp::ServerKind::RustAnalyzer,
+            perch_lsp::Status::Indexing { percent: None },
+        );
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let symbol = Symbol {
+            path: "src/x.rs".into(),
+            line: 4,
+            column: 8,
+            end: 11,
+            text: "run".into(),
+        };
+        let loading = "rust-analyzer is still loading";
+
+        show(state, &backend, &symbol);
+        let token = state.hierarchy_ask.get().unwrap().token;
+        state.finish_prepare_hierarchy(token, Err(loading.into()), None);
+        assert!(state.hierarchy.get().is_none());
+        assert_eq!(
+            state.pending_notice.get().as_deref(),
+            Some("No call hierarchy for `run` (rust-analyzer is still loading)")
+        );
+
+        show(state, &backend, &symbol);
+        let token = state.hierarchy_ask.get().unwrap().token;
+        state.finish_prepare_hierarchy(token, Ok(vec![item("run", 0)]), Some(root_place()));
+        let first = state.pending_calls.get()[0].0;
+        state.finish_calls(first, Err(loading.into()));
+        let listed = rows(&state.hierarchy.get().unwrap());
+        assert!(matches!(
+            &listed[1],
+            Row::Notice { text, depth: 1, .. }
+                if text == "No callers (rust-analyzer is still loading)."
+        ));
+
+        state.ask_again(&backend, perch_lsp::ServerKind::Gopls);
+        assert_eq!(state.pending_calls.get().len(), 1, "not its server");
+
+        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
+        state.ask_again(&backend, perch_lsp::ServerKind::RustAnalyzer);
+        let queued = state.pending_calls.get();
+        assert_eq!(queued.len(), 2);
+        assert_eq!((queued[1].1.name.as_str(), queued[1].2), ("run", Direction::Callers));
+        let open = state.hierarchy.get().unwrap();
+        assert_eq!(open.rows[0].pending, Some(queued[1].0));
+        assert!(matches!(&rows(&open)[1], Row::Notice { text, .. } if text == "Looking\u{2026}"));
+
+        state.finish_calls(queued[1].0, Ok(vec![call("main", 10, "run();")]));
+        let open = state.hierarchy.get().unwrap();
+        assert_eq!(open.rows.len(), 2);
+        assert_eq!(open.rows[0].failed, None);
+        state.ask_again(&backend, perch_lsp::ServerKind::RustAnalyzer);
+        assert_eq!(state.pending_calls.get().len(), 2, "answered: nothing to ask again");
     }
 }

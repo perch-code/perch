@@ -526,17 +526,56 @@ impl Client {
             partial_result_params: Default::default(),
         };
         let params = serde_json::to_value(params).unwrap_or(Value::Null);
-        let value = self.request(method, params, timeout).await?;
-        Ok(goto_locations(value))
+        self.ask_for_list(method, params, timeout, goto_locations).await
+    }
+
+    /// Ask for a list, read from the reply by `read`. A reply that is an
+    /// error, or none in time, is the error.
+    ///
+    /// Asked while the server is loading, none is no answer yet:
+    /// rust-analyzer answers with nothing until it has fetched the
+    /// workspace, then holds each ask until it has indexed and fails it as
+    /// "content modified". Such an ask is asked again if the server has
+    /// settled since, and is `Error::Loading` if it has not.
+    async fn ask_for_list<T>(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+        read: fn(Value) -> Vec<T>,
+    ) -> Result<Vec<T>, Error> {
+        let loading = self.status().is_loading();
+        let answer = self.request(method, params.clone(), timeout).await.map(read);
+        if !loading || answer.as_ref().is_ok_and(|found| !found.is_empty()) {
+            return answer;
+        }
+        match self.status() {
+            // Given longer: rust-analyzer's first answers once it has
+            // settled took 2 to 5 seconds on slatedb.
+            Status::Ready => self
+                .request(method, params, timeout.max(PANEL_TIMEOUT))
+                .await
+                .map(read),
+            status if status.is_loading() => Err(Error::Loading {
+                server: self.spec.kind.name(),
+            }),
+            // Broken or gone since: the answer says what it can.
+            _ => answer,
+        }
     }
 
     /// Every use of the symbol under the cursor, its declaration among them.
     ///
     /// The declaration is asked for so the list reads whole: a reader looking
     /// for a symbol's uses wants the line that introduces it in the same list.
-    pub async fn references(&self, path: &Path, line: u32, character: u32) -> Vec<Location> {
+    pub async fn references(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<Location>, Error> {
         let Some(position) = self.position(path, line, character) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let params = ReferenceParams {
             text_document_position: position,
@@ -544,14 +583,9 @@ impl Client {
             partial_result_params: Default::default(),
             context: ReferenceContext { include_declaration: true },
         };
-        let Ok(params) = serde_json::to_value(params) else {
-            return Vec::new();
-        };
-        let Ok(value) = self.request("textDocument/references", params, PANEL_TIMEOUT).await
-        else {
-            return Vec::new();
-        };
-        reference_locations(value)
+        let params = serde_json::to_value(params).unwrap_or(Value::Null);
+        self.ask_for_list("textDocument/references", params, PANEL_TIMEOUT, reference_locations)
+            .await
     }
 
     /// Every use of the symbol at a position in its own file, as ranges,
@@ -616,62 +650,47 @@ impl Client {
         path: &Path,
         line: u32,
         character: u32,
-    ) -> Vec<CallHierarchyItem> {
+    ) -> Result<Vec<CallHierarchyItem>, Error> {
         let Some(position) = self.position(path, line, character) else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let params = CallHierarchyPrepareParams {
             text_document_position_params: position,
             work_done_progress_params: WorkDoneProgressParams::default(),
         };
-        let Ok(params) = serde_json::to_value(params) else {
-            return Vec::new();
-        };
-        let Ok(value) = self
-            .request("textDocument/prepareCallHierarchy", params, PANEL_TIMEOUT)
+        let params = serde_json::to_value(params).unwrap_or(Value::Null);
+        self.ask_for_list("textDocument/prepareCallHierarchy", params, PANEL_TIMEOUT, list)
             .await
-        else {
-            return Vec::new();
-        };
-        decode_result(value).unwrap_or_default()
     }
 
     /// The callers of an item, each with where in the caller the call is.
-    pub async fn incoming_calls(&self, item: CallHierarchyItem) -> Vec<CallHierarchyIncomingCall> {
+    pub async fn incoming_calls(
+        &self,
+        item: CallHierarchyItem,
+    ) -> Result<Vec<CallHierarchyIncomingCall>, Error> {
         let params = CallHierarchyIncomingCallsParams {
             item,
             work_done_progress_params: WorkDoneProgressParams::default(),
             partial_result_params: Default::default(),
         };
-        let Ok(params) = serde_json::to_value(params) else {
-            return Vec::new();
-        };
-        let Ok(value) = self
-            .request("callHierarchy/incomingCalls", params, PANEL_TIMEOUT)
+        let params = serde_json::to_value(params).unwrap_or(Value::Null);
+        self.ask_for_list("callHierarchy/incomingCalls", params, PANEL_TIMEOUT, list)
             .await
-        else {
-            return Vec::new();
-        };
-        decode_result(value).unwrap_or_default()
     }
 
     /// The functions an item calls, each with where in the item the call is.
-    pub async fn outgoing_calls(&self, item: CallHierarchyItem) -> Vec<CallHierarchyOutgoingCall> {
+    pub async fn outgoing_calls(
+        &self,
+        item: CallHierarchyItem,
+    ) -> Result<Vec<CallHierarchyOutgoingCall>, Error> {
         let params = CallHierarchyOutgoingCallsParams {
             item,
             work_done_progress_params: WorkDoneProgressParams::default(),
             partial_result_params: Default::default(),
         };
-        let Ok(params) = serde_json::to_value(params) else {
-            return Vec::new();
-        };
-        let Ok(value) = self
-            .request("callHierarchy/outgoingCalls", params, PANEL_TIMEOUT)
+        let params = serde_json::to_value(params).unwrap_or(Value::Null);
+        self.ask_for_list("callHierarchy/outgoingCalls", params, PANEL_TIMEOUT, list)
             .await
-        else {
-            return Vec::new();
-        };
-        decode_result(value).unwrap_or_default()
     }
 
     /// The symbols in the workspace whose names match `query` as the server
@@ -852,10 +871,15 @@ fn handle_notification(method: &str, params: Value, reported: &mut Reported) -> 
             Some(status) => reported.progress(status).into_iter().collect(),
             None => Vec::new(),
         },
-        "experimental/serverStatus" => match server_health(&params) {
-            Some(health) => reported.health(health),
-            None => Vec::new(),
-        },
+        "experimental/serverStatus" => {
+            if let Some(quiescent) = params.get("quiescent").and_then(Value::as_bool) {
+                reported.quiescent = Some(quiescent);
+            }
+            match server_health(&params) {
+                Some(health) => reported.health(health),
+                None => reported.tell().into_iter().collect(),
+            }
+        }
         "window/showMessage" if reported.hears_messages => match message_health(&params) {
             Some(health) => reported.health(health),
             None => Vec::new(),
@@ -929,17 +953,24 @@ fn server_health(params: &Value) -> Option<Health> {
 
 /// The status told so far, put together from two sources: `$/progress`
 /// says whether the server is indexing, and rust-analyzer's server status
-/// whether it is well. A server whose workspace failed to load ends its
-/// progress all the same, so an error outranks the progress until a
-/// later status clears it. Each status and each warning is told once,
-/// not on every repeat: rust-analyzer sends its status again whenever it
-/// goes quiet or busy.
+/// whether it is well and whether it is still loading. A server whose
+/// workspace failed to load ends its progress all the same, so an error
+/// outranks the progress until a later status clears it. Each status and
+/// each warning is told once, not on every repeat: rust-analyzer sends
+/// its status again whenever it goes quiet or busy.
 #[derive(Debug, Default)]
 struct Reported {
     /// Whether `window/showMessage` says how the server is.
     hears_messages: bool,
     progress: Option<Status>,
     health: Option<Health>,
+    /// rust-analyzer's `quiescent`: false from its start until it has
+    /// fetched the workspace, built its scripts, loaded its proc macros
+    /// and primed its caches. Its progress ends a dozen times on the way,
+    /// the first within a second of starting, and what it answers before
+    /// it is quiescent is nothing, or "content modified". `None` from a
+    /// server that has not said.
+    quiescent: Option<bool>,
     told: Option<Status>,
     warned: Option<String>,
 }
@@ -971,11 +1002,20 @@ impl Reported {
     }
 
     fn tell(&mut self) -> Option<ServerEvent> {
-        let status = match &self.health {
-            Some(Health::Error(message)) => Status::Unhealthy {
+        let status = match (&self.health, self.quiescent) {
+            (Some(Health::Error(message)), _) => Status::Unhealthy {
                 message: message.clone(),
             },
-            _ => self.progress.clone()?,
+            // Loading until it says it is quiescent, whatever its progress
+            // says; the progress gives the percentage when it has one.
+            (_, Some(false)) => match &self.progress {
+                Some(indexing @ Status::Indexing { .. }) => indexing.clone(),
+                _ => Status::Indexing { percent: None },
+            },
+            // And ready once it is, though a `cargo check` it runs reports
+            // progress of its own: it answers all the same.
+            (_, Some(true)) => Status::Ready,
+            (_, None) => self.progress.clone()?,
         };
         if self.told.as_ref() == Some(&status) {
             return None;
@@ -1066,6 +1106,11 @@ fn goto_locations(value: Value) -> Vec<Location> {
 /// rather than a failure.
 fn reference_locations(value: Value) -> Vec<Location> {
     decode_result::<Vec<Location>>(value).unwrap_or_default()
+}
+
+/// A reply that is a list, as a call hierarchy's are. Null is none.
+fn list<T: serde::de::DeserializeOwned>(value: Value) -> Vec<T> {
+    decode_result(value).unwrap_or_default()
 }
 
 /// The symbols in a `workspace/symbol` reply, in either of its shapes,
@@ -1565,21 +1610,174 @@ while True:
                 ("experimental/serverStatus", error),
             ],
         );
+        // Never ready on the way: the fetch's end came while it was busy.
         assert_eq!(
             events,
-            vec![
-                "rust-analyzer indexing",
-                "rust-analyzer ready",
-                "rust-analyzer: Failed to read Cargo metadata",
-            ]
+            vec!["rust-analyzer indexing", "rust-analyzer: Failed to read Cargo metadata"]
         );
 
-        // Loaded after all: the progress speaks again.
+        // Loaded after all.
         let events = told(
             &mut reported,
             &[("experimental/serverStatus", json!({"health":"ok","quiescent":true}))],
         );
         assert_eq!(events, vec!["rust-analyzer ready"]);
+    }
+
+    /// rust-analyzer 1.91.1 on slatedb, its progress cut short: the fetch
+    /// ends within a second, the caches are primed for ten more, and only
+    /// then is it quiescent, and only then does it answer.
+    #[test]
+    fn rust_analyzer_is_ready_once_it_is_quiescent_and_not_before() {
+        let progress = |token: &str, kind: &str, percentage: Option<u64>| {
+            let mut value = json!({"kind": kind});
+            if let Some(p) = percentage {
+                value["percentage"] = json!(p);
+            }
+            ("$/progress", json!({"token": token, "value": value}))
+        };
+        let status = |quiescent: bool| {
+            ("experimental/serverStatus", json!({"health":"ok","quiescent":quiescent}))
+        };
+        let mut reported = Reported::default();
+        let events = told(
+            &mut reported,
+            &[
+                status(false),
+                progress("rustAnalyzer/Fetching", "begin", None),
+                progress("rustAnalyzer/Fetching", "end", None),
+                progress("rustAnalyzer/Roots Scanned", "begin", Some(0)),
+                progress("rustAnalyzer/Roots Scanned", "end", None),
+                progress("rustAnalyzer/Loading proc-macros", "begin", None),
+                progress("rustAnalyzer/Loading proc-macros", "end", None),
+                progress("rustAnalyzer/cachePriming", "begin", Some(0)),
+                progress("rust-analyzer/flycheck/0", "begin", None),
+                progress("rust-analyzer/flycheck/0", "end", None),
+                progress("rustAnalyzer/cachePriming", "report", Some(50)),
+                progress("rustAnalyzer/cachePriming", "end", None),
+                status(true),
+                // A check once it is ready leaves it ready.
+                progress("rust-analyzer/flycheck/0", "begin", None),
+                progress("rust-analyzer/flycheck/0", "end", None),
+            ],
+        );
+        assert_eq!(
+            events,
+            vec![
+                "rust-analyzer indexing",
+                "rust-analyzer indexing 0%",
+                "rust-analyzer indexing",
+                "rust-analyzer indexing 0%",
+                "rust-analyzer indexing",
+                "rust-analyzer indexing 50%",
+                "rust-analyzer indexing",
+                "rust-analyzer ready",
+            ]
+        );
+
+        // Busy again, a Cargo.toml changed, say: loading again.
+        let events = told(
+            &mut reported,
+            &[
+                status(false),
+                progress("rustAnalyzer/Fetching", "begin", None),
+                progress("rustAnalyzer/Fetching", "end", None),
+                status(true),
+            ],
+        );
+        assert_eq!(events, vec!["rust-analyzer indexing", "rust-analyzer ready"]);
+    }
+
+    /// A server that says it is loading as it starts and answers a
+    /// definition with nothing; then, asked again, settles while it is
+    /// asked and fails the ask as rust-analyzer does; then answers with a
+    /// location, and then with nothing again.
+    const LOADING_SERVER: &str = r#"
+import json, sys
+def send(message):
+    body = json.dumps(message).encode()
+    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+    sys.stdout.buffer.flush()
+def status(quiescent):
+    send({"jsonrpc": "2.0", "method": "experimental/serverStatus",
+          "params": {"health": "ok", "quiescent": quiescent}})
+asked = 0
+while True:
+    length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            sys.exit(0)
+        if line in (b"\r\n", b"\n"):
+            break
+        name, _, value = line.decode().partition(":")
+        if name.lower() == "content-length":
+            length = int(value)
+    message = json.loads(sys.stdin.buffer.read(length))
+    if message.get("method") == "exit":
+        sys.exit(0)
+    if "id" not in message:
+        continue
+    result = None
+    if message["method"] == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}})
+        status(False)
+        continue
+    if message["method"] == "textDocument/definition":
+        asked += 1
+        if asked == 2:
+            status(True)
+            send({"jsonrpc": "2.0", "id": message["id"],
+                  "error": {"code": -32801, "message": "content modified"}})
+            continue
+        if asked == 3:
+            point = {"line": 3, "character": 4}
+            result = [{"uri": "file:///a/src/lib.rs", "range": {"start": point, "end": point}}]
+    send({"jsonrpc": "2.0", "id": message["id"], "result": result})
+"#;
+
+    /// A goto asked while the server loads is no answer yet: said to be
+    /// loading while it still is, asked again once it has settled, and a
+    /// miss only when asked of a server that was ready.
+    #[tokio::test]
+    async fn a_goto_asked_while_the_server_loads_is_no_answer_yet() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("server.py");
+        std::fs::write(&script, LOADING_SERVER).unwrap();
+        let spec = ServerSpec {
+            kind: ServerKind::RustAnalyzer,
+            binary: PathBuf::from("python3"),
+            args: vec![script.display().to_string()],
+            options: Value::Null,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let client = Client::start(spec, dir.path(), tx).await.unwrap();
+        let loading = tokio::time::timeout(LIFECYCLE_TIMEOUT, async {
+            while let Some(event) = rx.recv().await {
+                if let ServerEvent::Status(status @ Status::Indexing { .. }) = event {
+                    return Some(status);
+                }
+            }
+            None
+        });
+        assert_eq!(loading.await.ok().flatten(), Some(Status::Indexing { percent: None }));
+
+        let file = dir.path().join("lib.rs");
+        let error = client.definition(&file, 0, 0).await.unwrap_err();
+        assert_eq!(error.to_string(), "rust-analyzer is still loading");
+        // The lists the panels show are asked the same way.
+        let loading = |e: Error| e.to_string() == "rust-analyzer is still loading";
+        assert!(client.references(&file, 0, 0).await.is_err_and(loading));
+        assert!(client.prepare_call_hierarchy(&file, 0, 0).await.is_err_and(loading));
+
+        let found = client.definition(&file, 0, 0).await.unwrap();
+        assert_eq!(client.status(), Status::Ready);
+        assert_eq!(found.len(), 1, "asked again once it settled");
+        assert_eq!(found[0].range.start.line, 3);
+
+        assert_eq!(client.definition(&file, 0, 0).await.unwrap(), Vec::new());
+        assert_eq!(client.references(&file, 0, 0).await.unwrap(), Vec::new());
+        client.shutdown().await;
     }
 
     /// A server with no status of its own says how it is in a message: an
