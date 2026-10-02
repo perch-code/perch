@@ -460,6 +460,52 @@ pub fn group_review_runs(
     entries
 }
 
+/// The entries with a row for each of the item's reviews whose runs are
+/// not among them, an older page not loaded or a review no reviewer was
+/// admitted to, so every review is in the one list. Each goes among the
+/// finished entries by when it ran, newest first.
+pub fn with_every_review(
+    mut entries: Vec<AgentRunEntry>,
+    groups: &[crate::review::model::ReviewGroupSummary],
+) -> Vec<AgentRunEntry> {
+    let listed = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            AgentRunEntry::ReviewGroup(group) => Some(group.key.clone()),
+            AgentRunEntry::Run(_) => None,
+        })
+        .collect::<HashSet<_>>();
+    // When a finished entry happened, for placing a review among them; a
+    // working one is never passed.
+    let finished_at = |entry: &AgentRunEntry| match entry {
+        AgentRunEntry::Run(run) if run.status.is_active() => None,
+        AgentRunEntry::Run(run) => Some(run.ended_at.unwrap_or(run.queued_at)),
+        AgentRunEntry::ReviewGroup(group) => match &group.summary {
+            Some(summary) if summary.group.status.is_active() => None,
+            _ => group.ran_at(),
+        },
+    };
+    for summary in groups {
+        if listed.contains(&summary.group.id) {
+            continue;
+        }
+        let at = summary.ran_at();
+        let index = entries
+            .iter()
+            .position(|entry| finished_at(entry).is_some_and(|when| when < at))
+            .unwrap_or(entries.len());
+        entries.insert(
+            index,
+            AgentRunEntry::ReviewGroup(AgentReviewRunGroup {
+                key: summary.group.id.clone(),
+                summary: Some(summary.clone()),
+                runs: Vec::new(),
+            }),
+        );
+    }
+    entries
+}
+
 /// Every item's working runs, grouped by item. Groups keep the order in
 /// which their first run was admitted, except that the open item's is
 /// lifted to the front; in a group, queued work is last. A reviewer

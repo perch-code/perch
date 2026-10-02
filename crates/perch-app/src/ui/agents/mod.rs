@@ -7,6 +7,7 @@ pub mod model;
 
 mod detail;
 pub mod dropdown;
+mod review_row;
 pub mod section;
 
 use std::rc::Rc;

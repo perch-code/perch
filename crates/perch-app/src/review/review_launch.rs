@@ -3,7 +3,6 @@
 //! Findings themselves remain ordinary `CommentThread`s. This module owns
 //! only the group-level controls and summaries around those threads.
 
-use std::cell::Cell;
 use std::rc::Rc;
 
 use floem::event::EventPropagation;
@@ -11,7 +10,7 @@ use floem::prelude::*;
 use floem::reactive::{Effect, Memo, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
 use floem::views::{
-    dyn_container, dyn_stack, text_editor, Container, Decorators, Empty, Label, Stack,
+    dyn_container, text_editor, Container, Decorators, Empty, Label, Stack,
 };
 
 use crate::backend::Backend;
@@ -802,252 +801,10 @@ fn invalid(reason: impl Into<String>) -> LaunchValidation {
 
 /// Group-level summaries belong in Conversation even when a successful
 /// review found nothing and therefore produced no finding threads.
-pub fn history(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    dyn_container(
-        move || {
-            current_item_id(state).map(|item_id| {
-                let groups = app.review_groups_for(&item_id);
-                (item_id, groups)
-            })
-        },
-        move |loaded| {
-            let Some((_item_id, groups)) = loaded else {
-                return Empty::new().into_any();
-            };
-            if groups.is_empty() {
-                return Empty::new().into_any();
-            }
-            let opener = Rc::new(Cell::new(None));
-            let action_opener = opener.clone();
-            let latest = action_button(
-                "Review latest",
-                "review-latest",
-                false,
-                move || active_group(app, state).is_none(),
-                move || crate::review::review_menu::open_agents(state, action_opener.get()),
-            );
-            let latest_id = latest.view_id();
-            opener.set(Some(latest_id));
-            let cards_backend = backend.clone();
-            Stack::vertical((
-                Stack::horizontal((
-                    crate::review::cards::section_title("Reviews"),
-                    Empty::new().style(|s| s.flex_grow(1.0_f32)),
-                    latest,
-                ))
-                .style(crate::review::cards::section_header_style),
-                dyn_stack(
-                    move || groups.as_ref().clone(),
-                    |summary| {
-                        (
-                            summary.group.id.clone(),
-                            summary.group.status,
-                            summary.group.new_findings,
-                            summary.group.still_present,
-                            summary.group.verified_fixed,
-                            summary.group.not_verified,
-                            summary
-                                .attempts
-                                .iter()
-                                .map(|attempt| (attempt.id.clone(), attempt.phase))
-                                .collect::<Vec<_>>(),
-                        )
-                    },
-                    move |summary| group_card(app, state, cards_backend.clone(), summary),
-                )
-                .style(|s| s.flex_col().width_full()),
-            ))
-            // The reader's own reviews, so on Perch's grey, as Agents is.
-            .style(|s| {
-                crate::review::cards::perch_surface(s.flex_col().width_full())
-                    .margin_top(theme::CARD_GAP)
-            })
-            .debug_name("review-history")
-            .into_any()
-        },
-    )
-}
-
-fn group_card(
-    app: AppState,
-    state: ReviewState,
-    backend: Rc<Backend>,
-    summary: ReviewGroupSummary,
-) -> impl IntoView {
-    let title = group_title(&summary);
-    let ran_at = summary.ran_at();
-    let instructions = summary.group.instructions.clone();
-    let attempts = attempt_summary(&summary);
-    let unread = unread_summary(&summary);
-    let newer_summary = summary.clone();
-    let open_summary = summary.clone();
-    let open_backend = backend.clone();
-    let openable = (summary.snapshot.manifest_path.is_some()
-        && summary.snapshot.diff_path.is_some())
-        || summary.group.status == perch_github::ReviewGroupStatus::Empty;
-    let open = if openable {
-        action_button(
-            "Open snapshot",
-            "open-review-snapshot",
-            false,
-            || true,
-            move || {
-                let request_id = open_backend.open_review_snapshot(
-                    &open_summary.group.item_id,
-                    &open_summary.group.id,
-                );
-                app.begin_historical_review(state, open_summary.clone(), request_id);
-            },
-        )
-        .into_any()
-    } else {
-        Label::derived(|| "Snapshot unavailable".to_string())
-            .style(|s| {
-                s.height(28.0)
-                    .items_center()
-                    .font_size(theme::TEXT_BADGE)
-                    .font_weight(theme::weight_emphasis())
-                    .color(theme::fg_subtle())
-                    .selectable(false)
-            })
-            .into_any()
-    };
-
-    let group_id = summary.group.id.clone();
-    let stop_backend = backend.clone();
-    let active = summary.group.status.is_active();
-    let stop = if active {
-        action_button(
-            "Stop all",
-            "stop-review-group",
-            false,
-            || true,
-            move || stop_backend.stop_review_group(&group_id),
-        )
-        .into_any()
-    } else {
-        Empty::new().into_any()
-    };
-    let retry_backend = backend.clone();
-    let retries = summary
-        .attempts
-        .iter()
-        .filter(|attempt| {
-            matches!(
-                attempt.phase,
-                perch_github::ReviewerPhase::Failed
-                    | perch_github::ReviewerPhase::Stopped
-                    | perch_github::ReviewerPhase::Interrupted
-            )
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let retry = dyn_stack(
-        move || retries.clone(),
-        |attempt| attempt.id.clone(),
-        move |attempt| {
-            let id = attempt.id.clone();
-            let label = format!("Retry {}", backend_label_from_name(&attempt.backend));
-            let retry_backend = retry_backend.clone();
-            action_button(
-                &label,
-                "retry-review-attempt",
-                false,
-                move || active_group(app, state).is_none(),
-                move || retry_backend.retry_review_attempt(&id),
-            )
-        },
-    )
-    .style(|s| s.items_center().gap(4.0));
-
-    Container::new(
-        Stack::vertical((
-            Stack::horizontal((
-                Stack::vertical((
-                    Label::derived(move || title.clone()).style(|s| {
-                        s.font_size(theme::TEXT_BODY)
-                            .font_weight(theme::weight_emphasis())
-                            .color(theme::fg())
-                            .text_wrap()
-                            .width_full()
-                    }),
-                    Label::derived(move || crate::timefmt::relative(ran_at, app.now.get()))
-                        .style(|s| s.font_size(theme::TEXT_META).color(theme::fg_muted()))
-                        .debug_name("review-group-when"),
-                ))
-                .style(|s| s.flex_col().gap(2.0).min_width(0.0).flex_grow(1.0_f32)),
-                open,
-            ))
-            .style(|s| s.items_start().width_full().gap(8.0)),
-            match instructions {
-                Some(instructions) => Label::derived(move || instructions.clone())
-                    .style(|s| {
-                        s.font_size(theme::TEXT_META)
-                            .color(theme::fg_muted())
-                            .line_height(theme::PROSE_LINE_HEIGHT)
-                            .text_wrap()
-                            .width_full()
-                            .padding_left(8.0)
-                            .border_left(2.0)
-                            .border_color(theme::border())
-                    })
-                    .debug_name("review-group-instructions")
-                    .into_any(),
-                None => Empty::new().into_any(),
-            },
-            Label::derived(move || attempts.clone()).style(|s| {
-                s.font_size(theme::TEXT_META)
-                    .color(theme::fg_muted())
-                    .text_wrap()
-                    .width_full()
-            }),
-            match unread {
-                Some(unread) => Label::derived(move || unread.clone())
-                    .style(|s| {
-                        s.font_size(theme::TEXT_META)
-                            .color(theme::notice_fg())
-                            .text_wrap()
-                            .width_full()
-                    })
-                    .debug_name("review-group-unread")
-                    .into_any(),
-                None => Empty::new().into_any(),
-            },
-            count_chips(&summary),
-            dyn_container(
-                move || newer_changes(state, &newer_summary),
-                |newer| {
-                    if newer {
-                        Label::derived(|| "Newer changes exist".to_string())
-                            .style(|s| {
-                                s.font_size(theme::TEXT_SECTION)
-                                    .font_weight(theme::weight_emphasis())
-                                    .color(theme::accent())
-                            })
-                            .into_any()
-                    } else {
-                        Empty::new().into_any()
-                    }
-                },
-            ),
-            Stack::horizontal((retry, stop)).style(|s| s.items_center().gap(4.0)),
-        ))
-        .style(|s| s.flex_col().width_full().gap(7.0)),
-    )
-    .style(|s| {
-        s.width_full()
-            .padding_vert(12.0)
-            .padding_horiz(theme::CARD_PADDING)
-            .border_top(1.0)
-            .border_color(theme::border_muted())
-    })
-    .debug_name(format!("review-group:{}", summary.group.id))
-}
-
 /// A review's findings, a chip for each kind it has: new in the notice's
 /// yellow, fixed in green, and the rest grey. A kind with none has no
 /// chip.
-fn count_chips(summary: &ReviewGroupSummary) -> impl IntoView {
+pub(crate) fn count_chips(summary: &ReviewGroupSummary) -> impl IntoView {
     type Ink = fn() -> floem::peniko::Color;
     let group = &summary.group;
     let kinds: [(u64, &str, Ink, Ink); 4] = [
@@ -1346,17 +1103,8 @@ fn show_in_agents(app: AppState, state: ReviewState, summary: &ReviewGroupSummar
     });
 }
 
-fn group_title(summary: &ReviewGroupSummary) -> String {
-    format!(
-        "Review #{} · {} · against {} at {}",
-        summary.group.number,
-        summary.snapshot.head_label(),
-        summary.snapshot.requested_base_ref,
-        short_sha(&summary.snapshot.base_tip_sha)
-    )
-}
 
-fn attempt_summary(summary: &ReviewGroupSummary) -> String {
+pub(crate) fn attempt_summary(summary: &ReviewGroupSummary) -> String {
     if summary.attempts.is_empty() {
         return "No reviewer attempts were admitted".into();
     }
@@ -1376,7 +1124,7 @@ fn attempt_summary(summary: &ReviewGroupSummary) -> String {
 
 /// What a finished attempt left unread: its counts cover only what Perch
 /// could read, so an incomplete ingestion must not pass for a quiet review.
-fn unread_summary(summary: &ReviewGroupSummary) -> Option<String> {
+pub(crate) fn unread_summary(summary: &ReviewGroupSummary) -> Option<String> {
     let lines = summary
         .attempts
         .iter()
@@ -1412,7 +1160,7 @@ fn count_summary(summary: &ReviewGroupSummary) -> String {
 /// Whether the checkout has moved past what a review read. A review of
 /// uncommitted work is judged by the commit it sat on; later edits to the
 /// work itself do not show here.
-fn newer_changes(state: ReviewState, summary: &ReviewGroupSummary) -> bool {
+pub(crate) fn newer_changes(state: ReviewState, summary: &ReviewGroupSummary) -> bool {
     let reviewed = summary
         .snapshot
         .worktree_parent_sha
@@ -1425,9 +1173,6 @@ fn newer_changes(state: ReviewState, summary: &ReviewGroupSummary) -> bool {
     })
 }
 
-fn short_sha(sha: &str) -> String {
-    sha.chars().take(7).collect()
-}
 
 fn backend_label(backend: perch_agent::Backend) -> &'static str {
     match backend {
@@ -1905,57 +1650,6 @@ mod tests {
         state.stale_head.set(Some("newer".into()));
         assert!(!included());
         assert_eq!(uncommitted_unavailable(state), Some("head moved"));
-    }
-
-    #[test]
-    fn a_history_card_shows_what_the_review_was_asked_to_focus_on() {
-        let (app, state) = item_state();
-        let mut scoped = summary(perch_github::ReviewGroupStatus::Completed);
-        scoped.group.instructions = Some("Review rfcs/multi_get.md only.".into());
-        app.update_review_group("worktree".into(), scoped);
-        let root = TestRoot::new();
-        let view = history(app, state, Rc::new(Backend::detached()));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 700.0, 500.0);
-        harness.rebuild();
-        harness.paint();
-        assert!(named(harness.root_id(), "review-group-instructions").is_some());
-    }
-
-    #[test]
-    fn a_history_card_says_when_the_review_ran() {
-        let (app, state) = item_state();
-        let mut queued = summary(perch_github::ReviewGroupStatus::Preparing);
-        queued.group.started_at = None;
-        app.update_review_group("worktree".into(), queued);
-        app.now
-            .set("2026-09-19T12:42:00Z".parse::<Timestamp>().unwrap());
-        let root = TestRoot::new();
-        let view = history(app, state, Rc::new(Backend::detached()));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 700.0, 500.0);
-        harness.rebuild();
-        harness.paint();
-        let when = named(harness.root_id(), "review-group-when").expect("no time on the card");
-        assert!(
-            when.debug_name().contains("42 minutes ago"),
-            "{}",
-            when.debug_name()
-        );
-    }
-
-    #[test]
-    fn zero_attempt_review_still_has_a_history_card() {
-        let (app, state) = item_state();
-        app.update_review_group(
-            "worktree".into(),
-            summary(perch_github::ReviewGroupStatus::Empty),
-        );
-        let root = TestRoot::new();
-        let view = history(app, state, Rc::new(Backend::detached()));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 700.0, 500.0);
-        harness.rebuild();
-        harness.paint();
-        assert!(named(harness.root_id(), "review-history").is_some());
-        assert!(named(harness.root_id(), "review-group:group-3").is_some());
     }
 
     #[test]

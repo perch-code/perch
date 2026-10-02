@@ -173,12 +173,6 @@ pub fn open(state: ReviewState, opener: Option<floem::ViewId>) {
     state.review_open.set(true);
 }
 
-/// Open it with the agents' settings showing, to run them again.
-pub fn open_agents(state: ReviewState, opener: Option<floem::ViewId>) {
-    state.review_agents_expanded.set(true);
-    open(state, opener);
-}
-
 /// A dismissal the reader asked for. It never pretends to cancel a review
 /// already sent to GitHub: the popover stays to say how that went.
 pub(crate) fn cancel(state: ReviewState, restore_focus: bool) {

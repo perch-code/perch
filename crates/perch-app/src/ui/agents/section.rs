@@ -1,12 +1,12 @@
-//! An item's runs, on its Conversation: the Agents section over REVIEW
-//! HISTORY, whose header says what they are doing and folds the list
-//! under it.
+//! An item's runs and reviews, on its Conversation: the Agents section,
+//! whose header says what they are doing and folds the list under it.
 //!
-//! The list is the item's runs, working first and then its history,
-//! with a review's attempts under a row for the review. A run opens in
-//! place to what it did: its request, its activity, its answer and what
-//! it cost. The row is an index of the item's runs, not a second copy of
-//! its thread, which has a way to it.
+//! The list is what is working first and then what finished, newest
+//! first. A question is a row with a way to its thread, where its answer
+//! is; it opens in place to what it did. A review is a row that opens to
+//! what it found, each finding a way to its thread, and to its reviewers,
+//! each with its raw output behind a word (`review_row`). A review is
+//! listed whether or not its runs have loaded.
 
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -27,7 +27,7 @@ use crate::timefmt;
 use crate::ui::widgets::{clickable, sidebar_glyph};
 
 use super::model::{
-    elapsed_label, group_review_runs, item_runs, AgentRetryTarget, AgentReviewRunGroup,
+    elapsed_label, group_review_runs, item_runs, with_every_review, AgentRetryTarget,
     AgentRunEntry, AgentRunStatus, AgentRunSummary, RunCounts,
 };
 use super::{detail, metadata, queue_position, status_color, text_action};
@@ -66,15 +66,16 @@ fn waiting(review: ReviewState) -> HashSet<String> {
         .with(|pending| pending.iter().map(|p| p.run_id.clone()).collect())
 }
 
-/// Whether the open item has had a run. Tracked.
+/// Whether the open item has had a run or a review. Tracked.
 fn present(app: AppState, review: ReviewState) -> bool {
     let Some(item_id) = item_id(review) else {
         return false;
     };
-    app.agent_runs.with(|runs| {
-        runs.iter()
-            .any(|run| run.item_id.as_deref() == Some(item_id.as_str()))
-    })
+    !review_groups(app, &item_id).is_empty()
+        || app.agent_runs.with(|runs| {
+            runs.iter()
+                .any(|run| run.item_id.as_deref() == Some(item_id.as_str()))
+        })
 }
 
 /// The section's header: its name and what the runs are doing, the
@@ -181,13 +182,22 @@ fn entry_key(entry: &AgentRunEntry) -> String {
                 .map(|run| run.id.as_str())
                 .collect::<Vec<_>>()
                 .join(",");
-            format!("review:{}:{runs}:{status}:{done}", group.key)
+            // The counts too, which its row shows as they were when built.
+            let counts = group
+                .summary
+                .as_ref()
+                .map(|summary| {
+                    let g = &summary.group;
+                    format!("{}/{}/{}/{}", g.new_findings, g.still_present, g.verified_fixed, g.not_verified)
+                })
+                .unwrap_or_default();
+            format!("review:{}:{runs}:{status}:{done}:{counts}", group.key)
         }
     }
 }
 
-/// The Agents section, over Reviews: its header, and the list
-/// under it while unfolded. Absent until the item has had a run.
+/// The Agents section: its header, and the list under it while
+/// unfolded. Absent until the item has had a run or a review.
 pub fn section(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     Stack::vertical((section_header(app, review, backend.clone()), list(app, review, backend)))
         .debug_name("agents section")
@@ -256,7 +266,7 @@ fn list(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoVi
         let runs = app
             .agent_runs
             .with(|runs| item_runs(runs, &item_id, &groups));
-        group_review_runs(&runs, &groups)
+        with_every_review(group_review_runs(&runs, &groups), &groups)
     });
     let row_backend = backend.clone();
     Stack::vertical((
@@ -265,10 +275,11 @@ fn list(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoVi
             entry_key,
             move |entry| match entry {
                 AgentRunEntry::Run(run) => {
-                    run_row(app, review, row_backend.clone(), run).into_any()
+                    run_row(app, review, row_backend.clone(), run, false).into_any()
                 }
                 AgentRunEntry::ReviewGroup(group) => {
-                    review_group_row(app, review, row_backend.clone(), group).into_any()
+                    super::review_row::review_row(app, review, row_backend.clone(), group)
+                        .into_any()
                 }
             },
         )
@@ -317,7 +328,7 @@ fn older(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoV
 }
 
 /// Open a run in the list, or close it. Opening asks for what it did.
-fn toggle_run(app: AppState, review: ReviewState, backend: &Backend, id: &str) {
+pub(super) fn toggle_run(app: AppState, review: ReviewState, backend: &Backend, id: &str) {
     let open = review
         .agents_open_runs
         .with_untracked(|open| open.contains(id));
@@ -334,11 +345,15 @@ fn toggle_run(app: AppState, review: ReviewState, backend: &Backend, id: &str) {
     }
 }
 
-fn run_row(
+/// A run's row, and what it did under it while open. A question's row
+/// opens on a click; a reviewer's line, under its review, opens on Raw
+/// output, since the review's findings say what it found.
+pub(super) fn run_row(
     app: AppState,
     review: ReviewState,
     backend: Rc<Backend>,
     initial: AgentRunSummary,
+    reviewer: bool,
 ) -> impl IntoView {
     let id = initial.id.clone();
     let run = {
@@ -365,13 +380,21 @@ fn run_row(
     let (click_id, key_id) = (id.clone(), id.clone());
     let header = dyn_container(
         move || run.get(),
-        move |run| header(app, review, header_backend.clone(), run).into_any(),
+        move |run| {
+            if reviewer {
+                reviewer_header(app, review, header_backend.clone(), run, open).into_any()
+            } else {
+                header(app, review, header_backend.clone(), run).into_any()
+            }
+        },
     )
     .on_event_stop(el::Click, move |_, _| {
-        toggle_run(app, review, &click_backend, &click_id)
+        if !reviewer {
+            toggle_run(app, review, &click_backend, &click_id)
+        }
     })
     .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if matches!(key.code, Code::Enter | Code::Space) {
+        if !reviewer && matches!(key.code, Code::Enter | Code::Space) {
             toggle_run(app, review, &key_backend, &key_id);
             EventPropagation::Stop
         } else {
@@ -379,6 +402,9 @@ fn run_row(
         }
     })
     .style(move |s| {
+        if reviewer {
+            return s.width_full();
+        }
         let base = clickable(s)
             .width_full()
             .keyboard_navigable()
@@ -407,15 +433,17 @@ fn run_row(
             }
         },
     )
-    .style(|s| s.width_full());
+    .style(move |s| s.width_full().apply_if(reviewer, |s| s.margin_top(6.0)));
 
     let row = Stack::vertical((header, body))
         .debug_name(format!("agent-run:{id}"))
-        .style(|s| {
-            s.flex_col()
-                .width_full()
-                .border_top(1.0)
-                .border_color(theme::border_muted())
+        .style(move |s| {
+            let s = s.flex_col().width_full();
+            if reviewer {
+                s
+            } else {
+                s.border_top(1.0).border_color(theme::border_muted())
+            }
         });
     // Brought into view, it scrolls the page to put itself at the top: a
     // rectangle taller than any window shows its top edge.
@@ -431,8 +459,10 @@ fn run_row(
     })
 }
 
-/// A run's row: its status and what ran it, what it was asked, what it
-/// is doing or how it ended, when it ran, and what can be done with it.
+/// A question's row: the agent's mark, what it was asked, how it stands
+/// or when it ran, and what can be done with it; under that what ran it
+/// and why, and while it works or once it failed, what it is doing or
+/// how it ended. Its answer is in its thread, which Show in thread opens.
 fn header(
     app: AppState,
     review: ReviewState,
@@ -440,107 +470,191 @@ fn header(
     run: AgentRunSummary,
 ) -> impl IntoView {
     let color = status_color(run.status);
-    let meta = metadata(&run);
+    let status = run.status;
+    let failed = matches!(
+        status,
+        AgentRunStatus::Failed | AgentRunStatus::Stopped | AgentRunStatus::Interrupted
+    );
     let subject = run.subject();
-    let activity = run
-        .latest_activity
-        .clone()
-        .unwrap_or_else(|| match run.status {
+    let about = format!("{} \u{b7} {}", metadata(&run), run.purpose.label().to_lowercase());
+    let activity = if status.is_active() {
+        Some(run.latest_activity.clone().unwrap_or_else(|| match status {
             AgentRunStatus::Queued => "Waiting for an execution slot".to_string(),
             AgentRunStatus::Starting => "Starting the agent".to_string(),
-            AgentRunStatus::Running => "Working…".to_string(),
             AgentRunStatus::Stopping => "Stopping the process tree…".to_string(),
-            AgentRunStatus::Completed => "Completed".to_string(),
-            AgentRunStatus::Failed | AgentRunStatus::Stopped | AgentRunStatus::Interrupted => run
-                .terminal_display()
-                .unwrap_or_else(|| run.status.label().to_string()),
-        });
-    let elapsed_run = run.clone();
-    let queue = queue_position(app, &run.id);
-    let status = run.status;
-    let purpose = run.purpose.label();
-    let ran_at = run.ran_at();
+            _ => "Working…".to_string(),
+        }))
+    } else if failed {
+        Some(
+            run.terminal_display()
+                .unwrap_or_else(|| status.label().to_string()),
+        )
+    } else {
+        None
+    };
+    let when = run_when(app, &run);
     Stack::vertical((
         Stack::horizontal((
-            Empty::new().style(move |s| {
-                s.size(7.0, 7.0)
-                    .border_radius(4.0)
-                    .background(color())
-                    .flex_shrink(0.0_f32)
-            }),
-            Label::derived(move || meta.clone()).style(|s| {
-                s.font_size(theme::TEXT_BADGE)
-                    .font_weight(theme::weight_emphasis())
-                    .color(theme::fg_muted())
+            agent_mark(),
+            Label::derived(move || subject.clone()).style(|s| {
+                s.font_size(theme::TEXT_BODY)
+                    .color(theme::fg())
                     .text_ellipsis()
                     .min_width(0.0)
                     .flex_grow(1.0_f32)
                     .selectable(false)
             }),
-            Label::derived(move || {
-                let elapsed = elapsed_label(&elapsed_run, app.now.get());
-                if status == AgentRunStatus::Queued {
-                    let queued_for = elapsed.strip_prefix("Queued ").unwrap_or(&elapsed);
-                    match queue {
-                        Some(position) => format!("Queue #{position} · {queued_for}"),
-                        None => format!("Queued · {queued_for}"),
-                    }
-                } else {
-                    format!("{} · {elapsed}", status.label())
-                }
-            })
-            .style(move |s| {
-                s.font_size(theme::TEXT_SECTION)
-                    .font_weight(theme::weight_emphasis())
-                    .color(color())
-                    .flex_shrink(0.0_f32)
-                    .selectable(false)
-            }),
-        ))
-        .style(|s| s.items_center().width_full().gap(7.0)),
-        Label::derived(move || subject.clone()).style(|s| {
-            s.font_size(theme::TEXT_BODY)
-                .font_weight(theme::weight_emphasis())
-                .color(theme::fg())
-                .text_ellipsis()
-                .width_full()
-                .selectable(false)
-        }),
-        Label::derived(move || activity.clone()).style(move |s| {
-            s.font_size(theme::TEXT_BADGE)
-                .font_family(theme::CODE_FONT_STACK.to_string())
-                .color(if status == AgentRunStatus::Failed {
-                    theme::closed()
-                } else {
-                    theme::fg_subtle()
-                })
-                .text_ellipsis()
-                .width_full()
-                .selectable(false)
-        }),
-        Stack::horizontal((
-            Label::derived(move || {
-                format!("{purpose} · {}", timefmt::relative(ran_at, app.now.get()))
-            })
-            .style(|s| {
-                s.font_size(theme::TEXT_SECTION)
-                    .color(theme::fg_subtle())
-                    .text_ellipsis()
-                    .min_width(0.0)
-                    .flex_grow(1.0_f32)
-                    .selectable(false)
-            }),
+            Label::derived(when)
+                .debug_name("agent-run-when")
+                .style(move |s| {
+                    s.font_size(theme::TEXT_BADGE)
+                        .color(if status.is_active() || failed {
+                            color()
+                        } else {
+                            theme::fg_subtle()
+                        })
+                        .flex_shrink(0.0_f32)
+                        .selectable(false)
+                }),
             actions(review, backend, run),
         ))
-        .style(|s| s.items_center().width_full().height(27.0)),
+        .style(|s| s.items_center().width_full().gap(8.0).min_height(24.0)),
+        Label::derived(move || about.clone()).style(|s| {
+            s.font_size(theme::TEXT_BADGE)
+                .color(theme::fg_subtle())
+                .margin_left(AGENT_MARK + 8.0)
+                .text_ellipsis()
+                .min_width(0.0)
+                .selectable(false)
+        }),
+        match activity {
+            Some(activity) => Label::derived(move || activity.clone())
+                .style(move |s| {
+                    s.font_size(theme::TEXT_BADGE)
+                        .font_family(theme::CODE_FONT_STACK.to_string())
+                        .color(if failed { theme::closed() } else { theme::fg_subtle() })
+                        .margin_left(AGENT_MARK + 8.0)
+                        .text_ellipsis()
+                        .min_width(0.0)
+                        .selectable(false)
+                })
+                .into_any(),
+            None => Empty::new().into_any(),
+        },
     ))
     .style(|s| {
         s.flex_col()
             .width_full()
-            .gap(6.0)
+            .gap(3.0)
             .padding_vert(10.0)
-            .padding_left(theme::CARD_PADDING)
-            .padding_right(theme::CARD_PADDING)
+            .padding_horiz(theme::CARD_PADDING)
+    })
+}
+
+/// A reviewer's line under its review: the agent's mark, what ran it,
+/// how it stands and what it cost, then Stop or Retry, and Raw output,
+/// which opens what it said under the line.
+fn reviewer_header(
+    app: AppState,
+    review: ReviewState,
+    backend: Rc<Backend>,
+    run: AgentRunSummary,
+    open: Memo<bool>,
+) -> impl IntoView {
+    let color = status_color(run.status);
+    let status = run.status;
+    let meta = metadata(&run);
+    let cost = run.cost_usd.map(|cost| format!(" \u{b7} ${cost:.2}")).unwrap_or_default();
+    let elapsed_run = run.clone();
+    let id = run.id.clone();
+    let toggle_backend = backend.clone();
+    Stack::horizontal((
+        agent_mark(),
+        Label::derived(move || meta.clone()).style(|s| {
+            s.font_size(theme::TEXT_BADGE)
+                .color(theme::fg_muted())
+                .text_ellipsis()
+                .min_width(0.0)
+                .flex_shrink(1.0_f32)
+                .selectable(false)
+        }),
+        Label::derived(move || {
+            format!(
+                "{} \u{b7} {}{cost}",
+                status.label(),
+                elapsed_label(&elapsed_run, app.now.get())
+            )
+        })
+        .debug_name("agent-reviewer-status")
+        .style(move |s| {
+            s.font_size(theme::TEXT_BADGE)
+                .color(if status == AgentRunStatus::Completed {
+                    theme::fg_subtle()
+                } else {
+                    color()
+                })
+                .flex_shrink(0.0_f32)
+                .selectable(false)
+        }),
+        Empty::new().style(|s| s.flex_grow(1.0_f32)),
+        actions(review, backend, run),
+        text_action(
+            move || {
+                if open.get() {
+                    "Hide raw output".to_string()
+                } else {
+                    "Raw output".to_string()
+                }
+            },
+            false,
+            move || toggle_run(app, review, &toggle_backend, &id),
+        )
+        .debug_name("agent-reviewer raw output"),
+    ))
+    .style(|s| s.items_center().width_full().gap(8.0).min_height(24.0))
+}
+
+/// How a run stands or when it ran: Running and how long while it works,
+/// how it ended and when once it failed, and else only when. Kept current
+/// by the clock.
+fn run_when(app: AppState, run: &AgentRunSummary) -> impl Fn() -> String + 'static {
+    let run = run.clone();
+    let queue = queue_position(app, &run.id);
+    move || {
+        let now = app.now.get();
+        match run.status {
+            AgentRunStatus::Queued => {
+                let elapsed = elapsed_label(&run, now);
+                let queued_for = elapsed.strip_prefix("Queued ").unwrap_or(&elapsed).to_string();
+                match queue {
+                    Some(position) => format!("Queue #{position} \u{b7} {queued_for}"),
+                    None => format!("Queued \u{b7} {queued_for}"),
+                }
+            }
+            status if status.is_active() => {
+                format!("{} \u{b7} {}", status.label(), elapsed_label(&run, now))
+            }
+            AgentRunStatus::Completed => timefmt::relative(run.ran_at(), now),
+            status => format!("{} \u{b7} {}", status.label(), timefmt::relative(run.ran_at(), now)),
+        }
+    }
+}
+
+/// How wide an agent's mark is beside its row.
+pub(super) const AGENT_MARK: f64 = 18.0;
+
+/// An agent's mark: its glyph on a grey disc, as a thread draws one.
+pub(super) fn agent_mark() -> impl IntoView {
+    floem::views::Container::new(
+        sidebar_glyph(SidebarIcon::Agents, theme::fg_muted).style(|s| s.size(11.0, 11.0)),
+    )
+    .style(|s| {
+        s.size(AGENT_MARK, AGENT_MARK)
+            .border_radius(AGENT_MARK / 2.0)
+            .background(theme::badge_bg())
+            .items_center()
+            .justify_center()
+            .flex_shrink(0.0_f32)
     })
 }
 
@@ -605,177 +719,6 @@ fn actions(review: ReviewState, backend: Rc<Backend>, run: AgentRunSummary) -> i
         _ => Empty::new().into_any(),
     };
     Stack::horizontal((thread, control)).style(|s| s.items_center().gap(2.0).flex_shrink(0.0_f32))
-}
-
-fn title_case_status(status: &str) -> String {
-    let mut chars = status.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
-        .unwrap_or_default()
-}
-
-/// A review's row, `Review #n · sha · against base`, how far it has got
-/// and when it ran, over its attempts, with the way to the snapshot it
-/// read. It folds.
-fn review_group_row(
-    app: AppState,
-    review: ReviewState,
-    backend: Rc<Backend>,
-    group: AgentReviewRunGroup,
-) -> impl IntoView {
-    let key = group.key.clone();
-    let count = group.runs.len();
-    let ran_at = group.ran_at();
-    let (title, status) = match group.summary.as_ref() {
-        Some(summary) => {
-            let title = format!(
-                "Review #{} · {} · against {}",
-                summary.group.number,
-                summary.snapshot.head_label(),
-                summary.snapshot.requested_base_ref
-            );
-            let status = if summary.group.status.is_active() {
-                let complete = summary
-                    .attempts
-                    .iter()
-                    .filter(|attempt| attempt.phase.is_terminal())
-                    .count();
-                format!("{complete} of {} complete", summary.attempts.len())
-            } else {
-                title_case_status(summary.group.status.name())
-            };
-            (title, status)
-        }
-        None => (
-            "Worktree review".to_string(),
-            format!("{count} reviewer{}", if count == 1 { "" } else { "s" }),
-        ),
-    };
-    let collapsed = {
-        let key = key.clone();
-        Memo::new(move |_| app.collapsed_agent_review_groups.with(|c| c.contains(&key)))
-    };
-    let toggle = {
-        let key = key.clone();
-        move || {
-            app.collapsed_agent_review_groups.update(|c| {
-                if !c.insert(key.clone()) {
-                    c.remove(&key);
-                }
-            })
-        }
-    };
-    let key_toggle = toggle.clone();
-    // The snapshot the review read, as Reviews' card opens it.
-    let snapshot = match group.runs.first().and_then(|run| {
-        Some((run.item_id.clone()?, run.review_attempt_id.clone()?))
-    }) {
-        Some((item_id, attempt_id)) => {
-            let backend = backend.clone();
-            text_action(
-                || "Open snapshot".to_string(),
-                false,
-                move || {
-                    let navigation_id = backend.view_review_attempt_owner(&item_id, &attempt_id);
-                    app.begin_agent_review_navigation(
-                        review,
-                        item_id.clone(),
-                        attempt_id.clone(),
-                        navigation_id,
-                    );
-                },
-            )
-            .debug_name("agent-review-group open snapshot")
-            .into_any()
-        }
-        None => Empty::new().into_any(),
-    };
-    let header = Stack::horizontal((
-        dyn_container(
-            move || collapsed.get(),
-            |collapsed| {
-                sidebar_glyph(
-                    if collapsed {
-                        SidebarIcon::ChevronRight
-                    } else {
-                        SidebarIcon::ChevronDown
-                    },
-                    theme::fg_subtle,
-                )
-                .style(|s| s.size(10.0, 10.0))
-            },
-        ),
-        Stack::vertical((
-            Label::derived(move || title.clone()).style(|s| {
-                s.font_size(theme::TEXT_BODY)
-                    .font_weight(theme::weight_emphasis())
-                    .color(theme::fg())
-                    .text_ellipsis()
-                    .min_width(0.0)
-                    .width_full()
-                    .selectable(false)
-            }),
-            Label::derived(move || match ran_at {
-                Some(at) => format!("{status} · {}", timefmt::relative(at, app.now.get())),
-                None => status.clone(),
-            })
-            .style(|s| {
-                s.font_size(theme::TEXT_SECTION)
-                    .font_weight(theme::weight_emphasis())
-                    .color(theme::fg_muted())
-                    .selectable(false)
-            }),
-        ))
-        .style(|s| s.flex_col().gap(2.0).min_width(0.0).flex_grow(1.0_f32)),
-        snapshot,
-    ))
-    .on_event_stop(el::Click, move |_, _| toggle())
-    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if matches!(key.code, Code::Enter | Code::Space) {
-            key_toggle();
-            EventPropagation::Stop
-        } else {
-            EventPropagation::Continue
-        }
-    })
-    .style(|s| {
-        clickable(s)
-            .width_full()
-            .min_height(48.0)
-            .items_center()
-            .gap(9.0)
-            .padding_left(theme::CARD_PADDING)
-            .padding_right(theme::CARD_PADDING)
-            .padding_vert(8.0)
-            .border_top(1.0)
-            .border_color(theme::border_muted())
-            .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
-            .hover(|s| s.background(theme::canvas_hover()))
-    })
-    .debug_name(format!("agent-review-group:{key}"));
-    let runs = group.runs.clone();
-    let children = dyn_container(
-        move || collapsed.get(),
-        move |collapsed| {
-            if collapsed {
-                return Empty::new().into_any();
-            }
-            let backend = backend.clone();
-            let runs = runs.clone();
-            dyn_stack(
-                move || runs.clone(),
-                |run| run.id.clone(),
-                move |run| run_row(app, review, backend.clone(), run),
-            )
-            .style(|s| {
-                s.flex_col().width_full().padding_left(12.0)
-            })
-            .into_any()
-        },
-    );
-    Stack::vertical((header, children)).style(|s| s.flex_col().width_full())
 }
 
 #[cfg(test)]
@@ -973,7 +916,8 @@ mod tests {
         assert!(named(harness.root_id(), "\"Loading…\"").is_some());
     }
 
-    /// A review's attempts are under a row for the review, which folds.
+    /// A review's reviewers are under a row for the review, each with its
+    /// raw output a word away, and the row folds.
     #[test]
     fn a_reviews_attempts_are_under_its_row() {
         let (mut harness, app, review) = pull_request_harness();
@@ -1005,12 +949,27 @@ mod tests {
         review.agents_unfolded.set(true);
         settle(&mut harness);
         let group = named(harness.root_id(), "agent-review-group:group-3").expect("no review row");
-        assert!(named(harness.root_id(), "\"Review #3 · head · against main\"").is_some());
+        assert!(named(harness.root_id(), "\"Review #3\"").is_some());
+        assert!(named(harness.root_id(), "\"of head against main at base\"").is_some());
         let group = group.get_visual_rect_no_clip();
         for run in ["claude-run", "codex-run"] {
             assert!(rect(&harness, &format!("agent-run:{run}")).y0 >= group.y1 - 0.5);
         }
 
+        // A reviewer's line opens on Raw output, not on a click anywhere.
+        let line = named(harness.root_id(), "agent-run:claude-run").unwrap();
+        let raw = named(line, "agent-reviewer raw output").unwrap();
+        raw.scroll_to(None);
+        settle(&mut harness);
+        let raw = raw.get_visual_rect_no_clip();
+        harness.click(raw.center().x, raw.center().y);
+        settle(&mut harness);
+        assert!(review.agents_open_runs.with(|open| open.contains("claude-run")));
+
+        let group = named(harness.root_id(), "agent-review-group:group-3").unwrap();
+        group.scroll_to(None);
+        settle(&mut harness);
+        let group = group.get_visual_rect_no_clip();
         harness.click(group.center().x, group.center().y);
         settle(&mut harness);
         assert!(
@@ -1049,13 +1008,142 @@ mod tests {
         app.now.set(at("2026-09-19T12:40:00Z"));
         review.agents_unfolded.set(true);
         settle(&mut harness);
-        assert!(named(harness.root_id(), "\"Question · 2 hours ago\"").is_some());
-        assert!(named(harness.root_id(), "\"Completed · 2 hours ago\"").is_some());
-        assert!(named(harness.root_id(), "\"Worktree review · 2 hours ago\"").is_some());
+        let when = |harness: &HeadlessHarness, row: &str, label: &str| {
+            let row = named(harness.root_id(), row).unwrap();
+            named(row, label).unwrap().debug_name()
+        };
+        assert!(when(&harness, "agent-run:q", "agent-run-when").contains("2 hours ago"));
+        assert!(when(&harness, "agent-review-group:group-3", "review-group-when")
+            .contains("2 hours ago"));
 
         app.now.set(at("2026-09-19T13:40:00Z"));
         settle(&mut harness);
-        assert!(named(harness.root_id(), "\"Question · 3 hours ago\"").is_some());
+        assert!(when(&harness, "agent-run:q", "agent-run-when").contains("3 hours ago"));
+    }
+
+    /// A review opens to what it found, worst first, each finding its
+    /// first line without the severity its comment opens with, where it
+    /// is, and Show, which goes to its thread.
+    #[test]
+    fn a_review_lists_its_findings_and_show_goes_to_the_thread() {
+        let (mut harness, app, review) = pull_request_harness();
+        app.review_groups.update(|all| {
+            all.insert(
+                "pr".into(),
+                Arc::new(vec![super::super::model::tests::review_summary("group-3", &[])]),
+            );
+        });
+        let when = at("2026-09-19T10:00:00Z");
+        let thread = |id: &str, body: &str, line: u32| perch_github::CommentThread {
+            id: id.into(),
+            worktree_id: "pr".into(),
+            origin: perch_github::ThreadOrigin::Local,
+            github_id: None,
+            anchor: Some(perch_github::Anchor {
+                path: "src/a.rs".into(),
+                start_line: line,
+                line,
+                side: perch_github::Side::Right,
+                commit_sha: "head".into(),
+            }),
+            outdated: false,
+            resolved: false,
+            node_id: None,
+            can_resolve: false,
+            created_at: when,
+            messages: vec![perch_github::CommentMessage {
+                id: format!("{id}-m"),
+                thread_id: id.into(),
+                origin: perch_github::ThreadOrigin::Local,
+                author: perch_github::Author::Agent {
+                    backend: "claude-code".into(),
+                    model: "opus".into(),
+                },
+                body: body.into(),
+                created_at: when,
+                run: None,
+                github_id: None,
+                node_id: None,
+                html_url: None,
+                diff_hunk: None,
+                reactions: Default::default(),
+            }],
+        };
+        review.comment_threads.set(Arc::new(vec![
+            thread("t-low", "**Low · A comment is stale.**", 3),
+            thread("t-high", "**High · The lock is held across an await.**", 7),
+        ]));
+        let finding = |id: &str, thread: &str, severity| crate::review::model::ReviewFindingSummary {
+            finding: perch_github::Finding {
+                id: id.into(),
+                item_id: "pr".into(),
+                stable_key: id.into(),
+                thread_id: thread.into(),
+                created_group_id: Some("group-3".into()),
+                disposition: perch_github::FindingDisposition::Open,
+                verification: perch_github::FindingVerification::Present,
+                dismissal_reason: None,
+                possible_duplicate_of: None,
+                duplicate_of: None,
+                last_verified_snapshot_id: None,
+                last_verified_head_sha: None,
+                last_checked_snapshot_id: None,
+                last_checked_head_sha: None,
+                created_at: when,
+                updated_at: when,
+            },
+            severity,
+            attributions: Vec::new(),
+            seen_in_reviews: vec![3],
+            backend: None,
+            model: None,
+            original_review_number: Some(3),
+        };
+        app.update_review_finding("pr".into(), finding("f-low", "t-low", perch_github::FindingSeverity::Low));
+        app.update_review_finding("pr".into(), finding("f-high", "t-high", perch_github::FindingSeverity::High));
+        review.agents_unfolded.set(true);
+        settle(&mut harness);
+
+        let rows = named(harness.root_id(), "review-group-findings")
+            .expect("the findings")
+            .children();
+        assert_eq!(rows.len(), 2);
+        let first = rows[0];
+        assert!(named(first, "\"The lock is held across an await.\"").is_some(), "worst first");
+        assert!(named(first, "\"a.rs:7\"").is_some());
+        assert!(named(rows[1], "\"A comment is stale.\"").is_some());
+
+        let show = named(first, "review-finding show").unwrap();
+        show.scroll_to(None);
+        settle(&mut harness);
+        let show = show.get_visual_rect_no_clip();
+        harness.click(show.center().x, show.center().y);
+        settle(&mut harness);
+        assert_eq!(
+            review.focus_card.get(),
+            Some(crate::review::doc::CardId::Thread("t-high".into()))
+        );
+    }
+
+    /// A review is listed with or without its runs loaded, even one no
+    /// reviewer was admitted to, with what it was asked to focus on.
+    #[test]
+    fn a_review_is_listed_without_its_runs_and_says_what_it_was_asked() {
+        let (mut harness, app, review) = pull_request_harness();
+        let mut empty = super::super::model::tests::review_summary("group-3", &[]);
+        empty.group.status = perch_github::ReviewGroupStatus::Empty;
+        empty.group.instructions = Some("Review rfcs/multi_get.md only.".into());
+        app.review_groups.update(|all| {
+            all.insert("pr".into(), Arc::new(vec![empty]));
+        });
+        settle(&mut harness);
+        assert!(shown(&harness, "agents section"), "a review alone brings the section");
+        review.agents_unfolded.set(true);
+        settle(&mut harness);
+        assert!(shown(&harness, "agent-review-group:group-3"));
+        assert!(named(harness.root_id(), "review-group-instructions").is_some());
+        assert!(named(harness.root_id(), "\"No reviewer attempts were admitted\"").is_some());
+        assert!(named(harness.root_id(), "Review latest").is_none(), "no Review latest");
     }
 
     /// While a review runs, the bar's Review says so, and Show in its

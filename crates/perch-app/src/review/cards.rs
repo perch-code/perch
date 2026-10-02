@@ -2135,16 +2135,6 @@ pub(crate) fn finding_controls(
                     _ => absent(),
                 };
 
-                // Run another review: the one way to learn whether it holds.
-                let recheck = if moved && !historical {
-                    quiet_action("Re-check", move || {
-                        crate::review::review_menu::open_agents(state, None)
-                    })
-                    .debug_name("finding-recheck")
-                    .into_any()
-                } else {
-                    absent()
-                };
                 let sha_backend = backend.clone();
                 let provenance = Stack::horizontal((
                     sidebar_glyph(SidebarIcon::Agents, theme::fg_subtle)
@@ -2210,7 +2200,6 @@ pub(crate) fn finding_controls(
                             None => absent(),
                         },
                         Empty::new().style(|s| s.flex_grow(1.0_f32).min_width(8.0)),
-                        recheck,
                         view_original,
                         dismiss,
                         reopen,
@@ -2243,7 +2232,7 @@ pub(crate) fn finding_controls(
 }
 
 /// A chip's ink or fill, read as it is drawn so it follows the appearance.
-type ChipInk = fn() -> Color;
+pub(crate) type ChipInk = fn() -> Color;
 
 /// What a finding's status chip says, and its ink and fill: fixed in
 /// green, a duplicate in GitHub's blue, disputed in the notice's yellow,
@@ -2282,7 +2271,7 @@ fn finding_status(finding: &perch_github::Finding, rechecked: bool) -> (String, 
 
 /// A severity chip's ink and fill: High and Critical in red, Medium in
 /// the notice's yellow, the rest grey.
-fn severity_inks(severity: perch_github::FindingSeverity) -> (ChipInk, ChipInk) {
+pub(crate) fn severity_inks(severity: perch_github::FindingSeverity) -> (ChipInk, ChipInk) {
     use perch_github::FindingSeverity;
     match severity {
         FindingSeverity::Critical | FindingSeverity::High => (theme::closed, theme::diff_deleted_bg),
@@ -2345,7 +2334,7 @@ pub(crate) fn thread_action(label: &'static str, action: impl Fn() + 'static) ->
         })
 }
 
-fn finding_severity_label(severity: perch_github::FindingSeverity) -> &'static str {
+pub(crate) fn finding_severity_label(severity: perch_github::FindingSeverity) -> &'static str {
     match severity {
         perch_github::FindingSeverity::Unknown => "Finding",
         perch_github::FindingSeverity::Note => "Note",

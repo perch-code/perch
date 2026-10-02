@@ -124,7 +124,6 @@ pub fn view(
             crate::review::open_pull::surface(app, state, backend.clone()),
             crate::review::close_as_issue::surface(app, state, backend.clone()),
             crate::ui::agents::section::section(app, state, summary_backend),
-            crate::review::review_launch::history(app, state, backend.clone()),
             Label::derived(|| "Nothing here yet. Ask about the worktree below.".to_string()).style(
                 move |s| {
                     // Hidden rather than absent, so it takes no share of the
