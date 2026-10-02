@@ -12506,14 +12506,28 @@ async fn attach_pull_requests(ctx: &Ctx) -> bool {
         let Some((head_owner, _)) = head_repo.split_once('/') else {
             continue;
         };
-        // The pull request may be against any declared repository when the
-        // checkout is a fork of one. The lookups are conditional, so a
-        // repository asked every poll is one request that mostly says 304.
+        // The pull request may be against another declared repository when
+        // the checkout is a fork of it, or both are forks of the same one: a
+        // fork's root with no `upstream` remote is filed under the fork. A
+        // repository with no forks in common cannot have it, and is not
+        // asked. One whose forks could not be read is asked all the same.
+        let others: Vec<String> = ctx
+            .config()
+            .declared()
+            .into_iter()
+            .filter(|r| !perch_github::is_local(r) && !r.eq_ignore_ascii_case(&item.repo_full_name))
+            .collect();
         let mut candidates: Vec<String> = vec![item.repo_full_name.clone()];
-        for r in ctx.config().declared() {
-            if !perch_github::is_local(&r) && !candidates.iter().any(|c| c.eq_ignore_ascii_case(&r))
-            {
-                candidates.push(r);
+        if !others.is_empty() {
+            let item_root = fork_root(ctx, &github, &item.repo_full_name).await;
+            for r in others {
+                let related = match (&item_root, fork_root(ctx, &github, &r).await) {
+                    (Some(a), Some(b)) => a.eq_ignore_ascii_case(&b),
+                    _ => true,
+                };
+                if related && !candidates.iter().any(|c| c.eq_ignore_ascii_case(&r)) {
+                    candidates.push(r);
+                }
             }
         }
         for repo in candidates {
@@ -12585,6 +12599,26 @@ async fn attach_pull_requests(ctx: &Ctx) -> bool {
         }
     }
     changed
+}
+
+/// The repository at the top of `repo`'s forks, asked of GitHub once and
+/// kept: what a repository was forked from does not change. `None` when
+/// GitHub could not say, which is asked again next time.
+async fn fork_root(ctx: &Ctx, github: &GitHub, repo: &str) -> Option<String> {
+    let key = format!("fork_root:{}", repo.to_lowercase());
+    if let Some(root) = ctx.with_cache(|c| c.meta(&key).ok().flatten()).flatten() {
+        return Some(root);
+    }
+    match github.fork_root(repo).await {
+        Ok(root) => {
+            ctx.with_cache(|c| c.set_meta(&key, &root));
+            Some(root)
+        }
+        Err(e) => {
+            tracing::info!(repo, error = %e, "could not read what a repository was forked from");
+            None
+        }
+    }
 }
 
 /// The repository a checkout's branch is pushed to, which is what a pull
@@ -22884,6 +22918,87 @@ read eof || true
             "{}",
             paths[0]
         );
+    }
+
+    #[tokio::test]
+    async fn a_branch_is_not_looked_up_under_a_repository_with_no_forks_in_common() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve_by_method(|_, path, _| match path {
+            "/repos/a/b" => ("200 OK", r#"{"full_name":"a/b"}"#.into()),
+            "/repos/c/d" => ("200 OK", r#"{"full_name":"c/d"}"#.into()),
+            _ => ("200 OK", "[]".into()),
+        });
+        let (ctx, _received) = ctx_declaring(
+            dir.path(),
+            &base,
+            vec![github_repo("a/b"), github_repo("c/d")],
+        );
+        let mut branch = Item::new("a/b", "2026-09-10T00:00:00Z".parse().unwrap());
+        branch.checkout = Some(root_checkout("feature"));
+        ctx.with_cache(|c| c.insert_item(&branch)).unwrap().unwrap();
+
+        attach_pull_requests(&ctx).await;
+        attach_pull_requests(&ctx).await;
+
+        let paths = paths.lock().unwrap();
+        let lookups: Vec<&String> = paths.iter().filter(|p| p.contains("/pulls?")).collect();
+        assert_eq!(lookups.len(), 2, "one per poll: {paths:?}");
+        assert!(
+            lookups
+                .iter()
+                .all(|p| p.starts_with("/repos/a/b/pulls?head=")),
+            "{paths:?}"
+        );
+        // What each repository was forked from is asked once, then kept.
+        assert_eq!(
+            paths.iter().filter(|p| *p == "/repos/a/b").count(),
+            1,
+            "{paths:?}"
+        );
+        assert_eq!(
+            paths.iter().filter(|p| *p == "/repos/c/d").count(),
+            1,
+            "{paths:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fork_filed_under_itself_takes_its_pull_request_from_the_repository_it_forked() {
+        // A root whose only remote is the reader's fork is filed under the
+        // fork; its pull request is on the repository the fork came from.
+        let dir = tempfile::tempdir().unwrap();
+        let (base, _paths) = serve_by_method(|_, path, _| {
+            if path == "/repos/me/fork" {
+                (
+                    "200 OK",
+                    r#"{"full_name":"me/fork","source":{"full_name":"acme/widgets"}}"#.into(),
+                )
+            } else if path == "/repos/acme/widgets" {
+                ("200 OK", r#"{"full_name":"acme/widgets"}"#.into())
+            } else if path.starts_with("/repos/acme/widgets/pulls?head=me%3Afeature") {
+                let pull = r#"{"number":9,"title":"two","state":"open","draft":false,
+                    "user":{"login":"me","avatar_url":""},
+                    "head":{"sha":"h7","ref":"feature","repo":{"full_name":"me/fork"}},
+                    "base":{"sha":"m","ref":"main","repo":{"full_name":"acme/widgets"}},
+                    "updated_at":"2026-09-16T11:40:00Z"}"#;
+                ("200 OK", format!("[{pull}]"))
+            } else {
+                ("200 OK", "[]".into())
+            }
+        });
+        let (ctx, _received) = ctx_declaring(
+            dir.path(),
+            &base,
+            vec![github_repo("me/fork"), github_repo("acme/widgets")],
+        );
+        let mut branch = Item::new("me/fork", "2026-09-10T00:00:00Z".parse().unwrap());
+        branch.checkout = Some(root_checkout("feature"));
+        ctx.with_cache(|c| c.insert_item(&branch)).unwrap().unwrap();
+
+        assert!(attach_pull_requests(&ctx).await);
+
+        let row = ctx.item(&branch.id).unwrap();
+        assert_eq!(row.pull_request().map(|pr| pr.number), Some(9));
     }
 
     fn git(dir: &Path, args: &[&str]) -> String {

@@ -1569,6 +1569,27 @@ impl GitHub {
         })
     }
 
+    /// The repository at the top of `repo_full_name`'s forks: the one it
+    /// was forked from, all the way up, or itself when it is not a fork.
+    /// A pull request only goes between two repositories with the same
+    /// top.
+    pub async fn fork_root(&self, repo_full_name: &str) -> Result<String, Error> {
+        #[derive(serde::Deserialize)]
+        struct Repository {
+            full_name: String,
+            source: Option<Source>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Source {
+            full_name: String,
+        }
+
+        let body = self.get_text(&format!("/repos/{repo_full_name}")).await?;
+        let repo: Repository =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        Ok(repo.source.map_or(repo.full_name, |s| s.full_name))
+    }
+
     /// Whether a commit's check runs or commit statuses may have changed
     /// since `tags` were read: both listings asked conditionally, so a
     /// quiet commit costs two 304s and none of the rate limit. The
