@@ -55,7 +55,7 @@ pub use model::{
     is_app_avatar, Participant, Reason, Repository, RunSnapshot, Subject, SubjectKind, SubjectSnapshot, SubjectState, Thread,
 };
 pub use pulls::{
-    CheckStatus, MergeMethod, MergeMethods, MergeResult, MergeState, MergeableState, PullRequest,
+    CheckStatus, CommitMessage, MergeMethod, MergeMethods, MergeResult, MergeState, MergeableState, PullRequest,
     PullRequestOverview, RepositoryPermission, ReviewDecision, Reviewer,
 };
 pub use reactions::{ReactionGroup, ReactionKind, Reactions};

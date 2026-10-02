@@ -129,6 +129,31 @@ pub struct PullRequestOverview {
     pub viewer_permission: Option<RepositoryPermission>,
     pub allowed_merge_methods: MergeMethods,
     pub checks: Checks,
+    /// The commit message GitHub's merge box would offer for a squash.
+    #[serde(default)]
+    pub squash_message: CommitMessage,
+    /// The commit message GitHub's merge box would offer for a merge commit.
+    #[serde(default)]
+    pub merge_message: CommitMessage,
+}
+
+impl PullRequestOverview {
+    /// The message GitHub would write for `method`; None for a rebase,
+    /// which keeps each commit's own.
+    pub fn commit_message(&self, method: MergeMethod) -> Option<&CommitMessage> {
+        match method {
+            MergeMethod::Squash => Some(&self.squash_message),
+            MergeMethod::Merge => Some(&self.merge_message),
+            MergeMethod::Rebase => None,
+        }
+    }
+}
+
+/// A merge's commit message: its first line and the rest.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CommitMessage {
+    pub title: String,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -398,6 +423,10 @@ query PullRequestOverview($owner: String!, $name: String!, $number: Int!, $conte
       merge_state: mergeStateStatus
       review_decision: reviewDecision
       viewer_can_merge_as_admin: viewerCanMergeAsAdmin
+      squash_title: viewerMergeHeadlineText(mergeType: SQUASH)
+      squash_body: viewerMergeBodyText(mergeType: SQUASH)
+      merge_title: viewerMergeHeadlineText(mergeType: MERGE)
+      merge_body: viewerMergeBodyText(mergeType: MERGE)
       status_check_rollup: statusCheckRollup {
         state
         contexts(first: 100, after: $contextsCursor) {
@@ -483,6 +512,14 @@ impl OverviewRepositoryPayload {
                 squash: self.squash_merge_allowed,
                 rebase: self.rebase_merge_allowed,
             },
+            squash_message: CommitMessage {
+                title: pull.squash_title,
+                body: pull.squash_body,
+            },
+            merge_message: CommitMessage {
+                title: pull.merge_title,
+                body: pull.merge_body,
+            },
             check_state,
             check_contexts,
             check_page_info,
@@ -502,6 +539,8 @@ pub(crate) struct PullRequestOverviewPage {
     viewer_can_merge_as_admin: bool,
     viewer_permission: Option<RepositoryPermission>,
     allowed_merge_methods: MergeMethods,
+    squash_message: CommitMessage,
+    merge_message: CommitMessage,
     check_state: Option<String>,
     check_contexts: Vec<Option<CheckContextPayload>>,
     check_page_info: CheckContextPageInfoPayload,
@@ -577,6 +616,8 @@ impl PullRequestOverviewAccumulator {
             viewer_permission: self.latest.viewer_permission,
             allowed_merge_methods: self.latest.allowed_merge_methods,
             checks: checks_from_contexts(self.latest.check_state, self.check_contexts),
+            squash_message: self.latest.squash_message,
+            merge_message: self.latest.merge_message,
         }
     }
 }
@@ -593,6 +634,14 @@ struct OverviewPullPayload {
     review_decision: Option<String>,
     #[serde(default)]
     viewer_can_merge_as_admin: bool,
+    #[serde(default)]
+    squash_title: String,
+    #[serde(default)]
+    squash_body: String,
+    #[serde(default)]
+    merge_title: String,
+    #[serde(default)]
+    merge_body: String,
     #[serde(default)]
     status_check_rollup: Option<StatusCheckRollupPayload>,
 }
@@ -1015,6 +1064,10 @@ fn repository_permission(permission: &str) -> RepositoryPermission {
 pub(crate) struct MergeRequest<'a> {
     pub sha: &'a str,
     pub merge_method: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_title: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_message: Option<&'a str>,
 }
 
 #[cfg(test)]

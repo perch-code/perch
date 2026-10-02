@@ -12,10 +12,12 @@ use floem::peniko::Color;
 use floem::prelude::*;
 use floem::reactive::{Effect, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
-use floem::views::{dyn_container, dyn_stack, Container, Decorators, Empty, Label, Stack};
+use floem::views::{
+    dyn_container, dyn_stack, text_editor, Container, Decorators, Empty, Label, Stack, TextInput,
+};
 use floem::AnyView;
 use perch_github::{
-    Check, CheckRunState, CheckState, Checks, Item, MergeMethod, MergeMethods, MergeState,
+    Check, CheckRunState, CheckState, Checks, CommitMessage, Item, MergeMethod, MergeMethods, MergeState,
     MergeableState, PullRequest, PullRequestOverview, RepositoryPermission, ReviewDecision,
     SubjectState,
 };
@@ -26,7 +28,10 @@ use crate::review::model::ReviewState;
 use crate::state::Checked;
 use crate::theme;
 use crate::ui::menu::{Menu, MenuExt};
-use crate::ui::widgets::{checkbox, clickable, open_in_browser, sidebar_glyph, state_glyph};
+use crate::ui::widgets::{
+    checkbox, clickable, editor_box, lay_out_every_line, open_in_browser, sidebar_glyph,
+    state_glyph,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MergeConfirmation {
@@ -53,6 +58,58 @@ struct MergeSnapshot {
     selected_method: MergeMethod,
     bypass_requirements: bool,
     confirmation: Option<MergeConfirmation>,
+}
+
+/// The commit message being confirmed for a squash or a merge commit.
+/// It starts as GitHub's own and outlives the confirmation, which a
+/// status refresh puts away, so what was typed is there when it opens
+/// again for the same head and method.
+#[derive(Clone, Copy)]
+struct MessageDraft {
+    title: RwSignal<String>,
+    body: RwSignal<String>,
+    /// The item, head and method the text was filled for.
+    filled_for: RwSignal<Option<(String, String, MergeMethod)>>,
+}
+
+impl MessageDraft {
+    fn new() -> Self {
+        Self {
+            title: RwSignal::new(String::new()),
+            body: RwSignal::new(String::new()),
+            filled_for: RwSignal::new(None),
+        }
+    }
+
+    /// Put GitHub's message in, unless the draft is already this
+    /// request's.
+    fn fill(self, request: &MergeConfirmation, default: Option<&CommitMessage>) {
+        let key = (
+            request.item_id.clone(),
+            request.head_sha.clone(),
+            request.method,
+        );
+        if self.filled_for.with_untracked(|filled| filled.as_ref() == Some(&key)) {
+            return;
+        }
+        let default = default.cloned().unwrap_or_default();
+        self.title.set(default.title);
+        self.body.set(default.body);
+        self.filled_for.set(Some(key));
+    }
+
+    fn message(self) -> CommitMessage {
+        CommitMessage {
+            title: self.title.get_untracked().trim().to_string(),
+            body: self.body.get_untracked(),
+        }
+    }
+}
+
+/// Whether GitHub takes a commit message for `method`: a rebase keeps
+/// each commit's own.
+fn takes_message(method: MergeMethod) -> bool {
+    method != MergeMethod::Rebase
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +160,7 @@ pub fn surface(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let selected_method = RwSignal::new(MergeMethod::Squash);
     let bypass_requirements = RwSignal::new(false);
     let confirmation = RwSignal::new(None::<MergeConfirmation>);
+    let message = MessageDraft::new();
 
     // Consent and confirmation apply to one exact head, never to whichever
     // pull request happens to occupy this long-lived review view next.
@@ -150,6 +208,7 @@ pub fn surface(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                         selected_method,
                         bypass_requirements,
                         confirmation,
+                        message,
                     ),
                 ))
                 .style(|s| s.flex_col().width_full()),
@@ -530,6 +589,7 @@ fn merge_section(
     selected_method: RwSignal<MergeMethod>,
     bypass_requirements: RwSignal<bool>,
     confirmation: RwSignal<Option<MergeConfirmation>>,
+    message: MessageDraft,
 ) -> impl IntoView {
     dyn_container(
         move || MergeSnapshot {
@@ -560,6 +620,7 @@ fn merge_section(
                 selected_method,
                 bypass_requirements,
                 confirmation,
+                message,
                 snapshot,
             )
         },
@@ -572,6 +633,7 @@ fn merge_content(
     selected_method: RwSignal<MergeMethod>,
     bypass_requirements: RwSignal<bool>,
     confirmation: RwSignal<Option<MergeConfirmation>>,
+    message: MessageDraft,
     snapshot: MergeSnapshot,
 ) -> AnyView {
     let (Some(pull), Some(item)) = (snapshot.pull.as_ref(), snapshot.item.as_ref()) else {
@@ -597,6 +659,7 @@ fn merge_content(
         selected_method,
         bypass_requirements,
         confirmation,
+        message,
         decision,
         snapshot.clone(),
         pull.clone(),
@@ -714,6 +777,7 @@ fn merge_controls(
     selected_method: RwSignal<MergeMethod>,
     bypass_requirements: RwSignal<bool>,
     confirmation: RwSignal<Option<MergeConfirmation>>,
+    message: MessageDraft,
     decision: MergeDecision,
     snapshot: MergeSnapshot,
     pull: Arc<PullRequest>,
@@ -766,7 +830,7 @@ fn merge_controls(
             });
 
             if let Some(request) = valid_confirmation.cloned() {
-                return confirmation_controls(state, backend, confirmation, request, pull)
+                return confirmation_controls(state, backend, confirmation, message, request, pull)
                     .into_any();
             }
 
@@ -785,6 +849,7 @@ fn merge_controls(
                 bypass_requirements: bypass,
             };
             let start_request = request.clone();
+            let default_message = overview.commit_message(method).cloned();
             let start_enabled = !bypass_needed || bypass;
             let action_label = if bypass_needed {
                 format!("Bypass rules and merge ({})", method_short(method))
@@ -795,7 +860,10 @@ fn merge_controls(
                 action_label,
                 true,
                 move || start_enabled,
-                move || confirmation.set(Some(start_request.clone())),
+                move || {
+                    message.fill(&start_request, default_message.as_ref());
+                    confirmation.set(Some(start_request.clone()));
+                },
             )
             .style(|s| s.flex_grow(1.0_f32));
             // One allowed method leaves nothing to pick, so the button stands alone.
@@ -875,9 +943,11 @@ fn confirmation_controls(
     state: ReviewState,
     backend: Rc<Backend>,
     confirmation: RwSignal<Option<MergeConfirmation>>,
+    message: MessageDraft,
     request: MergeConfirmation,
     pull: Arc<PullRequest>,
 ) -> impl IntoView {
+    let with_message = takes_message(request.method);
     let summary = format!(
         "Merge {} into {} using {}?",
         short_sha(&request.head_sha),
@@ -900,10 +970,17 @@ fn confirmation_controls(
             "Confirm merge".to_string()
         },
         true,
-        move || request_is_current(state, &enabled_request),
+        move || {
+            request_is_current(state, &enabled_request)
+                && !(with_message && message.title.with(|title| title.trim().is_empty()))
+        },
         move || {
             if !request_is_current(state, &submit_request) {
                 confirmation.set(None);
+                return;
+            }
+            let message = with_message.then(|| message.message());
+            if message.as_ref().is_some_and(|message| message.title.is_empty()) {
                 return;
             }
             state.merge_pending.set(true);
@@ -916,13 +993,21 @@ fn confirmation_controls(
                 &submit_request.head_sha,
                 submit_request.method,
                 submit_request.bypass_requirements,
+                message,
             );
         },
     );
 
+    let fields = if with_message {
+        message_fields(message).into_any()
+    } else {
+        Empty::new().into_any()
+    };
+
     Stack::vertical((
         Label::derived(move || summary.clone())
             .style(|s| s.font_size(theme::TEXT_META).color(theme::fg_muted())),
+        fields,
         Stack::horizontal((Empty::new().style(|s| s.flex_grow(1.0_f32)), cancel, submit))
             .style(|s| s.width_full().items_center().gap(8.0)),
     ))
@@ -936,6 +1021,48 @@ fn confirmation_controls(
             .border_color(theme::border_muted())
             .border_radius(theme::RADIUS)
     })
+}
+
+/// The commit's title and description, as GitHub's merge box has them.
+fn message_fields(message: MessageDraft) -> impl IntoView {
+    let title = TextInput::new(message.title)
+        .placeholder("Commit title")
+        .debug_name("merge-commit-title")
+        .style(|s| {
+            s.width_full()
+                .height(30.0)
+                .font_size(theme::TEXT_BODY)
+                .padding_horiz(8.0)
+                .background(theme::canvas())
+                .border(1.0)
+                .border_color(theme::border())
+                .border_radius(theme::RADIUS)
+                .focus(|s| s.border_color(theme::accent()))
+        });
+
+    let editor = text_editor(message.body.get_untracked())
+        .placeholder("Add an optional extended description\u{2026}".to_string())
+        .editor_style(|s| s.hide_gutter(true).selection_color(theme::selection_bg()));
+    lay_out_every_line(editor.editor());
+    let editor = editor
+        .update(move |update| {
+            if let Some(editor) = update.editor {
+                message.body.set(editor.doc().text().to_string());
+            }
+        })
+        .style(|s| {
+            s.size_full()
+                .font_family(theme::FONT_STACK.to_string())
+                .font_size(theme::TEXT_BODY)
+        })
+        .debug_name("merge-commit-body");
+    let body = editor_box(
+        editor,
+        || (theme::COMPOSER_MIN_HEIGHT, theme::COMPOSER_GROWN_HEIGHT),
+        true,
+    );
+
+    Stack::vertical((title, body)).style(|s| s.flex_col().width_full().gap(8.0))
 }
 
 fn merge_method_button(
@@ -1464,6 +1591,8 @@ mod tests {
                     url: None,
                     runs: vec![check(CheckRunState::Success)],
                 },
+                squash_message: CommitMessage::default(),
+                merge_message: CommitMessage::default(),
             })));
         state
     }
@@ -1648,6 +1777,88 @@ mod tests {
         harness.paint();
 
         assert!(named(harness.root_id(), "merge-action:Confirm-bypass-and-merge").is_some());
+    }
+
+    /// Squash confirms with GitHub's message to start with; what is typed
+    /// is what goes, and it outlives the confirmation for the same head.
+    #[test]
+    fn a_squash_confirms_an_editable_commit_message() {
+        use crate::backend::Command;
+
+        let root = TestRoot::new();
+        let state = review_state(MergeState::Clean, false);
+        state.pull_request_overview.update(|overview| {
+            let mut edited = (**overview.as_ref().unwrap()).clone();
+            edited.squash_message = CommitMessage {
+                title: "Merge support (#42)".into(),
+                body: "* Add the merge box".into(),
+            };
+            *overview = Some(Arc::new(edited));
+        });
+        let (backend, mut commands) = Backend::recording();
+        let selected_method = RwSignal::new(MergeMethod::Squash);
+        let bypass = RwSignal::new(false);
+        let confirmation = RwSignal::new(None::<MergeConfirmation>);
+        let message = MessageDraft::new();
+        let view = merge_section(
+            state,
+            Rc::new(backend),
+            selected_method,
+            bypass,
+            confirmation,
+            message,
+        );
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
+        let press = |harness: &mut HeadlessHarness, name: &str| {
+            let id = named(harness.root_id(), name).unwrap_or_else(|| panic!("no view {name}"));
+            id.request_focus();
+            harness.rebuild();
+            harness.dispatch_event(key(Code::Enter));
+            harness.rebuild();
+            harness.paint();
+        };
+        harness.rebuild();
+        harness.paint();
+
+        press(&mut harness, "merge-action:Squash-and-merge");
+        assert!(named(harness.root_id(), "merge-commit-title").is_some());
+        assert!(named(harness.root_id(), "merge-commit-body").is_some());
+        assert_eq!(message.title.get_untracked(), "Merge support (#42)");
+        assert_eq!(message.body.get_untracked(), "* Add the merge box");
+
+        // Typed, put away, opened again: the typing stays.
+        message.title.set("Add a merge box (#42)".into());
+        press(&mut harness, "merge-action:Cancel");
+        press(&mut harness, "merge-action:Squash-and-merge");
+        assert_eq!(message.title.get_untracked(), "Add a merge box (#42)");
+
+        // A blank title can't be confirmed.
+        message.title.set("  ".into());
+        press(&mut harness, "merge-action:Confirm-merge");
+        assert!(std::iter::from_fn(|| commands.try_recv().ok())
+            .all(|c| !matches!(c, Command::MergePullRequest { .. })));
+
+        message.title.set("Add a merge box (#42) ".into());
+        message.body.set(String::new());
+        harness.rebuild();
+        harness.paint();
+        press(&mut harness, "merge-action:Confirm-merge");
+        let sent: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+        assert!(
+            sent.iter().any(|c| matches!(
+                c,
+                Command::MergePullRequest { method: MergeMethod::Squash, message: Some(m), .. }
+                    if m.title == "Add a merge box (#42)" && m.body.is_empty()
+            )),
+            "{sent:?}"
+        );
+    }
+
+    #[test]
+    fn a_rebase_has_no_message_to_edit() {
+        assert!(!takes_message(MergeMethod::Rebase));
+        assert!(takes_message(MergeMethod::Squash));
+        assert!(takes_message(MergeMethod::Merge));
     }
 
     /// Merged elsewhere while GitHub's last word on the rules still says

@@ -31,7 +31,7 @@ use crate::discussion::{
 use crate::items::{Issue, IssueCloseReason, IssuePayload};
 use crate::model::{SubjectSnapshot, SubjectState, Thread};
 use crate::pulls::{
-    check_sighting, rest_check_sighting, CheckSighting, MergeMethod, MergeRequest, MergeResult,
+    check_sighting, rest_check_sighting, CheckSighting, CommitMessage, MergeMethod, MergeRequest, MergeResult,
     PullPayload, PullRequest, PullRequestOverview, PullRequestOverviewAccumulator,
     PullRequestOverviewQuery, PULL_REQUEST_OVERVIEW_QUERY,
 };
@@ -461,6 +461,7 @@ impl GitHub {
         number: u64,
         expected_head_sha: &str,
         method: MergeMethod,
+        message: Option<&CommitMessage>,
     ) -> Result<MergeResult, Error> {
         let (owner, name) = repo_parts(repo_full_name)?;
         if expected_head_sha.is_empty() || expected_head_sha.trim() != expected_head_sha {
@@ -472,6 +473,8 @@ impl GitHub {
         let body = MergeRequest {
             sha: expected_head_sha,
             merge_method: method.as_str(),
+            commit_title: message.map(|message| message.title.as_str()),
+            commit_message: message.map(|message| message.body.as_str()),
         };
         let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;

@@ -15,6 +15,7 @@ use jiff::Timestamp;
 use perch_git::{Preparer, RepoId, ReviewSnapshotStore, Store};
 use perch_github::{
     resolve_token, Anchor, Author, Cache, CacheError, CacheOpen, CommentMessage, CommentThread,
+    CommitMessage,
     Config, DraftRow, GitHub, Item, ItemCheckout, ItemKind, ItemSubject, MergeMethod, MergeState,
     MergeableState, NewRunEvent, PullRequest, PullRequestOverview, PullReviewEvent,
     ReactionKind, Reactions, RepositoryPermission, Review, ReviewCommentDraft, RevisionContext,
@@ -159,6 +160,8 @@ pub enum Command {
     /// Merge the exact pull request head the reader confirmed. GitHub
     /// performs the merge; `bypass_requirements` records the explicit UI
     /// consent needed before an authorized rules bypass is attempted.
+    /// `message` is the commit message the reader confirmed, for a squash
+    /// or a merge commit; None leaves it to GitHub.
     MergePullRequest {
         attempt_id: u64,
         item_id: String,
@@ -167,6 +170,7 @@ pub enum Command {
         expected_head_sha: String,
         method: MergeMethod,
         bypass_requirements: bool,
+        message: Option<CommitMessage>,
     },
     /// How the branch stands for a pull request into `base`, or into its
     /// own base, and what the form fills in. `PullRequestReadiness`
@@ -2574,6 +2578,7 @@ impl Backend {
         expected_head_sha: &str,
         method: MergeMethod,
         bypass_requirements: bool,
+        message: Option<CommitMessage>,
     ) {
         let Some(attempt_id) = self.merge_attempts.begin(item_id) else {
             return;
@@ -2586,6 +2591,7 @@ impl Backend {
             expected_head_sha: expected_head_sha.to_string(),
             method,
             bypass_requirements,
+            message,
         }).is_err() {
             self.merge_attempts.finish(item_id, attempt_id);
         }
@@ -4062,6 +4068,7 @@ async fn run(
                 expected_head_sha,
                 method,
                 bypass_requirements,
+                message,
             } => {
                 ctx.clear_notice();
                 let _ = ctx.events.send(Event::PullRequestMergeStarted {
@@ -4082,6 +4089,7 @@ async fn run(
                         &expected_head_sha,
                         method,
                         bypass_requirements,
+                        message.as_ref(),
                     )
                     .await;
                     ctx.merge_attempts.finish(&item_id, attempt_id);
@@ -8734,6 +8742,7 @@ async fn merge_open_pull_request(
     expected_head_sha: &str,
     method: MergeMethod,
     bypass_requirements: bool,
+    message: Option<&CommitMessage>,
 ) {
     let open = ctx.slot.lock().ok().and_then(|slot| {
         slot.as_ref()
@@ -8827,7 +8836,14 @@ async fn merge_open_pull_request(
     }
 
     let result = match github
-        .merge_pull_request(repo_full_name, number, expected_head_sha, method)
+        .merge_pull_request(
+            repo_full_name,
+            number,
+            expected_head_sha,
+            method,
+            // A rebase keeps each commit's own message.
+            message.filter(|_| method != MergeMethod::Rebase),
+        )
         .await
     {
         Ok(result) => result,
@@ -18126,6 +18142,8 @@ mod tests {
             review_decision: None,
             viewer_can_merge_as_admin: false,
             viewer_permission: Some(RepositoryPermission::Write),
+            squash_message: Default::default(),
+            merge_message: Default::default(),
             allowed_merge_methods: perch_github::MergeMethods {
                 merge: true,
                 squash: true,

@@ -3318,6 +3318,8 @@ mod tests {
             review_decision: None,
             viewer_can_merge_as_admin: false,
             viewer_permission: Some(RepositoryPermission::Write),
+            squash_message: Default::default(),
+            merge_message: Default::default(),
             allowed_merge_methods: MergeMethods {
                 merge: true,
                 squash: true,

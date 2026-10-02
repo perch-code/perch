@@ -6,7 +6,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 
 use perch_github::{
-    CheckKind, CheckRunState, CheckState, Error, GitHub, IssueCloseReason, MergeMethod, MergeState, MergeableState,
+    CheckKind, CheckRunState, CheckState, CommitMessage, Error, GitHub, IssueCloseReason, MergeMethod, MergeState, MergeableState,
     RepositoryPermission, ReviewDecision,
 };
 
@@ -105,6 +105,10 @@ const OVERVIEW: &str = r#"{
         "merge_state": "BLOCKED",
         "review_decision": "REVIEW_REQUIRED",
         "viewer_can_merge_as_admin": true,
+        "squash_title": "Merge support (#42)",
+        "squash_body": "Adds a merge box.",
+        "merge_title": "Merge pull request #42 from a/feature",
+        "merge_body": "Merge support",
         "status_check_rollup": {
           "state": "FAILURE",
           "contexts": { "nodes": [
@@ -239,6 +243,18 @@ async fn overview_combines_merge_permissions_and_deduplicated_status_rollup() {
     assert!(overview.allowed_merge_methods.merge);
     assert!(overview.allowed_merge_methods.squash);
     assert!(!overview.allowed_merge_methods.rebase);
+    assert_eq!(
+        overview.commit_message(MergeMethod::Squash),
+        Some(&CommitMessage {
+            title: "Merge support (#42)".into(),
+            body: "Adds a merge box.".into(),
+        })
+    );
+    assert_eq!(
+        overview.commit_message(MergeMethod::Merge).map(|m| m.title.as_str()),
+        Some("Merge pull request #42 from a/feature")
+    );
+    assert_eq!(overview.commit_message(MergeMethod::Rebase), None);
     assert_eq!(
         overview.checks.state,
         CheckState::Failing {
@@ -411,7 +427,7 @@ async fn merge_methods_put_the_confirmed_head_sha_on_the_guarded_endpoint() {
 
     for method in [MergeMethod::Merge, MergeMethod::Squash, MergeMethod::Rebase] {
         let result = github
-            .merge_pull_request("a/b", 42, "abc123", method)
+            .merge_pull_request("a/b", 42, "abc123", method, None)
             .await
             .unwrap();
         assert!(result.merged);
@@ -426,7 +442,33 @@ async fn merge_methods_put_the_confirmed_head_sha_on_the_guarded_endpoint() {
         let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
         assert_eq!(body["sha"], "abc123");
         assert_eq!(body["merge_method"], method);
+        assert!(body.get("commit_title").is_none());
+        assert!(body.get("commit_message").is_none());
     }
+}
+
+#[tokio::test]
+async fn an_edited_commit_message_goes_with_the_merge() {
+    let (base, requests) = spawn(vec![Response::new(
+        "200 OK",
+        r#"{"sha":"merged123","merged":true,"message":"Pull Request successfully merged"}"#,
+    )]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+    let message = CommitMessage {
+        title: "Add a merge box (#42)".into(),
+        body: String::new(),
+    };
+
+    github
+        .merge_pull_request("a/b", 42, "abc123", MergeMethod::Squash, Some(&message))
+        .await
+        .unwrap();
+
+    let requests = requests.lock().unwrap();
+    let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(body["merge_method"], "squash");
+    assert_eq!(body["commit_title"], "Add a merge box (#42)");
+    assert_eq!(body["commit_message"], "");
 }
 
 #[tokio::test]
@@ -438,7 +480,7 @@ async fn stale_head_conflicts_remain_distinct_github_errors() {
     let github = GitHub::with_base_uri("token", &base).unwrap();
 
     assert!(matches!(
-        github.merge_pull_request("a/b", 42, "old", MergeMethod::Squash).await,
+        github.merge_pull_request("a/b", 42, "old", MergeMethod::Squash, None).await,
         Err(Error::Status { status: 409, body }) if body.contains("Head branch was modified")
     ));
 }
