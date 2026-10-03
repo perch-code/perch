@@ -4674,7 +4674,7 @@ async fn run(
                         result,
                     });
                     if let (true, Some(revision)) = (applied, scope_revision) {
-                        refresh_scope(&ctx, &item_id, navigation_id, revision).await;
+                        show_applied_suggestion(&ctx, &item_id, navigation_id, revision).await;
                     }
                 });
             }
@@ -10160,6 +10160,32 @@ async fn apply_suggestion(
     tokio::fs::write(&file, applied)
         .await
         .map_err(|e| format!("Perch could not write {path}: {e}"))
+}
+
+/// Show a suggestion just written into the worktree. A scope that reads
+/// the file on disk is read again; any other shows a commit, where the
+/// edit is not, so the view moves to Uncommitted, which has it on the
+/// same lines. Left alone if the reader picked a scope since.
+async fn show_applied_suggestion(ctx: &Ctx, item_id: &str, navigation_id: u64, scope_revision: u64) {
+    let scope = ctx.slot.lock().ok().and_then(|g| {
+        g.as_ref()
+            .filter(|c| c.item_id == item_id && c.navigation_id == navigation_id)
+            .map(|c| c.scope.clone())
+    });
+    match scope {
+        Some(perch_git::Scope::Uncommitted | perch_git::Scope::Unstaged) | None => {
+            refresh_scope(ctx, item_id, navigation_id, scope_revision).await;
+        }
+        Some(_) => {
+            if !ctx.navigation_requests.is_current(navigation_id)
+                || ctx.scope_requests.stable_revision() != Some(scope_revision)
+            {
+                return;
+            }
+            let request_id = ctx.scope_requests.begin(item_id);
+            set_scope(ctx, item_id, perch_git::Scope::Uncommitted, request_id, navigation_id).await;
+        }
+    }
 }
 
 /// Put a comment GitHub just took on an issue in its kept comments, the
@@ -19975,6 +20001,71 @@ while True:
         std::fs::write(worktree.join("made.txt"), "made\nedited\n").unwrap();
         assert_eq!(look().await, 1);
         assert_eq!(blob().unwrap(), git(&worktree, &["hash-object", "made.txt"]));
+    }
+
+    /// A suggestion put in the file under Branch, which shows the head
+    /// commit, moves the view to Uncommitted, where the edit is; under
+    /// Uncommitted it stays and reads the file again. A scope picked
+    /// meanwhile is left alone.
+    #[tokio::test]
+    async fn an_applied_suggestion_is_shown_under_uncommitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("notes");
+        let worktree = root_with_branch(&root, "feature").canonicalize().unwrap();
+        let mut entry = rooted(None, &root);
+        entry.resolve(None);
+        let (ctx, received) = ctx_declaring(dir.path(), &nowhere(), vec![entry.clone()]);
+        assert!(scan_roots(&ctx).await);
+        let item = ctx.with_cache(|c| c.load_items().unwrap()).unwrap().remove(0);
+        open_in_slot(&ctx, &item);
+        let navigation_id = ctx.navigation_requests.begin_item(&item.id);
+        {
+            let mut slot = ctx.slot.lock().unwrap();
+            let open = slot.as_mut().unwrap();
+            open.checkout.worktree = worktree.clone();
+            open.checkout.head_sha = git(&worktree, &["rev-parse", "HEAD"]);
+            open.navigation_id = navigation_id;
+            open.scope = perch_git::Scope::Branch;
+        }
+        let scope = || ctx.slot.lock().unwrap().as_ref().unwrap().scope.clone();
+        let suggest = |from: &str, to: &str| {
+            let original = crate::review::suggestion::Original { first: 1, lines: vec![from.into()] };
+            let (ctx, item_id, to) = (&ctx, item.id.clone(), to.to_string());
+            async move {
+                apply_suggestion(ctx, &item_id, "two.txt", &original, &[to]).await.unwrap();
+                let revision = ctx.scope_requests.stable_revision().unwrap();
+                show_applied_suggestion(ctx, &item_id, navigation_id, revision).await;
+            }
+        };
+        let readies = || {
+            received
+                .try_iter()
+                .filter_map(|e| match e {
+                    Event::ScopeReady { scope, files, .. } => Some((scope, files)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        suggest("two", "TWO").await;
+        assert_eq!(std::fs::read_to_string(worktree.join("two.txt")).unwrap(), "TWO\n");
+        assert_eq!(scope(), perch_git::Scope::Uncommitted);
+        let sent = readies();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, perch_git::Scope::Uncommitted);
+        assert!(sent[0].1.iter().any(|f| f.path == "two.txt"));
+
+        suggest("TWO", "Two").await;
+        assert_eq!(scope(), perch_git::Scope::Uncommitted, "already on disk");
+        assert!(readies().iter().all(|(s, _)| *s == perch_git::Scope::Uncommitted));
+
+        ctx.slot.lock().unwrap().as_mut().unwrap().scope = perch_git::Scope::Branch;
+        let original = crate::review::suggestion::Original { first: 1, lines: vec!["Two".into()] };
+        apply_suggestion(&ctx, &item.id, "two.txt", &original, &["2".into()]).await.unwrap();
+        let revision = ctx.scope_requests.stable_revision().unwrap();
+        ctx.scope_requests.begin(&item.id);
+        show_applied_suggestion(&ctx, &item.id, navigation_id, revision).await;
+        assert_eq!(scope(), perch_git::Scope::Branch, "the reader picked a scope since");
     }
 
     /// A Claude Code that asks its host about `$PERCH_ASK` (a

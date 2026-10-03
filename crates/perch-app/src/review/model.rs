@@ -4441,7 +4441,12 @@ impl ReviewState {
             return;
         }
         match result {
-            Ok(()) => self.composer_sent(),
+            // No thread comes of a comment or a suggestion put in the
+            // file, so a card's rows are not kept for one.
+            Ok(()) => {
+                self.composer_sent();
+                self.drop_sent_placeholder();
+            }
             Err(message) => self.composer_error.set(Some(message)),
         }
     }
@@ -6331,7 +6336,7 @@ mod tests {
         state.open_composer(None, Some(anchor.clone()), String::new(), choice.clone());
         state.composer_sent();
         assert!(state.sent_composer.get().is_some());
-        state.open_composer(None, Some(anchor), String::new(), choice);
+        state.open_composer(None, Some(anchor.clone()), String::new(), choice.clone());
         assert_eq!(state.sent_composer.get(), None);
         assert_eq!(
             state
@@ -6341,6 +6346,17 @@ mod tests {
                 .count(),
             1
         );
+
+        // A suggestion put in the file brings no thread, so its rows go
+        // with the composer rather than wait under the lines for one.
+        state.close_composer();
+        state.open_composer(None, Some(anchor), "```suggestion\nx\n```".into(), choice);
+        state.set_card_rows(&CardId::Composer, 10);
+        state.start_applying(7, "```suggestion\nx\n```".into());
+        state.settle_issue_comment(7, Ok(()));
+        assert!(state.composer.get().is_none());
+        assert_eq!(state.sent_composer.get(), None);
+        assert!(!state.cards_in("src/x.rs").iter().any(|c| c.id == CardId::Composer));
     }
 
     #[test]

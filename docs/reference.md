@@ -214,8 +214,9 @@ worktree with no pull request there is no one on GitHub to accept it, so a
 message that is a suggestion and nothing else goes straight into the file
 instead of to the agent, as Commit suggestion does on github.com. It goes in
 only while the file still reads those lines; otherwise the composer says they
-changed and keeps the text. A suggestion with words beside it goes to the
-agent as any message does.
+changed and keeps the text. The edit is uncommitted, so under a scope that
+shows a commit, such as Branch, the view moves to Uncommitted to show it. A
+suggestion with words beside it goes to the agent as any message does.
 
 On an open pull request, a suggestion in a comment on GitHub has **Apply
 suggestion** under it. It opens a popover with the commit message, `Update
