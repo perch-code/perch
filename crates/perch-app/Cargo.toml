@@ -55,6 +55,10 @@ regex = "1"
 # GitHub's emoji shortcodes, gemoji's: a composer's `:` lists them, and a
 # comment's `:tada:` is drawn as its emoji.
 emojis = "0.9"
+# TeX math, `$x^2$` and `$$…$$` in a comment, typeset in STIX Two Math
+# (bundled) and drawn as an SVG of its glyphs' outlines, where GitHub runs
+# MathJax. Pure Rust, on ttf-parser alone.
+latex-rust = { version = "2.1", default-features = false, features = ["std"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"

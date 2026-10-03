@@ -20,6 +20,7 @@ pub mod hover;
 pub mod images;
 pub mod linked_text;
 pub mod markdown;
+pub mod math;
 pub mod markdown_toolbar;
 pub mod mention;
 pub mod merge;

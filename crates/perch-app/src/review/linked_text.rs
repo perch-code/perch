@@ -40,6 +40,12 @@
 //! Cmd-F on Conversation looks through the linked text shown on the page,
 //! which is its prose, and each view tints what was found in it, under
 //! the selection, as the code's editor tints its matches.
+//!
+//! A formula in the text is an [`Inline`]: an inline box in the
+//! attributes holds its place in the line, and this view draws it there
+//! from the shadow layout, before the glyphs as the rules are. It has no
+//! bytes of the text, so a selection takes it when it takes the place
+//! the box sits at, and a copy puts it back as `$TeX$`.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -62,6 +68,7 @@ use floem::views::{rich_text, Decorators};
 use floem::{IntoView, Renderer, View, ViewId};
 
 use crate::review::cards::{tip_body, within_window};
+use crate::review::math::Formula;
 use crate::theme;
 use crate::ui::widgets::{copy_to_clipboard, follow_link};
 use crate::ui::OS_MOD;
@@ -76,6 +83,17 @@ const DRAG_SLOP: f64 = 2.0;
 struct Link {
     range: Range<usize>,
     target: Target,
+}
+
+/// A formula in the line: the byte of the text it sits before, the
+/// formula, the size of its em, and its colour. Its inline box in the
+/// attributes has its index in the view's list as its id.
+#[derive(Clone)]
+pub struct Inline {
+    pub index: usize,
+    pub formula: Rc<Formula>,
+    pub em: f64,
+    pub ink: fn() -> Color,
 }
 
 /// Where a link goes.
@@ -172,6 +190,8 @@ struct Leaf {
     /// The byte ranges the find bar found in the text, in order, and
     /// which of them it is on.
     found: RefCell<(Vec<Range<usize>>, Option<usize>)>,
+    /// The formulas in the text.
+    formulas: Vec<Inline>,
 }
 
 thread_local! {
@@ -327,6 +347,11 @@ pub struct LinkedText {
     /// Whether the text may be selected: inherited, and off inside a row
     /// that is a button.
     props: SelectProps,
+    /// Where the last paint drew the formulas. The renderer grows its
+    /// atlas only as a frame begins, so the first paint of a formula at a
+    /// size the atlas cannot hold draws nothing; a paint that drew them
+    /// anywhere new asks for one more.
+    painted: Vec<Rect>,
 }
 
 /// `text`, where each of `links` is a byte range of the text and where it
@@ -336,6 +361,17 @@ pub struct LinkedText {
 pub fn linked_text(
     text: String,
     links: Vec<(Range<usize>, Target)>,
+    styled: impl Fn() -> (AttrsList, Vec<Strike>) + 'static,
+) -> impl IntoView {
+    linked_text_with(text, links, Vec::new(), styled)
+}
+
+/// [`linked_text`] with formulas in the line, each held a place by an
+/// inline box that `styled`'s attributes carry.
+pub fn linked_text_with(
+    text: String,
+    links: Vec<(Range<usize>, Target)>,
+    formulas: Vec<Inline>,
     styled: impl Fn() -> (AttrsList, Vec<Strike>) + 'static,
 ) -> impl IntoView {
     let id = ViewId::new();
@@ -351,6 +387,7 @@ pub fn linked_text(
         taken: RefCell::new(None),
         selectable: Cell::new(true),
         found: RefCell::new((Vec::new(), None)),
+        formulas,
     });
     LEAVES.with_borrow_mut(|leaves| {
         leaves.retain(|_, leaf| leaf.strong_count() > 0);
@@ -389,6 +426,7 @@ pub fn linked_text(
         unit: Unit::Glyph,
         spread: Vec::new(),
         props: SelectProps::default(),
+        painted: Vec::new(),
     };
     view.style(move |s| {
         // Focusable, so a drag can take the focus and keep its selection
@@ -443,6 +481,56 @@ impl Leaf {
     /// The text laid out as the wrapped view lays it out at `width`.
     fn layout_for(&self, width: f32) -> TextLayout {
         layout_at(&self.text, self.attrs.borrow().clone(), width)
+    }
+
+    /// Whether a selection of `range` of the text takes the formula at
+    /// `index`: it takes the place the formula sits at, before the byte
+    /// at `index`, or reaches the end the formula sits at.
+    fn takes(&self, range: &Range<usize>, index: usize) -> bool {
+        !range.is_empty()
+            && range.start <= index
+            && (index < range.end || index == self.text.len())
+            && index <= range.end
+    }
+
+    /// `range` of the text as it copies: with the formulas it takes put
+    /// back as their TeX.
+    fn copied(&self, range: Range<usize>) -> String {
+        let mut out = String::new();
+        let mut at = range.start;
+        for inline in self.formulas.iter().filter(|inline| self.takes(&range, inline.index)) {
+            out.push_str(&self.text[at..inline.index]);
+            out.push('$');
+            out.push_str(&inline.formula.source);
+            out.push('$');
+            at = inline.index;
+        }
+        out.push_str(&self.text[at..range.end]);
+        out
+    }
+
+    /// Where the formulas are drawn, in the view's coordinates: each
+    /// one's whole box, from its top to the bottom of its depth, by its
+    /// index in the list.
+    fn formula_rects(&self) -> Vec<(usize, Rect)> {
+        if self.formulas.is_empty() {
+            return Vec::new();
+        }
+        self.with_shadow(|layout, origin| {
+            layout
+                .inline_boxes()
+                .into_iter()
+                .filter_map(|placed| {
+                    let i = placed.id as usize;
+                    let inline = self.formulas.get(i)?;
+                    let (width, height, depth) = inline.formula.size_at(inline.em);
+                    let (x, top) = (f64::from(placed.x), f64::from(placed.y + placed.height) - height);
+                    let rect = Rect::new(x, top, x + width, top + height + depth) + origin.to_vec2();
+                    Some((i, rect))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
     }
 
     /// The byte of the text a drag from another view reaches with the
@@ -610,15 +698,14 @@ impl LinkedText {
                         "\n"
                     });
                 }
-                out.push_str(&leaf.text[range]);
+                out.push_str(&leaf.copied(range));
                 above = Some(rect);
             }
             return (!out.is_empty()).then_some(out);
         }
         let selection = self.selection()?;
-        self.with_shadow(|layout, _| {
-            self.leaf.text[layout.selection_text_range(&selection)].to_string()
-        })
+        let range = self.with_shadow(|layout, _| layout.selection_text_range(&selection))?;
+        Some(self.leaf.copied(range))
     }
 
     /// Tells [`selected_under`] what this view has selected now: its text,
@@ -990,19 +1077,37 @@ impl View for LinkedText {
                 .selection()
                 .filter(|_| cx.window_state.is_focused(self.id)),
         };
+        let formulas = self.leaf.formula_rects();
         if let Some(selection) = selection {
-            let rects = self
+            let (mut rects, range) = self
                 .with_shadow(|layout, origin| {
                     let mut rects = Vec::new();
                     layout.selection_geometry_with_line_metrics(&selection, |x0, y0, x1, y1| {
                         rects.push(Rect::new(x0, y0, x1, y1) + origin.to_vec2());
                     });
-                    rects
+                    (rects, layout.selection_text_range(&selection))
                 })
                 .unwrap_or_default();
+            // A formula has no glyphs to be selected; it is shaded whole
+            // when the selection takes it.
+            rects.extend(
+                formulas
+                    .iter()
+                    .filter(|(i, _)| self.leaf.takes(&range, self.leaf.formulas[*i].index))
+                    .map(|(_, rect)| *rect),
+            );
             for rect in rects {
                 cx.fill(&rect, theme::selection_bg(), 0.0);
             }
+        }
+        for (i, rect) in &formulas {
+            let inline = &self.leaf.formulas[*i];
+            inline.formula.draw(cx, *rect, (inline.ink)());
+        }
+        let drawn: Vec<Rect> = formulas.into_iter().map(|(_, rect)| rect).collect();
+        if drawn != self.painted {
+            self.painted = drawn;
+            self.id.request_paint();
         }
         // The link under the pointer is underlined in its own colour, as
         // a browser underlines one on hover.
@@ -1714,6 +1819,142 @@ mod tests {
                 Point::new(fox.x1 - 2.0, y),
             );
             assert_eq!(copy(&mut h), Vec::<String>::new());
+        }
+    }
+
+    mod formulas {
+        use super::*;
+        use crate::review::math;
+        use crate::ui::widgets::copied;
+        use floem::headless::{HeadlessHarness, TestRoot};
+        use floem::text::InlineBox;
+        use floem::views::Container;
+
+        const WIDTH: f64 = 1000.0;
+        /// "I pay $O(n)$ in time", the formula a box before " in".
+        const TEXT: &str = "I pay  in time";
+        const AT: usize = 6;
+        const EM: f64 = 15.0 * 1.1;
+
+        fn inline() -> Inline {
+            Inline {
+                index: AT,
+                formula: math::typeset("O(n)", false).unwrap(),
+                em: EM,
+                ink: theme::fg,
+            }
+        }
+
+        fn attrs() -> AttrsList {
+            let (width, height, _) = inline().formula.size_at(EM);
+            let mut attrs = prose(15.0);
+            attrs.add_inline_box(InlineBox {
+                id: 0,
+                index: AT,
+                width: width as f32,
+                height: height as f32,
+            });
+            attrs
+        }
+
+        fn harness() -> (HeadlessHarness, ViewId) {
+            let root = TestRoot::new();
+            let view = Container::new(linked_text_with(TEXT.into(), Vec::new(), vec![inline()], || {
+                (attrs(), Vec::new())
+            }))
+            .style(|s| s.width(WIDTH).padding(0.0));
+            let mut harness = HeadlessHarness::new_with_size(root, view, WIDTH, 400.0);
+            harness.rebuild();
+            harness.paint();
+            let id = find(harness.root_id()).expect("no linked text");
+            copied();
+            (harness, id)
+        }
+
+        fn find(id: ViewId) -> Option<ViewId> {
+            if id.debug_name() == "LinkedText" {
+                return Some(id);
+            }
+            id.children().into_iter().find_map(find)
+        }
+
+        fn copy(harness: &mut HeadlessHarness) -> Vec<String> {
+            harness.dispatch_event(Event::Key(KeyboardEvent {
+                state: KeyState::Down,
+                key: floem::ui_events::keyboard::Key::Character("c".into()),
+                code: Code::KeyC,
+                location: Default::default(),
+                modifiers: OS_MOD,
+                repeat: false,
+                is_composing: false,
+            }));
+            copied()
+        }
+
+        /// Where the glyphs of `needle` sit.
+        fn glyphs(needle: &str) -> Rect {
+            let start = TEXT.find(needle).unwrap();
+            let layout = layout_at(TEXT, attrs(), WIDTH as f32);
+            let link = Link { range: start..start + needle.len(), target: Target::Url(String::new()) };
+            line_rects(&layout, &link)[0]
+        }
+
+        #[test]
+        fn a_formula_is_drawn_in_its_place_on_the_baseline() {
+            let (_h, id) = harness();
+            let rects = leaf(id).unwrap().formula_rects();
+            assert_eq!(rects.len(), 1);
+            let (i, rect) = rects[0];
+            assert_eq!(i, 0);
+            let (width, height, depth) = inline().formula.size_at(EM);
+            assert!((rect.width() - width).abs() < 0.01, "{rect:?}");
+            assert!((rect.height() - height - depth).abs() < 0.01, "{rect:?}");
+            // After "I pay ", and "in" after it.
+            let layout = layout_at(TEXT, prose(15.0), WIDTH as f32);
+            let pay_end = layout.cursor_point(AT, floem::text::Affinity::Downstream).x;
+            assert!((rect.x0 - pay_end).abs() < 0.5, "{rect:?} {pay_end}");
+            assert!(glyphs("in").x0 >= rect.x1, "{rect:?} {:?}", glyphs("in"));
+            // Its baseline is the line's: the depth hangs below it.
+            let shadow = layout_at(TEXT, attrs(), WIDTH as f32);
+            let baseline = f64::from(shadow.parley_layout().lines().next().unwrap().metrics().baseline);
+            assert!((rect.y0 + height - baseline).abs() < 0.01, "{rect:?} {baseline}");
+        }
+
+        #[test]
+        fn a_selection_that_takes_a_formula_copies_its_tex() {
+            let (mut h, _) = harness();
+            let (pay, time) = (glyphs("pay"), glyphs("time"));
+            let y = pay.center().y;
+            h.pointer_down(pay.x0 + 1.0, y);
+            h.pointer_move(pay.x0 + DRAG_SLOP + 2.0, y);
+            h.pointer_move(time.x1 - 1.0, y);
+            h.pointer_up(time.x1 - 1.0, y);
+            assert_eq!(copy(&mut h), vec!["pay $O(n)$ in time".to_string()]);
+            // Only the words after it: no formula.
+            let into = glyphs("in");
+            h.pointer_down(into.x0 + 1.0, y);
+            h.pointer_move(into.x0 + DRAG_SLOP + 2.0, y);
+            h.pointer_move(time.x1 - 1.0, y);
+            h.pointer_up(time.x1 - 1.0, y);
+            assert_eq!(copy(&mut h), vec!["in time".to_string()]);
+        }
+
+        #[test]
+        fn a_formula_at_the_end_is_taken_by_a_selection_to_the_end() {
+            let leaf = Leaf {
+                id: ViewId::new(),
+                text: "x is ".into(),
+                attrs: RefCell::new(prose(15.0)),
+                strikes: RefCell::new(Vec::new()),
+                shadow: RefCell::new(None),
+                taken: RefCell::new(None),
+                selectable: Cell::new(true),
+                found: RefCell::new((Vec::new(), None)),
+                formulas: vec![Inline { index: 5, ..inline() }],
+            };
+            assert_eq!(leaf.copied(0..5), "x is $O(n)$");
+            assert_eq!(leaf.copied(0..4), "x is");
+            assert_eq!(leaf.copied(5..5), "");
         }
     }
 }

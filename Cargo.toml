@@ -153,12 +153,15 @@ codegen-units = 4
 # `scroll_to` waits in those for layout, so a pane built with its scroll
 # put back, as a file's tab or Conversation is on every switch, painted
 # a frame at its top before jumping to where the reader had left it.
-# Last, one that pastes text ending in a newline at the cursor in a
+# Then one that pastes text ending in a newline at the cursor in a
 # non-modal editor. floem pasted it as whole lines, vim's way, above the
 # cursor's line, so a line copied from another app and pasted after a
 # comment's "> " landed above the quote. Only a line the editor itself
 # copied or cut with nothing selected still goes back above, as in VS
-# Code. Drop a
+# Code. Last, one that lets an `AttrsList` carry parley's inline boxes,
+# room in a line that the caller draws into, and says where each landed:
+# a comment's `$…$` is a typeset formula in its line of text, wrapping
+# with the words. Drop a
 # patch from the branch once upstream merges it; `cargo update -p floem`
 # takes the branch's new head. `floem_renderer` is patched too so that
 # perch-app's own dependency on it resolves to the checkout floem's does,

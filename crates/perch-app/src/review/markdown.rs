@@ -30,11 +30,16 @@
 //! [`crate::review::images`]). Until it has come, and if it cannot, it is
 //! its alt text, linked to it.
 //!
+//! Math is typeset, as GitHub's MathJax sets it (see
+//! [`crate::review::math`]): `$…$` in the line, as the TeX would have it
+//! there, and `$$…$$` or a fence named `math` on a line of its own,
+//! centred. GitHub's `` $`…`$ `` is the same as `$…$`. A formula that
+//! cannot be set is its TeX, as code.
+//!
 //! What GitHub does that this does not: a picture in a table cell or a
 //! heading, or at an address relative to the repository, is shown by its
 //! alt text or file name, other raw HTML by its text, code in a fence is
-//! not coloured, a cell's wrapped lines all start at the left, and
-//! `$math$` is left as written.
+//! not coloured, and a cell's wrapped lines all start at the left.
 
 use std::collections::{HashMap, VecDeque};
 use std::iter::Peekable;
@@ -46,7 +51,9 @@ use floem::prelude::*;
 use floem::reactive::Memo;
 use floem::taffy::prelude::auto;
 use floem::taffy::GridTemplateComponent;
-use floem::text::{Attrs, AttrsList, FamilyOwned, FontStyle, FontWeight, LineHeightValue, TextLayout};
+use floem::text::{
+    Attrs, AttrsList, FamilyOwned, FontStyle, FontWeight, InlineBox, LineHeightValue, TextLayout,
+};
 use floem::views::{Container, Decorators, Empty, Label, Stack};
 use floem::AnyView;
 use pulldown_cmark::{
@@ -57,7 +64,8 @@ use crate::icons::{self, SidebarIcon};
 use crate::review::code_refs::{self, linked_run, Plan, Refs};
 use crate::review::emoji::emojify;
 use crate::review::images;
-use crate::review::linked_text::{linked_text, passage, Strike, Target};
+use crate::review::linked_text::{linked_text, linked_text_with, passage, Inline, Strike, Target};
+use crate::review::math::{self, Formula};
 use crate::review::model::ReviewState;
 use crate::review::suggestion::Original;
 use crate::theme;
@@ -70,7 +78,8 @@ const OPTIONS: Options = Options::ENABLE_TABLES
     .union(Options::ENABLE_STRIKETHROUGH)
     .union(Options::ENABLE_TASKLISTS)
     .union(Options::ENABLE_FOOTNOTES)
-    .union(Options::ENABLE_GFM);
+    .union(Options::ENABLE_GFM)
+    .union(Options::ENABLE_MATH);
 
 /// A run of text with the styles that apply to it.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -87,6 +96,9 @@ pub struct Span {
     /// The picture the run names, when it is one: its text is the alt,
     /// shown where the picture cannot be.
     pub image: Option<Box<Image>>,
+    /// The formula the run is, typeset, when it is one: its text is the
+    /// TeX, which takes no room in the line, where the formula does.
+    pub math: Option<Rc<Formula>>,
 }
 
 /// A picture to draw.
@@ -108,6 +120,8 @@ pub enum Block {
     Paragraph(Vec<Span>),
     /// A picture, on a line of its own.
     Image(Image),
+    /// A formula, on a line of its own, centred.
+    Math(Rc<Formula>),
     Heading { level: u8, spans: Vec<Span> },
     /// A quote, or one of GitHub's alerts when `alert` is set.
     Quote { alert: Option<Alert>, blocks: Vec<Block> },
@@ -337,6 +351,8 @@ fn push_text(spans: &mut Vec<Span>, style: &Span, text: &str) {
             if !style.footnote
                 && style.image.is_none()
                 && last.image.is_none()
+                && style.math.is_none()
+                && last.math.is_none()
                 && last.bold == style.bold
                 && last.italic == style.italic
                 && last.code == style.code
@@ -521,10 +537,12 @@ impl<'a> Builder<'a> {
     fn inline(&mut self, event: Event<'a>, spans: &mut Vec<Span>, style: &mut Marks) {
         match event {
             Event::Text(t) => push_text(spans, &style.span(), &t),
-            Event::Code(t) | Event::InlineMath(t) | Event::DisplayMath(t) => {
+            Event::Code(t) => {
                 let s = Span { code: true, ..style.span() };
                 push_text(spans, &s, &t);
             }
+            Event::InlineMath(t) => push_math(spans, style, &t, false),
+            Event::DisplayMath(t) => push_math(spans, style, &t, true),
             Event::Start(Tag::Strong) => style.bold += 1,
             Event::End(TagEnd::Strong) => style.bold = style.bold.saturating_sub(1),
             Event::Start(Tag::Emphasis) => style.italic += 1,
@@ -655,7 +673,13 @@ impl<'a> Builder<'a> {
                 _ => {}
             }
         }
-        Block::Code { lang, text: text.trim_end().to_string() }
+        let text = text.trim_end().to_string();
+        if lang.as_deref() == Some("math") {
+            if let Some(formula) = math::typeset(text.trim(), true) {
+                return Block::Math(formula);
+            }
+        }
+        Block::Code { lang, text }
     }
 
     fn table(&mut self, aligns: Vec<Alignment>) -> Block {
@@ -760,24 +784,55 @@ fn push_image(spans: &mut Vec<Span>, style: &Marks, image: Image) {
     push_text(spans, &s, &image.alt);
 }
 
+/// A formula, typeset: in the line, or, `display`, as a paragraph takes
+/// it out to draw on a line of its own. GitHub's `` $`…`$ `` comes as
+/// the code span between the dollars. One that cannot be set is its
+/// TeX, as code.
+fn push_math(spans: &mut Vec<Span>, style: &Marks, tex: &str, display: bool) {
+    let tex = match tex.strip_prefix('`').and_then(|t| t.strip_suffix('`')) {
+        Some(inner) if !display => inner,
+        _ => tex,
+    };
+    let tex = tex.trim();
+    match math::typeset(tex, display) {
+        Some(formula) => spans.push(Span { text: tex.to_string(), math: Some(formula), ..style.span() }),
+        None => push_text(spans, &Span { code: true, ..style.span() }, tex),
+    }
+}
+
+/// Whether a run is a formula on a line of its own.
+fn is_display(span: &Span) -> bool {
+    span.math.as_ref().is_some_and(|formula| formula.display)
+}
+
+/// The text a run puts in the line: none for a formula, which is a box
+/// there.
+fn shown(span: &Span) -> &str {
+    if span.math.is_some() {
+        ""
+    } else {
+        &span.text
+    }
+}
+
 /// The last part of an address's path: what a picture with no alt text
 /// is called.
 fn file_name(src: &str) -> String {
     src.trim_end_matches('/').rsplit('/').next().unwrap_or(src).to_string()
 }
 
-/// A paragraph with its pictures taken out to be drawn, each on a line of
-/// its own: the text before, between and after them is a paragraph of
-/// its own, with the white space at its ends left off.
+/// A paragraph with its pictures and display math taken out to be drawn,
+/// each on a line of its own: the text before, between and after them is
+/// a paragraph of its own, with the white space at its ends left off.
 fn paragraphs(spans: Vec<Span>) -> Vec<Block> {
     let mut out = Vec::new();
     let mut text: Vec<Span> = Vec::new();
     let flush = |text: &mut Vec<Span>, out: &mut Vec<Block>| {
         let mut run = std::mem::take(text);
-        if let Some(first) = run.first_mut() {
+        if let Some(first) = run.first_mut().filter(|span| span.math.is_none()) {
             first.text = first.text.trim_start().to_string();
         }
-        if let Some(last) = run.last_mut() {
+        if let Some(last) = run.last_mut().filter(|span| span.math.is_none()) {
             last.text = last.text.trim_end().to_string();
         }
         run.retain(|span| !span.text.is_empty());
@@ -785,13 +840,18 @@ fn paragraphs(spans: Vec<Span>) -> Vec<Block> {
             out.push(Block::Paragraph(run));
         }
     };
-    if spans.iter().all(|span| span.image.is_none()) {
+    if spans.iter().all(|span| span.image.is_none() && !is_display(span)) {
         if !spans.is_empty() {
             out.push(Block::Paragraph(spans));
         }
         return out;
     }
     for span in spans {
+        if let Some(formula) = span.math.clone().filter(|formula| formula.display) {
+            flush(&mut text, &mut out);
+            out.push(Block::Math(formula));
+            continue;
+        }
         match span.image {
             Some(image) => {
                 flush(&mut text, &mut out);
@@ -1545,8 +1605,8 @@ fn gap_before(prev: &Block, block: &Block) -> f64 {
             _ => 0.0,
         },
         (
-            Block::Paragraph(_) | Block::Details { .. } | Block::Image(_),
-            Block::Paragraph(_) | Block::Details { .. } | Block::Image(_),
+            Block::Paragraph(_) | Block::Details { .. } | Block::Image(_) | Block::Math(_),
+            Block::Paragraph(_) | Block::Details { .. } | Block::Image(_) | Block::Math(_),
         ) => 4.0,
         (Block::Paragraph(_), Block::List { .. } | Block::Table { .. } | Block::Quote { .. }) => 1.0,
         _ => 2.0,
@@ -1579,6 +1639,7 @@ fn block_view(block: Block, ctx: Ctx) -> AnyView {
             ctx.refs,
         ),
         Block::Image(image) => image_view(image, ctx),
+        Block::Math(formula) => math::display(formula, f64::from(ctx.size * math::SCALE), ctx.color).into_any(),
         Block::Heading { level, spans } => heading_view(level, spans, ctx),
         Block::Quote { alert: None, blocks } => stack(blocks, Ctx { color: theme::fg_muted, ..ctx })
             .style(|s| s.padding_left(10.0).border_left(3.0).border_color(theme::border()))
@@ -2111,10 +2172,10 @@ fn prose_view(
 ) -> AnyView {
     let plan = plan(&spans, refs);
     linked_run(plan, refs, move |links| {
-        let (text, _, links, _) = layout(&spans, size, weight, color, leading, links);
+        let (text, _, links, _, formulas) = layout(&spans, size, weight, color, leading, links);
         let (spans, styled_links) = (spans.clone(), links.clone());
-        linked_text(text, links, move || {
-            let (_, attrs, _, strikes) = layout(&spans, size, weight, color, leading, styled_links.clone());
+        linked_text_with(text, links, formulas, move || {
+            let (_, attrs, _, strikes, _) = layout(&spans, size, weight, color, leading, styled_links.clone());
             (attrs, strikes)
         })
             .style(move |s| if fill { s.width_full() } else { s })
@@ -2131,7 +2192,7 @@ fn plan(spans: &[Span], refs: Option<Refs>) -> Plan {
     let mut urls: Vec<(Range<usize>, String)> = Vec::new();
     let mut at = 0;
     for span in spans {
-        let range = at..at + span.text.len();
+        let range = at..at + shown(span).len();
         at = range.end;
         if range.is_empty() {
             continue;
@@ -2158,8 +2219,9 @@ fn plan(spans: &[Span], refs: Option<Refs>) -> Plan {
 }
 
 /// The text of `spans` run together, the attributes over each styled
-/// byte range, the links as `links` has them, and the ranges to strike
-/// through in their text's colour. A link is drawn in the links' colour
+/// byte range, the links as `links` has them, the ranges to strike
+/// through in their text's colour, and the formulas in the line, each an
+/// inline box in the attributes. A link is drawn in the links' colour
 /// wherever it runs, a part of a code span as well as a whole span.
 #[allow(clippy::type_complexity)]
 fn layout(
@@ -2169,7 +2231,7 @@ fn layout(
     color: fn() -> Color,
     leading: LineHeightValue,
     links: Vec<(Range<usize>, Target)>,
-) -> (String, AttrsList, Vec<(Range<usize>, Target)>, Vec<Strike>) {
+) -> (String, AttrsList, Vec<(Range<usize>, Target)>, Vec<Strike>, Vec<Inline>) {
     let body: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::FONT_STACK).collect();
     let code: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect();
     let base = || {
@@ -2182,9 +2244,23 @@ fn layout(
     };
     let mut list = AttrsList::new(base());
     let mut strikes: Vec<Strike> = Vec::new();
+    let mut formulas: Vec<Inline> = Vec::new();
 
     let mut text = String::new();
     for span in spans {
+        if let Some(formula) = &span.math {
+            let em = f64::from(size * math::SCALE);
+            let (width, height, _) = formula.size_at(em);
+            list.add_inline_box(InlineBox {
+                id: formulas.len() as u64,
+                index: text.len(),
+                width: width as f32,
+                height: height as f32,
+            });
+            let ink: fn() -> Color = if span.link.is_some() { theme::link } else { color };
+            formulas.push(Inline { index: text.len(), formula: formula.clone(), em, ink });
+            continue;
+        }
         let start = text.len();
         text.push_str(&span.text);
         let range = start..text.len();
@@ -2229,7 +2305,7 @@ fn layout(
             }
         }
     }
-    (text, list, links, strikes)
+    (text, list, links, strikes, formulas)
 }
 
 #[cfg(test)]
@@ -2253,7 +2329,7 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn laid(spans: &[Span]) -> (String, Vec<(Range<usize>, Target)>, Vec<Strike>) {
         let links = plan(spans, None).links;
-        let (text, _, links, strikes) =
+        let (text, _, links, strikes, _) =
             layout(spans, 14.0, theme::weight_body(), theme::fg, prose_leading(14.0), links);
         (text, links, strikes)
     }
@@ -2284,6 +2360,88 @@ mod tests {
         assert_eq!(blocks[2], Block::List { start: None, tight: true, items: vec![item("bullet")] });
         assert_eq!(blocks[3], Block::Code { lang: Some("rust".into()), text: "let a = 1;".into() });
         assert_eq!(blocks[4], Block::Quote { alert: None, blocks: vec![paragraph("note")] });
+    }
+
+    /// The TeX of each formula in `spans`, and whether it is display math.
+    fn formulas(spans: &[Span]) -> Vec<(String, bool)> {
+        spans
+            .iter()
+            .filter_map(|s| Some((s.math.as_ref()?.source.clone(), s.math.as_ref()?.display)))
+            .collect()
+    }
+
+    #[test]
+    fn dollars_around_tex_are_a_formula_in_the_line() {
+        let Block::Paragraph(spans) = &parse("I pay $O(memtablesize)$ in that case.")[0] else { panic!() };
+        assert_eq!(formulas(spans), vec![("O(memtablesize)".to_string(), false)]);
+        assert_eq!(spans[0].text, "I pay ");
+        assert_eq!(spans[2].text, " in that case.");
+        // GitHub's other spelling is the same formula.
+        let Block::Paragraph(spans) = &parse("so $`a+b`$ here")[0] else { panic!() };
+        assert_eq!(formulas(spans), vec![("a+b".to_string(), false)]);
+    }
+
+    #[test]
+    fn prices_are_not_math() {
+        assert_eq!(parse("costs $5 and $10 total"), vec![paragraph("costs $5 and $10 total")]);
+        assert_eq!(parse("a $ b $ c"), vec![paragraph("a $ b $ c")]);
+        assert_eq!(parse(r"escaped \$x\$"), vec![paragraph("escaped $x$")]);
+        assert_eq!(
+            spans_of("`$x$` in code"),
+            vec![Span { text: "$x$".into(), code: true, ..Default::default() }, plain(" in code")]
+        );
+    }
+
+    #[test]
+    fn tex_that_cannot_be_set_is_shown_as_code() {
+        assert_eq!(
+            spans_of(r"see $\nosuch{x}$ here"),
+            vec![
+                plain("see "),
+                Span { text: r"\nosuch{x}".into(), code: true, ..Default::default() },
+                plain(" here"),
+            ]
+        );
+    }
+
+    #[test]
+    fn display_math_is_a_block_of_its_own_from_dollars_or_a_fence() {
+        let blocks = parse("Before $$\\sum_i x_i$$ after\n\n$$\nx = 1\n$$\n\n```math\ny^2\n```");
+        let shown: Vec<String> = blocks
+            .iter()
+            .map(|b| match b {
+                Block::Paragraph(spans) => format!("p:{}", spans.iter().map(|s| s.text.as_str()).collect::<String>()),
+                Block::Math(f) => format!("m:{}:{}", f.source, f.display),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(shown, vec!["p:Before", "m:\\sum_i x_i:true", "p:after", "m:x = 1:true", "m:y^2:true"]);
+        // A fence of math that cannot be set is the code it is.
+        assert_eq!(
+            parse("```math\n\\nosuch\n```"),
+            vec![Block::Code { lang: Some("math".into()), text: "\\nosuch".into() }]
+        );
+    }
+
+    #[test]
+    fn a_formula_takes_no_text_and_a_box_its_place() {
+        let spans = spans_of("pay $O(n)$ for [it](https://x.dev) now");
+        let (text, links, _) = laid(&spans);
+        assert_eq!(text, "pay  for it now");
+        // The link's range is in the text the line holds.
+        assert_eq!(links.len(), 1);
+        assert_eq!(&text[links[0].0.clone()], "it");
+        let plan = plan(&spans, None);
+        let (_, attrs, _, _, formulas) =
+            layout(&spans, 14.0, theme::weight_body(), theme::fg, prose_leading(14.0), plan.links);
+        assert_eq!(formulas.len(), 1);
+        assert_eq!(formulas[0].index, 4);
+        let boxes = attrs.inline_boxes();
+        assert_eq!(boxes.len(), 1);
+        assert_eq!((boxes[0].id, boxes[0].index), (0, 4));
+        let (width, height, _) = formulas[0].formula.size_at(f64::from(14.0 * math::SCALE));
+        assert!((f64::from(boxes[0].width) - width).abs() < 0.01);
+        assert!((f64::from(boxes[0].height) - height).abs() < 0.01);
     }
 
     #[test]
@@ -2953,7 +3111,7 @@ mod tests {
     fn a_link_inside_a_code_span_is_drawn_as_a_link_and_the_rest_as_code() {
         let spans = spans_of("A `regular: Option<WalGcPolicy>` field");
         let links = vec![(18..29, local("src/gc.rs:3"))];
-        let (text, attrs, links, _) =
+        let (text, attrs, links, _, _) =
             layout(&spans, 14.0, theme::weight_body(), theme::fg, prose_leading(14.0), links);
         assert_eq!(&text[18..29], "WalGcPolicy");
         assert_eq!(links.len(), 1);
