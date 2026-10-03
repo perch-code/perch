@@ -900,6 +900,14 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 .custom_style_class(|s: floem::views::LabelCustomStyle| {
                     s.selection_color(theme::selection_bg())
                 })
+                // The caret in every field and editor. floem's own is 30%
+                // black, which a dark window hides.
+                .class(floem::views::TextInputClass, |s| {
+                    s.cursor_color(theme::fg())
+                })
+                .class(floem::views::editor::view::EditorViewClass, |s| {
+                    s.cursor_color(theme::fg())
+                })
                 // Every scroll's bars as macOS's own: when it overlays
                 // them, there while the view scrolls and while the pointer
                 // is on one, and fading out once it stops.

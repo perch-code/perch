@@ -1253,7 +1253,6 @@ fn query_box(state: ReviewState) -> impl IntoView {
                 .border_color(theme::border())
                 .border_radius(crate::ui::menu::ROW_RADIUS)
                 .focus(|s| s.border_color(theme::accent()))
-                .cursor_color(theme::fg())
                 .set(SelectionColor, Brush::Solid(theme::selection_bg()))
                 .class(PlaceholderTextClass, |s| s.color(theme::fg_subtle()))
         });

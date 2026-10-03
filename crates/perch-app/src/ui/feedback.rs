@@ -1523,6 +1523,41 @@ mod tests {
         );
     }
 
+    /// The title's caret and the description's draw in the text colour,
+    /// light or dark. floem's own was 30% black, gone on a dark window
+    /// (criccomini/perch#8).
+    #[test]
+    fn the_carets_show_in_the_dark() {
+        use floem::peniko::Brush;
+        use floem::style::{CursorColor, StyleProp};
+
+        fn carets(harness: &HeadlessHarness, id: floem::ViewId, out: &mut Vec<Brush>) {
+            let caret = harness.get_computed_style(id).get(CursorColor);
+            if caret != CursorColor::default_value() {
+                out.push(caret);
+            }
+            for child in id.children() {
+                carets(harness, child, out);
+            }
+        }
+
+        let (mut harness, app, review, _commands) = empty_window();
+        open(app, review, FeedbackKind::Bug, None);
+        settle(&mut harness);
+        crate::theme::set_appearance(crate::theme::Appearance::Dark);
+        settle(&mut harness);
+        let fg = Brush::Solid(theme::fg());
+        let found = ["feedback-title", "feedback-body"].map(|name| {
+            let mut found = Vec::new();
+            carets(&harness, named(harness.root_id(), name).unwrap(), &mut found);
+            (name, found)
+        });
+        crate::theme::set_appearance(crate::theme::Appearance::Light);
+        for (name, found) in found {
+            assert_eq!(found, std::slice::from_ref(&fg), "{name}");
+        }
+    }
+
     #[test]
     fn send_feedback_opens_an_idea_unless_a_draft_is_there() {
         let (mut harness, app, review, _commands) = empty_window();
