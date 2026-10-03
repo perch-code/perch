@@ -3743,6 +3743,19 @@ async fn run(
     };
     send_agent_runs(&ctx, 50);
     reviews::recover(&ctx).await;
+    // A language server grows as it loads, so whether the kept ones fit
+    // beside the ones on show is looked at again every little while, not
+    // only when one is set aside.
+    {
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(SERVER_MEMORY_CHECK);
+            loop {
+                tick.tick().await;
+                trim_language_servers(&ctx).await;
+            }
+        });
+    }
     // A discussion directory no run points at is left by a run whose
     // admission failed, or by `perch --ask`. A day is long enough for
     // either to be done with it.
@@ -5335,6 +5348,21 @@ fn spawn_calls(
         });
         let _ = events.send(Event::LspCalls { token, calls: Ok(calls) });
     });
+}
+
+/// How often the language servers' memory is checked against
+/// `[lsp] max_memory_mb`.
+const SERVER_MEMORY_CHECK: Duration = Duration::from_secs(10);
+
+/// Stop kept language servers while every server, in every window, uses
+/// more than `[lsp] max_memory_mb`. The ones on show stay.
+async fn trim_language_servers(ctx: &Ctx) {
+    let mut active = Vec::new();
+    for view in ctx.views() {
+        active.extend(view.language_servers.lock().await.values().cloned());
+    }
+    let budget_kb = ctx.config().lsp.max_memory_mb.saturating_mul(1024);
+    ctx.kept_servers.trim(budget_kb, &active).await;
 }
 
 /// A window's language servers for the worktree it shows, one of each

@@ -706,6 +706,10 @@ async fn language_servers(ctx: &Ctx, request: &PrepareRequest) -> Vec<String> {
     } else {
         format!("Other language server processes: {}", others.join("; "))
     });
+    lines.push(format!(
+        "Memory budget: {} (lsp.max_memory_mb)",
+        megabytes(ctx.config().lsp.max_memory_mb.saturating_mul(1024))
+    ));
     lines
 }
 

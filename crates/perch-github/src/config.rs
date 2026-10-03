@@ -25,6 +25,9 @@ pub struct Config {
     /// `[work]`: how new work is set up in every repository.
     #[serde(default)]
     pub work: WorkDefaults,
+    /// `[lsp]`: the language servers Perch runs.
+    #[serde(default)]
+    pub lsp: LspConfig,
     /// The old `[[project]]` key. Read only so `load` can refuse the file
     /// by name: with no field for it, toml would drop the table without a
     /// word and the reader would see an empty sidebar and no reason.
@@ -199,6 +202,29 @@ pub fn is_local(identity: &str) -> bool {
     match identity.split_once('/') {
         Some((owner, _)) => owner.eq_ignore_ascii_case(LOCAL_OWNER),
         None => false,
+    }
+}
+
+/// `[lsp]`: the language servers Perch runs.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct LspConfig {
+    /// What every language server Perch runs may use between them, in
+    /// megabytes, before the ones kept for a return to an earlier item are
+    /// stopped, oldest first. The ones on show are never stopped, so the
+    /// total can stay above this.
+    #[serde(default = "default_max_memory_mb")]
+    pub max_memory_mb: u64,
+}
+
+fn default_max_memory_mb() -> u64 {
+    8 * 1024
+}
+
+impl Default for LspConfig {
+    fn default() -> Self {
+        Self {
+            max_memory_mb: default_max_memory_mb(),
+        }
     }
 }
 
@@ -781,6 +807,7 @@ impl Config {
             github_host: None,
             repo: Vec::new(),
             work: WorkDefaults::default(),
+            lsp: LspConfig::default(),
             project: Vec::new(),
             warnings: Vec::new(),
         }
@@ -968,6 +995,15 @@ network = ["index.crates.io"]
         assert_eq!(c.agent.effort, "low");
         assert_eq!(c.agent.model, "opus");
         assert_eq!(c.agent.max_concurrent_runs, 7);
+    }
+
+    #[test]
+    fn the_lsp_memory_budget_defaults_and_overrides() {
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.lsp.max_memory_mb, 8192);
+        assert_eq!(Config::fallback().lsp.max_memory_mb, 8192);
+        let c: Config = toml::from_str("[lsp]\nmax_memory_mb = 4096").unwrap();
+        assert_eq!(c.lsp.max_memory_mb, 4096);
     }
 
     #[test]

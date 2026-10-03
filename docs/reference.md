@@ -358,6 +358,19 @@ names cargo's caches and not `~/.cargo`: `~/.cargo/config.toml` and
 entry that is or holds the home directory or `~/.perch`, or that is in or
 holds a root's `.git`, is left out, with a notice at startup.
 
+A language server is kept running for a while after its item is left, so
+going back to it doesn't wait for the workspace to load again: two at most,
+ten minutes each. On a large workspace each can hold several gigabytes, so
+`[lsp]` caps what every server uses between them:
+
+```toml
+[lsp]
+max_memory_mb = 8192           # the default
+```
+
+Past it, the kept servers are stopped, oldest first. The ones on show never
+are, so their own total can go over.
+
 Perch's database, avatars, managed clones, worktrees, and agent state live
 under `~/.perch`. The database also holds local items, conversations, and
 review state, so it is not disposable. GitHub notifications and fetched
