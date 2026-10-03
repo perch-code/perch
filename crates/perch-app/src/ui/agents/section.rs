@@ -204,7 +204,7 @@ pub fn section(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
         // Perch's own runs, so on Perch's grey, as the reader's threads are.
         .style(move |s| {
             crate::review::cards::perch_surface(s.flex_col().width_full())
-                .margin_top(theme::CARD_GAP)
+                .margin_top(theme::CONVERSATION_ENTRY_PADDING)
                 .apply_if(!present(app, review), |s| s.hide())
         })
 }
