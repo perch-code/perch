@@ -1691,6 +1691,11 @@ pub struct ReviewState {
     pub approvals: RwSignal<Vec<crate::backend::ApprovalView>>,
     /// Each repository's grants, by its identity in lower case.
     pub grants: RwSignal<HashMap<String, Vec<perch_github::WorkGrantRecord>>>,
+    /// Who each repository's issues and pull requests can be assigned
+    /// to, by its identity in lower case, when the reader may assign
+    /// them; none when they may not, and absent until GitHub says.
+    pub assignable:
+        RwSignal<HashMap<String, Option<Arc<Vec<perch_github::MentionableUser>>>>>,
     /// The destination last sent from each face, by `ThreadFace::index`:
     /// inline in the code, and on Conversation. A new composer on lines
     /// starts on its face's. Kept for the app's life, as `agent_last` is.
@@ -2038,6 +2043,7 @@ impl ReviewState {
             run_changes: RwSignal::new(HashMap::new()),
             approvals: RwSignal::new(Vec::new()),
             grants: RwSignal::new(HashMap::new()),
+            assignable: RwSignal::new(HashMap::new()),
             last_destination: [RwSignal::new(None), RwSignal::new(None)],
             agent: RwSignal::new(perch_github::AgentConfig::default()),
             hovered_line: RwSignal::new(None),

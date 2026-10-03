@@ -1049,7 +1049,7 @@ fn review_decision(decision: &str) -> Option<ReviewDecision> {
     }
 }
 
-fn repository_permission(permission: &str) -> RepositoryPermission {
+pub(crate) fn repository_permission(permission: &str) -> RepositoryPermission {
     match permission {
         "ADMIN" => RepositoryPermission::Admin,
         "MAINTAIN" => RepositoryPermission::Maintain,

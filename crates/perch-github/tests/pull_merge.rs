@@ -617,3 +617,75 @@ async fn whether_the_reader_may_close_an_issue_is_asked_of_graphql() {
         serde_json::json!({ "owner": "a", "name": "b", "number": 7 })
     );
 }
+
+#[tokio::test]
+async fn who_may_be_assigned_is_asked_with_the_readers_permission() {
+    let (base, requests) = spawn(vec![
+        Response::new(
+            "200 OK",
+            r#"{"data":{"repository":{"viewer_permission":"TRIAGE","assignable_users":{"nodes":[{"login":"criccomini","name":"Chris","avatar_url":"https://avatars/1"}]}}}}"#,
+        ),
+        Response::new(
+            "200 OK",
+            r#"{"data":{"repository":{"viewer_permission":"READ","assignable_users":{"nodes":[]}}}}"#,
+        ),
+    ]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let users = github.assignable_users("a/b", 100).await.unwrap().unwrap();
+    assert_eq!(users[0].login, "criccomini");
+    assert_eq!(github.assignable_users("a/b", 100).await.unwrap(), None);
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests[0].path, "/graphql");
+    let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    let query = body["query"].as_str().unwrap();
+    assert!(query.contains("viewerPermission") && query.contains("assignableUsers"));
+    assert_eq!(
+        body["variables"],
+        serde_json::json!({ "owner": "a", "name": "b", "first": 100 })
+    );
+}
+
+#[tokio::test]
+async fn assigning_posts_and_unassigning_deletes_and_github_answers_who_is_assigned() {
+    let issue = |assignees: &str| {
+        format!(
+            r#"{{"number":7,"title":"t","state":"open","assignees":[{assignees}],"updated_at":"2026-10-03T10:00:00Z"}}"#
+        )
+    };
+    let (base, requests) = spawn(vec![
+        Response::new("201 Created", issue(r#"{"login":"rohan"},{"login":"criccomini"}"#)),
+        Response::new("200 OK", issue(r#"{"login":"rohan"}"#)),
+    ]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let assigned = github
+        .set_assignees("a/b", 7, &["criccomini".to_string()], true)
+        .await
+        .unwrap();
+    assert_eq!(assigned.assignees, vec!["rohan", "criccomini"]);
+    let unassigned = github
+        .set_assignees("a/b", 7, &["criccomini".to_string()], false)
+        .await
+        .unwrap();
+    assert_eq!(unassigned.assignees, vec!["rohan"]);
+    assert_eq!(
+        unassigned.updated_at,
+        "2026-10-03T10:00:00Z".parse::<jiff::Timestamp>().unwrap()
+    );
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        (requests[0].method.as_str(), requests[0].path.as_str()),
+        ("POST", "/repos/a/b/issues/7/assignees")
+    );
+    assert_eq!(
+        (requests[1].method.as_str(), requests[1].path.as_str()),
+        ("DELETE", "/repos/a/b/issues/7/assignees")
+    );
+    for request in requests.iter() {
+        let body: serde_json::Value = serde_json::from_str(&request.body).unwrap();
+        assert_eq!(body, serde_json::json!({ "assignees": ["criccomini"] }));
+    }
+}

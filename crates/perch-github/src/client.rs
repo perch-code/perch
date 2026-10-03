@@ -1383,6 +1383,66 @@ impl GitHub {
             .ok_or_else(|| Error::Decode(format!("GitHub has no issue {repo_full_name}#{number}")))
     }
 
+    /// The repository's assignable users, at most `first` of them, when
+    /// the reader may assign them; none when they may not. GitHub lets
+    /// triage access and more assign, whoever opened the issue.
+    pub async fn assignable_users(
+        &self,
+        repo_full_name: &str,
+        first: usize,
+    ) -> Result<Option<Vec<crate::MentionableUser>>, Error> {
+        let (owner, name) = repo_parts(repo_full_name)?;
+        let payload = serde_json::json!({
+            "query": crate::assignees::assignable_query(),
+            "variables": { "owner": owner, "name": name, "first": first.clamp(1, 100) },
+        });
+        let data: crate::assignees::AssignableData =
+            self.graphql(&payload, "assignable users").await?;
+        Ok(data.into_assignable())
+    }
+
+    /// Assign `logins` to an issue or pull request, or take them off it
+    /// when `assign` is false: `POST` or `DELETE /issues/{number}/assignees`,
+    /// which leave anyone else assigned as they were and answer with the
+    /// issue. GitHub drops a login it will not assign without a word, so
+    /// the answer is the one to believe.
+    pub async fn set_assignees(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+        logins: &[String],
+        assign: bool,
+    ) -> Result<crate::Assigned, Error> {
+        let (owner, name) = repo_parts(repo_full_name)?;
+
+        #[derive(serde::Serialize)]
+        struct Request<'a> {
+            assignees: &'a [String],
+        }
+
+        let path = format!("/repos/{owner}/{name}/issues/{number}/assignees");
+        let request = Request { assignees: logins };
+        let _request_guard = self.api_permit().await;
+        self.check_rate_limit()?;
+        let (response, method, expected) = if assign {
+            let response = self.octo._post(&path, Some(&request)).await;
+            (response, "POST", StatusCode::CREATED)
+        } else {
+            let response = self.octo._delete(&path, Some(&request)).await;
+            (response, "DELETE", StatusCode::OK)
+        };
+        let response = response.map_err(map_octocrab_error)?;
+        let body = self
+            .finish_response(response, &[expected, StatusCode::OK], &format!("{method} {path}"))
+            .await?;
+        let payload: IssuePayload =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        Ok(crate::Assigned {
+            assignees: payload.assignees.into_iter().map(|u| u.login).collect(),
+            updated_at: payload.updated_at,
+        })
+    }
+
     /// Whether a number in a repository is a pull request or an issue.
     /// GitHub numbers the two together, and the issues endpoint answers
     /// for both, with a `pull_request` key on a pull request.

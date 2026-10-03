@@ -8,12 +8,13 @@
 //! rail, since the summary is Conversation's alone.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use floem::prelude::*;
 use floem::reactive::{Memo, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
 use floem::views::{dyn_container, dyn_stack, Container, Decorators, Empty, Label, Stack};
-use perch_github::{CheckState, Item, ItemKind, ItemSubject, SubjectState};
+use perch_github::{CheckState, Item, ItemKind, ItemSubject, MentionableUser, SubjectState};
 
 use crate::backend::Backend;
 use crate::icons::{self, SidebarIcon};
@@ -23,7 +24,7 @@ use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
 use crate::ui::items::OpenItem;
-use crate::ui::menu::MenuExt;
+use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::widgets::{
     avatar, badge_box, badge_text, clickable, name_label, open_in_browser, sidebar_glyph,
     worktree_menu, Name,
@@ -76,6 +77,31 @@ pub fn summary(
             .collect::<Vec<_>>()
     });
     let grants_backend = backend.clone();
+    // Who the item can be assigned to, when the reader may assign: asked
+    // as an issue or a pull request opens, a repository at a time.
+    let assign_repo = Memo::new(move |_| {
+        state.item.with(|item| {
+            item.as_ref()
+                .filter(|item| item.subject.is_some())
+                .map(|item| item.repo_full_name.clone())
+        })
+    });
+    {
+        let backend = backend.clone();
+        floem::reactive::Effect::new(move |_| {
+            if let Some(repo) = assign_repo.get() {
+                backend.assignable_users(&repo);
+            }
+        });
+    }
+    let assignable = Memo::new(move |_| {
+        assign_repo.get().and_then(|repo| {
+            state
+                .assignable
+                .with(|all| all.get(&repo.to_lowercase()).cloned().flatten())
+        })
+    });
+    let assign_backend = backend.clone();
     Stack::vertical((
         notices(app, state, backend.clone()),
         dyn_row(
@@ -137,12 +163,28 @@ pub fn summary(
             |l| !l.is_empty(),
             |labels| chips(labels, |l| label_chip(l.name, l.color)),
         ),
+        // Shown with nobody in it too when the reader may assign, for
+        // the Assign menu.
         dyn_row(
             SidebarIcon::Person,
             "Assignees",
-            move || data.with(|d| d.assignees.clone()),
-            |a| !a.is_empty(),
-            move |logins| assignees(app, logins),
+            move || (data.with(|d| d.assignees.clone()), assignable.with(Option::is_some)),
+            |(logins, may_assign)| !logins.is_empty() || *may_assign,
+            move |(logins, may_assign)| {
+                let nobody = logins.is_empty();
+                Stack::horizontal((
+                    assignees(app, logins)
+                        .style(move |s| s.min_width(0.0).apply_if(nobody, |s| s.hide())),
+                    assign_button(app, state, assign_backend.clone(), assignable)
+                        .style(move |s| s.apply_if(!may_assign, |s| s.hide())),
+                ))
+                .style(|s| {
+                    s.items_center()
+                        .flex_wrap(floem::taffy::FlexWrap::Wrap)
+                        .gap(10.0)
+                        .min_width(0.0)
+                })
+            },
         ),
         dyn_row(
             SidebarIcon::Milestone,
@@ -1160,6 +1202,116 @@ fn assignees(app: AppState, logins: Vec<String>) -> impl IntoView {
     })
 }
 
+/// Who the open issue or pull request is assigned to.
+fn assignees_of(state: ReviewState) -> Vec<String> {
+    state
+        .pull_request
+        .with_untracked(|p| p.as_ref().map(|p| p.assignees.clone()))
+        .or_else(|| state.issue.with_untracked(|i| i.as_ref().map(|i| i.assignees.clone())))
+        .unwrap_or_default()
+}
+
+/// Assign, after the assignees: a menu of who can be.
+fn assign_button(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    assignable: Memo<Option<Arc<Vec<MentionableUser>>>>,
+) -> impl IntoView {
+    Stack::horizontal((
+        Label::derived(|| "Assign".to_string()).style(|s| {
+            s.font_size(theme::TEXT_BADGE)
+                .color(theme::fg_muted())
+                .pointer_events_none()
+        }),
+        sidebar_glyph(SidebarIcon::ChevronDown, theme::fg_subtle).style(|s| {
+            s.size(10.0, 10.0)
+                .margin_left(5.0)
+                .flex_shrink(0.0_f32)
+                .pointer_events_none()
+        }),
+    ))
+    .dropdown(move || {
+        let users = assignable.get_untracked().unwrap_or_default();
+        let viewer = app
+            .viewer
+            .with_untracked(|v| v.as_ref().map(|(login, _)| login.clone()));
+        let item_id = state
+            .item
+            .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+            .unwrap_or_default();
+        let backend = backend.clone();
+        assign_menu(
+            viewer.as_deref(),
+            &assignees_of(state),
+            &users,
+            Rc::new(move |login: String, assign: bool| {
+                backend.set_assigned(&item_id, &login, assign);
+            }),
+        )
+    })
+    .debug_name("assign menu")
+    .style(|s| {
+        s.items_center()
+            .height(22.0)
+            .padding_horiz(8.0)
+            .background(theme::canvas())
+            .border(1.0)
+            .border_color(theme::border_muted())
+            .border_radius(theme::RADIUS)
+            .flex_shrink(0.0_f32)
+            .selectable(false)
+            .hover(|s| {
+                s.background(theme::canvas_hover())
+                    .cursor(CursorStyle::Pointer)
+            })
+    })
+}
+
+/// The Assign menu: the reader first, then whoever is assigned, then the
+/// rest of the repository's assignable users in GitHub's order, each
+/// checked while assigned and named after their login. Picking one
+/// assigns them or takes them off. GitHub assigns ten at most, so with
+/// ten the rest are greyed.
+fn assign_menu(
+    viewer: Option<&str>,
+    assigned: &[String],
+    users: &[MentionableUser],
+    set: Rc<dyn Fn(String, bool)>,
+) -> Menu {
+    let name_of = |login: &str| {
+        users
+            .iter()
+            .find(|u| u.login.eq_ignore_ascii_case(login))
+            .and_then(|u| u.name.clone())
+    };
+    let mut people: Vec<(String, Option<String>)> = Vec::new();
+    let candidates = viewer
+        .into_iter()
+        .chain(assigned.iter().map(String::as_str))
+        .chain(users.iter().map(|u| u.login.as_str()));
+    for login in candidates {
+        if !people.iter().any(|(l, _)| l.eq_ignore_ascii_case(login)) {
+            people.push((login.to_string(), name_of(login)));
+        }
+    }
+    let full = assigned.len() >= perch_github::MAX_ASSIGNEES;
+    people.into_iter().fold(Menu::new(), |menu, (login, name)| {
+        let on = assigned.iter().any(|a| a.eq_ignore_ascii_case(&login));
+        let set = set.clone();
+        menu.item(login.clone(), move |item| {
+            let item = item
+                .checked(on)
+                .enabled(on || !full)
+                .action(move || set(login.clone(), !on));
+            match name {
+                Some(name) => item.detail(name),
+                None => item,
+            }
+        })
+    })
+}
+
 fn milestone(name: String) -> impl IntoView {
     Label::derived(move || name.clone()).style(|s| {
         s.font_size(theme::TEXT_BADGE)
@@ -1588,6 +1740,131 @@ mod tests {
             "{:?}",
             state.preparing.get()
         );
+    }
+
+    fn user(login: &str, name: Option<&str>) -> MentionableUser {
+        MentionableUser {
+            login: login.into(),
+            name: name.map(Into::into),
+            avatar_url: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_assign_menu_has_the_reader_then_the_assigned_then_the_rest_and_picking_toggles() {
+        let picked = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let set: Rc<dyn Fn(String, bool)> = {
+            let picked = picked.clone();
+            Rc::new(move |login, assign| picked.borrow_mut().push((login, assign)))
+        };
+        let users = [
+            user("agavra", Some("Almog")),
+            user("cadonna", None),
+            user("criccomini", Some("Chris")),
+            user("rohan", None),
+        ];
+        // Rohan is assigned; Fivo has lost access but stays, to be taken off.
+        let assigned = ["rohan".to_string(), "FiV0".to_string()];
+        let menu = assign_menu(Some("criccomini"), &assigned, &users, set.clone());
+        assert_eq!(
+            menu.outline(),
+            ["criccomini", "✓ rohan", "✓ FiV0", "agavra", "cadonna"]
+        );
+        menu.choose("criccomini");
+        menu.choose("rohan");
+        menu.choose("FiV0");
+        assert_eq!(
+            *picked.borrow(),
+            [
+                ("criccomini".to_string(), true),
+                ("rohan".to_string(), false),
+                ("FiV0".to_string(), false),
+            ]
+        );
+
+        // Ten assigned is GitHub's most: the rest are greyed, and the ten
+        // can still be taken off.
+        let ten: Vec<String> = (0..10).map(|n| format!("u{n}")).collect();
+        let menu = assign_menu(Some("criccomini"), &ten, &users, set);
+        let outline = menu.outline();
+        assert_eq!(outline[0], "(criccomini)");
+        assert_eq!(outline[1], "✓ u0");
+        assert_eq!(outline.last().unwrap(), "(rohan)");
+    }
+
+    #[test]
+    fn the_assignees_row_offers_assign_once_github_says_the_reader_may() {
+        let (mut harness, _, state) = issue_harness();
+        assert!(
+            !rows_shown(&harness).contains(&"Assignees".to_string()),
+            "nobody assigned and no word from GitHub: no row"
+        );
+        // Read access: still no row.
+        state.assignable.update(|all| {
+            all.insert("slatedb/slatedb".into(), None);
+        });
+        harness.rebuild();
+        harness.paint();
+        assert!(!rows_shown(&harness).contains(&"Assignees".to_string()));
+
+        state.assignable.update(|all| {
+            all.insert("slatedb/slatedb".into(), Some(Arc::new(vec![user("criccomini", None)])));
+        });
+        harness.rebuild();
+        harness.paint();
+        assert!(rows_shown(&harness).contains(&"Assignees".to_string()));
+        let row = rect(&harness, "summary row Assignees");
+        let button = rect(&harness, "assign menu");
+        assert!(within(button, row), "Assign at {button:?} is outside {row:?}");
+        assert_eq!(
+            button.x0,
+            row.x0 + theme::SUMMARY_NAME_WIDTH,
+            "with nobody assigned, Assign is where the values start"
+        );
+    }
+
+    #[test]
+    fn who_may_be_assigned_is_asked_as_an_issue_opens() {
+        let app = AppState::new();
+        let state = ReviewState::new();
+        let now = "2026-09-20T12:00:00Z".parse().unwrap();
+        let mut item = Item::new("slatedb/slatedb", now);
+        item.subject = Some(ItemSubject::Issue(perch_github::Issue {
+            node_id: String::new(),
+            reactions: Default::default(),
+            number: 2144,
+            title: "Linear seek".into(),
+            body: String::new(),
+            state: "open".into(),
+            state_reason: None,
+            author_login: "FiV0".into(),
+            author_avatar_url: String::new(),
+            labels: Vec::new(),
+            assignees: Vec::new(),
+            comments: 0,
+            created_at: None,
+            updated_at: now,
+            repo_full_name: "slatedb/slatedb".into(),
+        }));
+        state.item.set(Some(Arc::new(item)));
+        state.ready.set(true);
+        state.phase.set(crate::review::model::Phase::Issue);
+        state.composer_autofocus.set(false);
+        let (backend, mut commands) = Backend::recording();
+        let root = floem::headless::TestRoot::new();
+        let view = crate::ui::app_view(app, state, Rc::new(backend));
+        let mut harness = floem::headless::HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+        let mut asked = false;
+        while let Ok(command) = commands.try_recv() {
+            asked |= matches!(
+                command,
+                crate::backend::Command::AssignableUsers { ref repo_full_name }
+                    if repo_full_name == "slatedb/slatedb"
+            );
+        }
+        assert!(asked, "who may be assigned is asked as the issue opens");
     }
 
     #[test]

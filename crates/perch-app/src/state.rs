@@ -2826,6 +2826,16 @@ impl AppState {
                     });
                 }
             }
+            Event::AssignableUsers {
+                repo_full_name,
+                users,
+            } => {
+                if let Some(review) = self.review.get_untracked() {
+                    review.assignable.update(|all| {
+                        all.insert(repo_full_name.to_lowercase(), users);
+                    });
+                }
+            }
             Event::RunChanges { run_id, counts } => {
                 if let Some(review) = self.review.get_untracked() {
                     review.run_changes.update(|changes| {

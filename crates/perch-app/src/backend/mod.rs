@@ -231,6 +231,18 @@ pub enum Command {
         repo_full_name: String,
         query: String,
     },
+    /// Whether the reader may assign people in a repository, and who
+    /// can be, for the summary's Assignees. `AssignableUsers` answers.
+    AssignableUsers {
+        repo_full_name: String,
+    },
+    /// Assign `login` to the item's issue or pull request, or take them
+    /// off it when `assign` is false.
+    SetAssigned {
+        item_id: String,
+        login: String,
+        assign: bool,
+    },
     /// The issues and pull requests of the item's repository that
     /// `query` names, for the `#` a composer is suggesting them for.
     /// `IssueReferences` answers.
@@ -1152,6 +1164,12 @@ pub enum Event {
         query: String,
         users: Vec<perch_github::MentionableUser>,
     },
+    /// Who in a repository can be assigned, when the reader may assign
+    /// them; none when they may not.
+    AssignableUsers {
+        repo_full_name: String,
+        users: Option<Arc<Vec<perch_github::MentionableUser>>>,
+    },
     /// The issues and pull requests of the item's repository that
     /// matched `query`. Nothing when GitHub could not be asked.
     IssueReferences {
@@ -1525,6 +1543,7 @@ impl Event {
                 | Event::LspCalls { .. }
                 | Event::LspNames { .. }
                 | Event::MentionableUsers { .. }
+                | Event::AssignableUsers { .. }
                 | Event::IssueReferences { .. }
                 | Event::Notice(_)
                 | Event::Done(_)
@@ -2722,6 +2741,26 @@ impl Backend {
             item_id: item_id.to_string(),
             repo_full_name: repo_full_name.to_string(),
             query: query.to_string(),
+        });
+    }
+
+    /// Ask GitHub whether the reader may assign people in a repository,
+    /// and who can be. `AssignableUsers` answers; nothing does when
+    /// GitHub could not be asked.
+    pub fn assignable_users(&self, repo_full_name: &str) {
+        let _ = self.commands.send(Command::AssignableUsers {
+            repo_full_name: repo_full_name.to_string(),
+        });
+    }
+
+    /// Assign `login` to the item's issue or pull request, or take them
+    /// off it. The item comes back with GitHub's assignees; a refusal is
+    /// a notice.
+    pub fn set_assigned(&self, item_id: &str, login: &str, assign: bool) {
+        let _ = self.commands.send(Command::SetAssigned {
+            item_id: item_id.to_string(),
+            login: login.to_string(),
+            assign,
         });
     }
 
@@ -4218,6 +4257,22 @@ async fn run(
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     mentionable_users(&ctx, &item_id, &repo_full_name, &query).await;
+                });
+            }
+            Command::AssignableUsers { repo_full_name } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    assignable_users(&ctx, &repo_full_name).await;
+                });
+            }
+            Command::SetAssigned {
+                item_id,
+                login,
+                assign,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    set_assigned(&ctx, &item_id, &login, assign).await;
                 });
             }
             Command::IssueReferences {
@@ -9656,6 +9711,86 @@ async fn mentionable_users(ctx: &Ctx, item_id: &str, repo_full_name: &str, query
             query: query.to_string(),
             users,
         });
+    }
+}
+
+/// The most assignable users GitHub is asked for: as many as it gives in
+/// one page, which is every collaborator of most repositories.
+const ASSIGNABLE_USERS: usize = 100;
+
+/// Whether the reader may assign people in a repository, and who can be.
+/// A failure is quiet: the row stays as it was, without the menu.
+async fn assignable_users(ctx: &Ctx, repo_full_name: &str) {
+    let Some(github) = ctx.github() else {
+        return;
+    };
+    match github.assignable_users(repo_full_name, ASSIGNABLE_USERS).await {
+        Ok(users) => {
+            if let Some(users) = &users {
+                ctx.want_avatars(users.iter().map(|u| u.avatar_url.clone()));
+            }
+            let _ = ctx.events.send(Event::AssignableUsers {
+                repo_full_name: repo_full_name.to_string(),
+                users: users.map(Arc::new),
+            });
+        }
+        Err(error) => {
+            tracing::info!(repo = repo_full_name, %error, "assignable users not read");
+        }
+    }
+}
+
+/// Assign `login` to the item's issue or pull request, or take them off
+/// it, and put GitHub's answer in the item. GitHub drops an assignee it
+/// will not take without refusing, so a login missing from the answer is
+/// a notice too.
+async fn set_assigned(ctx: &Ctx, item_id: &str, login: &str, assign: bool) {
+    let Some(item) = ctx.item(item_id) else {
+        return;
+    };
+    let (repo_full_name, number) = match &item.subject {
+        Some(ItemSubject::Issue(issue)) => (issue.repo_full_name.clone(), issue.number),
+        Some(ItemSubject::PullRequest(pr)) => (pr.repo_full_name.clone(), pr.number),
+        None => return,
+    };
+    let Some(github) = ctx.github() else {
+        return ctx.notice("GitHub is unavailable while Perch is offline");
+    };
+    let logins = [login.to_string()];
+    let assigned = match github
+        .set_assignees(&repo_full_name, number, &logins, assign)
+        .await
+    {
+        Ok(assigned) => assigned,
+        Err(error) => {
+            let doing = if assign { "assign" } else { "unassign" };
+            tracing::info!(item = item_id, login, %error, "assignees not changed");
+            return ctx.notice(format!("GitHub could not {doing} {login}: {error}"));
+        }
+    };
+    let now_assigned = assigned.assignees.iter().any(|a| a.eq_ignore_ascii_case(login));
+    if now_assigned != assign {
+        let doing = if assign { "assign" } else { "unassign" };
+        ctx.notice(format!("GitHub did not {doing} {login}"));
+    }
+    // Read again: the item may have moved while GitHub answered.
+    let Some(item) = ctx.item(item_id) else {
+        return;
+    };
+    match &item.subject {
+        Some(ItemSubject::Issue(issue)) => {
+            let mut issue = issue.clone();
+            issue.assignees = assigned.assignees;
+            issue.updated_at = issue.updated_at.max(assigned.updated_at);
+            install_issue_snapshot(ctx, item_id, issue);
+        }
+        Some(ItemSubject::PullRequest(pr)) => {
+            let mut pr = pr.clone();
+            pr.assignees = assigned.assignees;
+            pr.updated_at = Some(pr.updated_at.map_or(assigned.updated_at, |at| at.max(assigned.updated_at)));
+            install_pull_request_snapshot(ctx, item_id, pr, None);
+        }
+        None => {}
     }
 }
 
@@ -21939,6 +22074,84 @@ read eof || true
         assert_eq!(kept.comments.iter().map(|c| c.id).collect::<Vec<_>>(), [1, 920]);
         let prompted = ctx.slot.lock().unwrap().as_ref().unwrap().issue.clone().unwrap();
         assert_eq!(prompted.1.len(), 2, "the next question sees it");
+    }
+
+    /// Assigning puts GitHub's assignees in the item and the open view,
+    /// for an issue and a pull request alike; a login GitHub dropped
+    /// without refusing is a notice.
+    #[tokio::test]
+    async fn assigning_puts_githubs_assignees_in_the_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let sent: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = sent.clone();
+        let (base, _) = serve_by_body(move |method, path, _, body| {
+            seen.lock().unwrap().push(format!("{method} {path} {body}"));
+            let answer = |number: u64, assignees: &[&str]| {
+                serde_json::json!({
+                    "number": number,
+                    "title": "t",
+                    "state": "open",
+                    "assignees": assignees.iter().map(|l| serde_json::json!({ "login": l })).collect::<Vec<_>>(),
+                    "updated_at": "2026-10-03T10:00:00Z",
+                })
+                .to_string()
+            };
+            match (method, path) {
+                ("POST", "/repos/a/b/issues/8/assignees") => ("201 Created", answer(8, &["criccomini"])),
+                ("DELETE", "/repos/a/b/issues/9/assignees") => ("200 OK", answer(9, &[])),
+                // Nobody GitHub will assign: the issue as it was.
+                ("POST", "/repos/a/b/issues/9/assignees") => ("201 Created", answer(9, &[])),
+                _ => ("404 Not Found", "{}".to_string()),
+            }
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+
+        let issue = store_issue(&ctx, 8);
+        open_in_slot(&ctx, &issue);
+        let snapshot = issue.issue().cloned().unwrap();
+        ctx.slot.lock().unwrap().as_mut().unwrap().issue = Some(Arc::new((snapshot, Vec::new())));
+        set_assigned(&ctx, &issue.id, "criccomini", true).await;
+        assert_eq!(ctx.item(&issue.id).unwrap().issue().unwrap().assignees, ["criccomini"]);
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            events.iter().any(|e| matches!(e, Event::IssueUpdated { issue, .. } if issue.assignees == ["criccomini"])),
+            "{events:?}"
+        );
+        assert!(!events.iter().any(|e| matches!(e, Event::Notice(_))), "{events:?}");
+
+        let mut pull = store_pull(&ctx, 9);
+        pull.subject = pull.pull_request().cloned().map(|mut pr| {
+            pr.assignees = vec!["rohan".into()];
+            ItemSubject::PullRequest(pr)
+        });
+        ctx.with_cache(|c| c.update_item(&pull)).unwrap().unwrap();
+        open_in_slot(&ctx, &pull);
+        set_assigned(&ctx, &pull.id, "rohan", false).await;
+        assert!(ctx.item(&pull.id).unwrap().pull_request().unwrap().assignees.is_empty());
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            events.iter().any(|e| matches!(e, Event::PullRequestUpdated { pull_request, .. } if pull_request.assignees.is_empty())),
+            "{events:?}"
+        );
+
+        set_assigned(&ctx, &pull.id, "stranger", true).await;
+        assert_eq!(notices(&received), ["GitHub did not assign stranger"]);
+        let sent: Vec<String> = sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.contains("/assignees"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            sent.iter().map(|r| r.split(' ').take(2).collect::<Vec<_>>().join(" ")).collect::<Vec<_>>(),
+            [
+                "POST /repos/a/b/issues/8/assignees",
+                "DELETE /repos/a/b/issues/9/assignees",
+                "POST /repos/a/b/issues/9/assignees",
+            ]
+        );
+        assert!(sent[0].ends_with(r#"{"assignees":["criccomini"]}"#), "{sent:?}");
     }
 
     /// Closing an issue posts the comment, closes it with the reason, and
