@@ -1,12 +1,14 @@
 //! Immutable source capture for native code reviews.
 //!
 //! A snapshot owns its object database. It never borrows objects from the
-//! reader's clone, so historical diffs and anchors survive source removal and
-//! aggressive garbage collection. Capture is staged beside the destination
+//! reader's clone through alternates, so historical diffs and anchors survive
+//! source removal and aggressive garbage collection; the files it shares
+//! with the clone are hardlinks, which outlive the clone's. Capture is staged beside the destination
 //! and published with one rename; every error or cancelled future removes its
 //! staging directory.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::ops::RangeInclusive;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -442,21 +444,9 @@ impl ReviewSnapshotStore {
             create_unique_directory(&self.root, &format!(".{}.partial", request.snapshot_id))?;
         let mut cleanup = StagingCleanup::new(staging.clone());
         let retained_repo = staging.join(RETAINED_REPO);
-        self.git
-            .run(
-                None,
-                [
-                    "init".to_string(),
-                    "--bare".to_string(),
-                    "--quiet".to_string(),
-                    retained_repo.to_string_lossy().into_owned(),
-                ],
-                QUERY_TIMEOUT,
-            )
-            .await?;
         self.retain_objects(&source, &retained_repo, &range).await?;
         self.write_private_refs(&retained_repo, &range).await?;
-        self.materialize_checkout(&retained_repo, &staging.join(CHECKOUT_DIR), &range.head)
+        self.materialize_checkout(&retained_repo, &staging.join(CHECKOUT_DIR), &range)
             .await?;
 
         std::fs::write(staging.join(DIFF_FILE), diff)?;
@@ -512,15 +502,14 @@ impl ReviewSnapshotStore {
             return Ok(checkout);
         }
 
-        let temporary = create_unique_directory(&snapshot.root, ".checkout.partial")?;
-        // `git init` requires the destination not to exist, so the guard owns
-        // the parent while the actual repository is built one level below.
-        let candidate = temporary.join(CHECKOUT_DIR);
-        let mut cleanup = StagingCleanup::new(temporary.clone());
+        // Built beside the destination, at the same depth, so the checkout's
+        // relative alternates path is already right when it is renamed.
+        let candidate = create_unique_directory(&snapshot.root, ".checkout.partial")?;
+        let mut cleanup = StagingCleanup::new(candidate.clone());
         self.materialize_checkout(
             &snapshot.retained_repo(),
             &candidate,
-            &snapshot.manifest.range.head,
+            &snapshot.manifest.range,
         )
         .await?;
         make_tree_readonly(&candidate)?;
@@ -533,7 +522,6 @@ impl ReviewSnapshotStore {
             Ok(()) => {
                 set_path_owner_writable(&checkout, false)?;
                 cleanup.disarm();
-                let _ = std::fs::remove_dir(&temporary);
                 Ok(checkout)
             }
             Err(_) if checkout.exists() => {
@@ -726,12 +714,123 @@ impl ReviewSnapshotStore {
             .map_err(Into::into)
     }
 
+    /// Give the snapshot an object database of its own. A local clone
+    /// hardlinks the source's packs and loose objects, which Git never
+    /// rewrites in place: it takes a fraction of a second where packing
+    /// the history took seconds, costs no disk until the source repacks,
+    /// and the links keep the objects after the source prunes or goes. A
+    /// source that borrows objects through alternates would pass the
+    /// borrow on, so it, and a clone that fails, gets the range's history
+    /// packed instead.
     async fn retain_objects(
         &self,
         source: &Path,
         retained_repo: &Path,
         range: &ResolvedReviewRange,
     ) -> Result<(), SnapshotError> {
+        if let Err(error) = self.link_objects(source, retained_repo).await {
+            tracing::info!(%error, "packing the review source's objects instead of linking them");
+            if retained_repo.exists() {
+                remove_store_entry(retained_repo)?;
+            }
+            self.pack_objects(source, retained_repo, range).await?;
+        }
+        for oid in [&range.base_tip, &range.merge_base, &range.head] {
+            self.git
+                .run(
+                    Some(retained_repo),
+                    ["cat-file", "-e", &format!("{oid}^{{commit}}")],
+                    QUERY_TIMEOUT,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn link_objects(&self, source: &Path, retained_repo: &Path) -> Result<(), SnapshotError> {
+        let common = self
+            .git
+            .run(
+                Some(source),
+                ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+                QUERY_TIMEOUT,
+            )
+            .await?;
+        let common = PathBuf::from(common.trim());
+        let alternates = common.join("objects/info/alternates");
+        if std::fs::metadata(&alternates).is_ok_and(|metadata| metadata.len() > 0) {
+            return Err(SnapshotError::Io(format!(
+                "{} borrows objects through alternates",
+                common.display()
+            )));
+        }
+        self.git
+            .run(
+                None,
+                [
+                    OsStr::new("clone"),
+                    OsStr::new("--bare"),
+                    OsStr::new("--local"),
+                    OsStr::new("--quiet"),
+                    common.as_os_str(),
+                    retained_repo.as_os_str(),
+                ],
+                CAPTURE_TIMEOUT,
+            )
+            .await?;
+        // Only the review's own refs, written after this, belong in it.
+        let refs = self
+            .git
+            .run(
+                Some(retained_repo),
+                ["for-each-ref", "--format=delete %(refname)"],
+                QUERY_TIMEOUT,
+            )
+            .await?;
+        if !refs.trim().is_empty() {
+            self.git
+                .run_with_input(
+                    Some(retained_repo),
+                    ["update-ref", "--stdin"],
+                    refs.as_bytes(),
+                    QUERY_TIMEOUT,
+                )
+                .await?;
+        }
+        let remotes = self
+            .git
+            .run(Some(retained_repo), ["remote"], QUERY_TIMEOUT)
+            .await?;
+        for remote in remotes.lines().map(str::trim).filter(|r| !r.is_empty()) {
+            self.git
+                .run(
+                    Some(retained_repo),
+                    ["remote", "remove", remote],
+                    QUERY_TIMEOUT,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn pack_objects(
+        &self,
+        source: &Path,
+        retained_repo: &Path,
+        range: &ResolvedReviewRange,
+    ) -> Result<(), SnapshotError> {
+        self.git
+            .run(
+                None,
+                [
+                    "init".to_string(),
+                    "--bare".to_string(),
+                    "--quiet".to_string(),
+                    retained_repo.to_string_lossy().into_owned(),
+                ],
+                QUERY_TIMEOUT,
+            )
+            .await?;
         let pack_prefix = retained_repo.join("objects/pack/review");
         let revisions = format!("{}\n{}\n{}\n", range.base_tip, range.merge_base, range.head);
         self.git
@@ -747,15 +846,6 @@ impl ReviewSnapshotStore {
                 CAPTURE_TIMEOUT,
             )
             .await?;
-        for oid in [&range.base_tip, &range.merge_base, &range.head] {
-            self.git
-                .run(
-                    Some(retained_repo),
-                    ["cat-file", "-e", &format!("{oid}^{{commit}}")],
-                    QUERY_TIMEOUT,
-                )
-                .await?;
-        }
         Ok(())
     }
 
@@ -780,11 +870,17 @@ impl ReviewSnapshotStore {
         Ok(())
     }
 
+    /// The head checked out for the reviewers. It reads the retained
+    /// repository's objects through alternates rather than fetching a copy
+    /// of them: the two live and are released together, and everything the
+    /// checkout's refs reach is reachable from the retained repository's
+    /// own. A checkout beside the retained repository names it relatively,
+    /// so the snapshot can be built in staging and renamed into place.
     async fn materialize_checkout(
         &self,
         retained_repo: &Path,
         checkout: &Path,
-        head: &str,
+        range: &ResolvedReviewRange,
     ) -> Result<(), SnapshotError> {
         self.git
             .run(
@@ -797,25 +893,27 @@ impl ReviewSnapshotStore {
                 QUERY_TIMEOUT,
             )
             .await?;
+        let objects = match (
+            retained_repo.parent(),
+            checkout.parent(),
+            retained_repo.file_name(),
+        ) {
+            (Some(retained_parent), Some(checkout_parent), Some(name))
+                if retained_parent == checkout_parent =>
+            {
+                Path::new("../../..").join(name).join("objects")
+            }
+            _ => retained_repo.join("objects"),
+        };
+        std::fs::write(
+            checkout.join(".git/objects/info/alternates"),
+            format!("{}\n", objects.display()),
+        )?;
+        self.write_private_refs(checkout, range).await?;
         self.git
             .run(
                 Some(checkout),
-                [
-                    "fetch".to_string(),
-                    "--quiet".to_string(),
-                    "--no-tags".to_string(),
-                    retained_repo.to_string_lossy().into_owned(),
-                    format!("+{BASE_TIP_REF}:{BASE_TIP_REF}"),
-                    format!("+{MERGE_BASE_REF}:{MERGE_BASE_REF}"),
-                    format!("+{HEAD_REF}:{HEAD_REF}"),
-                ],
-                CAPTURE_TIMEOUT,
-            )
-            .await?;
-        self.git
-            .run(
-                Some(checkout),
-                ["checkout", "--detach", "--quiet", head],
+                ["checkout", "--detach", "--quiet", range.head.as_str()],
                 QUERY_TIMEOUT,
             )
             .await?;
@@ -940,6 +1038,9 @@ fn make_tree_readonly(path: &Path) -> Result<(), SnapshotError> {
 }
 
 /// Make a hardened tree removable without following any symlink it contains.
+/// Removing a file takes a writable directory, not a writable file, so only
+/// directories are touched: a retained repository's packs are hardlinks to
+/// the source's, and a file's mode is its source twin's too.
 fn make_tree_writable(path: &Path) -> Result<(), SnapshotError> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -954,9 +1055,8 @@ fn make_tree_writable(path: &Path) -> Result<(), SnapshotError> {
     if metadata.file_type().is_symlink() {
         return Ok(());
     }
-    // Directories must be searchable before their children can be visited.
-    set_owner_writable(path, &metadata, true)?;
     if metadata.is_dir() {
+        set_owner_writable(path, &metadata, true)?;
         for entry in std::fs::read_dir(path)
             .map_err(|error| io_error(&format!("reading directory {}", path.display()), error))?
         {
@@ -2453,6 +2553,128 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_worktree_source_is_linked_and_keeps_only_the_reviews_refs() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let repo = repository();
+        std::fs::write(repo.path().join("code.rs"), "base\n").unwrap();
+        commit_all(repo.path(), "base");
+        git(repo.path(), &["branch", "unrelated"]);
+        git(repo.path(), &["tag", "v1"]);
+        git(repo.path(), &["repack", "-a", "-d", "-q"]);
+        let worktrees = tempfile::tempdir().unwrap();
+        let source = worktrees.path().join("feature");
+        git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                source.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(source.join("code.rs"), "base\nfeature\n").unwrap();
+        commit_all(&source, "feature");
+
+        let storage = tempfile::tempdir().unwrap();
+        let store = ReviewSnapshotStore::new(storage.path());
+        let snapshot = captured(store.capture(request("linked", &source)).await.unwrap());
+
+        let retained = snapshot.retained_repo();
+        let mut refs = git(&retained, &["for-each-ref", "--format=%(refname)"])
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        refs.sort();
+        assert_eq!(refs, [BASE_TIP_REF, HEAD_REF, MERGE_BASE_REF]);
+        assert_eq!(git(&retained, &["remote"]), "");
+        let packs = std::fs::read_dir(retained.join("objects/pack"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "pack"))
+            .collect::<Vec<_>>();
+        assert!(!packs.is_empty());
+        let source_pack = repo
+            .path()
+            .join(".git/objects/pack")
+            .join(packs[0].file_name().unwrap());
+        assert!(std::fs::metadata(&packs[0]).unwrap().nlink() >= 2);
+        let source_mode = std::fs::metadata(&source_pack)
+            .unwrap()
+            .permissions()
+            .mode();
+
+        assert_eq!(
+            std::fs::read_to_string(snapshot.checkout().join(".git/objects/info/alternates"))
+                .unwrap(),
+            "../../../repo.git/objects\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(snapshot.checkout().join("code.rs")).unwrap(),
+            "base\nfeature\n"
+        );
+        assert!(store.cleanup_checkout("linked").unwrap());
+        let checkout = store.ensure_checkout("linked").await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(checkout.join("code.rs")).unwrap(),
+            "base\nfeature\n"
+        );
+
+        assert!(store.release("linked").unwrap());
+        assert_eq!(
+            std::fs::metadata(&source_pack)
+                .unwrap()
+                .permissions()
+                .mode(),
+            source_mode
+        );
+    }
+
+    #[tokio::test]
+    async fn a_source_borrowing_objects_is_packed_rather_than_linked() {
+        let origin = repository();
+        std::fs::write(origin.path().join("code.rs"), "base\n").unwrap();
+        commit_all(origin.path(), "base");
+        let clones = tempfile::tempdir().unwrap();
+        let source = clones.path().join("shared");
+        git(
+            clones.path(),
+            &[
+                "clone",
+                "-q",
+                "--shared",
+                origin.path().to_str().unwrap(),
+                source.to_str().unwrap(),
+            ],
+        );
+        git(&source, &["config", "user.name", "Perch Test"]);
+        git(&source, &["config", "user.email", "perch@example.com"]);
+        git(&source, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(source.join("code.rs"), "base\nshared\n").unwrap();
+        commit_all(&source, "feature");
+
+        let storage = tempfile::tempdir().unwrap();
+        let store = ReviewSnapshotStore::new(storage.path());
+        let snapshot = captured(store.capture(request("shared", &source)).await.unwrap());
+        assert!(!snapshot
+            .retained_repo()
+            .join("objects/info/alternates")
+            .exists());
+        store.cleanup_checkout("shared").unwrap();
+        std::fs::remove_dir_all(origin.path()).unwrap();
+        std::fs::remove_dir_all(&source).unwrap();
+
+        let checkout = store.ensure_checkout("shared").await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(checkout.join("code.rs")).unwrap(),
+            "base\nshared\n"
+        );
+    }
+
     fn assert_tree_readonly(path: &Path) {
         use std::os::unix::fs::PermissionsExt;
 

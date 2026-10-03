@@ -60,6 +60,9 @@ pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
         if let Some(group) = review_launch::active_group(app, state) {
             return review_launch::progress_label(&group);
         }
+        if review_launch::launching(app, state) {
+            return "Starting review…".to_string();
+        }
         match count.get() {
             0 => "Review".to_string(),
             n => format!("Review \u{b7} {n}"),

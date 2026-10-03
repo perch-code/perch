@@ -417,6 +417,13 @@ pub(super) async fn start(ctx: &Ctx, request: ReviewLaunchRequest) {
 }
 
 async fn start_inner(ctx: &Ctx, request: ReviewLaunchRequest) -> Result<(), String> {
+    let requested = std::time::Instant::now();
+    tracing::info!(
+        item = %request.item_id,
+        base = %request.base_ref,
+        reviewers = request.reviewers.len(),
+        "review requested"
+    );
     // Deletion/archive owns the same fence. Keep the source checkout and
     // item row stable until the snapshot, durable group, and scheduler
     // children have all been admitted.
@@ -436,6 +443,7 @@ async fn start_inner(ctx: &Ctx, request: ReviewLaunchRequest) -> Result<(), Stri
 
     let group_id = perch_github::comments::new_id();
     let snapshot_id = perch_github::comments::new_id();
+    let capturing = std::time::Instant::now();
     let captured = ctx
         .review_snapshots
         .capture(SnapshotCapture {
@@ -448,6 +456,15 @@ async fn start_inner(ctx: &Ctx, request: ReviewLaunchRequest) -> Result<(), Stri
         })
         .await
         .map_err(|error| format!("Could not capture the review source: {error}"))?;
+    tracing::info!(
+        item = %request.item_id,
+        files = match &captured {
+            CaptureOutcome::Captured(snapshot) => snapshot.manifest.files.len(),
+            CaptureOutcome::Empty(_) => 0,
+        },
+        capture_ms = capturing.elapsed().as_millis() as u64,
+        "review source captured"
+    );
 
     let now = Timestamp::now();
     let (snapshot, attempts, captured_snapshot) = match captured {
@@ -523,6 +540,12 @@ async fn start_inner(ctx: &Ctx, request: ReviewLaunchRequest) -> Result<(), Stri
         )
         .await;
     }
+    tracing::info!(
+        item = %request.item_id,
+        group = %group_id,
+        elapsed_ms = requested.elapsed().as_millis() as u64,
+        "review admitted"
+    );
     send_group(ctx, &group_id);
     Ok(())
 }
@@ -1206,6 +1229,8 @@ async fn execute_attempt(
     };
     ctx.runs.attach(&lease, handle.clone());
     run = ctx.runs.load(&run.id).unwrap_or(run);
+    let spawned = std::time::Instant::now();
+    tracing::info!(attempt = %attempt_id, run = %run.id, backend = %attempt.backend, "reviewer started");
 
     let mut raw = Vec::new();
     // The report the reviewer filed through its tool, and whether a
@@ -1216,6 +1241,13 @@ async fn execute_attempt(
     let mut persistence_error = None;
     while let Some(event) = rx.recv().await {
         event_index += 1;
+        if event_index == 1 {
+            tracing::info!(
+                attempt = %attempt_id,
+                after_ms = spawned.elapsed().as_millis() as u64,
+                "reviewer's first output"
+            );
+        }
         let terminal = matches!(
             event,
             perch_agent::RunEvent::Finished { .. }
@@ -3685,6 +3717,7 @@ pub(super) fn verification_prior_findings(ctx: &Ctx, snapshot_id: &str) -> Vec<F
 }
 
 fn launch_failed(ctx: &Ctx, item_id: &str, message: String) {
+    tracing::warn!(item = item_id, %message, "review could not start");
     let _ = ctx.events.send(Event::ReviewLaunchFailed {
         item_id: item_id.to_string(),
         message,

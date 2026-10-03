@@ -284,6 +284,11 @@ pub struct AppState {
         RwSignal<HashMap<String, Arc<Vec<crate::review::model::ReviewFindingSummary>>>>,
     pub review_launch_errors: RwSignal<HashMap<String, String>>,
     pub review_dashboard_loading: RwSignal<HashSet<String>>,
+    /// Items whose review was asked for and has not reached the UI yet,
+    /// with the newest group number they had then. Capturing the source
+    /// can take seconds on a large repository, and Review should not sit
+    /// unchanged meanwhile.
+    pub review_launching: RwSignal<HashMap<String, u64>>,
 
     /// The item the pointer is over, so a row can show its buttons and a
     /// bare keystroke knows what it means.
@@ -403,6 +408,7 @@ impl AppState {
             review_findings: RwSignal::new(HashMap::new()),
             review_launch_errors: RwSignal::new(HashMap::new()),
             review_dashboard_loading: RwSignal::new(HashSet::new()),
+            review_launching: RwSignal::new(HashMap::new()),
             agent: RwSignal::new(AgentConfig::default()),
             usage: RwSignal::new(Default::default()),
             hovered_item: RwSignal::new(None),
@@ -551,6 +557,24 @@ impl AppState {
             .update(|errors| _ = errors.remove(item_id));
     }
 
+    pub fn begin_review_launch(&self, item_id: &str) {
+        let newest = self
+            .review_groups_for(item_id)
+            .iter()
+            .map(|summary| summary.group.number)
+            .max()
+            .unwrap_or(0);
+        self.review_launching
+            .update(|launching| _ = launching.insert(item_id.to_string(), newest));
+        self.review_launch_errors
+            .update(|errors| _ = errors.remove(item_id));
+    }
+
+    pub fn is_review_launching(&self, item_id: &str) -> bool {
+        self.review_launching
+            .with(|launching| launching.contains_key(item_id))
+    }
+
     pub fn set_review_dashboard(
         &self,
         item_id: String,
@@ -580,6 +604,15 @@ impl AppState {
         item_id: String,
         summary: crate::review::model::ReviewGroupSummary,
     ) {
+        // An older group's news does not mean the new one has arrived.
+        if self.review_launching.with_untracked(|launching| {
+            launching
+                .get(&item_id)
+                .is_some_and(|newest| summary.group.number > *newest)
+        }) {
+            self.review_launching
+                .update(|launching| _ = launching.remove(&item_id));
+        }
         self.review_groups.update(|all| {
             let mut groups = all
                 .get(&item_id)
@@ -598,6 +631,8 @@ impl AppState {
     }
 
     pub fn fail_review_launch(&self, item_id: String, message: String) {
+        self.review_launching
+            .update(|launching| _ = launching.remove(&item_id));
         self.review_dashboard_loading
             .update(|loading| _ = loading.remove(&item_id));
         self.review_launch_errors

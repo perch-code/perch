@@ -81,7 +81,7 @@ pub(crate) fn agents_section(
         let Some(request) = validation.request else {
             return;
         };
-        app.begin_review_dashboard_load(&request.item_id);
+        app.begin_review_launch(&request.item_id);
         run_backend.start_review(request);
         crate::review::review_menu::close(state, true);
     });
@@ -744,6 +744,9 @@ fn launch_validation(app: AppState, state: ReviewState) -> LaunchValidation {
     if active_group(app, state).is_some() {
         return invalid("A review is already active for this worktree");
     }
+    if app.is_review_launching(&item_id) {
+        return invalid("Starting the review…");
+    }
     if app
         .review_dashboard_loading
         .with(|loading| loading.contains(&item_id))
@@ -1068,6 +1071,11 @@ pub(crate) fn active_group(app: AppState, state: ReviewState) -> Option<ReviewGr
         .iter()
         .find(|summary| summary.group.status.is_active())
         .cloned()
+}
+
+/// Run was pressed on the open item and its review has not arrived yet.
+pub(crate) fn launching(app: AppState, state: ReviewState) -> bool {
+    current_item_id(state).is_some_and(|item_id| app.is_review_launching(&item_id))
 }
 
 pub(crate) fn progress_label(summary: &ReviewGroupSummary) -> String {
@@ -1426,6 +1434,35 @@ mod tests {
             },
             attempts: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_started_review_says_so_until_its_group_arrives_or_fails() {
+        use perch_github::ReviewGroupStatus;
+
+        let (app, state) = item_state();
+        app.update_review_group("worktree".into(), summary(ReviewGroupStatus::Completed));
+        app.begin_review_launch("worktree");
+        assert!(launching(app, state));
+        assert_eq!(
+            launch_validation(app, state).reason.as_deref(),
+            Some("Starting the review…")
+        );
+
+        // News of an older group is not the new one arriving.
+        app.update_review_group("worktree".into(), summary(ReviewGroupStatus::Completed));
+        assert!(launching(app, state));
+
+        let mut started = summary(ReviewGroupStatus::Preparing);
+        started.group.id = "group-4".into();
+        started.group.number = 4;
+        app.update_review_group("worktree".into(), started);
+        assert!(!launching(app, state));
+        assert!(active_group(app, state).is_some());
+
+        app.begin_review_launch("worktree");
+        app.fail_review_launch("worktree".into(), "Could not capture".into());
+        assert!(!launching(app, state));
     }
 
     #[test]
