@@ -89,6 +89,13 @@ pub enum PullEventKind {
     AutoMergeDisabled,
     MergeQueued,
     MergeDequeued,
+    /// A comment someone deleted. `author` wrote it: the REST timeline
+    /// leaves that out and GraphQL is asked, so it is empty when GitHub
+    /// could not say.
+    CommentDeleted {
+        #[serde(default)]
+        author: String,
+    },
 }
 
 /// The issue or pull request on the other end of a cross-reference.
@@ -123,6 +130,10 @@ pub(crate) const TIMELINE_MAX_PAGES: usize = 10;
 pub(crate) struct TimelineEventPayload {
     #[serde(default)]
     pub event: String,
+    /// The event's GraphQL id, which a deleted comment's author is read
+    /// by.
+    #[serde(default)]
+    pub node_id: String,
     #[serde(default)]
     pub actor: Option<UserRef>,
     /// Absent on `committed`, which is dated by its git author instead.
@@ -318,9 +329,39 @@ impl TimelineEventPayload {
             "auto_merge_disabled" => PullEventKind::AutoMergeDisabled,
             "added_to_merge_queue" => PullEventKind::MergeQueued,
             "removed_from_merge_queue" => PullEventKind::MergeDequeued,
+            "comment_deleted" => PullEventKind::CommentDeleted {
+                author: String::new(),
+            },
             _ => return None,
         };
         Some(PullEvent { kind, at, actor })
+    }
+}
+
+/// Who wrote each deleted comment, by the deletion's node id, a hundred
+/// to a query.
+pub(crate) const DELETED_AUTHORS_QUERY: &str = "query($ids: [ID!]!) { nodes(ids: $ids) { ... on CommentDeletedEvent { deletedCommentAuthor { login } } } }";
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct DeletedAuthorsData {
+    #[serde(default)]
+    nodes: Vec<Option<DeletedNode>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeletedNode {
+    #[serde(default, rename = "deletedCommentAuthor")]
+    author: Option<UserRef>,
+}
+
+impl DeletedAuthorsData {
+    /// The authors in the order the ids were asked for; empty for a node
+    /// GitHub did not answer for, or a comment whose author is gone.
+    pub(crate) fn authors(self) -> Vec<String> {
+        self.nodes
+            .into_iter()
+            .map(|node| node.and_then(|n| n.author).map(|a| a.login).unwrap_or_default())
+            .collect()
     }
 }
 

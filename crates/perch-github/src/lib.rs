@@ -46,7 +46,7 @@ pub use config::{
     WorkDefaults, CLAUDE_CODE, CODEX, CODEX_DEFAULT_MODEL, LOCAL_OWNER,
 };
 pub use discussion::{
-    Discussion, IssueComment, PullReviewEvent, Review, ReviewComment, ReviewCommentDraft,
+    CommentPlace, Discussion, IssueComment, PullReviewEvent, Review, ReviewComment, ReviewCommentDraft,
     ReviewThreadState,
 };
 pub use items::{

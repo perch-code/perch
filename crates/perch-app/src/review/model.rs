@@ -11,8 +11,9 @@ use perch_git::{
     ChangeStatus, ChangedFile, Commit, Dirt, DisplayBuffer, LineStatus, Row, Scope, TreeEntry,
 };
 use perch_github::{
-    Anchor, Checks, CommentThread, Discussion, Issue, IssueComment, Item, PullRequest,
-    PullRequestOverview, PullReviewEvent, ReactionKind, Reactions, Review,
+    Anchor, Checks, CommentPlace, CommentThread, Discussion, Issue, IssueComment, Item, PullEvent,
+    PullEventKind, PullRequest, PullRequestOverview, PullReviewEvent, ReactionKind, Reactions,
+    Review,
 };
 use perch_syntax::{Language, LineSpans};
 
@@ -1651,6 +1652,9 @@ pub struct ReviewState {
     pub pending_focus_card: RwSignal<Option<CardId>>,
     /// A thread whose Delete is waiting for a yes, under its byline.
     pub confirm_thread: RwSignal<Option<String>>,
+    /// A comment on GitHub whose Delete is waiting for a yes, under its
+    /// text, by its node id.
+    pub confirm_comment: RwSignal<Option<String>>,
     /// Runs whose step list the reader opened.
     pub expanded_runs: RwSignal<std::collections::HashSet<String>>,
     /// The rows each card has now: the estimate until the card has been
@@ -2031,6 +2035,7 @@ impl ReviewState {
             focus_card: RwSignal::new(None),
             pending_focus_card: RwSignal::new(None),
             confirm_thread: RwSignal::new(None),
+            confirm_comment: RwSignal::new(None),
             expanded_runs: RwSignal::new(std::collections::HashSet::new()),
             card_rows: RwSignal::new(HashMap::new()),
             collapsed_cards: RwSignal::new(HashSet::new()),
@@ -2237,6 +2242,7 @@ impl ReviewState {
         self.focus_card.set(None);
         self.pending_focus_card.set(None);
         self.confirm_thread.set(None);
+        self.confirm_comment.set(None);
         // The rows are the next item's cards' to fill; whether a card is
         // open is the reader's and stays, as `collapsed_cards` says.
         self.card_rows.set(HashMap::new());
@@ -2650,6 +2656,98 @@ impl ReviewState {
                 reactions.toggle(kind, !add);
             }
         });
+    }
+
+    /// Whether GitHub lets the reader delete the line comment with this
+    /// node id, as the discussion read it. Tracked.
+    pub fn may_delete_line_comment(&self, node_id: &str) -> bool {
+        self.discussion.with(|d| {
+            d.as_ref().is_some_and(|d| {
+                d.review_comments
+                    .iter()
+                    .any(|c| c.node_id == node_id && c.viewer_can_delete)
+            })
+        })
+    }
+
+    /// Take a comment the reader is deleting on GitHub out of what is
+    /// shown, before GitHub answers. One in the conversation leaves a line
+    /// in the timeline where it was, `actor` deleting it, as GitHub's own
+    /// timeline will. One on a line goes from its thread, and the thread
+    /// with it when nothing else was under it. Where the comment was, or
+    /// `None` when nothing shown has that id.
+    pub fn take_out_github_comment(&self, node_id: &str, actor: &str) -> Option<CommentPlace> {
+        if node_id.is_empty() {
+            return None;
+        }
+        let deletion = |author: String| {
+            PullEvent::new(
+                PullEventKind::CommentDeleted { author },
+                jiff::Timestamp::now(),
+                actor,
+            )
+        };
+        let mut place = None;
+        let issue_author = self.issue_comments.with_untracked(|comments| {
+            comments
+                .iter()
+                .find(|c| c.node_id == node_id)
+                .map(|c| c.user.clone())
+        });
+        if let Some(author) = issue_author {
+            self.issue_comments
+                .update(|comments| Arc::make_mut(comments).retain(|c| c.node_id != node_id));
+            self.issue_events
+                .update(|events| Arc::make_mut(events).push(deletion(author)));
+            place = Some(CommentPlace::Conversation);
+        }
+        let in_discussion = self.discussion.with_untracked(|d| {
+            d.as_ref().and_then(|d| {
+                let author = d
+                    .comments
+                    .iter()
+                    .find(|c| c.node_id == node_id)
+                    .map(|c| c.user.clone());
+                let line = d.review_comments.iter().any(|c| c.node_id == node_id);
+                (author.is_some() || line).then_some((author, line))
+            })
+        });
+        if let Some((author, _)) = in_discussion {
+            place = place.or(Some(if author.is_some() {
+                CommentPlace::Conversation
+            } else {
+                CommentPlace::Line
+            }));
+            self.discussion.update(|d| {
+                if let Some(d) = d {
+                    let d = Arc::make_mut(d);
+                    d.comments.retain(|c| c.node_id != node_id);
+                    d.review_comments.retain(|c| c.node_id != node_id);
+                    if let Some(author) = author {
+                        d.events.push(deletion(author));
+                    }
+                }
+            });
+        }
+        let holds = |t: &CommentThread| {
+            t.messages
+                .iter()
+                .any(|m| m.node_id.as_deref() == Some(node_id))
+        };
+        if self.comment_threads.with_untracked(|threads| threads.iter().any(holds)) {
+            self.comment_threads.update(|threads| {
+                let threads = Arc::make_mut(threads);
+                threads.retain_mut(|t| {
+                    if !holds(t) {
+                        return true;
+                    }
+                    t.messages.retain(|m| m.node_id.as_deref() != Some(node_id));
+                    !t.messages.is_empty()
+                });
+            });
+            place = place.or(Some(CommentPlace::Line));
+        }
+        place
     }
 
     /// Whether the review view should be on screen at all.
@@ -5416,6 +5514,77 @@ mod tests {
         assert!(!state.composer_in_code());
         assert_eq!(state.tab.get(), ItemTab::Conversation);
         assert_eq!(state.composer_draft.get(), "reply");
+    }
+
+    /// A line comment being deleted goes from its thread, and the thread
+    /// with it when it was the only comment there; no timeline line is
+    /// put in for it, GitHub's timeline having none. An id nothing shown
+    /// has is nothing to delete.
+    #[test]
+    fn a_deleted_line_comment_leaves_its_thread_and_an_emptied_thread_goes() {
+        let state = ReviewState::new();
+        let mut one = github_thread(10, 3, perch_github::Side::Right, "2026-09-18T09:00:00Z", 0);
+        one.messages[0].node_id = Some("PRRC_10".into());
+        let mut two = github_thread(20, 5, perch_github::Side::Right, "2026-09-18T09:00:00Z", 1);
+        two.messages[1].node_id = Some("PRRC_21".into());
+        state.comment_threads.set(Arc::new(vec![one, two]));
+
+        assert_eq!(
+            state.take_out_github_comment("PRRC_21", "chris"),
+            Some(CommentPlace::Line)
+        );
+        let threads = state.comment_threads.get();
+        assert_eq!(threads.len(), 2);
+        assert_eq!(threads[1].messages.len(), 1, "the reply went, the root stayed");
+
+        assert_eq!(
+            state.take_out_github_comment("PRRC_10", "chris"),
+            Some(CommentPlace::Line)
+        );
+        let threads = state.comment_threads.get();
+        assert_eq!(threads.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["gh-20"]);
+        assert!(state.issue_events.get().is_empty());
+
+        assert_eq!(state.take_out_github_comment("PRRC_99", "chris"), None);
+        assert_eq!(state.take_out_github_comment("", "chris"), None);
+    }
+
+    /// An issue's comment being deleted goes, and a line saying who
+    /// deleted whose takes its place in the issue's timeline.
+    #[test]
+    fn a_deleted_issue_comment_leaves_a_line_in_the_timeline() {
+        let state = ReviewState::new();
+        let comment = |id: u64, node: &str, user: &str| IssueComment {
+            id,
+            node_id: node.into(),
+            user: user.into(),
+            user_avatar_url: String::new(),
+            body: "spam".into(),
+            created_at: "2026-10-03T22:00:00Z".parse().unwrap(),
+            updated_at: None,
+            html_url: String::new(),
+            reactions: Default::default(),
+            viewer_can_delete: true,
+        };
+        state
+            .issue_comments
+            .set(Arc::new(vec![comment(1, "IC_1", "kvnloo"), comment(2, "IC_2", "rohan")]));
+
+        assert_eq!(
+            state.take_out_github_comment("IC_1", "criccomini"),
+            Some(CommentPlace::Conversation)
+        );
+        let left: Vec<u64> = state.issue_comments.get().iter().map(|c| c.id).collect();
+        assert_eq!(left, vec![2]);
+        let events = state.issue_events.get();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].actor, "criccomini");
+        assert_eq!(
+            events[0].kind,
+            PullEventKind::CommentDeleted {
+                author: "kvnloo".into()
+            }
+        );
     }
 
     /// One of GitHub's threads on head line `line` of `src/x.rs`,

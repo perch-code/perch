@@ -828,6 +828,7 @@ mod tests {
             updated_at: None,
             html_url: String::new(),
             reactions: Default::default(),
+            viewer_can_delete: false,
         }
     }
 

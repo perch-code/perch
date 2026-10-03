@@ -23,7 +23,7 @@ use crate::commits::{
     FILE_TEXT_QUERY,
 };
 use crate::discussion::{
-    resolve_thread_mutation, Discussion, IssueComment, IssueCommentPayload, PullReviewEvent,
+    resolve_thread_mutation, CommentPlace, Discussion, IssueComment, IssueCommentPayload, PullReviewEvent,
     PullSummary, ResolveThreadData, Review, ReviewComment, ReviewCommentDraft,
     ReviewCommentPayload, ReviewPayload, ReviewThreadState, ReviewThreadsData,
     REVIEW_THREADS_MAX_PAGES, REVIEW_THREADS_QUERY,
@@ -36,14 +36,14 @@ use crate::pulls::{
     PullRequestOverviewQuery, PULL_REQUEST_OVERVIEW_QUERY,
 };
 use crate::reactions::{
-    reaction_mutation, reactions_query, ReactionKind, ReactionMutationData, Reactions,
+    reaction_mutation, reactions_query, NodeReading, ReactionKind, ReactionMutationData, Reactions,
     ReactionsData, NODES_PER_QUERY,
 };
 use crate::responses::{Responses, BUDGET_BYTES};
 use crate::subjects::{SubjectLook, SubjectLookData};
 use crate::timeline::{
-    fill_logins, same_moment, tidy, wants_login, PullCommitPayload, PullEvent, TimelineEventPayload,
-    TIMELINE_MAX_PAGES,
+    fill_logins, same_moment, tidy, wants_login, DeletedAuthorsData, PullCommitPayload, PullEvent,
+    PullEventKind, TimelineEventPayload, DELETED_AUTHORS_QUERY, TIMELINE_MAX_PAGES,
 };
 use crate::workflow_runs::{Checks, WorkflowRunPayload, WorkflowRunsPayload};
 
@@ -712,7 +712,11 @@ impl GitHub {
             .await?;
         let comment: ReviewCommentPayload =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
-        Ok(ReviewComment::from(comment))
+        // Its author may delete it, as the reader now is.
+        Ok(ReviewComment {
+            viewer_can_delete: true,
+            ..ReviewComment::from(comment)
+        })
     }
 
     /// Say something in the conversation on a pull request or issue: an
@@ -748,7 +752,11 @@ impl GitHub {
             .await?;
         let comment: IssueCommentPayload =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
-        Ok(IssueComment::from(comment))
+        // Its author may delete it, as the reader now is.
+        Ok(IssueComment {
+            viewer_can_delete: true,
+            ..IssueComment::from(comment)
+        })
     }
 
     /// Open an issue on `repo_full_name`, `POST /issues`, which answers
@@ -966,17 +974,57 @@ impl GitHub {
                 .map(|r| r.user.clone())
                 .filter(|user| !user.is_empty())
         };
-        let events = raw
-            .into_iter()
-            .filter_map(|value| match serde_json::from_value::<TimelineEventPayload>(value) {
-                Ok(payload) => payload.into_event(&reviewer),
+        let mut events = Vec::new();
+        // Each deleted comment's line, by where it is in `events`, and the
+        // deletion's node id, which says whose comment it was.
+        let mut deletions = Vec::new();
+        for value in raw {
+            let payload = match serde_json::from_value::<TimelineEventPayload>(value) {
+                Ok(payload) => payload,
                 Err(e) => {
                     tracing::debug!(repo = repo_full_name, number, error = %e, "skipping a timeline event that did not read");
-                    None
+                    continue;
                 }
-            })
-            .collect();
+            };
+            let node_id = payload.node_id.clone();
+            let Some(event) = payload.into_event(&reviewer) else {
+                continue;
+            };
+            if matches!(event.kind, PullEventKind::CommentDeleted { .. }) && !node_id.is_empty() {
+                deletions.push((events.len(), node_id));
+            }
+            events.push(event);
+        }
+        if let Err(e) = self.fill_deleted_authors(&mut events, &deletions).await {
+            tracing::info!(repo = repo_full_name, number, error = %e, "could not read whose comments were deleted");
+        }
         Ok(tidy(events))
+    }
+
+    /// Name the author of each deleted comment, which the REST timeline
+    /// leaves out, from GraphQL. A line GitHub says nothing more about
+    /// keeps no name.
+    async fn fill_deleted_authors(
+        &self,
+        events: &mut [PullEvent],
+        deletions: &[(usize, String)],
+    ) -> Result<(), Error> {
+        for chunk in deletions.chunks(NODES_PER_QUERY) {
+            let ids: Vec<&str> = chunk.iter().map(|(_, id)| id.as_str()).collect();
+            let payload = serde_json::json!({
+                "query": DELETED_AUTHORS_QUERY,
+                "variables": { "ids": ids },
+            });
+            let data: DeletedAuthorsData = self.graphql(&payload, "deleted comment authors").await?;
+            for ((at, _), login) in chunk.iter().zip(data.authors()) {
+                if let Some(PullEventKind::CommentDeleted { author }) =
+                    events.get_mut(*at).map(|e| &mut e.kind)
+                {
+                    *author = login;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Whether each review thread on a pull request is resolved, and
@@ -1112,10 +1160,13 @@ impl GitHub {
     /// them: how many of each, and which are the reader's own. The lists
     /// count reactions without saying whose they are, and count none on a
     /// review or the body, so GraphQL is asked about every node at once.
+    ///
+    /// The same query asks which comments the reader may delete.
     pub async fn fill_reactions(&self, discussion: &mut Discussion) -> Result<(), Error> {
         let ids = discussion.reactable_ids();
-        for (id, reactions) in self.fetch_reactions(&ids).await? {
-            discussion.set_reactions(&id, &reactions);
+        for (id, node) in self.read_nodes(&ids).await? {
+            discussion.set_reactions(&id, &node.reactions);
+            discussion.set_deletable(&id, node.viewer_can_delete);
         }
         Ok(())
     }
@@ -1127,6 +1178,20 @@ impl GitHub {
         &self,
         node_ids: &[String],
     ) -> Result<std::collections::HashMap<String, Reactions>, Error> {
+        Ok(self
+            .read_nodes(node_ids)
+            .await?
+            .into_iter()
+            .map(|(id, node)| (id, node.reactions))
+            .collect())
+    }
+
+    /// The reactions on each of the nodes named and whether the reader
+    /// may delete it, by id, a hundred to a query.
+    async fn read_nodes(
+        &self,
+        node_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, NodeReading>, Error> {
         let mut all = std::collections::HashMap::new();
         for ids in node_ids.chunks(NODES_PER_QUERY) {
             let payload = serde_json::json!({
@@ -1159,6 +1224,28 @@ impl GitHub {
         let data: ReactionMutationData = self.graphql(&payload, "react").await?;
         data.into_reactions()
             .ok_or_else(|| Error::Decode("GitHub answered the reaction without its subject".into()))
+    }
+
+    /// Delete a comment on GitHub, for good, by its GraphQL id: one in
+    /// the conversation, or one on a line of a pull request. GitHub
+    /// refuses a reader who is neither its author nor able to write to
+    /// the repository.
+    pub async fn delete_comment(&self, node_id: &str, place: CommentPlace) -> Result<(), Error> {
+        if node_id.is_empty() {
+            return Err(Error::Decode("the comment has no node id".into()));
+        }
+        let field = match place {
+            CommentPlace::Conversation => "deleteIssueComment",
+            CommentPlace::Line => "deletePullRequestReviewComment",
+        };
+        let payload = serde_json::json!({
+            "query": format!(
+                "mutation($id: ID!) {{ {field}(input: {{id: $id}}) {{ clientMutationId }} }}"
+            ),
+            "variables": { "id": node_id },
+        });
+        let _: serde_json::Value = self.graphql(&payload, "delete comment").await?;
+        Ok(())
     }
 
     /// Whether the reader gave each of these issues a 👍, how many did,

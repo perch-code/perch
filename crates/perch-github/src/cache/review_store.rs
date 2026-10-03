@@ -4321,6 +4321,7 @@ mod tests {
             updated_at: None,
             html_url: "https://github.com/acme/widgets/pull/7#discussion_r500".into(),
             reactions: Reactions::default(),
+            viewer_can_delete: false,
         };
         cache
             .mark_draft_posted("message-o1", &comment, true)

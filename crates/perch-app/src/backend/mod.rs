@@ -14,8 +14,8 @@ use std::time::Duration;
 use jiff::Timestamp;
 use perch_git::{Preparer, RepoId, ReviewSnapshotStore, Store};
 use perch_github::{
-    resolve_token, Anchor, Author, Cache, CacheError, CacheOpen, CommentMessage, CommentThread,
-    CommitMessage,
+    resolve_token, Anchor, Author, Cache, CacheError, CacheOpen, CommentMessage, CommentPlace,
+    CommentThread, CommitMessage,
     Config, DraftRow, GitHub, Item, ItemCheckout, ItemKind, ItemSubject, MergeMethod, MergeState,
     MergeableState, NewRunEvent, PullRequest, PullRequestOverview, PullReviewEvent,
     ReactionKind, Reactions, RepositoryPermission, Review, ReviewCommentDraft, RevisionContext,
@@ -259,6 +259,13 @@ pub enum Command {
         node_id: String,
         kind: ReactionKind,
         add: bool,
+    },
+    /// Delete a comment on GitHub, in the conversation or on a line, by
+    /// its GraphQL id. The view has already taken it out.
+    DeleteGithubComment {
+        item_id: String,
+        node_id: String,
+        place: CommentPlace,
     },
     /// Resolve a thread on the item, or unresolve it: on GitHub for one
     /// that is there, by the id the backend reads from the cache, and in
@@ -2787,6 +2794,17 @@ impl Backend {
         });
     }
 
+    /// Delete a comment of the open item on GitHub, for good. The view has
+    /// already taken it out and put the deletion in the timeline; the item
+    /// is read again after, which puts back a comment GitHub kept.
+    pub fn delete_github_comment(&self, item_id: &str, node_id: &str, place: CommentPlace) {
+        let _ = self.commands.send(Command::DeleteGithubComment {
+            item_id: item_id.to_string(),
+            node_id: node_id.to_string(),
+            place,
+        });
+    }
+
     /// Resolve a thread of the open item, or unresolve it, on GitHub or in
     /// Perch as the thread is. The view already shows it as asked;
     /// `ThreadResolveSettled` lets it go back to the threads.
@@ -4294,6 +4312,16 @@ async fn run(
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     set_reaction(&ctx, &item_id, &node_id, kind, add).await;
+                });
+            }
+            Command::DeleteGithubComment {
+                item_id,
+                node_id,
+                place,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    delete_github_comment(&ctx, &item_id, &node_id, place).await;
                 });
             }
             Command::ResolveThread {
@@ -9856,6 +9884,101 @@ async fn set_reaction(ctx: &Ctx, item_id: &str, node_id: &str, kind: ReactionKin
             kind,
             reactions,
         });
+    }
+}
+
+/// Delete a comment on GitHub. One GitHub deleted goes from the kept
+/// discussion too. Either way the open item is read again: GitHub's
+/// timeline then has the deletion, and a comment it refused to delete
+/// comes back where the view took it out. Offline, nothing can be read,
+/// and what was kept is shown again.
+async fn delete_github_comment(ctx: &Ctx, item_id: &str, node_id: &str, place: CommentPlace) {
+    let deleted = match ctx.github() {
+        Some(github) => github
+            .delete_comment(node_id, place)
+            .await
+            .map_err(|error| format!("GitHub could not delete the comment: {error}")),
+        None => Err("GitHub is unavailable while Perch is offline".to_string()),
+    };
+    match deleted {
+        Ok(()) => {
+            tracing::info!(item = item_id, node_id, ?place, "deleted a comment on GitHub");
+            forget_cached_comment(ctx, item_id, node_id);
+        }
+        Err(message) => {
+            tracing::info!(item = item_id, node_id, %message, "comment not deleted");
+            ctx.notice(message);
+        }
+    }
+    let pull_request = ctx.slot.lock().ok().and_then(|slot| {
+        slot.as_ref()
+            .filter(|open| open.item_id == item_id)
+            .map(|open| open.pull_request.clone())
+    });
+    let read = match pull_request {
+        None => return,
+        Some(Some(pr)) => {
+            let discussion_generation = ctx.discussion_requests.begin(item_id);
+            fetch_discussion(ctx, item_id, &pr, discussion_generation).await;
+            true
+        }
+        Some(None) => refresh_open_item(ctx, item_id).await,
+    };
+    if !read || ctx.github().is_none() {
+        show_kept_comments(ctx, item_id);
+    }
+}
+
+/// Take a comment GitHub deleted out of the kept discussion, so the next
+/// open does not paint it before the network answers. The threads made of
+/// line comments are left to the next fetch, which knows what replaces a
+/// deleted root.
+fn forget_cached_comment(ctx: &Ctx, item_id: &str, node_id: &str) {
+    let cached = ctx
+        .with_cache(|cache| cache.load_discussion(item_id))
+        .and_then(Result::ok)
+        .flatten();
+    let Some((_, mut discussion)) = cached else {
+        return;
+    };
+    let before = discussion.comments.len() + discussion.review_comments.len();
+    discussion.comments.retain(|c| c.node_id != node_id);
+    discussion.review_comments.retain(|c| c.node_id != node_id);
+    if discussion.comments.len() + discussion.review_comments.len() == before {
+        return;
+    }
+    if let Some(Err(error)) = ctx.with_cache(|cache| cache.rewrite_discussion(item_id, &discussion)) {
+        tracing::warn!(item = item_id, %error, "could not forget the deleted comment");
+    }
+}
+
+/// Show the open item's comments as they were kept, over what the view
+/// took out ahead of GitHub.
+fn show_kept_comments(ctx: &Ctx, item_id: &str) {
+    if !ctx.is_open(item_id) {
+        return;
+    }
+    let cached = ctx
+        .with_cache(|cache| cache.load_discussion(item_id))
+        .and_then(Result::ok)
+        .flatten();
+    let Some((_, discussion)) = cached else {
+        return;
+    };
+    let is_pull = ctx.slot.lock().ok().is_some_and(|slot| {
+        slot.as_ref()
+            .is_some_and(|open| open.item_id == item_id && open.pull_request.is_some())
+    });
+    if is_pull {
+        publish_discussion(ctx, item_id, discussion);
+    } else {
+        let _ = ctx.events.send(Event::IssueComments {
+            item_id: item_id.to_string(),
+            comments: Arc::new(discussion.comments),
+            events: Arc::new(discussion.events),
+            body_reactions: discussion.reactions,
+        });
+        ctx.send_threads(item_id);
     }
 }
 
@@ -19588,6 +19711,7 @@ while True:
                 updated_at: None,
                 html_url: String::new(),
                 reactions: Default::default(),
+                viewer_can_delete: false,
             }],
             ..Default::default()
         };
@@ -20456,6 +20580,7 @@ read eof || true
             updated_at: None,
             html_url: String::new(),
             reactions: Default::default(),
+            viewer_can_delete: false,
         });
         ctx.with_cache(|c| c.store_discussion(&item.id, &discussion))
             .unwrap()
@@ -20521,6 +20646,7 @@ read eof || true
                 updated_at: None,
                 html_url: String::new(),
                 reactions: Default::default(),
+                viewer_can_delete: false,
             }],
             ..Default::default()
         };

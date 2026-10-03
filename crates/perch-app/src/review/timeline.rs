@@ -219,6 +219,15 @@ pub fn event_pieces(event: &PullEvent) -> Vec<Piece> {
         PullEventKind::AutoMergeDisabled => vec![Piece::words("disabled auto-merge")],
         PullEventKind::MergeQueued => vec![Piece::words("added this to the merge queue")],
         PullEventKind::MergeDequeued => vec![Piece::words("removed this from the merge queue")],
+        PullEventKind::CommentDeleted { author } if author.is_empty() => {
+            vec![Piece::words("deleted a comment")]
+        }
+        PullEventKind::CommentDeleted { author } if same(author) => {
+            vec![Piece::words("deleted their comment")]
+        }
+        PullEventKind::CommentDeleted { author } => {
+            vec![Piece::words(format!("deleted a comment from {author}"))]
+        }
     }
 }
 
@@ -438,6 +447,7 @@ pub(crate) mod tests {
             created_at: at(when),
             updated_at: None,
             html_url: format!("https://github.com/a/b/pull/57#issuecomment-{id}"),
+            viewer_can_delete: false,
         }
     }
 
@@ -477,6 +487,7 @@ pub(crate) mod tests {
             created_at: at(when),
             updated_at: None,
             html_url: String::new(),
+            viewer_can_delete: false,
         }
     }
 
@@ -732,6 +743,19 @@ pub(crate) mod tests {
         assert_eq!(
             name(PullEventKind::ReviewDismissed { who: String::new() }),
             "dismissed a review"
+        );
+        assert_eq!(
+            name(PullEventKind::CommentDeleted { author: "chris".into() }),
+            "deleted a comment from chris"
+        );
+        assert_eq!(
+            name(PullEventKind::CommentDeleted { author: "rohan".into() }),
+            "deleted their comment"
+        );
+        assert_eq!(
+            name(PullEventKind::CommentDeleted { author: String::new() }),
+            "deleted a comment",
+            "GitHub could not say whose"
         );
         assert_eq!(
             name(PullEventKind::ForcePushed { sha: "abc1234def".into() }),

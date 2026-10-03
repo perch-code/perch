@@ -4938,6 +4938,7 @@ mod tests {
                 updated_at: None,
                 html_url: String::new(),
                 reactions,
+                viewer_can_delete: false,
             }],
             ..Default::default()
         }
@@ -5460,6 +5461,7 @@ mod tests {
                         updated_at: None,
                         html_url: String::new(),
                         reactions: Default::default(),
+                        viewer_can_delete: false,
                     })
                 }),
             }

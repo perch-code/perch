@@ -1745,6 +1745,7 @@ mod tests {
             created_at: "2026-09-18T11:00:00Z".parse().unwrap(),
             updated_at: None,
             html_url: String::new(),
+            viewer_can_delete: false,
         }];
         let p = first_prompt(&PromptInput {
             issue: Some((&issue, &comments)),
@@ -1816,6 +1817,7 @@ mod tests {
             created_at: "2026-09-18T11:00:00Z".parse().unwrap(),
             updated_at: None,
             html_url: String::new(),
+            viewer_can_delete: false,
         }];
         let p = first_prompt(&PromptInput {
             issue: Some((&issue, &comments)),

@@ -49,7 +49,7 @@ use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
 use crate::ui::widgets::{
-    avatar, clickable, follow_link, name_label, open_in_browser, sidebar_glyph, Name,
+    avatar, clickable, follow_link, name_label, open_in_browser, sidebar_glyph, text_button, Name,
 };
 
 /// What a card's row in the column is keyed by. A row with the same key is
@@ -345,6 +345,125 @@ pub(crate) fn quote_action(
         .on_event_cont(el::PointerEnter, move |_, _| {
             *selected.borrow_mut() = crate::review::linked_text::selected_under(scope);
         })
+}
+
+/// Delete under the pointer, for a comment on GitHub, while `may` says
+/// GitHub lets the reader delete it; absent otherwise, as Quote reply is
+/// where it has nowhere to go. It asks first, under the comment.
+pub(crate) fn delete_action(
+    state: ReviewState,
+    hovered: RwSignal<bool>,
+    node_id: String,
+    may: impl Fn() -> bool + 'static,
+) -> floem::AnyView {
+    let offered = Memo::new(move |_| may());
+    dyn_container(
+        move || offered.get(),
+        move |offered| {
+            if !offered {
+                return Empty::new().into_any();
+            }
+            let node_id = node_id.clone();
+            hover_action(
+                hovered,
+                SidebarIcon::Trash,
+                "Delete",
+                "delete-comment",
+                Rc::new(move || state.confirm_comment.set(Some(node_id.clone()))),
+            )
+            .into_any()
+        },
+    )
+    .into_any()
+}
+
+/// "Delete this comment?" with Delete and Cancel, under the comment that
+/// asked. Delete takes the comment out of the view at once, a line in the
+/// timeline in its place for one in the conversation, and asks GitHub to
+/// delete it for good; GitHub's refusal puts it back.
+pub(crate) fn delete_comment_confirmation(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    node_id: String,
+) -> impl IntoView {
+    let asked = node_id.clone();
+    let asking = Memo::new(move |_| {
+        state
+            .confirm_comment
+            .with(|c| c.as_deref() == Some(asked.as_str()))
+    });
+    dyn_container(
+        move || asking.get(),
+        move |asking| {
+            if !asking {
+                return Empty::new().into_any();
+            }
+            let backend = backend.clone();
+            let node_id = node_id.clone();
+            Stack::vertical((
+                Label::derived(|| "Delete this comment?".to_string()).style(|s| {
+                    s.font_size(theme::TEXT_META)
+                        .font_weight(theme::weight_emphasis())
+                        .color(theme::fg())
+                        .selectable(false)
+                }),
+                Label::derived(|| "It goes from GitHub for good, for everyone.".to_string()).style(
+                    |s| {
+                        s.font_size(theme::TEXT_BADGE)
+                            .color(theme::fg_muted())
+                            .text_wrap()
+                            .width_full()
+                            .margin_top(2.0)
+                    },
+                ),
+                Stack::horizontal((
+                    Container::new(text_button(
+                        || "Delete".to_string(),
+                        SidebarIcon::Trash,
+                        move || {
+                            state.confirm_comment.set(None);
+                            let Some(item_id) =
+                                state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+                            else {
+                                return;
+                            };
+                            let actor = app
+                                .viewer
+                                .get_untracked()
+                                .map(|(login, _)| login)
+                                .unwrap_or_default();
+                            if let Some(place) = state.take_out_github_comment(&node_id, &actor) {
+                                backend.delete_github_comment(&item_id, &node_id, place);
+                            }
+                        },
+                    ))
+                    .debug_name("confirm-delete-comment"),
+                    Container::new(text_button(
+                        || "Cancel".to_string(),
+                        SidebarIcon::Close,
+                        move || state.confirm_comment.set(None),
+                    ))
+                    .debug_name("cancel-delete-comment"),
+                ))
+                .style(|s| s.gap(6.0).margin_top(8.0)),
+            ))
+            .debug_name("delete-comment-confirmation")
+            .on_event_stop(el::Click, |_, _| {})
+            .style(|s| {
+                s.flex_col()
+                    .width_full()
+                    .padding(10.0)
+                    .margin_top(8.0)
+                    .background(theme::notice_bg())
+                    .border(1.0)
+                    .border_color(theme::notice_border())
+                    .border_radius(theme::RADIUS)
+            })
+            .into_any()
+        },
+    )
+    .style(move |s| s.width_full().apply_if(!asking.get(), |s| s.hide()))
 }
 
 /// Follow the pointer in and out of a card, for Ask about this.
@@ -1146,6 +1265,12 @@ pub fn comment_card(
     let ask: Rc<dyn Fn()> = Rc::new(move || ask_about(app, state, None, &author, &url, &body));
     let text = markdown::render_linked(&comment.body, state).into_any();
     let quote = quote_reply_button(state, hovered, comment.body.clone(), text.id());
+    let deletable = comment.viewer_can_delete && !comment.node_id.is_empty();
+    let delete = delete_action(state, hovered, comment.node_id.clone(), move || deletable);
+    let leading = Stack::horizontal((quote, delete))
+        .style(|s| s.items_center().gap(4.0))
+        .into_any();
+    let confirm = delete_comment_confirmation(app, state, backend.clone(), comment.node_id.clone());
     let react = reactable(&comment.node_id);
     let reactions = reactions_under(app, state, backend.clone(), &react);
     track_hover(
@@ -1153,10 +1278,10 @@ pub fn comment_card(
             byline_strip(byline(
                 app,
                 who,
-                actions(state, backend, hovered, Some(quote), Some(ask), react, comment.html_url.clone()),
+                actions(state, backend, hovered, Some(leading), Some(ask), react, comment.html_url.clone()),
             )),
             Some(
-                Stack::vertical((text, reactions))
+                Stack::vertical((text, reactions, confirm))
                     .style(|s| s.flex_col().width_full())
                     .into_any(),
             ),
@@ -2707,6 +2832,7 @@ mod tests {
                 created_at: at("2026-09-15T09:14:00Z"),
                 updated_at: edited.map(at),
                 html_url: String::new(),
+                viewer_can_delete: false,
             })
         };
         assert_ne!(

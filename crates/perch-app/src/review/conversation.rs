@@ -533,6 +533,7 @@ mod tests {
             created_at: at(when),
             updated_at: None,
             html_url: format!("https://github.com/criccomini/perch/pull/57#discussion_r{id}"),
+            viewer_can_delete: false,
         };
         Discussion {
             node_id: String::new(),
@@ -549,6 +550,7 @@ mod tests {
                 created_at: at("2026-09-15T10:00:00Z"),
                 updated_at: None,
                 html_url: "https://github.com/criccomini/perch/pull/57#issuecomment-1".into(),
+                viewer_can_delete: false,
             }],
             reviews: vec![Review {
                 node_id: String::new(),
@@ -1186,6 +1188,7 @@ mod tests {
                 created_at: at("2026-09-15T11:00:00Z"),
                 updated_at: None,
                 html_url: format!("https://github.com/criccomini/perch/pull/57#issuecomment-{i}"),
+                viewer_can_delete: false,
             });
         }
         state.discussion.set(Some(Arc::new(discussion)));
@@ -1721,6 +1724,60 @@ mod tests {
             state.composer_draft.get(),
             "> Thanks\n\nYou're welcome.\n\n> Looks right.\n\n"
         );
+    }
+
+    /// Delete on a comment the reader may delete asks first, under the
+    /// comment; Cancel leaves it. Delete then takes the comment out at
+    /// once, puts a line in the timeline saying who deleted whose, and
+    /// asks the backend. A card GitHub did not say the reader may delete
+    /// offers no Delete.
+    #[test]
+    fn delete_asks_then_leaves_a_line_where_the_comment_was() {
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let mut discussion = discussion();
+        discussion.comments[0].node_id = "IC_1".into();
+        discussion.comments[0].user = "kvnloo".into();
+        discussion.comments[0].viewer_can_delete = true;
+        let (mut harness, app, state) = app_harness_on(backend, discussion);
+        app.viewer.set(Some(("criccomini".into(), String::new())));
+        let root = harness.root_id();
+        let comment = find(root, "card:comment").unwrap();
+        comment.scroll_to(None);
+        harness.rebuild();
+        harness.paint();
+        hover_and_click(&mut harness, comment, "delete-comment");
+        assert_eq!(state.confirm_comment.get().as_deref(), Some("IC_1"));
+        assert!(shown(&harness, "delete-comment-confirmation"));
+        let cancel = find(comment, "cancel-delete-comment").unwrap();
+        click_on(&mut harness, cancel);
+        assert_eq!(state.confirm_comment.get(), None);
+        assert!(!shown(&harness, "delete-comment-confirmation"));
+
+        while commands.try_recv().is_ok() {}
+        let comment = find(harness.root_id(), "card:comment").unwrap();
+        hover_and_click(&mut harness, comment, "delete-comment");
+        let delete = find(comment, "confirm-delete-comment").unwrap();
+        click_on(&mut harness, delete);
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(crate::backend::Command::DeleteGithubComment { item_id, node_id, place: perch_github::CommentPlace::Conversation })
+                if item_id == "wt" && node_id == "IC_1"
+        ));
+        let root = harness.root_id();
+        assert!(find(root, "card:comment").is_none(), "the comment is gone");
+        let mut all = Vec::new();
+        names(root, &mut all);
+        assert!(
+            all.iter().any(|n| n.contains("deleted a comment from kvnloo")),
+            "the timeline says who deleted whose"
+        );
+
+        let review = find(root, "card:review").unwrap();
+        let c = review.get_visual_rect_no_clip().center();
+        harness.pointer_move(c.x, c.y);
+        harness.rebuild();
+        harness.paint();
+        assert!(find(review, "delete-comment").is_none(), "a review is not deleted from here");
     }
 
     /// Double-click the first word of the linked text under `card` that
@@ -2308,6 +2365,7 @@ mod tests {
             updated_at: None,
             html_url: "https://github.com/criccomini/perch/pull/57#issuecomment-2".into(),
             reactions: Default::default(),
+            viewer_can_delete: false,
         });
         app.apply_with_review(
             Event::DiscussionReady {

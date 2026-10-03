@@ -3133,6 +3133,15 @@ fn github_message_view(
 ) -> floem::AnyView {
     let hovered = RwSignal::new(false);
     let (reply_button, ask) = reply_and_ask(app, state, thread, hovered);
+    let node_id = message.node_id.clone().unwrap_or_default();
+    let may = node_id.clone();
+    let delete = cards::delete_action(state, hovered, node_id.clone(), move || {
+        !may.is_empty() && state.may_delete_line_comment(&may)
+    });
+    let leading = Stack::horizontal((reply_button, delete))
+        .style(|s| s.items_center().gap(4.0))
+        .into_any();
+    let confirm = cards::delete_comment_confirmation(app, state, backend.clone(), node_id);
     let react = message.node_id.as_deref().and_then(cards::reactable);
     let url = message.html_url.clone().unwrap_or_default();
     let reactions = cards::reactions_under(app, state, backend.clone(), &react);
@@ -3146,7 +3155,7 @@ fn github_message_view(
             author_label(state, move || Some(author.clone())).into_any(),
             after_review_label(state, message.created_at).into_any(),
         ],
-        cards::actions(state, backend, hovered, Some(reply_button), Some(ask), react, url),
+        cards::actions(state, backend, hovered, Some(leading), Some(ask), react, url),
     );
     let avatar = crate::ui::widgets::avatar(
         app,
@@ -3155,7 +3164,11 @@ fn github_message_view(
         login,
     )
     .into_any();
-    let body = Stack::vertical((message_body(state, thread, &message.body, Some(applying)), reactions))
+    let body = Stack::vertical((
+        message_body(state, thread, &message.body, Some(applying)),
+        reactions,
+        confirm,
+    ))
     .style(|s| s.flex_col().width_full())
     .into_any();
     cards::track_hover(comment_frame(face, place, avatar, byline, body), hovered).into_any()
@@ -3217,8 +3230,8 @@ fn draft_message_view(
 /// A comment of the reader's that is on GitHub, under their face and
 /// name with the comment's time, Reply, Ask about this, the reaction
 /// picker and its link on hover, as anyone's comment has, and the
-/// reactions on it under its text. No Draft mark, no edit and no delete:
-/// what is on github.com is edited there.
+/// reactions on it under its text, and Delete, which asks first. No
+/// Draft mark and no edit: what is on github.com is edited there.
 fn posted_message_view(
     app: AppState,
     state: ReviewState,
@@ -3230,6 +3243,14 @@ fn posted_message_view(
 ) -> floem::AnyView {
     let hovered = RwSignal::new(false);
     let (reply_button, ask) = reply_and_ask(app, state, thread, hovered);
+    // The reader wrote it, so GitHub lets them delete it.
+    let node_id = message.node_id.clone().unwrap_or_default();
+    let deletable = !node_id.is_empty();
+    let delete = cards::delete_action(state, hovered, node_id.clone(), move || deletable);
+    let leading = Stack::horizontal((reply_button, delete))
+        .style(|s| s.items_center().gap(4.0))
+        .into_any();
+    let confirm = cards::delete_comment_confirmation(app, state, backend.clone(), node_id);
     let react = message.node_id.as_deref().and_then(cards::reactable);
     let url = message.html_url.clone().unwrap_or_default();
     let reactions = cards::reactions_under(app, state, backend.clone(), &react);
@@ -3241,9 +3262,13 @@ fn posted_message_view(
             author_label(state, move || viewer_login(app)).into_any(),
             after_review_label(state, message.created_at).into_any(),
         ],
-        cards::actions(state, backend, hovered, Some(reply_button), Some(ask), react, url),
+        cards::actions(state, backend, hovered, Some(leading), Some(ask), react, url),
     );
-    let body = Stack::vertical((message_body(state, thread, &message.body, Some(applying)), reactions))
+    let body = Stack::vertical((
+        message_body(state, thread, &message.body, Some(applying)),
+        reactions,
+        confirm,
+    ))
     .style(|s| s.flex_col().width_full())
     .into_any();
     let avatar = viewer_avatar(app, face.avatar()).into_any();
@@ -4518,6 +4543,7 @@ mod tests {
             updated_at: None,
             html_url: String::new(),
             reactions: Default::default(),
+            viewer_can_delete: false,
         };
         state
             .issue_comments

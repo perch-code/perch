@@ -116,6 +116,20 @@ impl Discussion {
         set
     }
 
+    /// Mark whether the reader may delete the comment with this node id,
+    /// in the conversation or on a line. An empty id names nothing.
+    pub fn set_deletable(&mut self, node_id: &str, deletable: bool) {
+        if node_id.is_empty() {
+            return;
+        }
+        for c in self.comments.iter_mut().filter(|c| c.node_id == node_id) {
+            c.viewer_can_delete = deletable;
+        }
+        for c in self.review_comments.iter_mut().filter(|c| c.node_id == node_id) {
+            c.viewer_can_delete = deletable;
+        }
+    }
+
     /// Everything here with its reactions, by node id, for the view to
     /// key on.
     pub fn reactions_by_id(&self) -> impl Iterator<Item = (&str, &Reactions)> {
@@ -143,6 +157,15 @@ pub struct ReviewThreadState {
     pub can_resolve: bool,
 }
 
+/// Where a comment was left, which names the mutation that deletes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommentPlace {
+    /// In the conversation: an issue comment.
+    Conversation,
+    /// On a line of a pull request's diff: a review comment.
+    Line,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IssueComment {
     pub id: u64,
@@ -159,6 +182,12 @@ pub struct IssueComment {
     pub html_url: String,
     #[serde(default)]
     pub reactions: Reactions,
+    /// Whether GitHub lets the reader delete the comment: its author
+    /// may, and so may anyone with write access to the repository. Read
+    /// with the reactions; false until they are, and on a row an older
+    /// build kept.
+    #[serde(default)]
+    pub viewer_can_delete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -258,6 +287,12 @@ pub struct ReviewComment {
     pub html_url: String,
     #[serde(default)]
     pub reactions: Reactions,
+    /// Whether GitHub lets the reader delete the comment: its author
+    /// may, and so may anyone with write access to the repository. Read
+    /// with the reactions; false until they are, and on a row an older
+    /// build kept.
+    #[serde(default)]
+    pub viewer_can_delete: bool,
 }
 
 impl ReviewComment {
@@ -301,6 +336,7 @@ impl From<IssueCommentPayload> for IssueComment {
             updated_at: p.updated_at,
             html_url: p.html_url,
             reactions: Reactions::default(),
+            viewer_can_delete: false,
         }
     }
 }
@@ -405,6 +441,7 @@ impl From<ReviewCommentPayload> for ReviewComment {
             updated_at: p.updated_at,
             html_url: p.html_url,
             reactions: Reactions::default(),
+            viewer_can_delete: false,
         }
     }
 }
@@ -894,6 +931,7 @@ mod tests {
                 updated_at: None,
                 html_url: "https://github.com/a/b/pull/1#issuecomment-1".into(),
                 reactions: thumbs,
+                viewer_can_delete: false,
             }],
             reviews: vec![Review {
                 id: 9,
@@ -927,6 +965,7 @@ mod tests {
                 updated_at: Some(at("2026-09-16T11:38:00Z")),
                 html_url: String::new(),
                 reactions: Reactions::default(),
+                viewer_can_delete: false,
             }],
             events: vec![
                 PullEvent::new(PullEventKind::Opened, at("2026-09-14T14:02:00Z"), "rohan"),
