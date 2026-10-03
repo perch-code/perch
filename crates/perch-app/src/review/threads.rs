@@ -2826,6 +2826,29 @@ fn perch_only_label() -> impl IntoView {
     )
 }
 
+/// After Review #N, in the byline of a message said after the past review
+/// the item shows had ended. A mark rather than words in the text, so an
+/// edit never carries it into the message.
+fn after_review_label(state: ReviewState, at: jiff::Timestamp) -> impl IntoView {
+    let number = Memo::new(move |_| {
+        state.historical_review.with(|review| {
+            let group = &review.as_ref()?.group;
+            (at > group.ended_at?).then_some(group.number)
+        })
+    });
+    cards::tip(
+        badge(
+            move || number.get().map(|n| format!("After Review #{n}")).unwrap_or_default(),
+            theme::fg_muted,
+            || floem::peniko::Color::TRANSPARENT,
+            Some(theme::border),
+        )
+        .debug_name("after-review")
+        .style(move |s| s.margin_left(6.0).apply_if(number.get().is_none(), |s| s.hide())),
+        "Said after this review ended; the code shown is what the review read.".to_string(),
+    )
+}
+
 /// The reader's question to an agent, or an agent's answer, under the
 /// reader's face and name or the agent's mark and its model, `private`
 /// marking it Perch only. A finished run sits on the answer, and reads in
@@ -2888,6 +2911,7 @@ fn local_message_view(
     if private {
         after.push(perch_only_label().into_any());
     }
+    after.push(after_review_label(state, message.created_at).into_any());
     let avatar = author_avatar(app, state, &author, face.avatar());
     let byline = byline_row(
         name_label(
@@ -3120,6 +3144,7 @@ fn github_message_view(
         vec![
             when_label(app, message.created_at, face, "comment-when").into_any(),
             author_label(state, move || Some(author.clone())).into_any(),
+            after_review_label(state, message.created_at).into_any(),
         ],
         cards::actions(state, backend, hovered, Some(reply_button), Some(ask), react, url),
     );
@@ -3180,6 +3205,7 @@ fn draft_message_view(
         vec![
             draft_pill().into_any(),
             author_label(state, move || viewer_login(app)).into_any(),
+            after_review_label(state, message.created_at).into_any(),
         ],
         actions,
     );
@@ -3213,6 +3239,7 @@ fn posted_message_view(
         vec![
             when_label(app, message.created_at, face, "posted-when").into_any(),
             author_label(state, move || viewer_login(app)).into_any(),
+            after_review_label(state, message.created_at).into_any(),
         ],
         cards::actions(state, backend, hovered, Some(reply_button), Some(ask), react, url),
     );
@@ -5061,6 +5088,95 @@ mod tests {
         harness.paint();
         harness.dispatch_event(enter(Modifiers::META));
         assert!(matches!(commands.try_recv(), Ok(Command::Ask { .. })));
+    }
+
+    /// Over a past review, a draft said after it ended carries After
+    /// Review #N in its byline, not in its text: edit opens on the words
+    /// alone, so saving never writes the mark into the draft (issue 11).
+    #[test]
+    fn a_draft_after_a_past_review_is_marked_in_its_byline_not_its_text() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_item();
+        let mut thread = github_thread_with_private_messages();
+        thread.messages.truncate(1);
+        let said = thread.messages[0].created_at;
+        let mut draft = thread.messages[0].clone();
+        draft.id = "d1".into();
+        draft.author = Author::User;
+        draft.github_id = None;
+        draft.body = "I will fix it".into();
+        draft.created_at = said + jiff::SignedDuration::from_hours(1);
+        thread.messages.push(draft);
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let ended = said + jiff::SignedDuration::from_mins(1);
+        state.historical_review.set(Some(crate::review::model::ReviewGroupSummary {
+            group: perch_github::ReviewGroup {
+                id: "group-1".into(),
+                item_id: "item-1".into(),
+                snapshot_id: "snapshot-1".into(),
+                number: 1,
+                status: perch_github::ReviewGroupStatus::Completed,
+                new_findings: 0,
+                still_present: 0,
+                verified_fixed: 0,
+                not_verified: 0,
+                created_at: said,
+                started_at: Some(said),
+                ended_at: Some(ended),
+                instructions: None,
+            },
+            snapshot: perch_github::ReviewSnapshot {
+                id: "snapshot-1".into(),
+                item_id: "item-1".into(),
+                repository: "slatedb/slatedb".into(),
+                branch_label: None,
+                requested_base_ref: "main".into(),
+                base_tip_sha: "base".into(),
+                merge_base_sha: "base".into(),
+                head_sha: "head".into(),
+                dirty_edits_excluded: false,
+                retention_key: "snapshot-1".into(),
+                retained_ref: None,
+                manifest_path: None,
+                diff_path: None,
+                created_at: said,
+                worktree_parent_sha: None,
+            },
+            attempts: Vec::new(),
+        }));
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = messages_view(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
+            .style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+        let root_id = harness.root_id();
+        let shown = find_all(root_id, "after-review")
+            .into_iter()
+            .filter(|id| harness.get_layout_rect(*id).width() > 0.0)
+            .count();
+        assert_eq!(shown, 1, "only the draft came after the review");
+        assert!(find(root_id, "Label: \"After Review #1\"").is_some());
+
+        let pill = find(root_id, "draft-pill").unwrap().get_visual_rect_no_clip().center();
+        harness.pointer_move(pill.x, pill.y);
+        harness.rebuild();
+        harness.paint();
+        let edit = find(root_id, "edit-draft").expect("edit");
+        let c = edit.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        assert_eq!(state.composer_draft.get(), "I will fix it");
+
+        // Back on the live item, the mark goes.
+        state.composer.set(None);
+        state.clear_historical_review();
+        harness.rebuild();
+        harness.paint();
+        let root_id = harness.root_id();
+        assert!(find_all(root_id, "after-review")
+            .into_iter()
+            .all(|id| harness.get_layout_rect(id).width() == 0.0));
     }
 
     /// A draft under GitHub's thread: the reader's byline with the Draft

@@ -5695,20 +5695,6 @@ impl Ctx {
                         thread.created_at <= cutoff
                     }
                 });
-                for thread in &mut threads {
-                    for message in &mut thread.messages {
-                        if message.created_at > cutoff {
-                            message.body = if message.body.trim().is_empty() {
-                                format!("[After Review #{} · later discussion]", group.number)
-                            } else {
-                                format!(
-                                    "[After Review #{} · later discussion]\n\n{}",
-                                    group.number, message.body
-                                )
-                            };
-                        }
-                    }
-                }
             }
             Ok(threads)
         });
