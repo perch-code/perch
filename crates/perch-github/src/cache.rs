@@ -3089,6 +3089,11 @@ impl Cache {
         load_run_on(&self.conn, id)
     }
 
+    /// A run without its steps: what it ran with and how it went.
+    pub fn load_run_projection(&self, id: &str) -> Result<Option<RunRecord>, CacheError> {
+        load_run_projection_on(&self.conn, id)
+    }
+
     /// Record where a run's discussion was written and the manifest of what
     /// its prompt was shown. Either may be absent: a run with no discussion
     /// has neither, and one whose directory could not be written keeps the

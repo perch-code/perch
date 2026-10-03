@@ -296,7 +296,7 @@ fn chosen_agent(state: AppState) -> AgentChoice {
         .unwrap_or_else(|| crate::review::threads::defaults(state))
 }
 
-/// `Claude · Opus`, and the effort, as the composers pick them; never
+/// `Claude Opus`, and the effort, as the composers pick them; never
 /// GitHub, since new work has nothing on GitHub yet.
 fn agent_chips(state: AppState) -> impl IntoView {
     let nw = state.new_work;

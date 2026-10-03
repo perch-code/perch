@@ -140,15 +140,12 @@ pub(super) fn status_color(status: AgentRunStatus) -> fn() -> Color {
 }
 
 pub(super) fn metadata(run: &AgentRunSummary) -> String {
-    let model = crate::review::threads::model_label(&run.model);
-    let effort = perch_agent::Effort::parse(&run.effort)
-        .map(|effort| effort.label().to_string())
-        .unwrap_or_else(|| run.effort.clone());
+    let agent = crate::review::threads::agent_name(&run.backend, &run.model, &run.effort);
     let work = match run.mode {
         perch_github::RunMode::Work => "Work · ",
         perch_github::RunMode::Ask => "",
     };
-    format!("{work}{} · {model} · {effort}", run.backend_label())
+    format!("{work}{agent}")
 }
 
 /// Where a queued run is in the queue, from one.

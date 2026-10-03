@@ -206,7 +206,7 @@ fn finding_summary(ctx: &Ctx, finding: Finding) -> Result<ReviewFindingSummary, 
         let Some(attempt) = cache(ctx, |cache| cache.load_reviewer_attempt(attempt_id))? else {
             continue;
         };
-        attributions.insert((attempt.backend.clone(), attempt.model.clone()));
+        attributions.insert(attribution(ctx, &attempt)?);
         if let Some(group) = cache(ctx, |cache| cache.load_review_group(&attempt.group_id))? {
             seen_in_reviews.insert(group.number);
         }
@@ -233,6 +233,22 @@ fn finding_summary(ctx: &Ctx, finding: Finding) -> Result<ReviewFindingSummary, 
         original_review_number,
         title: reported_title(&observations),
     })
+}
+
+/// Who a reviewer attempt was: its backend, the model its run reported,
+/// else the one it asked for, and its effort.
+fn attribution(ctx: &Ctx, attempt: &ReviewerAttempt) -> Result<(String, String, String), String> {
+    let reported = match attempt.run_id.as_deref() {
+        Some(id) => cache(ctx, |cache| cache.load_run_projection(id))?
+            .map(|run| run.model)
+            .filter(|model| !model.trim().is_empty()),
+        None => None,
+    };
+    Ok((
+        attempt.backend.clone(),
+        reported.unwrap_or_else(|| attempt.model.clone()),
+        attempt.effort.clone(),
+    ))
 }
 
 /// The title a finding was first reported under, else the latest one
@@ -354,7 +370,7 @@ fn historical_finding_summaries(
             let Some(attempt) = cache(ctx, |cache| cache.load_reviewer_attempt(attempt_id))? else {
                 continue;
             };
-            attributions.insert((attempt.backend.clone(), attempt.model.clone()));
+            attributions.insert(attribution(ctx, &attempt)?);
             if let Some(seen_group) =
                 cache(ctx, |cache| cache.load_review_group(&attempt.group_id))?
             {

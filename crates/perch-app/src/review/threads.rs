@@ -38,17 +38,92 @@ use crate::ui::widgets::{
     text_button, Name,
 };
 
-/// A model alias as the screen shows it: "Sonnet" for `sonnet`. A full id
-/// such as `claude-sonnet-5` is shown as typed.
+/// A model as the screen shows it, without its maker: "Sonnet" for the
+/// alias `sonnet`, "Opus 5.5" for `claude-opus-5-5`, "Sol 6.1" for
+/// `gpt-6.1-sol` and "GPT 5.5" for `gpt-5.5`. The date on the end of an
+/// id such as `claude-haiku-4-5-20251001` goes; the version says it.
 pub fn model_label(model: &str) -> String {
-    if model.contains('-') {
+    // Claude Code can report the context window on the end: `[1m]`.
+    let model = model.split('[').next().unwrap_or_default().trim();
+    let mut words = Vec::new();
+    let mut version = Vec::new();
+    let mut gpt = false;
+    for part in model.split('-').filter(|part| !part.is_empty()) {
+        if part.eq_ignore_ascii_case("claude") || part.eq_ignore_ascii_case("codex") {
+            // The maker, which `model_name` puts first.
+        } else if part.eq_ignore_ascii_case("gpt") {
+            gpt = true;
+        } else if part.len() >= 6 && part.chars().all(|c| c.is_ascii_digit()) {
+            // A release date.
+        } else if part.starts_with(|c: char| c.is_ascii_digit()) {
+            version.push(part);
+        } else if part.chars().all(|c| c.is_ascii_alphabetic()) {
+            let mut chars = part.chars();
+            let first = chars.next().map(|c| c.to_ascii_uppercase());
+            words.push(first.into_iter().chain(chars.map(|c| c.to_ascii_lowercase())).collect());
+        } else {
+            words.push(part.to_string());
+        }
+    }
+    if words.is_empty() && gpt {
+        words.push("GPT".to_string());
+    }
+    if words.is_empty() && version.is_empty() {
         return model.to_string();
     }
-    let mut chars = model.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().chain(chars).collect(),
-        None => String::new(),
+    if !version.is_empty() {
+        words.push(version.join("."));
     }
+    words.join(" ")
+}
+
+/// A model with its maker first: "Claude Opus 5.5", "Codex Sol 6.1". The
+/// maker is the backend's, or the id's when the backend is not known.
+pub fn model_name(backend: &str, model: &str) -> String {
+    let maker = match perch_agent::Backend::parse(backend) {
+        Some(perch_agent::Backend::ClaudeCode) => Some("Claude"),
+        Some(perch_agent::Backend::Codex) => Some("Codex"),
+        None if backend.eq_ignore_ascii_case("claude") => Some("Claude"),
+        None => {
+            let model = model.trim().to_ascii_lowercase();
+            if model.starts_with("claude") {
+                Some("Claude")
+            } else if model.starts_with("gpt") {
+                Some("Codex")
+            } else {
+                None
+            }
+        }
+    };
+    let label = model_label(model);
+    match maker {
+        Some(maker) if label.is_empty() => maker.to_string(),
+        Some(maker) => format!("{maker} {label}"),
+        None => label,
+    }
+}
+
+/// Who ran, as a byline names them: "Claude Opus 5.5 (high)",
+/// "Codex Sol 6.1 (xhigh)".
+pub fn agent_name(backend: &str, model: &str, effort: &str) -> String {
+    let name = model_name(backend, model);
+    match effort.trim() {
+        "" => name,
+        effort => format!("{name} ({})", effort.to_ascii_lowercase()),
+    }
+}
+
+/// A run's [`agent_name`]: the model and effort it ran with, else, until
+/// the CLI says, the ones it asked for.
+pub fn run_agent_name(run: &RunRecord) -> String {
+    let or_requested = |used: &str, requested: &str| {
+        if used.trim().is_empty() { requested } else { used }.to_string()
+    };
+    agent_name(
+        &run.backend,
+        &or_requested(&run.model, &run.requested_model),
+        &or_requested(&run.effort, &run.requested_effort),
+    )
 }
 
 /// Whether the command a box's keymap resolved a key to is Cmd-Enter,
@@ -1325,16 +1400,11 @@ fn composer_original(
     Some((anchor, original))
 }
 
-/// The picker's face: `Claude · Opus`, `Codex · gpt-5.5`, or `GitHub`.
+/// The picker's face: `Claude Opus`, `Codex Sol 6.1`, or `GitHub`. The
+/// effort has a picker of its own beside it.
 pub fn destination_label(destination: &Destination) -> String {
     match destination {
-        Destination::Agent { backend, model, .. } => {
-            let agent = match backend {
-                perch_agent::Backend::ClaudeCode => "Claude",
-                perch_agent::Backend::Codex => "Codex",
-            };
-            format!("{agent} \u{00b7} {}", model_label(model))
-        }
+        Destination::Agent { backend, model, .. } => model_name(backend.name(), model),
         Destination::GitHub => "GitHub".to_string(),
     }
 }
@@ -1790,6 +1860,7 @@ fn resolved_row(app: AppState, state: ReviewState, thread: CommentThread) -> imp
 fn collapsed_row(app: AppState, state: ReviewState, thread: CommentThread) -> impl IntoView {
     let first = thread.messages.first();
     let author = first.map(|m| m.author.clone()).unwrap_or(Author::User);
+    let run = first.and_then(|m| m.run.clone());
     let line = first
         .map(|m| crate::review::timeline::first_line(&m.body))
         .unwrap_or_default();
@@ -1826,7 +1897,7 @@ fn collapsed_row(app: AppState, state: ReviewState, thread: CommentThread) -> im
         state,
         card_id,
         avatar,
-        move || author_name(app, &author),
+        move || author_name(app, &author, run.as_ref()),
         line,
         thread.messages.len().saturating_sub(1),
         thread.outdated,
@@ -1883,9 +1954,10 @@ pub(crate) fn collapsed_card_row(
 }
 
 /// Who wrote a message, as a collapsed card names them: the reader by
-/// their login once GitHub has said it, the agent by its model. A login
-/// is a link to its page; a model and "You" lead nowhere.
-fn author_name(app: AppState, author: &Author) -> Name {
+/// their login once GitHub has said it, the agent by its model and the
+/// effort of the `run` that wrote it. A login is a link to its page; a
+/// model and "You" lead nowhere.
+fn author_name(app: AppState, author: &Author, run: Option<&RunRecord>) -> Name {
     match author {
         Author::User => app
             .viewer
@@ -1894,7 +1966,10 @@ fn author_name(app: AppState, author: &Author) -> Name {
             .filter(|l| !l.is_empty())
             .map(Name::Login)
             .unwrap_or_else(|| Name::Plain("You".into())),
-        Author::Agent { model, .. } => Name::Plain(model_label(model)),
+        Author::Agent { backend, model } => Name::Plain(match run {
+            Some(run) => run_agent_name(run),
+            None => model_name(backend, model),
+        }),
         Author::GitHubUser(login) => Name::Login(login.clone()),
     }
 }
@@ -2808,13 +2883,17 @@ fn local_message_view(
         None => (text, None),
     };
     let author = message.author.clone();
+    let author_run = message.run.clone();
     let mut after = vec![when_label(app, message.created_at, face, "comment-when").into_any()];
     if private {
         after.push(perch_only_label().into_any());
     }
     let avatar = author_avatar(app, state, &author, face.avatar());
     let byline = byline_row(
-        name_label(move || author_name(app, &author), move |s| name_style(s, face)),
+        name_label(
+            move || author_name(app, &author, author_run.as_ref()),
+            move |s| name_style(s, face),
+        ),
         after,
         actions,
     );
@@ -2852,16 +2931,7 @@ fn pending_answer_view(
     let at = run.started_at.unwrap_or(run.queued_at);
     // The model the CLI reports can land after the run starts.
     let live = live_run(state, run.clone());
-    let model = move || {
-        live.with(|run| {
-            let model = if run.model.is_empty() {
-                &run.requested_model
-            } else {
-                &run.model
-            };
-            Name::Plain(model_label(model))
-        })
-    };
+    let model = move || live.with(|run| Name::Plain(run_agent_name(run)));
     let mut after = vec![when_label(app, at, face, "comment-when").into_any()];
     if private {
         after.push(perch_only_label().into_any());
@@ -3106,7 +3176,7 @@ fn draft_message_view(
     .style(|s| s.items_center().gap(4.0).flex_shrink(0.0_f32))
     .into_any();
     let byline = byline_row(
-        name_label(move || author_name(app, &Author::User), move |s| name_style(s, face)),
+        name_label(move || author_name(app, &Author::User, None), move |s| name_style(s, face)),
         vec![
             draft_pill().into_any(),
             author_label(state, move || viewer_login(app)).into_any(),
@@ -3139,7 +3209,7 @@ fn posted_message_view(
     let reactions = cards::reactions_under(app, state, backend.clone(), &react);
     let applying = backend.clone();
     let byline = byline_row(
-        name_label(move || author_name(app, &Author::User), move |s| name_style(s, face)),
+        name_label(move || author_name(app, &Author::User, None), move |s| name_style(s, face)),
         vec![
             when_label(app, message.created_at, face, "posted-when").into_any(),
             author_label(state, move || viewer_login(app)).into_any(),
@@ -3452,29 +3522,29 @@ fn run_footer(backend: Rc<Backend>, run: RunRecord) -> floem::AnyView {
         RunStatus::Queued | RunStatus::Starting | RunStatus::Running | RunStatus::Stopping => {
             Empty::new().into_any()
         }
-        RunStatus::Completed => Label::derived(move || {
-            let cost = run
-                .cost_usd
-                .map(|c| format!(" \u{00b7} ${c:.2}"))
-                .unwrap_or_default();
-            let effort = perch_agent::Effort::parse(&run.effort)
-                .map(|e| e.label().to_string())
-                .unwrap_or_else(|| run.effort.clone());
-            // The answer's byline names the model and the steps line how
-            // long it took; the run says whether it worked in the
-            // worktree, how hard it thought and what it cost.
-            let work = match run.mode {
-                perch_github::RunMode::Work => "Work \u{00b7} ",
-                perch_github::RunMode::Ask => "",
-            };
-            format!("{work}{effort}{cost}")
-        })
-        .style(|s| {
-            s.font_size(theme::TEXT_SECTION)
-                .color(theme::fg_subtle())
-                .selectable(false)
-        })
-        .into_any(),
+        RunStatus::Completed => {
+            // The answer's byline names the model and how hard it thought,
+            // and the steps line how long it took; the run says whether it
+            // worked in the worktree and what it cost.
+            let footer = [
+                matches!(run.mode, perch_github::RunMode::Work).then(|| "Work".to_string()),
+                run.cost_usd.map(|c| format!("${c:.2}")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" \u{00b7} ");
+            if footer.is_empty() {
+                return Empty::new().into_any();
+            }
+            Label::derived(move || footer.clone())
+                .style(|s| {
+                    s.font_size(theme::TEXT_SECTION)
+                        .color(theme::fg_subtle())
+                        .selectable(false)
+                })
+                .into_any()
+        }
         RunStatus::Stopped | RunStatus::Failed | RunStatus::Interrupted => {
             let error = run.error.clone().unwrap_or_else(|| "Failed".to_string());
             let retry_id = run.id.clone();
@@ -3790,10 +3860,43 @@ mod tests {
     }
 
     #[test]
-    fn aliases_are_capitalised_and_ids_left_alone() {
+    fn models_are_named_by_family_and_version() {
         assert_eq!(model_label("sonnet"), "Sonnet");
         assert_eq!(model_label("fable"), "Fable");
-        assert_eq!(model_label("claude-sonnet-5"), "claude-sonnet-5");
+        assert_eq!(model_label("claude-sonnet-5"), "Sonnet 5");
+        assert_eq!(model_label("claude-opus-5-5"), "Opus 5.5");
+        assert_eq!(model_label("claude-opus-5-5[1m]"), "Opus 5.5");
+        assert_eq!(model_label("claude-haiku-4-5-20251001"), "Haiku 4.5");
+        assert_eq!(model_label("claude-3-5-sonnet-20241022"), "Sonnet 3.5");
+        assert_eq!(model_label("gpt-6.1-sol"), "Sol 6.1");
+        assert_eq!(model_label("gpt-6-astra"), "Astra 6");
+        assert_eq!(model_label("gpt-5.5"), "GPT 5.5");
+        assert_eq!(model_label("gpt-5.1-codex-max"), "Max 5.1");
+        assert_eq!(model_label("o3"), "o3");
+        assert_eq!(model_label(""), "");
+    }
+
+    #[test]
+    fn agents_are_named_by_maker_model_version_and_effort() {
+        assert_eq!(agent_name("claude-code", "claude-opus-5-5", "low"), "Claude Opus 5.5 (low)");
+        assert_eq!(agent_name("codex", "gpt-6.1-sol", "xhigh"), "Codex Sol 6.1 (xhigh)");
+        assert_eq!(agent_name("claude-code", "opus", "High"), "Claude Opus (high)");
+        assert_eq!(agent_name("", "claude-sonnet-5", ""), "Claude Sonnet 5");
+        assert_eq!(agent_name("", "gpt-5.5", "medium"), "Codex GPT 5.5 (medium)");
+        assert_eq!(agent_name("codex", "", "low"), "Codex (low)");
+        let run = RunRecord {
+            backend: "claude-code".into(),
+            requested_model: "opus".into(),
+            requested_effort: "high".into(),
+            ..RunRecord::default()
+        };
+        assert_eq!(run_agent_name(&run), "Claude Opus (high)", "what it asked for");
+        let run = RunRecord {
+            model: "claude-opus-5-5".into(),
+            effort: "medium".into(),
+            ..run
+        };
+        assert_eq!(run_agent_name(&run), "Claude Opus 5.5 (medium)", "what it ran with");
     }
 
     fn enter(modifiers: Modifiers) -> floem::event::Event {
@@ -4049,7 +4152,9 @@ mod tests {
         thread.messages[1].run = Some(RunRecord {
             id: "run-1".into(),
             status: RunStatus::Running,
+            backend: "claude-code".into(),
             requested_model: "opus".into(),
+            requested_effort: "high".into(),
             ..RunRecord::default()
         });
         state.comment_threads.set(Arc::new(vec![thread.clone()]));
@@ -4060,7 +4165,10 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert_eq!(find_all(harness.root_id(), "agent-avatar").len(), 1);
-        assert!(find(harness.root_id(), "Label: \"Opus\"").is_some(), "the requested model");
+        assert!(
+            find(harness.root_id(), "Label: \"Claude Opus (high)\"").is_some(),
+            "the requested model"
+        );
         assert_eq!(
             find_all(harness.root_id(), "perch-only").len(),
             2,
@@ -4075,7 +4183,7 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert!(
-            find(harness.root_id(), "Label: \"claude-opus-5-5\"").is_some(),
+            find(harness.root_id(), "Label: \"Claude Opus 5.5 (high)\"").is_some(),
             "the model the CLI reported"
         );
     }

@@ -1989,17 +1989,10 @@ pub(crate) fn finding_controls(
         move |summary| match summary {
             Some((summary, historical, original_group, head)) => {
                 let finding = &summary.finding;
-                // "Claude Code · Opus", as the Agents section names a run.
-                let name = |backend: &str, model: &str| {
-                    format!(
-                        "{} \u{b7} {}",
-                        crate::review::review_launch::backend_label_from_name(backend),
-                        threads::model_label(model)
-                    )
-                };
+                // "Claude Opus 5.5 (high)", as the Agents section names a run.
                 let reviewer = if summary.attributions.is_empty() {
                     match (&summary.backend, &summary.model) {
-                        (Some(backend), Some(model)) => name(backend, model),
+                        (Some(backend), Some(model)) => threads::model_name(backend, model),
                         (Some(backend), None) => {
                             crate::review::review_launch::backend_label_from_name(backend).to_string()
                         }
@@ -2009,7 +2002,7 @@ pub(crate) fn finding_controls(
                     summary
                         .attributions
                         .iter()
-                        .map(|(backend, model)| name(backend, model))
+                        .map(|(backend, model, effort)| threads::agent_name(backend, model, effort))
                         .collect::<Vec<_>>()
                         .join(", ")
                 };

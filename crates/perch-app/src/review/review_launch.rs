@@ -238,7 +238,7 @@ pub(crate) fn agents_section(
         .debug_name("review-agents")
 }
 
-/// The reviewers the next run would start, `Claude · opus · High`, one
+/// The reviewers the next run would start, `Claude Opus (high)`, one
 /// after another; or why there are none.
 fn reviewers_summary(app: AppState, state: ReviewState) -> String {
     let chosen = state.review_launcher_draft.with(|draft| {
@@ -250,11 +250,10 @@ fn reviewers_summary(app: AppState, state: ReviewState) -> String {
                     .iter()
                     .filter_map(|choice| effective_choice(app, choice))
                     .map(|choice| {
-                        format!(
-                            "{} \u{b7} {} \u{b7} {}",
-                            backend_label(choice.backend),
-                            choice.model,
-                            choice.effort.label()
+                        crate::review::threads::agent_name(
+                            choice.backend.name(),
+                            &choice.model,
+                            choice.effort.name(),
                         )
                     })
                     .collect::<Vec<_>>()
@@ -497,6 +496,7 @@ fn model_selector(
         move || {
             choice_for(state, reviewer)
                 .and_then(|choice| choice.model)
+                .map(|model| crate::review::threads::model_label(&model))
                 .unwrap_or_else(|| "Choose model".into())
         },
         move || {
@@ -506,7 +506,7 @@ fn model_selector(
                 let backend = backend.clone();
                 let pick = model.clone();
                 let checked = selected.as_deref() == Some(model.as_str());
-                menu = menu.item(model, move |item| {
+                menu = menu.item(crate::review::threads::model_label(&model), move |item| {
                     let pick = pick.clone();
                     item.checked(checked).action(move || {
                         let wanted = choice_for(state, reviewer).and_then(|choice| choice.effort);

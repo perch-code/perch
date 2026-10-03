@@ -1095,8 +1095,9 @@ impl ReviewGroupSummary {
 pub struct ReviewFindingSummary {
     pub finding: perch_github::Finding,
     pub severity: perch_github::FindingSeverity,
-    /// Every reviewer/model which has reported or verified this identity.
-    pub attributions: Vec<(String, String)>,
+    /// Every reviewer which has reported or verified this identity, as
+    /// backend, model and effort.
+    pub attributions: Vec<(String, String, String)>,
     /// Review numbers containing an observation of this finding.
     pub seen_in_reviews: Vec<u64>,
     /// The latest observation's reviewer, retained for compact callers.
