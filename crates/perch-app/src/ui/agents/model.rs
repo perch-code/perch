@@ -677,13 +677,13 @@ impl RunCounts {
     }
 }
 
-fn seconds_between(start: Timestamp, end: Timestamp) -> u64 {
+pub fn seconds_between(start: Timestamp, end: Timestamp) -> u64 {
     let start = start.as_nanosecond();
     let end = end.as_nanosecond();
     ((end - start).max(0) / 1_000_000_000) as u64
 }
 
-fn duration_label(seconds: u64) -> String {
+pub fn duration_label(seconds: u64) -> String {
     if seconds < 60 {
         format!("{seconds}s")
     } else if seconds < 3_600 {

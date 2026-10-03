@@ -30,7 +30,7 @@ use super::model::{
     elapsed_label, group_review_runs, item_runs, with_every_review, AgentRetryTarget,
     AgentRunEntry, AgentRunStatus, AgentRunSummary, RunCounts,
 };
-use super::{detail, metadata, queue_position, status_color, text_action};
+use super::{detail, live_dot, queue_position, status_color, status_mark, text_action};
 
 /// How tall an open run is before what it did scrolls inside it.
 pub const OPEN_RUN_MAX_HEIGHT: f64 = 480.0;
@@ -97,27 +97,58 @@ fn section_header(app: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     let toggle = move || review.agents_unfolded.update(|open| *open = !*open);
     Stack::horizontal((
         crate::review::cards::section_title("Agents"),
-        Empty::new().style(move |s| {
-            let counts = counts.get();
-            let color = if counts.running > 0 {
-                status_color(AgentRunStatus::Running)
-            } else {
-                status_color(AgentRunStatus::Queued)
-            };
-            s.size(7.0, 7.0)
-                .border_radius(4.0)
-                .background(color())
-                .flex_shrink(0.0_f32)
-                .apply_if(!counts.active(), |s| s.hide())
-        }),
-        Label::derived(move || counts.get().label()).style(move |s| {
+        dyn_container(
+            move || {
+                let counts = counts.get();
+                (counts.active(), counts.running > 0)
+            },
+            move |(active, running)| match (active, running) {
+                (true, true) => live_dot(app, 7.0).into_any(),
+                (true, false) => Empty::new()
+                    .style(|s| {
+                        s.size(7.0, 7.0)
+                            .border_radius(4.0)
+                            .background(status_color(AgentRunStatus::Queued)())
+                    })
+                    .into_any(),
+                _ => Empty::new().into_any(),
+            },
+        )
+        .style(|s| s.flex_shrink(0.0_f32)),
+        // While anything works, its busiest state leads, in that state's
+        // colour, and the rest follow quietly.
+        Label::derived(move || {
+            let label = counts.get().label();
+            match counts.get().active() {
+                true => label.split(" \u{b7} ").next().unwrap_or_default().to_string(),
+                false => label,
+            }
+        })
+        .style(move |s| {
             let counts = counts.get();
             s.font_size(theme::TEXT_META)
-                .color(if !counts.active() && counts.last_failed {
+                .color(if counts.running > 0 {
+                    theme::running()
+                } else if counts.active() {
+                    theme::notice_fg()
+                } else if counts.last_failed {
                     theme::closed()
                 } else {
                     theme::fg_muted()
                 })
+                .flex_shrink(0.0_f32)
+                .selectable(false)
+        }),
+        Label::derived(move || {
+            let label = counts.get().label();
+            match (counts.get().active(), label.split_once(" \u{b7} ")) {
+                (true, Some((_, rest))) => format!("\u{b7} {rest}"),
+                _ => String::new(),
+            }
+        })
+        .style(move |s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::fg_subtle())
                 .text_ellipsis()
                 .min_width(0.0)
                 .selectable(false)
@@ -345,9 +376,9 @@ pub(super) fn toggle_run(app: AppState, review: ReviewState, backend: &Backend, 
     }
 }
 
-/// A run's row, and what it did under it while open. A question's row
-/// opens on a click; a reviewer's line, under its review, opens on Raw
-/// output, since the review's findings say what it found.
+/// A run's row, and what it did under it while open, which a click on
+/// it opens: a question's, or a reviewer's line under its review, whose
+/// raw output it opens to, since the review's findings say what it found.
 pub(super) fn run_row(
     app: AppState,
     review: ReviewState,
@@ -378,23 +409,20 @@ pub(super) fn run_row(
     let click_backend = backend.clone();
     let key_backend = backend.clone();
     let (click_id, key_id) = (id.clone(), id.clone());
+    let hovered = RwSignal::new(false);
     let header = dyn_container(
         move || run.get(),
         move |run| {
             if reviewer {
-                reviewer_header(app, review, header_backend.clone(), run, open).into_any()
+                reviewer_header(app, review, header_backend.clone(), run, open, hovered).into_any()
             } else {
-                header(app, review, header_backend.clone(), run).into_any()
+                header(app, review, header_backend.clone(), run, hovered).into_any()
             }
         },
     )
-    .on_event_stop(el::Click, move |_, _| {
-        if !reviewer {
-            toggle_run(app, review, &click_backend, &click_id)
-        }
-    })
+    .on_event_stop(el::Click, move |_, _| toggle_run(app, review, &click_backend, &click_id))
     .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if !reviewer && matches!(key.code, Code::Enter | Code::Space) {
+        if matches!(key.code, Code::Enter | Code::Space) {
             toggle_run(app, review, &key_backend, &key_id);
             EventPropagation::Stop
         } else {
@@ -402,14 +430,16 @@ pub(super) fn run_row(
         }
     })
     .style(move |s| {
-        if reviewer {
-            return s.width_full();
-        }
         let base = clickable(s)
             .width_full()
             .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
-            .hover(|s| s.background(theme::canvas_hover()));
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()));
+        if reviewer {
+            return base
+                .border_radius(theme::RADIUS)
+                .hover(|s| s.background(theme::canvas_hover()));
+        }
+        let base = base.hover(|s| s.background(theme::canvas_hover()));
         if open.get() {
             base.background(theme::accent_subtle())
         } else {
@@ -417,6 +447,7 @@ pub(super) fn run_row(
         }
     })
     .debug_name("agent-run-header");
+    let header = crate::review::cards::track_hover(header, hovered);
     let body = dyn_container(
         move || open.get(),
         move |open| {
@@ -459,15 +490,17 @@ pub(super) fn run_row(
     })
 }
 
-/// A question's row: the agent's mark, what it was asked, how it stands
-/// or when it ran, and what can be done with it; under that what ran it
-/// and why, and while it works or once it failed, what it is doing or
-/// how it ended. Its answer is in its thread, which Show in thread opens.
+/// A question's row: its mark, what it was asked, and under that what
+/// ran it and why, and while it works or once it failed, what it is doing
+/// or how it ended; then how long it has worked or when it ran, and, under
+/// the pointer, what can be done with it. Its answer is in its thread,
+/// which Show in thread opens.
 fn header(
     app: AppState,
     review: ReviewState,
     backend: Rc<Backend>,
     run: AgentRunSummary,
+    hovered: RwSignal<bool>,
 ) -> impl IntoView {
     let color = status_color(run.status);
     let status = run.status;
@@ -476,7 +509,11 @@ fn header(
         AgentRunStatus::Failed | AgentRunStatus::Stopped | AgentRunStatus::Interrupted
     );
     let subject = run.subject();
-    let about = format!("{} \u{b7} {}", metadata(&run), run.purpose.label().to_lowercase());
+    let about = format!(
+        "{} \u{b7} {}",
+        crate::review::threads::agent_name(&run.backend, &run.model, &run.effort),
+        run.purpose.label().to_lowercase()
+    );
     let activity = if status.is_active() {
         Some(run.latest_activity.clone().unwrap_or_else(|| match status {
             AgentRunStatus::Queued => "Waiting for an execution slot".to_string(),
@@ -493,130 +530,173 @@ fn header(
         None
     };
     let when = run_when(app, &run);
-    Stack::vertical((
-        Stack::horizontal((
-            agent_mark(),
+    Stack::horizontal((
+        status_mark(app, status),
+        Stack::vertical((
             Label::derived(move || subject.clone()).style(|s| {
                 s.font_size(theme::TEXT_BODY)
                     .color(theme::fg())
                     .text_ellipsis()
                     .min_width(0.0)
-                    .flex_grow(1.0_f32)
                     .selectable(false)
             }),
-            Label::derived(when)
-                .debug_name("agent-run-when")
-                .style(move |s| {
-                    s.font_size(theme::TEXT_BADGE)
-                        .color(if status.is_active() || failed {
-                            color()
+            Label::derived(move || about.clone()).style(|s| {
+                s.font_size(theme::TEXT_BADGE)
+                    .color(theme::fg_subtle())
+                    .text_ellipsis()
+                    .min_width(0.0)
+                    .selectable(false)
+            }),
+            match activity {
+                Some(activity) => Label::derived(move || activity.clone())
+                    .style(move |s| {
+                        let s = s
+                            .font_size(theme::TEXT_BADGE)
+                            .color(if failed { theme::closed() } else { theme::fg_muted() })
+                            .text_ellipsis()
+                            .min_width(0.0)
+                            .selectable(false);
+                        if failed {
+                            s
                         } else {
-                            theme::fg_subtle()
-                        })
-                        .flex_shrink(0.0_f32)
-                        .selectable(false)
-                }),
-            actions(review, backend, run),
+                            s.font_family(theme::CODE_FONT_STACK.to_string())
+                        }
+                    })
+                    .into_any(),
+                None => Empty::new().into_any(),
+            },
         ))
-        .style(|s| s.items_center().width_full().gap(8.0).min_height(24.0)),
-        Label::derived(move || about.clone()).style(|s| {
-            s.font_size(theme::TEXT_BADGE)
-                .color(theme::fg_subtle())
-                .margin_left(AGENT_MARK + 8.0)
-                .text_ellipsis()
-                .min_width(0.0)
-                .selectable(false)
-        }),
-        match activity {
-            Some(activity) => Label::derived(move || activity.clone())
-                .style(move |s| {
-                    s.font_size(theme::TEXT_BADGE)
-                        .font_family(theme::CODE_FONT_STACK.to_string())
-                        .color(if failed { theme::closed() } else { theme::fg_subtle() })
-                        .margin_left(AGENT_MARK + 8.0)
-                        .text_ellipsis()
-                        .min_width(0.0)
-                        .selectable(false)
-                })
-                .into_any(),
-            None => Empty::new().into_any(),
-        },
+        .style(|s| s.flex_col().gap(3.0).min_width(0.0).flex_grow(1.0_f32).flex_basis(0.0)),
+        Label::derived(when)
+            .debug_name("agent-run-when")
+            .style(move |s| {
+                s.font_size(theme::TEXT_BADGE)
+                    .color(if status.is_active() {
+                        color()
+                    } else {
+                        theme::fg_subtle()
+                    })
+                    .flex_shrink(0.0_f32)
+                    .selectable(false)
+            }),
+        actions(review, backend, run, hovered),
     ))
     .style(|s| {
-        s.flex_col()
+        s.items_center()
             .width_full()
-            .gap(3.0)
+            .gap(12.0)
+            .min_height(48.0)
             .padding_vert(10.0)
             .padding_horiz(theme::CARD_PADDING)
     })
 }
 
-/// A reviewer's line under its review: the agent's mark, what ran it,
-/// how it stands and what it cost, then Stop or Retry, and Raw output,
-/// which opens what it said under the line.
+/// A reviewer's line under its review, in a box of its own: a dot for how
+/// it stands, what ran it, and what it is doing or how it went; under the
+/// pointer, Stop or Retry; and a chevron for its raw output, which the
+/// whole line opens under it.
 fn reviewer_header(
     app: AppState,
     review: ReviewState,
     backend: Rc<Backend>,
     run: AgentRunSummary,
     open: Memo<bool>,
+    hovered: RwSignal<bool>,
 ) -> impl IntoView {
     let color = status_color(run.status);
     let status = run.status;
-    let meta = metadata(&run);
+    let name = crate::review::threads::agent_name(&run.backend, &run.model, &run.effort);
     let cost = run.cost_usd.map(|cost| format!(" \u{b7} ${cost:.2}")).unwrap_or_default();
+    let activity = run.latest_activity.clone().filter(|_| status.is_active());
+    let live = activity.is_some();
     let elapsed_run = run.clone();
-    let id = run.id.clone();
-    let toggle_backend = backend.clone();
+    let dot = if matches!(status, AgentRunStatus::Starting | AgentRunStatus::Running) {
+        live_dot(app, 6.0).into_any()
+    } else {
+        Empty::new()
+            .style(move |s| {
+                s.size(6.0, 6.0)
+                    .border_radius(3.0)
+                    .background(color())
+                    .flex_shrink(0.0_f32)
+            })
+            .into_any()
+    };
     Stack::horizontal((
-        agent_mark(),
-        Label::derived(move || meta.clone()).style(|s| {
+        dot,
+        Label::derived(move || name.clone()).style(|s| {
             s.font_size(theme::TEXT_BADGE)
-                .color(theme::fg_muted())
+                .color(theme::fg())
                 .text_ellipsis()
                 .min_width(0.0)
                 .flex_shrink(1.0_f32)
                 .selectable(false)
         }),
-        Label::derived(move || {
-            format!(
+        Label::derived(move || match &activity {
+            Some(activity) => activity.clone(),
+            None => format!(
                 "{} \u{b7} {}{cost}",
                 status.label(),
                 elapsed_label(&elapsed_run, app.now.get())
-            )
+            ),
         })
         .debug_name("agent-reviewer-status")
         .style(move |s| {
-            s.font_size(theme::TEXT_BADGE)
-                .color(if status == AgentRunStatus::Completed {
-                    theme::fg_subtle()
-                } else {
-                    color()
+            let s = s
+                .font_size(theme::TEXT_BADGE)
+                .color(match status {
+                    AgentRunStatus::Completed => theme::fg_subtle(),
+                    _ if live => theme::fg_muted(),
+                    _ => color(),
                 })
-                .flex_shrink(0.0_f32)
-                .selectable(false)
+                .text_ellipsis()
+                .min_width(0.0)
+                .flex_grow(1.0_f32)
+                .flex_basis(0.0)
+                .selectable(false);
+            if live {
+                s.font_family(theme::CODE_FONT_STACK.to_string())
+            } else {
+                s
+            }
         }),
-        Empty::new().style(|s| s.flex_grow(1.0_f32)),
-        actions(review, backend, run),
-        text_action(
-            move || {
-                if open.get() {
-                    "Hide raw output".to_string()
-                } else {
-                    "Raw output".to_string()
-                }
-            },
-            false,
-            move || toggle_run(app, review, &toggle_backend, &id),
-        )
-        .debug_name("agent-reviewer raw output"),
+        actions(review, backend, run, hovered),
+        crate::review::cards::tip(
+            dyn_container(
+                move || open.get(),
+                |open| {
+                    sidebar_glyph(
+                        if open {
+                            SidebarIcon::ChevronDown
+                        } else {
+                            SidebarIcon::ChevronRight
+                        },
+                        theme::fg_subtle,
+                    )
+                    .style(|s| s.size(10.0, 10.0))
+                },
+            )
+            .debug_name("agent-reviewer raw output")
+            .style(|s| s.size(16.0, 16.0).items_center().justify_center().flex_shrink(0.0_f32)),
+            "Raw output".to_string(),
+        ),
     ))
-    .style(|s| s.items_center().width_full().gap(8.0).min_height(24.0))
+    .style(move |s| {
+        s.items_center()
+            .width_full()
+            .gap(8.0)
+            .min_height(32.0)
+            .padding_horiz(8.0)
+            .border(1.0)
+            .border_color(theme::border())
+            .border_radius(theme::RADIUS)
+            .apply_if(open.get(), |s| s.background(theme::accent_subtle()))
+    })
 }
 
-/// How a run stands or when it ran: Running and how long while it works,
-/// how it ended and when once it failed, and else only when. Kept current
-/// by the clock.
+/// How a run stands or when it ran: how long while it works, in the
+/// colour of its state, its place while queued, and else only when.
+/// Kept current by the clock.
 fn run_when(app: AppState, run: &AgentRunSummary) -> impl Fn() -> String + 'static {
     let run = run.clone();
     let queue = queue_position(app, &run.id);
@@ -631,91 +711,70 @@ fn run_when(app: AppState, run: &AgentRunSummary) -> impl Fn() -> String + 'stat
                     None => format!("Queued \u{b7} {queued_for}"),
                 }
             }
-            status if status.is_active() => {
-                format!("{} \u{b7} {}", status.label(), elapsed_label(&run, now))
-            }
-            AgentRunStatus::Completed => timefmt::relative(run.ran_at(), now),
-            status => format!("{} \u{b7} {}", status.label(), timefmt::relative(run.ran_at(), now)),
+            AgentRunStatus::Stopping => format!("Stopping \u{b7} {}", elapsed_label(&run, now)),
+            status if status.is_active() => elapsed_label(&run, now),
+            _ => timefmt::short(run.ran_at(), now),
         }
     }
 }
 
-/// How wide an agent's mark is beside its row.
-pub(super) const AGENT_MARK: f64 = 18.0;
-
-/// An agent's mark: its glyph on a grey disc, as a thread draws one.
-pub(super) fn agent_mark() -> impl IntoView {
-    floem::views::Container::new(
-        sidebar_glyph(SidebarIcon::Agents, theme::fg_muted).style(|s| s.size(11.0, 11.0)),
-    )
-    .style(|s| {
-        s.size(AGENT_MARK, AGENT_MARK)
-            .border_radius(AGENT_MARK / 2.0)
-            .background(theme::badge_bg())
-            .items_center()
-            .justify_center()
-            .flex_shrink(0.0_f32)
-    })
-}
-
 /// Show in thread, for a run that has one, then Cancel, Stop or Retry as
-/// the run allows.
-fn actions(review: ReviewState, backend: Rc<Backend>, run: AgentRunSummary) -> impl IntoView {
+/// the run allows: glyphs, shown while the row is under the pointer.
+fn actions(
+    review: ReviewState,
+    backend: Rc<Backend>,
+    run: AgentRunSummary,
+    hovered: RwSignal<bool>,
+) -> impl IntoView {
+    use crate::review::cards::hover_action;
     let thread = match run.thread_id.clone() {
-        Some(thread_id) => text_action(
-            || "Show in thread".to_string(),
-            true,
-            move || {
+        Some(thread_id) => hover_action(
+            hovered,
+            SidebarIcon::Thread,
+            "Show in thread",
+            "agent-run show in thread",
+            Rc::new(move || {
                 review
                     .focus_card
                     .set(Some(CardId::Thread(thread_id.clone())))
-            },
+            }),
         )
-        .debug_name("agent-run show in thread")
         .into_any(),
         None => Empty::new().into_any(),
     };
     let control = match run.status {
         AgentRunStatus::Queued => {
             let id = run.id.clone();
-            text_action(
-                || "Cancel".to_string(),
-                false,
-                move || backend.cancel_run(&id),
+            hover_action(
+                hovered,
+                SidebarIcon::Close,
+                "Cancel",
+                "agent-run cancel",
+                Rc::new(move || backend.cancel_run(&id)),
             )
             .into_any()
         }
         status if status.may_stop() => {
             let id = run.id.clone();
-            text_action(
-                || "Stop".to_string(),
-                false,
-                move || backend.cancel_run(&id),
+            hover_action(
+                hovered,
+                SidebarIcon::Stop,
+                "Stop",
+                "agent-run stop",
+                Rc::new(move || backend.cancel_run(&id)),
             )
             .into_any()
         }
-        status if status.may_retry() => match run.retry_target() {
-            AgentRetryTarget::ReviewAttempt(attempt_id) => text_action(
-                || "Retry".to_string(),
-                false,
-                move || backend.retry_review_attempt(&attempt_id),
-            )
-            .into_any(),
-            AgentRetryTarget::Run(id) => text_action(
-                || "Retry".to_string(),
-                false,
-                move || backend.retry_run(&id),
-            )
-            .into_any(),
-        },
-        AgentRunStatus::Stopping => Label::derived(|| "Stopping…".to_string())
-            .style(|s| {
-                s.font_size(theme::TEXT_BADGE)
-                    .color(theme::fg_subtle())
-                    .selectable(false)
-                    .padding_horiz(8.0)
-            })
-            .into_any(),
+        status if status.may_retry() => {
+            let retry: Rc<dyn Fn()> = match run.retry_target() {
+                AgentRetryTarget::ReviewAttempt(attempt_id) => {
+                    Rc::new(move || backend.retry_review_attempt(&attempt_id))
+                }
+                AgentRetryTarget::Run(id) => Rc::new(move || backend.retry_run(&id)),
+            };
+            hover_action(hovered, SidebarIcon::Refresh, "Retry", "agent-run retry", retry)
+                .into_any()
+        }
         _ => Empty::new().into_any(),
     };
     Stack::horizontal((thread, control)).style(|s| s.items_center().gap(2.0).flex_shrink(0.0_f32))
@@ -805,7 +864,8 @@ mod tests {
         settle(&mut harness);
         assert!(shown(&harness, "agents section"));
         assert!(named(harness.root_id(), "summary row Agents").is_none());
-        assert!(named(harness.root_id(), "\"1 running · 1 done\"").is_some());
+        assert!(named(harness.root_id(), "\"1 running\"").is_some());
+        assert!(named(harness.root_id(), "\"· 1 done\"").is_some());
         assert!(
             !shown(&harness, "agents list"),
             "unfolded before it was asked"
@@ -880,11 +940,14 @@ mod tests {
             .agents_open_runs
             .with(|open| !open.contains("a") && open.contains("b")));
 
+        // Show in thread is drawn while the row is under the pointer.
+        let a = header(&mut harness, "a");
+        harness.pointer_move(a.x0 + 20.0, a.y0 + 14.0);
+        settle(&mut harness);
         let row = named(harness.root_id(), "agent-run:a").unwrap();
         let show = named(row, "agent-run show in thread").unwrap();
-        show.scroll_to(None);
-        settle(&mut harness);
         let show = show.get_visual_rect_no_clip();
+        assert!(show.height() > 0.0, "Show in thread is not drawn under the pointer");
         harness.click(show.center().x, show.center().y);
         settle(&mut harness);
         assert_eq!(review.focus_card.get(), Some(CardId::Thread("t-a".into())));
@@ -950,13 +1013,13 @@ mod tests {
         settle(&mut harness);
         let group = named(harness.root_id(), "agent-review-group:group-3").expect("no review row");
         assert!(named(harness.root_id(), "\"Review #3\"").is_some());
-        assert!(named(harness.root_id(), "\"of head against main at base\"").is_some());
+        assert!(named(harness.root_id(), "\"head \u{2192} main\"").is_some());
         let group = group.get_visual_rect_no_clip();
         for run in ["claude-run", "codex-run"] {
             assert!(rect(&harness, &format!("agent-run:{run}")).y0 >= group.y1 - 0.5);
         }
 
-        // A reviewer's line opens on Raw output, not on a click anywhere.
+        // A reviewer's line opens to its raw output.
         let line = named(harness.root_id(), "agent-run:claude-run").unwrap();
         let raw = named(line, "agent-reviewer raw output").unwrap();
         raw.scroll_to(None);
@@ -1012,13 +1075,13 @@ mod tests {
             let row = named(harness.root_id(), row).unwrap();
             named(row, label).unwrap().debug_name()
         };
-        assert!(when(&harness, "agent-run:q", "agent-run-when").contains("2 hours ago"));
+        assert!(when(&harness, "agent-run:q", "agent-run-when").contains("\"2h\""));
         assert!(when(&harness, "agent-review-group:group-3", "review-group-when")
-            .contains("2 hours ago"));
+            .contains("\"2h\""));
 
         app.now.set(at("2026-09-19T13:40:00Z"));
         settle(&mut harness);
-        assert!(when(&harness, "agent-run:q", "agent-run-when").contains("3 hours ago"));
+        assert!(when(&harness, "agent-run:q", "agent-run-when").contains("\"3h\""));
     }
 
     /// A review opens to what it found, worst first, each finding its
@@ -1139,9 +1202,20 @@ mod tests {
         assert!(named(emptied, "\"f-emptied as reported\"").is_some(), "blank line");
         assert!(named(emptied, "review-finding show").is_none(), "nothing to show");
 
+        let hover = |harness: &mut HeadlessHarness, row: floem::ViewId| {
+            row.scroll_to(None);
+            settle(harness);
+            let at = row.get_visual_rect_no_clip();
+            harness.pointer_move(at.x0 + 20.0, at.center().y);
+            settle(harness);
+        };
+        assert!(
+            named(first, "review-finding show")
+                .is_some_and(|show| show.get_visual_rect_no_clip().height() == 0.0),
+            "Show is drawn with no row under the pointer"
+        );
+        hover(&mut harness, first);
         let show = named(first, "review-finding show").unwrap();
-        show.scroll_to(None);
-        settle(&mut harness);
         let show = show.get_visual_rect_no_clip();
         harness.click(show.center().x, show.center().y);
         settle(&mut harness);
@@ -1150,9 +1224,8 @@ mod tests {
             Some(crate::review::doc::CardId::Thread("t-high".into()))
         );
 
+        hover(&mut harness, shown);
         let show = named(shown, "review-finding show").unwrap();
-        show.scroll_to(None);
-        settle(&mut harness);
         let show = show.get_visual_rect_no_clip();
         harness.click(show.center().x, show.center().y);
         settle(&mut harness);

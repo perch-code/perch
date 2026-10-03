@@ -24,15 +24,15 @@ use crate::review::review_launch;
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
-use crate::ui::widgets::{badge, clickable, sidebar_glyph};
+use crate::ui::widgets::{badge, clickable};
 
-use super::model::AgentReviewRunGroup;
+use super::model::{duration_label, seconds_between, AgentReviewRunGroup, AgentRunStatus};
 use super::section::run_row;
-use super::text_action;
+use super::{icon_action, status_mark, STATUS_MARK};
 
 /// How far a review's findings and reviewers are set in under its title:
-/// past the chevron, to where the title starts.
-const REVIEW_INSET: f64 = 17.0;
+/// past its mark, to where the title starts.
+const REVIEW_INSET: f64 = STATUS_MARK + 10.0;
 
 pub(super) fn review_row(
     app: AppState,
@@ -57,25 +57,9 @@ pub(super) fn review_row(
     };
     let key_toggle = toggle.clone();
     let summary = group.summary.clone();
-    let status_backend = backend.clone();
-    let early = group.clone();
 
-    let header = Stack::horizontal((
-        dyn_container(
-            move || collapsed.get(),
-            |collapsed| {
-                sidebar_glyph(
-                    if collapsed {
-                        SidebarIcon::ChevronRight
-                    } else {
-                        SidebarIcon::ChevronDown
-                    },
-                    theme::fg_subtle,
-                )
-                .style(|s| s.size(10.0, 10.0))
-            },
-        )
-        .style(|s| s.width(REVIEW_INSET - 7.0).flex_shrink(0.0_f32)),
+    let title = Stack::horizontal((
+        status_mark(app, group_status(&group)),
         Label::derived({
             let summary = summary.clone();
             move || match &summary {
@@ -95,34 +79,38 @@ pub(super) fn review_row(
             move || summary.as_ref().map(subject).unwrap_or_default()
         })
         .style(|s| {
-            s.font_size(theme::TEXT_META)
+            s.font_size(theme::TEXT_BADGE)
+                .font_family(theme::CODE_FONT_STACK.to_string())
                 .color(theme::fg_muted())
                 .text_ellipsis()
                 .min_width(0.0)
                 .flex_grow(1.0_f32)
+                .flex_basis(0.0)
                 .selectable(false)
         }),
         standing(app, &group),
+        group_actions(app, review, backend.clone(), &group),
     ))
-    .on_event_stop(el::Click, move |_, _| toggle())
-    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if matches!(key.code, Code::Enter | Code::Space) {
-            key_toggle();
-            EventPropagation::Stop
-        } else {
-            EventPropagation::Continue
-        }
-    })
-    .style(|s| {
-        clickable(s)
-            .items_center()
-            .width_full()
-            .gap(7.0)
-            .min_height(24.0)
-            .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
-    })
-    .debug_name(format!("agent-review-group:{key}"));
+    .style(|s| s.items_center().width_full().gap(10.0).min_height(28.0));
+
+    let header = Stack::vertical((title, progress(&group)))
+        .on_event_stop(el::Click, move |_, _| toggle())
+        .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+            if matches!(key.code, Code::Enter | Code::Space) {
+                key_toggle();
+                EventPropagation::Stop
+            } else {
+                EventPropagation::Continue
+            }
+        })
+        .style(|s| {
+            clickable(s)
+                .flex_col()
+                .width_full()
+                .keyboard_navigable()
+                .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+        })
+        .debug_name(format!("agent-review-group:{key}"));
 
     let body = dyn_container(
         move || collapsed.get(),
@@ -130,16 +118,14 @@ pub(super) fn review_row(
             if collapsed {
                 return Empty::new().into_any();
             }
-            let summary = group.summary.clone();
-            Stack::vertical((
-                match &summary {
-                    Some(summary) => findings(app, review, summary.clone()).into_any(),
-                    None => Empty::new().into_any(),
-                },
-                reviewers(app, review, backend.clone(), &group),
-            ))
-            .style(|s| s.flex_col().width_full().gap(10.0).margin_top(8.0))
-            .into_any()
+            let mut parts = Vec::new();
+            if let Some(summary) = &group.summary {
+                parts.push(findings(app, review, summary.clone()).into_any());
+            }
+            parts.push(reviewers(app, review, backend.clone(), &group).into_any());
+            Stack::vertical_from_iter(parts)
+                .style(|s| s.flex_col().width_full().gap(10.0).margin_top(10.0))
+                .into_any()
         },
     )
     .style(|s| s.width_full().padding_left(REVIEW_INSET));
@@ -147,8 +133,8 @@ pub(super) fn review_row(
     Stack::vertical((
         header,
         match &summary {
-            Some(summary) => status_line(app, review, status_backend, summary.clone()).into_any(),
-            None => early_snapshot(app, review, status_backend, &early).into_any(),
+            Some(summary) => status_line(review, summary.clone()).into_any(),
+            None => Empty::new().into_any(),
         },
         body,
     ))
@@ -162,18 +148,32 @@ pub(super) fn review_row(
     })
 }
 
-/// What the review read: `of d1dc594 against main at 05e8de2`.
+/// How the review stands, as a run's mark says it: working until every
+/// reviewer is done, then done, failed or stopped as it ended.
+fn group_status(group: &AgentReviewRunGroup) -> AgentRunStatus {
+    use perch_github::ReviewGroupStatus as G;
+    match group.summary.as_ref().map(|summary| summary.group.status) {
+        None | Some(G::Preparing | G::Reviewing | G::Reconciling) => AgentRunStatus::Running,
+        Some(G::Stopping) => AgentRunStatus::Stopping,
+        Some(G::Empty | G::Completed) => AgentRunStatus::Completed,
+        Some(G::Failed) => AgentRunStatus::Failed,
+        Some(G::Stopped) => AgentRunStatus::Stopped,
+        Some(G::Interrupted) => AgentRunStatus::Interrupted,
+    }
+}
+
+/// What the review read: `d1dc594 → main`.
 fn subject(summary: &ReviewGroupSummary) -> String {
-    let base: String = summary.snapshot.base_tip_sha.chars().take(7).collect();
     format!(
-        "of {} against {} at {base}",
+        "{} \u{2192} {}",
         summary.snapshot.head_label(),
         summary.snapshot.requested_base_ref
     )
 }
 
-/// How the review stands at the end of its title: how far its reviewers
-/// have got while it runs, and when it ran once it is done.
+/// How the review stands at the end of its title: how many reviewers are
+/// done and for how long it has run while it runs, and when it ran once
+/// it is done.
 fn standing(app: AppState, group: &AgentReviewRunGroup) -> impl IntoView {
     let ran_at = group.ran_at();
     let active = group
@@ -186,19 +186,23 @@ fn standing(app: AppState, group: &AgentReviewRunGroup) -> impl IntoView {
             .iter()
             .filter(|attempt| attempt.phase.is_terminal())
             .count();
-        format!("Reviewing \u{b7} {done} of {} complete", summary.attempts.len())
+        format!("{done} of {}", summary.attempts.len())
     });
-    Label::derived(move || match (active, &progress, ran_at) {
-        (true, Some(progress), _) => progress.clone(),
-        (true, None, _) => "Starting".to_string(),
-        (false, _, Some(at)) => timefmt::relative(at, app.now.get()),
-        (false, _, None) => String::new(),
+    Label::derived(move || {
+        let now = app.now.get();
+        let elapsed = ran_at.map(|at| duration_label(seconds_between(at, now)));
+        match (active, &progress, elapsed) {
+            (true, Some(progress), Some(elapsed)) => format!("{progress} \u{b7} {elapsed}"),
+            (true, Some(progress), None) => progress.clone(),
+            (true, None, _) => "Starting".to_string(),
+            (false, _, _) => ran_at.map(|at| timefmt::short(at, now)).unwrap_or_default(),
+        }
     })
     .debug_name("review-group-when")
     .style(move |s| {
         s.font_size(theme::TEXT_BADGE)
             .color(if active {
-                theme::draft_yellow()
+                theme::running()
             } else {
                 theme::fg_subtle()
             })
@@ -207,35 +211,78 @@ fn standing(app: AppState, group: &AgentReviewRunGroup) -> impl IntoView {
     })
 }
 
-/// Under the title: what the review found, in chips, whether the code has
-/// moved since, and what can be done with it; then what it was asked to
-/// focus on, and what of a reviewer's output Perch could not read.
-fn status_line(
-    app: AppState,
-    review: ReviewState,
-    backend: Rc<Backend>,
-    summary: ReviewGroupSummary,
-) -> impl IntoView {
+/// While the review runs, a bar under its title with a piece for each
+/// reviewer: filled once it is done, faint while it works, empty while
+/// it waits.
+fn progress(group: &AgentReviewRunGroup) -> impl IntoView {
+    let phases: Vec<perch_github::ReviewerPhase> = group
+        .summary
+        .as_ref()
+        .filter(|summary| summary.group.status.is_active())
+        .map(|summary| summary.attempts.iter().map(|attempt| attempt.phase).collect())
+        .unwrap_or_default();
+    let shown = !phases.is_empty();
+    Stack::horizontal_from_iter(phases.into_iter().map(|phase| {
+        Empty::new().style(move |s| {
+            let color = if phase.is_terminal() {
+                theme::running()
+            } else if phase == perch_github::ReviewerPhase::Queued {
+                theme::border()
+            } else {
+                theme::running().with_alpha(0.3)
+            };
+            s.height(3.0)
+                .flex_grow(1.0_f32)
+                .flex_basis(0.0)
+                .border_radius(1.5)
+                .background(color)
+        })
+    }))
+    .debug_name("review-group-progress")
+    .style(move |s| {
+        s.width_full()
+            .gap(3.0)
+            .margin_top(8.0)
+            .padding_left(REVIEW_INSET)
+            .apply_if(!shown, |s| s.hide())
+    })
+}
+
+/// Under the title: what the review found, in chips, and whether the code
+/// has moved since, when there is either; then what it was asked to focus
+/// on, and what of a reviewer's output Perch could not read.
+fn status_line(review: ReviewState, summary: ReviewGroupSummary) -> impl IntoView {
     let instructions = summary.group.instructions.clone();
     let unread = review_launch::unread_summary(&summary);
+    let g = &summary.group;
+    let chips = g.new_findings + g.still_present + g.verified_fixed + g.not_verified > 0;
     let newer = summary.clone();
-    Stack::vertical((
-        Stack::horizontal((
-            review_launch::count_chips(&summary),
-            Label::derived(|| "\u{b7} code changed since".to_string())
-                .debug_name("review-group-newer")
-                .style(move |s| {
-                    s.font_size(theme::TEXT_BADGE)
-                        .color(theme::notice_fg())
-                        .selectable(false)
-                        .apply_if(!review_launch::newer_changes(review, &newer), |s| s.hide())
-                }),
-            Empty::new().style(|s| s.flex_grow(1.0_f32)),
-            group_actions(app, review, backend, summary),
-        ))
-        .style(|s| s.items_center().width_full().gap(6.0).min_height(24.0)),
-        match instructions {
-            Some(instructions) => Label::derived(move || instructions.clone())
+    let changed = move || review_launch::newer_changes(review, &newer);
+    let shown_changed = changed.clone();
+    let mut lines = vec![Stack::horizontal((
+        review_launch::count_chips(&summary).style(move |s| s.apply_if(!chips, |s| s.hide())),
+        Label::derived(move || {
+            if chips { "\u{b7} code changed since" } else { "Code changed since" }.to_string()
+        })
+        .debug_name("review-group-newer")
+        .style(move |s| {
+            s.font_size(theme::TEXT_BADGE)
+                .color(theme::notice_fg())
+                .selectable(false)
+                .apply_if(!changed(), |s| s.hide())
+        }),
+    ))
+    .style(move |s| {
+        s.items_center()
+            .width_full()
+            .gap(6.0)
+            .min_height(24.0)
+            .apply_if(!chips && !shown_changed(), |s| s.hide())
+    })
+    .into_any()];
+    if let Some(instructions) = instructions {
+        lines.push(
+            Label::derived(move || instructions.clone())
                 .debug_name("review-group-instructions")
                 .style(|s| {
                     s.font_size(theme::TEXT_META)
@@ -248,10 +295,11 @@ fn status_line(
                         .border_color(theme::border())
                 })
                 .into_any(),
-            None => Empty::new().into_any(),
-        },
-        match unread {
-            Some(unread) => Label::derived(move || unread.clone())
+        );
+    }
+    if let Some(unread) = unread {
+        lines.push(
+            Label::derived(move || unread.clone())
                 .debug_name("review-group-unread")
                 .style(|s| {
                     s.font_size(theme::TEXT_META)
@@ -260,10 +308,9 @@ fn status_line(
                         .width_full()
                 })
                 .into_any(),
-            None => Empty::new().into_any(),
-        },
-    ))
-    .style(|s| {
+        );
+    }
+    Stack::vertical_from_iter(lines).style(|s| {
         s.flex_col()
             .width_full()
             .gap(6.0)
@@ -272,85 +319,72 @@ fn status_line(
     })
 }
 
-/// Open snapshot, while the snapshot the review read is kept, and Stop
-/// all while it runs.
+/// At the end of the title, glyphs: Stop, while the review runs, and Open
+/// snapshot, while the snapshot it read is kept. A review whose own record
+/// has not arrived, as just after it starts, is found by way of a
+/// reviewer's run, which names it.
 fn group_actions(
-    app: AppState,
-    review: ReviewState,
-    backend: Rc<Backend>,
-    summary: ReviewGroupSummary,
-) -> impl IntoView {
-    let openable = (summary.snapshot.manifest_path.is_some()
-        && summary.snapshot.diff_path.is_some())
-        || summary.group.status == perch_github::ReviewGroupStatus::Empty;
-    let open = match openable {
-        true => {
-            let backend = backend.clone();
-            let summary = summary.clone();
-            text_action(
-                || "Open snapshot".to_string(),
-                false,
-                move || {
-                    let request_id = backend
-                        .open_review_snapshot(&summary.group.item_id, &summary.group.id);
-                    app.begin_historical_review(review, summary.clone(), request_id);
-                },
-            )
-            .debug_name("review-group open snapshot")
-            .into_any()
-        }
-        _ => Empty::new().into_any(),
-    };
-    let stop = match summary.group.status.is_active() {
-        true => {
-            let group_id = summary.group.id.clone();
-            text_action(
-                || "Stop all".to_string(),
-                false,
-                move || backend.stop_review_group(&group_id),
-            )
-            .debug_name("review-group stop")
-            .into_any()
-        }
-        _ => Empty::new().into_any(),
-    };
-    Stack::horizontal((open, stop)).style(|s| s.items_center().gap(2.0).flex_shrink(0.0_f32))
-}
-
-/// Open snapshot on a review whose own record has not arrived, as just
-/// after it starts: found by way of a reviewer's run, which names it.
-fn early_snapshot(
     app: AppState,
     review: ReviewState,
     backend: Rc<Backend>,
     group: &AgentReviewRunGroup,
 ) -> impl IntoView {
-    let Some((item_id, attempt_id)) = group
-        .runs
-        .first()
-        .and_then(|run| Some((run.item_id.clone()?, run.review_attempt_id.clone()?)))
-    else {
-        return Empty::new().into_any();
+    let open: Option<Rc<dyn Fn()>> = match &group.summary {
+        Some(summary) => {
+            let openable = (summary.snapshot.manifest_path.is_some()
+                && summary.snapshot.diff_path.is_some())
+                || summary.group.status == perch_github::ReviewGroupStatus::Empty;
+            let backend = backend.clone();
+            let summary = summary.clone();
+            openable.then(|| -> Rc<dyn Fn()> {
+                Rc::new(move || {
+                    let request_id = backend
+                        .open_review_snapshot(&summary.group.item_id, &summary.group.id);
+                    app.begin_historical_review(review, summary.clone(), request_id);
+                })
+            })
+        }
+        None => group
+            .runs
+            .first()
+            .and_then(|run| Some((run.item_id.clone()?, run.review_attempt_id.clone()?)))
+            .map(|(item_id, attempt_id)| -> Rc<dyn Fn()> {
+                let backend = backend.clone();
+                Rc::new(move || {
+                    let navigation_id = backend.view_review_attempt_owner(&item_id, &attempt_id);
+                    app.begin_agent_review_navigation(
+                        review,
+                        item_id.clone(),
+                        attempt_id.clone(),
+                        navigation_id,
+                    );
+                })
+            }),
     };
-    Stack::horizontal((
-        Empty::new().style(|s| s.flex_grow(1.0_f32)),
-        text_action(
-            || "Open snapshot".to_string(),
-            false,
-            move || {
-                let navigation_id = backend.view_review_attempt_owner(&item_id, &attempt_id);
-                app.begin_agent_review_navigation(
-                    review,
-                    item_id.clone(),
-                    attempt_id.clone(),
-                    navigation_id,
-                );
-            },
+    let stop = group
+        .summary
+        .as_ref()
+        .filter(|summary| summary.group.status.is_active())
+        .map(|summary| {
+            let group_id = summary.group.id.clone();
+            crate::review::cards::tip(
+                icon_action(SidebarIcon::Stop, "review-group stop", move || {
+                    backend.stop_review_group(&group_id)
+                }),
+                "Stop review".to_string(),
+            )
+            .into_any()
+        })
+        .unwrap_or_else(|| Empty::new().into_any());
+    let open = match open {
+        Some(open) => crate::review::cards::tip(
+            icon_action(SidebarIcon::ArrowUpRight, "review-group open snapshot", move || open()),
+            "Open snapshot".to_string(),
         )
-        .debug_name("review-group open snapshot"),
-    ))
-    .style(|s| s.width_full().items_center().margin_top(6.0))
-    .into_any()
+        .into_any(),
+        None => Empty::new().into_any(),
+    };
+    Stack::horizontal((stop, open)).style(|s| s.items_center().gap(2.0).flex_shrink(0.0_f32))
 }
 
 /// What the review found, worst first: each finding's severity, its first
@@ -420,7 +454,6 @@ fn findings(app: AppState, review: ReviewState, summary: ReviewGroupSummary) -> 
             .style(|s| {
                 s.flex_col()
                     .width_full()
-                    .background(theme::canvas())
                     .border(1.0)
                     .border_color(theme::border_muted())
                     .border_radius(theme::RADIUS)
@@ -428,7 +461,8 @@ fn findings(app: AppState, review: ReviewState, summary: ReviewGroupSummary) -> 
             .into_any()
         },
     )
-    .style(|s| s.width_full())
+    // Nothing at all while a running review has found nothing yet.
+    .style(move |s| s.width_full().apply_if(!done && rows.with(|r| r.is_empty()), |s| s.hide()))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -463,7 +497,8 @@ fn finding_row(
     } = row;
     let item_id = item_id.to_string();
     let faded = settled.is_some();
-    Stack::horizontal((
+    let hovered = RwSignal::new(false);
+    let row = Stack::horizontal((
         badge(move || severity.to_string(), ink, fill, None),
         Label::derived(move || line.clone()).style(move |s| {
             s.font_size(theme::TEXT_META)
@@ -496,12 +531,13 @@ fn finding_row(
             None => Empty::new().into_any(),
         },
         match shown {
-            true => text_action(
-                || "Show".to_string(),
-                true,
-                move || show_thread(app, review, &item_id, &thread_id),
+            true => crate::review::cards::hover_action(
+                hovered,
+                SidebarIcon::Thread,
+                "Show in thread",
+                "review-finding show",
+                Rc::new(move || show_thread(app, review, &item_id, &thread_id)),
             )
-            .debug_name("review-finding show")
             .into_any(),
             false => Empty::new().into_any(),
         },
@@ -515,7 +551,8 @@ fn finding_row(
             .padding_left(10.0)
             .padding_right(4.0)
             .apply_if(!first, |s| s.border_top(1.0).border_color(theme::border_muted()))
-    })
+    });
+    crate::review::cards::track_hover(row, hovered)
 }
 
 /// Bring a finding's thread into view on Conversation. One the Open

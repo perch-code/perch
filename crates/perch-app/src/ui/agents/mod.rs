@@ -128,24 +128,73 @@ pub(super) fn text_action(
 
 pub(super) fn status_color(status: AgentRunStatus) -> fn() -> Color {
     match status {
-        AgentRunStatus::Running => theme::accent,
+        AgentRunStatus::Starting | AgentRunStatus::Running => theme::running,
         AgentRunStatus::Completed => theme::open,
         AgentRunStatus::Failed => theme::closed,
         AgentRunStatus::Stopped => theme::fg_subtle,
-        AgentRunStatus::Queued
-        | AgentRunStatus::Starting
-        | AgentRunStatus::Stopping
-        | AgentRunStatus::Interrupted => theme::draft_yellow,
+        AgentRunStatus::Queued | AgentRunStatus::Stopping | AgentRunStatus::Interrupted => {
+            theme::draft_yellow
+        }
     }
 }
 
-pub(super) fn metadata(run: &AgentRunSummary) -> String {
-    let agent = crate::review::threads::agent_name(&run.backend, &run.model, &run.effort);
-    let work = match run.mode {
-        perch_github::RunMode::Work => "Work · ",
-        perch_github::RunMode::Ask => "",
+/// How wide a run's mark is beside its row.
+pub(super) const STATUS_MARK: f64 = 20.0;
+
+/// A run's mark, which says how it stands before its words do: a ring
+/// round a beating dot while it works, a check once done, a cross once
+/// failed, a clock while queued, a square once stopped.
+pub(super) fn status_mark(app: AppState, status: AgentRunStatus) -> impl IntoView {
+    let glyph: Option<(SidebarIcon, fn() -> Color)> = match status {
+        AgentRunStatus::Starting | AgentRunStatus::Running => None,
+        AgentRunStatus::Completed => Some((SidebarIcon::Check, theme::open)),
+        AgentRunStatus::Failed | AgentRunStatus::Interrupted => Some((SidebarIcon::Close, theme::closed)),
+        AgentRunStatus::Queued => Some((SidebarIcon::Clock, theme::draft_yellow)),
+        AgentRunStatus::Stopping => Some((SidebarIcon::Stop, theme::draft_yellow)),
+        AgentRunStatus::Stopped => Some((SidebarIcon::Stop, theme::fg_subtle)),
     };
-    format!("{work}{agent}")
+    match glyph {
+        // Its glyph on a wash of its own colour, which shows on the grey
+        // a section of Perch's own is drawn on.
+        Some((icon, ink)) => Container::new(sidebar_glyph(icon, ink).style(|s| s.size(12.0, 12.0)))
+            .debug_name(format!("status-mark:{}", status.label()))
+            .style(move |s| {
+                s.size(STATUS_MARK, STATUS_MARK)
+                    .border_radius(STATUS_MARK / 2.0)
+                    .background(ink().with_alpha(0.14))
+                    .items_center()
+                    .justify_center()
+                    .flex_shrink(0.0_f32)
+            })
+            .into_any(),
+        None => Container::new(live_dot(app, 8.0))
+            .debug_name(format!("status-mark:{}", status.label()))
+            .style(|s| {
+                s.size(STATUS_MARK, STATUS_MARK)
+                    .border_radius(STATUS_MARK / 2.0)
+                    .border(1.5)
+                    .border_color(theme::running())
+                    .items_center()
+                    .justify_center()
+                    .flex_shrink(0.0_f32)
+            })
+            .into_any(),
+    }
+}
+
+/// A dot that beats with the agents' clock while there is work: full on
+/// even seconds, faded on odd, easing between. It holds still once the
+/// clock stops.
+pub(super) fn live_dot(app: AppState, size: f64) -> impl IntoView {
+    floem::views::Empty::new().style(move |s| {
+        let faded = app.agents_clock_armed.get() && app.now.get().as_second() % 2 != 0;
+        let color = theme::running();
+        s.size(size, size)
+            .border_radius(size / 2.0)
+            .flex_shrink(0.0_f32)
+            .background(if faded { color.with_alpha(0.35) } else { color })
+            .transition_background(floem::style::Transition::ease_in_out(Duration::from_millis(900)))
+    })
 }
 
 /// Where a queued run is in the queue, from one.

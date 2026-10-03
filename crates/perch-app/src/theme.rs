@@ -218,6 +218,11 @@ pub fn closed() -> Color {
 pub fn draft() -> Color {
     pick(rgb(0x59636e), rgb(0x9198a1))
 }
+/// An agent at work: a blue that reads as live against the grey it sits
+/// on, as the accent's near-black did not.
+pub fn running() -> Color {
+    pick(rgb(0x0969da), rgb(0x4493f8))
+}
 /// A check still running: GitHub's pending yellow.
 pub fn draft_yellow() -> Color {
     pick(rgb(0xbf8700), rgb(0xd29922))
