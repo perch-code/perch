@@ -174,6 +174,9 @@ pub struct GitHub {
     /// What this process has spent of each rate-limit resource, for the
     /// spend log. Shared by every clone.
     spent: Arc<std::sync::Mutex<HashMap<String, Spent>>>,
+    /// The token, for a picture uploaded to github.com: Octocrab holds
+    /// its own copy and sends it to the API only.
+    token: Arc<str>,
 }
 
 /// One rate-limit resource's spend: in each window by the epoch GitHub
@@ -223,6 +226,7 @@ impl GitHub {
             search_limit_until: Arc::new(AtomicI64::new(0)),
             responses: Arc::new(std::sync::Mutex::new(Responses::new(BUDGET_BYTES))),
             spent: Arc::default(),
+            token: Arc::from(token),
         })
     }
 
@@ -2030,6 +2034,52 @@ impl GitHub {
             .map(|b| b.to_vec())
             .map_err(|e| Error::Network(e.to_string()))
     }
+
+    /// Download a picture a comment shows. Returns raw encoded bytes.
+    ///
+    /// One uploaded to github.com, as GitHub's editor puts a pasted
+    /// screenshot at `github.com/user-attachments/assets/…`, is asked for
+    /// with the token, which a private repository's needs; it redirects to
+    /// storage elsewhere, and the client drops the token on the way. Any
+    /// other host is asked without it.
+    pub async fn fetch_picture(&self, url: &str) -> Result<Vec<u8>, Error> {
+        let mut request = self.http.get(url);
+        if sends_token(url) {
+            request = request.bearer_auth(&*self.token);
+        }
+        let mut response = request
+            .send()
+            .await
+            .map_err(|e| Error::Network(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(Error::Status {
+                status: response.status().as_u16(),
+                body: "picture fetch failed".into(),
+            });
+        }
+        if response.content_length().is_some_and(|length| length > PICTURE_BYTES) {
+            return Err(Error::Decode(format!("picture over {PICTURE_BYTES} bytes")));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|e| Error::Network(e.to_string()))? {
+            bytes.extend_from_slice(&chunk);
+            if bytes.len() as u64 > PICTURE_BYTES {
+                return Err(Error::Decode(format!("picture over {PICTURE_BYTES} bytes")));
+            }
+        }
+        Ok(bytes)
+    }
+}
+
+/// The most a picture may weigh: GitHub takes uploads of up to 10 MB, and
+/// a picture from elsewhere bigger than this is not one to draw in a
+/// comment.
+const PICTURE_BYTES: u64 = 25 * 1024 * 1024;
+
+/// Whether a picture's address is on github.com over https, the one host
+/// the token goes to with it.
+fn sends_token(url: &str) -> bool {
+    url.strip_prefix("https://github.com/").is_some()
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -2256,6 +2306,16 @@ mod tests {
             with_size_param("https://x/a?v=4", 64),
             "https://x/a?v=4&s=64"
         );
+    }
+
+    #[test]
+    fn only_a_picture_on_github_com_is_asked_for_with_the_token() {
+        assert!(sends_token("https://github.com/user-attachments/assets/0a1b"));
+        assert!(sends_token("https://github.com/o/r/assets/1/0a1b"));
+        assert!(!sends_token("http://github.com/user-attachments/assets/0a1b"));
+        assert!(!sends_token("https://github.com.evil.example/x.png"));
+        assert!(!sends_token("https://user-images.githubusercontent.com/1/x.png"));
+        assert!(!sends_token("https://example.com/https://github.com/x.png"));
     }
 
     #[test]

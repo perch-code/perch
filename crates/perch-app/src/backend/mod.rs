@@ -492,6 +492,10 @@ pub enum Command {
         key: String,
         value: String,
     },
+    /// Download a picture a comment shows, for every window.
+    WantPicture {
+        url: String,
+    },
 
     /// Ask the agent a question in an item's checkout. `thread_id` of `None`
     /// starts a thread; the anchor is ignored on a follow-up.
@@ -793,6 +797,12 @@ pub enum Event {
     Avatar {
         url: String,
         bytes: Vec<u8>,
+    },
+    /// What came of downloading a picture a comment shows.
+    Picture {
+        url: String,
+        /// `None` when it could not be downloaded or decoded.
+        decoded: Option<Arc<crate::review::images::Decoded>>,
     },
     /// Who acted last on pull requests and issues, by repository and
     /// number: the faces on item and Browse rows.
@@ -3040,6 +3050,11 @@ impl Backend {
         navigation_id
     }
 
+    /// Download a picture a comment shows.
+    pub fn want_picture(&self, url: &str) {
+        let _ = self.commands.send(Command::WantPicture { url: url.to_string() });
+    }
+
     pub fn set_meta(&self, key: &str, value: &str) {
         let _ = self.commands.send(Command::SetMeta {
             key: key.to_string(),
@@ -4444,6 +4459,7 @@ async fn run(
             Command::SetMeta { key, value } => {
                 ctx.with_cache(|c| c.set_meta(&key, &value));
             }
+            Command::WantPicture { url } => ctx.want_picture(url),
             Command::Ask {
                 mode,
                 item_id,
@@ -5495,6 +5511,42 @@ impl Ctx {
         if let Ok(mut current) = self.session.write() {
             *current = session;
         }
+    }
+
+    /// Download a picture a comment shows and decode it to draw. It
+    /// waits its turn with the faces.
+    fn want_picture(&self, url: String) {
+        let Some(github) = self.github() else {
+            let _ = self.events.send(Event::Picture { url, decoded: None });
+            return;
+        };
+        let events = self.events.clone();
+        let limit = self.avatars.clone();
+        tokio::spawn(async move {
+            let Ok(permit) = limit.acquire().await else {
+                return;
+            };
+            let bytes = github.fetch_picture(&url).await;
+            drop(permit);
+            let decoded = match bytes {
+                Ok(bytes) => {
+                    let at = url.clone();
+                    let decoded = tokio::task::spawn_blocking(move || crate::review::images::decode(&bytes, &at))
+                        .await
+                        .ok()
+                        .flatten();
+                    if decoded.is_none() {
+                        tracing::debug!(url, "picture did not decode");
+                    }
+                    decoded
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, url, "picture fetch failed");
+                    None
+                }
+            };
+            let _ = events.send(Event::Picture { url, decoded: decoded.map(Arc::new) });
+        });
     }
 
     /// Have these faces on hand, from disk or the network.

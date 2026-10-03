@@ -17,6 +17,7 @@ pub mod gutter;
 pub mod header;
 pub mod hierarchy;
 pub mod hover;
+pub mod images;
 pub mod linked_text;
 pub mod markdown;
 pub mod markdown_toolbar;

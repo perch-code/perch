@@ -24,10 +24,17 @@
 //! A `<details>` block folds as GitHub folds one: its summary with a
 //! chevron, shut until clicked.
 //!
-//! What GitHub does that this does not: images are shown by their alt
-//! text or file name, other raw HTML by its text, code in a fence is not
-//! coloured, a cell's wrapped lines all start at the left, and `$math$`
-//! is left as written.
+//! A picture, written `![alt](https://…)` or as the `<img>` GitHub's
+//! editor pastes a screenshot as, is drawn on a line of its own, as wide
+//! as it is or as the column, whichever is narrower (see
+//! [`crate::review::images`]). Until it has come, and if it cannot, it is
+//! its alt text, linked to it.
+//!
+//! What GitHub does that this does not: a picture in a table cell or a
+//! heading, or at an address relative to the repository, is shown by its
+//! alt text or file name, other raw HTML by its text, code in a fence is
+//! not coloured, a cell's wrapped lines all start at the left, and
+//! `$math$` is left as written.
 
 use std::collections::{HashMap, VecDeque};
 use std::iter::Peekable;
@@ -49,11 +56,12 @@ use pulldown_cmark::{
 use crate::icons::{self, SidebarIcon};
 use crate::review::code_refs::{self, linked_run, Plan, Refs};
 use crate::review::emoji::emojify;
+use crate::review::images;
 use crate::review::linked_text::{linked_text, passage, Strike, Target};
 use crate::review::model::ReviewState;
 use crate::review::suggestion::Original;
 use crate::theme;
-use crate::ui::widgets::{clickable, icon_in, sidebar_glyph};
+use crate::ui::widgets::{clickable, follow_link, icon_in, sidebar_glyph};
 
 /// The extensions GitHub renders. Not `Options::all()`: smart punctuation,
 /// wikilinks, definition lists, heading attributes and metadata blocks
@@ -76,11 +84,30 @@ pub struct Span {
     pub strike: bool,
     /// A footnote's mark: its number, raised.
     pub footnote: bool,
+    /// The picture the run names, when it is one: its text is the alt,
+    /// shown where the picture cannot be.
+    pub image: Option<Box<Image>>,
+}
+
+/// A picture to draw.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Image {
+    pub src: String,
+    /// Its alt text, or its file name when it has none.
+    pub alt: String,
+    /// The link it sits in, where a click on it goes; with none, a click
+    /// opens the picture itself.
+    pub link: Option<String>,
+    /// The size its tag asks for, in points.
+    pub width: Option<f64>,
+    pub height: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Block {
     Paragraph(Vec<Span>),
+    /// A picture, on a line of its own.
+    Image(Image),
     Heading { level: u8, spans: Vec<Span> },
     /// A quote, or one of GitHub's alerts when `alert` is set.
     Quote { alert: Option<Alert>, blocks: Vec<Block> },
@@ -193,6 +220,7 @@ enum Piece {
     Open,
     Summary(Vec<Span>),
     Close,
+    Image(Image),
 }
 
 /// What ends a run of blocks.
@@ -303,9 +331,12 @@ fn push_text(spans: &mut Vec<Span>, style: &Span, text: &str) {
         return;
     }
     match spans.last_mut() {
-        // Two footnote numbers side by side stay two, not "12".
+        // Two footnote numbers side by side stay two, not "12", and a
+        // picture's alt stays its own.
         Some(last)
             if !style.footnote
+                && style.image.is_none()
+                && last.image.is_none()
                 && last.bold == style.bold
                 && last.italic == style.italic
                 && last.code == style.code
@@ -328,6 +359,7 @@ impl<'a> Builder<'a> {
                     Piece::Html(text) => out.push(Block::Paragraph(vec![Span { text, ..Span::default() }])),
                     Piece::Open => out.push(self.details()),
                     Piece::Summary(spans) => out.push(Block::Paragraph(spans)),
+                    Piece::Image(image) => out.push(Block::Image(image)),
                     Piece::Close if closer == Closer::Details => break,
                     // A close with nothing open, or one inside a list or
                     // quote in the details: dropped.
@@ -355,9 +387,7 @@ impl<'a> Builder<'a> {
             // item's does, styled or not.
             if is_inline(&event) {
                 let spans = self.inlines_from(event);
-                if !spans.is_empty() {
-                    out.push(Block::Paragraph(spans));
-                }
+                out.extend(paragraphs(spans));
                 continue;
             }
             match event {
@@ -368,9 +398,7 @@ impl<'a> Builder<'a> {
                         self.loose = true;
                     }
                     let spans = self.inlines(InlineCloser::Paragraph);
-                    if !spans.is_empty() {
-                        out.push(Block::Paragraph(spans));
-                    }
+                    out.extend(paragraphs(spans));
                 }
                 Event::Start(Tag::Heading { level, .. }) => {
                     let spans = self.inlines(InlineCloser::Heading);
@@ -507,15 +535,25 @@ impl<'a> Builder<'a> {
             Event::End(TagEnd::Link) => {
                 style.links.pop();
             }
-            // An image is its alt text, as a link to the image; with no
-            // alt, the file name, so the reader knows something was there.
+            // An image is a picture to draw, and where it cannot be, its
+            // alt text as a link to it; with no alt, the file name, so the
+            // reader knows something was there. One at an address
+            // relative to the repository is only ever the text.
             Event::Start(Tag::Image { dest_url, .. }) => {
+                let link = style.links.last().cloned();
                 style.links.push(dest_url.to_string());
                 let mut alt = Vec::new();
                 self.read_inlines(&mut alt, style, InlineCloser::Image);
-                if alt.iter().all(|s| s.text.trim().is_empty()) {
-                    let name = dest_url.rsplit('/').next().unwrap_or(&dest_url).to_string();
-                    push_text(spans, &style.span(), &name);
+                let blank = alt.iter().all(|s| s.text.trim().is_empty());
+                if images::fetchable(&dest_url) {
+                    let alt = match blank {
+                        true => file_name(&dest_url),
+                        false => alt.iter().map(|s| s.text.as_str()).collect::<String>().trim().to_string(),
+                    };
+                    let image = Image { src: dest_url.to_string(), alt, link, width: None, height: None };
+                    push_image(spans, style, image);
+                } else if blank {
+                    push_text(spans, &style.span(), &file_name(&dest_url));
                 } else {
                     for s in alt {
                         push_text(spans, &s, &s.text.clone());
@@ -538,6 +576,10 @@ impl<'a> Builder<'a> {
             }
             Event::InlineHtml(html) => match inline_html(&html) {
                 InlineHtml::Break => push_text(spans, &style.span(), "\n"),
+                InlineHtml::Image(mut image) => {
+                    image.link = style.links.last().cloned();
+                    push_image(spans, style, image);
+                }
                 // An image, by its alt text or file name, as a markdown
                 // image reads, and a link to it.
                 InlineHtml::Picture(name, src) => {
@@ -711,10 +753,63 @@ impl From<Alignment> for Align {
     }
 }
 
+/// A picture as a run of its alt text, linked to it, that a paragraph
+/// takes out to draw.
+fn push_image(spans: &mut Vec<Span>, style: &Marks, image: Image) {
+    let s = Span { link: Some(image.src.clone()), image: Some(Box::new(image.clone())), ..style.span() };
+    push_text(spans, &s, &image.alt);
+}
+
+/// The last part of an address's path: what a picture with no alt text
+/// is called.
+fn file_name(src: &str) -> String {
+    src.trim_end_matches('/').rsplit('/').next().unwrap_or(src).to_string()
+}
+
+/// A paragraph with its pictures taken out to be drawn, each on a line of
+/// its own: the text before, between and after them is a paragraph of
+/// its own, with the white space at its ends left off.
+fn paragraphs(spans: Vec<Span>) -> Vec<Block> {
+    let mut out = Vec::new();
+    let mut text: Vec<Span> = Vec::new();
+    let flush = |text: &mut Vec<Span>, out: &mut Vec<Block>| {
+        let mut run = std::mem::take(text);
+        if let Some(first) = run.first_mut() {
+            first.text = first.text.trim_start().to_string();
+        }
+        if let Some(last) = run.last_mut() {
+            last.text = last.text.trim_end().to_string();
+        }
+        run.retain(|span| !span.text.is_empty());
+        if !run.is_empty() {
+            out.push(Block::Paragraph(run));
+        }
+    };
+    if spans.iter().all(|span| span.image.is_none()) {
+        if !spans.is_empty() {
+            out.push(Block::Paragraph(spans));
+        }
+        return out;
+    }
+    for span in spans {
+        match span.image {
+            Some(image) => {
+                flush(&mut text, &mut out);
+                out.push(Block::Image(*image));
+            }
+            None => text.push(span),
+        }
+    }
+    flush(&mut text, &mut out);
+    out
+}
+
 /// What an inline tag contributes to the text.
 enum InlineHtml {
     /// A `<br>`: a line break.
     Break,
+    /// An `<img>` at an address to download it from.
+    Image(Image),
     /// An `<img>` or `<video>`: its alt text or its file's name, and
     /// where it is.
     Picture(String, Option<String>),
@@ -728,6 +823,9 @@ fn inline_html(html: &str) -> InlineHtml {
     let name = tag_name(inner);
     if name == "br" {
         return InlineHtml::Break;
+    }
+    if let Some(image) = image_tag(&name, inner) {
+        return InlineHtml::Image(image);
     }
     match picture(&name, inner) {
         Some((name, src)) => InlineHtml::Picture(name, src),
@@ -760,6 +858,26 @@ fn picture(name: &str, inner: &str) -> Option<(String, Option<String>)> {
         (!name.is_empty()).then_some(name)
     });
     alt.or(file).map(|text| (decode_entities(&text), src))
+}
+
+/// An `<img>` to draw: one with an address to download it from. Its
+/// `width` and `height` are kept when they are in pixels, as GitHub's
+/// editor writes them.
+fn image_tag(name: &str, inner: &str) -> Option<Image> {
+    if name != "img" {
+        return None;
+    }
+    let src = decode_entities(&attribute(inner, "src")?);
+    if !images::fetchable(&src) {
+        return None;
+    }
+    let (alt, _) = picture(name, inner)?;
+    let size = |name| {
+        attribute(inner, name)
+            .and_then(|v| v.trim().trim_end_matches("px").parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0)
+    };
+    Some(Image { src, alt, link: None, width: size("width"), height: size("height") })
 }
 
 /// The value of `name="..."` (or `name='...'`, or bare) in a tag.
@@ -795,12 +913,7 @@ fn html_pieces(html: &str) -> Vec<Piece> {
     let mut pieces = Vec::new();
     let mut between = 0;
     let mut at = 0;
-    let push_text = |pieces: &mut Vec<Piece>, raw: &str| {
-        let text = html_text(raw);
-        if !text.is_empty() {
-            pieces.push(Piece::Html(text));
-        }
-    };
+    let push_text = |pieces: &mut Vec<Piece>, raw: &str| html_runs(raw, pieces);
     while let Some(lt) = html[at..].find('<').map(|i| at + i) {
         let after = &html[lt + 1..];
         if after.starts_with("!--") {
@@ -840,6 +953,48 @@ fn html_pieces(html: &str) -> Vec<Piece> {
     }
     push_text(&mut pieces, &html[between..]);
     pieces
+}
+
+/// The text of a stretch of HTML as pieces, cut where an `<img>` to draw
+/// stands, with the picture between: GitHub's editor pastes a screenshot
+/// as a tag on a line of its own, and a README centres one in a `<p>`,
+/// in an `<a>` it links to.
+fn html_runs(html: &str, pieces: &mut Vec<Piece>) {
+    let push_text = |pieces: &mut Vec<Piece>, raw: &str| {
+        let text = html_text(raw);
+        if !text.is_empty() {
+            pieces.push(Piece::Html(text));
+        }
+    };
+    let mut link: Option<String> = None;
+    let mut from = 0;
+    let mut at = 0;
+    while let Some(lt) = html[at..].find('<').map(|i| at + i) {
+        let after = &html[lt + 1..];
+        if after.starts_with("!--") {
+            at = after.find("-->").map(|i| lt + 1 + i + 3).unwrap_or(html.len());
+            continue;
+        }
+        let Some(gt) = after.find('>') else { break };
+        let inner = &after[..gt];
+        let end = lt + 1 + gt + 1;
+        let name = tag_name(inner);
+        match (name.as_str(), inner.trim_start().starts_with('/')) {
+            ("a", false) => link = attribute(inner, "href").map(|href| decode_entities(&href)),
+            ("a", true) => link = None,
+            (_, false) => {
+                if let Some(mut image) = image_tag(&name, inner) {
+                    image.link = link.clone();
+                    push_text(pieces, &html[from..lt]);
+                    pieces.push(Piece::Image(image));
+                    from = end;
+                }
+            }
+            _ => {}
+        }
+        at = end;
+    }
+    push_text(pieces, &html[from..]);
 }
 
 /// A line of inline HTML, a summary's, as styled runs: `<b>` and
@@ -1389,7 +1544,10 @@ fn gap_before(prev: &Block, block: &Block) -> f64 {
             2 | 3 => 1.0,
             _ => 0.0,
         },
-        (Block::Paragraph(_) | Block::Details { .. }, Block::Paragraph(_) | Block::Details { .. }) => 4.0,
+        (
+            Block::Paragraph(_) | Block::Details { .. } | Block::Image(_),
+            Block::Paragraph(_) | Block::Details { .. } | Block::Image(_),
+        ) => 4.0,
         (Block::Paragraph(_), Block::List { .. } | Block::Table { .. } | Block::Quote { .. }) => 1.0,
         _ => 2.0,
     }
@@ -1420,6 +1578,7 @@ fn block_view(block: Block, ctx: Ctx) -> AnyView {
             prose_leading(ctx.size),
             ctx.refs,
         ),
+        Block::Image(image) => image_view(image, ctx),
         Block::Heading { level, spans } => heading_view(level, spans, ctx),
         Block::Quote { alert: None, blocks } => stack(blocks, Ctx { color: theme::fg_muted, ..ctx })
             .style(|s| s.padding_left(10.0).border_left(3.0).border_color(theme::border()))
@@ -1434,6 +1593,57 @@ fn block_view(block: Block, ctx: Ctx) -> AnyView {
             .into_any(),
         Block::Details { summary, blocks } => details_view(summary, blocks, ctx),
         Block::Footnotes(notes) => footnotes_view(notes, ctx),
+    }
+}
+
+/// A picture, as wide as it is or as the column, whichever is narrower,
+/// that opens on a click where its link goes, or itself. It is its alt
+/// text, linked to it, until it has come and if it does not.
+fn image_view(image: Image, ctx: Ctx) -> AnyView {
+    images::want(&image.src);
+    let shown = images::watch(image.src.clone());
+    dyn_container(
+        move || shown.get(),
+        move |decoded| match decoded {
+            Some(decoded) => {
+                let (width, ratio) = shown_size(&image, decoded.natural);
+                let target = image.link.clone().unwrap_or_else(|| image.src.clone());
+                images::Shown::new(decoded)
+                    .on_event_stop(el::Click, move |_, _| follow_link(&target))
+                    .style(move |s| {
+                        clickable(s)
+                            .width(width)
+                            .max_width_full()
+                            .aspect_ratio(ratio as f32)
+                            .flex_shrink(0.0_f32)
+                    })
+                    .into_any()
+            }
+            None => text_view(
+                vec![Span { text: image.alt.clone(), link: Some(image.src.clone()), ..Span::default() }],
+                ctx.size,
+                theme::weight_body(),
+                ctx.color,
+                prose_leading(ctx.size),
+                ctx.refs,
+            ),
+        },
+    )
+    .style(|s| s.flex_col().width_full())
+    .into_any()
+}
+
+/// How wide a picture is drawn, in points, before the column narrows it,
+/// and its width over its height: the size its tag asks for, or, as
+/// GitHub draws one, a point for each of its pixels.
+fn shown_size(image: &Image, natural: (u32, u32)) -> (f64, f64) {
+    let (width, height) = (f64::from(natural.0), f64::from(natural.1));
+    let ratio = width / height;
+    match (image.width, image.height) {
+        (Some(w), Some(h)) => (w, w / h),
+        (Some(w), None) => (w, ratio),
+        (None, Some(h)) => (h * ratio, ratio),
+        (None, None) => (width, ratio),
     }
 }
 
@@ -2510,7 +2720,10 @@ mod tests {
         // GitHub's editor pastes a screenshot as an img tag on a line of
         // its own.
         let blocks = parse("## Screenshots\n\n<img width=\"1052\" alt=\"Screenshot 2024-05-01\" src=\"https://x/assets/abc\">\n\nBefore: <img src=before.png> After: <video src=\"clip.mp4\"></video>");
-        assert_eq!(blocks[1], paragraph("Screenshot 2024-05-01"));
+        assert_eq!(
+            blocks[1],
+            Block::Image(Image { width: Some(1052.0), ..image("https://x/assets/abc", "Screenshot 2024-05-01") })
+        );
         assert_eq!(
             blocks[2],
             Block::Paragraph(vec![
@@ -2525,6 +2738,39 @@ mod tests {
     }
 
     #[test]
+    fn html_images_are_drawn_where_they_stand_with_the_link_round_them() {
+        let blocks = parse(
+            "<p align=\"center\">\n  <a href=\"https://x.dev\"><img src=\"https://x/logo.png\" alt=\"Logo\" height=\"80px\"></a>\n  <br>A tagline\n</p>\n\nInline <img alt=\"&quot;q&quot;\" src=\"https://x/a.png?w=1&amp;h=2\" width=\"50%\"> too",
+        );
+        assert_eq!(
+            blocks,
+            vec![
+                Block::Image(Image {
+                    link: Some("https://x.dev".into()),
+                    height: Some(80.0),
+                    ..image("https://x/logo.png", "Logo")
+                }),
+                paragraph("A tagline"),
+                paragraph("Inline"),
+                Block::Image(image("https://x/a.png?w=1&h=2", "\"q\"")),
+                paragraph("too"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_picture_is_its_size_or_the_size_its_tag_asks_for() {
+        let plain = image("https://x/a.png", "a");
+        assert_eq!(shown_size(&plain, (800, 400)), (800.0, 2.0));
+        assert_eq!(shown_size(&Image { width: Some(200.0), ..plain.clone() }, (800, 400)), (200.0, 2.0));
+        assert_eq!(shown_size(&Image { height: Some(100.0), ..plain.clone() }, (800, 400)), (200.0, 2.0));
+        assert_eq!(
+            shown_size(&Image { width: Some(300.0), height: Some(300.0), ..plain }, (800, 400)),
+            (300.0, 1.0)
+        );
+    }
+
+    #[test]
     fn html_tables_keep_a_gap_between_cells_and_a_bare_less_than_stays() {
         assert_eq!(html_text("<table><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></table>"), "a b\nc");
         assert_eq!(html_text("<p>1 < 2 &lt; 3 &mdash; &copy; &#x41;</p>"), "1 < 2 < 3 \u{2014} \u{a9} A");
@@ -2536,15 +2782,41 @@ mod tests {
         assert_eq!(html_text("<p align=\"center\">\n  <b>Hi</b> &lt;there&gt;\n</p>"), "Hi <there>");
     }
 
+    fn image(src: &str, alt: &str) -> Image {
+        Image { src: src.into(), alt: alt.into(), link: None, width: None, height: None }
+    }
+
     #[test]
-    fn images_read_as_their_alt_text_or_their_file_name() {
+    fn images_are_drawn_on_lines_of_their_own_named_by_their_alt_text_or_file_name() {
         assert_eq!(
-            parse("![a shot](http://x/y.png) and ![](http://x/z.png)"),
-            vec![Block::Paragraph(vec![
-                Span { text: "a shot".into(), link: Some("http://x/y.png".into()), ..Default::default() },
-                plain(" and "),
-                Span { text: "z.png".into(), link: Some("http://x/z.png".into()), ..Default::default() },
-            ])]
+            parse("See ![a *shot*](http://x/y.png) and\n![](https://x/z.png)"),
+            vec![
+                paragraph("See"),
+                Block::Image(image("http://x/y.png", "a shot")),
+                paragraph("and"),
+                Block::Image(image("https://x/z.png", "z.png")),
+            ]
+        );
+        // In a link, a click on it goes where the link does.
+        assert_eq!(
+            parse("[![build](https://ci/badge.png)](https://ci/run)"),
+            vec![Block::Image(Image { link: Some("https://ci/run".into()), ..image("https://ci/badge.png", "build") })]
+        );
+    }
+
+    #[test]
+    fn an_image_in_a_cell_or_at_a_relative_address_stays_its_linked_alt_text() {
+        let blocks = parse("| a |\n|---|\n| ![shot](https://x/y.png) |\n\n![local](docs/a.png) here");
+        let Block::Table { rows, .. } = &blocks[0] else { panic!("{blocks:?}") };
+        assert_eq!(rows[0][0].len(), 1);
+        assert_eq!(rows[0][0][0].text, "shot");
+        assert_eq!(rows[0][0][0].link.as_deref(), Some("https://x/y.png"));
+        assert_eq!(
+            blocks[1],
+            Block::Paragraph(vec![
+                Span { text: "local".into(), link: Some("docs/a.png".into()), ..Default::default() },
+                plain(" here"),
+            ])
         );
     }
 
@@ -2751,6 +3023,35 @@ mod tests {
             let mut all = Vec::new();
             find_all(harness.root_id(), text, &mut all);
             all.into_iter().map(|id| id.get_visual_rect()).collect()
+        }
+
+        #[test]
+        fn a_picture_is_its_link_until_it_comes_then_fits_the_column_and_opens_on_a_click() {
+            images::asked();
+            let wide = "https://x/layout-wide.png";
+            let small = "https://x/layout-small.png";
+            let mut h = harness(&format!("Before\n\n![wide]({wide})\n\n<img alt=small src=\"{small}\">\n\nAfter"));
+            assert_eq!(images::asked(), vec![wide.to_string(), small.to_string()]);
+            assert!(rects(&h, "comment picture").is_empty());
+            let waiting = rect(&h, "Before").y1;
+
+            for (url, size) in [(wide, (1200, 600)), (small, (100, 50))] {
+                let decoded = images::decode(&images::tests::png(size.0, size.1), url).unwrap();
+                images::arrived(url.into(), Some(Arc::new(decoded)));
+            }
+            h.rebuild();
+            h.paint();
+            let pictures = rects(&h, "comment picture");
+            assert_eq!(pictures.len(), 2);
+            assert_eq!((pictures[0].width(), pictures[0].height()), (WIDTH, WIDTH / 2.0), "the column narrows it");
+            assert_eq!((pictures[1].width(), pictures[1].height()), (100.0, 50.0), "a point a pixel");
+            assert!(pictures[0].y0 >= waiting && pictures[1].y0 > pictures[0].y1);
+            assert!(rect(&h, "After").y0 >= pictures[1].y1);
+
+            crate::ui::widgets::opened();
+            let at = pictures[1].center();
+            h.click(at.x, at.y);
+            assert_eq!(crate::ui::widgets::opened(), vec![small.to_string()]);
         }
 
         #[test]

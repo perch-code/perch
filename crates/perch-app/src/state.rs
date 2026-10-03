@@ -2615,6 +2615,7 @@ impl AppState {
                     m.insert(url, Arc::new(bytes));
                 });
             }
+            Event::Picture { url, decoded } => crate::review::images::arrived(url, decoded),
             Event::Participants(found) => {
                 self.participants.update(|m| m.extend(found));
             }

@@ -400,6 +400,13 @@ pub fn open_link(url: &str) -> bool {
     }
 }
 
+/// Download a picture a comment shows, for every window.
+pub fn want_picture(url: &str) {
+    if let Some(app) = app() {
+        app.backend.want_picture(url);
+    }
+}
+
 /// A click on the Dock icon opens a window when none is left. A minimized
 /// one macOS brings back itself.
 pub fn reopen() {
