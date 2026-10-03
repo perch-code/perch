@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -102,6 +102,8 @@ pub struct Client {
     class_files: std::sync::Mutex<HashMap<String, String>>,
     /// Why the server exited, from its error output, once it has.
     exited: std::sync::OnceLock<Option<String>>,
+    /// Set once Perch asks the server to stop: its exit then is no failure.
+    stopping: Arc<AtomicBool>,
     /// The server process, for a bug report's memory and uptime.
     pid: Option<u32>,
     /// When it was started.
@@ -145,11 +147,7 @@ impl Client {
         // for a toolchain without rust-analyzer says why and quits.
         let stderr_tail = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
         let stderr_done = child.stderr.take().map(|stderr| {
-            let server = spec
-                .binary
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
+            let server = spec_name(&spec);
             let tail = stderr_tail.clone();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
@@ -166,6 +164,7 @@ impl Client {
         });
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let pid = child.id();
+        let stopping = Arc::new(AtomicBool::new(false));
 
         let client = Arc::new(Self {
             stdin: Arc::new(Mutex::new(stdin)),
@@ -177,6 +176,7 @@ impl Client {
             documents: Default::default(),
             class_files: Default::default(),
             exited: Default::default(),
+            stopping: stopping.clone(),
             pid,
             started: std::time::Instant::now(),
         });
@@ -199,15 +199,32 @@ impl Client {
                 let _ = client.exited.set(reason);
                 // Fail what is waiting now rather than at its timeout.
                 pending.lock().await.clear();
-                client.tell(ServerEvent::Status(Status::Failed {
-                    reason: client.exited_error().to_string(),
-                }));
+                // A server stopped on purpose, kept too long or one too
+                // many, may exit seconds later, after a new one for the
+                // same worktree is on show: said, it would read as that
+                // one failing.
+                if !client.stopping.load(Ordering::Relaxed) {
+                    client.tell(ServerEvent::Status(Status::Failed {
+                        reason: client.exited_error().to_string(),
+                    }));
+                }
             });
         }
 
-        // Reap the child so a crash does not leave a zombie.
+        // Reap the child so a crash does not leave a zombie, and say how
+        // it ended, so a crash can be told from a stop.
+        let server = spec_name(&client.spec);
         tokio::spawn(async move {
-            let _ = child.wait().await;
+            let status = child.wait().await;
+            let status = match &status {
+                Ok(status) => status.to_string(),
+                Err(error) => error.to_string(),
+            };
+            if stopping.load(Ordering::Relaxed) {
+                tracing::info!(%server, ?pid, %status, "language server exited when asked");
+            } else {
+                tracing::warn!(%server, ?pid, %status, "language server exited unasked");
+            }
         });
 
         client.initialize(root).await?;
@@ -771,10 +788,20 @@ impl Client {
         stdin.flush().await
     }
 
+    /// Stop the server. Its exit is not told as a failure.
     pub async fn shutdown(&self) {
+        self.stopping.store(true, Ordering::Relaxed);
         let _ = self.request("shutdown", Value::Null, LIFECYCLE_TIMEOUT).await;
         self.notify("exit", Value::Null).await;
     }
+}
+
+/// The name of a server's binary, as its log lines are tagged.
+fn spec_name(spec: &ServerSpec) -> String {
+    spec.binary
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 /// How many lines of a server's error output are kept to say why it exited.
@@ -1387,6 +1414,41 @@ while True:
             }
         }
         assert_eq!(statuses[..2], [Status::Starting, Status::Starting]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A server Perch stops exits without its exit told as a failure: a
+    /// kept server stopped for one too many exits after a new one for its
+    /// worktree may be on show.
+    #[tokio::test]
+    async fn a_server_stopped_on_purpose_does_not_fail() {
+        let dir = std::env::temp_dir().join(format!("perch-lsp-stopped-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("server.py");
+        std::fs::write(&script, RECORDING_SERVER).unwrap();
+        let spec = ServerSpec {
+            binary: PathBuf::from("python3"),
+            args: vec![script.display().to_string(), dir.join("methods").display().to_string()],
+            kind: ServerKind::RustAnalyzer,
+            options: Value::Null,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let client = Client::start(spec, &dir, tx).await.unwrap();
+        client.shutdown().await;
+        for _ in 0..100 {
+            if client.exited.get().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(client.exited.get().is_some(), "the server exited");
+        // What follows the exit is told just after it is noted.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        while let Ok(event) = rx.try_recv() {
+            if let ServerEvent::Status(status) = event {
+                assert!(!matches!(status, Status::Failed { .. }), "{status:?}");
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
