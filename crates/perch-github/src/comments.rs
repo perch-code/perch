@@ -297,6 +297,10 @@ pub fn review_threads_of(
                 .find(|s| s.root_comment_id == root.id);
             let at_head = root.line.is_some();
             let line = root.line.or(root.original_line);
+            let on_file = match line {
+                None => file_comment_anchor(root, fallback_head_sha),
+                Some(_) => None,
+            };
             let anchor = line.map(|line| {
                 let start_line = if at_head { root.start_line } else { root.original_start_line };
                 let commit = if at_head { &root.commit_id } else { &root.original_commit_id };
@@ -312,18 +316,22 @@ pub fn review_threads_of(
                     },
                 }
             });
+            let mut message = github_message(root, root.id);
+            if let Some((_, body)) = &on_file {
+                message.body = body.to_string();
+            }
             CommentThread {
                 id: github_thread_id(root.id),
                 worktree_id: item_id.to_string(),
                 origin: ThreadOrigin::GitHub,
                 github_id: Some(root.id),
-                anchor,
-                outdated: state.map_or(!at_head, |s| s.outdated),
+                outdated: state.map_or(!at_head && on_file.is_none(), |s| s.outdated),
+                anchor: anchor.or(on_file.map(|(anchor, _)| anchor)),
                 resolved: state.is_some_and(|s| s.resolved),
                 node_id: state.map(|s| s.node_id.clone()).filter(|id| !id.is_empty()),
                 can_resolve: state.is_some_and(|s| s.can_resolve),
                 created_at: root.created_at,
-                messages: vec![github_message(root, root.id)],
+                messages: vec![message],
             }
         })
         .collect();
@@ -338,6 +346,94 @@ pub fn review_threads_of(
     }
     threads.sort_by_key(|t| t.created_at);
     threads
+}
+
+/// What a comment on lines outside a pull request's diff says when it
+/// goes on the lines' file, which GitHub takes where it refuses the
+/// lines: a permalink to the lines on a line of its own, which GitHub
+/// draws as the code, then `body`. `repo_url` is the repository's page;
+/// `commit` and `path` name the blob the lines count in, the head's for
+/// the head side and the merge base's for the base side. Perch reads the
+/// lines back from the link, `file_comment_anchor`.
+pub fn file_comment_body(
+    repo_url: &str,
+    commit: &str,
+    path: &str,
+    start_line: u32,
+    line: u32,
+    body: &str,
+) -> String {
+    let lines = if start_line == line {
+        format!("L{line}")
+    } else {
+        format!("L{start_line}-L{line}")
+    };
+    format!(
+        "{}/blob/{commit}/{}#{lines}\n\n{body}",
+        repo_url.trim_end_matches('/'),
+        url_path(path)
+    )
+}
+
+/// The lines a comment on a file is about and its text without them,
+/// when it opens with a permalink to lines of its own file, as
+/// `file_comment_body` writes one. A link at the commit the comment was
+/// left on is on the head side; at any other, the base side. `None` for a
+/// comment on lines, or one that opens with anything else.
+pub fn file_comment_anchor<'a>(
+    c: &'a ReviewComment,
+    fallback_head_sha: &str,
+) -> Option<(Anchor, &'a str)> {
+    if c.line.is_some() || c.original_line.is_some() {
+        return None;
+    }
+    let repo_url = &c.html_url[..c.html_url.find("/pull/")?];
+    let body = c.body.trim_start();
+    let (link, rest) = body.split_once('\n').unwrap_or((body, ""));
+    let link = link.trim_end().strip_prefix(repo_url)?.strip_prefix("/blob/")?;
+    let (commit, link) = link.split_once('/')?;
+    let (path, lines) = link.split_once("#L")?;
+    if path != url_path(&c.path) || commit.is_empty() {
+        return None;
+    }
+    let (start_line, line) = match lines.split_once("-L") {
+        Some((start, end)) => (start.parse().ok()?, end.parse().ok()?),
+        None => {
+            let line = lines.parse().ok()?;
+            (line, line)
+        }
+    };
+    if start_line == 0 || start_line > line {
+        return None;
+    }
+    let head = [c.original_commit_id.as_str(), c.commit_id.as_str()]
+        .into_iter()
+        .find(|sha| !sha.is_empty());
+    let side = match head {
+        Some(head) if head != commit => Side::Left,
+        _ => Side::Right,
+    };
+    let anchor = Anchor {
+        path: c.path.clone(),
+        start_line,
+        line,
+        side,
+        commit_sha: head.unwrap_or(fallback_head_sha).to_string(),
+    };
+    Some((anchor, rest.trim_start_matches(['\r', '\n'])))
+}
+
+/// `path` as a URL's path: each part percent-encoded, the slashes kept.
+fn url_path(path: &str) -> String {
+    const PART: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'.')
+        .remove(b'_')
+        .remove(b'~');
+    path.split('/')
+        .map(|part| percent_encoding::utf8_percent_encode(part, PART).to_string())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// The thread id a GitHub review thread has in Perch, from its root
@@ -1186,6 +1282,68 @@ mod tests {
         assert_eq!(first.messages[2].thread_id, "gh-1");
         assert!(first.is_github_bound() && first.has_github_message());
         assert_eq!(threads[0].messages.len(), 1);
+    }
+
+    #[test]
+    fn a_comment_on_a_file_is_on_the_lines_its_permalink_names() {
+        let body = file_comment_body(
+            "https://github.com/a/b",
+            "orig",
+            "src/my file.rs",
+            861,
+            863,
+            "Unsigned types are untested.",
+        );
+        assert_eq!(
+            body,
+            "https://github.com/a/b/blob/orig/src/my%20file.rs#L861-L863\n\n\
+             Unsigned types are untested."
+        );
+        let mut root = comment(1, None, "2026-09-16T11:38:00Z");
+        root.path = "src/my file.rs".into();
+        root.line = None;
+        root.original_line = None;
+        root.body = body;
+        let threads = review_threads_of(&discussion(vec![root.clone()]), "w", "fallback");
+        let thread = &threads[0];
+        assert_eq!(
+            thread.anchor,
+            Some(Anchor {
+                path: "src/my file.rs".into(),
+                start_line: 861,
+                line: 863,
+                side: Side::Right,
+                commit_sha: "orig".into(),
+            })
+        );
+        assert!(!thread.outdated, "a comment on a file stays on it");
+        assert_eq!(thread.messages[0].body, "Unsigned types are untested.");
+
+        // A link at another commit is to the base side's lines.
+        root.body = file_comment_body("https://github.com/a/b", "base", "src/my file.rs", 7, 7, "x");
+        let (anchor, body) = file_comment_anchor(&root, "fallback").unwrap();
+        assert_eq!((anchor.side, anchor.start_line, anchor.line), (Side::Left, 7, 7));
+        assert_eq!(anchor.commit_sha, "orig");
+        assert_eq!(body, "x");
+
+        // Anything else on a file has no lines.
+        for other in [
+            "Looks fine.".to_string(),
+            file_comment_body("https://github.com/o/other", "orig", "src/my file.rs", 7, 7, "x"),
+            file_comment_body("https://github.com/a/b", "orig", "src/other.rs", 7, 7, "x"),
+            "https://github.com/a/b/blob/orig/src/my%20file.rs#L9-L3".to_string(),
+        ] {
+            root.body = other;
+            assert_eq!(file_comment_anchor(&root, "fallback"), None, "{}", root.body);
+        }
+        let threads = review_threads_of(&discussion(vec![root.clone()]), "w", "fallback");
+        assert_eq!(threads[0].anchor, None);
+        assert!(threads[0].outdated);
+
+        // A comment on lines is on them, whatever it opens with.
+        let mut on_lines = comment(2, None, "2026-09-16T11:38:00Z");
+        on_lines.body = file_comment_body("https://github.com/a/b", "orig", "a.rs", 7, 7, "x");
+        assert_eq!(file_comment_anchor(&on_lines, "fallback"), None);
     }
 
     #[test]

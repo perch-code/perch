@@ -373,6 +373,50 @@ async fn a_comment_on_its_own_names_the_commit_it_was_written_against() {
 }
 
 #[tokio::test]
+async fn a_comment_on_a_file_names_no_lines_and_reads_back_with_none() {
+    let (base, requests) = spawn(vec![Response::new(
+        "201 Created",
+        serde_json::json!({
+            "id": 79,
+            "node_id": "PRRC_79",
+            "pull_request_review_id": 5,
+            "in_reply_to_id": null,
+            "user": { "login": "reviewer" },
+            "body": "Off the diff",
+            "path": "src/x.rs",
+            "line": null,
+            "original_line": null,
+            "side": "RIGHT",
+            "subject_type": "file",
+            "diff_hunk": "",
+            "commit_id": "abc123",
+            "original_commit_id": "abc123",
+            "created_at": "2026-09-20T18:00:00Z",
+            "html_url": "https://github.com/a/b/pull/42#discussion_r79",
+        })
+        .to_string(),
+    )]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let posted = github
+        .create_file_comment("a/b", 42, "abc123", "src/x.rs", "Off the diff")
+        .await
+        .unwrap();
+    assert_eq!(posted.id, 79);
+    assert_eq!((posted.line, posted.original_line), (None, None));
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests[0].method, "POST");
+    assert_eq!(requests[0].path, "/repos/a/b/pulls/42/comments");
+    let json: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(json["commit_id"], "abc123");
+    assert_eq!(json["path"], "src/x.rs");
+    assert_eq!(json["subject_type"], "file");
+    assert_eq!(json["body"], "Off the diff");
+    assert!(json.get("line").is_none() && json.get("side").is_none());
+}
+
+#[tokio::test]
 async fn an_issue_comment_posts_to_the_conversation_and_decodes_the_comment() {
     let (base, requests) = spawn(vec![Response::new(
         "201 Created",

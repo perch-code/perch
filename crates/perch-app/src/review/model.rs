@@ -950,13 +950,14 @@ fn count_of(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-/// What the review form says once the submission is done and not every
+/// What the reader is told once the submission is done and not every
 /// draft posted, from the counts the backend answered with: nothing when
 /// they all did. `review` says a review posted; `posted` counts the
 /// drafts confirmed on GitHub. `drafts` are the drafts still kept, which
 /// say whether a failed one was a reply or a comment, and where each of
-/// `outside_diff`, those kept out of the review, is. Those are named, the
-/// first three, since each has to be moved or dropped before it can go.
+/// `outside_diff`, those on files the pull request does not change, is.
+/// Those are named, the first three, since each has to be moved or
+/// dropped before it can go.
 pub fn submit_review_outcome(
     review: bool,
     posted: usize,
@@ -1004,7 +1005,7 @@ pub fn submit_review_outcome(
             text.push(' ');
         }
         text.push_str(&format!(
-            "GitHub takes comments from Perch only on lines of the pull request's diff, \
+            "GitHub takes comments only on files the pull request changes, \
              so {which} {} still {}.",
             if n == 1 { "is" } else { "are" },
             if n == 1 { "a draft" } else { "drafts" },
@@ -7222,9 +7223,10 @@ mod tests {
         );
     }
 
-    /// The drafts kept out of the review, on lines GitHub's diff does not
-    /// show, are named by their lines, the first three, since each has to
-    /// be moved or dropped; one the form no longer has is counted instead.
+    /// The drafts kept out of the review, on files the pull request does
+    /// not change, are named by their lines, the first three, since each
+    /// has to be moved or dropped; one the form no longer has is counted
+    /// instead.
     #[test]
     fn the_outcome_names_the_drafts_kept_off_the_diff() {
         let on = |id: &str, start_line: u32, line: u32| Draft {
@@ -7247,16 +7249,16 @@ mod tests {
         assert_eq!(
             submit_review_outcome(true, 1, &[], &[], &["a".into()], &kept).as_deref(),
             Some(
-                "Posted the review and 1 comment. GitHub takes comments from Perch only on \
-                 lines of the pull request's diff, so src/a.rs:9 is still a draft."
+                "Posted the review and 1 comment. GitHub takes comments only on files the pull \
+                 request changes, so src/a.rs:9 is still a draft."
             )
         );
         assert_eq!(
             submit_review_outcome(true, 0, &[], &[], &["a".into(), "b".into()], &kept)
                 .as_deref(),
             Some(
-                "Posted the review. GitHub takes comments from Perch only on lines of the pull \
-                 request's diff, so src/a.rs:9 and src/b.rs:3\u{2013}5 are still drafts."
+                "Posted the review. GitHub takes comments only on files the pull request \
+                 changes, so src/a.rs:9 and src/b.rs:3\u{2013}5 are still drafts."
             )
         );
         // No review went, and a reply under one of them could not follow it.
@@ -7265,7 +7267,7 @@ mod tests {
         assert_eq!(
             submit_review_outcome(false, 0, &[], &orphaned, &four, &kept).as_deref(),
             Some(
-                "GitHub takes comments from Perch only on lines of the pull request's diff, so \
+                "GitHub takes comments only on files the pull request changes, so \
                  src/a.rs:9, src/b.rs:3\u{2013}5, src/c.rs:1 and 1 more are still drafts. 1 reply \
                  did not post: the comment that opens its thread did not post."
             )
@@ -7273,7 +7275,7 @@ mod tests {
         assert_eq!(
             submit_review_outcome(false, 0, &[], &[], &["gone".into()], &kept).as_deref(),
             Some(
-                "GitHub takes comments from Perch only on lines of the pull request's diff, so \
+                "GitHub takes comments only on files the pull request changes, so \
                  1 comment is still a draft."
             )
         );

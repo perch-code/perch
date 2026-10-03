@@ -2302,11 +2302,19 @@ impl AppState {
                         &outside_diff,
                         &review.drafts(),
                     );
+                    // Once something is up the form is done with, and
+                    // what did not go is a warning in the popup: said in
+                    // the form, under Submit, it read as a review that
+                    // had failed. With nothing up the form stays to say
+                    // why, or the popup does when the form is gone.
+                    let went = submitted.is_some() || posted > 0;
                     let review_of = submitted.as_deref().cloned();
-                    if !review.finish_submit_review(attempt_id, review_of, outcome.clone()) {
-                        // The form that sent it is gone; what did not
-                        // post is still said, in the popup.
-                        if let Some(outcome) = outcome {
+                    let in_form = outcome.clone().filter(|_| !went);
+                    let owned = review.finish_submit_review(attempt_id, review_of, in_form);
+                    if let Some(outcome) = outcome {
+                        if went {
+                            self.notify(outcome, Tone::Warning);
+                        } else if !owned {
                             self.complain(outcome);
                         }
                     }
@@ -5298,7 +5306,9 @@ mod tests {
     }
 
     #[test]
-    fn a_review_whose_drafts_did_not_all_post_keeps_the_form_open_to_say_so() {
+    fn a_review_whose_drafts_did_not_all_post_closes_the_form_and_warns() {
+        // The popup times its messages out, which needs a root.
+        let _root = floem::headless::TestRoot::new();
         let app = AppState::new();
         let review = review_of_pull("wt", 7, "head");
         review.review_open.set(true);
@@ -5332,20 +5342,24 @@ mod tests {
             review,
         );
         assert!(review.submit_review_pending.with(Option::is_none));
-        assert!(review.review_open.get(), "stays open to say what did not post");
+        assert!(!review.review_open.get(), "the review is up");
         assert!(review.submit_review_draft.get().is_empty(), "the summary posted");
         assert_eq!(review.submit_review_event.get(), PullReviewEvent::Comment);
         assert_eq!(review.submit_review_error.get(), None);
+        assert_eq!(review.submit_review_outcome.get(), None);
         assert_eq!(
-            review.submit_review_outcome.get().as_deref(),
+            app.notice().as_deref(),
             Some(
-                "Posted the review and 1 comment. GitHub takes comments from Perch only on lines \
-                 of the pull request's diff, so 1 comment is still a draft. 1 comment did not \
+                "Posted the review and 1 comment. GitHub takes comments only on files the pull \
+                 request changes, so 1 comment is still a draft. 1 comment did not \
                  post: GitHub returned 422: no. 1 comment could not be matched to what GitHub \
                  returned and is still a draft."
             )
         );
-        assert_eq!(review.submit_review_generation.get(), 1, "the form is built anew");
+        assert!(app.toasts.with(|toasts| toasts.iter().any(|toast| matches!(
+            &toast.kind,
+            ToastKind::Message { tone: Tone::Warning, .. }
+        ))));
         assert_eq!(*review.submitted_reviews.get(), vec![accepted]);
     }
 

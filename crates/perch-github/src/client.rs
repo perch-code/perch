@@ -621,6 +621,45 @@ impl GitHub {
         .await
     }
 
+    /// Open a review thread on the file at `path` rather than on its
+    /// lines, against `commit_id`: what GitHub takes for lines its pull
+    /// request diff does not show. The comment says which lines itself
+    /// (`comments::file_comment_body`).
+    pub async fn create_file_comment(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+        commit_id: &str,
+        path: &str,
+        body: &str,
+    ) -> Result<ReviewComment, Error> {
+        if commit_id.is_empty() || commit_id.trim() != commit_id {
+            return Err(Error::Decode(
+                "pull request comment commit SHA is empty or invalid".into(),
+            ));
+        }
+
+        #[derive(serde::Serialize)]
+        struct Request<'a> {
+            commit_id: &'a str,
+            path: &'a str,
+            body: &'a str,
+            subject_type: &'static str,
+        }
+
+        self.post_review_comment(
+            repo_full_name,
+            number,
+            &Request {
+                commit_id,
+                path,
+                body,
+                subject_type: "file",
+            },
+        )
+        .await
+    }
+
     /// Reply under a review thread. GitHub takes the thread's root comment
     /// as `in_reply_to`, and the reply is not part of any review.
     pub async fn reply_to_review_comment(

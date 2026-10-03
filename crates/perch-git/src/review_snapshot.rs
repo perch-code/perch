@@ -306,10 +306,16 @@ impl RangeDiff {
         path: &str,
         side: DiffSide,
     ) -> Result<Vec<RangeInclusive<u32>>, SnapshotError> {
-        let Some(file) = self.files.iter().find(|file| file.path == path) else {
+        let Some(file) = self.file(path) else {
             return Ok(Vec::new());
         };
         file_hunks(&Git::new(None), &self.repo, file, side).await
+    }
+
+    /// The file at `path`, named as `hunks` takes it, if the range changed
+    /// it.
+    pub fn file(&self, path: &str) -> Option<&SnapshotFile> {
+        self.files.iter().find(|file| file.path == path)
     }
 }
 

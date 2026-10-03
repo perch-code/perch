@@ -1253,8 +1253,8 @@ pub enum Event {
     /// GitHub listed after, and are drafts still; the `failed` ones were
     /// refused after the review landed, each with GitHub's reason, and
     /// are drafts still; the `outside_diff` ones were kept out of the
-    /// review, on lines the pull request's diff does not show, which
-    /// GitHub refuses, and are drafts still. `review` is `None` when there
+    /// review, on files the pull request does not change, which GitHub
+    /// refuses, and are drafts still. `review` is `None` when there
     /// was none to post: a comment with no summary whose drafts all went
     /// on their own, or stayed.
     PullRequestReviewSubmitted {
@@ -8959,9 +8959,11 @@ async fn merge_open_pull_request(
 /// rather than approving unseen changes.
 ///
 /// The drafts go three ways. One that opens a thread at the head rides in
-/// the review. One that opens a thread at an older commit, and a reply
-/// under a thread on GitHub, post one request each once the review has
-/// landed, since the review's comments cannot carry either. Then GitHub's
+/// the review, unless its lines are outside the pull request's diff: then
+/// it goes on its file (`hold_back_outside_diff`). That, one that opens a
+/// thread at an older commit, and a reply under a thread on GitHub, post
+/// one request each once the review has landed, since the review's
+/// comments cannot carry any of them. Then GitHub's
 /// copy of the discussion is read back and the drafts that rode in the
 /// review are found in it and marked posted; a draft under a thread
 /// another draft opened is replied then, under the root that is known by
@@ -9076,7 +9078,19 @@ async fn submit_open_pull_request_review(
         );
         return false;
     }
-    hold_back_outside_diff(ctx, &checkout, &fresh.base_sha, expected_head_sha, &mut drafts).await;
+    let repo_url = fresh
+        .html_url
+        .find("/pull/")
+        .map_or(fresh.html_url.as_str(), |at| &fresh.html_url[..at]);
+    hold_back_outside_diff(
+        ctx,
+        &checkout,
+        repo_url,
+        &fresh.base_sha,
+        expected_head_sha,
+        &mut drafts,
+    )
+    .await;
 
     // Nothing else commits to the item's discussion until the drafts are
     // matched to what posted: a read landing in between would list a
@@ -9161,6 +9175,19 @@ async fn submit_open_pull_request_review(
             Ok(comment) => {
                 let opens_thread = draft.thread_github_id.is_none();
                 record_posted(ctx, item_id, &draft.message_id, &comment, opens_thread);
+                posted += 1;
+            }
+            Err(error) => failed.push((draft.message_id.clone(), error.to_string())),
+        }
+    }
+    for (draft, body) in &drafts.on_file {
+        let Some(anchor) = &draft.anchor else { continue };
+        match github
+            .create_file_comment(repo_full_name, number, expected_head_sha, &anchor.path, body)
+            .await
+        {
+            Ok(comment) => {
+                record_posted(ctx, item_id, &draft.message_id, &comment, true);
                 posted += 1;
             }
             Err(error) => failed.push((draft.message_id.clone(), error.to_string())),
@@ -9255,7 +9282,8 @@ async fn submit_open_pull_request_review(
         .map(|d| d.message_id.clone())
         .collect();
     let kept = unmatched.len() + failed.len() + outside_diff.len();
-    if ctx.is_open(item_id) {
+    let open = ctx.is_open(item_id);
+    if open {
         ctx.send_threads(item_id);
         let _ = ctx.events.send(Event::PullRequestReviewSubmitted {
             item_id: item_id.to_string(),
@@ -9278,12 +9306,15 @@ async fn submit_open_pull_request_review(
         format!("Posted {}", count_of(posted, "comment", "comments"))
     };
     if kept > 0 {
-        notice.push_str(&format!(
-            ", {} still {}",
-            count_of(kept, "draft", "drafts"),
-            if kept == 1 { "a draft" } else { "drafts" }
-        ));
-        ctx.notice(notice);
+        // The open item says which did not post, and why.
+        if !open {
+            notice.push_str(&format!(
+                "; {} still {}",
+                count_of(kept, "comment", "comments"),
+                if kept == 1 { "is a draft" } else { "are drafts" }
+            ));
+            ctx.notice(notice);
+        }
     } else if review_needed || posted > 0 {
         ctx.done(notice);
     } else {
@@ -9322,8 +9353,14 @@ struct SplitDrafts {
     /// Opens a thread at the head: rides in the review's comments.
     in_review: Vec<DraftRow>,
     /// Would open a thread at the head on lines the pull request's diff
-    /// does not show, which GitHub refuses, and the whole review with it.
-    /// Kept back by `hold_back_outside_diff`, drafts still.
+    /// does not show, which GitHub refuses, and the whole review with it,
+    /// in a file the pull request changes. Each posts after the review on
+    /// its file instead, with the text `hold_back_outside_diff` gave it: a
+    /// link to its lines, then the draft's.
+    on_file: Vec<(DraftRow, String)>,
+    /// The same in a file the pull request does not change, where GitHub
+    /// takes no comment at all. Kept back by `hold_back_outside_diff`,
+    /// drafts still.
     outside_diff: Vec<DraftRow>,
     /// Posted one request each after the review, in the order the cache
     /// lists them: a reply under a thread that is on GitHub (`thread_github_id`
@@ -9373,13 +9410,17 @@ fn split_drafts(drafts: Vec<DraftRow>, head_sha: &str) -> SplitDrafts {
 /// lines are not inside one hunk of the pull request's diff, first line
 /// and last, which GitHub's API asks of a review comment even where its
 /// own page takes one on any line. One such comment fails the whole
-/// review, so these stay drafts, and the rest go. The diff is the head
+/// review, so these do not ride in it. One in a file the pull request
+/// changes goes on that file instead, opening with a permalink to its
+/// lines at the head, or at the merge base for the base side, under
+/// `repo_url`; one in any other file stays a draft. The diff is the head
 /// against GitHub's merge base, read in the checkout with three lines of
 /// context, as `DraftLines` reads a review's findings. Where git cannot
 /// read it the drafts go unchecked and GitHub decides, as it always did.
 async fn hold_back_outside_diff(
     ctx: &Ctx,
     checkout: &perch_git::Checkout,
+    repo_url: &str,
     base_sha: &str,
     head_sha: &str,
     drafts: &mut SplitDrafts,
@@ -9428,11 +9469,27 @@ async fn hold_back_outside_diff(
             hunks.insert(key.clone(), read);
         }
         let outside = matches!(&hunks[&key], Some(hunks) if !in_one_hunk(hunks, anchor));
-        if outside {
-            drafts.outside_diff.push(draft);
-        } else {
+        if !outside {
             drafts.in_review.push(draft);
+            continue;
         }
+        let Some(file) = diff.file(&anchor.path) else {
+            drafts.outside_diff.push(draft);
+            continue;
+        };
+        let commit = match side {
+            perch_git::DiffSide::Left => merge_base.as_str(),
+            perch_git::DiffSide::Right => head_sha,
+        };
+        let body = perch_github::comments::file_comment_body(
+            repo_url,
+            commit,
+            file.path_on(side).unwrap_or(&anchor.path),
+            anchor.start_line,
+            anchor.line,
+            &draft.body,
+        );
+        drafts.on_file.push((draft, body));
     }
 }
 
@@ -18670,8 +18727,10 @@ mod tests {
 
     /// GitHub's API takes a review comment only inside one hunk of the
     /// pull request's diff, first line and last, and one it refuses fails
-    /// the whole review. Those are kept out of it; where the diff cannot
-    /// be read, nothing is, and GitHub decides.
+    /// the whole review. Those are kept out of it: on a file the pull
+    /// request changes they go on the file, with a link to their lines,
+    /// and on any other they stay drafts. Where the diff cannot be read,
+    /// nothing is kept out, and GitHub decides.
     #[tokio::test]
     async fn the_drafts_outside_the_diff_are_kept_out_of_the_review() {
         let dir = tempfile::tempdir().unwrap();
@@ -18715,15 +18774,41 @@ mod tests {
             on("untouched", "same.rs", perch_github::Side::Right, 1, 1),
             on("removed", "code.rs", perch_github::Side::Left, 10, 10),
         ]);
-        hold_back_outside_diff(&ctx, &checkout, &merge_base, &head, &mut drafts).await;
+        let repo_url = "https://github.com/a/b";
+        drafts.in_review.push(on("base", "code.rs", perch_github::Side::Left, 25, 26));
+        hold_back_outside_diff(&ctx, &checkout, repo_url, &merge_base, &head, &mut drafts).await;
         assert_eq!(ids(&drafts.in_review), ["changed", "hunk", "removed"]);
-        assert_eq!(ids(&drafts.outside_diff), ["below", "across", "untouched"]);
+        assert_eq!(ids(&drafts.outside_diff), ["untouched"]);
+        let on_file: Vec<(&str, &str)> = drafts
+            .on_file
+            .iter()
+            .map(|(draft, body)| (draft.message_id.as_str(), body.as_str()))
+            .collect();
+        assert_eq!(
+            on_file,
+            [
+                (
+                    "below",
+                    format!("{repo_url}/blob/{head}/code.rs#L20\n\ndraft below").as_str()
+                ),
+                (
+                    "across",
+                    format!("{repo_url}/blob/{head}/code.rs#L12-L15\n\ndraft across").as_str()
+                ),
+                (
+                    "base",
+                    format!("{repo_url}/blob/{merge_base}/code.rs#L25-L26\n\ndraft base")
+                        .as_str()
+                ),
+            ]
+        );
 
         // A base the clone has not fetched: the merge base it was opened with.
         let unfetched = "0".repeat(40);
         let mut drafts = split(vec![at("changed", 10, 10), at("below", 20, 20)]);
-        hold_back_outside_diff(&ctx, &checkout, &unfetched, &head, &mut drafts).await;
-        assert_eq!(ids(&drafts.outside_diff), ["below"]);
+        hold_back_outside_diff(&ctx, &checkout, repo_url, &unfetched, &head, &mut drafts).await;
+        assert_eq!(drafts.on_file.len(), 1);
+        assert_eq!(drafts.on_file[0].0.message_id, "below");
 
         // No merge base to go by, or no clone to read the diff in.
         let unmerged = perch_git::Checkout {
@@ -18736,9 +18821,9 @@ mod tests {
         };
         for (checkout, base) in [(&unmerged, &unfetched), (&gone, &merge_base)] {
             let mut drafts = split(vec![at("below", 20, 20)]);
-            hold_back_outside_diff(&ctx, checkout, base, &head, &mut drafts).await;
+            hold_back_outside_diff(&ctx, checkout, repo_url, base, &head, &mut drafts).await;
             assert_eq!(ids(&drafts.in_review), ["below"], "{}", checkout.bare.display());
-            assert!(drafts.outside_diff.is_empty());
+            assert!(drafts.outside_diff.is_empty() && drafts.on_file.is_empty());
         }
     }
 
@@ -20835,16 +20920,18 @@ read eof || true
     }
 
     /// One comment GitHub refuses fails the whole review, and GitHub's API
-    /// refuses one on lines outside the pull request's diff. That draft
-    /// stays a draft, the form is told which, and the rest of the review
-    /// posts.
+    /// refuses one on lines outside the pull request's diff. Such a draft
+    /// on a file the pull request changes goes on the file, and comes back
+    /// on its lines; one on any other file stays a draft and the form is
+    /// told which. The rest of the review posts.
     #[tokio::test]
-    async fn a_draft_outside_the_diff_stays_and_the_rest_of_the_review_posts() {
+    async fn a_draft_outside_the_diff_goes_on_its_file_and_the_rest_of_the_review_posts() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path().join("repo");
         let (merge_base, head) = one_hunk_repo(&repo);
         let pull = serde_json::json!({
             "number": 7, "title": "seven", "state": "open", "draft": false,
+            "html_url": "https://github.com/a/b/pull/7",
             "user": { "login": "u", "avatar_url": "" },
             "head": { "sha": head, "ref": "feature", "repo": { "full_name": "a/b" } },
             "base": { "sha": merge_base, "ref": "main", "repo": { "full_name": "a/b" } },
@@ -20860,6 +20947,25 @@ read eof || true
             "html_url": "https://github.com/a/b/pull/7#pullrequestreview-9",
         })
         .to_string();
+        let on_file_body = format!("https://github.com/a/b/blob/{head}/code.rs#L20\n\noutside");
+        let on_file = serde_json::json!({
+            "id": 701,
+            "node_id": "PRRC_701",
+            "pull_request_review_id": 10,
+            "in_reply_to_id": null,
+            "user": { "login": "chris", "avatar_url": "" },
+            "body": on_file_body,
+            "path": "code.rs",
+            "line": null,
+            "original_line": null,
+            "side": "RIGHT",
+            "subject_type": "file",
+            "diff_hunk": "",
+            "commit_id": head,
+            "original_commit_id": head,
+            "created_at": "2026-09-22T18:00:01Z",
+            "html_url": "https://github.com/a/b/pull/7#discussion_r701",
+        });
         let listed = serde_json::json!([{
             "id": 700,
             "node_id": "PRRC_700",
@@ -20875,16 +20981,23 @@ read eof || true
             "original_commit_id": head,
             "created_at": "2026-09-22T18:00:00Z",
             "html_url": "https://github.com/a/b/pull/7#discussion_r700",
-        }])
+        }, on_file])
         .to_string();
+        let on_file = on_file.to_string();
         let sent_review: Arc<Mutex<Option<serde_json::Value>>> = Arc::default();
         let seen = sent_review.clone();
+        let sent_comments: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+        let seen_comments = sent_comments.clone();
         let (base, _) = serve_by_body(move |method, path, _, sent| {
             match (method, path.split('?').next().unwrap_or(path)) {
                 ("GET", "/repos/a/b/pulls/7") => ("200 OK", pull.clone()),
                 ("POST", "/repos/a/b/pulls/7/reviews") => {
                     *seen.lock().unwrap() = serde_json::from_str(sent).ok();
                     ("200 OK", review.clone())
+                }
+                ("POST", "/repos/a/b/pulls/7/comments") => {
+                    seen_comments.lock().unwrap().push(serde_json::from_str(sent).unwrap());
+                    ("201 Created", on_file.clone())
                 }
                 ("GET", "/repos/a/b/pulls/7/comments") => ("200 OK", listed.clone()),
                 ("GET", _) => ("200 OK", "[]".to_string()),
@@ -20903,7 +21016,11 @@ read eof || true
             open.checkout.bare = repo.clone();
             open.checkout.merge_base = merge_base.clone();
         }
-        for (minute, id, line) in [(0, "inside", 10), (1, "outside", 20)] {
+        for (minute, id, path, line) in [
+            (0, "inside", "code.rs", 10),
+            (1, "outside", "code.rs", 20),
+            (2, "untouched", "same.rs", 1),
+        ] {
             let at: Timestamp = format!("2026-09-22T12:0{minute}:00Z").parse().unwrap();
             let thread = CommentThread {
                 id: format!("t-{id}"),
@@ -20911,7 +21028,7 @@ read eof || true
                 origin: ThreadOrigin::GitHub,
                 github_id: None,
                 anchor: Some(Anchor {
-                    path: "code.rs".into(),
+                    path: path.into(),
                     start_line: line,
                     line,
                     side: perch_github::Side::Right,
@@ -20980,19 +21097,43 @@ read eof || true
             )),
             _ => None,
         });
-        assert_eq!(outcome, Some((true, 1, 0, 0, vec!["outside".to_string()])), "{events:?}");
-        let notice = events.iter().find_map(|e| match e {
-            Event::Notice(message) => Some(message.as_str()),
-            _ => None,
-        });
-        assert_eq!(notice, Some("Review submitted, 1 draft still a draft"));
+        assert_eq!(
+            outcome,
+            Some((true, 2, 0, 0, vec!["untouched".to_string()])),
+            "{events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::Notice(_))),
+            "the open item says what did not post: {events:?}"
+        );
 
-        // The one outside is a draft still, the other the reader's comment.
+        // The one outside the hunk went on its file, after the review.
+        let sent_comments = sent_comments.lock().unwrap().clone();
+        assert_eq!(sent_comments.len(), 1);
+        assert_eq!(sent_comments[0]["subject_type"], "file");
+        assert_eq!(sent_comments[0]["path"], "code.rs");
+        assert_eq!(sent_comments[0]["commit_id"], head.as_str());
+        assert_eq!(sent_comments[0]["body"], on_file_body.as_str());
+
+        // The one on a file the pull request leaves alone is a draft still.
         let kept = ctx.with_cache(|c| c.load_drafts(&item.id)).unwrap().unwrap();
         assert_eq!(
             kept.iter().map(|d| d.message_id.as_str()).collect::<Vec<_>>(),
-            ["outside"]
+            ["untouched"]
         );
+        let threads = threads_of(&ctx, &item);
+        let outside = threads
+            .iter()
+            .find(|t| t.messages.iter().any(|m| m.id == "outside"))
+            .expect("kept its id");
+        assert_eq!(outside.github_id, Some(701));
+        assert_eq!(
+            outside.anchor.as_ref().map(|a| (a.path.as_str(), a.start_line, a.line)),
+            Some(("code.rs", 20, 20)),
+            "back on its line"
+        );
+        assert!(!outside.outdated);
+        assert_eq!(outside.messages[0].body, "outside");
         let threads = threads_of(&ctx, &item);
         let inside = threads
             .iter()
