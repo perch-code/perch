@@ -395,13 +395,25 @@ fn card_view(
             // in thread say, the card comes into view as it flashes. The
             // first run only subscribes, as the flash's does.
             let id = view.view_id();
+            let pending_id = card_id.clone();
             floem::reactive::Effect::new(move |first: Option<()>| {
                 let focused = state.focus_card.with(|f| f.as_ref() == Some(&card_id));
                 if first.is_some() && focused {
                     id.scroll_to(None);
                 }
             });
-            view
+            // Built for the asking, as a finding's thread the filter hid
+            // is, it takes the focus once it has somewhere to scroll to.
+            view.on_event_cont(el::UpdatePhaseLayout, move |_, _| {
+                if state
+                    .pending_focus_card
+                    .with_untracked(|p| p.as_ref() == Some(&pending_id))
+                {
+                    state.pending_focus_card.set(None);
+                    state.focus_card.set(Some(pending_id.clone()));
+                }
+            })
+            .into_any()
         }
     };
     view.debug_name(format!("card:{debug}"))

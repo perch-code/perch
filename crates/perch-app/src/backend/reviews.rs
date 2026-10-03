@@ -231,7 +231,19 @@ fn finding_summary(ctx: &Ctx, finding: Finding) -> Result<ReviewFindingSummary, 
         backend: attempt.map(|attempt| attempt.backend.clone()),
         model: attempt.map(|attempt| attempt.model.clone()),
         original_review_number,
+        title: reported_title(&observations),
     })
+}
+
+/// The title a finding was first reported under, else the latest one
+/// seen for it.
+fn reported_title(observations: &[Observation]) -> String {
+    observations
+        .iter()
+        .find(|observation| observation.kind == ObservationKind::Reported)
+        .or(observations.last())
+        .map(|observation| observation.title.clone())
+        .unwrap_or_default()
 }
 
 /// Reconstruct the finding projection at one review's terminal cutoff. The
@@ -367,6 +379,7 @@ fn historical_finding_summaries(
             backend: latest_attempt.map(|attempt| attempt.backend.clone()),
             model: latest_attempt.map(|attempt| attempt.model.clone()),
             original_review_number,
+            title: reported_title(&observations),
         });
     }
     Ok(summaries)

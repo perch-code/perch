@@ -6013,6 +6013,7 @@ mod tests {
                 backend: None,
                 model: None,
                 original_review_number: None,
+                title: "The lock is held across an await.".into(),
             },
         );
         harness.rebuild();

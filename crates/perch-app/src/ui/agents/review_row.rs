@@ -17,7 +17,9 @@ use crate::backend::Backend;
 use crate::icons::SidebarIcon;
 use crate::review::cards::{finding_severity_label, severity_inks};
 use crate::review::doc::CardId;
-use crate::review::model::{ReviewFindingSummary, ReviewGroupSummary, ReviewState};
+use crate::review::model::{
+    ReviewFindingFilter, ReviewFindingSummary, ReviewGroupSummary, ReviewState,
+};
 use crate::review::review_launch;
 use crate::state::AppState;
 use crate::theme;
@@ -357,6 +359,7 @@ fn early_snapshot(
 fn findings(app: AppState, review: ReviewState, summary: ReviewGroupSummary) -> impl IntoView {
     let group_id = summary.group.id.clone();
     let item_id = summary.group.item_id.clone();
+    let show_item_id = item_id.clone();
     let done = !summary.group.status.is_active();
     let rows = Memo::new(move |_| {
         let mut found: Vec<ReviewFindingSummary> = app
@@ -371,10 +374,11 @@ fn findings(app: AppState, review: ReviewState, summary: ReviewGroupSummary) -> 
                 .into_iter()
                 .map(|f| {
                     let thread = threads.iter().find(|t| t.id == f.finding.thread_id);
-                    let line = thread
-                        .and_then(|t| t.messages.first())
-                        .map(|m| finding_line(&m.body))
-                        .unwrap_or_default();
+                    // A finding dismissed with its draft keeps a thread with
+                    // nothing in it, which is not drawn: its line is the
+                    // title it was reported under, and there is no Show.
+                    let first = thread.and_then(|t| t.messages.first());
+                    let line = finding_line(first.map_or(f.title.as_str(), |m| m.body.as_str()));
                     let place = thread.and_then(|t| t.anchor.as_ref()).map(|a| {
                         let file = a.path.rsplit('/').next().unwrap_or(&a.path);
                         format!("{file}:{}", a.line)
@@ -385,6 +389,7 @@ fn findings(app: AppState, review: ReviewState, summary: ReviewGroupSummary) -> 
                         line,
                         place,
                         settled: settled_word(&f.finding),
+                        shown: first.is_some(),
                     }
                 })
                 .collect::<Vec<_>>()
@@ -405,10 +410,11 @@ fn findings(app: AppState, review: ReviewState, summary: ReviewGroupSummary) -> 
                 .into_any();
             }
             let last = rows.len() - 1;
+            let item_id = show_item_id.clone();
             dyn_stack(
                 move || rows.clone().into_iter().enumerate(),
                 |(i, row)| format!("{i}:{}", row.thread_id),
-                move |(i, row)| finding_row(review, row, i == 0, i == last),
+                move |(i, row)| finding_row(app, review, &item_id, row, i == 0, i == last),
             )
             .debug_name("review-group-findings")
             .style(|s| {
@@ -433,9 +439,18 @@ struct FindingRow {
     place: Option<String>,
     /// Fixed or Dismissed, once it is either.
     settled: Option<&'static str>,
+    /// Whether its thread has anything in it to show.
+    shown: bool,
 }
 
-fn finding_row(review: ReviewState, row: FindingRow, first: bool, _last: bool) -> impl IntoView {
+fn finding_row(
+    app: AppState,
+    review: ReviewState,
+    item_id: &str,
+    row: FindingRow,
+    first: bool,
+    _last: bool,
+) -> impl IntoView {
     let (ink, fill) = severity_inks(row.severity);
     let severity = finding_severity_label(row.severity);
     let FindingRow {
@@ -443,8 +458,10 @@ fn finding_row(review: ReviewState, row: FindingRow, first: bool, _last: bool) -
         line,
         place,
         settled,
+        shown,
         ..
     } = row;
+    let item_id = item_id.to_string();
     let faded = settled.is_some();
     Stack::horizontal((
         badge(move || severity.to_string(), ink, fill, None),
@@ -478,12 +495,16 @@ fn finding_row(review: ReviewState, row: FindingRow, first: bool, _last: bool) -
                 .into_any(),
             None => Empty::new().into_any(),
         },
-        text_action(
-            || "Show".to_string(),
-            true,
-            move || review.focus_card.set(Some(CardId::Thread(thread_id.clone()))),
-        )
-        .debug_name("review-finding show"),
+        match shown {
+            true => text_action(
+                || "Show".to_string(),
+                true,
+                move || show_thread(app, review, &item_id, &thread_id),
+            )
+            .debug_name("review-finding show")
+            .into_any(),
+            false => Empty::new().into_any(),
+        },
     ))
     .debug_name("review-finding")
     .style(move |s| {
@@ -495,6 +516,25 @@ fn finding_row(review: ReviewState, row: FindingRow, first: bool, _last: bool) -
             .padding_right(4.0)
             .apply_if(!first, |s| s.border_top(1.0).border_color(theme::border_muted()))
     })
+}
+
+/// Bring a finding's thread into view on Conversation. One the Open
+/// filter hides, as it does a dismissed or fixed finding's, turns the
+/// filter to All, and is focused once its card is there.
+fn show_thread(app: AppState, review: ReviewState, item_id: &str, thread_id: &str) {
+    let card = CardId::Thread(thread_id.to_string());
+    if review
+        .hidden_review_threads
+        .with_untracked(|hidden| hidden.contains(thread_id))
+    {
+        review.apply_review_finding_filter(
+            ReviewFindingFilter::All,
+            &app.review_findings_for(item_id),
+        );
+        review.pending_focus_card.set(Some(card));
+    } else {
+        review.focus_card.set(Some(card));
+    }
 }
 
 /// Who reviewed: a line for each reviewer's run, or, before its runs have

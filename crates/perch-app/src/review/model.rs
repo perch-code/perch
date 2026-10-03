@@ -1103,6 +1103,10 @@ pub struct ReviewFindingSummary {
     pub backend: Option<String>,
     pub model: Option<String>,
     pub original_review_number: Option<u64>,
+    /// What the reviewer called it when it first reported it. Kept apart
+    /// from the thread, which a dismissal can empty of the draft that
+    /// said it.
+    pub title: String,
 }
 
 /// The last stable file context while one or more historical selections are
@@ -1638,6 +1642,11 @@ pub struct ReviewState {
     /// marker is still a second flash, while a card built after the click
     /// ignores what it finds here.
     pub focus_card: RwSignal<Option<CardId>>,
+    /// A card to focus once Conversation has built and laid it out: a
+    /// finding's thread that the findings filter hid until Show asked
+    /// for it. The card takes it into `focus_card` then, since one built
+    /// after `focus_card` was set ignores it.
+    pub pending_focus_card: RwSignal<Option<CardId>>,
     /// A thread whose Delete is waiting for a yes, under its byline.
     pub confirm_thread: RwSignal<Option<String>>,
     /// Runs whose step list the reader opened.
@@ -2013,6 +2022,7 @@ impl ReviewState {
             sent_composer: RwSignal::new(None),
             selection: RwSignal::new(None),
             focus_card: RwSignal::new(None),
+            pending_focus_card: RwSignal::new(None),
             confirm_thread: RwSignal::new(None),
             expanded_runs: RwSignal::new(std::collections::HashSet::new()),
             card_rows: RwSignal::new(HashMap::new()),
@@ -2217,6 +2227,7 @@ impl ReviewState {
         self.sent_composer.set(None);
         self.selection.set(None);
         self.focus_card.set(None);
+        self.pending_focus_card.set(None);
         self.confirm_thread.set(None);
         // The rows are the next item's cards' to fill; whether a card is
         // open is the reader's and stays, as `collapsed_cards` says.

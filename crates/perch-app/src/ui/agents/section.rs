@@ -1023,7 +1023,10 @@ mod tests {
 
     /// A review opens to what it found, worst first, each finding its
     /// first line without the severity its comment opens with, where it
-    /// is, and Show, which goes to its thread.
+    /// is, and Show, which goes to its thread. A dismissed finding's
+    /// thread, which the Open filter hides, is shown under All; one
+    /// dismissed with its draft has an empty thread, so it says the title
+    /// it was reported under and has no Show.
     #[test]
     fn a_review_lists_its_findings_and_show_goes_to_the_thread() {
         let (mut harness, app, review) = pull_request_harness();
@@ -1069,9 +1072,13 @@ mod tests {
                 reactions: Default::default(),
             }],
         };
+        let mut emptied = thread("t-emptied", "", 9);
+        emptied.messages.clear();
         review.comment_threads.set(Arc::new(vec![
             thread("t-low", "**Low · A comment is stale.**", 3),
             thread("t-high", "**High · The lock is held across an await.**", 7),
+            thread("t-dismissed", "**Note · A name could be shorter.**", 5),
+            emptied,
         ]));
         let finding = |id: &str, thread: &str, severity| crate::review::model::ReviewFindingSummary {
             finding: perch_github::Finding {
@@ -1098,20 +1105,39 @@ mod tests {
             backend: None,
             model: None,
             original_review_number: Some(3),
+            title: format!("{id} as reported"),
+        };
+        let dismissed = |id: &str, thread: &str| {
+            let mut summary = finding(id, thread, perch_github::FindingSeverity::Note);
+            summary.finding.disposition = perch_github::FindingDisposition::Dismissed;
+            summary
         };
         app.update_review_finding("pr".into(), finding("f-low", "t-low", perch_github::FindingSeverity::Low));
         app.update_review_finding("pr".into(), finding("f-high", "t-high", perch_github::FindingSeverity::High));
+        app.update_review_finding("pr".into(), dismissed("f-dismissed", "t-dismissed"));
+        app.update_review_finding("pr".into(), dismissed("f-emptied", "t-emptied"));
+        review.apply_review_finding_filter(
+            crate::review::model::ReviewFindingFilter::Open,
+            &app.review_findings_for("pr"),
+        );
         review.agents_unfolded.set(true);
         settle(&mut harness);
 
         let rows = named(harness.root_id(), "review-group-findings")
             .expect("the findings")
             .children();
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 4);
         let first = rows[0];
         assert!(named(first, "\"The lock is held across an await.\"").is_some(), "worst first");
         assert!(named(first, "\"a.rs:7\"").is_some());
         assert!(named(rows[1], "\"A comment is stale.\"").is_some());
+        let (shown, emptied) = match named(rows[2], "\"A name could be shorter.\"") {
+            Some(_) => (rows[2], rows[3]),
+            None => (rows[3], rows[2]),
+        };
+        assert!(named(shown, "\"A name could be shorter.\"").is_some());
+        assert!(named(emptied, "\"f-emptied as reported\"").is_some(), "blank line");
+        assert!(named(emptied, "review-finding show").is_none(), "nothing to show");
 
         let show = named(first, "review-finding show").unwrap();
         show.scroll_to(None);
@@ -1122,6 +1148,22 @@ mod tests {
         assert_eq!(
             review.focus_card.get(),
             Some(crate::review::doc::CardId::Thread("t-high".into()))
+        );
+
+        let show = named(shown, "review-finding show").unwrap();
+        show.scroll_to(None);
+        settle(&mut harness);
+        let show = show.get_visual_rect_no_clip();
+        harness.click(show.center().x, show.center().y);
+        settle(&mut harness);
+        assert_eq!(
+            review.review_finding_filter.get(),
+            crate::review::model::ReviewFindingFilter::All
+        );
+        assert_eq!(review.pending_focus_card.get(), None, "the card never took it");
+        assert_eq!(
+            review.focus_card.get(),
+            Some(crate::review::doc::CardId::Thread("t-dismissed".into()))
         );
     }
 
