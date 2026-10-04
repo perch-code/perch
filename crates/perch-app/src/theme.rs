@@ -5,12 +5,9 @@
 //! surfaces and text, and GitHub's dark Primer for what GitHub colours: a
 //! diff, the syntax, a state, a link.
 
-use std::path::Path;
-use std::sync::Arc;
-
-use floem::peniko::{Blob, Color};
+use floem::peniko::Color;
 use floem::reactive::{RwSignal, Scope, SignalGet, SignalUpdate, SignalWith};
-use floem::text::{FontStyle, FontWeight, FONT_CONTEXT};
+use floem::text::{FontWeight, FONT_CONTEXT};
 use fontique::{FallbackKey, FamilyId, FontInfoOverride, Script};
 
 /// Light or dark, as macOS has it.
@@ -639,7 +636,28 @@ pub const PROSE_CODE_LINE_HEIGHT: f32 = 20.0 / 12.0;
 /// variable font, so it draws the body weight the sans does. The
 /// `monospace` generic resolves to Courier, and Menlo, which this used
 /// to name, is a different design.
+#[cfg(target_os = "macos")]
 pub const CODE_FONT_STACK: &str = ".SF NS Mono";
+
+/// Off macOS, the name `install_code_font` registers the chosen family's
+/// files under, so code names one family wherever it is drawn whichever
+/// family that is.
+#[cfg(not(target_os = "macos"))]
+pub const CODE_FONT_STACK: &str = "Perch Code";
+
+/// The families code is set in off macOS, the first installed one taken
+/// unless `[ui] code_font` names another. JetBrains Mono is the nearest to
+/// SF Mono's proportions; DejaVu Sans Mono has the widest coverage of the
+/// ones a Linux desktop is likely to have.
+#[cfg(not(target_os = "macos"))]
+const CODE_FONT_FAMILIES: [&str; 6] = [
+    "JetBrains Mono",
+    "DejaVu Sans Mono",
+    "Noto Sans Mono",
+    "Liberation Mono",
+    "Adwaita Mono",
+    "Droid Sans Mono",
+];
 
 /// Puts SF Mono's two files under the name `CODE_FONT_STACK` asks for,
 /// each flagged with its slope. Called once, before any text is laid out.
@@ -654,7 +672,16 @@ pub const CODE_FONT_STACK: &str = ".SF NS Mono";
 /// of the same name, so this is the family the code font resolves to. A
 /// file that is not there is skipped, and with neither the name falls
 /// through to the scanned family as before.
-pub fn install_code_font() {
+///
+/// `_wanted` is `[ui] code_font`, which only the other platforms read.
+#[cfg(target_os = "macos")]
+pub fn install_code_font(_wanted: Option<&str>) {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use floem::peniko::Blob;
+    use floem::text::FontStyle;
+
     let faces = [
         ("SFNSMono.ttf", FontStyle::Normal),
         ("SFNSMonoItalic.ttf", FontStyle::Italic),
@@ -680,11 +707,73 @@ pub fn install_code_font() {
     }
 }
 
+/// Puts an installed monospace family's files under `CODE_FONT_STACK`:
+/// `wanted` if it is installed, else the first of `CODE_FONT_FAMILIES`
+/// that is, else whatever the system's `monospace` is. Called once,
+/// before any text is laid out.
+#[cfg(not(target_os = "macos"))]
+pub fn install_code_font(wanted: Option<&str>) {
+    use fontique::GenericFamily;
+
+    let mut guard = FONT_CONTEXT.lock();
+    let fonts = &mut *guard;
+    let collection = &mut fonts.collection;
+    if let Some(name) = wanted.filter(|name| collection.family_id(name).is_none()) {
+        tracing::warn!(family = name, "code font not installed");
+    }
+    let named = wanted
+        .into_iter()
+        .chain(CODE_FONT_FAMILIES)
+        .find_map(|name| collection.family_by_name(name));
+    let family = named.or_else(|| {
+        let id = collection.generic_families(GenericFamily::Monospace).next()?;
+        collection.family(id)
+    });
+    let Some(family) = family else {
+        tracing::warn!("no monospace font installed");
+        return;
+    };
+    tracing::info!(family = family.name(), "code font");
+    // A collection file holds several faces and registers them all at
+    // once, so each file goes in once however many of its faces the
+    // family lists.
+    let mut registered = Vec::new();
+    for font in family.fonts() {
+        let source = font.source().id();
+        if registered.contains(&source) {
+            continue;
+        }
+        registered.push(source);
+        let Some(data) = font.load(Some(&mut fonts.source_cache)) else {
+            continue;
+        };
+        fonts.collection.register_fonts(
+            data,
+            Some(FontInfoOverride {
+                family_name: Some(CODE_FONT_STACK),
+                ..Default::default()
+            }),
+        );
+    }
+}
+
 /// Where a symbol neither SF Pro nor SF Mono has is drawn from, in the
 /// order macOS's own cascade list names them: Apple Symbols for set and
 /// logic signs (∪, ∀, ⊢), Menlo for letterlike ones (ℕ), and STIX for
 /// the rest of mathematics.
-const SYMBOL_FONTS: [&str; 3] = ["Apple Symbols", "Menlo", "STIX Two Math"];
+#[cfg(target_os = "macos")]
+const SYMBOL_FONTS: &[&str] = &["Apple Symbols", "Menlo", "STIX Two Math"];
+
+/// Off macOS, the common Linux families that cover the same ground: Noto's
+/// symbol and math faces, then DejaVu Sans for letterlike signs.
+#[cfg(not(target_os = "macos"))]
+const SYMBOL_FONTS: &[&str] = &[
+    "Noto Sans Symbols",
+    "Noto Sans Symbols 2",
+    "Noto Sans Math",
+    "DejaVu Sans",
+    "STIX Two Math",
+];
 
 /// The scripts whose text gets `SYMBOL_FONTS`: Latin, which a line of
 /// symbols alone falls back as too, and the two whose letters stand in
@@ -1184,7 +1273,7 @@ mod tests {
     /// file, which fontique takes for the upright, has no glyph for it.
     #[test]
     fn code_font_draws_the_arrow() {
-        install_code_font();
+        install_code_font(None);
         let ids = code_glyphs("main \u{2190} topic");
         assert_eq!(ids.len(), 12, "one glyph a character: {ids:?}");
         assert!(ids.iter().all(|&id| id != 0), "a .notdef among {ids:?}");
@@ -1194,7 +1283,7 @@ mod tests {
     /// Helvetica, has none either.
     #[test]
     fn symbols_neither_sf_face_has_are_drawn() {
-        install_code_font();
+        install_code_font(None);
         install_symbol_fallbacks();
         for stack in [FONT_STACK, CODE_FONT_STACK] {
             let ids = glyphs(stack, "A \u{222a} B, \u{2200}x \u{2115}");
