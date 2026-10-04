@@ -2074,6 +2074,10 @@ mod tests {
                 .env("GIT_AUTHOR_EMAIL", "t@t")
                 .env("GIT_COMMITTER_NAME", "t")
                 .env("GIT_COMMITTER_EMAIL", "t@t")
+                // Not the developer's own config: a `commit.gpgsign` there asks for
+                // a passphrase, and fails the commit when none is given.
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
                 .output()
                 .unwrap();
             assert!(
@@ -2221,6 +2225,10 @@ mod tests {
                 .env("GIT_AUTHOR_EMAIL", "t@t")
                 .env("GIT_COMMITTER_NAME", "t")
                 .env("GIT_COMMITTER_EMAIL", "t@t")
+                // Not the developer's own config: a `commit.gpgsign` there asks for
+                // a passphrase, and fails the commit when none is given.
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
                 .output()
                 .unwrap();
             String::from_utf8_lossy(&out.stdout).trim().to_string()
