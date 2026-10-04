@@ -782,8 +782,10 @@ next such run as it finishes. Deleting the run's thread or item drops the refs.
 
 **Review** in the bar opens one popover for the whole review. On top are the
 agents: on a pull request, one line naming the reviewers the next run starts,
-with **Run**, and **Settings** to choose them, their models and efforts, the
-base and the instructions. Under them is your own review for GitHub: the
+with **Run**, and **Settings** to choose them, the range and the
+instructions. Each reviewer is one line: a box to take it or leave it, its
+name, then its model and effort side by side; one that cannot run says why
+under its name. Under them is your own review for GitHub: the
 drafts, a summary, and a verdict to send them with. Unfolding the settings folds
 your review to a line, and **Open** brings it back. A worktree without a pull
 request has only the agents, their settings showing. The button is dark while
@@ -793,13 +795,14 @@ running review has got.
 Running the agents starts Claude Code and/or Codex's native review workflow
 against the branch diff from the selected base's merge base to the head. It
 works for Perch-managed and registered external worktrees, with or without a
-pull request. **Head** in the settings says where the range ends: **Last
+pull request. **Changes** in the settings reads head → base, as a review's
+history does. The head says where the range ends: **Last
 commit** is `HEAD`, and **Working tree** adds the uncommitted work, staged,
 unstaged and untracked files alike, as a commit Perch makes over `HEAD`
 without touching the worktree, its index or its refs. Head starts on Working
 tree when the worktree is dirty and the branch has no commits yet, or the
-Files view shows an uncommitted scope; otherwise on Last commit, and Perch
-labels a dirty worktree `Committed changes only; local edits are excluded`.
+Files view shows an uncommitted scope; otherwise on Last commit, and under a
+dirty worktree's range Perch notes `Uncommitted work is left out`.
 Staged-only, individual-commit, and incremental-only review scopes are not
 supported. If the diff is empty, Perch records that result without launching
 an agent.

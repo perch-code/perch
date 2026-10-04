@@ -17,10 +17,10 @@ use crate::review::model::{
     ReviewGroupSummary, ReviewLaunchChoice, ReviewLaunchDraft, ReviewLaunchRequest,
     ReviewPreferenceChoice, ReviewState,
 };
-use crate::state::AppState;
+use crate::state::{AppState, Checked};
 use crate::theme;
 use crate::ui::menu::{Menu, MenuExt};
-use crate::ui::widgets::{clickable, editor_box, prose_editor, sidebar_glyph};
+use crate::ui::widgets::{checkbox, clickable, editor_box, prose_editor, sidebar_glyph};
 
 /// Keep the open item's reviews loaded, and the launcher's choices in step
 /// with what the reviewers support while the Review popover is open.
@@ -171,7 +171,6 @@ pub(crate) fn agents_section(
     .style(|s| s.items_center().width_full().gap(8.0));
 
     let settings = Stack::vertical((
-        scope_note(state),
         dyn_container(
             move || (app.review_capabilities.get(), app.agent.get()),
             move |_| {
@@ -189,11 +188,10 @@ pub(crate) fn agents_section(
                         perch_agent::Backend::Codex,
                     ),
                 ))
-                .style(|s| s.flex_col().width_full().gap(10.0))
+                .style(|s| s.flex_col().width_full().gap(4.0))
             },
         ),
-        base_row(app, state),
-        head_row(state),
+        range_row(app, state),
         instructions_box(state, run),
         launch_error(app, state),
         Stack::horizontal((
@@ -341,90 +339,154 @@ fn agents_status(app: AppState, state: ReviewState, expanded: Memo<bool>) -> imp
     .style(|s| s.width_full())
 }
 
+/// A word on the uncommitted work when the head leaves it out of a
+/// worktree that has some, or takes it with its untracked files.
 fn scope_note(state: ReviewState) -> impl IntoView {
-    Label::derived(move || {
-        if includes_uncommitted(state) {
-            "Commits and uncommitted work, untracked files included".to_string()
-        } else if state.dirty.get().any() {
-            "Committed changes only; local edits are excluded".to_string()
-        } else {
-            "Committed changes only".to_string()
-        }
-    })
-    .style(|s| {
-        s.font_size(theme::TEXT_META)
-            .color(theme::fg_subtle())
-            .width_full()
-            .text_wrap()
-    })
+    dyn_container(
+        move || {
+            if includes_uncommitted(state) {
+                Some("Uncommitted work included, untracked files too")
+            } else if state.dirty.get().any() {
+                Some("Uncommitted work is left out")
+            } else {
+                None
+            }
+        },
+        |note| match note {
+            Some(note) => Label::derived(move || note.to_string())
+                .style(|s| {
+                    s.font_size(theme::TEXT_META)
+                        .color(theme::fg_subtle())
+                        .width_full()
+                        .text_wrap()
+                })
+                .debug_name("review-scope-note")
+                .into_any(),
+            None => Empty::new().into_any(),
+        },
+    )
+    .style(|s| s.width_full())
 }
 
+/// A box to take the reviewer or leave it, its name, then the model and
+/// effort it runs with side by side, as New work picks them. Under them,
+/// why it cannot run, when it cannot.
 fn reviewer_row(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
     reviewer: perch_agent::Backend,
 ) -> impl IntoView {
-    let effort_backend = backend.clone();
+    // Its CLI does native review and has models to run; the rows are
+    // built again when either changes.
+    let usable = capability(app, reviewer).is_some_and(|capability| capability.available)
+        && !models_for(&app.agent.get_untracked(), reviewer).is_empty();
+    let chosen = move || {
+        choice_for(state, reviewer).is_some_and(|choice| effective_choice(app, &choice).is_some())
+    };
+    let toggle_backend = backend.clone();
+    let toggle = Rc::new(move || {
+        if !usable {
+            return;
+        }
+        let on = chosen();
+        let models = models_for(&app.agent.get_untracked(), reviewer);
+        let updated = update_choice(state, reviewer, |choice| {
+            if on {
+                choice.enabled = false;
+                return;
+            }
+            // Taking it back mends what it would run with, so the box
+            // never ticks without a reviewer behind it.
+            if !choice.model.as_ref().is_some_and(|model| models.contains(model)) {
+                choice.model = models.first().cloned();
+            }
+            choice.effort = choice
+                .model
+                .as_deref()
+                .and_then(|model| nearest_effort(app, reviewer, model, choice.effort));
+            choice.enabled = true;
+        });
+        if let Some(choice) = updated {
+            toggle_backend.save_review_preference(choice);
+        }
+    });
+    let name_toggle = toggle.clone();
+
+    let pickers = if usable {
+        Stack::horizontal((
+            model_selector(app, state, backend.clone(), reviewer)
+                .style(|s| s.min_width(PICKER_MODEL_WIDTH)),
+            effort_selector(app, state, backend, reviewer)
+                .style(|s| s.min_width(PICKER_EFFORT_WIDTH)),
+        ))
+        .style(|s| s.items_center().gap(6.0).flex_shrink(0.0_f32))
+        .into_any()
+    } else {
+        Empty::new().into_any()
+    };
+
     Stack::vertical((
         Stack::horizontal((
-            Label::derived(move || backend_label(reviewer).to_string()).style(|s| {
-                s.font_size(theme::TEXT_BODY)
-                    .font_weight(theme::weight_emphasis())
-                    .color(theme::fg())
-                    .min_width(70.0)
-            }),
-            Empty::new().style(|s| s.flex_grow(1.0_f32)),
-            dyn_container(
-                move || effective_unavailable_reason(app, state, reviewer),
-                move |reason| {
-                    if reason.as_ref().is_some_and(|reason| {
-                        capability(app, reviewer).is_none_or(|capability| !capability.available)
-                            || reason.starts_with("No models")
-                    }) {
-                        return disabled_selector("None").into_any();
+            // The drawn box sits on the left edge, under the other rows'
+            // first letters; its wider target hangs into the margin.
+            Container::new(checkbox(
+                move || {
+                    if chosen() {
+                        Checked::Full
+                    } else {
+                        Checked::Empty
                     }
-                    effort_selector(app, state, effort_backend.clone(), reviewer).into_any()
                 },
-            ),
+                move || toggle(),
+            ))
+            .style(move |s| {
+                s.margin_left(-5.0)
+                    .flex_shrink(0.0_f32)
+                    .apply_if(!usable, |s| s.opacity(0.45_f32).pointer_events_none())
+            })
+            .debug_name(format!("review-take:{}", reviewer.name())),
+            Label::derived(move || backend_label(reviewer).to_string())
+                .on_event_stop(el::Click, move |_, _| name_toggle())
+                .style(move |s| {
+                    s.font_size(theme::TEXT_BODY)
+                        .color(if chosen() { theme::fg() } else { theme::fg_muted() })
+                        .min_width(0.0)
+                        .apply_if(usable, clickable)
+                        .selectable(false)
+                }),
+            Empty::new().style(|s| s.flex_grow(1.0_f32)),
+            pickers,
         ))
-        .style(|s| s.items_center().width_full().gap(8.0)),
-        Stack::horizontal((
-            Label::derived(|| "Model".to_string()).style(|s| {
-                s.font_size(theme::TEXT_SECTION)
-                    .color(theme::fg_subtle())
-                    .min_width(70.0)
-            }),
-            model_selector(app, state, backend, reviewer),
-        ))
-        .style(|s| s.items_center().width_full().gap(8.0)),
+        .style(|s| s.items_center().width_full().gap(4.0).min_height(30.0)),
         dyn_container(
             move || effective_unavailable_reason(app, state, reviewer),
             |reason| match reason {
                 Some(reason) => Label::derived(move || reason.clone())
                     .style(|s| {
-                        s.font_size(theme::TEXT_SECTION)
+                        s.font_size(theme::TEXT_META)
                             .color(theme::fg_subtle())
                             .text_wrap()
                             .width_full()
+                            .padding_left(REVIEWER_NAME_INSET)
                     })
+                    .debug_name("reviewer-unavailable")
                     .into_any(),
                 None => Empty::new().into_any(),
             },
-        ),
+        )
+        .style(|s| s.width_full()),
     ))
-    .style(|s| {
-        s.flex_col()
-            .width_full()
-            .gap(6.0)
-            .padding(10.0)
-            .background(theme::canvas_subtle())
-            .border(1.0)
-            .border_color(theme::border_muted())
-            .border_radius(theme::RADIUS)
-    })
+    .style(|s| s.flex_col().width_full())
     .debug_name(format!("reviewer-row:{}", reviewer.name()))
 }
+
+/// The pickers keep one width down the rows, so the efforts line up
+/// under each other whatever the models are called.
+const PICKER_MODEL_WIDTH: f64 = 92.0;
+const PICKER_EFFORT_WIDTH: f64 = 84.0;
+/// Where a reviewer's name starts, past its box.
+const REVIEWER_NAME_INSET: f64 = 25.0;
 
 fn effort_selector(
     app: AppState,
@@ -435,38 +497,23 @@ fn effort_selector(
     menu_button(
         move || {
             choice_for(state, reviewer)
-                .filter(|choice| choice.enabled && effective_choice(app, choice).is_some())
                 .and_then(|choice| choice.effort)
                 .map(|effort| effort.label().to_string())
-                .unwrap_or_else(|| "None".into())
+                .unwrap_or_else(|| "Effort".into())
         },
         move || {
             let selected = choice_for(state, reviewer);
-            let none_selected = selected.clone();
-            let none_backend = backend.clone();
-            let mut menu = Menu::new().item("None", move |item| {
-                item.checked(none_selected.as_ref().is_none_or(|choice| !choice.enabled))
-                    .action({
-                        let backend = none_backend.clone();
-                        move || {
-                            if let Some(choice) = update_choice(state, reviewer, |choice| {
-                                choice.enabled = false;
-                            }) {
-                                backend.save_review_preference(choice);
-                            }
-                        }
-                    })
-            });
-            let model = selected.and_then(|choice| choice.model);
+            let model = selected.as_ref().and_then(|choice| choice.model.clone());
+            let mut menu = Menu::new();
             for effort in supported_efforts(app, reviewer, model.as_deref()) {
                 let backend = backend.clone();
-                let checked = choice_for(state, reviewer)
-                    .is_some_and(|choice| choice.enabled && choice.effort == Some(effort));
+                let checked = selected
+                    .as_ref()
+                    .is_some_and(|choice| choice.effort == Some(effort));
                 menu = menu.item(effort.label(), move |item| {
                     item.checked(checked).action(move || {
                         if let Some(choice) = update_choice(state, reviewer, |choice| {
                             choice.effort = Some(effort);
-                            choice.enabled = true;
                         }) {
                             backend.save_review_preference(choice);
                         }
@@ -486,10 +533,6 @@ fn model_selector(
     reviewer: perch_agent::Backend,
 ) -> impl IntoView {
     let models = models_for(&app.agent.get_untracked(), reviewer);
-    let available = capability(app, reviewer).is_some_and(|capability| capability.available);
-    if !available || models.is_empty() {
-        return disabled_selector("Unavailable").into_any();
-    }
     menu_button(
         move || {
             choice_for(state, reviewer)
@@ -525,50 +568,68 @@ fn model_selector(
     .into_any()
 }
 
-fn base_row(app: AppState, state: ReviewState) -> impl IntoView {
-    Stack::horizontal((
-        Label::derived(|| "Base".to_string()).style(|s| {
-            s.font_size(theme::TEXT_BODY)
-                .font_weight(theme::weight_emphasis())
-                .color(theme::fg())
-                .min_width(70.0)
-        }),
-        Empty::new().style(|s| s.flex_grow(1.0_f32)),
-        menu_button(
-            move || {
-                state
-                    .review_launcher_draft
-                    .with(|draft| draft.as_ref().and_then(|draft| draft.base_ref.clone()))
-                    .unwrap_or_else(|| "Choose base".into())
-            },
-            move || {
-                let Some(item_id) = current_item_id(state) else {
-                    return Menu::new();
-                };
-                let selected = state.review_launcher_draft.with_untracked(|draft| {
-                    draft.as_ref().and_then(|draft| draft.base_ref.clone())
-                });
-                let mut menu = Menu::new();
-                for base_ref in app.review_base_refs_for(&item_id).iter() {
-                    let pick = base_ref.clone();
-                    let checked = selected.as_deref() == Some(base_ref.as_str());
-                    menu = menu.item(base_ref.clone(), move |item| {
-                        let pick = pick.clone();
-                        item.checked(checked).action(move || {
-                            state.review_launcher_draft.update(|draft| {
-                                if let Some(draft) = draft {
-                                    draft.base_ref = Some(pick.clone());
-                                }
-                            });
-                        })
-                    });
-                }
-                menu
-            },
-            "review-base".into(),
-        ),
+/// What the reviewers read, written as the review history writes it:
+/// the head, the last commit or the working tree over it, onto the base.
+/// Under it, a word on the uncommitted work when it matters.
+fn range_row(app: AppState, state: ReviewState) -> impl IntoView {
+    Stack::vertical((
+        Stack::horizontal((
+            Label::derived(|| "Changes".to_string()).style(|s| {
+                s.font_size(theme::TEXT_BODY)
+                    .color(theme::fg())
+                    .flex_grow(1.0_f32)
+                    .min_width(0.0)
+            }),
+            head_picker(state),
+            Label::derived(|| "\u{2192}".to_string()).style(|s| {
+                s.font_size(theme::TEXT_META)
+                    .color(theme::fg_subtle())
+                    .selectable(false)
+            }),
+            // The base under the efforts, the column the eye runs down.
+            base_picker(app, state).style(|s| s.min_width(PICKER_EFFORT_WIDTH)),
+        ))
+        .style(|s| s.items_center().width_full().gap(6.0).min_height(30.0)),
+        scope_note(state),
     ))
-    .style(|s| s.items_center().width_full().gap(8.0))
+    .style(|s| s.flex_col().width_full().gap(2.0))
+    .debug_name("review-range")
+}
+
+fn base_picker(app: AppState, state: ReviewState) -> impl IntoView {
+    menu_button(
+        move || {
+            state
+                .review_launcher_draft
+                .with(|draft| draft.as_ref().and_then(|draft| draft.base_ref.clone()))
+                .unwrap_or_else(|| "Choose base".into())
+        },
+        move || {
+            let Some(item_id) = current_item_id(state) else {
+                return Menu::new();
+            };
+            let selected = state.review_launcher_draft.with_untracked(|draft| {
+                draft.as_ref().and_then(|draft| draft.base_ref.clone())
+            });
+            let mut menu = Menu::new();
+            for base_ref in app.review_base_refs_for(&item_id).iter() {
+                let pick = base_ref.clone();
+                let checked = selected.as_deref() == Some(base_ref.as_str());
+                menu = menu.item(base_ref.clone(), move |item| {
+                    let pick = pick.clone();
+                    item.checked(checked).action(move || {
+                        state.review_launcher_draft.update(|draft| {
+                            if let Some(draft) = draft {
+                                draft.base_ref = Some(pick.clone());
+                            }
+                        });
+                    })
+                });
+            }
+            menu
+        },
+        "review-base".into(),
+    )
 }
 
 /// Why the working tree cannot be the head, or `None` when it can: it
@@ -607,47 +668,37 @@ fn includes_uncommitted(state: ReviewState) -> bool {
 
 /// Where the reviewed range ends: the last commit, or the working tree
 /// over it.
-fn head_row(state: ReviewState) -> impl IntoView {
-    Stack::horizontal((
-        Label::derived(|| "Head".to_string()).style(|s| {
-            s.font_size(theme::TEXT_BODY)
-                .font_weight(theme::weight_emphasis())
-                .color(theme::fg())
-                .min_width(70.0)
-        }),
-        Empty::new().style(|s| s.flex_grow(1.0_f32)),
-        menu_button(
-            move || {
-                if includes_uncommitted(state) {
-                    "Working tree".into()
-                } else {
-                    "Last commit".into()
-                }
-            },
-            move || {
-                let included = includes_uncommitted(state);
-                let unavailable = uncommitted_unavailable(state);
-                let pick = move |uncommitted: bool| {
-                    move || state.review_launcher_uncommitted.set(Some(uncommitted))
-                };
-                let working_tree = match unavailable {
-                    Some(reason) => format!("Working tree ({reason})"),
-                    None => "Working tree".to_string(),
-                };
-                Menu::new()
-                    .item("Last commit", move |item| {
-                        item.checked(!included).action(pick(false))
-                    })
-                    .item(working_tree, move |item| {
-                        item.checked(included)
-                            .enabled(unavailable.is_none())
-                            .action(pick(true))
-                    })
-            },
-            "review-head".into(),
-        ),
-    ))
-    .style(|s| s.items_center().width_full().gap(8.0))
+fn head_picker(state: ReviewState) -> impl IntoView {
+    menu_button(
+        move || {
+            if includes_uncommitted(state) {
+                "Working tree".into()
+            } else {
+                "Last commit".into()
+            }
+        },
+        move || {
+            let included = includes_uncommitted(state);
+            let unavailable = uncommitted_unavailable(state);
+            let pick = move |uncommitted: bool| {
+                move || state.review_launcher_uncommitted.set(Some(uncommitted))
+            };
+            let working_tree = match unavailable {
+                Some(reason) => format!("Working tree ({reason})"),
+                None => "Working tree".to_string(),
+            };
+            Menu::new()
+                .item("Last commit", move |item| {
+                    item.checked(!included).action(pick(false))
+                })
+                .item(working_tree, move |item| {
+                    item.checked(included)
+                        .enabled(unavailable.is_none())
+                        .action(pick(true))
+                })
+        },
+        "review-head".into(),
+    )
 }
 
 /// What the reviewers should focus on, such as one file of a branch that
@@ -658,10 +709,12 @@ fn instructions_box(state: ReviewState, run: Rc<dyn Fn()>) -> impl IntoView {
 
     use crate::review::threads::cmd_enter;
 
+    // Markdown styled, as the summary box is, so the popover's two boxes
+    // read the same.
     let editor = prose_editor(
         state.review_launcher_instructions.get_untracked(),
         "Instructions for the reviewers (optional)",
-        None,
+        Some(state.next_token()),
     );
     let editor = editor
         .pre_command(move |cmd| {
@@ -1222,6 +1275,7 @@ pub(crate) fn menu_button(
                 .selectable(false)
                 .pointer_events_none()
                 .margin_right(5.0)
+                .flex_grow(1.0_f32)
         }),
         sidebar_glyph(SidebarIcon::ChevronDown, theme::fg_subtle)
             .style(|s| s.size(9.0, 9.0).pointer_events_none()),
@@ -1242,21 +1296,6 @@ pub(crate) fn menu_button(
     })
     .debug_name(debug)
     .into_view()
-}
-
-fn disabled_selector(label: &'static str) -> impl IntoView {
-    Label::derived(move || label.to_string()).style(|s| {
-        s.height(26.0)
-            .items_center()
-            .padding_horiz(8.0)
-            .font_size(theme::TEXT_BADGE)
-            .color(theme::fg_subtle())
-            .background(theme::canvas_subtle())
-            .border(1.0)
-            .border_color(theme::border_muted())
-            .border_radius(theme::RADIUS)
-            .selectable(false)
-    })
 }
 
 pub(crate) fn action_button(
@@ -1614,6 +1653,85 @@ mod tests {
             neither.reason.as_deref(),
             Some("Select at least one reviewer")
         );
+    }
+
+    /// A reviewer is one line: its box and name, then its model and effort
+    /// side by side (criccomini/perch#16). The box takes it or leaves it;
+    /// one that cannot run has no pickers and a box that does nothing, and
+    /// says why under its name.
+    #[test]
+    fn a_reviewer_is_one_line_and_its_box_takes_it_or_leaves_it() {
+        let (app, state) = item_state();
+        let root = TestRoot::new();
+        let view =
+            crate::review::review_menu::control(app, state, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 700.0, 800.0);
+        let settle = |harness: &mut HeadlessHarness| {
+            harness.rebuild();
+            harness.paint();
+        };
+        let rect = |harness: &HeadlessHarness, name: &str| {
+            named(harness.root_id(), name)
+                .unwrap_or_else(|| panic!("no view named {name}"))
+                .get_visual_rect_no_clip()
+        };
+        let click = |harness: &mut HeadlessHarness, name: &str| {
+            let center = rect(harness, name).center();
+            harness.click(center.x, center.y);
+            harness.rebuild();
+            harness.paint();
+        };
+        let reviewers = || {
+            launch_validation(app, state)
+                .request
+                .map(|request| {
+                    request
+                        .reviewers
+                        .iter()
+                        .map(|choice| choice.backend)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        crate::review::review_menu::open(state, None);
+        settle(&mut harness);
+        // Opening asks the backend again, and nothing answers here.
+        app.review_dashboard_loading.update(|loading| loading.clear());
+        settle(&mut harness);
+
+        let model = rect(&harness, "review-model:claude-code");
+        let effort = rect(&harness, "review-effort:claude-code");
+        assert!(
+            (model.center().y - effort.center().y).abs() < 1.0,
+            "{model:?} {effort:?}"
+        );
+        assert!(model.x1 < effort.x0, "{model:?} {effort:?}");
+        let head = rect(&harness, "review-head");
+        let base = rect(&harness, "review-base");
+        assert!((head.center().y - base.center().y).abs() < 1.0, "{head:?} {base:?}");
+        assert!(head.x1 < base.x0, "{head:?} {base:?}");
+        assert_eq!(reviewers(), vec![perch_agent::Backend::ClaudeCode]);
+
+        // Codex has no models yet.
+        assert!(named(harness.root_id(), "review-model:codex").is_none());
+        let codex = named(harness.root_id(), "reviewer-row:codex").unwrap();
+        assert!(named(codex, "reviewer-unavailable").is_some());
+        click(&mut harness, "review-take:codex");
+        assert_eq!(reviewers(), vec![perch_agent::Backend::ClaudeCode]);
+
+        app.agent.update(|agent| agent.codex.models = vec!["gpt-5.5".into()]);
+        settle(&mut harness);
+        let codex = named(harness.root_id(), "reviewer-row:codex").unwrap();
+        assert!(named(codex, "reviewer-unavailable").is_none());
+        click(&mut harness, "review-take:codex");
+        assert_eq!(
+            reviewers(),
+            vec![perch_agent::Backend::ClaudeCode, perch_agent::Backend::Codex]
+        );
+        click(&mut harness, "review-take:claude-code");
+        assert_eq!(reviewers(), vec![perch_agent::Backend::Codex]);
+        click(&mut harness, "review-take:codex");
+        assert!(reviewers().is_empty());
     }
 
     #[test]
