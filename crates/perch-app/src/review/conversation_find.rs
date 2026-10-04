@@ -381,6 +381,7 @@ mod tests {
             "Bump it:\n\n```\nepoch += 1;\nsave(epoch);\n```",
         ));
         Discussion {
+            viewer_can_update: false,
             node_id: String::new(),
             reactions: Default::default(),
             opened_at: Some(at("2026-09-14T14:02:00Z")),

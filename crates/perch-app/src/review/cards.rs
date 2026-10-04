@@ -62,8 +62,8 @@ pub fn key(card: &Card) -> String {
     match card {
         // The time lands with the discussion, after a first paint from
         // the snapshot, and an edit can keep a body's length.
-        Card::Description { body, at, .. } => {
-            format!("description:{:?}:{:x}", at, body_hash(body))
+        Card::Description { body, at, editable, .. } => {
+            format!("description:{:?}:{:x}:{}", at, body_hash(body), editable)
         }
         // An edit made here shows before GitHub dates it, and what the
         // reader may do with it lands after a first paint.
@@ -76,7 +76,13 @@ pub fn key(card: &Card) -> String {
             c.viewer_can_delete
         ),
         Card::Review { review } => {
-            format!("review:{}:{:?}:{:x}", review.id, review.submitted_at, body_hash(&review.body))
+            format!(
+                "review:{}:{:?}:{:x}:{}",
+                review.id,
+                review.submitted_at,
+                body_hash(&review.body),
+                review.viewer_can_update
+            )
         }
         Card::Event(e) => format!("event:{}:{}", event_name(e), e.at),
         Card::Thread(t) => format!(
@@ -1234,6 +1240,7 @@ pub fn description_card(
     backend: Rc<Backend>,
     body: String,
     node_id: String,
+    editable: bool,
 ) -> impl IntoView {
     let hovered = RwSignal::new(false);
     let description = if body.trim().is_empty() {
@@ -1246,8 +1253,16 @@ pub fn description_card(
     let scope = description.id();
     let quote = (!body.trim().is_empty())
         .then(|| quote_reply_button(state, hovered, body.clone(), scope));
+    let edit = edit_in_card_action(state, hovered, node_id.clone(), body.clone(), editable);
+    let leading = Stack::horizontal((quote.unwrap_or_else(|| Empty::new().into_any()), edit))
+        .style(|s| s.items_center().gap(4.0))
+        .into_any();
     let react = reactable(&node_id);
     let reactions = reactions_under(app, state, backend.clone(), &react);
+    let shown = Stack::vertical((description, reactions))
+        .style(|s| s.flex_col().width_full())
+        .into_any();
+    let shown = edited_in_card(app, state, backend.clone(), node_id, shown);
     track_hover(
         card(
             byline_strip(
@@ -1258,15 +1273,11 @@ pub fn description_card(
                             .color(theme::fg())
                     }),
                     Empty::new().style(|s| s.flex_grow(1.0_f32)),
-                    actions(state, backend, hovered, quote, None, react, String::new()),
+                    actions(state, backend, hovered, Some(leading), None, react, String::new()),
                 ))
                 .style(|s| s.items_center().width_full().min_width(0.0)),
             ),
-            Some(
-                Stack::vertical((description, reactions))
-                    .style(|s| s.flex_col().width_full())
-                    .into_any(),
-            ),
+            Some(shown),
         ),
         hovered,
     )
@@ -1298,20 +1309,12 @@ pub fn comment_card(
     let quote = quote_reply_button(state, hovered, comment.body.clone(), text.id());
     let deletable = comment.viewer_can_delete && !comment.node_id.is_empty();
     let delete = delete_action(state, hovered, comment.node_id.clone(), move || deletable);
-    let updatable = comment.viewer_can_update && !comment.node_id.is_empty();
-    let (node_id, draft) = (comment.node_id.clone(), comment.body.clone());
-    let edit = edit_action(
+    let edit = edit_in_card_action(
+        state,
         hovered,
-        move || updatable,
-        Rc::new(move || {
-            state.open_composer_with(
-                None,
-                None,
-                draft.clone(),
-                Destination::GitHub,
-                Some(node_id.clone()),
-            )
-        }),
+        comment.node_id.clone(),
+        comment.body.clone(),
+        comment.viewer_can_update,
     );
     let leading = Stack::horizontal((quote, edit, delete))
         .style(|s| s.items_center().gap(4.0))
@@ -1319,26 +1322,74 @@ pub fn comment_card(
     let confirm = delete_comment_confirmation(app, state, backend.clone(), comment.node_id.clone());
     let react = reactable(&comment.node_id);
     let reactions = reactions_under(app, state, backend.clone(), &react);
-    // Edited, the comment's text gives way to the composer, with its
-    // words in it, until the edit is sent or put away.
-    let edited = comment.node_id.clone();
+    let shown = Stack::vertical((text, reactions, confirm))
+        .style(|s| s.flex_col().width_full())
+        .into_any();
+    let body = edited_in_card(app, state, backend.clone(), comment.node_id.clone(), shown);
+    track_hover(
+        card(
+            byline_strip(byline(
+                app,
+                who,
+                actions(state, backend, hovered, Some(leading), Some(ask), react, comment.html_url.clone()),
+            )),
+            Some(body),
+        ),
+        hovered,
+    )
+}
+
+/// Edit under the pointer for what has `node_id` on GitHub, while `may`
+/// says GitHub lets the reader edit it: it opens the composer in the
+/// card with `body`, its words as written.
+fn edit_in_card_action(
+    state: ReviewState,
+    hovered: RwSignal<bool>,
+    node_id: String,
+    body: String,
+    may: bool,
+) -> floem::AnyView {
+    let may = may && !node_id.is_empty();
+    edit_action(
+        hovered,
+        move || may,
+        Rc::new(move || {
+            state.open_composer_with(
+                None,
+                None,
+                body.clone(),
+                Destination::GitHub,
+                Some(node_id.clone()),
+            )
+        }),
+    )
+}
+
+/// What a card shows of `node_id`, which gives way to the composer while
+/// the reader edits it, until the edit is sent or put away.
+fn edited_in_card(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    node_id: String,
+    shown: floem::AnyView,
+) -> floem::AnyView {
     let editing = Memo::new(move |_| {
         state.composer.with(|c| {
             c.as_ref()
                 .filter(|c| {
                     c.thread_id.is_none()
-                        && !edited.is_empty()
-                        && c.editing.as_deref() == Some(edited.as_str())
+                        && !node_id.is_empty()
+                        && c.editing.as_deref() == Some(node_id.as_str())
                 })
                 .map(|c| c.opening)
         })
     });
-    let composing = backend.clone();
     let editor = dyn_container(
         move || editing.get(),
         move |opening| match (opening, state.composer.get_untracked()) {
             (Some(_), Some(c)) => {
-                threads::composer_view(app, state, composing.clone(), c, ThreadFace::Card)
+                threads::composer_view(app, state, backend.clone(), c, ThreadFace::Card)
                     .style(|s| s.width_full())
                     .into_any()
             }
@@ -1347,27 +1398,11 @@ pub fn comment_card(
     )
     .debug_name("comment-editor")
     .style(move |s| s.width_full().apply_if(editing.get().is_none(), |s| s.hide()));
-    let shown = Stack::vertical((text, reactions, confirm))
-        .style(move |s| {
-            s.flex_col()
-                .width_full()
-                .apply_if(editing.get().is_some(), |s| s.hide())
-        });
-    track_hover(
-        card(
-            byline_strip(byline(
-                app,
-                who,
-                actions(state, backend, hovered, Some(leading), Some(ask), react, comment.html_url.clone()),
-            )),
-            Some(
-                Stack::vertical((shown, editor))
-                    .style(|s| s.flex_col().width_full())
-                    .into_any(),
-            ),
-        ),
-        hovered,
-    )
+    let shown = Container::new(shown)
+        .style(move |s| s.width_full().apply_if(editing.get().is_some(), |s| s.hide()));
+    Stack::vertical((shown, editor))
+        .style(|s| s.flex_col().width_full())
+        .into_any()
 }
 
 /// The glyph a verdict takes: a green check, a red page of changes, or a
@@ -1411,17 +1446,28 @@ pub fn review_card(
         .clone()
         .zip(text.as_ref().map(|text| text.id()))
         .map(|(body, scope)| quote_reply_button(state, hovered, body, scope));
+    // A summary is edited where it is; a review with none has nothing
+    // to edit here.
+    let quote = summary.clone().map(|body| {
+        let edit = edit_in_card_action(state, hovered, review.node_id.clone(), body, review.viewer_can_update);
+        Stack::horizontal((quote.unwrap_or_else(|| Empty::new().into_any()), edit))
+            .style(|s| s.items_center().gap(4.0))
+            .into_any()
+    });
+    let editing = backend.clone();
+    let edited = review.node_id.clone();
     // A review with no summary has nothing to react to; GitHub allows it,
     // but there would be nothing to draw the pills under.
     let react = summary.as_ref().and_then(|_| reactable(&review.node_id));
 
     let body = text.map(|text| {
-        Stack::vertical((
+        let shown = Stack::vertical((
             text,
             reactions_under(app, state, backend.clone(), &react),
         ))
         .style(|s| s.flex_col().width_full())
-        .into_any()
+        .into_any();
+        edited_in_card(app, state, editing, edited, shown)
     });
 
     track_hover(

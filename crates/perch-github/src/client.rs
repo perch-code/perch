@@ -887,6 +887,7 @@ impl GitHub {
             .await?;
 
         let mut discussion = Discussion {
+            viewer_can_update: false,
             events: pull.events(),
             node_id: pull.node_id,
             opened_at: pull.created_at,
@@ -1240,6 +1241,9 @@ impl GitHub {
         let field = match place {
             CommentPlace::Conversation => "deleteIssueComment",
             CommentPlace::Line => "deletePullRequestReviewComment",
+            CommentPlace::PullRequestBody | CommentPlace::IssueBody | CommentPlace::Review => {
+                return Err(Error::Decode("a description or a review is not deleted".into()));
+            }
         };
         let payload = serde_json::json!({
             "query": format!(
@@ -1252,8 +1256,9 @@ impl GitHub {
     }
 
     /// Edit a comment on GitHub, by its GraphQL id: one in the
-    /// conversation, or one on a line of a pull request. The answer is
-    /// the body GitHub keeps. GitHub refuses a reader who is neither its
+    /// conversation, one on a line of a pull request, a pull request's or
+    /// an issue's description, or a review's summary. The answer is the
+    /// body GitHub keeps. GitHub refuses a reader who is neither its
     /// author nor able to write to the repository.
     pub async fn update_comment(
         &self,
@@ -1270,6 +1275,13 @@ impl GitHub {
                 "updatePullRequestReviewComment",
                 "pullRequestReviewCommentId",
                 "pullRequestReviewComment",
+            ),
+            CommentPlace::PullRequestBody => ("updatePullRequest", "pullRequestId", "pullRequest"),
+            CommentPlace::IssueBody => ("updateIssue", "id", "issue"),
+            CommentPlace::Review => (
+                "updatePullRequestReview",
+                "pullRequestReviewId",
+                "pullRequestReview",
             ),
         };
         let payload = serde_json::json!({

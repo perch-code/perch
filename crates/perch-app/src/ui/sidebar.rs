@@ -718,6 +718,7 @@ mod tests {
         let mut item = Item::new(repo, now);
         item.id = id.into();
         item.subject = Some(ItemSubject::Issue(Issue {
+            viewer_can_update: false,
             node_id: String::new(),
             reactions: Default::default(),
             number: 1,

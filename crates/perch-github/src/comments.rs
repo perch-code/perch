@@ -1357,6 +1357,7 @@ mod tests {
         d.review_comments[1].pull_request_review_id = Some(10);
         d.reviews = vec![
             crate::discussion::Review {
+                viewer_can_update: false,
                 id: 10,
                 node_id: String::new(),
                 user: "me".into(),

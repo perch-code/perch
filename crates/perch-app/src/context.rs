@@ -836,6 +836,7 @@ mod tests {
     #[test]
     fn a_discussion_becomes_an_archive_without_the_reader_s_pending_review() {
         let review = |id: u64, user: &str, state: &str| perch_github::Review {
+            viewer_can_update: false,
             id,
             node_id: String::new(),
             user: user.into(),

@@ -146,6 +146,43 @@ async fn each_place_is_edited_by_its_own_mutation_and_answers_the_kept_body() {
 }
 
 #[tokio::test]
+async fn a_description_and_a_review_summary_are_edited_by_their_own_mutations() {
+    let (base, requests) = spawn(vec![
+        Response::ok(r#"{"data":{"updatePullRequest":{"pullRequest":{"body":"pr"}}}}"#),
+        Response::ok(r#"{"data":{"updateIssue":{"issue":{"body":"issue"}}}}"#),
+        Response::ok(r#"{"data":{"updatePullRequestReview":{"pullRequestReview":{"body":"lgtm"}}}}"#),
+    ]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let places = [
+        ("PR_1", CommentPlace::PullRequestBody, "pr"),
+        ("I_1", CommentPlace::IssueBody, "issue"),
+        ("PRR_1", CommentPlace::Review, "lgtm"),
+    ];
+    for (id, place, body) in places {
+        assert_eq!(github.update_comment(id, place, body).await.unwrap(), body);
+    }
+
+    let requests = requests.lock().unwrap();
+    let query = |i: usize| requests[i].body["query"].as_str().unwrap().to_string();
+    assert!(query(0).contains("updatePullRequest(input: {pullRequestId: $id, body: $body})"));
+    assert!(query(1).contains("updateIssue(input: {id: $id, body: $body})"));
+    assert!(query(2).contains("updatePullRequestReview(input: {pullRequestReviewId: $id, body: $body})"));
+    assert_eq!(requests[2].body["variables"]["id"], "PRR_1");
+}
+
+#[tokio::test]
+async fn a_description_or_a_review_is_never_deleted() {
+    let (base, requests) = spawn(Vec::new());
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+    for place in [CommentPlace::PullRequestBody, CommentPlace::IssueBody, CommentPlace::Review] {
+        let refused = github.delete_comment("X_1", place).await.unwrap_err();
+        assert!(matches!(refused, Error::Decode(_)), "{refused:?}");
+    }
+    assert!(requests.lock().unwrap().is_empty(), "nothing was asked");
+}
+
+#[tokio::test]
 async fn a_refused_edit_is_an_error_and_no_id_asks_nothing() {
     let (base, requests) = spawn(vec![Response::ok(
         r#"{"data":{"updateIssueComment":null},"errors":[{"message":"Resource not accessible by integration"}]}"#,

@@ -6744,6 +6744,7 @@ mod tests {
         use crate::discussion::{IssueComment, Review};
         use crate::timeline::{PullEvent, PullEventKind};
         Discussion {
+            viewer_can_update: false,
             node_id: "PR_7".into(),
             opened_at: Some(stamp_of("2026-09-14T14:02:00Z")),
             body: "The description.".into(),
@@ -6762,6 +6763,7 @@ mod tests {
                 viewer_can_update: false,
             }],
             reviews: vec![Review {
+                viewer_can_update: false,
                 id: 9,
                 node_id: "PRR_9".into(),
                 user: "rohan".into(),

@@ -1719,6 +1719,7 @@ mod tests {
     #[test]
     fn an_issue_takes_the_pull_request_block_s_place() {
         let issue = perch_github::Issue {
+            viewer_can_update: false,
             node_id: String::new(),
             reactions: Default::default(),
             number: 42,
@@ -1792,6 +1793,7 @@ mod tests {
     #[test]
     fn an_issue_with_a_discussion_drops_its_last_comments_for_it() {
         let issue = perch_github::Issue {
+            viewer_can_update: false,
             node_id: String::new(),
             reactions: Default::default(),
             number: 42,

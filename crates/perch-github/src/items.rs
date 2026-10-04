@@ -36,6 +36,10 @@ pub struct Issue {
     /// The reactions on the body, once read with the comments.
     #[serde(default)]
     pub reactions: crate::reactions::Reactions,
+    /// Whether GitHub lets the reader edit the body, read with its
+    /// reactions; false until they are.
+    #[serde(default)]
+    pub viewer_can_update: bool,
     /// `open` or `closed`.
     pub state: String,
     /// `completed`, `not_planned` or `duplicate`, for a closed issue.
@@ -156,6 +160,7 @@ impl IssuePayload {
             .map(|u| (u.login, u.avatar_url))
             .unwrap_or_default();
         Issue {
+            viewer_can_update: false,
             number: self.number,
             node_id: self.node_id,
             title: self.title,
@@ -503,6 +508,7 @@ mod tests {
         });
         assert_eq!(i.title(), "perch/issue-42");
         i.subject = Some(Subject::Issue(Issue {
+            viewer_can_update: false,
             number: 42,
             node_id: String::new(),
             title: "Fence the manifest".into(),
@@ -586,6 +592,7 @@ mod tests {
     fn closed_means_the_subject_is_closed() {
         let mut i = item();
         i.subject = Some(Subject::Issue(Issue {
+            viewer_can_update: false,
             number: 1,
             node_id: String::new(),
             title: "t".into(),
@@ -666,6 +673,7 @@ mod tests {
     #[test]
     fn a_subject_serialises_with_its_kind() {
         let s = Subject::Issue(Issue {
+            viewer_can_update: false,
             number: 7,
             node_id: String::new(),
             title: "t".into(),

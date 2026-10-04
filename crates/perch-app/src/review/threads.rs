@@ -1311,8 +1311,9 @@ impl EditKind {
     }
 }
 
-/// What `composer` edits: a message in a thread by its id, or a comment
-/// in the conversation by its node id. `None` when it edits nothing.
+/// What `composer` edits: a message in a thread by its id, or what a card
+/// shows of GitHub's by its node id, a comment in the conversation, the
+/// description or a review's summary. `None` when it edits nothing.
 fn edit_kind(state: ReviewState, composer: &Composer) -> Option<EditKind> {
     let id = composer.editing.as_deref()?;
     let message = state.comment_threads.with_untracked(|threads| {
@@ -6275,6 +6276,7 @@ mod tests {
 
     fn issue() -> perch_github::Issue {
         perch_github::Issue {
+            viewer_can_update: false,
             node_id: String::new(),
             reactions: Default::default(),
             number: 43,

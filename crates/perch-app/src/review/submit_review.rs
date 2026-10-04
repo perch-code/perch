@@ -1491,6 +1491,7 @@ mod tests {
         let attempt = state.submit_review_pending.get_untracked().unwrap();
 
         let accepted = perch_github::Review {
+            viewer_can_update: false,
             node_id: String::new(),
             reactions: Default::default(),
             id: 55,

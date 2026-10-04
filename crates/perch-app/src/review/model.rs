@@ -2682,11 +2682,32 @@ impl ReviewState {
         })
     }
 
-    /// Where the comment on GitHub with this node id is shown: in the
-    /// conversation, or on a line. `None` when nothing shown has it.
+    /// Where what has this node id on GitHub is shown: the description,
+    /// a review's summary, a comment in the conversation or on a line.
+    /// `None` when nothing shown has it.
     pub fn github_comment_place(&self, node_id: &str) -> Option<CommentPlace> {
         if node_id.is_empty() {
             return None;
+        }
+        if self
+            .issue
+            .with_untracked(|i| i.as_ref().is_some_and(|i| i.node_id == node_id))
+        {
+            return Some(CommentPlace::IssueBody);
+        }
+        let in_discussion = self.discussion.with_untracked(|d| {
+            d.as_ref().and_then(|d| {
+                if d.node_id == node_id {
+                    Some(CommentPlace::PullRequestBody)
+                } else if d.reviews.iter().any(|r| r.node_id == node_id) {
+                    Some(CommentPlace::Review)
+                } else {
+                    None
+                }
+            })
+        });
+        if in_discussion.is_some() {
+            return in_discussion;
         }
         let in_conversation = self
             .issue_comments
@@ -2710,11 +2731,21 @@ impl ReviewState {
         on_a_line.then_some(CommentPlace::Line)
     }
 
-    /// Show `body` for the comment the reader is editing on GitHub, before
+    /// Show `body` for what the reader is editing on GitHub, before
     /// GitHub answers, wherever it is shown.
     pub fn rewrite_github_comment(&self, node_id: &str, body: &str) {
         if node_id.is_empty() {
             return;
+        }
+        if self
+            .issue
+            .with_untracked(|i| i.as_ref().is_some_and(|i| i.node_id == node_id))
+        {
+            self.issue.update(|i| {
+                if let Some(i) = i {
+                    Arc::make_mut(i).body = body.to_string();
+                }
+            });
         }
         if self
             .issue_comments
@@ -2728,7 +2759,9 @@ impl ReviewState {
         }
         let in_discussion = self.discussion.with_untracked(|d| {
             d.as_ref().is_some_and(|d| {
-                d.comments.iter().any(|c| c.node_id == node_id)
+                d.node_id == node_id
+                    || d.reviews.iter().any(|r| r.node_id == node_id)
+                    || d.comments.iter().any(|c| c.node_id == node_id)
                     || d.review_comments.iter().any(|c| c.node_id == node_id)
             })
         });
@@ -2736,6 +2769,12 @@ impl ReviewState {
             self.discussion.update(|d| {
                 if let Some(d) = d {
                     let d = Arc::make_mut(d);
+                    if d.node_id == node_id {
+                        d.body = body.to_string();
+                    }
+                    for r in d.reviews.iter_mut().filter(|r| r.node_id == node_id) {
+                        r.body = body.to_string();
+                    }
                     for c in d.comments.iter_mut().filter(|c| c.node_id == node_id) {
                         c.body = body.to_string();
                     }
@@ -5668,6 +5707,27 @@ mod tests {
         assert_eq!(state.github_comment_place("IC_1"), Some(CommentPlace::Conversation));
         assert_eq!(state.github_comment_place("PRRC_10"), Some(CommentPlace::Line));
         assert_eq!(state.github_comment_place("PRRC_99"), None);
+        state.discussion.set(Some(Arc::new(perch_github::Discussion {
+            node_id: "PR_1".into(),
+            reviews: vec![Review {
+                id: 9,
+                node_id: "PRR_9".into(),
+                user: "rohan".into(),
+                body: "lgtm".into(),
+                state: "APPROVED".into(),
+                submitted_at: None,
+                html_url: String::new(),
+                reactions: Default::default(),
+                viewer_can_update: true,
+            }],
+            ..Default::default()
+        })));
+        assert_eq!(state.github_comment_place("PR_1"), Some(CommentPlace::PullRequestBody));
+        assert_eq!(state.github_comment_place("PRR_9"), Some(CommentPlace::Review));
+        state.rewrite_github_comment("PR_1", "described");
+        state.rewrite_github_comment("PRR_9", "approved");
+        let d = state.discussion.get().unwrap();
+        assert_eq!((d.body.as_str(), d.reviews[0].body.as_str()), ("described", "approved"));
         assert_eq!(state.github_comment_place(""), None);
 
         state.rewrite_github_comment("IC_1", "typo");

@@ -3758,6 +3758,7 @@ mod tests {
             let now = "2026-09-19T12:00:00Z".parse().unwrap();
             let mut item = Item::new(repo, now);
             item.subject = Some(perch_github::ItemSubject::Issue(perch_github::Issue {
+                viewer_can_update: false,
                 node_id: String::new(),
                 reactions: Default::default(),
                 number,
@@ -5120,6 +5121,7 @@ mod tests {
         let app = AppState::new();
         let review = review_of("wt");
         let issue = |state: &str| perch_github::Issue {
+            viewer_can_update: false,
             number: 42,
             node_id: "I_42".into(),
             title: "Fence the manifest".into(),
@@ -5168,6 +5170,7 @@ mod tests {
         let review = review_of("wt");
         let thumbs = theirs(ReactionKind::ThumbsUp, 4);
         let issue = perch_github::Issue {
+            viewer_can_update: false,
             number: 42,
             node_id: "I_42".into(),
             title: "Fence the manifest".into(),
@@ -5249,6 +5252,7 @@ mod tests {
         assert_eq!(review.submit_review_pending.get(), Some(10));
 
         let accepted = Review {
+            viewer_can_update: false,
             node_id: String::new(),
             reactions: Default::default(),
             id: 99,
@@ -5329,6 +5333,7 @@ mod tests {
         review.begin_submit_review(5);
 
         let accepted = Review {
+            viewer_can_update: false,
             node_id: String::new(),
             reactions: Default::default(),
             id: 55,
@@ -5572,6 +5577,7 @@ mod tests {
                 expected_head_sha: "head".into(),
                 attempt_id: 12,
                 review: Some(Arc::new(Review {
+                    viewer_can_update: false,
                     node_id: String::new(),
                     reactions: Default::default(),
                     id: 101,

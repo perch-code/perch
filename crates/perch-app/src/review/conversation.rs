@@ -368,8 +368,8 @@ fn card_view(
     let view: floem::AnyView = match card {
         // What Perch started from an issue is the summary's In Perch row,
         // not repeated under the description.
-        Card::Description { body, node_id, .. } => {
-            cards::description_card(app, state, backend, body, node_id).into_any()
+        Card::Description { body, node_id, editable, .. } => {
+            cards::description_card(app, state, backend, body, node_id, editable).into_any()
         }
         Card::Comment(comment) => cards::comment_card(app, state, backend, comment).into_any(),
         Card::Review { review } => cards::review_card(app, state, backend, review).into_any(),
@@ -537,6 +537,7 @@ mod tests {
             viewer_can_update: false,
         };
         Discussion {
+            viewer_can_update: false,
             node_id: String::new(),
             reactions: Default::default(),
             opened_at: Some(at("2026-09-14T14:02:00Z")),
@@ -555,6 +556,7 @@ mod tests {
                 viewer_can_update: false,
             }],
             reviews: vec![Review {
+                viewer_can_update: false,
                 node_id: String::new(),
                 reactions: Default::default(),
                 id: 9,
@@ -1842,7 +1844,85 @@ mod tests {
         harness.pointer_move(c.x, c.y);
         harness.rebuild();
         harness.paint();
-        assert!(find(review, "edit-comment").is_none(), "a review is not edited from here");
+        assert!(find(review, "edit-comment").is_none(), "not without GitHub's say so");
+    }
+
+    /// The description and a review's summary, which GitHub says the
+    /// reader may edit, are edited in their cards as a comment is, each
+    /// by its own place; neither offers Edit without GitHub's say so.
+    #[test]
+    fn the_description_and_a_review_summary_are_edited_in_their_cards() {
+        use crate::review::model::Destination;
+        use perch_github::CommentPlace;
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let mut discussion = discussion();
+        discussion.node_id = "PR_57".into();
+        discussion.viewer_can_update = true;
+        discussion.reviews[0].node_id = "PRR_9".into();
+        discussion.reviews[0].viewer_can_update = true;
+        let (mut harness, _, state) = app_harness_on(backend, discussion);
+
+        let cases = [
+            ("card:description", "PR_57", "The description.", CommentPlace::PullRequestBody),
+            ("card:review", "PRR_9", "Looks right.", CommentPlace::Review),
+        ];
+        for (name, id, was, place) in cases {
+            let card = find(harness.root_id(), name).unwrap();
+            card.scroll_to(None);
+            harness.rebuild();
+            harness.paint();
+            hover_and_click(&mut harness, card, "edit-comment");
+            let composer = state.composer.get().unwrap_or_else(|| panic!("{name}: no composer"));
+            assert_eq!(composer.editing.as_deref(), Some(id), "{name}");
+            assert_eq!(state.composer_draft.get(), was, "{name}");
+            let card = find(harness.root_id(), name).unwrap();
+            let editor = find(card, "comment-editor").expect("the card holds the editor");
+            assert!(harness.get_layout_rect(editor).height() > 0.0, "{name}");
+            assert!(find(editor, "Label: \"Update comment\"").is_some(), "{name}");
+
+            while commands.try_recv().is_ok() {}
+            let words = format!("{was} Edited.");
+            state.open_composer_with(None, None, words.clone(), Destination::GitHub, Some(id.into()));
+            harness.rebuild();
+            harness.paint();
+            let card = find(harness.root_id(), name).unwrap();
+            click_on(&mut harness, find(card, "composer-send").expect("Update comment"));
+            match commands.try_recv() {
+                Ok(crate::backend::Command::UpdateGithubComment { item_id, node_id, place: asked, body }) => {
+                    assert_eq!((item_id.as_str(), node_id.as_str(), asked), ("wt", id, place), "{name}");
+                    assert_eq!(body, words, "{name}");
+                }
+                other => panic!("{name}: the edit was not asked for: {other:?}"),
+            }
+            assert!(state.composer.get().is_none(), "{name}: the edit closed");
+            let card = find(harness.root_id(), name).unwrap();
+            let mut all = Vec::new();
+            names(card, &mut all);
+            assert!(all.iter().any(|n| n.contains("Edited.")), "{name}: shows the new words");
+        }
+        let kept = state.discussion.get().unwrap();
+        assert_eq!(kept.body, "The description. Edited.");
+        assert_eq!(kept.reviews[0].body, "Looks right. Edited.");
+
+        // Without GitHub's say so, neither offers Edit.
+        state.discussion.update(|d| {
+            let d = Arc::make_mut(d.as_mut().unwrap());
+            d.viewer_can_update = false;
+            d.reviews[0].viewer_can_update = false;
+        });
+        harness.rebuild();
+        harness.paint();
+        for name in ["card:description", "card:review"] {
+            let card = find(harness.root_id(), name).unwrap();
+            card.scroll_to(None);
+            harness.rebuild();
+            harness.paint();
+            let c = card.get_visual_rect_no_clip().center();
+            harness.pointer_move(c.x, c.y);
+            harness.rebuild();
+            harness.paint();
+            assert!(find(card, "edit-comment").is_none(), "{name}");
+        }
     }
 
     /// A comment GitHub did not say the reader may edit has no Edit.

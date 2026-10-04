@@ -10026,9 +10026,10 @@ async fn read_after_comment_change(ctx: &Ctx, item_id: &str) {
     }
 }
 
-/// Put the body GitHub kept for an edited comment in the kept discussion,
-/// so the next open does not paint the old one before the network
-/// answers.
+/// Put the body GitHub kept for an edited comment, description or review
+/// summary in the kept discussion, so the next open does not paint the
+/// old one before the network answers. An issue's description is kept on
+/// its item, which the read after the edit rewrites.
 fn rewrite_cached_comment(ctx: &Ctx, item_id: &str, node_id: &str, body: &str) {
     let cached = ctx
         .with_cache(|cache| cache.load_discussion(item_id))
@@ -10038,6 +10039,14 @@ fn rewrite_cached_comment(ctx: &Ctx, item_id: &str, node_id: &str, body: &str) {
         return;
     };
     let mut changed = false;
+    if discussion.node_id == node_id {
+        discussion.body = body.to_string();
+        changed = true;
+    }
+    for r in discussion.reviews.iter_mut().filter(|r| r.node_id == node_id) {
+        r.body = body.to_string();
+        changed = true;
+    }
     for c in discussion.comments.iter_mut().filter(|c| c.node_id == node_id) {
         c.body = body.to_string();
         changed = true;
@@ -12704,6 +12713,7 @@ async fn fetch_issue_view(
         tracing::warn!(repo = %repo_full_name, number, error = %e, "could not read the reactions");
     }
     issue.reactions = read.reactions;
+    issue.viewer_can_update = read.viewer_can_update;
     Ok((issue, Some((read.comments, timeline))))
 }
 
@@ -12752,6 +12762,7 @@ pub(super) fn issue_discussion(
         opened_at: issue.created_at,
         body: issue.body.clone(),
         reactions: issue.reactions.clone(),
+        viewer_can_update: issue.viewer_can_update,
         comments: comments.to_vec(),
         reviews: Vec::new(),
         review_comments: Vec::new(),
@@ -19367,6 +19378,7 @@ mod tests {
     fn store_issue(ctx: &Ctx, number: u64) -> Item {
         let mut item = Item::new("a/b", "2026-09-10T00:00:00Z".parse().unwrap());
         item.subject = Some(ItemSubject::Issue(perch_github::Issue {
+            viewer_can_update: false,
             node_id: String::new(),
             reactions: Default::default(),
             number,
@@ -19398,6 +19410,7 @@ mod tests {
         .unwrap()
         .unwrap();
         let mut review = Review {
+            viewer_can_update: false,
             node_id: String::new(),
             reactions: Default::default(),
             id: 9,
@@ -21037,6 +21050,7 @@ read eof || true
         let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
         let item = store_pull(&ctx, 7);
         let issue = perch_github::Issue {
+            viewer_can_update: false,
             node_id: String::new(),
             reactions: Default::default(),
             number: 7,
@@ -22677,6 +22691,7 @@ read eof || true
         let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
         let item = store_pull(&ctx, 7);
         let discussion = perch_github::Discussion {
+            viewer_can_update: false,
             node_id: String::new(),
             reactions: Default::default(),
             opened_at: None,

@@ -54,6 +54,10 @@ pub struct Discussion {
     /// The reactions on the description.
     #[serde(default)]
     pub reactions: Reactions,
+    /// Whether GitHub lets the reader edit the description. Read with
+    /// the reactions; false until they are.
+    #[serde(default)]
+    pub viewer_can_update: bool,
     /// The conversation tab, in time order.
     pub comments: Vec<IssueComment>,
     /// Each review's verdict and summary.
@@ -130,11 +134,18 @@ impl Discussion {
         }
     }
 
-    /// Mark whether the reader may edit the comment with this node id,
-    /// in the conversation or on a line. An empty id names nothing.
+    /// Mark whether the reader may edit what has this node id: the
+    /// description, a comment in the conversation or on a line, or a
+    /// review's summary. An empty id names nothing.
     pub fn set_updatable(&mut self, node_id: &str, updatable: bool) {
         if node_id.is_empty() {
             return;
+        }
+        if self.node_id == node_id {
+            self.viewer_can_update = updatable;
+        }
+        for r in self.reviews.iter_mut().filter(|r| r.node_id == node_id) {
+            r.viewer_can_update = updatable;
         }
         for c in self.comments.iter_mut().filter(|c| c.node_id == node_id) {
             c.viewer_can_update = updatable;
@@ -171,14 +182,20 @@ pub struct ReviewThreadState {
     pub can_resolve: bool,
 }
 
-/// Where a comment was left, which names the mutations that edit and
-/// delete it.
+/// Where something the reader can edit or delete was written, which
+/// names the mutations that do it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommentPlace {
     /// In the conversation: an issue comment.
     Conversation,
     /// On a line of a pull request's diff: a review comment.
     Line,
+    /// A pull request's description. Edited, never deleted.
+    PullRequestBody,
+    /// An issue's description. Edited, never deleted.
+    IssueBody,
+    /// A review's summary. Edited, never deleted.
+    Review,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -226,6 +243,10 @@ pub struct Review {
     /// The reactions on the summary.
     #[serde(default)]
     pub reactions: Reactions,
+    /// Whether GitHub lets the reader edit the summary. Read with the
+    /// reactions, which are read only for a review with a summary.
+    #[serde(default)]
+    pub viewer_can_update: bool,
 }
 
 /// A comment that opens a thread on a line, as the review it is submitted
@@ -385,6 +406,7 @@ pub(crate) struct ReviewPayload {
 impl From<ReviewPayload> for Review {
     fn from(p: ReviewPayload) -> Self {
         Review {
+            viewer_can_update: false,
             id: p.id,
             node_id: p.node_id,
             user: login(p.user),
@@ -942,6 +964,7 @@ mod tests {
         let mut thumbs = Reactions::default();
         thumbs.toggle(crate::reactions::ReactionKind::ThumbsUp, true);
         let d = Discussion {
+            viewer_can_update: false,
             node_id: "PR_1".into(),
             opened_at: Some(at("2026-09-14T14:02:00Z")),
             body: "The description.".into(),
@@ -960,6 +983,7 @@ mod tests {
                 viewer_can_update: false,
             }],
             reviews: vec![Review {
+                viewer_can_update: false,
                 id: 9,
                 node_id: "PRR_9".into(),
                 user: "chris".into(),
@@ -1038,5 +1062,31 @@ mod tests {
         assert_eq!(rc.user_avatar_url, "");
         assert_eq!((rc.start_line, rc.original_start_line, rc.start_side), (None, None, None));
         assert_eq!((rc.commit_id.as_str(), rc.original_commit_id.as_str()), ("", ""));
+    }
+
+    #[test]
+    fn what_the_reader_may_edit_is_marked_on_the_description_reviews_and_comments() {
+        let mut d = Discussion {
+            node_id: "PR_1".into(),
+            reviews: vec![Review {
+                id: 9,
+                node_id: "PRR_9".into(),
+                user: "rohan".into(),
+                body: "lgtm".into(),
+                state: "APPROVED".into(),
+                submitted_at: None,
+                html_url: String::new(),
+                reactions: Reactions::default(),
+                viewer_can_update: false,
+            }],
+            ..Default::default()
+        };
+        d.set_updatable("PR_1", true);
+        d.set_updatable("PRR_9", true);
+        d.set_updatable("", false);
+        assert!(d.viewer_can_update);
+        assert!(d.reviews[0].viewer_can_update);
+        d.set_updatable("PRR_9", false);
+        assert!(!d.reviews[0].viewer_can_update);
     }
 }

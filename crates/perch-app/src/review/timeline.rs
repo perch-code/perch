@@ -23,7 +23,7 @@ pub enum Card {
     /// is the summary's Author row. `node_id` is what reactions on it are
     /// left by; empty when the pull request's discussion has not landed, or
     /// an older build kept it.
-    Description { at: Option<Timestamp>, body: String, node_id: String },
+    Description { at: Option<Timestamp>, body: String, node_id: String, editable: bool },
     Comment(IssueComment),
     /// A review with its verdict and summary. Its line comments are threads
     /// of their own.
@@ -307,11 +307,13 @@ pub fn timeline(
             at: discussion.and_then(|d| d.opened_at),
             body: discussion.map(|d| d.body.clone()).unwrap_or_default(),
             node_id: discussion.map(|d| d.node_id.clone()).unwrap_or_default(),
+            editable: discussion.is_some_and(|d| d.viewer_can_update),
         }),
         (None, Some((issue, _, _))) => cards.push(Card::Description {
             at: issue.created_at,
             body: issue.body.clone(),
             node_id: issue.node_id.clone(),
+            editable: issue.viewer_can_update,
         }),
         (None, None) => {}
     }
@@ -404,6 +406,7 @@ pub(crate) mod tests {
 
     fn issue() -> Issue {
         Issue {
+            viewer_can_update: false,
             node_id: String::new(),
             reactions: Default::default(),
             number: 42,
@@ -424,6 +427,7 @@ pub(crate) mod tests {
 
     fn discussion(reviews: Vec<Review>, review_comments: Vec<ReviewComment>) -> Discussion {
         Discussion {
+            viewer_can_update: false,
             node_id: String::new(),
             reactions: Default::default(),
             opened_at: Some(at("2026-09-14T14:02:00Z")),
@@ -454,6 +458,7 @@ pub(crate) mod tests {
 
     pub(crate) fn review(id: u64, state: &str, body: &str, when: Option<&str>) -> Review {
         Review {
+            viewer_can_update: false,
             node_id: String::new(),
             reactions: Default::default(),
             id,

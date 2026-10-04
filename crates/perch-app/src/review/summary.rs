@@ -1151,6 +1151,7 @@ fn reviewers_view(
                 match verdict {
                     Some(state) => {
                         let review = perch_github::Review {
+                            viewer_can_update: false,
                             node_id: String::new(),
                             reactions: Default::default(),
                             id: 0,
@@ -1830,6 +1831,7 @@ mod tests {
         let now = "2026-09-20T12:00:00Z".parse().unwrap();
         let mut item = Item::new("slatedb/slatedb", now);
         item.subject = Some(ItemSubject::Issue(perch_github::Issue {
+            viewer_can_update: false,
             node_id: String::new(),
             reactions: Default::default(),
             number: 2144,

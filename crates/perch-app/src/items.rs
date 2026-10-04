@@ -1019,6 +1019,7 @@ mod tests {
 
     fn issue(number: u64, title: &str, state: &str, updated: &str) -> ItemSubject {
         ItemSubject::Issue(Issue {
+            viewer_can_update: false,
             node_id: String::new(),
             reactions: Default::default(),
             number,
