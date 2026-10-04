@@ -112,8 +112,9 @@ pub struct Client {
     exited: std::sync::OnceLock<Option<String>>,
     /// Set once Perch asks the server to stop: its exit then is no failure.
     stopping: Arc<AtomicBool>,
-    /// Tells the task that reaps the server process to kill it.
-    kill: Arc<tokio::sync::Notify>,
+    /// Tells the task that reaps the server process to kill it, and why,
+    /// for its log.
+    kill: mpsc::UnboundedSender<String>,
     /// True once the server process has ended and been reaped.
     ended: tokio::sync::watch::Receiver<bool>,
     /// The server process, for a bug report's memory and uptime.
@@ -124,6 +125,8 @@ pub struct Client {
 
 impl Client {
     /// Start a server rooted at `root` and drive its output into `events`.
+    /// A server whose handshake fails is killed before the error comes
+    /// back.
     pub async fn start(
         spec: ServerSpec,
         root: &Path,
@@ -177,7 +180,7 @@ impl Client {
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let pid = child.id();
         let stopping = Arc::new(AtomicBool::new(false));
-        let kill = Arc::new(tokio::sync::Notify::new());
+        let (kill, mut kill_asked) = mpsc::unbounded_channel::<String>();
         let (ended_tx, ended) = tokio::sync::watch::channel(false);
 
         let client = Arc::new(Self {
@@ -191,7 +194,7 @@ impl Client {
             class_files: Default::default(),
             exited: Default::default(),
             stopping: stopping.clone(),
-            kill: kill.clone(),
+            kill,
             ended,
             pid,
             started: std::time::Instant::now(),
@@ -207,7 +210,7 @@ impl Client {
                 // A server whose output cannot be read is of no use, and
                 // left running it would hold its workspace unseen.
                 if unreadable.is_some() {
-                    client.kill.notify_one();
+                    let _ = client.kill.send("its output could not be read".into());
                 }
                 // Its error output closes as it goes; wait for the last of it.
                 if let Some(done) = stderr_done {
@@ -241,13 +244,13 @@ impl Client {
         let server = spec_name(&client.spec);
         tokio::spawn(async move {
             let (status, killed) = tokio::select! {
-                status = child.wait() => (status, false),
-                _ = kill.notified() => match child.try_wait() {
+                status = child.wait() => (status, None),
+                Some(why) = kill_asked.recv() => match child.try_wait() {
                     // Ended on its own just as the kill was asked for.
-                    Ok(Some(status)) => (Ok(status), false),
+                    Ok(Some(status)) => (Ok(status), None),
                     _ => {
                         let _ = child.start_kill();
-                        (child.wait().await, true)
+                        (child.wait().await, Some(why))
                     }
                 },
             };
@@ -255,26 +258,28 @@ impl Client {
                 Ok(status) => status.to_string(),
                 Err(error) => error.to_string(),
             };
-            match (killed, stopping.load(Ordering::Relaxed)) {
-                (true, true) => tracing::warn!(
-                    %server, ?pid, %status,
-                    "language server killed: it did not exit when asked"
-                ),
-                (true, false) => tracing::warn!(
-                    %server, ?pid, %status,
-                    "language server killed: its output could not be read"
-                ),
-                (false, true) => {
+            match killed {
+                Some(why) => {
+                    tracing::warn!(%server, ?pid, %status, "language server killed: {why}")
+                }
+                None if stopping.load(Ordering::Relaxed) => {
                     tracing::info!(%server, ?pid, %status, "language server exited when asked")
                 }
-                (false, false) => {
-                    tracing::warn!(%server, ?pid, %status, "language server exited unasked")
-                }
+                None => tracing::warn!(%server, ?pid, %status, "language server exited unasked"),
             }
             let _ = ended_tx.send(true);
         });
 
-        client.initialize(root).await?;
+        if let Err(error) = client.initialize(root).await {
+            // Nothing holds a server whose start failed to stop it later,
+            // and the tasks above keep it running. Its end is no failure of
+            // its own: the caller tells why it did not start, and the read
+            // loop is not to tell a vaguer failure over that.
+            client.stopping.store(true, Ordering::Relaxed);
+            let _ = client.kill.send(format!("its start failed: {error}"));
+            client.ended(KILL_WAIT).await;
+            return Err(error);
+        }
         // A server that never says it is ready is ready once it answers.
         if !client.spec.kind.reports_readiness() {
             client.tell_if_starting(Status::Ready);
@@ -856,7 +861,7 @@ impl Client {
             .await
             .unwrap_or(false);
         if !exited {
-            self.kill.notify_one();
+            let _ = self.kill.send("it did not exit when asked".into());
             self.ended(KILL_WAIT).await;
         }
     }
@@ -1625,6 +1630,60 @@ while True:
         let took = stop_a_server_ignoring("shutdown").await;
         assert!(took >= LIFECYCLE_TIMEOUT, "{took:?}");
         assert!(took < LIFECYCLE_TIMEOUT + KILL_WAIT + Duration::from_secs(1), "{took:?}");
+    }
+
+    /// A server that writes its process id to the file named by its
+    /// argument and then answers nothing.
+    const SILENT_SERVER: &str = r#"
+import os, sys, time
+with open(sys.argv[1], "w") as file:
+    file.write(str(os.getpid()))
+time.sleep(600)
+"#;
+
+    /// A server that never answers the handshake fails its start once the
+    /// ask times out, and is killed rather than left running with nothing
+    /// to stop it. Its end is not told as a failure: the caller tells why
+    /// the start failed.
+    #[tokio::test]
+    async fn a_server_that_does_not_answer_the_handshake_is_killed() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("server.py");
+        std::fs::write(&script, SILENT_SERVER).unwrap();
+        let pid_file = dir.path().join("pid");
+        let spec = ServerSpec {
+            binary: PathBuf::from("python3"),
+            args: vec![script.display().to_string(), pid_file.display().to_string()],
+            kind: ServerKind::RustAnalyzer,
+            options: Value::Null,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let started = std::time::Instant::now();
+        let error = Client::start(spec, dir.path(), tx)
+            .await
+            .err()
+            .expect("the start fails");
+        let took = started.elapsed();
+        assert!(matches!(error, Error::Timeout), "{error}");
+        let timeout = ServerKind::RustAnalyzer.initialize_timeout();
+        assert!(took >= timeout, "{took:?}");
+        assert!(took < timeout + KILL_WAIT + Duration::from_secs(1), "{took:?}");
+        let pid: u32 = std::fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+        assert!(!alive(pid), "gone once the start failed");
+        // Once nothing holds the client its events end, so this also says
+        // the tasks it started let it go.
+        let statuses = tokio::time::timeout(LIFECYCLE_TIMEOUT, async {
+            let mut statuses = Vec::new();
+            while let Some(event) = rx.recv().await {
+                if let ServerEvent::Status(status) = event {
+                    statuses.push(status);
+                }
+            }
+            statuses
+        })
+        .await
+        .expect("the client is let go");
+        assert_eq!(statuses, [Status::Starting]);
     }
 
     /// A server that answers the handshake after a stray line, which is
