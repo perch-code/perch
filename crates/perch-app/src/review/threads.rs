@@ -135,19 +135,22 @@ pub fn run_agent_name(run: &RunRecord) -> String {
     )
 }
 
-/// Whether the command a box's keymap resolved a key to is Cmd-Enter,
-/// which sends. floem binds Cmd-Enter to `NewLineBelow`, a command of its
-/// own, not to Enter's `InsertNewLine` with the modifier held; a box for
-/// a question has no use for a line opened under the caret, so either
-/// command with Cmd held is Send.
+/// Whether the command a box's keymap resolved a key to is Cmd-Enter
+/// (Ctrl-Enter off macOS), which sends. floem binds Cmd-Enter to
+/// `NewLineBelow`, and Ctrl-Enter on Linux and Windows to `NewLineAbove`,
+/// commands of their own, not to Enter's `InsertNewLine` with the
+/// modifier held; a box for a question has no use for a line opened by
+/// the caret, so any of them with the command key held is Send.
 pub fn cmd_enter(cmd: &floem::views::editor::text_document::PreCommand<'_>) -> bool {
     use floem::views::editor::command::Command;
     use floem::views::editor::core::command::EditCommand;
 
-    matches!(
-        cmd.cmd,
-        Command::Edit(EditCommand::InsertNewLine | EditCommand::NewLineBelow)
-    ) && cmd.mods.contains(Modifiers::META)
+    let opens_a_line = match cmd.cmd {
+        Command::Edit(EditCommand::InsertNewLine | EditCommand::NewLineBelow) => true,
+        Command::Edit(EditCommand::NewLineAbove) => !cfg!(target_os = "macos"),
+        _ => false,
+    };
+    opens_a_line && cmd.mods.contains(crate::ui::OS_MOD)
 }
 
 /// What a fresh composer starts on: the last thing sent, else config.
@@ -4367,7 +4370,7 @@ mod tests {
         assert_eq!(state.composer_draft.get(), "why?\n");
         assert!(commands.try_recv().is_err(), "Enter sent the question");
 
-        harness.dispatch_event(enter(Modifiers::META));
+        harness.dispatch_event(enter(crate::ui::OS_MOD));
         harness.rebuild();
         match commands.try_recv() {
             Ok(Command::Ask { question, .. }) => assert_eq!(question, "why?"),
@@ -5469,7 +5472,7 @@ mod tests {
         let text_box = state.composer_box.get().expect("the box registered itself");
         assert!(harness.is_focused(text_box), "the flip kept the keyboard");
 
-        harness.dispatch_event(enter(Modifiers::META));
+        harness.dispatch_event(enter(crate::ui::OS_MOD));
         harness.rebuild();
         match commands.try_recv() {
             Ok(Command::SaveDraft {
@@ -5576,7 +5579,7 @@ mod tests {
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
         harness.rebuild();
         harness.paint();
-        harness.dispatch_event(enter(Modifiers::META));
+        harness.dispatch_event(enter(crate::ui::OS_MOD));
         harness.rebuild();
         let token = match commands.try_recv() {
             Ok(Command::ApplySuggestion {
@@ -5620,7 +5623,7 @@ mod tests {
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
         harness.rebuild();
         harness.paint();
-        harness.dispatch_event(enter(Modifiers::META));
+        harness.dispatch_event(enter(crate::ui::OS_MOD));
         assert!(matches!(commands.try_recv(), Ok(Command::Ask { .. })));
     }
 
@@ -5849,7 +5852,11 @@ mod tests {
         harness.paint();
         let text_box = state.composer_box.get().expect("the box registered itself");
         assert!(harness.is_focused(text_box));
-        harness.dispatch_event(key(Key::Character("a".into()), Code::KeyA, Modifiers::META));
+        harness.dispatch_event(key(
+            Key::Character("a".into()),
+            Code::KeyA,
+            crate::ui::OS_MOD,
+        ));
         harness.dispatch_event(key(
             Key::Named(NamedKey::Backspace),
             Code::Backspace,
@@ -5862,7 +5869,7 @@ mod tests {
                 Modifiers::empty(),
             ));
         }
-        harness.dispatch_event(enter(Modifiers::META));
+        harness.dispatch_event(enter(crate::ui::OS_MOD));
         harness.rebuild();
         match commands.try_recv() {
             Ok(Command::SaveDraft {
@@ -5973,7 +5980,11 @@ mod tests {
 
         let text_box = state.composer_box.get().expect("the box registered itself");
         assert!(harness.is_focused(text_box));
-        harness.dispatch_event(key(Key::Character("a".into()), Code::KeyA, Modifiers::META));
+        harness.dispatch_event(key(
+            Key::Character("a".into()),
+            Code::KeyA,
+            crate::ui::OS_MOD,
+        ));
         harness.dispatch_event(key(
             Key::Named(NamedKey::Backspace),
             Code::Backspace,
@@ -5986,7 +5997,7 @@ mod tests {
                 Modifiers::empty(),
             ));
         }
-        harness.dispatch_event(enter(Modifiers::META));
+        harness.dispatch_event(enter(crate::ui::OS_MOD));
         harness.rebuild();
         match commands.try_recv() {
             Ok(Command::UpdateGithubComment {
@@ -6421,7 +6432,11 @@ mod tests {
 
         let text_box = state.composer_box.get().expect("the box registered itself");
         assert!(harness.is_focused(text_box));
-        harness.dispatch_event(key(Key::Character("a".into()), Code::KeyA, Modifiers::META));
+        harness.dispatch_event(key(
+            Key::Character("a".into()),
+            Code::KeyA,
+            crate::ui::OS_MOD,
+        ));
         harness.dispatch_event(key(
             Key::Named(NamedKey::Backspace),
             Code::Backspace,
@@ -6434,7 +6449,7 @@ mod tests {
                 Modifiers::empty(),
             ));
         }
-        harness.dispatch_event(enter(Modifiers::META));
+        harness.dispatch_event(enter(crate::ui::OS_MOD));
         harness.rebuild();
         match commands.try_recv() {
             Ok(Command::EditReviewerMessage {
@@ -7685,7 +7700,7 @@ mod tests {
         assert!(harness.is_focused(text_box));
 
         // The first send asks.
-        harness.dispatch_event(enter(Modifiers::META));
+        harness.dispatch_event(enter(crate::ui::OS_MOD));
         harness.rebuild();
         harness.paint();
         assert!(
@@ -7711,7 +7726,7 @@ mod tests {
         assert!(find(harness.root_id(), "Label: \"Comment\"").is_some());
 
         // Enter alone is the yes.
-        harness.dispatch_event(enter(Modifiers::META));
+        harness.dispatch_event(enter(crate::ui::OS_MOD));
         harness.rebuild();
         assert!(state.composer_confirming.get());
         harness.dispatch_event(enter(Modifiers::empty()));
@@ -7754,7 +7769,7 @@ mod tests {
         );
 
         // Nothing sends twice, and the keys do nothing to the text.
-        harness.dispatch_event(enter(Modifiers::META));
+        harness.dispatch_event(enter(crate::ui::OS_MOD));
         harness.dispatch_event(enter(Modifiers::empty()));
         harness.rebuild();
         assert!(commands.try_recv().is_err());
@@ -7850,7 +7865,7 @@ mod tests {
         assert!(find(root_id, "Label: \"Reply\"").is_some());
         assert!(find(root_id, "Label: \"Add to review\"").is_none());
 
-        harness.dispatch_event(enter(Modifiers::META));
+        harness.dispatch_event(enter(crate::ui::OS_MOD));
         harness.rebuild();
         harness.paint();
         assert!(
@@ -8396,7 +8411,7 @@ mod tests {
         harness.rebuild();
         harness.paint();
 
-        harness.dispatch_event(enter(Modifiers::META));
+        harness.dispatch_event(enter(crate::ui::OS_MOD));
         harness.rebuild();
         assert!(state.composer_confirming.get());
         harness.dispatch_event(key(

@@ -375,14 +375,16 @@ impl Shortcut {
     }
 
     /// Keys written as `super+shift+KeyH` or `F12`: modifiers first,
-    /// joined by `+`, then the key's code.
+    /// joined by `+`, then the key's code. `super` is the platform's
+    /// command key, as in VS Code's keybindings: Cmd on macOS, Ctrl
+    /// elsewhere.
     pub fn parse(keys: &str) -> Option<Self> {
         let mut parts: Vec<&str> = keys.split('+').collect();
         let code = Code::from_str(parts.pop()?).ok()?;
         let mut modifiers = Modifiers::empty();
         for part in parts {
             modifiers |= match part.to_ascii_lowercase().as_str() {
-                "super" | "cmd" | "command" | "meta" => Modifiers::META,
+                "super" | "cmd" | "command" | "meta" => crate::ui::OS_MOD,
                 "shift" => Modifiers::SHIFT,
                 "alt" | "option" => Modifiers::ALT,
                 "ctrl" | "control" => Modifiers::CONTROL,
@@ -392,17 +394,34 @@ impl Shortcut {
         Some(Shortcut { modifiers, code })
     }
 
-    /// How macOS writes it: `⌃⌥⇧⌘` in that order, then the key.
+    /// The written form of keys `parse` reads, `super+KeyP` as ⌘P on
+    /// macOS and Ctrl+P elsewhere; the keys themselves if they don't parse.
+    pub fn label_of(keys: &str) -> String {
+        Shortcut::parse(keys).map_or_else(|| keys.to_string(), |s| s.label())
+    }
+
+    /// How the platform writes it. macOS: `⌃⌥⇧⌘` in that order, then the
+    /// key. Elsewhere: `Ctrl+Alt+Shift+Super+`, then the key.
     pub fn label(&self) -> String {
         let mut out = String::new();
-        for (flag, mark) in [
-            (Modifiers::CONTROL, '⌃'),
-            (Modifiers::ALT, '⌥'),
-            (Modifiers::SHIFT, '⇧'),
-            (Modifiers::META, '⌘'),
-        ] {
+        let marks: [(Modifiers, &str); 4] = if cfg!(target_os = "macos") {
+            [
+                (Modifiers::CONTROL, "⌃"),
+                (Modifiers::ALT, "⌥"),
+                (Modifiers::SHIFT, "⇧"),
+                (Modifiers::META, "⌘"),
+            ]
+        } else {
+            [
+                (Modifiers::CONTROL, "Ctrl+"),
+                (Modifiers::ALT, "Alt+"),
+                (Modifiers::SHIFT, "Shift+"),
+                (Modifiers::META, "Super+"),
+            ]
+        };
+        for (flag, mark) in marks {
             if self.modifiers.contains(flag) {
-                out.push(mark);
+                out.push_str(mark);
             }
         }
         let code = self.code.to_string();
@@ -877,7 +896,7 @@ impl Host {
                     self.activate(depth, at, true);
                 }
             }
-            Code::Backspace | Code::Delete if plain || key.modifiers == Modifiers::META => {
+            Code::Backspace | Code::Delete if plain || key.modifiers == crate::ui::OS_MOD => {
                 if let Some(at) = at {
                     self.remove(depth, at, true);
                 }
@@ -1581,6 +1600,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn shortcuts_read_as_macos_writes_them() {
         let parse = |s: &str| Shortcut::parse(s).unwrap().label();
         assert_eq!(parse("F12"), "F12");
@@ -1596,6 +1616,19 @@ mod tests {
             .label(),
             "⌥⌘R"
         );
+        assert!(Shortcut::parse("hyper+KeyA").is_none());
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn shortcuts_read_with_ctrl_for_super_off_macos() {
+        let parse = |s: &str| Shortcut::parse(s).unwrap();
+        assert_eq!(parse("super+KeyC").modifiers, Modifiers::CONTROL);
+        assert_eq!(parse("F12").label(), "F12");
+        assert_eq!(parse("super+F12").label(), "Ctrl+F12");
+        assert_eq!(parse("shift+alt+KeyH").label(), "Alt+Shift+H");
+        assert_eq!(parse("alt+super+KeyR").label(), "Ctrl+Alt+R");
+        assert_eq!(Shortcut::label_of("super+BracketLeft"), "Ctrl+[");
         assert!(Shortcut::parse("hyper+KeyA").is_none());
     }
 

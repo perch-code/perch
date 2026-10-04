@@ -1349,7 +1349,7 @@ mod tests {
         harness.paint();
         assert!(can_submit(state));
 
-        harness.dispatch_event(enter(Modifiers::META));
+        harness.dispatch_event(enter(crate::ui::OS_MOD));
         harness.rebuild();
         match next_command(&mut commands) {
             Ok(Command::SubmitPullRequestReview { body, event, .. }) => {
@@ -1508,7 +1508,7 @@ mod tests {
         harness.rebuild();
         harness.paint();
 
-        harness.dispatch_event(enter(Modifiers::META));
+        harness.dispatch_event(enter(crate::ui::OS_MOD));
         harness.rebuild();
         assert!(next_command(&mut commands).is_ok());
         let attempt = state.submit_review_pending.get_untracked().unwrap();
@@ -1666,7 +1666,7 @@ mod tests {
             "Enter submitted the review"
         );
 
-        harness.dispatch_event(enter(Modifiers::META));
+        harness.dispatch_event(enter(crate::ui::OS_MOD));
         harness.rebuild();
         match next_command(&mut commands) {
             Ok(Command::SubmitPullRequestReview { body, event, .. }) => {

@@ -198,7 +198,7 @@ fn close_button(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl
                 app.begin_close(state, navigation_id);
             },
         ),
-        "Close (⌘[)".to_string(),
+        format!("Close ({})", crate::ui::menu::Shortcut::label_of("super+BracketLeft")),
     )
     .debug_name("close button")
     .style(control)

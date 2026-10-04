@@ -165,20 +165,14 @@ pub fn editor_pane(
                             centered_message(
                                 SidebarIcon::Search,
                                 || "No changes".to_string(),
-                                || {
-                                    "Pick a file from the tree, or press ⌘P to go to one by name."
-                                        .to_string()
-                                },
+                                || format!("Pick a file from the tree, or press {} to go to one by name.", crate::ui::menu::Shortcut::label_of("super+KeyP")),
                             )
                             .into_any()
                         }
                         None => centered_message(
                             SidebarIcon::Search,
                             || "No file open".to_string(),
-                            || {
-                                "Pick a file from the tree, or press ⌘P to go to one by name."
-                                    .to_string()
-                            },
+                            || format!("Pick a file from the tree, or press {} to go to one by name.", crate::ui::menu::Shortcut::label_of("super+KeyP")),
                         )
                         .into_any(),
                         Some(path) => match state.file(&path) {
