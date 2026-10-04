@@ -138,7 +138,8 @@ impl KeptServers {
         if kept.is_empty() {
             return;
         }
-        let memory = process_tree_memory().await;
+        let pids: Vec<u32> = active.iter().chain(&kept).filter_map(|c| c.pid()).collect();
+        let memory = process_tree_memory(&pids).await;
         let size = |client: &perch_lsp::Client| {
             client
                 .pid()
@@ -177,20 +178,23 @@ impl KeptServers {
     }
 }
 
-/// Every process's resident memory in KB, with that of every process under
-/// it added in, by pid. Empty when `ps` can't be run.
-async fn process_tree_memory() -> HashMap<u32, u64> {
+/// The resident memory in KB of each of `pids`, with that of every process
+/// under it added in, by pid. A pid `ps` doesn't list is left out; empty
+/// when `ps` can't be run.
+async fn process_tree_memory(pids: &[u32]) -> HashMap<u32, u64> {
     let mut command = tokio::process::Command::new("ps");
     command.args(["-axo", "pid=,ppid=,rss="]).kill_on_drop(true);
     let out = match tokio::time::timeout(Duration::from_secs(5), command.output()).await {
         Ok(Ok(out)) if out.status.success() => out.stdout,
         _ => return HashMap::new(),
     };
-    tree_memory(&String::from_utf8_lossy(&out))
+    tree_memory(&String::from_utf8_lossy(&out), pids)
 }
 
-/// `ps -o pid=,ppid=,rss=` output as `process_tree_memory` gives it.
-fn tree_memory(ps: &str) -> HashMap<u32, u64> {
+/// `ps -o pid=,ppid=,rss=` output as `process_tree_memory` gives it, for
+/// `pids` alone: a walk from every process would be one of the whole
+/// machine from pid 1.
+fn tree_memory(ps: &str, pids: &[u32]) -> HashMap<u32, u64> {
     let mut own = HashMap::new();
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
     for line in ps.lines() {
@@ -206,7 +210,8 @@ fn tree_memory(ps: &str) -> HashMap<u32, u64> {
             children.entry(ppid).or_default().push(pid);
         }
     }
-    own.keys()
+    pids.iter()
+        .filter(|pid| own.contains_key(pid))
         .map(|&pid| {
             let mut total = 0;
             let mut stack = vec![pid];
@@ -230,7 +235,7 @@ mod tests {
     #[test]
     fn a_process_counts_everything_under_it() {
         let ps = "    1     0   100\n   10     1  5000\n   11    10   300\n   12    11    20\n   20     1   700\n";
-        let memory = tree_memory(ps);
+        let memory = tree_memory(ps, &[10, 11, 20, 1]);
         assert_eq!(memory[&10], 5320);
         assert_eq!(memory[&11], 320);
         assert_eq!(memory[&20], 700);
@@ -239,8 +244,16 @@ mod tests {
 
     #[test]
     fn lines_that_are_not_three_numbers_are_skipped() {
-        let memory = tree_memory("garbage\n  5  1  40\n  6  1\n");
+        let memory = tree_memory("garbage\n  5  1  40\n  6  1\n", &[5, 6]);
         assert_eq!(memory.len(), 1);
         assert_eq!(memory[&5], 40);
+    }
+
+    #[test]
+    fn only_the_processes_asked_for_are_summed() {
+        let ps = "    1     0   100\n   10     1  5000\n   11    10   300\n   20     1   700\n";
+        let memory = tree_memory(ps, &[10, 30]);
+        assert_eq!(memory.len(), 1, "not pid 1, nor one ps doesn't list");
+        assert_eq!(memory[&10], 5300);
     }
 }

@@ -1920,6 +1920,60 @@ mod tests {
         }
     }
 
+    /// A description may be emptied, and keeps the whitespace it opens
+    /// with, an indented code block's, losing only what trails. A review's
+    /// summary emptied is not sent, as a comment's is not.
+    #[test]
+    fn an_edited_description_may_be_empty_and_keeps_its_leading_whitespace() {
+        use crate::review::model::Destination;
+        use perch_github::CommentPlace;
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let mut discussion = discussion();
+        discussion.node_id = "PR_57".into();
+        discussion.viewer_can_update = true;
+        discussion.reviews[0].node_id = "PRR_9".into();
+        discussion.reviews[0].viewer_can_update = true;
+        let (mut harness, _, state) = app_harness_on(backend, discussion);
+        let mut update = |harness: &mut HeadlessHarness, name: &str, id: &str, words: &str| {
+            while commands.try_recv().is_ok() {}
+            state.open_composer_with(None, None, words.into(), Destination::GitHub, Some(id.into()));
+            harness.rebuild();
+            harness.paint();
+            let card = find(harness.root_id(), name).unwrap();
+            card.scroll_to(None);
+            harness.rebuild();
+            harness.paint();
+            click_on(harness, find(card, "composer-send").expect("Update comment"));
+            match commands.try_recv() {
+                Ok(crate::backend::Command::UpdateGithubComment { node_id, place, body, .. }) => {
+                    assert_eq!(node_id, id);
+                    Some((place, body))
+                }
+                _ => None,
+            }
+        };
+
+        let cases = [
+            ("", ""),
+            (" \n\n", ""),
+            ("    let x = 1;\n\nThe description.\n\n", "    let x = 1;\n\nThe description."),
+        ];
+        for (words, sent) in cases {
+            let asked = update(&mut harness, "card:description", "PR_57", words);
+            assert_eq!(asked, Some((CommentPlace::PullRequestBody, sent.to_string())), "{words:?}");
+            assert!(state.composer.get().is_none(), "{words:?}: the edit closed");
+            assert_eq!(state.discussion.get().unwrap().body, sent, "{words:?}: shown at once");
+        }
+        update(&mut harness, "card:description", "PR_57", "");
+        let card = find(harness.root_id(), "card:description").unwrap();
+        assert!(find(card, "No description.").is_some(), "an emptied description says so");
+
+        let asked = update(&mut harness, "card:review", "PRR_9", "  ");
+        assert_eq!(asked, None, "a summary needs words");
+        assert!(state.composer.get().is_some(), "the edit stays open");
+        assert_eq!(state.discussion.get().unwrap().reviews[0].body, "Looks right.");
+    }
+
     /// A comment GitHub did not say the reader may edit has no Edit.
     #[test]
     fn a_comment_the_reader_may_not_edit_offers_no_edit() {

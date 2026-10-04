@@ -399,10 +399,12 @@ pub fn composer_view(
                 return;
             }
             let question = read_text();
-            // A close needs nothing said; everything else does.
+            // A close needs nothing said, nor does a description, which
+            // may be emptied; everything else does.
             let closing = state.composer_confirming.get_untracked()
                 && state.composer_closing.get_untracked();
-            if question.trim().is_empty() && !closing {
+            let description = edit_kind.as_ref().is_some_and(EditKind::edits_description);
+            if question.trim().is_empty() && !closing && !description {
                 return;
             }
             // A run that has ended since takes it as a follow-up.
@@ -421,7 +423,8 @@ pub fn composer_view(
             };
             // A reviewer's words, edited, stay where they are, Perch's. A
             // comment on GitHub shows its new words at once and goes back
-            // to GitHub with them.
+            // to GitHub with them. A description keeps the whitespace it
+            // opens with, an indented code block's.
             match (&edit_kind, &composer.editing) {
                 (Some(EditKind::Reviewer), Some(id)) => {
                     backend.edit_reviewer_message(&item_id, id, question.trim());
@@ -429,8 +432,13 @@ pub fn composer_view(
                     return;
                 }
                 (Some(EditKind::Posted { node_id, place }), _) => {
-                    state.rewrite_github_comment(node_id, question.trim());
-                    backend.update_github_comment(&item_id, node_id, *place, question.trim());
+                    let body = if description {
+                        question.trim_end()
+                    } else {
+                        question.trim()
+                    };
+                    state.rewrite_github_comment(node_id, body);
+                    backend.update_github_comment(&item_id, node_id, *place, body);
                     state.composer_sent();
                     return;
                 }
@@ -1297,6 +1305,21 @@ impl EditKind {
             EditKind::Reviewer => Some("Save"),
             EditKind::Posted { .. } => Some("Update comment"),
         }
+    }
+
+    /// Whether this edits a pull request's or an issue's description,
+    /// which may be empty, as it may when opened. A review's summary may
+    /// not: GitHub wants one on a review that asks for changes, and a
+    /// review with none has no Edit here to give it words again.
+    fn edits_description(&self) -> bool {
+        use perch_github::CommentPlace;
+        matches!(
+            self,
+            EditKind::Posted {
+                place: CommentPlace::PullRequestBody | CommentPlace::IssueBody,
+                ..
+            }
+        )
     }
 }
 
@@ -3212,9 +3235,7 @@ fn github_message_view(
         move || !may.is_empty() && state.may_update_line_comment(&may),
         edit_in_row(state, thread, message),
     );
-    let leading = Stack::horizontal((reply_button, edit, delete))
-        .style(|s| s.items_center().gap(4.0))
-        .into_any();
+    let leading = cards::leading_actions(Some(reply_button), edit, Some(delete));
     let confirm = cards::delete_comment_confirmation(app, state, backend.clone(), node_id);
     let react = message.node_id.as_deref().and_then(cards::reactable);
     let url = message.html_url.clone().unwrap_or_default();
@@ -3311,9 +3332,7 @@ fn posted_message_view(
     let deletable = !node_id.is_empty();
     let delete = cards::delete_action(state, hovered, node_id.clone(), move || deletable);
     let edit = cards::edit_action(hovered, move || deletable, edit_in_row(state, thread, message));
-    let leading = Stack::horizontal((reply_button, edit, delete))
-        .style(|s| s.items_center().gap(4.0))
-        .into_any();
+    let leading = cards::leading_actions(Some(reply_button), edit, Some(delete));
     let confirm = cards::delete_comment_confirmation(app, state, backend.clone(), node_id);
     let react = message.node_id.as_deref().and_then(cards::reactable);
     let url = message.html_url.clone().unwrap_or_default();

@@ -411,6 +411,23 @@ fn offered_action(
     .into_any()
 }
 
+/// What a card puts first among its [`actions`], in a row: Quote reply or
+/// a thread's Reply where there is one, Edit, then Delete where the card
+/// offers it.
+pub(crate) fn leading_actions(
+    first: Option<floem::AnyView>,
+    edit: floem::AnyView,
+    delete: Option<floem::AnyView>,
+) -> floem::AnyView {
+    let first = first.unwrap_or_else(|| Empty::new().into_any());
+    match delete {
+        Some(delete) => Stack::horizontal((first, edit, delete)),
+        None => Stack::horizontal((first, edit)),
+    }
+    .style(|s| s.items_center().gap(4.0))
+    .into_any()
+}
+
 /// "Delete this comment?" with Delete and Cancel, under the comment that
 /// asked. Delete takes the comment out of the view at once, a line in the
 /// timeline in its place for one in the conversation, and asks GitHub to
@@ -1218,9 +1235,7 @@ pub fn description_card(
     let quote = (!body.trim().is_empty())
         .then(|| quote_reply_button(state, hovered, body.clone(), scope));
     let edit = edit_in_card_action(state, hovered, node_id.clone(), body.clone(), editable);
-    let leading = Stack::horizontal((quote.unwrap_or_else(|| Empty::new().into_any()), edit))
-        .style(|s| s.items_center().gap(4.0))
-        .into_any();
+    let leading = leading_actions(quote, edit, None);
     let react = reactable(&node_id);
     let reactions = reactions_under(app, state, backend.clone(), &react);
     let shown = Stack::vertical((description, reactions))
@@ -1280,9 +1295,7 @@ pub fn comment_card(
         comment.body.clone(),
         comment.viewer_can_update,
     );
-    let leading = Stack::horizontal((quote, edit, delete))
-        .style(|s| s.items_center().gap(4.0))
-        .into_any();
+    let leading = leading_actions(Some(quote), edit, Some(delete));
     let confirm = delete_comment_confirmation(app, state, backend.clone(), comment.node_id.clone());
     let react = reactable(&comment.node_id);
     let reactions = reactions_under(app, state, backend.clone(), &react);
@@ -1422,9 +1435,7 @@ pub fn review_card(
                 body,
                 review.viewer_can_update,
             );
-            Stack::horizontal((quote, edit))
-                .style(|s| s.items_center().gap(4.0))
-                .into_any()
+            leading_actions(Some(quote), edit, None)
         });
     // A review with no summary has nothing to react to; GitHub allows it,
     // but there would be nothing to draw the pills under.
