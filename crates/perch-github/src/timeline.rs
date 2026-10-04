@@ -118,8 +118,10 @@ impl Reference {
     }
 }
 
-/// How many pages of timeline one item is read for. A hundred to a page,
-/// and nobody reads the thousandth line of a pull request.
+/// How many pages of timeline one item is read for, a hundred to a page:
+/// the first and the newest. GitHub lists the oldest first, so a longer
+/// timeline loses the pages between, where nobody reads, and keeps its
+/// latest close, merge or push.
 pub(crate) const TIMELINE_MAX_PAGES: usize = 10;
 
 /// The wire shape: one struct for every kind GitHub sends, since the list

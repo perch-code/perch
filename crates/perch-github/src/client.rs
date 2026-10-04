@@ -12,7 +12,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use http::header::{HeaderMap, HeaderValue, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED};
+use http::header::{
+    HeaderMap, HeaderValue, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, LINK,
+};
 use http::StatusCode;
 use http_body_util::BodyExt;
 use jiff::Timestamp;
@@ -39,7 +41,7 @@ use crate::reactions::{
     reaction_mutation, reactions_query, NodeReading, ReactionKind, ReactionMutationData, Reactions,
     ReactionsData, NODES_PER_QUERY,
 };
-use crate::responses::{Responses, BUDGET_BYTES};
+use crate::responses::{Known, Responses, BUDGET_BYTES};
 use crate::subjects::{SubjectLook, SubjectLookData};
 use crate::timeline::{
     fill_logins, same_moment, tidy, wants_login, DeletedAuthorsData, PullCommitPayload, PullEvent,
@@ -964,6 +966,11 @@ impl GitHub {
     ///
     /// The list is heterogeneous, so each element is read on its own: one
     /// shape that does not fit costs its own line and not the page.
+    ///
+    /// GitHub lists the oldest first. A timeline longer than
+    /// `TIMELINE_MAX_PAGES` pages is read for its first page and its
+    /// newest, so how the item started and where it stands now are both
+    /// there, and the pages between are what goes unread.
     pub async fn fetch_timeline(
         &self,
         repo_full_name: &str,
@@ -971,7 +978,7 @@ impl GitHub {
         reviews: &[Review],
     ) -> Result<Vec<PullEvent>, Error> {
         let raw: Vec<serde_json::Value> = self
-            .list_pages(
+            .list_first_and_newest_pages(
                 &format!("/repos/{repo_full_name}/issues/{number}/timeline"),
                 TIMELINE_MAX_PAGES,
             )
@@ -1266,6 +1273,10 @@ impl GitHub {
     /// an issue's description, or a review's summary. The answer is the
     /// body GitHub keeps. GitHub refuses a reader who is neither its
     /// author nor able to write to the repository.
+    ///
+    /// A description's edit forgets the kept read of its pull request or
+    /// issue, so the discussion read after it asks GitHub rather than
+    /// taking a read from moments before the edit as current.
     pub async fn update_comment(
         &self,
         node_id: &str,
@@ -1275,34 +1286,58 @@ impl GitHub {
         if node_id.is_empty() {
             return Err(Error::Decode("the comment has no node id".into()));
         }
-        let (field, id, comment) = match place {
-            CommentPlace::Conversation => ("updateIssueComment", "id", "issueComment"),
+        // The last is where a description's subject is read from, by
+        // repository and number.
+        let (field, id, comment, read_at) = match place {
+            CommentPlace::Conversation => ("updateIssueComment", "id", "issueComment", None),
             CommentPlace::Line => (
                 "updatePullRequestReviewComment",
                 "pullRequestReviewCommentId",
                 "pullRequestReviewComment",
+                None,
             ),
-            CommentPlace::PullRequestBody => ("updatePullRequest", "pullRequestId", "pullRequest"),
-            CommentPlace::IssueBody => ("updateIssue", "id", "issue"),
+            CommentPlace::PullRequestBody => {
+                ("updatePullRequest", "pullRequestId", "pullRequest", Some("pulls"))
+            }
+            CommentPlace::IssueBody => ("updateIssue", "id", "issue", Some("issues")),
             CommentPlace::Review => (
                 "updatePullRequestReview",
                 "pullRequestReviewId",
                 "pullRequestReview",
+                None,
             ),
+        };
+        let fields = if read_at.is_some() {
+            "body number repository { nameWithOwner }"
+        } else {
+            "body"
         };
         let payload = serde_json::json!({
             "query": format!(
-                "mutation($id: ID!, $body: String!) {{ {field}(input: {{{id}: $id, body: $body}}) {{ {comment} {{ body }} }} }}"
+                "mutation($id: ID!, $body: String!) {{ {field}(input: {{{id}: $id, body: $body}}) {{ {comment} {{ {fields} }} }} }}"
             ),
             "variables": { "id": node_id, "body": body },
         });
         let data: serde_json::Value = self.graphql(&payload, "edit comment").await?;
-        data.get(field)
-            .and_then(|answer| answer.get(comment))
+        let answer = data.get(field).and_then(|answer| answer.get(comment));
+        let kept = answer
             .and_then(|comment| comment.get("body"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_string)
-            .ok_or_else(|| Error::Decode("GitHub answered the edit without the comment".into()))
+            .ok_or_else(|| Error::Decode("GitHub answered the edit without the comment".into()))?;
+        if let (Some(read_at), Some(answer)) = (read_at, answer) {
+            let number = answer.get("number").and_then(serde_json::Value::as_u64);
+            let repo = answer
+                .pointer("/repository/nameWithOwner")
+                .and_then(serde_json::Value::as_str);
+            if let (Some(number), Some(repo)) = (number, repo) {
+                self.responses
+                    .lock()
+                    .unwrap()
+                    .remove_any_case(&format!("/repos/{repo}/{read_at}/{number}"));
+            }
+        }
+        Ok(kept)
     }
 
     /// Whether the reader gave each of these issues a 👍, how many did,
@@ -1950,12 +1985,7 @@ impl GitHub {
     ) -> Result<Vec<T>, Error> {
         let mut all = Vec::new();
         for page in 1..=max_pages {
-            let joiner = if path.contains('?') { '&' } else { '?' };
-            let body = self
-                .get_text(&format!(
-                    "{path}{joiner}per_page={LIST_PER_PAGE}&page={page}"
-                ))
-                .await?;
+            let body = self.get_text(&page_path(path, page)).await?;
             let items: Vec<T> =
                 serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
             let short = items.len() < LIST_PER_PAGE;
@@ -1967,20 +1997,71 @@ impl GitHub {
         Ok(all)
     }
 
+    /// A list GitHub keeps oldest first, cut to `max_pages` pages when it
+    /// runs longer: the first page, and the newest after it. The first is
+    /// read anyway, since its `Link` header says where the list ends, so
+    /// keeping it costs nothing; the pages between are the ones skipped.
+    ///
+    /// A 304 on the first page can hand back a `Link` kept from when the
+    /// list was shorter, so pages past the last one it names are read too
+    /// while they come full, and the oldest of the newest are let go.
+    async fn list_first_and_newest_pages<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        max_pages: usize,
+    ) -> Result<Vec<T>, Error> {
+        let (body, link) = self.get_linked(&page_path(path, 1)).await?;
+        let mut all: Vec<T> =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        let newest = max_pages.saturating_sub(1);
+        if all.len() < LIST_PER_PAGE || newest == 0 {
+            return Ok(all);
+        }
+        let first = newest_pages_from(link.as_deref().and_then(last_page), newest);
+        let mut tail = std::collections::VecDeque::new();
+        for page in first..first.saturating_add(LIST_MAX_PAGES) {
+            let body = self.get_text(&page_path(path, page)).await?;
+            let items: Vec<T> =
+                serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+            if items.is_empty() {
+                break;
+            }
+            let short = items.len() < LIST_PER_PAGE;
+            tail.push_back(items);
+            if tail.len() > newest {
+                tail.pop_front();
+            }
+            if short {
+                break;
+            }
+        }
+        all.extend(tail.into_iter().flatten());
+        Ok(all)
+    }
+
     /// One GET whose body is all the caller wants.
     ///
     /// Asked with the tag of the body last read at `path`, if one is kept:
     /// a 304 hands that body back, so the caller cannot tell the two apart
     /// except by the rate limit it did not spend.
     async fn get_text(&self, path: &str) -> Result<String, Error> {
+        self.get_linked(path).await.map(|(body, _)| body)
+    }
+
+    /// `get_text`, and the `Link` header the body came with: the answer's
+    /// own when it has one, else, on a 304, the one kept beside the body.
+    /// A kept one can be out of date, since a page's tag says nothing of
+    /// the pages after it.
+    async fn get_linked(&self, path: &str) -> Result<(String, Option<String>), Error> {
         let known = self.responses.lock().unwrap().get(path);
         let fetched = self
             .get(path, conditional(known.as_ref().map(|k| k.etag.as_str())))
             .await?;
+        let link = header_str(&fetched.headers, LINK.as_str());
         if fetched.status == StatusCode::NOT_MODIFIED {
             self.responses.lock().unwrap().confirm(path);
             return match known {
-                Some(known) => Ok(known.body.to_string()),
+                Some(known) => Ok((known.body.to_string(), link.or(known.link))),
                 None => Err(Error::Status {
                     status: StatusCode::NOT_MODIFIED.as_u16(),
                     body: String::new(),
@@ -1989,10 +2070,17 @@ impl GitHub {
         }
         let mut responses = self.responses.lock().unwrap();
         match header_str(&fetched.headers, ETAG.as_str()) {
-            Some(etag) => responses.put(path, etag, fetched.body.as_str().into()),
+            Some(etag) => responses.put(
+                path,
+                Known {
+                    etag,
+                    body: fetched.body.as_str().into(),
+                    link: link.clone(),
+                },
+            ),
             None => responses.remove(path),
         }
-        Ok(fetched.body)
+        Ok((fetched.body, link))
     }
 
     /// `get_text`, without asking when GitHub said the kept body was
@@ -2398,6 +2486,39 @@ fn conditional(etag: Option<&str>) -> Option<HeaderMap> {
     Some(headers)
 }
 
+/// One page of a list endpoint, a hundred to the page.
+fn page_path(path: &str, page: usize) -> String {
+    let joiner = if path.contains('?') { '&' } else { '?' };
+    format!("{path}{joiner}per_page={LIST_PER_PAGE}&page={page}")
+}
+
+/// The page a `Link` header names as the last, as GitHub writes one:
+/// `<…&page=2>; rel="next", <…&page=12>; rel="last"`.
+fn last_page(link: &str) -> Option<usize> {
+    link.split(',').find_map(|part| {
+        let (target, params) = part.split_once(';')?;
+        let last = params
+            .split(';')
+            .any(|param| param.trim().replace(' ', "") == r#"rel="last""#);
+        if !last {
+            return None;
+        }
+        let url = target.trim().strip_prefix('<')?.strip_suffix('>')?;
+        let (_, query) = url.split_once('?')?;
+        query
+            .split('&')
+            .find_map(|pair| pair.strip_prefix("page="))
+            .and_then(|page| page.parse().ok())
+    })
+}
+
+/// The page to read a list from for its `newest` pages after the first,
+/// when its last page is `last`. Without a last page, every page after
+/// the first is read.
+fn newest_pages_from(last: Option<usize>, newest: usize) -> usize {
+    last.map_or(2, |last| (last + 1).saturating_sub(newest).max(2))
+}
+
 /// The conditional header for a notifications probe.
 fn modified_since(last_modified: Option<&str>) -> Option<HeaderMap> {
     let value = last_modified.and_then(|value| HeaderValue::from_str(value).ok())?;
@@ -2537,6 +2658,27 @@ mod tests {
         );
         assert_eq!(search_sort("repo:a/b sort:updated"), ("repo:a/b".to_string(), "updated", "desc"));
         assert_eq!(search_sort("repo:a/b sort:bogus-asc"), ("repo:a/b".to_string(), "updated", "desc"));
+    }
+
+    #[test]
+    fn a_link_header_says_which_page_is_the_last() {
+        let link = r#"<https://api.github.com/repositories/1/issues/7/timeline?per_page=100&page=2>; rel="next", <https://api.github.com/repositories/1/issues/7/timeline?per_page=100&page=25>; rel="last""#;
+        assert_eq!(last_page(link), Some(25));
+        let on_the_last = r#"<https://x/t?page=1&per_page=100>; rel="first", <https://x/t?page=24&per_page=100>; rel="prev""#;
+        assert_eq!(last_page(on_the_last), None, "the last page names no last");
+        assert_eq!(last_page(""), None);
+        assert_eq!(last_page(r#"<https://x/t?per_page=100>; rel="last""#), None);
+    }
+
+    #[test]
+    fn a_long_list_is_read_from_its_newest_pages() {
+        // Nine newest pages of twenty-five are 17 to 25.
+        assert_eq!(newest_pages_from(Some(25), 9), 17);
+        // Ten pages in all are read whole after the first.
+        assert_eq!(newest_pages_from(Some(10), 9), 2);
+        assert_eq!(newest_pages_from(Some(3), 9), 2);
+        assert_eq!(newest_pages_from(None, 9), 2);
+        assert_eq!(newest_pages_from(Some(25), 1), 25);
     }
 
     #[test]
