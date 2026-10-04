@@ -15,7 +15,8 @@ use perch_github::ItemKind;
 
 use crate::backend::Backend;
 use crate::reference::{self, Reference};
-use crate::state::AppState;
+use crate::review::model::{Phase, Preparing};
+use crate::state::{AppState, Tone};
 use crate::theme;
 
 /// The box's state, in the app state. Signals, so it is `Copy`.
@@ -124,7 +125,8 @@ pub fn target(state: AppState, text: &str) -> Result<(String, Reference), String
     };
     let repo = match reference.repo.clone() {
         Some(repo) => repo,
-        None => default_repo(state).ok_or_else(|| "Which repository?".to_string())?,
+        None => default_repo(state)
+            .ok_or_else(|| "Which repository? Type owner/repo#57".to_string())?,
     };
     Ok((repo, reference))
 }
@@ -136,12 +138,28 @@ pub fn open_text(state: AppState, backend: &Backend, text: &str) -> Result<u64, 
     Ok(backend.open_reference(&repo, reference.number, reference.kind))
 }
 
-/// The Browse search box's Open row: the box, with what was typed in
-/// it, asked to open it, so it says what is wrong if it can't.
+/// The Browse search box's Open row, and Enter in the box: the progress
+/// card goes up at once, as it does for a row, and says why if GitHub has
+/// no such item. With no repository to ask about, a toast says so.
 pub fn open_from_search(state: AppState, backend: &Backend, text: &str) {
-    show(state, None);
-    state.open_box.text.set(text.trim().to_string());
-    submit(state, backend);
+    let (repo, reference) = match target(state, text) {
+        Ok(target) => target,
+        Err(message) => return state.notify(message, Tone::Warning),
+    };
+    let navigation_id = backend.open_reference(&repo, reference.number, reference.kind);
+    let message = match reference.kind {
+        Some(kind) => reading(kind).to_string(),
+        None => format!("Reading {repo}#{}", reference.number),
+    };
+    state.begin_open(&message, navigation_id);
+}
+
+/// What the progress card says while an item of `kind` is read.
+fn reading(kind: ItemKind) -> &'static str {
+    match kind {
+        ItemKind::PullRequest => "Reading the pull request",
+        ItemKind::Issue => "Reading the issue",
+    }
 }
 
 /// Enter.
@@ -180,7 +198,9 @@ pub fn open_link(state: AppState, backend: &Backend, url: &str) -> bool {
     true
 }
 
-/// GitHub has it: the box goes, and the open it asked for goes ahead.
+/// GitHub has it: the box goes, and the open it asked for goes ahead
+/// under the progress card. The search's card is up already, and now
+/// says which kind of item it is reading.
 pub fn resolved(state: AppState, navigation_id: u64, kind: ItemKind) {
     let link = state
         .open_box
@@ -188,22 +208,18 @@ pub fn resolved(state: AppState, navigation_id: u64, kind: ItemKind) {
         .with_untracked(|link| link.as_ref().is_some_and(|(id, _)| *id == navigation_id));
     if link {
         state.open_box.link.set(None);
-    } else if state.open_box.waiting.get_untracked() != Some(navigation_id) {
-        return;
-    } else {
+    } else if state.open_box.waiting.get_untracked() == Some(navigation_id) {
         close(state, false);
+    } else if !state.accepts_navigation(navigation_id) {
+        // The search's, given up for another open since.
+        return;
     }
-    state.begin_open(
-        match kind {
-            ItemKind::PullRequest => "Reading the pull request",
-            ItemKind::Issue => "Reading the issue",
-        },
-        navigation_id,
-    );
+    state.begin_open(reading(kind), navigation_id);
 }
 
-/// It can't be opened: the box says why and keeps what was typed. A
-/// link goes to the browser instead.
+/// It can't be opened: the box says why and keeps what was typed, and
+/// the search's progress card says why as a failed open does. A link
+/// goes to the browser instead.
 pub fn failed(state: AppState, navigation_id: u64, message: String) {
     let link = state.open_box.link.get_untracked();
     if let Some((_, url)) = link.filter(|(id, _)| *id == navigation_id) {
@@ -212,11 +228,18 @@ pub fn failed(state: AppState, navigation_id: u64, message: String) {
         crate::ui::widgets::open_in_browser(&url);
         return;
     }
-    if state.open_box.waiting.get_untracked() != Some(navigation_id) {
+    if state.open_box.waiting.get_untracked() == Some(navigation_id) {
+        state.open_box.waiting.set(None);
+        state.open_box.error.set(Some(message));
         return;
     }
-    state.open_box.waiting.set(None);
-    state.open_box.error.set(Some(message));
+    if !state.accepts_navigation(navigation_id) {
+        return;
+    }
+    if let Some(review) = state.review.get_untracked() {
+        review.preparing.set(Preparing::Failed { message });
+        review.set_phase(Phase::Failed);
+    }
 }
 
 /// The box's keys, from the window while it is up: Escape and Enter. The
@@ -367,7 +390,10 @@ mod tests {
         state
             .repos
             .set(declared(&["a/one", "a/two", "local/notes"]));
-        assert_eq!(target(state, "#5"), Err("Which repository?".to_string()));
+        assert_eq!(
+            target(state, "#5"),
+            Err("Which repository? Type owner/repo#57".to_string())
+        );
 
         state.repos.set(declared(&["a/one", "local/notes"]));
         let (repo, reference) = target(state, "#5").unwrap();
@@ -458,6 +484,79 @@ mod tests {
             state.accepts_navigation(navigation_id),
             "and the open is the window's"
         );
+    }
+
+    #[test]
+    fn the_search_puts_the_progress_card_up_and_it_says_why_if_github_cant() {
+        // The toast's timer.
+        let _root = floem::headless::TestRoot::new();
+        let state = AppState::new();
+        state.repos.set(declared(&["a/one", "a/two"]));
+        let review = crate::review::model::ReviewState::new();
+        state.review.set(Some(review));
+        let (backend, mut commands) = Backend::recording();
+
+        open_from_search(state, &backend, "#5");
+        assert!(commands.try_recv().is_err(), "nothing asked");
+        assert_eq!(
+            state.notice().as_deref(),
+            Some("Which repository? Type owner/repo#57")
+        );
+
+        open_from_search(state, &backend, " https://github.com/a/b/pull/7 ");
+        let Ok(Command::OpenReference { navigation_id, .. }) = commands.try_recv() else {
+            panic!("no OpenReference");
+        };
+        assert!(!state.open_box.open.get(), "no box goes up");
+        assert!(state.accepts_navigation(navigation_id));
+        assert_eq!(review.phase.get(), Phase::Preparing);
+        assert_eq!(
+            review.preparing.get(),
+            Preparing::Working {
+                message: "Reading the pull request".into(),
+                percent: None
+            }
+        );
+
+        failed(state, navigation_id, "No #7 in a/b".into());
+        assert_eq!(review.phase.get(), Phase::Failed, "the card says why");
+        assert_eq!(
+            review.preparing.get(),
+            Preparing::Failed {
+                message: "No #7 in a/b".into()
+            }
+        );
+
+        open_from_search(state, &backend, "a/b#8");
+        let Ok(Command::OpenReference { navigation_id, .. }) = commands.try_recv() else {
+            panic!("no OpenReference");
+        };
+        assert_eq!(
+            review.preparing.get(),
+            Preparing::Working {
+                message: "Reading a/b#8".into(),
+                percent: None
+            },
+            "before GitHub says which kind it is"
+        );
+        resolved(state, navigation_id, ItemKind::Issue);
+        assert_eq!(
+            review.preparing.get(),
+            Preparing::Working {
+                message: "Reading the issue".into(),
+                percent: None
+            }
+        );
+        assert!(state.accepts_navigation(navigation_id));
+
+        // The reader went on to another item before GitHub answered.
+        open_from_search(state, &backend, "a/b#9");
+        let Ok(Command::OpenReference { navigation_id, .. }) = commands.try_recv() else {
+            panic!("no OpenReference");
+        };
+        state.begin_open("Reading the pull request", navigation_id + 1);
+        failed(state, navigation_id, "No #9 in a/b".into());
+        assert_eq!(review.phase.get(), Phase::Preparing, "the other open's card stays");
     }
 
     #[test]

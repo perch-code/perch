@@ -30,8 +30,8 @@ pub fn browse(state: AppState, backend: Rc<Backend>) -> impl IntoView {
 }
 
 /// The first row while the search box holds something Open… reads: a
-/// URL, `owner/repo#57` or `#57`. It opens through Open…'s box, which
-/// says what is wrong if it can't.
+/// URL, `owner/repo#57` or `#57`. It opens as a result's row does, under
+/// the progress card, which says what is wrong if it can't.
 fn open_row(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     let label = move || {
         let text = state.item_query.get();
@@ -410,12 +410,14 @@ mod tests {
         assert!(find(harness.root_id(), "Not a repository on GitHub").is_some());
     }
 
-    /// A reference in the search box is the first row, and Enter opens it
-    /// through Open…'s box.
+    /// A reference in the search box is the first row, and a click opens it
+    /// under the progress card, with no box.
     #[test]
     fn a_reference_in_the_search_box_opens() {
         let root = TestRoot::new();
         let state = AppState::new();
+        let review = crate::review::model::ReviewState::new();
+        state.review.set(Some(review));
         state.sidebar_width.set(theme::SIDEBAR_MIN_WIDTH);
         state.item_filters.update(|f| f.tab = SidebarTab::Browse);
         let (backend, mut commands) = Backend::recording();
@@ -435,6 +437,7 @@ mod tests {
         let opened = std::iter::from_fn(|| commands.try_recv().ok())
             .any(|c| matches!(c, Command::OpenReference { number: 7, .. }));
         assert!(opened);
-        assert!(state.open_box.open.get(), "the box says how it goes");
+        assert!(!state.open_box.open.get(), "no box goes up");
+        assert_eq!(review.phase.get(), crate::review::model::Phase::Preparing);
     }
 }
