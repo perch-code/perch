@@ -260,6 +260,14 @@ pub enum Command {
         kind: ReactionKind,
         add: bool,
     },
+    /// Edit a comment on GitHub, in the conversation or on a line, by its
+    /// GraphQL id. The view already shows the new body.
+    UpdateGithubComment {
+        item_id: String,
+        node_id: String,
+        place: CommentPlace,
+        body: String,
+    },
     /// Delete a comment on GitHub, in the conversation or on a line, by
     /// its GraphQL id. The view has already taken it out.
     DeleteGithubComment {
@@ -2801,6 +2809,24 @@ impl Backend {
         });
     }
 
+    /// Edit a comment of the open item on GitHub. The view already shows
+    /// the new body; the item is read again after, which puts back the
+    /// old one where GitHub refused.
+    pub fn update_github_comment(
+        &self,
+        item_id: &str,
+        node_id: &str,
+        place: CommentPlace,
+        body: &str,
+    ) {
+        let _ = self.commands.send(Command::UpdateGithubComment {
+            item_id: item_id.to_string(),
+            node_id: node_id.to_string(),
+            place,
+            body: body.to_string(),
+        });
+    }
+
     /// Delete a comment of the open item on GitHub, for good. The view has
     /// already taken it out and put the deletion in the timeline; the item
     /// is read again after, which puts back a comment GitHub kept.
@@ -4327,6 +4353,17 @@ async fn run(
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     set_reaction(&ctx, &item_id, &node_id, kind, add).await;
+                });
+            }
+            Command::UpdateGithubComment {
+                item_id,
+                node_id,
+                place,
+                body,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    update_github_comment(&ctx, &item_id, &node_id, place, &body).await;
                 });
             }
             Command::DeleteGithubComment {
@@ -9932,6 +9969,44 @@ async fn delete_github_comment(ctx: &Ctx, item_id: &str, node_id: &str, place: C
             ctx.notice(message);
         }
     }
+    read_after_comment_change(ctx, item_id).await;
+}
+
+/// Edit a comment on GitHub. The body GitHub keeps goes into the kept
+/// discussion too. Either way the open item is read again, which puts
+/// back the old body where GitHub refused, or what was kept, offline.
+async fn update_github_comment(
+    ctx: &Ctx,
+    item_id: &str,
+    node_id: &str,
+    place: CommentPlace,
+    body: &str,
+) {
+    let updated = match ctx.github() {
+        Some(github) => github
+            .update_comment(node_id, place, body)
+            .await
+            .map_err(|error| format!("GitHub could not edit the comment: {error}")),
+        None => Err("GitHub is unavailable while Perch is offline".to_string()),
+    };
+    match updated {
+        Ok(kept) => {
+            tracing::info!(item = item_id, node_id, ?place, "edited a comment on GitHub");
+            rewrite_cached_comment(ctx, item_id, node_id, &kept);
+        }
+        Err(message) => {
+            tracing::info!(item = item_id, node_id, %message, "comment not edited");
+            ctx.notice(message);
+        }
+    }
+    read_after_comment_change(ctx, item_id).await;
+}
+
+/// Read the open item again after a comment on it was edited or deleted:
+/// GitHub's answer then shows, and a change it refused is undone where
+/// the view made it ahead. Offline, nothing can be read, and what was
+/// kept is shown again.
+async fn read_after_comment_change(ctx: &Ctx, item_id: &str) {
     let pull_request = ctx.slot.lock().ok().and_then(|slot| {
         slot.as_ref()
             .filter(|open| open.item_id == item_id)
@@ -9948,6 +10023,34 @@ async fn delete_github_comment(ctx: &Ctx, item_id: &str, node_id: &str, place: C
     };
     if !read || ctx.github().is_none() {
         show_kept_comments(ctx, item_id);
+    }
+}
+
+/// Put the body GitHub kept for an edited comment in the kept discussion,
+/// so the next open does not paint the old one before the network
+/// answers.
+fn rewrite_cached_comment(ctx: &Ctx, item_id: &str, node_id: &str, body: &str) {
+    let cached = ctx
+        .with_cache(|cache| cache.load_discussion(item_id))
+        .and_then(Result::ok)
+        .flatten();
+    let Some((_, mut discussion)) = cached else {
+        return;
+    };
+    let mut changed = false;
+    for c in discussion.comments.iter_mut().filter(|c| c.node_id == node_id) {
+        c.body = body.to_string();
+        changed = true;
+    }
+    for c in discussion.review_comments.iter_mut().filter(|c| c.node_id == node_id) {
+        c.body = body.to_string();
+        changed = true;
+    }
+    if !changed {
+        return;
+    }
+    if let Some(Err(error)) = ctx.with_cache(|cache| cache.rewrite_discussion(item_id, &discussion)) {
+        tracing::warn!(item = item_id, %error, "could not keep the edited comment");
     }
 }
 
@@ -19745,6 +19848,7 @@ while True:
                 html_url: String::new(),
                 reactions: Default::default(),
                 viewer_can_delete: false,
+                viewer_can_update: false,
             }],
             ..Default::default()
         };
@@ -20614,6 +20718,7 @@ read eof || true
             html_url: String::new(),
             reactions: Default::default(),
             viewer_can_delete: false,
+            viewer_can_update: false,
         });
         ctx.with_cache(|c| c.store_discussion(&item.id, &discussion))
             .unwrap()
@@ -20680,6 +20785,7 @@ read eof || true
                 html_url: String::new(),
                 reactions: Default::default(),
                 viewer_can_delete: false,
+                viewer_can_update: false,
             }],
             ..Default::default()
         };

@@ -198,10 +198,11 @@ fn reaction_groups() -> String {
 }
 
 /// The reactions on up to a hundred nodes at once, and whether the
-/// reader may delete each, which costs nothing more to ask in passing.
+/// reader may edit and delete each, which costs nothing more to ask in
+/// passing.
 pub(crate) fn reactions_query() -> String {
     format!(
-        "query($ids: [ID!]!) {{ nodes(ids: $ids) {{ ... on Reactable {{ {} }} ... on Deletable {{ viewerCanDelete }} }} }}",
+        "query($ids: [ID!]!) {{ nodes(ids: $ids) {{ ... on Reactable {{ {} }} ... on Deletable {{ viewerCanDelete }} ... on Updatable {{ viewerCanUpdate }} }} }}",
         reaction_groups()
     )
 }
@@ -244,14 +245,17 @@ struct ReactorPayload {
 }
 
 /// One node's answer. A node that is not reactable, or that GitHub could
-/// not find, has no groups; one that cannot be deleted, or that the
-/// mutation's answer did not ask about, is not the reader's to delete.
+/// not find, has no groups; one that cannot be deleted or edited, or that
+/// the mutation's answer did not ask about, is not the reader's to delete
+/// or edit.
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct ReactableNode {
     #[serde(default, rename = "reactionGroups")]
     reaction_groups: Vec<ReactionGroupPayload>,
     #[serde(default, rename = "viewerCanDelete")]
     viewer_can_delete: bool,
+    #[serde(default, rename = "viewerCanUpdate")]
+    viewer_can_update: bool,
 }
 
 impl ReactableNode {
@@ -261,11 +265,12 @@ impl ReactableNode {
 }
 
 /// What the node query reads of one node: its reactions, and whether the
-/// reader may delete it.
+/// reader may delete and edit it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct NodeReading {
     pub reactions: Reactions,
     pub viewer_can_delete: bool,
+    pub viewer_can_update: bool,
 }
 
 /// The `nodes` answer, one entry per id asked for, in order; `null` for a
@@ -284,12 +289,14 @@ impl ReactionsData {
             .zip(self.nodes)
             .filter_map(|(id, node)| {
                 let node = node?;
-                let viewer_can_delete = node.viewer_can_delete;
+                let (viewer_can_delete, viewer_can_update) =
+                    (node.viewer_can_delete, node.viewer_can_update);
                 Some((
                     id.clone(),
                     NodeReading {
                         reactions: node.into_reactions(),
                         viewer_can_delete,
+                        viewer_can_update,
                     },
                 ))
             })
@@ -422,6 +429,22 @@ mod tests {
         assert!(by_id["mine"].viewer_can_delete);
         assert!(!by_id["theirs"].viewer_can_delete);
         assert!(!by_id["review"].viewer_can_delete, "a node GitHub does not call deletable is not");
+    }
+
+    #[test]
+    fn whether_the_reader_may_edit_a_node_is_read_beside_its_reactions() {
+        assert!(reactions_query().contains("... on Updatable { viewerCanUpdate }"));
+        let data: ReactionsData = serde_json::from_str(
+            r#"{"nodes":[{"reactionGroups":[],"viewerCanDelete":true,"viewerCanUpdate":true},{"reactionGroups":[],"viewerCanDelete":true},{"reactionGroups":[]}]}"#,
+        )
+        .unwrap();
+        let by_id = data.by_id(&["mine".into(), "theirs".into(), "review".into()]);
+        assert!(by_id["mine"].viewer_can_update);
+        assert!(
+            !by_id["theirs"].viewer_can_update,
+            "a maintainer may delete what they may not edit"
+        );
+        assert!(!by_id["review"].viewer_can_update);
     }
 
     #[test]

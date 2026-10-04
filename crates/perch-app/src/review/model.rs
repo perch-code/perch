@@ -2670,6 +2670,99 @@ impl ReviewState {
         })
     }
 
+    /// Whether GitHub lets the reader edit the line comment with this
+    /// node id, as the discussion read it. Tracked.
+    pub fn may_update_line_comment(&self, node_id: &str) -> bool {
+        self.discussion.with(|d| {
+            d.as_ref().is_some_and(|d| {
+                d.review_comments
+                    .iter()
+                    .any(|c| c.node_id == node_id && c.viewer_can_update)
+            })
+        })
+    }
+
+    /// Where the comment on GitHub with this node id is shown: in the
+    /// conversation, or on a line. `None` when nothing shown has it.
+    pub fn github_comment_place(&self, node_id: &str) -> Option<CommentPlace> {
+        if node_id.is_empty() {
+            return None;
+        }
+        let in_conversation = self
+            .issue_comments
+            .with_untracked(|comments| comments.iter().any(|c| c.node_id == node_id))
+            || self.discussion.with_untracked(|d| {
+                d.as_ref()
+                    .is_some_and(|d| d.comments.iter().any(|c| c.node_id == node_id))
+            });
+        if in_conversation {
+            return Some(CommentPlace::Conversation);
+        }
+        let on_a_line = self.discussion.with_untracked(|d| {
+            d.as_ref()
+                .is_some_and(|d| d.review_comments.iter().any(|c| c.node_id == node_id))
+        }) || self.comment_threads.with_untracked(|threads| {
+            threads
+                .iter()
+                .flat_map(|t| &t.messages)
+                .any(|m| m.node_id.as_deref() == Some(node_id))
+        });
+        on_a_line.then_some(CommentPlace::Line)
+    }
+
+    /// Show `body` for the comment the reader is editing on GitHub, before
+    /// GitHub answers, wherever it is shown.
+    pub fn rewrite_github_comment(&self, node_id: &str, body: &str) {
+        if node_id.is_empty() {
+            return;
+        }
+        if self
+            .issue_comments
+            .with_untracked(|comments| comments.iter().any(|c| c.node_id == node_id))
+        {
+            self.issue_comments.update(|comments| {
+                for c in Arc::make_mut(comments).iter_mut().filter(|c| c.node_id == node_id) {
+                    c.body = body.to_string();
+                }
+            });
+        }
+        let in_discussion = self.discussion.with_untracked(|d| {
+            d.as_ref().is_some_and(|d| {
+                d.comments.iter().any(|c| c.node_id == node_id)
+                    || d.review_comments.iter().any(|c| c.node_id == node_id)
+            })
+        });
+        if in_discussion {
+            self.discussion.update(|d| {
+                if let Some(d) = d {
+                    let d = Arc::make_mut(d);
+                    for c in d.comments.iter_mut().filter(|c| c.node_id == node_id) {
+                        c.body = body.to_string();
+                    }
+                    for c in d.review_comments.iter_mut().filter(|c| c.node_id == node_id) {
+                        c.body = body.to_string();
+                    }
+                }
+            });
+        }
+        let holds = |t: &CommentThread| {
+            t.messages
+                .iter()
+                .any(|m| m.node_id.as_deref() == Some(node_id))
+        };
+        if self.comment_threads.with_untracked(|threads| threads.iter().any(holds)) {
+            self.comment_threads.update(|threads| {
+                for m in Arc::make_mut(threads)
+                    .iter_mut()
+                    .flat_map(|t| t.messages.iter_mut())
+                    .filter(|m| m.node_id.as_deref() == Some(node_id))
+                {
+                    m.body = body.to_string();
+                }
+            });
+        }
+    }
+
     /// Take a comment the reader is deleting on GitHub out of what is
     /// shown, before GitHub answers. One in the conversation leaves a line
     /// in the timeline where it was, `actor` deleting it, as GitHub's own
@@ -5549,6 +5642,40 @@ mod tests {
         assert_eq!(state.take_out_github_comment("", "chris"), None);
     }
 
+    /// A comment being edited shows its new words wherever it is shown,
+    /// and its place names the mutation that edits it; an id nothing
+    /// shown has has no place.
+    #[test]
+    fn an_edited_comment_shows_its_new_words_and_knows_its_place() {
+        let state = ReviewState::new();
+        let mut thread = github_thread(10, 3, perch_github::Side::Right, "2026-09-18T09:00:00Z", 0);
+        thread.messages[0].node_id = Some("PRRC_10".into());
+        state.comment_threads.set(Arc::new(vec![thread]));
+        state.issue_comments.set(Arc::new(vec![IssueComment {
+            id: 1,
+            node_id: "IC_1".into(),
+            user: "rohan".into(),
+            user_avatar_url: String::new(),
+            body: "tpyo".into(),
+            created_at: "2026-10-03T22:00:00Z".parse().unwrap(),
+            updated_at: None,
+            html_url: String::new(),
+            reactions: Default::default(),
+            viewer_can_delete: true,
+            viewer_can_update: true,
+        }]));
+
+        assert_eq!(state.github_comment_place("IC_1"), Some(CommentPlace::Conversation));
+        assert_eq!(state.github_comment_place("PRRC_10"), Some(CommentPlace::Line));
+        assert_eq!(state.github_comment_place("PRRC_99"), None);
+        assert_eq!(state.github_comment_place(""), None);
+
+        state.rewrite_github_comment("IC_1", "typo");
+        state.rewrite_github_comment("PRRC_10", "fixed");
+        assert_eq!(state.issue_comments.get()[0].body, "typo");
+        assert_eq!(state.comment_threads.get()[0].messages[0].body, "fixed");
+    }
+
     /// An issue's comment being deleted goes, and a line saying who
     /// deleted whose takes its place in the issue's timeline.
     #[test]
@@ -5565,6 +5692,7 @@ mod tests {
             html_url: String::new(),
             reactions: Default::default(),
             viewer_can_delete: true,
+            viewer_can_update: false,
         };
         state
             .issue_comments

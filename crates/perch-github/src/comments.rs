@@ -1244,6 +1244,7 @@ mod tests {
             html_url: format!("https://github.com/a/b/pull/1#discussion_r{id}"),
             reactions: Reactions::default(),
             viewer_can_delete: false,
+            viewer_can_update: false,
         }
     }
 

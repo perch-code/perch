@@ -65,7 +65,16 @@ pub fn key(card: &Card) -> String {
         Card::Description { body, at, .. } => {
             format!("description:{:?}:{:x}", at, body_hash(body))
         }
-        Card::Comment(c) => format!("comment:{}:{:?}", c.id, c.updated_at),
+        // An edit made here shows before GitHub dates it, and what the
+        // reader may do with it lands after a first paint.
+        Card::Comment(c) => format!(
+            "comment:{}:{:?}:{:x}:{}:{}",
+            c.id,
+            c.updated_at,
+            body_hash(&c.body),
+            c.viewer_can_update,
+            c.viewer_can_delete
+        ),
         Card::Review { review } => {
             format!("review:{}:{:?}:{:x}", review.id, review.submitted_at, body_hash(&review.body))
         }
@@ -372,6 +381,28 @@ pub(crate) fn delete_action(
                 Rc::new(move || state.confirm_comment.set(Some(node_id.clone()))),
             )
             .into_any()
+        },
+    )
+    .into_any()
+}
+
+/// Edit under the pointer, for a comment on GitHub, while `may` says
+/// GitHub lets the reader edit it; absent otherwise. `edit` opens the
+/// composer in the comment's place with its text.
+pub(crate) fn edit_action(
+    hovered: RwSignal<bool>,
+    may: impl Fn() -> bool + 'static,
+    edit: Rc<dyn Fn()>,
+) -> floem::AnyView {
+    let offered = Memo::new(move |_| may());
+    dyn_container(
+        move || offered.get(),
+        move |offered| {
+            if !offered {
+                return Empty::new().into_any();
+            }
+            hover_action(hovered, SidebarIcon::Pencil, "Edit", "edit-comment", edit.clone())
+                .into_any()
         },
     )
     .into_any()
@@ -1267,12 +1298,61 @@ pub fn comment_card(
     let quote = quote_reply_button(state, hovered, comment.body.clone(), text.id());
     let deletable = comment.viewer_can_delete && !comment.node_id.is_empty();
     let delete = delete_action(state, hovered, comment.node_id.clone(), move || deletable);
-    let leading = Stack::horizontal((quote, delete))
+    let updatable = comment.viewer_can_update && !comment.node_id.is_empty();
+    let (node_id, draft) = (comment.node_id.clone(), comment.body.clone());
+    let edit = edit_action(
+        hovered,
+        move || updatable,
+        Rc::new(move || {
+            state.open_composer_with(
+                None,
+                None,
+                draft.clone(),
+                Destination::GitHub,
+                Some(node_id.clone()),
+            )
+        }),
+    );
+    let leading = Stack::horizontal((quote, edit, delete))
         .style(|s| s.items_center().gap(4.0))
         .into_any();
     let confirm = delete_comment_confirmation(app, state, backend.clone(), comment.node_id.clone());
     let react = reactable(&comment.node_id);
     let reactions = reactions_under(app, state, backend.clone(), &react);
+    // Edited, the comment's text gives way to the composer, with its
+    // words in it, until the edit is sent or put away.
+    let edited = comment.node_id.clone();
+    let editing = Memo::new(move |_| {
+        state.composer.with(|c| {
+            c.as_ref()
+                .filter(|c| {
+                    c.thread_id.is_none()
+                        && !edited.is_empty()
+                        && c.editing.as_deref() == Some(edited.as_str())
+                })
+                .map(|c| c.opening)
+        })
+    });
+    let composing = backend.clone();
+    let editor = dyn_container(
+        move || editing.get(),
+        move |opening| match (opening, state.composer.get_untracked()) {
+            (Some(_), Some(c)) => {
+                threads::composer_view(app, state, composing.clone(), c, ThreadFace::Card)
+                    .style(|s| s.width_full())
+                    .into_any()
+            }
+            _ => Empty::new().into_any(),
+        },
+    )
+    .debug_name("comment-editor")
+    .style(move |s| s.width_full().apply_if(editing.get().is_none(), |s| s.hide()));
+    let shown = Stack::vertical((text, reactions, confirm))
+        .style(move |s| {
+            s.flex_col()
+                .width_full()
+                .apply_if(editing.get().is_some(), |s| s.hide())
+        });
     track_hover(
         card(
             byline_strip(byline(
@@ -1281,7 +1361,7 @@ pub fn comment_card(
                 actions(state, backend, hovered, Some(leading), Some(ask), react, comment.html_url.clone()),
             )),
             Some(
-                Stack::vertical((text, reactions, confirm))
+                Stack::vertical((shown, editor))
                     .style(|s| s.flex_col().width_full())
                     .into_any(),
             ),
@@ -2833,6 +2913,7 @@ mod tests {
                 updated_at: edited.map(at),
                 html_url: String::new(),
                 viewer_can_delete: false,
+                viewer_can_update: false,
             })
         };
         assert_ne!(

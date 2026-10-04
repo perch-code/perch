@@ -4939,6 +4939,7 @@ mod tests {
                 html_url: String::new(),
                 reactions,
                 viewer_can_delete: false,
+                viewer_can_update: false,
             }],
             ..Default::default()
         }
@@ -5462,6 +5463,7 @@ mod tests {
                         html_url: String::new(),
                         reactions: Default::default(),
                         viewer_can_delete: false,
+                        viewer_can_update: false,
                     })
                 }),
             }

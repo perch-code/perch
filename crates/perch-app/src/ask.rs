@@ -1746,6 +1746,7 @@ mod tests {
             updated_at: None,
             html_url: String::new(),
             viewer_can_delete: false,
+            viewer_can_update: false,
         }];
         let p = first_prompt(&PromptInput {
             issue: Some((&issue, &comments)),
@@ -1818,6 +1819,7 @@ mod tests {
             updated_at: None,
             html_url: String::new(),
             viewer_can_delete: false,
+            viewer_can_update: false,
         }];
         let p = first_prompt(&PromptInput {
             issue: Some((&issue, &comments)),

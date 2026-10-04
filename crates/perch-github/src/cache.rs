@@ -6759,6 +6759,7 @@ mod tests {
                 html_url: "https://github.com/acme/widgets/pull/7#issuecomment-1".into(),
                 reactions: Default::default(),
                 viewer_can_delete: false,
+                viewer_can_update: false,
             }],
             reviews: vec![Review {
                 id: 9,
@@ -6805,6 +6806,7 @@ mod tests {
             html_url: format!("https://github.com/acme/widgets/pull/7#discussion_r{id}"),
             reactions: thumbs,
             viewer_can_delete: false,
+            viewer_can_update: false,
         }
     }
 

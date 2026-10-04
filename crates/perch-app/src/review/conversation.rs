@@ -423,7 +423,7 @@ fn card_view(
 
 /// The composer for asking about the item as a whole, in place at the end
 /// of the column, or the box that opens it. A follow-up's composer is
-/// under its thread instead.
+/// under its thread instead, and one editing a comment is in its card.
 fn composer(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     // Keyed on whether one is open, what it is about and which opening it
     // is, not on the composer itself: picking a model writes the composer,
@@ -434,7 +434,7 @@ fn composer(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
     let open = floem::reactive::Memo::new(move |_| {
         state.composer.with(|c| {
             c.as_ref()
-                .filter(|c| c.thread_id.is_none())
+                .filter(|c| c.thread_id.is_none() && c.editing.is_none())
                 .map(|c| (c.anchor.clone(), c.opening))
         })
     });
@@ -534,6 +534,7 @@ mod tests {
             updated_at: None,
             html_url: format!("https://github.com/criccomini/perch/pull/57#discussion_r{id}"),
             viewer_can_delete: false,
+            viewer_can_update: false,
         };
         Discussion {
             node_id: String::new(),
@@ -551,6 +552,7 @@ mod tests {
                 updated_at: None,
                 html_url: "https://github.com/criccomini/perch/pull/57#issuecomment-1".into(),
                 viewer_can_delete: false,
+                viewer_can_update: false,
             }],
             reviews: vec![Review {
                 node_id: String::new(),
@@ -1189,6 +1191,7 @@ mod tests {
                 updated_at: None,
                 html_url: format!("https://github.com/criccomini/perch/pull/57#issuecomment-{i}"),
                 viewer_can_delete: false,
+                viewer_can_update: false,
             });
         }
         state.discussion.set(Some(Arc::new(discussion)));
@@ -1780,6 +1783,86 @@ mod tests {
         assert!(find(review, "delete-comment").is_none(), "a review is not deleted from here");
     }
 
+    /// Edit on a comment the reader may edit opens the composer in the
+    /// card, its words in it, the foot keeping the box that asks; Update
+    /// comment shows the new words at once and asks the backend. A card
+    /// GitHub did not say the reader may edit offers no Edit.
+    #[test]
+    fn edit_opens_the_composer_in_the_card_and_updates_the_comment() {
+        use crate::review::model::Destination;
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let mut discussion = discussion();
+        discussion.comments[0].node_id = "IC_1".into();
+        discussion.comments[0].viewer_can_update = true;
+        let (mut harness, _, state) = app_harness_on(backend, discussion);
+        let comment = find(harness.root_id(), "card:comment").unwrap();
+        comment.scroll_to(None);
+        harness.rebuild();
+        harness.paint();
+        hover_and_click(&mut harness, comment, "edit-comment");
+        let composer = state.composer.get().expect("Edit opened the composer");
+        assert_eq!(composer.editing.as_deref(), Some("IC_1"));
+        assert_eq!(composer.thread_id, None);
+        assert_eq!(composer.destination, Destination::GitHub);
+        assert_eq!(state.composer_draft.get(), "Thanks");
+        let comment = find(harness.root_id(), "card:comment").unwrap();
+        let editor = find(comment, "comment-editor").expect("the card holds the editor");
+        assert!(harness.get_layout_rect(editor).height() > 0.0);
+        assert!(find(editor, "Label: \"Update comment\"").is_some());
+        assert!(find(editor, "composer-destination").is_none(), "it goes nowhere else");
+        let mut all = Vec::new();
+        names(harness.root_id(), &mut all);
+        let boxes = all.iter().filter(|n| n.contains("composer-box")).count();
+        assert_eq!(boxes, 1, "the card's alone; the foot keeps the box that asks");
+
+        // Opened again with other words, as the reader would type them.
+        while commands.try_recv().is_ok() {}
+        state.open_composer_with(None, None, "Thanks a lot".into(), Destination::GitHub, Some("IC_1".into()));
+        harness.rebuild();
+        harness.paint();
+        let comment = find(harness.root_id(), "card:comment").unwrap();
+        let send = find(comment, "composer-send").expect("Update comment");
+        click_on(&mut harness, send);
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(crate::backend::Command::UpdateGithubComment { item_id, node_id, place: perch_github::CommentPlace::Conversation, body })
+                if item_id == "wt" && node_id == "IC_1" && body == "Thanks a lot"
+        ));
+        assert!(state.composer.get().is_none(), "the edit closed");
+        let kept = state.discussion.get().unwrap();
+        assert_eq!(kept.comments[0].body, "Thanks a lot", "shown before GitHub answers");
+        let comment = find(harness.root_id(), "card:comment").unwrap();
+        assert!(!shown(&harness, "comment-editor"));
+        let mut all = Vec::new();
+        names(comment, &mut all);
+        assert!(all.iter().any(|n| n.contains("Thanks a lot")), "the card shows the new words");
+
+        let review = find(harness.root_id(), "card:review").unwrap();
+        let c = review.get_visual_rect_no_clip().center();
+        harness.pointer_move(c.x, c.y);
+        harness.rebuild();
+        harness.paint();
+        assert!(find(review, "edit-comment").is_none(), "a review is not edited from here");
+    }
+
+    /// A comment GitHub did not say the reader may edit has no Edit.
+    #[test]
+    fn a_comment_the_reader_may_not_edit_offers_no_edit() {
+        let mut discussion = discussion();
+        discussion.comments[0].node_id = "IC_1".into();
+        let (mut harness, _, _) = app_harness_on(crate::backend::Backend::detached(), discussion);
+        let comment = find(harness.root_id(), "card:comment").unwrap();
+        comment.scroll_to(None);
+        harness.rebuild();
+        harness.paint();
+        let c = comment.get_visual_rect_no_clip().center();
+        harness.pointer_move(c.x, c.y);
+        harness.rebuild();
+        harness.paint();
+        assert!(find(comment, "quote-reply").is_some());
+        assert!(find(comment, "edit-comment").is_none());
+    }
+
     /// Double-click the first word of the linked text under `card` that
     /// reads `text`, selecting it.
     fn select_first_word(harness: &mut HeadlessHarness, card: floem::ViewId, text: &str) {
@@ -2366,6 +2449,7 @@ mod tests {
             html_url: "https://github.com/criccomini/perch/pull/57#issuecomment-2".into(),
             reactions: Default::default(),
             viewer_can_delete: false,
+            viewer_can_update: false,
         });
         app.apply_with_review(
             Event::DiscussionReady {

@@ -358,6 +358,7 @@ mod tests {
             updated_at: None,
             html_url: format!("https://github.com/criccomini/perch/pull/57#issuecomment-{id}"),
             viewer_can_delete: false,
+            viewer_can_update: false,
         }
     }
 

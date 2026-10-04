@@ -1,5 +1,5 @@
-//! Deleting a comment against a scripted local server, and the line a
-//! deletion leaves in the timeline.
+//! Deleting and editing a comment against a scripted local server, and
+//! the line a deletion leaves in the timeline.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -110,6 +110,62 @@ async fn each_place_is_deleted_by_its_own_mutation() {
     assert!(query(1).contains("deletePullRequestReviewComment(input: {id: $id})"));
     assert_eq!(requests[1].body["variables"]["id"], "PRRC_2");
     assert_eq!(requests[0].path, "/graphql");
+}
+
+#[tokio::test]
+async fn each_place_is_edited_by_its_own_mutation_and_answers_the_kept_body() {
+    let (base, requests) = spawn(vec![
+        Response::ok(r#"{"data":{"updateIssueComment":{"issueComment":{"body":"fixed"}}}}"#),
+        Response::ok(
+            r#"{"data":{"updatePullRequestReviewComment":{"pullRequestReviewComment":{"body":"also fixed"}}}}"#,
+        ),
+    ]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let kept = github
+        .update_comment("IC_1", CommentPlace::Conversation, "fixed")
+        .await
+        .unwrap();
+    assert_eq!(kept, "fixed");
+    let kept = github
+        .update_comment("PRRC_2", CommentPlace::Line, "also fixed")
+        .await
+        .unwrap();
+    assert_eq!(kept, "also fixed");
+
+    let requests = requests.lock().unwrap();
+    let query = |i: usize| requests[i].body["query"].as_str().unwrap().to_string();
+    assert!(query(0).contains("updateIssueComment(input: {id: $id, body: $body})"));
+    assert_eq!(requests[0].body["variables"]["id"], "IC_1");
+    assert_eq!(requests[0].body["variables"]["body"], "fixed");
+    assert!(query(1).contains(
+        "updatePullRequestReviewComment(input: {pullRequestReviewCommentId: $id, body: $body})"
+    ));
+    assert_eq!(requests[1].body["variables"]["id"], "PRRC_2");
+    assert_eq!(requests[1].body["variables"]["body"], "also fixed");
+}
+
+#[tokio::test]
+async fn a_refused_edit_is_an_error_and_no_id_asks_nothing() {
+    let (base, requests) = spawn(vec![Response::ok(
+        r#"{"data":{"updateIssueComment":null},"errors":[{"message":"Resource not accessible by integration"}]}"#,
+    )]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let refused = github
+        .update_comment("IC_1", CommentPlace::Conversation, "no")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&refused, Error::Graphql(message) if message.contains("not accessible")),
+        "{refused:?}"
+    );
+    let none = github
+        .update_comment("", CommentPlace::Line, "no")
+        .await
+        .unwrap_err();
+    assert!(matches!(none, Error::Decode(_)), "{none:?}");
+    assert_eq!(requests.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

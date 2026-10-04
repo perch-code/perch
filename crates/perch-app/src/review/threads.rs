@@ -320,7 +320,8 @@ pub fn composer_view(
     // run, which reads it after its current step. The box is built again
     // when the run ends, as a follow-up's. An edit is never a steer: it
     // saves the message it is in place of.
-    let editing_reviewer = edits_reviewer(state, &composer);
+    let edit_kind = edit_kind(state, &composer);
+    let save_label = edit_kind.clone().and_then(EditKind::save_label);
     let editing = composer.editing.is_some();
     let steering_run = composer.thread_id.as_ref().filter(|_| !editing).and_then(|id| {
         state.comment_threads.with_untracked(|threads| {
@@ -429,13 +430,22 @@ pub fn composer_view(
             let Some(item_id) = state.item.with(|i| i.as_ref().map(|i| i.id.clone())) else {
                 return;
             };
-            // A reviewer's words, edited, stay where they are, Perch's.
-            if editing_reviewer {
-                if let Some(id) = &composer.editing {
+            // A reviewer's words, edited, stay where they are, Perch's. A
+            // comment on GitHub shows its new words at once and goes back
+            // to GitHub with them.
+            match (&edit_kind, &composer.editing) {
+                (Some(EditKind::Reviewer), Some(id)) => {
                     backend.edit_reviewer_message(&item_id, id, question.trim());
                     state.composer_sent();
+                    return;
                 }
-                return;
+                (Some(EditKind::Posted { node_id, place }), _) => {
+                    state.rewrite_github_comment(node_id, question.trim());
+                    backend.update_github_comment(&item_id, node_id, *place, question.trim());
+                    state.composer_sent();
+                    return;
+                }
+                _ => {}
             }
             // An issue comment posts at once, so it is asked about first:
             // the footer names the pull request or issue, and the next
@@ -706,7 +716,7 @@ pub fn composer_view(
             theme::COMPOSER_MAX_HEIGHT,
         ),
         composer_error_line(state),
-        composer_footer(app, state, send, posting_here, steering, editing_reviewer),
+        composer_footer(app, state, send, posting_here, steering, save_label),
         resize_cursor_sheet(Grip::composer(state)),
     ))
     .debug_name("composer-box")
@@ -955,19 +965,20 @@ enum FooterMode {
 /// Cancel, and after Close
 /// with comment it asks whether to close; while this composer's comment
 /// or close goes, it says so and offers nothing. A reviewer's message
-/// being edited goes nowhere, so it has Save alone.
+/// or a comment on GitHub being edited has nowhere else to go, so it has
+/// `save` alone.
 fn composer_footer(
     app: AppState,
     state: ReviewState,
     send: Rc<dyn Fn()>,
     posting: impl Fn() -> bool + Copy + 'static,
     steering: bool,
-    editing_reviewer: bool,
+    save: Option<&'static str>,
 ) -> impl IntoView {
-    if editing_reviewer {
+    if let Some(save) = save {
         return Stack::horizontal((
             Empty::new().style(|s| s.flex_grow(1.0_f32)),
-            send_button(|| "Save".to_string(), send).debug_name("composer-send"),
+            send_button(move || save.to_string(), send).debug_name("composer-send"),
         ))
         .debug_name("composer-edit-footer")
         .style(|s| s.items_center().width_full().gap(6.0).margin_top(8.0))
@@ -1274,17 +1285,57 @@ fn mode_switch(app: AppState, state: ReviewState) -> impl IntoView {
     })
 }
 
-/// Whether `composer` edits what a reviewer said, rather than a draft.
-fn edits_reviewer(state: ReviewState, composer: &Composer) -> bool {
-    let Some(id) = composer.editing.as_deref() else {
-        return false;
-    };
-    state.comment_threads.with_untracked(|threads| {
+/// What a composer with `editing` set is editing.
+#[derive(Debug, Clone, PartialEq)]
+enum EditKind {
+    /// A draft of the reader's, still on its way to GitHub.
+    Draft,
+    /// What a reviewer said in a finding's thread, Perch's alone.
+    Reviewer,
+    /// A comment on GitHub, by its node id.
+    Posted {
+        node_id: String,
+        place: perch_github::CommentPlace,
+    },
+}
+
+impl EditKind {
+    /// The footer's one button for an edit that has nowhere else to go; a
+    /// draft's footer is a draft's as ever.
+    fn save_label(self) -> Option<&'static str> {
+        match self {
+            EditKind::Draft => None,
+            EditKind::Reviewer => Some("Save"),
+            EditKind::Posted { .. } => Some("Update comment"),
+        }
+    }
+}
+
+/// What `composer` edits: a message in a thread by its id, or a comment
+/// in the conversation by its node id. `None` when it edits nothing.
+fn edit_kind(state: ReviewState, composer: &Composer) -> Option<EditKind> {
+    let id = composer.editing.as_deref()?;
+    let message = state.comment_threads.with_untracked(|threads| {
         threads
             .iter()
             .flat_map(|t| &t.messages)
-            .any(|m| m.id == id && matches!(m.author, Author::Agent { .. }))
-    })
+            .find(|m| m.id == id)
+            .cloned()
+    });
+    match message {
+        Some(m) if matches!(m.author, Author::Agent { .. }) => Some(EditKind::Reviewer),
+        Some(m) if m.from_github() => {
+            let node_id = m.node_id.filter(|n| !n.is_empty())?;
+            Some(EditKind::Posted {
+                node_id,
+                place: perch_github::CommentPlace::Line,
+            })
+        }
+        Some(_) => Some(EditKind::Draft),
+        None => state
+            .github_comment_place(id)
+            .map(|place| EditKind::Posted { node_id: id.to_string(), place }),
+    }
 }
 
 fn send_label(state: ReviewState) -> String {
@@ -3193,7 +3244,13 @@ fn github_message_view(
     let delete = cards::delete_action(state, hovered, node_id.clone(), move || {
         !may.is_empty() && state.may_delete_line_comment(&may)
     });
-    let leading = Stack::horizontal((reply_button, delete))
+    let may = node_id.clone();
+    let edit = cards::edit_action(
+        hovered,
+        move || !may.is_empty() && state.may_update_line_comment(&may),
+        edit_in_row(state, thread, message),
+    );
+    let leading = Stack::horizontal((reply_button, edit, delete))
         .style(|s| s.items_center().gap(4.0))
         .into_any();
     let confirm = cards::delete_comment_confirmation(app, state, backend.clone(), node_id);
@@ -3244,17 +3301,7 @@ fn draft_message_view(
     place: Place,
 ) -> floem::AnyView {
     let hovered = RwSignal::new(false);
-    let (thread_id, anchor) = (thread.id.clone(), thread.anchor.clone());
-    let (edit_id, edit_body) = (message.id.clone(), message.body.clone());
-    let edit: Rc<dyn Fn()> = Rc::new(move || {
-        state.open_composer_with(
-            Some(thread_id.clone()),
-            anchor.clone(),
-            edit_body.clone(),
-            Destination::GitHub,
-            Some(edit_id.clone()),
-        );
-    });
+    let edit = edit_in_row(state, thread, message);
     let delete_id = message.id.clone();
     let delete: Rc<dyn Fn()> = Rc::new(move || {
         let Some(item_id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone())) else {
@@ -3285,8 +3332,8 @@ fn draft_message_view(
 /// A comment of the reader's that is on GitHub, under their face and
 /// name with the comment's time, Reply, Ask about this, the reaction
 /// picker and its link on hover, as anyone's comment has, and the
-/// reactions on it under its text, and Delete, which asks first. No
-/// Draft mark and no edit: what is on github.com is edited there.
+/// reactions on it under its text, Edit, which opens the composer in its
+/// row, and Delete, which asks first. No Draft mark.
 fn posted_message_view(
     app: AppState,
     state: ReviewState,
@@ -3298,11 +3345,12 @@ fn posted_message_view(
 ) -> floem::AnyView {
     let hovered = RwSignal::new(false);
     let (reply_button, ask) = reply_and_ask(app, state, thread, hovered);
-    // The reader wrote it, so GitHub lets them delete it.
+    // The reader wrote it, so GitHub lets them edit and delete it.
     let node_id = message.node_id.clone().unwrap_or_default();
     let deletable = !node_id.is_empty();
     let delete = cards::delete_action(state, hovered, node_id.clone(), move || deletable);
-    let leading = Stack::horizontal((reply_button, delete))
+    let edit = cards::edit_action(hovered, move || deletable, edit_in_row(state, thread, message));
+    let leading = Stack::horizontal((reply_button, edit, delete))
         .style(|s| s.items_center().gap(4.0))
         .into_any();
     let confirm = cards::delete_comment_confirmation(app, state, backend.clone(), node_id);
@@ -3328,6 +3376,22 @@ fn posted_message_view(
     .into_any();
     let avatar = viewer_avatar(app, face.avatar()).into_any();
     cards::track_hover(comment_frame(face, place, avatar, byline, body), hovered).into_any()
+}
+
+/// Open the composer in `message`'s row with its text, to edit it: a
+/// draft, a reviewer's words, or a comment on GitHub.
+fn edit_in_row(state: ReviewState, thread: &CommentThread, message: &CommentMessage) -> Rc<dyn Fn()> {
+    let (thread_id, anchor) = (thread.id.clone(), thread.anchor.clone());
+    let (id, body) = (message.id.clone(), message.body.clone());
+    Rc::new(move || {
+        state.open_composer_with(
+            Some(thread_id.clone()),
+            anchor.clone(),
+            body.clone(),
+            Destination::GitHub,
+            Some(id.clone()),
+        );
+    })
 }
 
 /// A message's text, a suggestion in it drawn as the change it makes to
@@ -4599,6 +4663,7 @@ mod tests {
             html_url: String::new(),
             reactions: Default::default(),
             viewer_can_delete: false,
+            viewer_can_update: false,
         };
         state
             .issue_comments
@@ -5375,6 +5440,107 @@ mod tests {
             other => panic!("Cmd-Enter did not rewrite the draft: {other:?}"),
         }
         assert!(state.composer.get().is_none(), "sending closes the edit");
+    }
+
+    /// Someone's comment on a line that GitHub says the reader may edit
+    /// has Edit under the pointer, which opens the composer in its row
+    /// with Update comment alone; sent, the new words show at once and
+    /// the backend is asked to put them on GitHub. Without GitHub's say
+    /// so there is no Edit.
+    #[test]
+    fn a_line_comment_the_reader_may_edit_is_edited_in_its_row() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_pull_request();
+        let mut thread = github_thread_with_private_messages();
+        thread.messages.truncate(1);
+        thread.messages[0].node_id = Some("PRRC_31".into());
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let line = perch_github::ReviewComment {
+            node_id: "PRRC_31".into(),
+            reactions: Default::default(),
+            id: 31,
+            pull_request_review_id: None,
+            in_reply_to_id: None,
+            user: "rohan".into(),
+            body: "epoch".into(),
+            path: "src/x.rs".into(),
+            line: Some(7),
+            original_line: None,
+            start_line: None,
+            original_start_line: None,
+            start_side: None,
+            commit_id: String::new(),
+            original_commit_id: String::new(),
+            user_avatar_url: String::new(),
+            diff_hunk: String::new(),
+            side: perch_github::Side::Right,
+            created_at: thread.created_at,
+            updated_at: None,
+            html_url: String::new(),
+            viewer_can_delete: false,
+            viewer_can_update: false,
+        };
+        let discussion = |updatable: bool| perch_github::Discussion {
+            review_comments: vec![perch_github::ReviewComment {
+                viewer_can_update: updatable,
+                ..line.clone()
+            }],
+            ..Default::default()
+        };
+        state.discussion.set(Some(Arc::new(discussion(false))));
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = messages_view(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
+            .style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "edit-comment").is_none(), "not without GitHub's say so");
+
+        state.discussion.set(Some(Arc::new(discussion(true))));
+        harness.rebuild();
+        harness.paint();
+        let root_id = harness.root_id();
+        let edit = find(root_id, "edit-comment").expect("GitHub says the reader may");
+        let at = find(root_id, "RichText").expect("the text").get_visual_rect_no_clip().center();
+        harness.pointer_move(at.x, at.y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(harness.get_layout_rect(edit).width(), 24.0);
+        let c = edit.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        let composer = state.composer.get().expect("Edit opened the composer");
+        assert_eq!(composer.editing.as_deref(), Some("gh-31"));
+        assert_eq!(state.composer_draft.get(), "epoch");
+        harness.rebuild();
+        harness.paint();
+        let root_id = harness.root_id();
+        assert!(find(root_id, "Label: \"Update comment\"").is_some());
+        assert!(find(root_id, "Label: \"Add to review\"").is_none());
+
+        let text_box = state.composer_box.get().expect("the box registered itself");
+        assert!(harness.is_focused(text_box));
+        harness.dispatch_event(key(Key::Character("a".into()), Code::KeyA, Modifiers::META));
+        harness.dispatch_event(key(Key::Named(NamedKey::Backspace), Code::Backspace, Modifiers::empty()));
+        for ch in "epochs".chars() {
+            harness.dispatch_event(key(Key::Character(ch.to_string()), Code::KeyA, Modifiers::empty()));
+        }
+        harness.dispatch_event(enter(Modifiers::META));
+        harness.rebuild();
+        match commands.try_recv() {
+            Ok(Command::UpdateGithubComment { item_id, node_id, place, body }) => {
+                assert_eq!(item_id, "item-1");
+                assert_eq!(node_id, "PRRC_31");
+                assert_eq!(place, perch_github::CommentPlace::Line);
+                assert_eq!(body, "epochs");
+            }
+            other => panic!("Cmd-Enter did not edit the comment: {other:?}"),
+        }
+        assert!(state.composer.get().is_none(), "sending closes the edit");
+        let shown = state.comment_threads.get()[0].messages[0].body.clone();
+        assert_eq!(shown, "epochs", "shown before GitHub answers");
+        let kept = state.discussion.get().unwrap();
+        assert_eq!(kept.review_comments[0].body, "epochs");
     }
 
     /// A comment of the reader's that posted: their byline with the time,

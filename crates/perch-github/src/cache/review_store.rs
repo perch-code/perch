@@ -4322,6 +4322,7 @@ mod tests {
             html_url: "https://github.com/acme/widgets/pull/7#discussion_r500".into(),
             reactions: Reactions::default(),
             viewer_can_delete: false,
+            viewer_can_update: false,
         };
         cache
             .mark_draft_posted("message-o1", &comment, true)

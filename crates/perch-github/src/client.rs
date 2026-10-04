@@ -712,9 +712,10 @@ impl GitHub {
             .await?;
         let comment: ReviewCommentPayload =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
-        // Its author may delete it, as the reader now is.
+        // Its author may edit and delete it, as the reader now is.
         Ok(ReviewComment {
             viewer_can_delete: true,
+            viewer_can_update: true,
             ..ReviewComment::from(comment)
         })
     }
@@ -752,9 +753,10 @@ impl GitHub {
             .await?;
         let comment: IssueCommentPayload =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
-        // Its author may delete it, as the reader now is.
+        // Its author may edit and delete it, as the reader now is.
         Ok(IssueComment {
             viewer_can_delete: true,
+            viewer_can_update: true,
             ..IssueComment::from(comment)
         })
     }
@@ -1161,12 +1163,13 @@ impl GitHub {
     /// count reactions without saying whose they are, and count none on a
     /// review or the body, so GraphQL is asked about every node at once.
     ///
-    /// The same query asks which comments the reader may delete.
+    /// The same query asks which comments the reader may edit and delete.
     pub async fn fill_reactions(&self, discussion: &mut Discussion) -> Result<(), Error> {
         let ids = discussion.reactable_ids();
         for (id, node) in self.read_nodes(&ids).await? {
             discussion.set_reactions(&id, &node.reactions);
             discussion.set_deletable(&id, node.viewer_can_delete);
+            discussion.set_updatable(&id, node.viewer_can_update);
         }
         Ok(())
     }
@@ -1246,6 +1249,42 @@ impl GitHub {
         });
         let _: serde_json::Value = self.graphql(&payload, "delete comment").await?;
         Ok(())
+    }
+
+    /// Edit a comment on GitHub, by its GraphQL id: one in the
+    /// conversation, or one on a line of a pull request. The answer is
+    /// the body GitHub keeps. GitHub refuses a reader who is neither its
+    /// author nor able to write to the repository.
+    pub async fn update_comment(
+        &self,
+        node_id: &str,
+        place: CommentPlace,
+        body: &str,
+    ) -> Result<String, Error> {
+        if node_id.is_empty() {
+            return Err(Error::Decode("the comment has no node id".into()));
+        }
+        let (field, id, comment) = match place {
+            CommentPlace::Conversation => ("updateIssueComment", "id", "issueComment"),
+            CommentPlace::Line => (
+                "updatePullRequestReviewComment",
+                "pullRequestReviewCommentId",
+                "pullRequestReviewComment",
+            ),
+        };
+        let payload = serde_json::json!({
+            "query": format!(
+                "mutation($id: ID!, $body: String!) {{ {field}(input: {{{id}: $id, body: $body}}) {{ {comment} {{ body }} }} }}"
+            ),
+            "variables": { "id": node_id, "body": body },
+        });
+        let data: serde_json::Value = self.graphql(&payload, "edit comment").await?;
+        data.get(field)
+            .and_then(|answer| answer.get(comment))
+            .and_then(|comment| comment.get("body"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| Error::Decode("GitHub answered the edit without the comment".into()))
     }
 
     /// Whether the reader gave each of these issues a 👍, how many did,
