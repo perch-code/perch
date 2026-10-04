@@ -411,7 +411,7 @@ fn popover(
         .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
             if key.code == Code::Escape && key.modifiers.is_empty() {
                 close();
-            } else if key.code == Code::Enter && key.modifiers == Modifiers::META {
+            } else if key.code == Code::Enter && key.modifiers == crate::ui::OS_MOD {
                 commit();
             }
             // Nothing typed here reaches the window's keys.

@@ -733,7 +733,8 @@ fn query_box(state: ReviewState) -> impl IntoView {
             state,
             "Aa",
             Face::Text,
-            "Match case (⌥⌘C)",
+            "Match case",
+            "alt+super+KeyC",
             "find-match-case",
             |o| o.match_case,
             |o| o.match_case = !o.match_case,
@@ -742,7 +743,8 @@ fn query_box(state: ReviewState) -> impl IntoView {
             state,
             "ab",
             Face::Underlined,
-            "Match whole word (⌥⌘W)",
+            "Match whole word",
+            "alt+super+KeyW",
             "find-whole-word",
             |o| o.whole_word,
             |o| o.whole_word = !o.whole_word,
@@ -751,7 +753,8 @@ fn query_box(state: ReviewState) -> impl IntoView {
             state,
             ".*",
             Face::Code,
-            "Use regular expression (⌥⌘R)",
+            "Use regular expression",
+            "alt+super+KeyR",
             "find-regex",
             |o| o.regex,
             |o| o.regex = !o.regex,
@@ -781,6 +784,7 @@ fn toggle_tile(
     letters: &'static str,
     face: Face,
     tip_text: &'static str,
+    keys: &'static str,
     name: &'static str,
     is_on: fn(&Options) -> bool,
     flip: fn(&mut Options),
@@ -816,7 +820,7 @@ fn toggle_tile(
                 base.hover(|s| s.background(theme::canvas_hover()))
             }
         });
-    tip(tile, tip_text.to_string())
+    tip(tile, format!("{tip_text} ({})", crate::ui::menu::Shortcut::label_of(keys)))
 }
 
 /// "3 of 8", "? of 8" before the bar has walked to one, "No results",

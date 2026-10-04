@@ -807,7 +807,8 @@ fn form(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoVi
     frame(app, parts, footer, "feedback-form").on_event(
         el::KeyDown,
         move |_, key: &KeyboardEvent| {
-            if key.code == Code::Enter && key.modifiers.meta() && can_preview() {
+            if key.code == Code::Enter && key.modifiers.contains(crate::ui::OS_MOD) && can_preview()
+            {
                 prepare(app, review, &enter_backend);
                 EventPropagation::Stop
             } else {
