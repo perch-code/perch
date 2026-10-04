@@ -42,6 +42,14 @@ pub const PANEL_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long the handshake and the shutdown wait.
 const LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a server told to exit has to go before it is killed. A JVM
+/// takes a moment to wind down; a server that ignores the exit would
+/// otherwise hold its workspace in memory for the rest of the session.
+const EXIT_GRACE: Duration = Duration::from_secs(3);
+
+/// How long a killed server is waited on to be gone.
+const KILL_WAIT: Duration = Duration::from_secs(1);
+
 /// What the client tells the caller about, outside of request replies.
 #[derive(Debug, Clone)]
 pub enum ServerEvent {
@@ -104,6 +112,10 @@ pub struct Client {
     exited: std::sync::OnceLock<Option<String>>,
     /// Set once Perch asks the server to stop: its exit then is no failure.
     stopping: Arc<AtomicBool>,
+    /// Tells the task that reaps the server process to kill it.
+    kill: Arc<tokio::sync::Notify>,
+    /// True once the server process has ended and been reaped.
+    ended: tokio::sync::watch::Receiver<bool>,
     /// The server process, for a bug report's memory and uptime.
     pid: Option<u32>,
     /// When it was started.
@@ -165,6 +177,8 @@ impl Client {
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let pid = child.id();
         let stopping = Arc::new(AtomicBool::new(false));
+        let kill = Arc::new(tokio::sync::Notify::new());
+        let (ended_tx, ended) = tokio::sync::watch::channel(false);
 
         let client = Arc::new(Self {
             stdin: Arc::new(Mutex::new(stdin)),
@@ -177,6 +191,8 @@ impl Client {
             class_files: Default::default(),
             exited: Default::default(),
             stopping: stopping.clone(),
+            kill: kill.clone(),
+            ended,
             pid,
             started: std::time::Instant::now(),
         });
@@ -187,15 +203,22 @@ impl Client {
         {
             let client = client.clone();
             tokio::spawn(async move {
-                read_loop(stdout, pending.clone(), client.clone()).await;
+                let unreadable = read_loop(stdout, pending.clone(), client.clone()).await;
+                // A server whose output cannot be read is of no use, and
+                // left running it would hold its workspace unseen.
+                if unreadable.is_some() {
+                    client.kill.notify_one();
+                }
                 // Its error output closes as it goes; wait for the last of it.
                 if let Some(done) = stderr_done {
                     let _ = tokio::time::timeout(Duration::from_millis(500), done).await;
                 }
-                let reason = stderr_tail
-                    .lock()
-                    .ok()
-                    .and_then(|tail| exit_reason(tail.iter().map(String::as_str)));
+                let reason = unreadable.or_else(|| {
+                    stderr_tail
+                        .lock()
+                        .ok()
+                        .and_then(|tail| exit_reason(tail.iter().map(String::as_str)))
+                });
                 let _ = client.exited.set(reason);
                 // Fail what is waiting now rather than at its timeout.
                 pending.lock().await.clear();
@@ -212,19 +235,43 @@ impl Client {
         }
 
         // Reap the child so a crash does not leave a zombie, and say how
-        // it ended, so a crash can be told from a stop.
+        // it ended, so a crash can be told from a stop. It is killed when
+        // asked: held here until it ends, the child is not dropped alive,
+        // so `kill_on_drop` only covers Perch quitting.
         let server = spec_name(&client.spec);
         tokio::spawn(async move {
-            let status = child.wait().await;
+            let (status, killed) = tokio::select! {
+                status = child.wait() => (status, false),
+                _ = kill.notified() => match child.try_wait() {
+                    // Ended on its own just as the kill was asked for.
+                    Ok(Some(status)) => (Ok(status), false),
+                    _ => {
+                        let _ = child.start_kill();
+                        (child.wait().await, true)
+                    }
+                },
+            };
             let status = match &status {
                 Ok(status) => status.to_string(),
                 Err(error) => error.to_string(),
             };
-            if stopping.load(Ordering::Relaxed) {
-                tracing::info!(%server, ?pid, %status, "language server exited when asked");
-            } else {
-                tracing::warn!(%server, ?pid, %status, "language server exited unasked");
+            match (killed, stopping.load(Ordering::Relaxed)) {
+                (true, true) => tracing::warn!(
+                    %server, ?pid, %status,
+                    "language server killed: it did not exit when asked"
+                ),
+                (true, false) => tracing::warn!(
+                    %server, ?pid, %status,
+                    "language server killed: its output could not be read"
+                ),
+                (false, true) => {
+                    tracing::info!(%server, ?pid, %status, "language server exited when asked")
+                }
+                (false, false) => {
+                    tracing::warn!(%server, ?pid, %status, "language server exited unasked")
+                }
             }
+            let _ = ended_tx.send(true);
         });
 
         client.initialize(root).await?;
@@ -788,11 +835,39 @@ impl Client {
         stdin.flush().await
     }
 
-    /// Stop the server. Its exit is not told as a failure.
+    /// Stop the server. Its exit is not told as a failure. A server that
+    /// does not answer the shutdown, or does not exit once told to, is
+    /// killed. Callers wait on this: it takes at most the shutdown's wait
+    /// and the exit's grace, and a kill's.
     pub async fn shutdown(&self) {
         self.stopping.store(true, Ordering::Relaxed);
-        let _ = self.request("shutdown", Value::Null, LIFECYCLE_TIMEOUT).await;
-        self.notify("exit", Value::Null).await;
+        let asked = async {
+            let hung = matches!(
+                self.request("shutdown", Value::Null, LIFECYCLE_TIMEOUT).await,
+                Err(Error::Timeout)
+            );
+            self.notify("exit", Value::Null).await;
+            // One that could not answer in time is not waited on again.
+            !hung && self.ended(EXIT_GRACE).await
+        };
+        // Bounded whole: a server that stopped reading can leave a write
+        // to it blocked on a full pipe.
+        let exited = tokio::time::timeout(LIFECYCLE_TIMEOUT + EXIT_GRACE, asked)
+            .await
+            .unwrap_or(false);
+        if !exited {
+            self.kill.notify_one();
+            self.ended(KILL_WAIT).await;
+        }
+    }
+
+    /// Wait up to `wait` for the server process to end, and say whether
+    /// it has.
+    async fn ended(&self, wait: Duration) -> bool {
+        let mut ended = self.ended.clone();
+        // An error is the reaping task gone, and the process with it.
+        let waited = tokio::time::timeout(wait, ended.wait_for(|ended| *ended)).await;
+        waited.is_ok()
     }
 }
 
@@ -819,7 +894,21 @@ pub(crate) fn exit_reason<'a>(lines: impl DoubleEndedIterator<Item = &'a str> + 
     error.or_else(|| lines.clone().next_back()).map(str::to_string)
 }
 
-async fn read_loop(stdout: tokio::process::ChildStdout, pending: Pending, client: Arc<Client>) {
+/// Read what the server sends until its output closes. What comes back is
+/// why reading stopped while the output was still open: a message whose
+/// end could not be found, past which no message can be told apart.
+async fn read_loop(
+    stdout: tokio::process::ChildStdout,
+    pending: Pending,
+    client: Arc<Client>,
+) -> Option<String> {
+    let unframed = |reason: &str| {
+        tracing::warn!(
+            server = %spec_name(&client.spec),
+            "the language server's output can no longer be read: {reason}"
+        );
+        Some(reason.to_string())
+    };
     let mut reader = BufReader::new(stdout);
     let mut headers = Vec::new();
     let mut reported = Reported {
@@ -837,24 +926,26 @@ async fn read_loop(stdout: tokio::process::ChildStdout, pending: Pending, client
             let mut byte = [0u8; 1];
             match reader.read_exact(&mut byte).await {
                 Ok(_) => headers.push(byte[0]),
-                Err(_) => return,
+                Err(_) => return None,
             }
             if headers.ends_with(b"\r\n\r\n") {
                 break;
             }
             if headers.len() > 8192 {
-                return;
+                return unframed("it sent headers with no end");
             }
         }
 
+        // Without a length the body cannot be told from the headers of the
+        // message after it: guessed at, every later message is misread.
         let header_text = String::from_utf8_lossy(&headers);
         let Some(length) = parse_header_block(header_text.trim_end()) else {
-            continue;
+            return unframed("it sent a message without a Content-Length");
         };
 
         let mut body = vec![0u8; length];
         if reader.read_exact(&mut body).await.is_err() {
-            return;
+            return None;
         }
         let body = String::from_utf8_lossy(&body).into_owned();
 
@@ -1450,6 +1541,144 @@ while True:
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A server that answers what it is sent until it is sent the method
+    /// named by its argument, and then stops and sleeps: told `exit`, it
+    /// stays running; asked `shutdown`, it never answers.
+    const IGNORING_SERVER: &str = r#"
+import json, sys, time
+while True:
+    length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            sys.exit(0)
+        if line in (b"\r\n", b"\n"):
+            break
+        name, _, value = line.decode().partition(":")
+        if name.lower() == "content-length":
+            length = int(value)
+    message = json.loads(sys.stdin.buffer.read(length))
+    if message.get("method") == sys.argv[1]:
+        time.sleep(600)
+    if "id" not in message:
+        continue
+    result = {"capabilities": {}} if message["method"] == "initialize" else None
+    body = json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}).encode()
+    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+    sys.stdout.buffer.flush()
+"#;
+
+    /// Whether a process is running, as `kill -0` finds it.
+    fn alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    /// Start `IGNORING_SERVER` ignoring `method`, stop it, and say how
+    /// long the stop took. The server is gone once the stop returns, and
+    /// its end is not told as a failure.
+    async fn stop_a_server_ignoring(method: &str) -> Duration {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("server.py");
+        std::fs::write(&script, IGNORING_SERVER).unwrap();
+        let spec = ServerSpec {
+            binary: PathBuf::from("python3"),
+            args: vec![script.display().to_string(), method.to_string()],
+            kind: ServerKind::RustAnalyzer,
+            options: Value::Null,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let client = Client::start(spec, dir.path(), tx).await.unwrap();
+        let pid = client.pid().unwrap();
+        assert!(alive(pid), "running once started");
+        let started = std::time::Instant::now();
+        client.shutdown().await;
+        let took = started.elapsed();
+        assert!(!alive(pid), "gone once stopped");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        while let Ok(event) = rx.try_recv() {
+            if let ServerEvent::Status(status) = event {
+                assert!(!matches!(status, Status::Failed { .. }), "{status:?}");
+            }
+        }
+        took
+    }
+
+    /// A server that answers the shutdown but ignores the exit is killed
+    /// once it has had a moment to go, rather than left running.
+    #[tokio::test]
+    async fn a_server_that_ignores_the_exit_is_killed() {
+        let took = stop_a_server_ignoring("exit").await;
+        assert!(took >= EXIT_GRACE, "given its moment: {took:?}");
+        assert!(took < EXIT_GRACE + KILL_WAIT + Duration::from_secs(1), "{took:?}");
+    }
+
+    /// A server that never answers the shutdown is killed once the ask
+    /// times out, without the exit's grace on top.
+    #[tokio::test]
+    async fn a_server_that_does_not_answer_the_shutdown_is_killed() {
+        let took = stop_a_server_ignoring("shutdown").await;
+        assert!(took >= LIFECYCLE_TIMEOUT, "{took:?}");
+        assert!(took < LIFECYCLE_TIMEOUT + KILL_WAIT + Duration::from_secs(1), "{took:?}");
+    }
+
+    /// A server that answers the handshake after a stray line, which is
+    /// skipped, then sends a message with no length and sleeps.
+    const UNFRAMED_SERVER: &str = r#"
+import json, sys, time
+length = None
+while True:
+    line = sys.stdin.buffer.readline()
+    if not line:
+        sys.exit(0)
+    if line in (b"\r\n", b"\n"):
+        break
+    name, _, value = line.decode().partition(":")
+    if name.lower() == "content-length":
+        length = int(value)
+message = json.loads(sys.stdin.buffer.read(length))
+body = json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}}).encode()
+sys.stdout.buffer.write(b"starting up\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+body = json.dumps({"jsonrpc": "2.0", "method": "window/logMessage", "params": {}}).encode()
+sys.stdout.buffer.write(b"Content-Type: x\r\n\r\n" + body)
+sys.stdout.buffer.flush()
+time.sleep(600)
+"#;
+
+    /// A message without a length leaves nothing after it readable: the
+    /// server is failed with why and killed, not misread from then on.
+    #[tokio::test]
+    async fn a_server_that_sends_a_message_without_a_length_fails_and_is_killed() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("server.py");
+        std::fs::write(&script, UNFRAMED_SERVER).unwrap();
+        let spec = ServerSpec {
+            binary: PathBuf::from("python3"),
+            args: vec![script.display().to_string()],
+            kind: ServerKind::RustAnalyzer,
+            options: Value::Null,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let client = Client::start(spec, dir.path(), tx).await.unwrap();
+        let failed = tokio::time::timeout(LIFECYCLE_TIMEOUT, async {
+            while let Some(event) = rx.recv().await {
+                if let ServerEvent::Status(Status::Failed { reason }) = event {
+                    return Some(reason);
+                }
+            }
+            None
+        });
+        let reason = "the language server exited: it sent a message without a Content-Length";
+        assert_eq!(failed.await.ok().flatten().as_deref(), Some(reason));
+        assert!(client.ended(LIFECYCLE_TIMEOUT).await, "killed");
+        assert!(!alive(client.pid().unwrap()));
+        let error = client.definition(&dir.path().join("lib.rs"), 0, 0).await.unwrap_err();
+        assert_eq!(error.to_string(), reason);
     }
 
     /// A server that answers a class file's contents with the URI it was

@@ -9,11 +9,14 @@ use serde_json::Value;
 
 /// Read one message's header block and return the body length.
 ///
-/// Returns `None` when the stream is exhausted. Headers are ASCII,
-/// case-insensitive, and terminated by a blank line.
+/// Returns `None` when the block has no length that parses. Headers are
+/// ASCII, case-insensitive, and terminated by a blank line. A line that
+/// is no header, a stray debug line a server printed, is skipped.
 pub fn parse_header_block(headers: &str) -> Option<usize> {
-    for line in headers.split("\r\n") {
-        let (name, value) = line.split_once(':')?;
+    for line in headers.lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
         if name.trim().eq_ignore_ascii_case("content-length") {
             return value.trim().parse().ok();
         }
@@ -111,6 +114,16 @@ mod tests {
     #[test]
     fn a_header_block_without_a_length_is_rejected() {
         assert_eq!(parse_header_block("Content-Type: x"), None);
+        assert_eq!(parse_header_block("starting up\r\nContent-Type: x"), None);
+        assert_eq!(parse_header_block("Content-Length: lots"), None);
+    }
+
+    #[test]
+    fn a_line_that_is_no_header_is_skipped() {
+        assert_eq!(parse_header_block("starting up\r\nContent-Length: 19"), Some(19));
+        assert_eq!(parse_header_block("\r\nContent-Length: 19"), Some(19));
+        // Printed with a bare newline, before the headers proper.
+        assert_eq!(parse_header_block("loading config\nContent-Length: 19"), Some(19));
     }
 
     #[test]
