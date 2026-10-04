@@ -1144,7 +1144,7 @@ fn ask_about(
 /// or the description, so a reply is a new comment at the end, and the
 /// quote says what it answers. A draft already bound for GitHub there
 /// keeps its text, the quote under it. Absent where there is no pull
-/// request to post to, as Reply is.
+/// request or issue to post to, as Reply is.
 fn quote_reply_button(
     state: ReviewState,
     hovered: RwSignal<bool>,
@@ -1153,7 +1153,9 @@ fn quote_reply_button(
 ) -> floem::AnyView {
     let quote: Rc<dyn Fn(Option<String>)> =
         Rc::new(move |selected| quote_reply(state, selected.as_deref().unwrap_or(&body)));
-    let offered = Memo::new(move |_| state.pull_request.with(Option::is_some));
+    let offered = Memo::new(move |_| {
+        state.pull_request.with(Option::is_some) || state.issue.with(Option::is_some)
+    });
     dyn_container(
         move || offered.get(),
         move |offered| {

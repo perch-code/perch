@@ -1990,6 +1990,43 @@ mod tests {
         assert_eq!(state.composer_draft.get(), "> Thanks for the fix\n\n");
     }
 
+    /// An issue takes a comment at its foot as a pull request does, so
+    /// its comments offer Quote reply too.
+    #[test]
+    fn quote_reply_on_an_issue_quotes_into_the_composer_for_github() {
+        let (mut harness, _, state) =
+            app_harness_prepared(crate::backend::Backend::detached(), discussion(), |state| {
+                state.pull_request.set(None);
+                state.issue.set(Some(Arc::new(perch_github::Issue {
+                    viewer_can_update: false,
+                    node_id: String::new(),
+                    reactions: Default::default(),
+                    number: 43,
+                    title: "Fence the manifest".into(),
+                    body: String::new(),
+                    state: "open".into(),
+                    state_reason: None,
+                    author_login: "rohan".into(),
+                    author_avatar_url: String::new(),
+                    labels: vec![],
+                    assignees: vec![],
+                    comments: 1,
+                    created_at: None,
+                    updated_at: at("2026-09-16T11:40:00Z"),
+                    repo_full_name: "criccomini/perch".into(),
+                })));
+            });
+        let comment = find(harness.root_id(), "card:comment").unwrap();
+        comment.scroll_to(None);
+        harness.rebuild();
+        harness.paint();
+        hover_and_click(&mut harness, comment, "quote-reply");
+        let composer = state.composer.get().expect("the composer opened");
+        assert_eq!((composer.thread_id, composer.anchor), (None, None), "at the foot");
+        assert!(composer.destination.is_github());
+        assert_eq!(state.composer_draft.get(), "> Thanks\n\n");
+    }
+
     /// Quote reply on an agent's answer opens the thread's Follow up box
     /// with the selected words quoted, bound for the agent, never GitHub,
     /// and keeps what the reader had typed there above the quote.
