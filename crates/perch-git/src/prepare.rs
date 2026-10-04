@@ -1482,6 +1482,9 @@ mod tests {
         let output = std::process::Command::new("git")
             .current_dir(cwd)
             .args(args)
+            // Not the developer's own config: a `commit.gpgsign` there asks for
+            // a passphrase, and fails the commit when none is given.
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("LC_ALL", "C")

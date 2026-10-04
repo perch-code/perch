@@ -466,6 +466,10 @@ async fn head_commit_time_is_the_committer_date() {
         .env("GIT_AUTHOR_EMAIL", "t@t")
         .env("GIT_COMMITTER_NAME", "t")
         .env("GIT_COMMITTER_EMAIL", "t@t")
+        // Not the developer's own config: a `commit.gpgsign` there asks for
+        // a passphrase, and fails the commit when none is given.
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_COMMITTER_DATE", when)
         .output()
         .unwrap();
