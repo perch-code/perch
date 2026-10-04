@@ -426,8 +426,8 @@ pub fn composer_view(
             };
             // A reviewer's words, edited, stay where they are, Perch's. A
             // comment on GitHub shows its new words at once and goes back
-            // to GitHub with them. A description keeps the whitespace it
-            // opens with, an indented code block's.
+            // to GitHub with them, keeping the whitespace it opens with,
+            // an indented code block's.
             match (&edit_kind, &composer.editing) {
                 (Some(EditKind::Reviewer), Some(id)) => {
                     backend.edit_reviewer_message(&item_id, id, question.trim());
@@ -435,11 +435,7 @@ pub fn composer_view(
                     return;
                 }
                 (Some(EditKind::Posted { node_id, place }), _) => {
-                    let body = if description {
-                        question.trim_end()
-                    } else {
-                        question.trim()
-                    };
+                    let body = question.trim_end();
                     state.rewrite_github_comment(node_id, body);
                     backend.update_github_comment(&item_id, node_id, *place, body);
                     state.composer_sent();
@@ -629,8 +625,12 @@ pub fn composer_view(
                 .font_size(theme::TEXT_BODY)
         })
         // The box draws its placeholder itself, in no view of its own. The
-        // name is dashed, so no search for words on screen finds it.
-        .debug_name(format!("composer-placeholder:{}", placeholder.replace(' ', "-")));
+        // name is lower-cased and dashed, so a search for words as the
+        // screen shows them does not find it.
+        .debug_name(format!(
+            "composer-placeholder:{}",
+            placeholder.to_lowercase().replace(' ', "-")
+        ));
     // Take the keyboard as soon as the composer appears.
     //
     // Two things have to be right for that. Focus is asked of the editor's

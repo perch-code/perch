@@ -1920,9 +1920,9 @@ mod tests {
         }
     }
 
-    /// A description may be emptied, and keeps the whitespace it opens
-    /// with, an indented code block's, losing only what trails. A review's
-    /// summary emptied is not sent, as a comment's is not.
+    /// A description may be emptied. It and a comment keep the whitespace
+    /// they open with, an indented code block's, losing only what trails.
+    /// A review's summary emptied is not sent, as a comment's is not.
     #[test]
     fn an_edited_description_may_be_empty_and_keeps_its_leading_whitespace() {
         use crate::review::model::Destination;
@@ -1931,6 +1931,8 @@ mod tests {
         let mut discussion = discussion();
         discussion.node_id = "PR_57".into();
         discussion.viewer_can_update = true;
+        discussion.comments[0].node_id = "IC_1".into();
+        discussion.comments[0].viewer_can_update = true;
         discussion.reviews[0].node_id = "PRR_9".into();
         discussion.reviews[0].viewer_can_update = true;
         let (mut harness, _, state) = app_harness_on(backend, discussion);
@@ -1968,6 +1970,12 @@ mod tests {
         let card = find(harness.root_id(), "card:description").unwrap();
         assert!(find(card, "No description.").is_some(), "an emptied description says so");
 
+        let words = "    let y = 2;\n\nThis panics.\n";
+        let asked = update(&mut harness, "card:comment", "IC_1", words);
+        let sent = "    let y = 2;\n\nThis panics.";
+        assert_eq!(asked, Some((CommentPlace::Conversation, sent.to_string())), "a comment too");
+        assert_eq!(state.discussion.get().unwrap().comments[0].body, sent);
+
         let asked = update(&mut harness, "card:review", "PRR_9", "  ");
         assert_eq!(asked, None, "a summary needs words");
         assert!(state.composer.get().is_some(), "the edit stays open");
@@ -1990,9 +1998,9 @@ mod tests {
         let (mut harness, _, state) =
             app_harness_on(crate::backend::Backend::detached(), discussion);
         let cases = [
-            ("card:description", "PR_57", "Add-a-description…"),
-            ("card:comment", "IC_1", "Leave-a-comment…"),
-            ("card:review", "PRR_9", "Leave-a-review…"),
+            ("card:description", "PR_57", "add-a-description…"),
+            ("card:comment", "IC_1", "leave-a-comment…"),
+            ("card:review", "PRR_9", "leave-a-review…"),
         ];
         for (name, id, placeholder) in cases {
             state.open_composer_with(None, None, String::new(), Destination::GitHub, Some(id.into()));
