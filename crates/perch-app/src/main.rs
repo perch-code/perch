@@ -102,8 +102,9 @@ fn main() {
     }
     init_logging();
     tracing::info!("perch starting");
-    theme::set_display(perch_github::Config::load().display);
-    theme::install_code_font();
+    let config = perch_github::Config::load();
+    theme::set_display(config.display);
+    theme::install_code_font(config.ui.code_font.as_deref());
     theme::install_symbol_fallbacks();
 
     windows::load_frame();

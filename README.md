@@ -170,6 +170,17 @@ Perch never lets typescript-language-server run a checkout's own TypeScript,
 which a pull request could replace; a server on `PATH` older than 2.1, or
 without a TypeScript of its own, gives way to Perch's.
 
+### Look
+
+On macOS code is set in SF Mono. Elsewhere Perch takes the first installed
+of JetBrains Mono, DejaVu Sans Mono, Noto Sans Mono and Liberation Mono,
+or another family you name:
+
+```toml
+[ui]
+code_font = "Fira Code"
+```
+
 ## Agent safety
 
 Agents read pull requests, comments and code that anyone could have written,

@@ -31,6 +31,9 @@ pub struct Config {
     /// `[display]`: how big Perch draws. Read at startup.
     #[serde(default)]
     pub display: DisplayConfig,
+    /// `[ui]`: how the window looks.
+    #[serde(default)]
+    pub ui: UiConfig,
     /// The old `[[project]]` key. Read only so `load` can refuse the file
     /// by name: with no field for it, toml would drop the table without a
     /// word and the reader would see an empty sidebar and no reason.
@@ -219,6 +222,15 @@ pub fn is_local(identity: &str) -> bool {
         Some((owner, _)) => owner.eq_ignore_ascii_case(LOCAL_OWNER),
         None => false,
     }
+}
+
+/// `[ui]`: how the window looks.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct UiConfig {
+    /// The family code is set in, by its installed name. Off macOS only:
+    /// there it is SF Mono, as the rest of the system's code is.
+    #[serde(default)]
+    pub code_font: Option<String>,
 }
 
 /// `[lsp]`: the language servers Perch runs.
@@ -943,6 +955,7 @@ impl Config {
             work: WorkDefaults::default(),
             lsp: LspConfig::default(),
             display: DisplayConfig::default(),
+            ui: UiConfig::default(),
             project: Vec::new(),
             warnings: Vec::new(),
         }
@@ -1177,6 +1190,13 @@ network = ["index.crates.io"]
         assert_eq!(c.agent.effort, "low");
         assert_eq!(c.agent.model, "opus");
         assert_eq!(c.agent.max_concurrent_runs, 7);
+    }
+
+    #[test]
+    fn the_code_font_is_unset_unless_named() {
+        assert_eq!(Config::fallback().ui.code_font, None);
+        let c: Config = toml::from_str("[ui]\ncode_font = \"Fira Code\"").unwrap();
+        assert_eq!(c.ui.code_font.as_deref(), Some("Fira Code"));
     }
 
     #[test]
