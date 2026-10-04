@@ -21,6 +21,7 @@ use crate::backend::Backend;
 use crate::icons::SidebarIcon;
 use crate::review::cards::tip_with;
 use crate::review::model::{ItemTab, Layout, Origin, ReviewState};
+use crate::review::timeline::count_of;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::drawer;
@@ -356,14 +357,7 @@ fn change_nav(state: ReviewState) -> impl IntoView {
         } else {
             Stack::horizontal((
                 nav_button(state, false),
-                Label::derived(move || {
-                    if n == 1 {
-                        "1 change".to_string()
-                    } else {
-                        format!("{n} changes")
-                    }
-                })
-                .style(|s| {
+                Label::derived(move || count_of(n, "change", "changes")).style(|s| {
                     s.font_size(theme::TEXT_BADGE)
                         .color(theme::fg_muted())
                         .selectable(false)

@@ -23,7 +23,7 @@ use std::collections::{HashMap, VecDeque};
 
 use serde_json::{json, Value};
 
-use crate::codex::{human_message, last_line, strip_shell};
+use crate::codex::{command_call, failed_step, human_message, last_line, strip_shell};
 use crate::parse::{one_line, str_of, summarize_tool_call};
 use crate::RunEvent;
 
@@ -894,32 +894,6 @@ fn auto_review_step(params: &Value) -> Vec<RunEvent> {
 
 fn request(id: u64, method: &str, params: Value) -> String {
     json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string()
-}
-
-fn command_call(id: String, item: &Value) -> RunEvent {
-    let command = strip_shell(&str_of(item, "command"));
-    RunEvent::ToolCall {
-        id,
-        name: "command_execution".into(),
-        summary: one_line(&format!("Ran {command}"), 120),
-        parent_id: None,
-    }
-}
-
-fn failed_step(id: String, message: &str) -> Vec<RunEvent> {
-    vec![
-        RunEvent::ToolCall {
-            id: id.clone(),
-            name: "error".into(),
-            summary: one_line(message, 120),
-            parent_id: None,
-        },
-        RunEvent::ToolResult {
-            id,
-            ok: false,
-            summary: String::new(),
-        },
-    ]
 }
 
 /// What a Codex permissions request asks for, in a line.

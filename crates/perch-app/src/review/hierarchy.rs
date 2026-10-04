@@ -225,7 +225,7 @@ fn header(state: ReviewState) -> impl IntoView {
                 .selectable(false)
         }),
         toggle(state),
-        close_button(state).style(|s| s.margin_left(8.0)),
+        close_button(move || state.close_panel()).style(|s| s.margin_left(8.0)),
     ))
 }
 

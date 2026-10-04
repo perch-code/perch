@@ -16,9 +16,7 @@ use floem::event::EventPropagation;
 use floem::kurbo::{Rect, Size};
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, RwSignal, Scope, SignalGet, SignalUpdate, SignalWith};
-use floem::views::{
-    dyn_container, text_editor, Container, Decorators, Empty, Label, Stack, TextInput,
-};
+use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack, TextInput};
 use floem::{AnyView, View, ViewId};
 use perch_github::{CommentThread, Side};
 
@@ -26,10 +24,9 @@ use crate::backend::Backend;
 use crate::icons::SidebarIcon;
 use crate::review::markdown::Foot;
 use crate::review::model::ReviewState;
-use crate::review::open_pull::action_button;
 use crate::review::suggestion::{headline_for, Commit, Original};
 use crate::theme;
-use crate::ui::widgets::{editor_box, lay_out_every_line, sidebar_glyph};
+use crate::ui::widgets::{self, action_button, editor_box, icon_action, prose_editor};
 
 /// The popover's width, GitHub's.
 const WIDTH: f64 = 400.0;
@@ -270,7 +267,7 @@ fn popover(
             .flex_grow(1.0_f32)
             .selectable(false)
     });
-    let close_button = crate::review::submit_review::icon_action(
+    let close_button = icon_action(
         SidebarIcon::Close,
         "apply-suggestion-close",
         move || !pending(),
@@ -313,10 +310,7 @@ fn popover(
         });
     let headline_id = headline_input.id();
 
-    let editor = text_editor("")
-        .placeholder("Add an optional extended description\u{2026}".to_string())
-        .editor_style(|s| s.hide_gutter(true).selection_color(theme::selection_bg()));
-    lay_out_every_line(editor.editor());
+    let editor = prose_editor("", "Add an optional extended description\u{2026}", None);
     let key_commit = commit.clone();
     let editor = editor
         .pre_command(move |cmd| {
@@ -350,25 +344,7 @@ fn popover(
             Some(Some(Err(message))) => Some(message),
             _ => None,
         },
-        |message| -> AnyView {
-            let Some(message) = message else {
-                return Empty::new().into_any();
-            };
-            Stack::horizontal((
-                sidebar_glyph(SidebarIcon::Warning, theme::closed)
-                    .style(|s| s.size(14.0, 14.0).margin_right(7.0).flex_shrink(0.0_f32)),
-                Label::derived(move || message.clone())
-                    .debug_name("apply-suggestion-error")
-                    .style(|s| {
-                        s.min_width(0.0)
-                            .flex_grow(1.0_f32)
-                            .font_size(theme::TEXT_META)
-                            .color(theme::closed())
-                    }),
-            ))
-            .style(|s| s.width_full().items_start())
-            .into_any()
-        },
+        |message| widgets::error_line(message, "apply-suggestion-error"),
     )
     .style(|s| s.width_full());
 

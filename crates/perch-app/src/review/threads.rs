@@ -18,9 +18,7 @@ use std::rc::Rc;
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
-use floem::views::{
-    dyn_container, dyn_stack, text_editor, Container, Decorators, Empty, Label, Stack,
-};
+use floem::views::{dyn_container, dyn_stack, Container, Decorators, Empty, Label, Stack};
 use perch_github::{
     Author, CommentMessage, CommentThread, IssueCloseReason, RunRecord, RunStatus, ThreadOrigin,
 };
@@ -30,12 +28,13 @@ use crate::icons::SidebarIcon;
 use crate::review::cards;
 use crate::review::doc::CardId;
 use crate::review::model::{AgentChoice, Composer, Destination, ReviewState};
+use crate::review::timeline::count_of;
 use crate::ui::menu::MenuExt;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{
-    badge, clickable, editor_box, icon_button, lay_out_every_line, name_label, sidebar_glyph,
-    text_button, Name,
+    badge, clickable, confirmation, editor_box, icon_button, name_label, prose_editor,
+    sidebar_glyph, text_button, Name,
 };
 
 /// A model as the screen shows it, without its maker: "Sonnet" for the
@@ -346,19 +345,9 @@ pub fn composer_view(
     // composer opened with: the view is rebuilt when the tab changes, and
     // the question must not go with it.
     let draft = state.composer_draft.get_untracked();
-    let editor = text_editor(draft.clone())
-        .placeholder(placeholder)
-        .editor_style(|s| s.hide_gutter(true).selection_color(theme::selection_bg()));
     // Markdown as it is typed: bold, italics, code and links take their
     // styles in the box, the way they will in the thread.
-    let styling_doc = editor.editor().doc();
-    let styling_id = state.next_token();
-    let editor = editor.styling(crate::review::composer_styling::ComposerStyling::new(
-        styling_doc,
-        styling_id,
-    ));
-    // Every line laid out, so a long question does not jump as it is typed.
-    lay_out_every_line(editor.editor());
+    let editor = prose_editor(draft.clone(), placeholder, Some(state.next_token()));
     let doc_editor = editor.editor().clone();
     let read_text = Rc::new(move || doc_editor.doc().text().to_string());
     // `@` offers people and files. A file goes to an agent as `@path`, as
@@ -2224,54 +2213,23 @@ pub fn delete_confirmation(
                     "The question, its answers and the anchor go. Nothing on GitHub is touched.",
                 )
             };
-            Stack::vertical((
-                Label::derived(move || title.to_string()).style(|s| {
-                    s.font_size(theme::TEXT_META)
-                        .font_weight(theme::weight_emphasis())
-                        .color(theme::fg())
-                        .selectable(false)
-                }),
-                Label::derived(move || copy.to_string())
-                .style(|s| {
-                    s.font_size(theme::TEXT_BADGE)
-                        .color(theme::fg_muted())
-                        .text_wrap()
-                        .width_full()
-                        .margin_top(2.0)
-                }),
-                Stack::horizontal((
-                    text_button(
-                        || "Delete".to_string(),
-                        SidebarIcon::Trash,
-                        move || {
-                            if let Some(id) = state.confirm_thread.get_untracked() {
-                                if github_bound {
-                                    backend.delete_private_messages(&id);
-                                } else {
-                                    backend.delete_comment_thread(&id);
-                                }
-                            }
-                            state.confirm_thread.set(None);
-                        },
-                    ),
-                    text_button(
-                        || "Cancel".to_string(),
-                        SidebarIcon::Close,
-                        move || state.confirm_thread.set(None),
-                    ),
-                ))
-                .style(|s| s.gap(6.0).margin_top(8.0)),
-            ))
-            .on_event_stop(el::Click, |_, _| {})
-            .style(|s| {
-                s.flex_col()
-                    .width_full()
-                    .padding(10.0)
-                    .background(theme::notice_bg())
-                    .border(1.0)
-                    .border_color(theme::notice_border())
-                    .border_radius(theme::RADIUS)
-            })
+            confirmation(
+                "delete-thread",
+                title.to_string(),
+                copy.to_string(),
+                "Delete",
+                move || {
+                    if let Some(id) = state.confirm_thread.get_untracked() {
+                        if github_bound {
+                            backend.delete_private_messages(&id);
+                        } else {
+                            backend.delete_comment_thread(&id);
+                        }
+                    }
+                    state.confirm_thread.set(None);
+                },
+                move || state.confirm_thread.set(None),
+            )
             .into_any()
         },
     )
@@ -2852,7 +2810,10 @@ fn when_label(
     face: ThreadFace,
     name: &'static str,
 ) -> impl IntoView {
-    Label::derived(move || crate::timefmt::relative(at, app.now.get()))
+    // `now` ticks each second while an agent runs; a memo only tells the
+    // label when the words change.
+    let ago = Memo::new(move |_| crate::timefmt::relative(at, app.now.get()));
+    Label::derived(move || ago.get())
         .debug_name(name)
         .style(move |s| {
             let size = match face {
@@ -3258,7 +3219,6 @@ fn github_message_view(
     let react = message.node_id.as_deref().and_then(cards::reactable);
     let url = message.html_url.clone().unwrap_or_default();
     let reactions = cards::reactions_under(app, state, backend.clone(), &react);
-    let applying = backend.clone();
     let name = login.clone();
     let author = login.clone();
     let byline = byline_row(
@@ -3268,7 +3228,7 @@ fn github_message_view(
             author_label(state, move || Some(author.clone())).into_any(),
             after_review_label(state, message.created_at).into_any(),
         ],
-        cards::actions(state, backend, hovered, Some(leading), Some(ask), react, url),
+        cards::actions(state, backend.clone(), hovered, Some(leading), Some(ask), react, url),
     );
     let avatar = crate::ui::widgets::avatar(
         app,
@@ -3278,7 +3238,7 @@ fn github_message_view(
     )
     .into_any();
     let body = Stack::vertical((
-        message_body(state, thread, &message.body, Some(applying)),
+        message_body(state, thread, &message.body, Some(backend)),
         reactions,
         confirm,
     ))
@@ -3358,7 +3318,6 @@ fn posted_message_view(
     let react = message.node_id.as_deref().and_then(cards::reactable);
     let url = message.html_url.clone().unwrap_or_default();
     let reactions = cards::reactions_under(app, state, backend.clone(), &react);
-    let applying = backend.clone();
     let byline = byline_row(
         name_label(move || author_name(app, &Author::User, None), move |s| name_style(s, face)),
         vec![
@@ -3366,10 +3325,10 @@ fn posted_message_view(
             author_label(state, move || viewer_login(app)).into_any(),
             after_review_label(state, message.created_at).into_any(),
         ],
-        cards::actions(state, backend, hovered, Some(leading), Some(ask), react, url),
+        cards::actions(state, backend.clone(), hovered, Some(leading), Some(ask), react, url),
     );
     let body = Stack::vertical((
-        message_body(state, thread, &message.body, Some(applying)),
+        message_body(state, thread, &message.body, Some(backend)),
         reactions,
         confirm,
     ))
@@ -3657,8 +3616,8 @@ fn work_changes(state: ReviewState, backend: Rc<Backend>, run: &RunRecord) -> fl
             };
             let (before, after) = (before.clone(), after.clone());
             let backend = backend.clone();
-            let noun = if files == 1 { "file" } else { "files" };
-            Label::derived(move || format!("{files} {noun} changed, +{added} \u{2212}{removed}"))
+            let files = count_of(files as usize, "file", "files");
+            Label::derived(move || format!("{files} changed, +{added} \u{2212}{removed}"))
                 .on_event_stop(el::Click, move |_, _| {
                     let Some(item_id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
                     else {
@@ -3796,28 +3755,16 @@ pub fn steps_summary(steps: &[perch_github::RunStep]) -> String {
         .count();
     let denied = steps.iter().filter(|s| !s.ok).count();
     if reads > 0 {
-        parts.push(format!(
-            "read {reads} {}",
-            if reads == 1 { "file" } else { "files" }
-        ));
+        parts.push(format!("read {}", count_of(reads, "file", "files")));
     }
     if runs > 0 {
-        parts.push(format!(
-            "ran {runs} {}",
-            if runs == 1 { "command" } else { "commands" }
-        ));
+        parts.push(format!("ran {}", count_of(runs, "command", "commands")));
     }
     if searches > 0 {
-        parts.push(format!(
-            "{searches} {}",
-            if searches == 1 { "search" } else { "searches" }
-        ));
+        parts.push(count_of(searches, "search", "searches"));
     }
     if edits > 0 {
-        parts.push(format!(
-            "edited {edits} {}",
-            if edits == 1 { "file" } else { "files" }
-        ));
+        parts.push(format!("edited {}", count_of(edits, "file", "files")));
     }
     if denied > 0 {
         parts.push(format!("{denied} not allowed"));

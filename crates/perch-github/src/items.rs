@@ -266,14 +266,6 @@ impl SubjectKind {
             SubjectKind::Issue => "issue",
         }
     }
-
-    pub fn from_column(s: &str) -> Option<Self> {
-        match s {
-            "pr" => Some(SubjectKind::PullRequest),
-            "issue" => Some(SubjectKind::Issue),
-            _ => None,
-        }
-    }
 }
 
 /// A branch checked out somewhere on this machine.

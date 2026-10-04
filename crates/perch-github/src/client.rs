@@ -868,23 +868,20 @@ impl GitHub {
         number: u64,
     ) -> Result<Discussion, Error> {
         let base = format!("/repos/{repo_full_name}");
-        // An open or a refresh reads the pull request a moment before it
-        // asks for the discussion; that read stands.
-        let body = self
-            .get_text_within(&format!("{base}/pulls/{number}"), JUST_READ)
-            .await?;
+        let pull_path = format!("{base}/pulls/{number}");
+        let comments_path = format!("{base}/issues/{number}/comments");
+        let reviews_path = format!("{base}/pulls/{number}/reviews");
+        let review_comments_path = format!("{base}/pulls/{number}/comments");
+        let (body, comments, reviews, review_comments) = tokio::try_join!(
+            // An open or a refresh reads the pull request a moment before
+            // it asks for the discussion; that read stands.
+            self.get_text_within(&pull_path, JUST_READ),
+            self.list_all::<IssueCommentPayload>(&comments_path),
+            self.list_all::<ReviewPayload>(&reviews_path),
+            self.list_all::<ReviewCommentPayload>(&review_comments_path),
+        )?;
         let pull: PullSummary =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
-
-        let comments: Vec<IssueCommentPayload> = self
-            .list_all(&format!("{base}/issues/{number}/comments"))
-            .await?;
-        let reviews: Vec<ReviewPayload> = self
-            .list_all(&format!("{base}/pulls/{number}/reviews"))
-            .await?;
-        let review_comments: Vec<ReviewCommentPayload> = self
-            .list_all(&format!("{base}/pulls/{number}/comments"))
-            .await?;
 
         let mut discussion = Discussion {
             viewer_can_update: false,
@@ -901,7 +898,17 @@ impl GitHub {
                 .collect(),
             review_threads: Vec::new(),
         };
-        match self.fetch_timeline(repo_full_name, number, &discussion.reviews).await {
+        let thread_states = async {
+            if discussion.review_comments.is_empty() {
+                return None;
+            }
+            Some(self.fetch_review_thread_states(repo_full_name, number).await)
+        };
+        let (timeline, thread_states) = tokio::join!(
+            self.fetch_timeline(repo_full_name, number, &discussion.reviews),
+            thread_states,
+        );
+        match timeline {
             // The timeline has no line for the opening, so that one stays.
             // It does carry the ending, so the payload's merge or close is
             // dropped where the timeline said the same thing, and kept
@@ -931,13 +938,12 @@ impl GitHub {
                 tracing::warn!(repo = repo_full_name, number, error = %e, "could not read the timeline");
             }
         }
-        if !discussion.review_comments.is_empty() {
-            match self.fetch_review_thread_states(repo_full_name, number).await {
-                Ok(states) => discussion.review_threads = states,
-                Err(e) => {
-                    tracing::warn!(repo = repo_full_name, number, error = %e, "could not read the review threads");
-                }
+        match thread_states {
+            Some(Ok(states)) => discussion.review_threads = states,
+            Some(Err(e)) => {
+                tracing::warn!(repo = repo_full_name, number, error = %e, "could not read the review threads");
             }
+            None => {}
         }
         if let Err(e) = self.fill_reactions(&mut discussion).await {
             tracing::warn!(repo = repo_full_name, number, error = %e, "could not read the reactions");

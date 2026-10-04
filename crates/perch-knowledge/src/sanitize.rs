@@ -213,6 +213,18 @@ pub fn strip_format_chars(text: &str) -> String {
         .collect()
 }
 
+/// The text on one line, every run of whitespace a single space.
+pub fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A fence one backtick longer than any run inside the text, so the text
+/// cannot close it. Longer than three is still a fence to CommonMark.
+pub fn fence_around(text: &str) -> String {
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    "`".repeat(longest.max(2) + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

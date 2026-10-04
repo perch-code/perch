@@ -141,7 +141,7 @@ fn message(
         Tone::Warning => theme::draft,
         Tone::Success => theme::open,
     };
-    let dismiss = agents::icon_action(SidebarIcon::Close, "Dismiss message", move || {
+    let dismiss = widgets::icon_action(SidebarIcon::Close, "Dismiss message", || true, move || {
         state.dismiss_toast(token)
     });
     let reported = text.clone();
@@ -217,7 +217,7 @@ fn server_offer(state: AppState, backend: Rc<Backend>, token: u64, offer: Server
         None => Empty::new().into_any(),
     };
     let key = offer.key.clone();
-    let close = agents::icon_action(SidebarIcon::Close, "Dismiss message", move || {
+    let close = widgets::icon_action(SidebarIcon::Close, "Dismiss message", || true, move || {
         state.decline_offer(token, &key)
     })
     .style(move |s| s.apply_if(installing(), |s| s.hide()));

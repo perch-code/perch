@@ -132,15 +132,6 @@ impl FileDiff {
     pub fn status_at(&self, line: usize) -> LineStatus {
         self.line_status.get(line).copied().unwrap_or(LineStatus::Unchanged)
     }
-
-    /// The first hunk starting after `line`, for the next-change key.
-    pub fn next_hunk(&self, line: usize) -> Option<Hunk> {
-        self.hunks.iter().find(|h| h.start > line).copied()
-    }
-
-    pub fn previous_hunk(&self, line: usize) -> Option<Hunk> {
-        self.hunks.iter().rev().find(|h| h.start < line).copied()
-    }
 }
 
 /// Every line of the head file marked against the base.
@@ -456,15 +447,11 @@ mod tests {
     }
 
     #[test]
-    fn hunks_let_the_reader_jump_forward_and_back() {
+    fn separate_changes_are_separate_hunks() {
         let d = file_diff("a\nb\nc\nd\ne\n", "a\nB\nc\nD\ne\n");
         assert_eq!(d.hunks.len(), 2);
-
         assert_eq!(d.hunks[0].start, 1);
         assert_eq!(d.hunks[1].start, 3);
-        assert_eq!(d.next_hunk(1).map(|h| h.start), Some(3));
-        assert_eq!(d.previous_hunk(4).map(|h| h.start), Some(3));
-        assert_eq!(d.previous_hunk(0), None);
     }
 
     #[test]

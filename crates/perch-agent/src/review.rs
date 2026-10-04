@@ -376,54 +376,17 @@ impl ReviewSpec {
     }
 
     fn codex_args(&self) -> Vec<String> {
-        let mut args = vec![
-            "exec".into(),
-            "review".into(),
-            "--json".into(),
-            // The private checkout is still untrusted input. Do not inherit
-            // user/project policy, persist it, or execute Codex/plugin hooks.
-            "--ignore-user-config".into(),
-            "--ignore-rules".into(),
-            "--ephemeral".into(),
-            "--strict-config".into(),
-            "--disable".into(),
-            "hooks".into(),
-            "--disable".into(),
-            "plugins".into(),
-            "--base".into(),
-            self.merge_base_ref.clone(),
-            "--model".into(),
-            self.model.clone(),
-            "--config".into(),
-            "sandbox_mode=\"read-only\"".into(),
-            "--config".into(),
-            "approval_policy=\"never\"".into(),
-            "--config".into(),
-            format!("model_reasoning_effort={}", self.effort.name()),
-            // Suppress repository instruction/config discovery. MCP entries
-            // are process-spawning customizations, so an empty command-line
-            // table takes precedence over any project configuration.
-            "--config".into(),
-            "project_doc_max_bytes=0".into(),
-            "--config".into(),
-            "project_doc_fallback_filenames=[]".into(),
-            "--config".into(),
-            "mcp_servers={}".into(),
-            "--config".into(),
-            "notify=[]".into(),
-            "--config".into(),
-            "instructions=\"\"".into(),
-            "--config".into(),
-            format!(
-                "developer_instructions={}",
-                toml_string(&match self.supplied_instructions() {
-                    Some(instructions) => {
-                        format!("{CODEX_REVIEW_DATA_BOUNDARY}\n\n{instructions}")
-                    }
-                    None => CODEX_REVIEW_DATA_BOUNDARY.to_string(),
-                })
-            ),
-        ];
+        let developer_instructions = match self.supplied_instructions() {
+            Some(instructions) => format!("{CODEX_REVIEW_DATA_BOUNDARY}\n\n{instructions}"),
+            None => CODEX_REVIEW_DATA_BOUNDARY.to_string(),
+        };
+        let mut args = vec!["exec".into(), "review".into(), "--json".into()];
+        args.extend(codex_isolation_args(
+            Some(&self.merge_base_ref),
+            &self.model,
+            self.effort,
+            &developer_instructions,
+        ));
         if let Some(schema) = &self.output_schema {
             args.push("--output-schema".into());
             args.push(schema.to_string_lossy().into_owned());
@@ -465,37 +428,7 @@ impl ReviewSpec {
             prompt.push_str("\n\n");
             prompt.push_str(&instructions);
         }
-        let mut args = vec![
-            "--print".into(),
-            // Safe mode disables CLAUDE.md, skills, plugins, hooks, MCP,
-            // commands, and agents from the repository. The strict MCP flag
-            // provides a second fail-closed boundary for process spawning,
-            // and the sandbox settings keep the shell offline and read-only.
-            "--safe-mode".into(),
-            "--strict-mcp-config".into(),
-            "--no-session-persistence".into(),
-            "--settings".into(),
-            claude_settings(&self.cwd),
-            "--output-format".into(),
-            "stream-json".into(),
-            "--verbose".into(),
-            "--model".into(),
-            self.model.clone(),
-            "--effort".into(),
-            self.effort.name().into(),
-            "--permission-mode".into(),
-            "dontAsk".into(),
-            "--permission-prompts".into(),
-            "none".into(),
-            "--allowedTools".into(),
-        ];
-        args.extend(READ_ONLY_TOOLS.iter().map(|tool| (*tool).to_string()));
-        args.extend(ORCHESTRATION_TOOLS.iter().map(|tool| (*tool).to_string()));
-        args.push("--disallowedTools".into());
-        args.extend(denied_tools());
-        args.push("--".into());
-        args.push(prompt);
-        args
+        claude_isolation_args(&self.cwd, &self.model, self.effort, ORCHESTRATION_TOOLS, prompt)
     }
 }
 
@@ -545,73 +478,115 @@ impl ReviewVerificationSpec {
     }
 
     fn codex_args(&self) -> Vec<String> {
-        vec![
-            "exec".into(),
-            "--json".into(),
-            "--ignore-user-config".into(),
-            "--ignore-rules".into(),
-            "--ephemeral".into(),
-            "--strict-config".into(),
-            "--disable".into(),
-            "hooks".into(),
-            "--disable".into(),
-            "plugins".into(),
-            "--model".into(),
-            self.model.clone(),
-            "--config".into(),
-            "sandbox_mode=\"read-only\"".into(),
-            "--config".into(),
-            "approval_policy=\"never\"".into(),
-            "--config".into(),
-            format!("model_reasoning_effort={}", self.effort.name()),
-            "--config".into(),
-            "project_doc_max_bytes=0".into(),
-            "--config".into(),
-            "project_doc_fallback_filenames=[]".into(),
-            "--config".into(),
-            "mcp_servers={}".into(),
-            "--config".into(),
-            "notify=[]".into(),
-            "--config".into(),
-            "instructions=\"\"".into(),
-            "--config".into(),
-            format!(
-                "developer_instructions={}",
-                toml_string(CODEX_VERIFIER_DATA_BOUNDARY)
-            ),
-            "--".into(),
-            self.prompt.clone(),
-        ]
-    }
-
-    fn claude_args(&self) -> Vec<String> {
-        let mut args = vec![
-            "--print".into(),
-            "--safe-mode".into(),
-            "--strict-mcp-config".into(),
-            "--no-session-persistence".into(),
-            "--settings".into(),
-            claude_settings(&self.cwd),
-            "--output-format".into(),
-            "stream-json".into(),
-            "--verbose".into(),
-            "--model".into(),
-            self.model.clone(),
-            "--effort".into(),
-            self.effort.name().into(),
-            "--permission-mode".into(),
-            "dontAsk".into(),
-            "--permission-prompts".into(),
-            "none".into(),
-            "--allowedTools".into(),
-        ];
-        args.extend(READ_ONLY_TOOLS.iter().map(|tool| (*tool).to_string()));
-        args.push("--disallowedTools".into());
-        args.extend(denied_tools());
+        let mut args = vec!["exec".into(), "--json".into()];
+        args.extend(codex_isolation_args(
+            None,
+            &self.model,
+            self.effort,
+            CODEX_VERIFIER_DATA_BOUNDARY,
+        ));
         args.push("--".into());
         args.push(self.prompt.clone());
         args
     }
+
+    fn claude_args(&self) -> Vec<String> {
+        claude_isolation_args(&self.cwd, &self.model, self.effort, &[], self.prompt.clone())
+    }
+}
+
+/// The Codex flags shared by a native review and a verifier, after `exec`'s
+/// own: a read-only, never-asking run with no user or repository
+/// configuration. A native review passes the base it reviews against.
+fn codex_isolation_args(
+    base: Option<&str>,
+    model: &str,
+    effort: ReviewEffort,
+    developer_instructions: &str,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        // The private checkout is still untrusted input. Do not inherit
+        // user/project policy, persist it, or execute Codex/plugin hooks.
+        "--ignore-user-config".into(),
+        "--ignore-rules".into(),
+        "--ephemeral".into(),
+        "--strict-config".into(),
+        "--disable".into(),
+        "hooks".into(),
+        "--disable".into(),
+        "plugins".into(),
+    ];
+    if let Some(base) = base {
+        args.push("--base".into());
+        args.push(base.to_string());
+    }
+    args.extend([
+        "--model".into(),
+        model.to_string(),
+        "--config".into(),
+        "sandbox_mode=\"read-only\"".into(),
+        "--config".into(),
+        "approval_policy=\"never\"".into(),
+        "--config".into(),
+        format!("model_reasoning_effort={}", effort.name()),
+        // Suppress repository instruction/config discovery. MCP entries
+        // are process-spawning customizations, so an empty command-line
+        // table takes precedence over any project configuration.
+        "--config".into(),
+        "project_doc_max_bytes=0".into(),
+        "--config".into(),
+        "project_doc_fallback_filenames=[]".into(),
+        "--config".into(),
+        "mcp_servers={}".into(),
+        "--config".into(),
+        "notify=[]".into(),
+        "--config".into(),
+        "instructions=\"\"".into(),
+        "--config".into(),
+        format!("developer_instructions={}", toml_string(developer_instructions)),
+    ]);
+    args
+}
+
+/// The whole Claude Code argv for a native review or a verifier: read-only
+/// tools, plus `extra_tools`, then the prompt.
+fn claude_isolation_args(
+    cwd: &Path,
+    model: &str,
+    effort: ReviewEffort,
+    extra_tools: &[&str],
+    prompt: String,
+) -> Vec<String> {
+    let mut args = vec![
+        "--print".into(),
+        // Safe mode disables CLAUDE.md, skills, plugins, hooks, MCP,
+        // commands, and agents from the repository. The strict MCP flag
+        // provides a second fail-closed boundary for process spawning,
+        // and the sandbox settings keep the shell offline and read-only.
+        "--safe-mode".into(),
+        "--strict-mcp-config".into(),
+        "--no-session-persistence".into(),
+        "--settings".into(),
+        claude_settings(cwd),
+        "--output-format".into(),
+        "stream-json".into(),
+        "--verbose".into(),
+        "--model".into(),
+        model.to_string(),
+        "--effort".into(),
+        effort.name().into(),
+        "--permission-mode".into(),
+        "dontAsk".into(),
+        "--permission-prompts".into(),
+        "none".into(),
+        "--allowedTools".into(),
+    ];
+    args.extend(READ_ONLY_TOOLS.iter().chain(extra_tools).map(|tool| (*tool).to_string()));
+    args.push("--disallowedTools".into());
+    args.extend(denied_tools());
+    args.push("--".into());
+    args.push(prompt);
+    args
 }
 
 fn is_object_id(value: &str) -> bool {

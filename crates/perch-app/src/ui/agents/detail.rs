@@ -182,11 +182,11 @@ fn activity_section(
         heading("ACTIVITY"),
         dyn_container(
             move || {
-                let (has_more, loading) = state.agent_run_events_page_state(&page_state_id);
+                let page = state.agent_run_events_page_state(&page_state_id);
                 let before = current_events(state, &page_state_id)
                     .first()
                     .map(|event| event.sequence);
-                (has_more, loading, before)
+                (page.has_more, page.loading, before)
             },
             move |(has_more, loading, before)| {
                 if !has_more {
@@ -261,7 +261,7 @@ fn activity_section(
             move || {
                 let run = current_run(state, &empty_id, &empty_initial);
                 let empty = activity_rows(&run, &current_events(state, &empty_id)).is_empty();
-                let loading = state.agent_run_events_page_state(&empty_id).1;
+                let loading = state.agent_run_events_page_state(&empty_id).loading;
                 (empty, loading)
             },
             |(empty, loading)| {
@@ -381,7 +381,7 @@ fn result_section(
             (
                 current_run(state, &id, &initial),
                 current_events(state, &events_id),
-                state.agent_run_events_page_state(&page_state_id).0,
+                state.agent_run_events_page_state(&page_state_id).has_more,
             )
         },
         |(run, events, has_more)| result_content(run, events, has_more).into_any(),
@@ -716,7 +716,7 @@ mod tests {
             queued_at: jiff::Timestamp::UNIX_EPOCH,
             ..perch_github::RunRecord::default()
         };
-        app.merge_agent_runs([perch_github::RunSummary::from(&record)], false);
+        app.merge_agent_runs([perch_github::RunSummary::from(&record)]);
         app.set_agent_run_detail(&record, events, false);
         let run = app.agent_run("run").unwrap();
         let view = inline(app, Rc::new(Backend::detached()), run, 100_000.0);

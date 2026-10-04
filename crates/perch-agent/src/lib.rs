@@ -527,35 +527,6 @@ fn isolation_args_with(settings: String) -> Vec<String> {
     ]
 }
 
-/// The `-c` override that keeps Codex from reading the repository's
-/// `.codex/` directory: config, hooks and rules there load only for a
-/// trusted project, and this marks the worktree untrusted whatever the
-/// user's config says about it or the repository it belongs to. The
-/// whole `projects` table goes in as one inline value: `-c` splits its
-/// key on every dot and knows no quoting, so a path cannot be a key
-/// segment. Codex merges the table into the user's, and looks the
-/// directory up under its given and its resolved name.
-pub fn codex_untrusted_project_override(cwd: &std::path::Path) -> String {
-    let mut keys = vec![cwd.to_path_buf()];
-    let real = real_path(cwd);
-    // Spelled differently, not merely a different path: `Path` equality
-    // ignores a trailing slash or a `.` component, Codex's lookup does not.
-    if real.as_os_str() != cwd.as_os_str() {
-        keys.push(real);
-    }
-    let entries = keys
-        .iter()
-        .map(|key| {
-            format!(
-                "{}={{trust_level=\"untrusted\"}}",
-                toml_string(&key.to_string_lossy())
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("projects={{{entries}}}")
-}
-
 /// The path with symlinks resolved, as the sandbox and Codex see it, or
 /// the path as given when it cannot be resolved.
 fn real_path(path: &std::path::Path) -> PathBuf {
@@ -2506,38 +2477,6 @@ mod tests {
             serde_json::json!([missing.to_string_lossy()]),
             "an unresolvable path is passed as given"
         );
-    }
-
-    #[test]
-    fn codex_is_told_the_worktree_is_untrusted_under_every_name() {
-        let dir = tempfile::tempdir().unwrap();
-        let real = dir.path().canonicalize().unwrap();
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
-        // Codex splits `-c key=value` at the first `=` and parses the
-        // value as TOML.
-        let projects = |cwd: &std::path::Path| -> toml::Table {
-            let arg = codex_untrusted_project_override(cwd);
-            let (key, value) = arg.split_once('=').unwrap();
-            assert_eq!(key, "projects");
-            value.parse::<toml::Value>().unwrap().try_into().unwrap()
-        };
-        let both = projects(&link);
-        assert_eq!(both.len(), 2, "{both:?}");
-        for key in [link.to_string_lossy(), real.to_string_lossy()] {
-            assert_eq!(
-                both[key.as_ref()]["trust_level"].as_str(),
-                Some("untrusted")
-            );
-        }
-        assert_eq!(projects(&real).len(), 1);
-        // The same directory under a spelling Codex would not match: both
-        // spellings go in.
-        let dotted = real.join(".");
-        let both = projects(&dotted);
-        assert_eq!(both.len(), 2, "{both:?}");
-        assert!(both.contains_key(dotted.to_string_lossy().as_ref()));
-        assert!(both.contains_key(real.to_string_lossy().as_ref()));
     }
 
     #[test]

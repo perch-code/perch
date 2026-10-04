@@ -20,7 +20,7 @@ use crate::review::cards::tip;
 use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::icon_button;
+use crate::ui::widgets::{action_button, icon_button};
 
 /// Whether there is anything to cut from: an issue or a pull request on
 /// GitHub that isn't merged, or a worktree with a checkout.
@@ -172,14 +172,14 @@ fn panel(app: AppState, backend: Rc<Backend>) -> impl IntoView {
         .with_untracked(|p| p.as_ref().map(|p| pending_title(app, p)))
         .unwrap_or_default();
     let has_title = !title.is_empty();
-    let cancel_button = crate::review::open_pull::action_button(
+    let cancel_button = action_button(
         || "Cancel".to_string(),
         "start-work-cancel",
         false,
         || true,
         move || cancel(app),
     );
-    let create_button = crate::review::open_pull::action_button(
+    let create_button = action_button(
         || "Create worktree".to_string(),
         "start-work-create",
         true,

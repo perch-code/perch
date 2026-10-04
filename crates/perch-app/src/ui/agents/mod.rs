@@ -24,7 +24,7 @@ use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::{clickable, sidebar_glyph};
+use crate::ui::widgets::{clickable, icon_action, sidebar_glyph};
 
 use model::{AgentRunStatus, AgentRunSummary};
 
@@ -39,47 +39,6 @@ pub fn wire(state: AppState) {
             arm_clock(state);
         }
     });
-}
-
-pub(super) fn request_agent_runs(state: AppState, backend: &Backend, history_limit: usize) {
-    let token = state.begin_agent_history_load();
-    backend.load_agent_runs(history_limit);
-    floem::action::exec_after(Duration::from_secs(5), move |_| {
-        state.time_out_agent_history_load(token);
-    });
-}
-
-pub(crate) fn icon_action(
-    icon: SidebarIcon,
-    debug: &'static str,
-    action: impl Fn() + 'static,
-) -> impl View {
-    let action: Rc<dyn Fn()> = Rc::new(action);
-    let click = action.clone();
-    Container::new(
-        sidebar_glyph(icon, theme::fg_muted).style(|s| s.size(14.0, 14.0).pointer_events_none()),
-    )
-    .on_event_stop(el::Click, move |_, _| click())
-    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if matches!(key.code, Code::Enter | Code::Space) {
-            action();
-            EventPropagation::Stop
-        } else {
-            EventPropagation::Continue
-        }
-    })
-    .style(|s| {
-        clickable(s)
-            .size(28.0, 28.0)
-            .items_center()
-            .justify_center()
-            .border_radius(theme::RADIUS)
-            .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
-            .hover(|s| s.background(theme::canvas_hover()))
-    })
-    .debug_name(debug)
-    .into_view()
 }
 
 pub(super) fn text_action(
@@ -262,7 +221,7 @@ pub(crate) fn completion_toast(
         state.dismiss_toast(token);
         dropdown::go_to_run(state, review, &backend, &run);
     });
-    let dismiss = icon_action(SidebarIcon::Close, "Dismiss agent completion", move || {
+    let dismiss = icon_action(SidebarIcon::Close, "Dismiss agent completion", || true, move || {
         state.dismiss_toast(token)
     });
     let body = Stack::horizontal((
@@ -328,7 +287,7 @@ mod tests {
         harness.rebuild();
         assert!(!app.agents_clock_armed.get());
 
-        app.merge_agent_runs([perch_github::RunSummary::from(&running_record())], false);
+        app.merge_agent_runs([perch_github::RunSummary::from(&running_record())]);
         harness.rebuild();
         assert!(app.agents_clock_armed.get());
     }

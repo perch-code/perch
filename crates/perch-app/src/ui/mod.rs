@@ -418,7 +418,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     let opener = (!review.agents_dropdown_open.get_untracked())
                         .then(|| focused_descendant(cx, root_id))
                         .flatten();
-                    agents::dropdown::toggle(state, review, key_backend, opener);
+                    agents::dropdown::toggle(review, key_backend, opener);
                     return EventPropagation::Stop;
                 }
                 // Cmd-Shift-E is the tree in the drawer on the right, from

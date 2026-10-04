@@ -14,19 +14,18 @@ use floem::event::EventPropagation;
 use floem::prelude::*;
 use floem::reactive::{Memo, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
-use floem::views::{
-    dyn_container, dyn_stack, text_editor, Container, Decorators, Empty, Label, Stack,
-};
+use floem::views::{dyn_container, dyn_stack, Container, Decorators, Empty, Label, Stack};
 use perch_github::PullReviewEvent;
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
 use crate::review::model::{drafts_summary, Draft, ReviewState};
 use crate::review::review_menu;
+use crate::review::timeline::short_sha;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{
-    clickable, editor_box, icon_button, lay_out_every_line, sidebar_glyph, text_button,
+    action_button, clickable, editor_box, icon_button, prose_editor, sidebar_glyph, text_button,
 };
 
 /// How much of a draft's text its row shows.
@@ -468,10 +467,6 @@ fn excerpt(body: &str) -> String {
     out
 }
 
-fn short_sha(sha: &str) -> String {
-    sha.chars().take(7).collect()
-}
-
 fn review_editor(
     app: AppState,
     state: ReviewState,
@@ -482,17 +477,11 @@ fn review_editor(
 
     use crate::review::threads::cmd_enter;
 
-    let editor = text_editor(state.submit_review_draft.get_untracked())
-        .placeholder("Leave a review…".to_string())
-        .editor_style(|s| s.hide_gutter(true).selection_color(theme::selection_bg()));
-    let styling_doc = editor.editor().doc();
-    let styling_id = state.next_token();
-    let editor = editor.styling(crate::review::composer_styling::ComposerStyling::new(
-        styling_doc,
-        styling_id,
-    ));
-    // Every line laid out, so a long review does not jump as it is typed.
-    lay_out_every_line(editor.editor());
+    let editor = prose_editor(
+        state.submit_review_draft.get_untracked(),
+        "Leave a review…",
+        Some(state.next_token()),
+    );
     // `@` offers people and files, as in a composer; the review goes to
     // GitHub, so a file goes in as a code span.
     let mentioner = crate::review::mention::attach(
@@ -829,121 +818,6 @@ fn submit(state: ReviewState, backend: &Backend) {
             "A review is already being submitted. Wait for it to finish.".into(),
         )),
     }
-}
-
-fn action_button(
-    label: impl Fn() -> String + 'static,
-    debug: &'static str,
-    prominent: bool,
-    enabled: impl Fn() -> bool + 'static,
-    action: impl Fn() + 'static,
-) -> impl View {
-    let enabled: Rc<dyn Fn() -> bool> = Rc::new(enabled);
-    let event_enabled = enabled.clone();
-    let style_enabled = enabled.clone();
-    let action: Rc<dyn Fn()> = Rc::new(action);
-    let click = action.clone();
-    Container::new(Label::derived(label).style(move |s| {
-        s.font_size(theme::TEXT_BADGE)
-            .font_weight(theme::weight_emphasis())
-            .color(if prominent {
-                theme::canvas()
-            } else {
-                theme::fg_muted()
-            })
-            .selectable(false)
-            .pointer_events_none()
-    }))
-    .on_event_stop(el::Click, move |_, _| {
-        if event_enabled() {
-            click();
-        }
-    })
-    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if matches!(key.code, Code::Enter | Code::Space) && enabled() {
-            action();
-            EventPropagation::Stop
-        } else {
-            EventPropagation::Continue
-        }
-    })
-    .style(move |s| {
-        let available = style_enabled();
-        clickable(s)
-            .height(30.0)
-            .padding_horiz(11.0)
-            .items_center()
-            .justify_center()
-            .background(if prominent { theme::fg() } else { theme::canvas() })
-            .border(1.0)
-            .border_color(if prominent { theme::fg() } else { theme::border() })
-            .border_radius(theme::RADIUS)
-            .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
-            .set_disabled(!available)
-            .apply_if(!available, |s| {
-                s.opacity(0.45_f32).cursor(CursorStyle::Default)
-            })
-            .apply_if(available, |s| {
-                s.hover(move |s| {
-                    s.background(if prominent {
-                        theme::action_hover()
-                    } else {
-                        theme::canvas_hover()
-                    })
-                })
-            })
-    })
-    .debug_name(debug)
-    .into_view()
-}
-
-pub(crate) fn icon_action(
-    icon: SidebarIcon,
-    debug: &'static str,
-    enabled: impl Fn() -> bool + 'static,
-    action: impl Fn() + 'static,
-) -> impl View {
-    let enabled: Rc<dyn Fn() -> bool> = Rc::new(enabled);
-    let event_enabled = enabled.clone();
-    let style_enabled = enabled.clone();
-    let action: Rc<dyn Fn()> = Rc::new(action);
-    let click = action.clone();
-    Container::new(
-        sidebar_glyph(icon, theme::fg_muted).style(|s| s.size(14.0, 14.0).pointer_events_none()),
-    )
-    .on_event_stop(el::Click, move |_, _| {
-        if event_enabled() {
-            click();
-        }
-    })
-    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if matches!(key.code, Code::Enter | Code::Space) && enabled() {
-            action();
-            EventPropagation::Stop
-        } else {
-            EventPropagation::Continue
-        }
-    })
-    .style(move |s| {
-        let available = style_enabled();
-        clickable(s)
-            .size(28.0, 28.0)
-            .items_center()
-            .justify_center()
-            .border_radius(theme::RADIUS)
-            .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
-            .set_disabled(!available)
-            .apply_if(!available, |s| {
-                s.opacity(0.45_f32).cursor(CursorStyle::Default)
-            })
-            .apply_if(available, |s| {
-                s.hover(|s| s.background(theme::canvas_hover()))
-            })
-    })
-    .debug_name(debug)
-    .into_view()
 }
 
 fn outcome_label(event: PullReviewEvent) -> &'static str {

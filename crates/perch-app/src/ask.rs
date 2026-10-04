@@ -8,7 +8,7 @@
 
 use perch_git::{DisplayBuffer, LineStatus, Row};
 use perch_github::{Anchor, Author, PullRequest};
-use perch_knowledge::sanitize::{clean, strip_format_chars};
+use perch_knowledge::sanitize::{clean, one_line, strip_format_chars};
 
 thread_local! {
     /// `RunStep` is a compatibility projection and does not retain tool IDs.
@@ -998,10 +998,6 @@ fn trimmed_lines(text: &str, max: usize) -> String {
         out.push_str("\n[…]");
     }
     out
-}
-
-fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 struct Quoted {

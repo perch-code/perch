@@ -11,7 +11,7 @@ use std::rc::Rc;
 use floem::event::EventPropagation;
 use floem::prelude::*;
 use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::views::{dyn_container, text_editor, Container, Decorators, Empty, Label, Stack};
+use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 use perch_git::BaseBranch;
 
 use crate::backend::{Backend, FirstRun, NewWork};
@@ -19,10 +19,11 @@ use crate::icons::SidebarIcon;
 use crate::review::cards::tip;
 use crate::review::model::{AgentChoice, Destination};
 use crate::review::review_launch::{action_button, menu_button};
+use crate::review::timeline::short_sha;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::menu::Menu;
-use crate::ui::widgets::{editor_box, icon_button, lay_out_every_line, sidebar_glyph};
+use crate::ui::widgets::{editor_box, icon_button, prose_editor, sidebar_glyph};
 
 /// The branches of the chosen repository, as far as they are known.
 #[derive(Debug, Clone, PartialEq)]
@@ -234,10 +235,7 @@ fn link_words(url: &str) -> Vec<String> {
         let named = match path.as_slice() {
             [_, _, "pull", n, ..] => Some(format!("pr {n}")),
             [_, _, "issues", n, ..] => Some(format!("issue {n}")),
-            [_, _, "commit", sha, ..] => Some(format!(
-                "commit {}",
-                sha.chars().take(7).collect::<String>()
-            )),
+            [_, _, "commit", sha, ..] => Some(format!("commit {}", short_sha(sha))),
             [_, _, "actions", "runs", n, ..] => Some(format!("ci {n}")),
             [_, repo, ..] => Some(repo.to_string()),
             _ => None,
@@ -489,10 +487,11 @@ fn message_box(state: AppState, start: Rc<dyn Fn()>) -> impl IntoView {
     use crate::review::threads::cmd_enter;
 
     let nw = state.new_work;
-    let editor = text_editor(nw.text.get_untracked())
-        .placeholder("Describe the work, or leave it empty for just the worktree".to_string())
-        .editor_style(|s| s.hide_gutter(true).selection_color(theme::selection_bg()));
-    lay_out_every_line(editor.editor());
+    let editor = prose_editor(
+        nw.text.get_untracked(),
+        "Describe the work, or leave it empty for just the worktree",
+        None,
+    );
     let editor = editor
         .pre_command(move |cmd| {
             if cmd_enter(&cmd) {

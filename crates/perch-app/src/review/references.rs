@@ -16,7 +16,6 @@ use floem::text::{Attrs, AttrsList, FamilyOwned, LineHeightValue};
 use floem::views::{
     ClipExt, Container, Decorators, Empty, Label, ScrollExt, Stack, dyn_container, dyn_stack, rich_text,
 };
-use perch_git::ChangeStatus;
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
@@ -339,15 +338,15 @@ fn header(state: ReviewState) -> impl IntoView {
                 .min_width(0.0)
                 .selectable(false)
         }),
-        close_button(state),
+        close_button(move || state.close_panel()),
     ))
 }
 
-/// The close glyph at the header's right end, for either panel: whichever
-/// is open closes.
-pub(crate) fn close_button(state: ReviewState) -> impl IntoView {
+/// The close glyph at a header's right end: the references' and the call
+/// hierarchy's panels have it, and so does the find bar.
+pub(crate) fn close_button(on_close: impl Fn() + 'static) -> impl IntoView {
     Container::new(sidebar_glyph(SidebarIcon::Close, theme::fg_subtle).style(|s| s.size(11.0, 11.0)))
-        .on_event_stop(el::Click, move |_, _| state.close_panel())
+        .on_event_stop(el::Click, move |_, _| on_close())
         .style(|s| {
             clickable(s)
                 .size(18.0, 18.0)
@@ -409,7 +408,10 @@ fn file_row(
 
     Stack::horizontal((
         dyn_container(status, |status| match status {
-            Some(status) => status_letter(status).into_any(),
+            // The rail's letter, so a file reads the same in both lists.
+            Some(status) => crate::review::rail::status_letter(status)
+                .style(|s| s.margin_right(6.0).selectable(false))
+                .into_any(),
             // Keep the column, so the paths line up whether or not the
             // file changed.
             None => Empty::new()
@@ -457,27 +459,6 @@ fn file_row(
             // header's border is already there.
             .apply_if(!first, |s| s.border_top(1.0).border_color(theme::border_muted()))
             .hover(|s| s.background(theme::canvas_hover()))
-    })
-}
-
-/// The rail's status letter, drawn the same way here so a file reads the
-/// same in both lists.
-fn status_letter(status: ChangeStatus) -> impl IntoView {
-    Label::derived(move || status.letter()).style(move |s| {
-        let color = match status {
-            ChangeStatus::Added => theme::status_added(),
-            ChangeStatus::Modified | ChangeStatus::TypeChanged => theme::status_modified(),
-            ChangeStatus::Deleted => theme::status_deleted(),
-            ChangeStatus::Renamed | ChangeStatus::Copied => theme::status_renamed(),
-        };
-        s.font_size(theme::TEXT_BADGE)
-            .font_weight(theme::weight_emphasis())
-            .color(color)
-            .width(14.0)
-            .flex_shrink(0.0_f32)
-            .text_align(floem::text::Alignment::Center)
-            .margin_right(6.0)
-            .selectable(false)
     })
 }
 

@@ -356,15 +356,8 @@ fn status_row(state: ReviewState) -> impl IntoView {
                                 .color(theme::fg_muted())
                                 .selectable(false)
                                 .apply_if(repo_of(state).is_empty(), |s| s.hide())
-                                .apply_if(opens, |s| {
-                                    // Underlined under the pointer, as a
-                                    // name is.
-                                    clickable(s)
-                                        .padding_top(1.0)
-                                        .border_bottom(1.0)
-                                        .border_color(floem::peniko::Color::TRANSPARENT)
-                                        .hover(|s| s.border_color(theme::fg_muted()))
-                                })
+                                // Underlined under the pointer, as a name is.
+                                .apply_if(opens, crate::ui::widgets::underlined_link)
                         }),
                 ))
                 .style(|s| s.items_center().col_gap(theme::SUMMARY_GAP)),
@@ -762,7 +755,7 @@ pub(crate) fn can_push(app: AppState, state: ReviewState) -> bool {
 fn push_button(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let shown = Memo::new(move |_| can_push(app, state) || state.push_pending.get());
     Stack::horizontal((
-        crate::review::open_pull::action_button(
+        crate::ui::widgets::action_button(
             move || {
                 if state.push_pending.get() {
                     "Pushing…".to_string()
@@ -920,9 +913,9 @@ pub fn back_to_current(app: AppState, state: ReviewState, backend: Rc<Backend>) 
 /// are given each file as it shows.
 fn notice_text(state: ReviewState) -> Option<String> {
     if let Some(head) = state.stale_head.get() {
-        let short: String = head.chars().take(7).collect();
         return Some(format!(
-            "Pull request moved to {short}; showing the worktree as it is"
+            "Pull request moved to {}; showing the worktree as it is",
+            crate::review::timeline::short_sha(&head)
         ));
     }
     if state.offline.get() {
@@ -1106,6 +1099,13 @@ fn author_view(
     (login, url, opened): (String, String, Option<jiff::Timestamp>),
 ) -> impl IntoView {
     let seed = login.clone();
+    // A memo, so the label is set again only when its text changes, not
+    // on every tick of the clock.
+    let opened_text = Memo::new(move |_| {
+        opened
+            .map(|at| format!("opened {}", timefmt::relative(at, app.now.get())))
+            .unwrap_or_default()
+    });
     Stack::horizontal((
         avatar(app, move || url.clone(), theme::SUMMARY_AVATAR, seed)
             .style(|s| s.margin_right(5.0)),
@@ -1113,19 +1113,15 @@ fn author_view(
             move || Name::Login(login.clone()),
             |s| s.font_size(theme::TEXT_BADGE).color(theme::fg_muted()),
         ),
-        Label::derived(move || {
-            opened
-                .map(|at| format!("opened {}", timefmt::relative(at, app.now.get())))
-                .unwrap_or_default()
-        })
-        .debug_name("opened")
-        .style(move |s| {
-            s.font_size(theme::TEXT_BADGE)
-                .color(theme::fg_subtle())
-                .margin_left(6.0)
-                .selectable(false)
-                .apply_if(opened.is_none(), |s| s.hide())
-        }),
+        Label::derived(move || opened_text.get())
+            .debug_name("opened")
+            .style(move |s| {
+                s.font_size(theme::TEXT_BADGE)
+                    .color(theme::fg_subtle())
+                    .margin_left(6.0)
+                    .selectable(false)
+                    .apply_if(opened.is_none(), |s| s.hide())
+            }),
     ))
     .debug_name("author")
     .style(|s| s.items_center().min_width(0.0))

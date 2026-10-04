@@ -118,22 +118,7 @@ impl Git {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut command = self.command(cwd, args);
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-        let output = tokio::time::timeout(timeout, command.output())
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(|e| Error::Spawn(e.to_string()))?;
-
-        if !output.status.success() {
-            return Err(Error::Git {
-                status: output.status.code().unwrap_or(-1),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            });
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        self.run_env(cwd, args, &[], timeout).await
     }
 
     /// [`run`](Self::run) with variables added to git's environment, such
@@ -153,21 +138,8 @@ impl Git {
         for (name, value) in env {
             command.env(name, value);
         }
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-        let output = tokio::time::timeout(timeout, command.output())
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(|e| Error::Spawn(e.to_string()))?;
-
-        if !output.status.success() {
-            return Err(Error::Git {
-                status: output.status.code().unwrap_or(-1),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            });
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        let stdout = stdout(command, timeout).await?;
+        Ok(String::from_utf8_lossy(&stdout).into_owned())
     }
 
     /// Run git and preserve stdout byte-for-byte. Review snapshot diffs and
@@ -182,20 +154,7 @@ impl Git {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        let mut command = self.command(cwd, args);
-        command.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-        let output = tokio::time::timeout(timeout, command.output())
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(|e| Error::Spawn(e.to_string()))?;
-        if !output.status.success() {
-            return Err(Error::Git {
-                status: output.status.code().unwrap_or(-1),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            });
-        }
-        Ok(output.stdout)
+        stdout(self.command(cwd, args), timeout).await
     }
 
     /// Run git with a bounded stdin payload. This is used by `pack-objects`
@@ -245,14 +204,7 @@ impl Git {
         })
         .await
         .map_err(|_| Error::Timeout)??;
-
-        if !output.status.success() {
-            return Err(Error::Git {
-                status: output.status.code().unwrap_or(-1),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            });
-        }
-        Ok(output.stdout)
+        stdout_of(output)
     }
 
     /// Run git, forwarding `--progress` output as it arrives.
@@ -354,6 +306,28 @@ impl Git {
         command.kill_on_drop(true);
         command
     }
+}
+
+/// Run `command` to its end and return its stdout, failing on a timeout
+/// or a non-zero exit.
+async fn stdout(mut command: Command, timeout: Duration) -> Result<Vec<u8>, Error> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let output = tokio::time::timeout(timeout, command.output())
+        .await
+        .map_err(|_| Error::Timeout)?
+        .map_err(|e| Error::Spawn(e.to_string()))?;
+    stdout_of(output)
+}
+
+/// The stdout of a git that exited zero, or its status and stderr.
+fn stdout_of(output: std::process::Output) -> Result<Vec<u8>, Error> {
+    if !output.status.success() {
+        return Err(Error::Git {
+            status: output.status.code().unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    Ok(output.stdout)
 }
 
 /// A parsed line of git's progress output.

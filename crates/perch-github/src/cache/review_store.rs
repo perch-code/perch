@@ -3,7 +3,10 @@ use std::collections::HashSet;
 use jiff::Timestamp;
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 
-use super::{insert_comment_message_row, load_run_projection_on, Cache, CacheError};
+use super::{
+    insert_comment_message_row, load_run_projection_on, optional_timestamp, timestamp, Cache,
+    CacheError,
+};
 use crate::comments::{self, Author, CommentMessage, RunOwner, RunPurpose, ThreadOrigin};
 use crate::reactions::Reactions;
 use crate::reviews::*;
@@ -287,16 +290,6 @@ const MAPPING_COLUMNS: &str = "id, finding_id, source_snapshot_id, target_snapsh
     created_by_attempt_id, created_at";
 const AUDIT_COLUMNS: &str = "id, finding_id, action, from_disposition, to_disposition,
     related_finding_id, snapshot_id, reason, evidence_json, created_at";
-
-fn timestamp(value: String, field: &str) -> Result<Timestamp, CacheError> {
-    value
-        .parse()
-        .map_err(|_| CacheError::Corrupt(field.to_string()))
-}
-
-fn optional_timestamp(value: Option<String>, field: &str) -> Result<Option<Timestamp>, CacheError> {
-    value.map(|value| timestamp(value, field)).transpose()
-}
 
 fn corrupt_enum(field: &str) -> CacheError {
     CacheError::Corrupt(field.to_string())
@@ -1543,14 +1536,6 @@ impl Cache {
         load_finding_on(&self.conn, id)
     }
 
-    pub fn load_finding_by_stable_key(
-        &self,
-        item_id: &str,
-        stable_key: &str,
-    ) -> Result<Option<Finding>, CacheError> {
-        finding_by_stable_key_on(&self.conn, item_id, stable_key)
-    }
-
     pub fn list_findings(
         &self,
         item_id: &str,
@@ -1586,13 +1571,6 @@ impl Cache {
             mapped.collect::<Result<Vec<_>, _>>()?
         };
         rows.into_iter().map(observation_from_row).collect()
-    }
-
-    pub fn list_attempt_observations(
-        &self,
-        attempt_id: &str,
-    ) -> Result<Vec<Observation>, CacheError> {
-        observations_for_attempt_on(&self.conn, attempt_id)
     }
 
     /// Append an immutable mapping decision. Replaying the exact same mapping

@@ -43,13 +43,14 @@ use crate::icons::SidebarIcon;
 use crate::review::markdown;
 use crate::review::model::{Destination, ItemTab, LoadedFile, ReviewState};
 use crate::review::threads::{self, ThreadFace};
-use crate::review::timeline::{event_name, event_pieces, short_sha, verdict, Card, Piece};
+use crate::review::timeline::{count_of, event_name, event_pieces, short_sha, verdict, Card, Piece};
 use crate::review::OpenFile;
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
 use crate::ui::widgets::{
-    avatar, clickable, follow_link, name_label, open_in_browser, sidebar_glyph, text_button, Name,
+    avatar, clickable, confirmation, follow_link, name_label, open_in_browser, sidebar_glyph,
+    underlined_link, Name,
 };
 
 /// What a card's row in the column is keyed by. A row with the same key is
@@ -226,6 +227,12 @@ pub(crate) fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> im
     // A verdict's words take its glyph's colour, so Changes requested
     // reads as red as its mark does; a comment's are muted.
     let verb_color = glyph.map(|(_, color)| color);
+    // `now` ticks each second while an agent runs; a memo only tells the
+    // label when the words change.
+    let ago = Memo::new(move |_| {
+        when.map(|at| timefmt::relative(at, app.now.get()))
+            .unwrap_or_default()
+    });
     Stack::horizontal((
         avatar(app, avatar_url, avatar_size, seed)
             .style(|s| s.margin_right(9.0).flex_shrink(0.0_f32)),
@@ -250,11 +257,7 @@ pub(crate) fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> im
                 .flex_shrink(0.0_f32)
                 .apply_if(verb_empty, |s| s.hide())
         }),
-        Label::derived(move || {
-            when.map(|at| timefmt::relative(at, app.now.get()))
-                .unwrap_or_default()
-        })
-        .style(move |s| {
+        Label::derived(move || ago.get()).style(move |s| {
             s.font_size(theme::TEXT_META)
                 .color(theme::fg_muted())
                 .margin_left(if verb_empty { 6.0 } else { 4.0 })
@@ -371,25 +374,8 @@ pub(crate) fn delete_action(
     node_id: String,
     may: impl Fn() -> bool + 'static,
 ) -> floem::AnyView {
-    let offered = Memo::new(move |_| may());
-    dyn_container(
-        move || offered.get(),
-        move |offered| {
-            if !offered {
-                return Empty::new().into_any();
-            }
-            let node_id = node_id.clone();
-            hover_action(
-                hovered,
-                SidebarIcon::Trash,
-                "Delete",
-                "delete-comment",
-                Rc::new(move || state.confirm_comment.set(Some(node_id.clone()))),
-            )
-            .into_any()
-        },
-    )
-    .into_any()
+    let delete = Rc::new(move || state.confirm_comment.set(Some(node_id.clone())));
+    offered_action(hovered, may, SidebarIcon::Trash, "Delete", "delete-comment", delete)
 }
 
 /// Edit under the pointer, for a comment on GitHub, while `may` says
@@ -400,6 +386,18 @@ pub(crate) fn edit_action(
     may: impl Fn() -> bool + 'static,
     edit: Rc<dyn Fn()>,
 ) -> floem::AnyView {
+    offered_action(hovered, may, SidebarIcon::Pencil, "Edit", "edit-comment", edit)
+}
+
+/// A hover action that is there only while `may` says so.
+fn offered_action(
+    hovered: RwSignal<bool>,
+    may: impl Fn() -> bool + 'static,
+    icon: SidebarIcon,
+    label: &'static str,
+    name: &'static str,
+    action: Rc<dyn Fn()>,
+) -> floem::AnyView {
     let offered = Memo::new(move |_| may());
     dyn_container(
         move || offered.get(),
@@ -407,8 +405,7 @@ pub(crate) fn edit_action(
             if !offered {
                 return Empty::new().into_any();
             }
-            hover_action(hovered, SidebarIcon::Pencil, "Edit", "edit-comment", edit.clone())
-                .into_any()
+            hover_action(hovered, icon, label, name, action.clone()).into_any()
         },
     )
     .into_any()
@@ -438,65 +435,30 @@ pub(crate) fn delete_comment_confirmation(
             }
             let backend = backend.clone();
             let node_id = node_id.clone();
-            Stack::vertical((
-                Label::derived(|| "Delete this comment?".to_string()).style(|s| {
-                    s.font_size(theme::TEXT_META)
-                        .font_weight(theme::weight_emphasis())
-                        .color(theme::fg())
-                        .selectable(false)
-                }),
-                Label::derived(|| "It goes from GitHub for good, for everyone.".to_string()).style(
-                    |s| {
-                        s.font_size(theme::TEXT_BADGE)
-                            .color(theme::fg_muted())
-                            .text_wrap()
-                            .width_full()
-                            .margin_top(2.0)
-                    },
-                ),
-                Stack::horizontal((
-                    Container::new(text_button(
-                        || "Delete".to_string(),
-                        SidebarIcon::Trash,
-                        move || {
-                            state.confirm_comment.set(None);
-                            let Some(item_id) =
-                                state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
-                            else {
-                                return;
-                            };
-                            let actor = app
-                                .viewer
-                                .get_untracked()
-                                .map(|(login, _)| login)
-                                .unwrap_or_default();
-                            if let Some(place) = state.take_out_github_comment(&node_id, &actor) {
-                                backend.delete_github_comment(&item_id, &node_id, place);
-                            }
-                        },
-                    ))
-                    .debug_name("confirm-delete-comment"),
-                    Container::new(text_button(
-                        || "Cancel".to_string(),
-                        SidebarIcon::Close,
-                        move || state.confirm_comment.set(None),
-                    ))
-                    .debug_name("cancel-delete-comment"),
-                ))
-                .style(|s| s.gap(6.0).margin_top(8.0)),
-            ))
-            .debug_name("delete-comment-confirmation")
-            .on_event_stop(el::Click, |_, _| {})
-            .style(|s| {
-                s.flex_col()
-                    .width_full()
-                    .padding(10.0)
-                    .margin_top(8.0)
-                    .background(theme::notice_bg())
-                    .border(1.0)
-                    .border_color(theme::notice_border())
-                    .border_radius(theme::RADIUS)
-            })
+            confirmation(
+                "delete-comment",
+                "Delete this comment?".to_string(),
+                "It goes from GitHub for good, for everyone.".to_string(),
+                "Delete",
+                move || {
+                    state.confirm_comment.set(None);
+                    let Some(item_id) =
+                        state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+                    else {
+                        return;
+                    };
+                    let actor = app
+                        .viewer
+                        .get_untracked()
+                        .map(|(login, _)| login)
+                        .unwrap_or_default();
+                    if let Some(place) = state.take_out_github_comment(&node_id, &actor) {
+                        backend.delete_github_comment(&item_id, &node_id, place);
+                    }
+                },
+                move || state.confirm_comment.set(None),
+            )
+            .style(|s| s.margin_top(8.0))
             .into_any()
         },
     )
@@ -1374,13 +1336,15 @@ fn edited_in_card(
     node_id: String,
     shown: floem::AnyView,
 ) -> floem::AnyView {
+    // What has no id on GitHub cannot be edited, so it never gives way.
+    if node_id.is_empty() {
+        return shown;
+    }
     let editing = Memo::new(move |_| {
         state.composer.with(|c| {
             c.as_ref()
                 .filter(|c| {
-                    c.thread_id.is_none()
-                        && !node_id.is_empty()
-                        && c.editing.as_deref() == Some(node_id.as_str())
+                    c.thread_id.is_none() && c.editing.as_deref() == Some(node_id.as_str())
                 })
                 .map(|c| c.opening)
         })
@@ -1442,20 +1406,24 @@ pub fn review_card(
     let text = summary
         .as_ref()
         .map(|body| markdown::render_linked(body, state).into_any());
-    let quote = summary
+    // A summary is quoted and edited where it is; a review with none has
+    // nothing to quote or edit here.
+    let leading = summary
         .clone()
         .zip(text.as_ref().map(|text| text.id()))
-        .map(|(body, scope)| quote_reply_button(state, hovered, body, scope));
-    // A summary is edited where it is; a review with none has nothing
-    // to edit here.
-    let quote = summary.clone().map(|body| {
-        let edit = edit_in_card_action(state, hovered, review.node_id.clone(), body, review.viewer_can_update);
-        Stack::horizontal((quote.unwrap_or_else(|| Empty::new().into_any()), edit))
-            .style(|s| s.items_center().gap(4.0))
-            .into_any()
-    });
-    let editing = backend.clone();
-    let edited = review.node_id.clone();
+        .map(|(body, scope)| {
+            let quote = quote_reply_button(state, hovered, body.clone(), scope);
+            let edit = edit_in_card_action(
+                state,
+                hovered,
+                review.node_id.clone(),
+                body,
+                review.viewer_can_update,
+            );
+            Stack::horizontal((quote, edit))
+                .style(|s| s.items_center().gap(4.0))
+                .into_any()
+        });
     // A review with no summary has nothing to react to; GitHub allows it,
     // but there would be nothing to draw the pills under.
     let react = summary.as_ref().and_then(|_| reactable(&review.node_id));
@@ -1467,16 +1435,11 @@ pub fn review_card(
         ))
         .style(|s| s.flex_col().width_full())
         .into_any();
-        edited_in_card(app, state, editing, edited, shown)
+        edited_in_card(app, state, backend.clone(), review.node_id.clone(), shown)
     });
 
-    track_hover(
-        card(
-            byline_strip(byline(app, who, actions(state, backend, hovered, quote, ask, react, url))),
-            body,
-        ),
-        hovered,
-    )
+    let trailing = actions(state, backend, hovered, leading, ask, react, url);
+    track_hover(card(byline_strip(byline(app, who, trailing)), body), hovered)
 }
 
 /// The file a thread is on, as the header across it names it: the path
@@ -1751,7 +1714,7 @@ fn more_row(more: usize) -> impl IntoView {
     if more == 0 {
         return Empty::new().into_any();
     }
-    Label::derived(move || format!("{more} more {}", if more == 1 { "line" } else { "lines" }))
+    Label::derived(move || count_of(more, "more line", "more lines"))
         .style(|s| {
             s.font_size(theme::TEXT_SECTION)
                 .color(theme::fg_subtle())
@@ -1808,6 +1771,9 @@ pub fn event_row(
         _ => theme::fg_subtle,
     };
     let at = event.at;
+    // A memo, as a byline's time is, so a tick of `now` that leaves the
+    // words alone does not lay the line out again.
+    let ago = Memo::new(move |_| timefmt::relative(at, app.now.get()));
     let pieces = event_pieces(&event);
     let link = link.filter(|_| event.kind == PullEventKind::Opened);
     // A card's padding and half an avatar puts the dot under the byline
@@ -1858,7 +1824,7 @@ pub fn event_row(
                 .into_any(),
             None => Empty::new().into_any(),
         },
-        Label::derived(move || timefmt::relative(at, app.now.get())).style(|s| {
+        Label::derived(move || ago.get()).style(|s| {
             s.font_size(theme::TEXT_META)
                 .color(theme::fg_muted())
                 .margin_left(4.0)
@@ -1960,19 +1926,6 @@ fn event_words(text: String) -> Label {
             .text_ellipsis()
             .min_width(0.0)
     })
-}
-
-/// A link on an event's line: the pointer over it, and an underline, the
-/// label's bottom border, that shows under the pointer. The pixel of
-/// padding on top balances the border, so the text sits level with the
-/// words beside it, as a name's does.
-fn underlined_link(s: floem::style::Style) -> floem::style::Style {
-    clickable(
-        s.padding_top(1.0)
-            .border_bottom(1.0)
-            .border_color(Color::TRANSPARENT),
-    )
-    .hover(|s| s.border_color(theme::fg_muted()))
 }
 
 /// Whether the checkout has a commit, so Files can show it by itself.
@@ -2627,10 +2580,7 @@ fn anchor_block(
     // or when the file is where the hunk's numbers count.
     let has_hunk = hunk.is_some();
     let from_file = move || !has_hunk || (!outdated && at_head.get());
-    if from_file() && !loaded.get_untracked() && !state.is_loading(&anchor.path) {
-        state.loading.update(|m| {
-            m.insert(anchor.path.clone(), ());
-        });
+    if from_file() && state.begin_load(&anchor.path) {
         backend.open_file(&anchor.path);
     }
     // A comment from GitHub on one line is shown with the few above it,

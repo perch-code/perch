@@ -146,6 +146,11 @@ pub fn short_sha(sha: &str) -> String {
     sha.chars().take(7).collect()
 }
 
+/// `n` and the noun that counts it: "1 comment", "3 comments".
+pub fn count_of(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
 /// The event's one line, in the order its pieces are drawn. Who did it is
 /// drawn before these and is not among them, so a line that names the
 /// same person twice says "self" instead.
@@ -293,12 +298,12 @@ fn cut(line: &str) -> String {
 /// events GitHub's timeline gave it. A bare branch has neither, and its
 /// timeline is its commits over the base, as a pull request's would be,
 /// and its threads.
-pub fn timeline(
+pub fn timeline<'a>(
     pull: Option<&PullRequest>,
     discussion: Option<&Discussion>,
     issue: Option<(&Issue, &[IssueComment], &[PullEvent])>,
     branch_commits: &[Commit],
-    threads: &[CommentThread],
+    threads: impl IntoIterator<Item = &'a CommentThread>,
 ) -> Vec<Card> {
     let mut cards = Vec::new();
 
@@ -341,7 +346,7 @@ pub fn timeline(
             ))
         }));
     }
-    cards.extend(threads.iter().cloned().map(Card::Thread));
+    cards.extend(threads.into_iter().cloned().map(Card::Thread));
 
     // The sort is stable, so cards a list already had in order keep it.
     cards.sort_by_key(|c| (!matches!(c, Card::Description { .. }), c.at(), c.rank()));

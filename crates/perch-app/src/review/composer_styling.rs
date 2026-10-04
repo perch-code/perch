@@ -1,13 +1,15 @@
 //! Markdown styling for the composer while it is being typed into.
 //!
 //! The editor asks for a line's attributes on every layout, so the whole
-//! text is re-highlighted whenever it changes and cached until it does. A
-//! question is a few lines; tree-sitter does it in microseconds.
+//! text is re-highlighted whenever it changes and cached until it does,
+//! keyed on the document's revision, which every edit bumps. A question
+//! is a few lines; tree-sitter does it in microseconds.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use floem::reactive::SignalGet;
 use floem::text::{Attrs, AttrsList, FamilyOwned, FontStyle};
 use floem::views::editor::id::EditorId;
 use floem::views::editor::text::{Document, Styling};
@@ -20,7 +22,8 @@ pub struct ComposerStyling {
     doc: Rc<dyn Document>,
     families: Vec<FamilyOwned>,
     code_families: Vec<FamilyOwned>,
-    cache: RefCell<(String, LineSpans)>,
+    /// The spans, and the revision of the document they were made from.
+    cache: RefCell<(Option<u64>, LineSpans)>,
     id: u64,
 }
 
@@ -30,17 +33,18 @@ impl ComposerStyling {
             doc,
             families: FamilyOwned::parse_list(theme::FONT_STACK).collect(),
             code_families: FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect(),
-            cache: RefCell::new((String::new(), LineSpans::default())),
+            cache: RefCell::new((None, LineSpans::default())),
             id,
         }
     }
 
     fn spans_for(&self, line: usize, f: impl FnOnce(&[perch_syntax::Span])) {
-        let text = self.doc.text().to_string();
+        let rev = self.doc.cache_rev().get_untracked();
         let mut cache = self.cache.borrow_mut();
-        if cache.0 != text {
+        if cache.0 != Some(rev) {
+            let text = self.doc.text().to_string();
             let spans = highlight_markdown(&text);
-            *cache = (text.clone(), LineSpans::new(&text, &spans));
+            *cache = (Some(rev), LineSpans::new(&text, &spans));
         }
         f(cache.1.line(line));
     }

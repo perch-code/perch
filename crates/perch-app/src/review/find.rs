@@ -906,19 +906,8 @@ fn arrow(state: ReviewState, pane: Pane, forward: bool) -> impl IntoView {
 }
 
 fn close_button(state: ReviewState, pane: Pane) -> impl IntoView {
-    let tile = Container::new(
-        sidebar_glyph(SidebarIcon::Close, theme::fg_subtle).style(|s| s.size(11.0, 11.0)),
-    )
-    .on_event_stop(el::Click, move |_, _| close(state, pane))
-    .debug_name("find-close")
-    .style(|s| {
-        clickable(s)
-            .size(18.0, 18.0)
-            .items_center()
-            .justify_center()
-            .border_radius(3.0)
-            .hover(|s| s.background(theme::badge_bg()))
-    });
+    let tile = crate::review::references::close_button(move || close(state, pane))
+        .debug_name("find-close");
     tip(tile, "Close (Escape)".to_string())
 }
 

@@ -280,7 +280,7 @@ pub fn editor_box(
 /// screen. floem drops them for a new width in an effect of its own; the
 /// effect here, made after the editor's, runs after that one and marks
 /// the layouts stale, so they are laid out again at the new width.
-pub fn lay_out_every_line(editor: &floem::views::editor::Editor) {
+fn lay_out_every_line(editor: &floem::views::editor::Editor) {
     use floem::reactive::{Effect, Memo};
 
     let ed = editor.clone();
@@ -303,10 +303,46 @@ pub fn lay_out_every_line(editor: &floem::views::editor::Editor) {
     });
 }
 
+/// An editor for prose, as a description or a review is typed: the
+/// placeholder while it is empty, no gutter, and every line laid out
+/// (`lay_out_every_line`). Given a token from `ReviewState::next_token`,
+/// it styles Markdown as it is typed.
+pub(crate) fn prose_editor(
+    text: impl Into<String>,
+    placeholder: impl Into<String>,
+    markdown: Option<u64>,
+) -> TextEditor {
+    let editor = text_editor(text.into())
+        .placeholder(placeholder)
+        .editor_style(|s| s.hide_gutter(true).selection_color(theme::selection_bg()));
+    let editor = match markdown {
+        Some(id) => {
+            let doc = editor.editor().doc();
+            editor.styling(crate::review::composer_styling::ComposerStyling::new(doc, id))
+        }
+        None => editor,
+    };
+    lay_out_every_line(editor.editor());
+    editor
+}
+
 pub fn clickable(style: floem::style::Style) -> floem::style::Style {
     style
         .selectable(false)
         .hover(|s| s.cursor(floem::style::CursorStyle::Pointer))
+}
+
+/// A link in a line of words: the pointer over it, and an underline, the
+/// label's bottom border, that shows under the pointer. The pixel of
+/// padding on top balances the border, so the text sits level with the
+/// words beside it, as a name's does.
+pub(crate) fn underlined_link(s: floem::style::Style) -> floem::style::Style {
+    clickable(
+        s.padding_top(1.0)
+            .border_bottom(1.0)
+            .border_color(Color::TRANSPARENT),
+    )
+    .hover(|s| s.border_color(theme::fg_muted()))
 }
 
 /// A 16px icon in a colour of its own.
@@ -411,6 +447,53 @@ pub fn text_button(
     })
 }
 
+/// A question before a delete, on the notice colours: `question`, what
+/// goes in `what` under it, then `go`, with the trash glyph, and Cancel.
+/// A click inside goes no further. It is named `{name}-confirmation`, its
+/// buttons `confirm-{name}` and `cancel-{name}`; the caller places it.
+pub(crate) fn confirmation(
+    name: &'static str,
+    question: String,
+    what: String,
+    go: &'static str,
+    on_go: impl Fn() + 'static,
+    on_cancel: impl Fn() + 'static,
+) -> impl IntoView {
+    Stack::vertical((
+        Label::new(question).style(|s| {
+            s.font_size(theme::TEXT_META)
+                .font_weight(theme::weight_emphasis())
+                .color(theme::fg())
+                .selectable(false)
+        }),
+        Label::new(what).style(|s| {
+            s.font_size(theme::TEXT_BADGE)
+                .color(theme::fg_muted())
+                .text_wrap()
+                .width_full()
+                .margin_top(2.0)
+        }),
+        Stack::horizontal((
+            text_button(move || go.to_string(), SidebarIcon::Trash, on_go)
+                .debug_name(format!("confirm-{name}")),
+            text_button(|| "Cancel".to_string(), SidebarIcon::Close, on_cancel)
+                .debug_name(format!("cancel-{name}")),
+        ))
+        .style(|s| s.gap(6.0).margin_top(8.0)),
+    ))
+    .debug_name(format!("{name}-confirmation"))
+    .on_event_stop(floem::event::listener::Click, |_, _| {})
+    .style(|s| {
+        s.flex_col()
+            .width_full()
+            .padding(10.0)
+            .background(theme::notice_bg())
+            .border(1.0)
+            .border_color(theme::notice_border())
+            .border_radius(theme::RADIUS)
+    })
+}
+
 /// A small round icon button, as sits at the end of an item row.
 ///
 /// Its own hover background, so it reads as a target inside a row that is
@@ -433,6 +516,141 @@ pub fn icon_button(
             .border_radius(13.0)
             .hover(|s| s.background(theme::badge_bg()))
     })
+}
+
+/// A form's button, filled when `prominent`: Cancel, Submit, Merge. A
+/// click presses it, and so do Enter and Space once it has the keyboard;
+/// while `enabled` says no it is faded and nothing presses it.
+pub(crate) fn action_button(
+    label: impl Fn() -> String + 'static,
+    debug: impl Into<String>,
+    prominent: bool,
+    enabled: impl Fn() -> bool + 'static,
+    action: impl Fn() + 'static,
+) -> impl View {
+    let enabled: std::rc::Rc<dyn Fn() -> bool> = std::rc::Rc::new(enabled);
+    let event_enabled = enabled.clone();
+    let style_enabled = enabled.clone();
+    let action: std::rc::Rc<dyn Fn()> = std::rc::Rc::new(action);
+    let click = action.clone();
+    Container::new(Label::derived(label).style(move |s| {
+        s.font_size(theme::TEXT_BADGE)
+            .font_weight(theme::weight_emphasis())
+            .color(if prominent { theme::canvas() } else { theme::fg_muted() })
+            .selectable(false)
+            .pointer_events_none()
+    }))
+    .on_event_stop(el::Click, move |_, _| {
+        if event_enabled() {
+            click();
+        }
+    })
+    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+        if matches!(key.code, Code::Enter | Code::Space) && enabled() {
+            action();
+            EventPropagation::Stop
+        } else {
+            EventPropagation::Continue
+        }
+    })
+    .style(move |s| {
+        let available = style_enabled();
+        clickable(s)
+            .height(30.0)
+            .padding_horiz(11.0)
+            .items_center()
+            .justify_center()
+            .flex_shrink(0.0_f32)
+            .background(if prominent { theme::fg() } else { theme::canvas() })
+            .border(1.0)
+            .border_color(if prominent { theme::fg() } else { theme::border() })
+            .border_radius(theme::RADIUS)
+            .keyboard_navigable()
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+            .set_disabled(!available)
+            .apply_if(!available, |s| {
+                s.opacity(0.45_f32).cursor(floem::style::CursorStyle::Default)
+            })
+            .apply_if(available, |s| {
+                s.hover(move |s| {
+                    s.background(if prominent {
+                        theme::action_hover()
+                    } else {
+                        theme::canvas_hover()
+                    })
+                })
+            })
+    })
+    .debug_name(debug)
+    .into_view()
+}
+
+/// A glyph as a button, as closes a popover. Pressed as `action_button`
+/// is, and as faded while `enabled` says no.
+pub(crate) fn icon_action(
+    icon: SidebarIcon,
+    debug: impl Into<String>,
+    enabled: impl Fn() -> bool + 'static,
+    action: impl Fn() + 'static,
+) -> impl View {
+    let enabled: std::rc::Rc<dyn Fn() -> bool> = std::rc::Rc::new(enabled);
+    let event_enabled = enabled.clone();
+    let style_enabled = enabled.clone();
+    let action: std::rc::Rc<dyn Fn()> = std::rc::Rc::new(action);
+    let click = action.clone();
+    Container::new(
+        sidebar_glyph(icon, theme::fg_muted).style(|s| s.size(14.0, 14.0).pointer_events_none()),
+    )
+    .on_event_stop(el::Click, move |_, _| {
+        if event_enabled() {
+            click();
+        }
+    })
+    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+        if matches!(key.code, Code::Enter | Code::Space) && enabled() {
+            action();
+            EventPropagation::Stop
+        } else {
+            EventPropagation::Continue
+        }
+    })
+    .style(move |s| {
+        let available = style_enabled();
+        clickable(s)
+            .size(28.0, 28.0)
+            .items_center()
+            .justify_center()
+            .border_radius(theme::RADIUS)
+            .keyboard_navigable()
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+            .set_disabled(!available)
+            .apply_if(!available, |s| {
+                s.opacity(0.45_f32).cursor(floem::style::CursorStyle::Default)
+            })
+            .apply_if(available, |s| s.hover(|s| s.background(theme::canvas_hover())))
+    })
+    .debug_name(debug)
+    .into_view()
+}
+
+/// Why a form's last try failed: a warning glyph and the message, in
+/// the closed colour. Nothing without a message.
+pub(crate) fn error_line(message: Option<String>, debug: &'static str) -> floem::AnyView {
+    let Some(message) = message else {
+        return Empty::new().into_any();
+    };
+    Stack::horizontal((
+        sidebar_glyph(SidebarIcon::Warning, theme::closed)
+            .style(|s| s.size(14.0, 14.0).margin_right(7.0).flex_shrink(0.0_f32)),
+        Label::derived(move || message.clone()).debug_name(debug).style(|s| {
+            s.min_width(0.0)
+                .flex_grow(1.0_f32)
+                .font_size(theme::TEXT_META)
+                .color(theme::closed())
+        }),
+    ))
+    .style(|s| s.width_full().items_start())
+    .into_any()
 }
 
 /// How round a face of `size` is: a circle, or for an app's face the

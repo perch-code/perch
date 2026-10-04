@@ -49,39 +49,34 @@ pub fn view(
         let issue = state.issue.get();
         let comments = state.issue_comments.get();
         let issue_events = state.issue_events.get();
-        let threads = state.comment_threads.with(|threads| {
-            threads
-                .iter()
-                .filter(|thread| state.thread_visible(thread))
-                .cloned()
-                .collect::<Vec<_>>()
-        });
         // Only a bare branch's own commits: an item about a pull request
         // or an issue has GitHub's timeline, which may not have landed yet.
         let bare = state
             .item
             .with(|item| item.as_ref().is_some_and(|item| item.subject.is_none()));
         let commits = if bare { state.commits.get() } else { Default::default() };
-        let cards = timeline(
-            pull.as_deref(),
-            discussion.as_deref(),
-            issue.as_deref()
-                .map(|i| (i, comments.as_slice(), issue_events.as_slice())),
-            &commits,
-            &threads,
-        );
+        let cards = state.comment_threads.with(|threads| {
+            timeline(
+                pull.as_deref(),
+                discussion.as_deref(),
+                issue.as_deref()
+                    .map(|i| (i, comments.as_slice(), issue_events.as_slice())),
+                &commits,
+                threads.iter().filter(|thread| state.thread_visible(thread)),
+            )
+        });
         let mut rows = Vec::with_capacity(cards.len());
-        let mut previous: Option<&Card> = None;
-        for card in &cards {
-            let gap = match previous {
+        // Whether the card before was an event line; `None` for the first.
+        let mut after_event = None;
+        for card in cards {
+            let event = matches!(card, Card::Event(_));
+            let gap = match after_event {
                 None => 0.0,
-                Some(p) if matches!(p, Card::Event(_)) || matches!(card, Card::Event(_)) => {
-                    theme::EVENT_GAP
-                }
+                Some(was) if was || event => theme::EVENT_GAP,
                 Some(_) => theme::CARD_GAP,
             };
-            rows.push((card.clone(), gap));
-            previous = Some(card);
+            after_event = Some(event);
+            rows.push((card, gap));
         }
         rows
     };

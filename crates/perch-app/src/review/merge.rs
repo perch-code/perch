@@ -11,10 +11,7 @@ use floem::event::EventPropagation;
 use floem::peniko::Color;
 use floem::prelude::*;
 use floem::reactive::{Effect, RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::style::CursorStyle;
-use floem::views::{
-    dyn_container, dyn_stack, text_editor, Container, Decorators, Empty, Label, Stack, TextInput,
-};
+use floem::views::{dyn_container, dyn_stack, Container, Decorators, Empty, Label, Stack, TextInput};
 use floem::AnyView;
 use perch_github::{
     Check, CheckRunState, CheckState, Checks, CommitMessage, Item, MergeMethod, MergeMethods, MergeState,
@@ -25,12 +22,13 @@ use perch_github::{
 use crate::backend::Backend;
 use crate::icons::{state_color, SidebarIcon};
 use crate::review::model::ReviewState;
+use crate::review::timeline::short_sha;
 use crate::state::Checked;
 use crate::theme;
 use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::widgets::{
-    checkbox, clickable, editor_box, lay_out_every_line, open_in_browser, sidebar_glyph,
-    state_glyph,
+    action_button, checkbox, clickable, editor_box, error_line, open_in_browser, prose_editor,
+    sidebar_glyph, state_glyph,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -662,8 +660,8 @@ fn merge_content(
 
     Stack::vertical((
         status,
-        error_line(snapshot.overview_error.clone()),
-        error_line(snapshot.merge_error.clone()),
+        error_line(snapshot.overview_error.clone(), "merge-overview-error"),
+        error_line(snapshot.merge_error.clone(), "merge-error"),
         controls,
     ))
     .style(|s| {
@@ -781,7 +779,7 @@ fn merge_controls(
         MergeDecision::Conflicts => {
             let url = conflicts_url(&pull.html_url);
             let open_url = url.clone();
-            action_button(
+            merge_button(
                 "Resolve conflicts on GitHub".to_string(),
                 false,
                 move || url.is_some(),
@@ -794,17 +792,17 @@ fn merge_controls(
             .into_any()
         }
         MergeDecision::Loading => {
-            action_button("Checking status…".to_string(), false, || false, || {}).into_any()
+            merge_button("Checking status…".to_string(), false, || false, || {}).into_any()
         }
         MergeDecision::Disabled(_) => {
-            action_button("Merge unavailable".to_string(), false, || false, || {}).into_any()
+            merge_button("Merge unavailable".to_string(), false, || false, || {}).into_any()
         }
         MergeDecision::Ready | MergeDecision::Bypass => {
             let Some(overview) = snapshot.overview.as_ref() else {
                 return Empty::new().into_any();
             };
             if snapshot.merge_pending {
-                return action_button("Merging…".to_string(), true, || false, || {}).into_any();
+                return merge_button("Merging…".to_string(), true, || false, || {}).into_any();
             }
 
             let Some(method) =
@@ -850,7 +848,7 @@ fn merge_controls(
             } else {
                 method_label(method).to_string()
             };
-            let action = action_button(
+            let action = merge_button(
                 action_label,
                 true,
                 move || start_enabled,
@@ -948,7 +946,7 @@ fn confirmation_controls(
         pull.base_ref,
         method_short(request.method),
     );
-    let cancel = action_button(
+    let cancel = merge_button(
         "Cancel".to_string(),
         false,
         || true,
@@ -957,7 +955,7 @@ fn confirmation_controls(
 
     let enabled_request = request.clone();
     let submit_request = request.clone();
-    let submit = action_button(
+    let submit = merge_button(
         if request.bypass_requirements {
             "Confirm bypass and merge".to_string()
         } else {
@@ -1034,10 +1032,11 @@ fn message_fields(message: MessageDraft) -> impl IntoView {
                 .focus(|s| s.border_color(theme::accent()))
         });
 
-    let editor = text_editor(message.body.get_untracked())
-        .placeholder("Add an optional extended description\u{2026}".to_string())
-        .editor_style(|s| s.hide_gutter(true).selection_color(theme::selection_bg()));
-    lay_out_every_line(editor.editor());
+    let editor = prose_editor(
+        message.body.get_untracked(),
+        "Add an optional extended description\u{2026}",
+        None,
+    );
     let editor = editor
         .update(move |update| {
             if let Some(editor) = update.editor {
@@ -1137,89 +1136,15 @@ fn merge_method_menu(
     menu
 }
 
-fn action_button(
+/// A button of the merge surface, named in the tree for its label.
+fn merge_button(
     label: String,
     prominent: bool,
     enabled: impl Fn() -> bool + 'static,
     action: impl Fn() + 'static,
 ) -> impl View {
     let debug = format!("merge-action:{}", label.replace(' ', "-"));
-    let enabled: Rc<dyn Fn() -> bool> = Rc::new(enabled);
-    let event_enabled = enabled.clone();
-    let style_enabled = enabled.clone();
-    let action: Rc<dyn Fn()> = Rc::new(action);
-    let click = action.clone();
-    Container::new(Label::derived(move || label.clone()).style(move |s| {
-        s.font_size(theme::TEXT_BADGE)
-            .font_weight(theme::weight_emphasis())
-            .color(if prominent {
-                theme::canvas()
-            } else {
-                theme::fg_muted()
-            })
-            .selectable(false)
-            .pointer_events_none()
-    }))
-    .on_event_stop(el::Click, move |_, _| {
-        if event_enabled() {
-            click();
-        }
-    })
-    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if matches!(key.code, Code::Enter | Code::Space) && enabled() {
-            action();
-            EventPropagation::Stop
-        } else {
-            EventPropagation::Continue
-        }
-    })
-    .style(move |s| {
-        let available = style_enabled();
-        clickable(s)
-            .height(30.0)
-            .padding_horiz(11.0)
-            .items_center()
-            .justify_center()
-            .background(if prominent { theme::fg() } else { theme::canvas() })
-            .border(1.0)
-            .border_color(if prominent { theme::fg() } else { theme::border() })
-            .border_radius(theme::RADIUS)
-            .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
-            .set_disabled(!available)
-            .apply_if(!available, |s| {
-                s.opacity(0.45_f32).cursor(CursorStyle::Default)
-            })
-            .apply_if(available, |s| {
-                s.hover(move |s| {
-                    s.background(if prominent {
-                        theme::action_hover()
-                    } else {
-                        theme::canvas_hover()
-                    })
-                })
-            })
-    })
-    .debug_name(debug)
-    .into_view()
-}
-
-fn error_line(message: Option<String>) -> AnyView {
-    match message {
-        Some(message) => Stack::horizontal((
-            sidebar_glyph(SidebarIcon::Warning, theme::closed)
-                .style(|s| s.size(14.0, 14.0).margin_right(7.0)),
-            Label::derived(move || message.clone()).style(|s| {
-                s.min_width(0.0)
-                    .flex_grow(1.0_f32)
-                    .font_size(theme::TEXT_META)
-                    .color(theme::closed())
-            }),
-        ))
-        .style(|s| s.width_full().items_start())
-        .into_any(),
-        None => Empty::new().into_any(),
-    }
+    action_button(move || label.clone(), debug, prominent, enabled, action)
 }
 
 fn merge_decision(snapshot: &MergeSnapshot, pull: &PullRequest, item: &Item) -> MergeDecision {
@@ -1466,10 +1391,6 @@ fn method_short(method: MergeMethod) -> &'static str {
         MergeMethod::Squash => "squash",
         MergeMethod::Rebase => "rebase",
     }
-}
-
-fn short_sha(sha: &str) -> String {
-    sha.chars().take(7).collect()
 }
 
 #[cfg(test)]

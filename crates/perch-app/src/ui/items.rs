@@ -15,18 +15,19 @@ use std::rc::Rc;
 
 use floem::prelude::*;
 use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::views::{Container, Decorators, Empty, Label, Stack, TextInput, dyn_container};
+use floem::views::{Container, Decorators, Empty, Stack, TextInput, dyn_container};
 use perch_github::{Item, ItemSubject, SubjectState};
 
 use crate::backend::{Backend, LossPrompt};
 use crate::icons::{self, SidebarIcon};
+use crate::review::timeline::count_of;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::menu::{Menu, MenuExt, Shortcut};
 use crate::ui::nav_row;
 use crate::ui::widgets::{
-    copy_to_clipboard, icon_button, open_in_browser, open_in_terminal, reveal_in_finder, sidebar_glyph,
-    state_glyph, text_button,
+    confirmation, copy_to_clipboard, icon_button, open_in_browser, open_in_terminal, reveal_in_finder,
+    sidebar_glyph, state_glyph,
 };
 
 /// Opening an item. Shared by every row.
@@ -546,36 +547,19 @@ fn delete_confirmation(state: AppState, backend: Rc<Backend>, item: Item) -> imp
         Some(_) => "Removes the row and its threads. Nothing on disk is touched.".to_string(),
         None => "Removes the row and its threads.".to_string(),
     };
-    let title = item.title().to_string();
     let id = item.id.clone();
-    Stack::vertical((
-        Label::derived(move || format!("Delete {title}?")).style(|s| {
-            s.font_size(theme::TEXT_META).font_weight(theme::weight_emphasis()).color(theme::fg()).selectable(false)
-        }),
-        Label::derived(move || what.clone()).style(|s| {
-            s.font_size(theme::TEXT_BADGE).color(theme::fg_muted()).text_wrap().width_full().margin_top(2.0)
-        }),
-        Stack::horizontal((
-            text_button(|| "Delete".to_string(), SidebarIcon::Trash, move || {
-                backend.delete_item(&id, false);
-                state.confirm_delete.set(None);
-            }),
-            text_button(|| "Cancel".to_string(), SidebarIcon::Close, move || state.confirm_delete.set(None)),
-        ))
-        .style(|s| s.gap(6.0).margin_top(8.0)),
-    ))
-    .on_event_stop(el::Click, |_, _| {})
-    .style(|s| {
-        s.flex_col()
-            .width_full()
-            .padding(10.0)
-            .margin_horiz(6.0)
-            .margin_bottom(4.0)
-            .background(theme::notice_bg())
-            .border(1.0)
-            .border_color(theme::notice_border())
-            .border_radius(theme::RADIUS)
-    })
+    confirmation(
+        "delete-item",
+        format!("Delete {}?", item.title()),
+        what,
+        "Delete",
+        move || {
+            backend.delete_item(&id, false);
+            state.confirm_delete.set(None);
+        },
+        move || state.confirm_delete.set(None),
+    )
+    .style(|s| s.margin_horiz(6.0).margin_bottom(4.0))
 }
 
 /// What is open under a row.
@@ -588,10 +572,7 @@ enum Under {
 
 /// What a loss prompt says: the question, then what goes.
 fn loss_text(title: &str, prompt: &LossPrompt) -> (String, String, &'static str) {
-    let commits = match prompt.commits {
-        1 => "1 commit".to_string(),
-        n => format!("{n} commits"),
-    };
+    let commits = count_of(prompt.commits as usize, "commit", "commits");
     (
         format!("Delete {title} and its commits?"),
         format!(
@@ -608,38 +589,18 @@ fn loss_text(title: &str, prompt: &LossPrompt) -> (String, String, &'static str)
 fn loss_confirmation(state: AppState, backend: Rc<Backend>, title: String, prompt: LossPrompt) -> impl IntoView {
     let (question, what, go) = loss_text(&title, &prompt);
     let id = prompt.item_id.clone();
-    Stack::vertical((
-        Label::derived(move || question.clone()).style(|s| {
-            s.font_size(theme::TEXT_META).font_weight(theme::weight_emphasis()).color(theme::fg()).selectable(false)
-        }),
-        Label::derived(move || what.clone()).style(|s| {
-            s.font_size(theme::TEXT_BADGE).color(theme::fg_muted()).text_wrap().width_full().margin_top(2.0)
-        }),
-        Stack::horizontal((
-            text_button(
-                move || go.to_string(),
-                SidebarIcon::Trash,
-                move || {
-                    state.confirm_loss.set(None);
-                    backend.delete_item(&id, true);
-                },
-            ),
-            text_button(|| "Cancel".to_string(), SidebarIcon::Close, move || state.confirm_loss.set(None)),
-        ))
-        .style(|s| s.gap(6.0).margin_top(8.0)),
-    ))
-    .on_event_stop(el::Click, |_, _| {})
-    .style(|s| {
-        s.flex_col()
-            .width_full()
-            .padding(10.0)
-            .margin_horiz(6.0)
-            .margin_bottom(4.0)
-            .background(theme::notice_bg())
-            .border(1.0)
-            .border_color(theme::notice_border())
-            .border_radius(theme::RADIUS)
-    })
+    confirmation(
+        "delete-anyway",
+        question,
+        what,
+        go,
+        move || {
+            state.confirm_loss.set(None);
+            backend.delete_item(&id, true);
+        },
+        move || state.confirm_loss.set(None),
+    )
+    .style(|s| s.margin_horiz(6.0).margin_bottom(4.0))
 }
 
 #[cfg(test)]

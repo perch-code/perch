@@ -284,9 +284,7 @@ fn item_view(
         // the new head out; other news is only fetched.
         crate::ui::widgets::news_pill(
             move || match moved_head(state) {
-                Some(head) => {
-                    format!("Pull request moved to {}", head.chars().take(7).collect::<String>())
-                }
+                Some(head) => format!("Pull request moved to {}", timeline::short_sha(&head)),
                 None => "New activity on GitHub".to_string(),
             },
             move || moved_head(state).is_some() || state.upstream_changed.get(),

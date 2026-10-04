@@ -97,62 +97,108 @@ impl Discussion {
     /// Whether anything did. An empty id names nothing, not the entries
     /// an older build kept without one.
     pub fn set_reactions(&mut self, node_id: &str, reactions: &Reactions) -> bool {
-        if node_id.is_empty() {
-            return false;
-        }
-        let mut set = false;
-        if self.node_id == node_id {
-            self.reactions = reactions.clone();
-            set = true;
-        }
-        for c in self.comments.iter_mut().filter(|c| c.node_id == node_id) {
-            c.reactions = reactions.clone();
-            set = true;
-        }
-        for r in self.reviews.iter_mut().filter(|r| r.node_id == node_id) {
-            r.reactions = reactions.clone();
-            set = true;
-        }
-        for c in self.review_comments.iter_mut().filter(|c| c.node_id == node_id) {
-            c.reactions = reactions.clone();
-            set = true;
-        }
-        set
+        self.each_node(node_id, |n| *n.reactions = reactions.clone())
     }
 
     /// Mark whether the reader may delete the comment with this node id,
     /// in the conversation or on a line. An empty id names nothing.
     pub fn set_deletable(&mut self, node_id: &str, deletable: bool) {
-        if node_id.is_empty() {
-            return;
-        }
-        for c in self.comments.iter_mut().filter(|c| c.node_id == node_id) {
-            c.viewer_can_delete = deletable;
-        }
-        for c in self.review_comments.iter_mut().filter(|c| c.node_id == node_id) {
-            c.viewer_can_delete = deletable;
-        }
+        self.each_node(node_id, |n| {
+            if let Some(d) = n.viewer_can_delete {
+                *d = deletable;
+            }
+        });
     }
 
     /// Mark whether the reader may edit what has this node id: the
     /// description, a comment in the conversation or on a line, or a
     /// review's summary. An empty id names nothing.
     pub fn set_updatable(&mut self, node_id: &str, updatable: bool) {
+        self.each_node(node_id, |n| *n.viewer_can_update = updatable);
+    }
+
+    /// Put `body` on what has this node id: the description, a review's
+    /// summary, or a comment. Whether anything did.
+    pub fn set_body(&mut self, node_id: &str, body: &str) -> bool {
+        self.each_node(node_id, |n| *n.body = body.to_string())
+    }
+
+    /// Where what has this node id is: the description, which this calls
+    /// a pull request's (an issue's is the caller's to know), a review's
+    /// summary, or a comment in the conversation or on a line. `None`
+    /// for an empty id or one nothing here has.
+    pub fn place_of(&self, node_id: &str) -> Option<CommentPlace> {
         if node_id.is_empty() {
-            return;
+            None
+        } else if self.node_id == node_id {
+            Some(CommentPlace::PullRequestBody)
+        } else if self.reviews.iter().any(|r| r.node_id == node_id) {
+            Some(CommentPlace::Review)
+        } else if self.comments.iter().any(|c| c.node_id == node_id) {
+            Some(CommentPlace::Conversation)
+        } else if self.review_comments.iter().any(|c| c.node_id == node_id) {
+            Some(CommentPlace::Line)
+        } else {
+            None
         }
-        if self.node_id == node_id {
-            self.viewer_can_update = updatable;
+    }
+
+    /// Run `f` on everything here with this node id. Whether anything
+    /// has it; an empty id names nothing.
+    fn each_node(&mut self, node_id: &str, mut f: impl FnMut(NodeMut<'_>)) -> bool {
+        if node_id.is_empty() {
+            return false;
         }
-        for r in self.reviews.iter_mut().filter(|r| r.node_id == node_id) {
-            r.viewer_can_update = updatable;
+        let mut found = false;
+        let mut visit = |id: &str, node: NodeMut<'_>| {
+            if id == node_id {
+                f(node);
+                found = true;
+            }
+        };
+        visit(
+            &self.node_id,
+            NodeMut {
+                body: &mut self.body,
+                reactions: &mut self.reactions,
+                viewer_can_update: &mut self.viewer_can_update,
+                viewer_can_delete: None,
+            },
+        );
+        for c in &mut self.comments {
+            visit(
+                &c.node_id,
+                NodeMut {
+                    body: &mut c.body,
+                    reactions: &mut c.reactions,
+                    viewer_can_update: &mut c.viewer_can_update,
+                    viewer_can_delete: Some(&mut c.viewer_can_delete),
+                },
+            );
         }
-        for c in self.comments.iter_mut().filter(|c| c.node_id == node_id) {
-            c.viewer_can_update = updatable;
+        for r in &mut self.reviews {
+            visit(
+                &r.node_id,
+                NodeMut {
+                    body: &mut r.body,
+                    reactions: &mut r.reactions,
+                    viewer_can_update: &mut r.viewer_can_update,
+                    viewer_can_delete: None,
+                },
+            );
         }
-        for c in self.review_comments.iter_mut().filter(|c| c.node_id == node_id) {
-            c.viewer_can_update = updatable;
+        for c in &mut self.review_comments {
+            visit(
+                &c.node_id,
+                NodeMut {
+                    body: &mut c.body,
+                    reactions: &mut c.reactions,
+                    viewer_can_update: &mut c.viewer_can_update,
+                    viewer_can_delete: Some(&mut c.viewer_can_delete),
+                },
+            );
         }
+        found
     }
 
     /// Everything here with its reactions, by node id, for the view to
@@ -164,6 +210,15 @@ impl Discussion {
             .chain(self.review_comments.iter().map(|c| (c.node_id.as_str(), &c.reactions)))
             .filter(|(id, _)| !id.is_empty())
     }
+}
+
+/// What a read or an edit changes on one node of a discussion, borrowed.
+struct NodeMut<'a> {
+    body: &'a mut String,
+    reactions: &'a mut Reactions,
+    viewer_can_update: &'a mut bool,
+    /// `None` for the description and a review, which are never deleted.
+    viewer_can_delete: Option<&'a mut bool>,
 }
 
 /// A review thread as GitHub keeps it: whether someone resolved it, and

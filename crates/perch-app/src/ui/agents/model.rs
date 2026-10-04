@@ -232,77 +232,31 @@ impl AgentRunSummary {
     }
 
     pub fn from_record(run: &perch_github::RunRecord) -> Self {
-        use perch_github::comments::RunPurpose;
-
-        let usage = run.usage.as_ref();
-        let review_attempt_id = match &run.owner {
-            perch_github::RunOwner::Review {
-                reviewer_run_id, ..
-            } => Some(reviewer_run_id.clone()),
-            _ => None,
-        };
-        Self {
-            id: run.id.clone(),
-            item_id: run.owner.item_id().map(str::to_string),
-            thread_id: run.thread_id().map(str::to_string),
-            review_attempt_id,
-            repository: run.labels.repository.clone(),
-            worktree: run
-                .labels
-                .branch
-                .clone()
-                .unwrap_or_else(|| run.labels.item.clone()),
-            purpose: match run.purpose {
-                RunPurpose::Question => AgentRunPurpose::Question,
-                RunPurpose::FollowUp => AgentRunPurpose::FollowUp,
-                RunPurpose::WorktreeReview => AgentRunPurpose::Review,
-            },
-            request: run.original_request.clone(),
-            backend: run.backend.clone(),
-            model: run.model.clone(),
-            effort: run.effort.clone(),
-            mode: run.mode,
-            status: AgentRunStatus::parse(run.status.name()),
-            terminal_reason: run.terminal_reason,
-            queue_position: None,
-            queued_at: run.queued_at,
-            started_at: run.started_at,
-            ended_at: run.ended_at,
-            latest_activity: run
-                .latest_activity
-                .clone()
-                .or_else(|| {
-                    run.steps
-                        .iter()
-                        .rev()
-                        .find(|step| !step.note)
-                        .map(|step| step.summary.clone())
-                }),
-            // The pane streams the agent's words as its response; the
-            // notes among the steps would say them twice.
-            steps: Arc::new(
-                run.steps
-                    .iter()
-                    .filter(|step| !step.note)
-                    .enumerate()
-                    .map(|(sequence, step)| AgentRunStep {
-                        sequence: sequence as u64,
-                        summary: step.summary.clone(),
-                        ok: step.ok,
-                    })
-                    .collect(),
-            ),
-            response: run.final_result.clone().unwrap_or_default(),
-            response_truncated: run.final_result_truncated,
-            error: run.error.clone(),
-            cost_usd: run.cost_usd,
-            input_tokens: usage.and_then(|usage| usage.input_tokens),
-            output_tokens: usage.and_then(|usage| usage.output_tokens),
-            cached_input_tokens: usage.and_then(|usage| usage.cached_input_tokens),
-            retry_of: run.retry_of.clone(),
-            source_available: run.owner.item_id().is_some(),
-            last_event_sequence: run.last_event_sequence,
-        }
+        let mut summary = Self::from_summary(&perch_github::RunSummary::from(run));
+        summary.latest_activity = run.latest_activity.clone().or_else(|| {
+            run.steps
+                .iter()
+                .rev()
+                .find(|step| !step.note)
+                .map(|step| step.summary.clone())
+        });
+        // The pane streams the agent's words as its response; the notes
+        // among the steps would say them twice.
+        summary.steps = Arc::new(
+            run.steps
+                .iter()
+                .filter(|step| !step.note)
+                .enumerate()
+                .map(|(sequence, step)| AgentRunStep {
+                    sequence: sequence as u64,
+                    summary: step.summary.clone(),
+                    ok: step.ok,
+                })
+                .collect(),
+        );
+        summary.response = run.final_result.clone().unwrap_or_default();
+        summary.response_truncated = run.final_result_truncated;
+        summary
     }
 
     /// Build the list projection without hydrating transcript-only fields.

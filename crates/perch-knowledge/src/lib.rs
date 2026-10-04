@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use sanitize::clean;
+use sanitize::{clean, fence_around, one_line};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -407,10 +407,6 @@ fn safe_component(value: &str) -> String {
     }
 }
 
-fn one_line(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 fn inline_text(value: &str) -> String {
     one_line(value).replace(['[', ']'], "")
 }
@@ -429,13 +425,6 @@ fn markdown_link(value: &str) -> String {
 
 fn short_sha(value: &str) -> String {
     value.chars().take(12).collect()
-}
-
-/// A fence one backtick longer than any run inside the text, so the text
-/// cannot close it. Longer than three is still a fence to CommonMark.
-fn fence_around(value: &str) -> String {
-    let longest = value.split(|c| c != '`').map(str::len).max().unwrap_or(0);
-    "`".repeat(longest.max(2) + 1)
 }
 
 #[cfg(test)]

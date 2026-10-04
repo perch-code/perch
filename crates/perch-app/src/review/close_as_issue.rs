@@ -14,19 +14,15 @@ use std::rc::Rc;
 use floem::event::EventPropagation;
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::views::{
-    dyn_container, text_editor, Container, Decorators, Empty, Label, Stack, TextInput,
-};
+use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack, TextInput};
 use floem::AnyView;
 
 use crate::backend::Backend;
-use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
-use crate::review::open_pull::action_button;
 use crate::review::threads::{resizable_editor_box, resize_cursor_sheet, Grip};
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::{editor_box, lay_out_every_line, sidebar_glyph};
+use crate::ui::widgets::{self, action_button, editor_box, prose_editor};
 
 /// What the comment says until the reader changes it. `{issue}` becomes
 /// the new issue's number.
@@ -379,16 +375,7 @@ fn markdown_box<B: IntoView + 'static>(
 
     use crate::review::threads::cmd_enter;
 
-    let editor = text_editor(text)
-        .placeholder(placeholder.to_string())
-        .editor_style(|s| s.hide_gutter(true).selection_color(theme::selection_bg()));
-    let styling_doc = editor.editor().doc();
-    let styling_id = state.next_token();
-    let editor = editor.styling(crate::review::composer_styling::ComposerStyling::new(
-        styling_doc,
-        styling_id,
-    ));
-    lay_out_every_line(editor.editor());
+    let editor = prose_editor(text, placeholder, Some(state.next_token()));
     let mentioner = crate::review::mention::attach(app, state, backend, editor.editor(), |path| {
         format!("`{path}` ")
     });
@@ -548,25 +535,7 @@ fn error_line(state: ReviewState) -> impl IntoView {
                 .get()
                 .or_else(|| state.issue_draft_error.get())
         },
-        |message| -> AnyView {
-            let Some(message) = message else {
-                return Empty::new().into_any();
-            };
-            Stack::horizontal((
-                sidebar_glyph(SidebarIcon::Warning, theme::closed)
-                    .style(|s| s.size(14.0, 14.0).margin_right(7.0).flex_shrink(0.0_f32)),
-                Label::derived(move || message.clone())
-                    .debug_name("close-as-issue-error")
-                    .style(|s| {
-                        s.min_width(0.0)
-                            .flex_grow(1.0_f32)
-                            .font_size(theme::TEXT_META)
-                            .color(theme::closed())
-                    }),
-            ))
-            .style(|s| s.width_full().items_start())
-            .into_any()
-        },
+        |message| widgets::error_line(message, "close-as-issue-error"),
     )
     .style(|s| s.width_full())
 }

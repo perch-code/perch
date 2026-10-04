@@ -279,7 +279,10 @@ pub fn note(text: Option<String>, color: impl theme::Ink) -> impl IntoView {
 
 /// "1d", at the title's right end, following the app's clock.
 pub fn age(state: AppState, at: Timestamp) -> impl IntoView {
-    Label::derived(move || timefmt::short(at, state.now.get()))
+    // A memo, so the label is set again only when its text changes, not
+    // on every tick of the clock.
+    let text = Memo::new(move |_| timefmt::short(at, state.now.get()));
+    Label::derived(move || text.get())
         .debug_name("row age")
         .style(|s| {
             s.font_size(theme::TEXT_BADGE)

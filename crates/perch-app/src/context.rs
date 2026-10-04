@@ -16,9 +16,10 @@ use perch_knowledge::discussion::{
     self as files, CheckEntry, CheckOutcome, DiscussionArchive, EntryKey, EventLine, Manifest,
     Post, ReviewEntry, ThreadEntry, Verdict,
 };
-use perch_knowledge::sanitize::{clean, strip_format_chars};
+use perch_knowledge::sanitize::{clean, one_line, strip_format_chars};
 
 use crate::ask::untrusted_block;
+use crate::review::timeline::short_sha;
 
 /// How much of the prompt the discussion may take, in characters: about
 /// six thousand tokens. The description is not counted.
@@ -154,7 +155,6 @@ fn event_line(event: &PullEvent) -> Option<EventLine> {
     } else {
         event.actor.as_str()
     };
-    let short = |sha: &str| sha.chars().take(7).collect::<String>();
     let text = match &event.kind {
         PullEventKind::Committed {
             sha,
@@ -167,9 +167,9 @@ fn event_line(event: &PullEvent) -> Option<EventLine> {
             } else {
                 author.as_str()
             };
-            format!("{who} committed {} {subject}", short(sha))
+            format!("{who} committed {} {subject}", short_sha(sha))
         }
-        PullEventKind::ForcePushed { sha } => format!("{actor} force-pushed to {}", short(sha)),
+        PullEventKind::ForcePushed { sha } => format!("{actor} force-pushed to {}", short_sha(sha)),
         PullEventKind::Merged => format!("{actor} merged it"),
         PullEventKind::Closed => format!("{actor} closed it"),
         PullEventKind::Reopened => format!("{actor} reopened it"),
@@ -597,10 +597,6 @@ fn cut(body: &str, key: EntryKey) -> String {
 /// bracket that could end the marker early.
 fn label(text: &str) -> String {
     one_line(&strip_format_chars(text)).replace(['[', ']'], "")
-}
-
-fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Where the runs' directories live: `$PERCH_HOME/context`.

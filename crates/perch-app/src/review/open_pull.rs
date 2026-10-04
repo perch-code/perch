@@ -13,19 +13,18 @@ use std::rc::Rc;
 use floem::event::EventPropagation;
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::style::CursorStyle;
-use floem::views::{dyn_container, text_editor, Container, Decorators, Empty, Label, Stack, TextInput};
-use floem::AnyView;
+use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack, TextInput};
 use perch_github::Item;
 
 use crate::backend::{Backend, OpenStep, PullRequestReadiness};
 use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
 use crate::review::threads::{resizable_editor_box, resize_cursor_sheet, Grip};
+use crate::review::timeline::count_of;
 use crate::state::{AppState, Checked};
 use crate::theme;
 use crate::ui::menu::{Menu, MenuExt};
-use crate::ui::widgets::{checkbox, clickable, lay_out_every_line, sidebar_glyph};
+use crate::ui::widgets::{self, action_button, checkbox, clickable, prose_editor, sidebar_glyph};
 
 /// What the reader has put into one branch's form.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -148,10 +147,8 @@ pub(crate) fn refusal(app: AppState, state: ReviewState, title: &str) -> Option<
 }
 
 fn commits_ahead(readiness: &PullRequestReadiness) -> String {
-    match readiness.ahead {
-        1 => format!("1 commit ahead of {}", readiness.base),
-        n => format!("{n} commits ahead of {}", readiness.base),
-    }
+    let commits = count_of(readiness.ahead as usize, "commit", "commits");
+    format!("{commits} ahead of {}", readiness.base)
 }
 
 /// The surface, on a branch that has something to propose. Nothing on
@@ -413,16 +410,8 @@ fn body_editor(
 
     use crate::review::threads::cmd_enter;
 
-    let editor = text_editor(draft_of(app, &item_id).body)
-        .placeholder("Description".to_string())
-        .editor_style(|s| s.hide_gutter(true).selection_color(theme::selection_bg()));
-    let styling_doc = editor.editor().doc();
-    let styling_id = state.next_token();
-    let editor = editor.styling(crate::review::composer_styling::ComposerStyling::new(
-        styling_doc,
-        styling_id,
-    ));
-    lay_out_every_line(editor.editor());
+    let editor =
+        prose_editor(draft_of(app, &item_id).body, "Description", Some(state.next_token()));
     let mentioner = crate::review::mention::attach(
         app,
         state,
@@ -718,89 +707,9 @@ fn notes(app: AppState, state: ReviewState, title: RwSignal<String>) -> impl Int
 fn error_line(state: ReviewState) -> impl IntoView {
     dyn_container(
         move || state.pull_error.get().or_else(|| state.description_error.get()),
-        |message| -> AnyView {
-            let Some(message) = message else {
-                return Empty::new().into_any();
-            };
-            Stack::horizontal((
-                sidebar_glyph(SidebarIcon::Warning, theme::closed)
-                    .style(|s| s.size(14.0, 14.0).margin_right(7.0).flex_shrink(0.0_f32)),
-                Label::derived(move || message.clone())
-                    .debug_name("open-pull-request-error")
-                    .style(|s| {
-                        s.min_width(0.0)
-                            .flex_grow(1.0_f32)
-                            .font_size(theme::TEXT_META)
-                            .color(theme::closed())
-                    }),
-            ))
-            .style(|s| s.width_full().items_start())
-            .into_any()
-        },
+        |message| widgets::error_line(message, "open-pull-request-error"),
     )
     .style(|s| s.width_full())
-}
-
-pub(crate) fn action_button(
-    label: impl Fn() -> String + 'static,
-    debug: &'static str,
-    prominent: bool,
-    enabled: impl Fn() -> bool + 'static,
-    action: impl Fn() + 'static,
-) -> impl View {
-    let enabled: Rc<dyn Fn() -> bool> = Rc::new(enabled);
-    let event_enabled = enabled.clone();
-    let style_enabled = enabled.clone();
-    let action: Rc<dyn Fn()> = Rc::new(action);
-    let click = action.clone();
-    Container::new(Label::derived(label).style(move |s| {
-        s.font_size(theme::TEXT_BADGE)
-            .font_weight(theme::weight_emphasis())
-            .color(if prominent { theme::canvas() } else { theme::fg_muted() })
-            .selectable(false)
-            .pointer_events_none()
-    }))
-    .on_event_stop(el::Click, move |_, _| {
-        if event_enabled() {
-            click();
-        }
-    })
-    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if matches!(key.code, Code::Enter | Code::Space) && enabled() {
-            action();
-            EventPropagation::Stop
-        } else {
-            EventPropagation::Continue
-        }
-    })
-    .style(move |s| {
-        let available = style_enabled();
-        clickable(s)
-            .height(30.0)
-            .padding_horiz(11.0)
-            .items_center()
-            .justify_center()
-            .flex_shrink(0.0_f32)
-            .background(if prominent { theme::fg() } else { theme::canvas() })
-            .border(1.0)
-            .border_color(if prominent { theme::fg() } else { theme::border() })
-            .border_radius(theme::RADIUS)
-            .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
-            .set_disabled(!available)
-            .apply_if(!available, |s| s.opacity(0.45_f32).cursor(CursorStyle::Default))
-            .apply_if(available, |s| {
-                s.hover(move |s| {
-                    s.background(if prominent {
-                        theme::action_hover()
-                    } else {
-                        theme::canvas_hover()
-                    })
-                })
-            })
-    })
-    .debug_name(debug)
-    .into_view()
 }
 
 #[cfg(test)]

@@ -573,11 +573,15 @@ fn item_list(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl I
 /// Worktrees' scrolling list, for either view. Pinning changes order and
 /// the row's pin indicator without adding a separate heading.
 fn local_item_list(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl IntoView {
+    // One list for the empty message and the rows. A memo, so a write
+    // that leaves the view's rows as they were diffs nothing. The rows
+    // are keyed on the whole item: a row draws most of it.
+    let visible = floem::reactive::Memo::new(move |_| state.visible_items());
     Stack::vertical((
         dyn_container(
             move || {
                 let view = state.item_filters.with(|f| f.worktrees.view);
-                if !state.visible_items().is_empty() {
+                if !visible.with(Vec::is_empty) {
                     None
                 } else if state.item_query.with(|q| !q.trim().is_empty()) || has_rows_unnarrowed(state) {
                     Some("No matching items")
@@ -599,7 +603,7 @@ fn local_item_list(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> 
             },
         ),
         dyn_stack(
-            move || state.visible_items(),
+            move || visible.get(),
             |item: &Item| item.clone(),
             move |item| item_row(state, backend.clone(), item, on_open.clone()),
         )

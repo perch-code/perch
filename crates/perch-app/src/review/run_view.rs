@@ -30,6 +30,7 @@ use crate::review::cards;
 use crate::review::code_refs::{written_place, Refs};
 use crate::review::model::ReviewState;
 use crate::review::threads::{steps_summary, worked_for};
+use crate::review::timeline::count_of;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{clickable, icon_button, sidebar_glyph};
@@ -574,10 +575,7 @@ fn live_box(state: ReviewState, calls: Vec<RunStep>, whole: RwSignal<bool>) -> f
                 Empty::new().into_any()
             } else {
                 fold_row(
-                    format!(
-                        "{hidden} earlier {}",
-                        if hidden == 1 { "step" } else { "steps" }
-                    ),
+                    count_of(hidden, "earlier step", "earlier steps"),
                     false,
                     move || whole.set(true),
                 )

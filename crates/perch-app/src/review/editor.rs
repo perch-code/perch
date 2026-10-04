@@ -229,6 +229,18 @@ struct Inputs {
     cards: Vec<Card>,
 }
 
+impl Inputs {
+    /// `file`'s stacked document; see `stacked_doc`.
+    fn stacked(&self, file: &LoadedFile) -> Doc {
+        stacked_doc(file, self.folded, &self.anchors, &self.reveals, &self.cards)
+    }
+
+    /// `file`'s split documents; see `split_doc`.
+    fn split(&self, file: &LoadedFile) -> Option<(Doc, Doc)> {
+        split_doc(file, self.folded, &self.anchors, &self.reveals, &self.cards)
+    }
+}
+
 /// The anchors and the cards of a file, as memos: a thread's messages
 /// change every line of a streaming answer, and a memo only tells its
 /// readers when what it holds has changed, so the document is not built
@@ -277,14 +289,7 @@ fn code_view(
     let memos = Memos::new(state, &file);
     let split = Effect::untrack(|| match layout {
         Layout::Split => {
-            let inputs = memos.inputs(state, &file);
-            split_doc(
-                &file,
-                inputs.folded,
-                &inputs.anchors,
-                &inputs.reveals,
-                &inputs.cards,
-            )
+            memos.inputs(state, &file).split(&file)
         }
         Layout::Stacked => None,
     });
@@ -337,16 +342,7 @@ fn stacked_view(
     backend: Rc<Backend>,
 ) -> impl IntoView {
     let file = live_file.get_untracked();
-    let built = Effect::untrack(|| {
-        let inputs = memos.inputs(state, &file);
-        stacked_doc(
-            &file,
-            inputs.folded,
-            &inputs.anchors,
-            &inputs.reveals,
-            &inputs.cards,
-        )
-    });
+    let built = Effect::untrack(|| memos.inputs(state, &file).stacked(&file));
     let text = built.text.clone();
     let doc = RwSignal::new(Arc::new(built));
     let editor = code_editor(
@@ -360,12 +356,7 @@ fn stacked_view(
             epoch,
         ),
     );
-    let live = LiveDoc {
-        handle: editor.doc(),
-        doc,
-        cursor: editor.editor().cursor,
-        content: editor.editor().editor_view_id.get_untracked(),
-    };
+    let live = LiveDoc::of(&editor, doc);
     state.docs.set(Some(LiveDocs {
         epoch,
         layout: LiveLayout::Stacked(live.clone()),
@@ -391,14 +382,7 @@ fn stacked_view(
     wire_highlights(state, &live, live_file);
     wire_folds(state, live_file, memos, epoch, {
         move |file: &LoadedFile, inputs: &Inputs, reloaded: bool| {
-            let new = stacked_doc(
-                file,
-                inputs.folded,
-                &inputs.anchors,
-                &inputs.reveals,
-                &inputs.cards,
-            );
-            apply(&live, new, viewport, scroll_to, cursor, shifted, reloaded)
+            apply(&live, inputs.stacked(file), viewport, scroll_to, cursor, shifted, reloaded)
         }
     });
     wire_cursor(state, backend.clone(), file.clone(), doc, cursor, shifted);
@@ -1366,18 +1350,8 @@ fn split_view(
             epoch.wrapping_mul(2) + 1,
         ),
     );
-    let left_live = LiveDoc {
-        handle: left.doc(),
-        doc: left_doc,
-        cursor: left.editor().cursor,
-        content: left.editor().editor_view_id.get_untracked(),
-    };
-    let right_live = LiveDoc {
-        handle: right.doc(),
-        doc: right_doc,
-        cursor: right.editor().cursor,
-        content: right.editor().editor_view_id.get_untracked(),
-    };
+    let left_live = LiveDoc::of(&left, left_doc);
+    let right_live = LiveDoc::of(&right, right_doc);
     state.docs.set(Some(LiveDocs {
         epoch,
         layout: LiveLayout::Split {
@@ -1408,13 +1382,7 @@ fn split_view(
     wire_highlights(state, &left_live, live_file);
     wire_folds(state, live_file, memos, epoch, {
         move |file: &LoadedFile, inputs: &Inputs, reloaded: bool| {
-            let Some((new_left, new_right)) = split_doc(
-                file,
-                inputs.folded,
-                &inputs.anchors,
-                &inputs.reveals,
-                &inputs.cards,
-            ) else {
+            let Some((new_left, new_right)) = inputs.split(file) else {
                 return;
             };
             apply(

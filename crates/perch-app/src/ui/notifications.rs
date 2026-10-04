@@ -7,7 +7,7 @@
 use std::rc::Rc;
 
 use floem::prelude::*;
-use floem::reactive::{RwSignal, SignalGet, SignalUpdate};
+use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate};
 use floem::views::{
     dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack,
 };
@@ -273,9 +273,11 @@ fn notification_trailing(
 /// When a snoozed row comes back, in the age's place: "6:00 PM",
 /// "tomorrow 8:00 AM", "Sat 8:00 AM".
 fn snoozed_until_label(state: AppState, until: jiff::Timestamp) -> impl IntoView {
+    // A memo, so the label is set again only when its text changes.
+    let text = Memo::new(move |_| timefmt::ahead(until, state.now.get()));
     Stack::horizontal((
         nav_row::mark(SidebarIcon::Clock, theme::nav_muted),
-        Label::derived(move || timefmt::ahead(until, state.now.get()))
+        Label::derived(move || text.get())
             .debug_name("snoozed until")
             .style(|s| {
                 s.font_size(theme::TEXT_BADGE)

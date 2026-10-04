@@ -959,10 +959,7 @@ pub enum Event {
     AgentSteer { run_id: String, text: String },
     /// App-wide run summaries. Every active run is included; terminal
     /// history is the requested newest-first prefix.
-    AgentRuns {
-        runs: Vec<RunSummary>,
-        has_more: bool,
-    },
+    AgentRuns { runs: Vec<RunSummary> },
     /// One item's active runs and a page of its history, newest first.
     ItemRuns {
         item_id: String,
@@ -3660,8 +3657,8 @@ async fn run(
     // Local state and agent history do not depend on GitHub credentials.
     // Reconcile them before token setup so a launch without a token cannot
     // leave crashed work looking active indefinitely.
-    let (cache, reset) = open_cache_for_app(&events);
-    tracing::info!(cache = cache.is_some(), reset, "cache opened");
+    let cache = open_cache_for_app(&events);
+    tracing::info!(cache = cache.is_some(), "cache opened");
     for warning in &config.warnings {
         let _ = events.send(Event::Notice(warning.clone()));
     }
@@ -3669,7 +3666,7 @@ async fn run(
     let _ = events.send(Event::WorkDefaults(config.work.clone()));
     let _ = events.send(Event::GithubHosts(config.github_hosts()));
     let mut initial_notifications = Vec::new();
-    let mut initial_items = Vec::new();
+    let mut initial_faces = RowFaces::default();
     if let Some(cache) = cache.as_ref() {
         if let Ok(guard) = cache.lock() {
             match guard.interrupt_active_runs(
@@ -3680,7 +3677,7 @@ async fn run(
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "could not reconcile runs"),
             }
-            initial_items = send_items(&guard, &events, Event::Items).unwrap_or_default();
+            initial_faces = send_items(&guard, &events, Event::Items).unwrap_or_default();
             match guard.load_threads() {
                 Ok(threads) => {
                     initial_notifications = threads.clone();
@@ -3865,9 +3862,9 @@ async fn run(
         });
     }
     // The faces on the cached rows, from disk where they are there.
-    ctx.want_avatars(author_avatars(&initial_items));
+    ctx.want_avatars(initial_faces.avatars);
     ctx.want_avatars(notification_avatars(&initial_notifications));
-    ctx.look_at_participants(item_subjects(&initial_items));
+    ctx.look_at_participants(initial_faces.subjects);
 
     // Who the reader is on GitHub, for their own byline: once per launch,
     // kept in meta so the next launch has it before the network does.
@@ -3902,7 +3899,7 @@ async fn run(
     // hook while this ran would have no row yet, and would be taken for a
     // stray and removed from under it. It is a directory listing and at
     // most a prune, so the first poll is not kept waiting.
-    reconcile_checkouts(&ctx, reset).await;
+    reconcile_checkouts(&ctx).await;
     // Then remove the worktrees nobody needs: see `sweep_items`. Only
     // owned checkouts are touched, so this can run beside whatever the
     // reader does next. It runs again after every poll.
@@ -4014,12 +4011,8 @@ async fn run(
                 ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    if open_subject_navigation(&ctx, repo_full_name, kind, number, navigation_id)
-                        .await
-                    {
-                        start_language_server(&ctx, navigation_id)
+                    open_subject_navigation(&ctx, repo_full_name, kind, number, navigation_id)
                         .await;
-                    }
                 });
             }
             Command::OpenReference {
@@ -4045,12 +4038,8 @@ async fn run(
                         navigation_id,
                         kind,
                     });
-                    if open_subject_navigation(&ctx, repo_full_name, kind, number, navigation_id)
-                        .await
-                    {
-                        start_language_server(&ctx, navigation_id)
+                    open_subject_navigation(&ctx, repo_full_name, kind, number, navigation_id)
                         .await;
-                    }
                 });
             }
             Command::Browse { query, page, poll } => {
@@ -4096,10 +4085,7 @@ async fn run(
                     let ctx = ctx.clone();
                     let repo = thread.repository.full_name;
                     tokio::spawn(async move {
-                        if open_subject_navigation(&ctx, repo, kind, number, navigation_id).await {
-                            start_language_server(&ctx, navigation_id)
-                            .await;
-                        }
+                        open_subject_navigation(&ctx, repo, kind, number, navigation_id).await;
                     });
                 }
             }
@@ -5958,23 +5944,23 @@ impl Ctx {
     }
 
     fn send_items(&self) {
-        if let Some(items) = self
+        if let Some(faces) = self
             .with_cache(|c| send_items(c, &self.events, Event::Items))
             .flatten()
         {
-            self.want_avatars(author_avatars(&items));
-            self.look_at_participants(item_subjects(&items));
+            self.want_avatars(faces.avatars);
+            self.look_at_participants(faces.subjects);
         }
     }
 
     /// The same, for what a poll found rather than what the reader did.
     fn send_polled_items(&self) {
-        if let Some(items) = self
+        if let Some(faces) = self
             .with_cache(|c| send_items(c, &self.events, Event::ItemsPolled))
             .flatten()
         {
-            self.want_avatars(author_avatars(&items));
-            self.look_at_participants(item_subjects(&items));
+            self.want_avatars(faces.avatars);
+            self.look_at_participants(faces.subjects);
         }
     }
 
@@ -6502,17 +6488,30 @@ impl Ctx {
     }
 }
 
-/// Publish the rows, and hand them back so the caller can ask for the
-/// faces on them.
+/// What the faces on a list of rows need asked after: the avatar of whoever
+/// opened each pull request or issue, and the subjects to look at for who
+/// acted there last.
+#[derive(Default)]
+struct RowFaces {
+    avatars: Vec<String>,
+    subjects: Vec<(String, u64, Timestamp)>,
+}
+
+/// Publish the rows, and hand back what the caller should ask after for
+/// the faces on them.
 fn send_items(
     cache: &Cache,
     events: &EventSender<Event>,
     event: fn(Vec<Item>) -> Event,
-) -> Option<Vec<Item>> {
+) -> Option<RowFaces> {
     match cache.load_items() {
         Ok(items) => {
-            let _ = events.send(event(items.clone()));
-            Some(items)
+            let faces = RowFaces {
+                avatars: author_avatars(&items).collect(),
+                subjects: item_subjects(&items),
+            };
+            let _ = events.send(event(items));
+            Some(faces)
         }
         Err(e) => {
             tracing::warn!(error = %e, "could not read items");
@@ -6791,7 +6790,7 @@ fn send_agent_runs_from_cache(
     let wanted = history_limit.max(1);
     let mut history = Vec::with_capacity(wanted);
     let mut cursor = None;
-    let has_more = loop {
+    loop {
         let page_size = (wanted - history.len()).min(AGENT_HISTORY_PAGE);
         let page = match guard.run_history_page(
             &RunHistoryFilter::default(),
@@ -6807,13 +6806,13 @@ fn send_agent_runs_from_cache(
         let page_was_empty = page.runs.is_empty();
         history.extend(page.runs);
         if history.len() >= wanted || page_was_empty {
-            break page.next_cursor.is_some();
+            break;
         }
         let Some(next) = page.next_cursor else {
-            break false;
+            break;
         };
         cursor = Some(next);
-    };
+    }
     runs.extend(history);
 
     // Reviewer children need their owning group even when the item has not
@@ -6851,7 +6850,7 @@ fn send_agent_runs_from_cache(
             }
         }
     }
-    let _ = events.send(Event::AgentRuns { runs, has_more });
+    let _ = events.send(Event::AgentRuns { runs });
 }
 
 /// One item's runs for its Agents section: the active ones, on the first
@@ -6985,7 +6984,7 @@ fn edit_item(ctx: &Ctx, id: &str, edit: impl FnOnce(&mut Item)) {
 /// deleted it by hand. A directory under the store's worktrees that no
 /// item claims is removed and pruned: nothing can open it, and it is how
 /// what an older schema left behind gets retired.
-async fn reconcile_checkouts(ctx: &Ctx, reset: bool) {
+async fn reconcile_checkouts(ctx: &Ctx) {
     let Some(items) = ctx.with_cache(|c| c.load_items().ok()).flatten() else {
         return;
     };
@@ -7016,17 +7015,9 @@ async fn reconcile_checkouts(ctx: &Ctx, reset: bool) {
     // that same cleanup once persisted runs have been marked Interrupted.
     retire_archived_checkouts(ctx).await;
 
-    // Directories no row claims. After a reset they are every checkout
-    // there was, and they stay: opening the pull request again finds its
-    // directory where it left it. Otherwise a clean one is a leftover and
-    // goes; one with uncommitted work in it is somebody's, whatever the
-    // table says, and is left alone.
-    if reset {
-        if changed {
-            ctx.send_items();
-        }
-        return;
-    }
+    // Directories no row claims. A clean one is a leftover and goes; one
+    // with uncommitted work in it is somebody's, whatever the table says,
+    // and is left alone.
     let known: std::collections::HashSet<std::path::PathBuf> = items
         .iter()
         .filter_map(|i| i.checkout.as_ref().map(|c| c.path.clone()))
@@ -9473,14 +9464,14 @@ async fn submit_open_pull_request_review(
     } else if posted == 0 {
         "Nothing posted".to_string()
     } else {
-        format!("Posted {}", count_of(posted, "comment", "comments"))
+        format!("Posted {}", crate::review::timeline::count_of(posted, "comment", "comments"))
     };
     if kept > 0 {
         // The open item says which did not post, and why.
         if !open {
             notice.push_str(&format!(
                 "; {} still {}",
-                count_of(kept, "comment", "comments"),
+                crate::review::timeline::count_of(kept, "comment", "comments"),
                 if kept == 1 { "is a draft" } else { "are drafts" }
             ));
             ctx.notice(notice);
@@ -9491,10 +9482,6 @@ async fn submit_open_pull_request_review(
         ctx.notice(notice);
     }
     true
-}
-
-fn count_of(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// A draft is on GitHub as `comment`; the cache says so. A cache that
@@ -9620,10 +9607,7 @@ async fn hold_back_outside_diff(
             drafts.in_review.push(draft);
             continue;
         };
-        let side = match anchor.side {
-            perch_github::Side::Left => perch_git::DiffSide::Left,
-            perch_github::Side::Right => perch_git::DiffSide::Right,
-        };
+        let side = reviews::git_side(anchor.side);
         let key = (anchor.path.clone(), side);
         if !hunks.contains_key(&key) {
             let read = match diff.hunks(&anchor.path, side).await {
@@ -10026,41 +10010,59 @@ async fn read_after_comment_change(ctx: &Ctx, item_id: &str) {
     }
 }
 
+/// The discussion kept for `item_id`, when one was kept and still reads.
+fn kept_discussion(ctx: &Ctx, item_id: &str) -> Option<perch_github::Discussion> {
+    ctx.with_cache(|cache| cache.load_discussion(item_id))
+        .and_then(Result::ok)
+        .flatten()
+        .map(|(_, discussion)| discussion)
+}
+
+/// Change the discussion kept for `item_id` with `edit`, under one hold
+/// of the cache, and keep it again when `edit` says it changed, warning
+/// `failed` when that does not take. The discussion as edited and whether
+/// it changed; `None` when nothing was kept.
+fn edit_kept_discussion(
+    ctx: &Ctx,
+    item_id: &str,
+    failed: &str,
+    edit: impl FnOnce(&mut perch_github::Discussion) -> bool,
+) -> Option<(perch_github::Discussion, bool)> {
+    let (discussion, changed, kept) = ctx
+        .with_cache(|cache| {
+            let (_, mut discussion) = cache.load_discussion(item_id).ok().flatten()?;
+            let changed = edit(&mut discussion);
+            let kept = changed.then(|| cache.rewrite_discussion(item_id, &discussion));
+            Some((discussion, changed, kept))
+        })
+        .flatten()?;
+    if let Some(Err(error)) = kept {
+        tracing::warn!(item = item_id, %error, "{failed}");
+    }
+    Some((discussion, changed))
+}
+
+/// Put `comment` at the end of the conversation unless it is there
+/// already. Whether it was put.
+fn push_new_comment(
+    discussion: &mut perch_github::Discussion,
+    comment: &perch_github::IssueComment,
+) -> bool {
+    let new = !discussion.comments.iter().any(|c| c.id == comment.id);
+    if new {
+        discussion.comments.push(comment.clone());
+    }
+    new
+}
+
 /// Put the body GitHub kept for an edited comment, description or review
 /// summary in the kept discussion, so the next open does not paint the
 /// old one before the network answers. An issue's description is kept on
 /// its item, which the read after the edit rewrites.
 fn rewrite_cached_comment(ctx: &Ctx, item_id: &str, node_id: &str, body: &str) {
-    let cached = ctx
-        .with_cache(|cache| cache.load_discussion(item_id))
-        .and_then(Result::ok)
-        .flatten();
-    let Some((_, mut discussion)) = cached else {
-        return;
-    };
-    let mut changed = false;
-    if discussion.node_id == node_id {
-        discussion.body = body.to_string();
-        changed = true;
-    }
-    for r in discussion.reviews.iter_mut().filter(|r| r.node_id == node_id) {
-        r.body = body.to_string();
-        changed = true;
-    }
-    for c in discussion.comments.iter_mut().filter(|c| c.node_id == node_id) {
-        c.body = body.to_string();
-        changed = true;
-    }
-    for c in discussion.review_comments.iter_mut().filter(|c| c.node_id == node_id) {
-        c.body = body.to_string();
-        changed = true;
-    }
-    if !changed {
-        return;
-    }
-    if let Some(Err(error)) = ctx.with_cache(|cache| cache.rewrite_discussion(item_id, &discussion)) {
-        tracing::warn!(item = item_id, %error, "could not keep the edited comment");
-    }
+    edit_kept_discussion(ctx, item_id, "could not keep the edited comment", |d| {
+        d.set_body(node_id, body)
+    });
 }
 
 /// Take a comment GitHub deleted out of the kept discussion, so the next
@@ -10068,22 +10070,12 @@ fn rewrite_cached_comment(ctx: &Ctx, item_id: &str, node_id: &str, body: &str) {
 /// line comments are left to the next fetch, which knows what replaces a
 /// deleted root.
 fn forget_cached_comment(ctx: &Ctx, item_id: &str, node_id: &str) {
-    let cached = ctx
-        .with_cache(|cache| cache.load_discussion(item_id))
-        .and_then(Result::ok)
-        .flatten();
-    let Some((_, mut discussion)) = cached else {
-        return;
-    };
-    let before = discussion.comments.len() + discussion.review_comments.len();
-    discussion.comments.retain(|c| c.node_id != node_id);
-    discussion.review_comments.retain(|c| c.node_id != node_id);
-    if discussion.comments.len() + discussion.review_comments.len() == before {
-        return;
-    }
-    if let Some(Err(error)) = ctx.with_cache(|cache| cache.rewrite_discussion(item_id, &discussion)) {
-        tracing::warn!(item = item_id, %error, "could not forget the deleted comment");
-    }
+    edit_kept_discussion(ctx, item_id, "could not forget the deleted comment", |d| {
+        let before = d.comments.len() + d.review_comments.len();
+        d.comments.retain(|c| c.node_id != node_id);
+        d.review_comments.retain(|c| c.node_id != node_id);
+        d.comments.len() + d.review_comments.len() != before
+    });
 }
 
 /// Show the open item's comments as they were kept, over what the view
@@ -10092,11 +10084,7 @@ fn show_kept_comments(ctx: &Ctx, item_id: &str) {
     if !ctx.is_open(item_id) {
         return;
     }
-    let cached = ctx
-        .with_cache(|cache| cache.load_discussion(item_id))
-        .and_then(Result::ok)
-        .flatten();
-    let Some((_, discussion)) = cached else {
+    let Some(discussion) = kept_discussion(ctx, item_id) else {
         return;
     };
     let is_pull = ctx.slot.lock().ok().is_some_and(|slot| {
@@ -10449,20 +10437,13 @@ async fn show_applied_suggestion(ctx: &Ctx, item_id: &str, navigation_id: u64, s
 /// open item's prompt context and the view, the way a fetch of them
 /// would. With nothing kept to add it to, the issue is fetched again.
 async fn show_posted_issue_comment(ctx: &Ctx, item_id: &str, comment: &perch_github::IssueComment) {
-    let cached = ctx
-        .with_cache(|cache| cache.load_discussion(item_id))
-        .and_then(Result::ok)
-        .flatten();
-    let Some((_, mut discussion)) = cached else {
+    let posted = edit_kept_discussion(ctx, item_id, "could not cache the posted comment", |d| {
+        push_new_comment(d, comment)
+    });
+    let Some((discussion, _)) = posted else {
         refresh_open_item(ctx, item_id).await;
         return;
     };
-    if !discussion.comments.iter().any(|c| c.id == comment.id) {
-        discussion.comments.push(comment.clone());
-        if let Some(Err(error)) = ctx.with_cache(|cache| cache.rewrite_discussion(item_id, &discussion)) {
-            tracing::warn!(item = item_id, %error, "could not cache the posted comment");
-        }
-    }
     if let Ok(mut guard) = ctx.slot.lock() {
         if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
             if let Some(kept) = open.issue.as_ref() {
@@ -10797,41 +10778,25 @@ fn append_cached_issue_comment(
     item_id: &str,
     comment: &perch_github::IssueComment,
 ) -> bool {
-    let cached = ctx
-        .with_cache(|cache| cache.load_discussion(item_id))
-        .and_then(Result::ok)
-        .flatten();
-    let Some((_, mut discussion)) = cached else {
+    let posted = edit_kept_discussion(ctx, item_id, "could not cache the posted comment", |d| {
+        push_new_comment(d, comment)
+    });
+    let Some((discussion, added)) = posted else {
         return false;
     };
-    if discussion.comments.iter().any(|c| c.id == comment.id) {
-        return true;
+    if added {
+        publish_discussion(ctx, item_id, discussion);
     }
-    discussion.comments.push(comment.clone());
-    if let Some(Err(error)) = ctx.with_cache(|cache| cache.rewrite_discussion(item_id, &discussion)) {
-        tracing::warn!(item = item_id, %error, "could not cache the posted comment");
-    }
-    publish_discussion(ctx, item_id, discussion);
     true
 }
 
 /// Put the reactions GitHub answered with on the kept discussion's copy
 /// of the subject, so the next open paints them before the network does.
 fn upsert_cached_reactions(ctx: &Ctx, item_id: &str, node_id: &str, reactions: &Reactions) {
-    let cached = ctx
-        .with_cache(|cache| cache.load_discussion(item_id))
-        .and_then(Result::ok)
-        .flatten();
-    let Some((_, mut discussion)) = cached else {
-        return;
-    };
-    if !discussion.set_reactions(node_id, reactions) {
-        return;
-    }
-    if let Some(Err(error)) = ctx.with_cache(|cache| cache.rewrite_discussion(item_id, &discussion)) {
-        tracing::warn!(item = item_id, %error, "could not cache the reaction");
-    }
-    if ctx.is_open(item_id) {
+    let kept = edit_kept_discussion(ctx, item_id, "could not cache the reaction", |d| {
+        d.set_reactions(node_id, reactions)
+    });
+    if kept.is_some_and(|(_, changed)| changed) && ctx.is_open(item_id) {
         ctx.send_threads(item_id);
     }
 }
@@ -10855,28 +10820,15 @@ fn upsert_cached_review(
     if !still_owns_subject {
         return;
     }
-    let cached = ctx
-        .with_cache(|cache| cache.load_discussion(item_id))
-        .and_then(Result::ok)
-        .flatten();
-    let Some((_, mut discussion)) = cached else {
-        return;
-    };
-    match discussion
-        .reviews
-        .iter_mut()
-        .find(|existing| existing.id == review.id)
-    {
-        Some(existing) => *existing = review.clone(),
-        None => discussion.reviews.push(review.clone()),
-    }
-    discussion
-        .reviews
-        .sort_by_key(|review| (review.submitted_at, review.id));
-    if let Some(Err(error)) = ctx.with_cache(|cache| cache.rewrite_discussion(item_id, &discussion)) {
-        tracing::warn!(item = item_id, %error, "could not cache the submitted review");
-    }
-    if ctx.is_open(item_id) {
+    let kept = edit_kept_discussion(ctx, item_id, "could not cache the submitted review", |d| {
+        match d.reviews.iter_mut().find(|existing| existing.id == review.id) {
+            Some(existing) => *existing = review.clone(),
+            None => d.reviews.push(review.clone()),
+        }
+        d.reviews.sort_by_key(|review| (review.submitted_at, review.id));
+        true
+    });
+    if kept.is_some() && ctx.is_open(item_id) {
         ctx.send_threads(item_id);
     }
 }
@@ -13316,18 +13268,23 @@ async fn resolve_reference(
     }
 }
 
+/// Open a subject while the reader still wants it, then start its
+/// language server with the item's lifecycle let go.
 async fn open_subject_navigation(
     ctx: &Ctx,
     repo_full_name: String,
     kind: ItemKind,
     number: u64,
     navigation_id: u64,
-) -> bool {
-    let _lifecycle = ctx.item_lifecycle.lock().await;
-    if !ctx.navigation_requests.is_current(navigation_id) {
-        return false;
+) {
+    let opened = {
+        let _lifecycle = ctx.item_lifecycle.lock().await;
+        ctx.navigation_requests.is_current(navigation_id)
+            && open_subject(ctx, repo_full_name, kind, number, navigation_id).await
+    };
+    if opened {
+        start_language_server(ctx, navigation_id).await;
     }
-    open_subject(ctx, repo_full_name, kind, number, navigation_id).await
 }
 
 async fn open_subject(
@@ -14616,49 +14573,19 @@ async fn review_finding_followup(
         .and_then(|observation| observation.anchor.as_ref());
     let original_code = match (original_anchor, original_snapshot.as_ref()) {
         (Some(anchor), Some(snapshot)) => {
-            let retained = ctx
-                .review_snapshots
-                .open(&snapshot.id)
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| {
-                    format!(
-                        "The retained source for finding {} is unavailable",
-                        finding.id
-                    )
-                })?;
-            let side = match anchor.side {
-                perch_github::Side::Left => perch_git::DiffSide::Left,
-                perch_github::Side::Right => perch_git::DiffSide::Right,
-            };
-            retained
-                .read_file(side, &anchor.path)
-                .await
-                .map_err(|error| error.to_string())?
-                .and_then(|bytes| finding_excerpt(&bytes, anchor))
+            retained_excerpt(ctx, &snapshot.id, anchor, || {
+                format!("The retained source for finding {} is unavailable", finding.id)
+            })
+            .await?
         }
         _ => None,
     };
     let mapped_code = match (target_anchor.as_ref(), target_snapshot.as_ref()) {
         (Some(anchor), Some(snapshot)) => {
-            let retained = ctx
-                .review_snapshots
-                .open(&snapshot.id)
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| {
-                    format!(
-                        "The retained mapped source for finding {} is unavailable",
-                        finding.id
-                    )
-                })?;
-            let side = match anchor.side {
-                perch_github::Side::Left => perch_git::DiffSide::Left,
-                perch_github::Side::Right => perch_git::DiffSide::Right,
-            };
-            retained
-                .read_file(side, &anchor.path)
-                .await
-                .map_err(|error| error.to_string())?
-                .and_then(|bytes| finding_excerpt(&bytes, anchor))
+            retained_excerpt(ctx, &snapshot.id, anchor, || {
+                format!("The retained mapped source for finding {} is unavailable", finding.id)
+            })
+            .await?
         }
         _ => None,
     };
@@ -14792,6 +14719,26 @@ fn bounded_review_text(value: &str, max_lines: usize, max_chars: usize) -> Strin
         out.extend(line.chars().take(remaining));
     }
     out
+}
+
+/// The code around `anchor`, on its side of a retained review snapshot.
+/// `unavailable` says what is missing when the snapshot is gone.
+async fn retained_excerpt(
+    ctx: &Ctx,
+    snapshot_id: &str,
+    anchor: &perch_github::ReviewAnchor,
+    unavailable: impl FnOnce() -> String,
+) -> Result<Option<String>, String> {
+    let retained = ctx
+        .review_snapshots
+        .open(snapshot_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(unavailable)?;
+    let bytes = retained
+        .read_file(reviews::git_side(anchor.side), &anchor.path)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(bytes.and_then(|bytes| finding_excerpt(&bytes, anchor)))
 }
 
 fn finding_excerpt(bytes: &[u8], anchor: &perch_github::ReviewAnchor) -> Option<String> {
@@ -15491,10 +15438,7 @@ fn discussion_archive(
     if pull_request.is_none() && issue.is_none() {
         return None;
     }
-    let (_, discussion) = ctx
-        .with_cache(|c| c.load_discussion(item_id))
-        .and_then(Result::ok)
-        .flatten()?;
+    let discussion = kept_discussion(ctx, item_id)?;
     let checks = pull_request.and_then(|pr| {
         ctx.with_cache(|c| c.load_checks(item_id, &pr.head_sha))
             .and_then(Result::ok)
@@ -15713,61 +15657,7 @@ async fn execute_question(
                 | perch_agent::RunEvent::Failed { .. }
                 | perch_agent::RunEvent::Stopped { .. }
         );
-        let stored = match &event {
-            perch_agent::RunEvent::Started { session_id, model } => Some(StoredRunEvent::Started {
-                session_id: session_id.clone(),
-                model: Some(model.clone()),
-            }),
-            perch_agent::RunEvent::Text(text) => Some(StoredRunEvent::Text { text: text.clone() }),
-            perch_agent::RunEvent::Steered(text) => {
-                Some(StoredRunEvent::SteerLanded { text: text.clone() })
-            }
-            perch_agent::RunEvent::ToolCall {
-                id,
-                name,
-                summary,
-                parent_id,
-            } => Some(StoredRunEvent::ToolCall {
-                id: id.clone(),
-                name: name.clone(),
-                summary: summary.clone(),
-                parent_id: parent_id.clone(),
-            }),
-            perch_agent::RunEvent::ToolResult { id, ok, summary } => {
-                Some(StoredRunEvent::ToolResult {
-                    id: id.clone(),
-                    ok: *ok,
-                    summary: summary.clone(),
-                })
-            }
-            perch_agent::RunEvent::PermissionDenied { tool, message } => {
-                Some(StoredRunEvent::PermissionDenied {
-                    tool: tool.clone(),
-                    message: message.clone(),
-                })
-            }
-            perch_agent::RunEvent::Usage {
-                input_tokens,
-                output_tokens,
-                cached_input_tokens,
-            } => Some(StoredRunEvent::Usage {
-                usage: perch_github::RunUsage {
-                    input_tokens: *input_tokens,
-                    output_tokens: *output_tokens,
-                    cached_input_tokens: *cached_input_tokens,
-                },
-                cost_usd: None,
-                duration_ms: None,
-            }),
-            // A filed report is review data; a discussion keeps only the
-            // tool call that carried it.
-            perch_agent::RunEvent::Report { .. } | perch_agent::RunEvent::Approval { .. } => None,
-            // Terminal state is committed only after `wait` proves the child
-            // and its process group have been reaped.
-            perch_agent::RunEvent::Finished { .. }
-            | perch_agent::RunEvent::Failed { .. }
-            | perch_agent::RunEvent::Stopped { .. } => None,
-        };
+        let stored = reviews::stored_process_event(&event);
         if !terminal && persistence_error.is_none() {
             let Some(stored) = stored else { continue };
             match append_stored_event(ctx, &run.id, &format!("process-{event_index}"), stored) {
@@ -17689,10 +17579,8 @@ pub(crate) fn build_loaded_file(
 
 type SharedCache = Option<Arc<std::sync::Mutex<Cache>>>;
 
-fn open_cache_for_app(events: &EventSender<Event>) -> (SharedCache, bool) {
-    let Some(path) = perch_github::config::db_path() else {
-        return (None, false);
-    };
+fn open_cache_for_app(events: &EventSender<Event>) -> SharedCache {
+    let path = perch_github::config::db_path()?;
     let avatars = perch_github::config::avatar_dir();
     match Cache::open_with_outcome(&path, avatars) {
         Ok((cache, outcome)) => {
@@ -17701,14 +17589,14 @@ fn open_cache_for_app(events: &EventSender<Event>) -> (SharedCache, bool) {
                     "Updated the local database from schema {from} to {to}; discussions and agent history were preserved"
                 )));
             }
-            (Some(Arc::new(std::sync::Mutex::new(cache))), false)
+            Some(Arc::new(std::sync::Mutex::new(cache)))
         }
         Err(error) => {
             tracing::warn!(%error, path = %path.display(), "running without a local cache");
             let _ = events.send(Event::Notice(format!(
                 "Could not open the local database: {error}. The existing file was left unchanged."
             )));
-            (None, false)
+            None
         }
     }
 }
@@ -23391,7 +23279,7 @@ read eof || true
         let events: Vec<_> = received.try_iter().collect();
         assert!(events.iter().any(|event| matches!(
             event,
-            Event::AgentRuns { runs, .. } if runs.iter().any(|stored| stored.id == run.id)
+            Event::AgentRuns { runs } if runs.iter().any(|stored| stored.id == run.id)
         )));
         assert!(events.iter().any(|event| matches!(
             event,

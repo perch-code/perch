@@ -1437,52 +1437,73 @@ fn read_run_db_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunDbRow> {
     })
 }
 
-fn parse_optional_timestamp(
-    value: Option<String>,
-    field: &str,
-) -> Result<Option<Timestamp>, CacheError> {
-    value
-        .map(|value| value.parse().map_err(|_| CacheError::Corrupt(field.into())))
-        .transpose()
+/// A stored timestamp, or `Corrupt(field)` when it does not parse.
+fn timestamp(value: String, field: &str) -> Result<Timestamp, CacheError> {
+    value.parse().map_err(|_| CacheError::Corrupt(field.into()))
 }
 
-fn run_from_db(row: RunDbRow, steps: Vec<RunStep>) -> Result<RunRecord, CacheError> {
-    let owner = match row.owner_kind.as_str() {
+fn optional_timestamp(value: Option<String>, field: &str) -> Result<Option<Timestamp>, CacheError> {
+    value.map(|value| timestamp(value, field)).transpose()
+}
+
+/// The owner a run row's owner columns name: the inverse of
+/// [`owner_columns`].
+fn run_owner(
+    kind: &str,
+    item_id: Option<String>,
+    thread_id: Option<String>,
+    request_id: Option<String>,
+    reviewer_run_id: Option<String>,
+) -> Result<RunOwner, CacheError> {
+    Ok(match kind {
         "discussion" => RunOwner::Discussion {
-            item_id: row
-                .owner_item_id
-                .ok_or_else(|| CacheError::Corrupt("discussion item id".into()))?,
-            thread_id: row
-                .owner_thread_id
+            item_id: item_id.ok_or_else(|| CacheError::Corrupt("discussion item id".into()))?,
+            thread_id: thread_id
                 .ok_or_else(|| CacheError::Corrupt("discussion thread id".into()))?,
-            request_id: row
-                .owner_request_id
+            request_id: request_id
                 .ok_or_else(|| CacheError::Corrupt("discussion request id".into()))?,
         },
         "review" => RunOwner::Review {
-            item_id: row
-                .owner_item_id
-                .ok_or_else(|| CacheError::Corrupt("review item id".into()))?,
-            reviewer_run_id: row
-                .owner_reviewer_run_id
+            item_id: item_id.ok_or_else(|| CacheError::Corrupt("review item id".into()))?,
+            reviewer_run_id: reviewer_run_id
                 .ok_or_else(|| CacheError::Corrupt("reviewer run id".into()))?,
         },
         "unavailable" => RunOwner::Unavailable {
-            legacy_thread_id: row.owner_thread_id,
+            legacy_thread_id: thread_id,
         },
         _ => return Err(CacheError::Corrupt("run owner kind".into())),
-    };
+    })
+}
+
+/// A run row's purpose, status and terminal reason.
+fn run_state(
+    purpose: &str,
+    status: &str,
+    terminal_reason: Option<String>,
+) -> Result<(RunPurpose, RunStatus, Option<TerminalReason>), CacheError> {
     let purpose =
-        RunPurpose::parse(&row.purpose).ok_or_else(|| CacheError::Corrupt("run purpose".into()))?;
+        RunPurpose::parse(purpose).ok_or_else(|| CacheError::Corrupt("run purpose".into()))?;
     let status =
-        RunStatus::parse(&row.status).ok_or_else(|| CacheError::Corrupt("run status".into()))?;
-    let terminal_reason = row
-        .terminal_reason
+        RunStatus::parse(status).ok_or_else(|| CacheError::Corrupt("run status".into()))?;
+    let terminal_reason = terminal_reason
         .map(|reason| {
             TerminalReason::parse(&reason)
                 .ok_or_else(|| CacheError::Corrupt("terminal reason".into()))
         })
         .transpose()?;
+    Ok((purpose, status, terminal_reason))
+}
+
+fn run_from_db(row: RunDbRow, steps: Vec<RunStep>) -> Result<RunRecord, CacheError> {
+    let owner = run_owner(
+        &row.owner_kind,
+        row.owner_item_id,
+        row.owner_thread_id,
+        row.owner_request_id,
+        row.owner_reviewer_run_id,
+    )?;
+    let (purpose, status, terminal_reason) =
+        run_state(&row.purpose, &row.status, row.terminal_reason)?;
     Ok(RunRecord {
         id: row.id,
         owner,
@@ -1515,12 +1536,9 @@ fn run_from_db(row: RunDbRow, steps: Vec<RunStep>) -> Result<RunRecord, CacheErr
         retry_of: row.retry_of,
         steps,
         error: row.error,
-        queued_at: row
-            .queued_at
-            .parse()
-            .map_err(|_| CacheError::Corrupt("run queued_at".into()))?,
-        started_at: parse_optional_timestamp(row.started_at, "run started_at")?,
-        ended_at: parse_optional_timestamp(row.ended_at, "run ended_at")?,
+        queued_at: timestamp(row.queued_at, "run queued_at")?,
+        started_at: optional_timestamp(row.started_at, "run started_at")?,
+        ended_at: optional_timestamp(row.ended_at, "run ended_at")?,
         final_result: row.final_result,
         final_result_truncated: row.final_result_truncated,
         latest_activity: row.latest_activity,
@@ -1605,42 +1623,15 @@ fn read_run_summary_db_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunSumma
 }
 
 fn summary_from_db(row: RunSummaryDbRow) -> Result<RunSummary, CacheError> {
-    let owner = match row.owner_kind.as_str() {
-        "discussion" => RunOwner::Discussion {
-            item_id: row
-                .owner_item_id
-                .ok_or_else(|| CacheError::Corrupt("discussion item id".into()))?,
-            thread_id: row
-                .owner_thread_id
-                .ok_or_else(|| CacheError::Corrupt("discussion thread id".into()))?,
-            request_id: row
-                .owner_request_id
-                .ok_or_else(|| CacheError::Corrupt("discussion request id".into()))?,
-        },
-        "review" => RunOwner::Review {
-            item_id: row
-                .owner_item_id
-                .ok_or_else(|| CacheError::Corrupt("review item id".into()))?,
-            reviewer_run_id: row
-                .owner_reviewer_run_id
-                .ok_or_else(|| CacheError::Corrupt("reviewer run id".into()))?,
-        },
-        "unavailable" => RunOwner::Unavailable {
-            legacy_thread_id: row.owner_thread_id,
-        },
-        _ => return Err(CacheError::Corrupt("run owner kind".into())),
-    };
-    let purpose =
-        RunPurpose::parse(&row.purpose).ok_or_else(|| CacheError::Corrupt("run purpose".into()))?;
-    let status =
-        RunStatus::parse(&row.status).ok_or_else(|| CacheError::Corrupt("run status".into()))?;
-    let terminal_reason = row
-        .terminal_reason
-        .map(|reason| {
-            TerminalReason::parse(&reason)
-                .ok_or_else(|| CacheError::Corrupt("terminal reason".into()))
-        })
-        .transpose()?;
+    let owner = run_owner(
+        &row.owner_kind,
+        row.owner_item_id,
+        row.owner_thread_id,
+        row.owner_request_id,
+        row.owner_reviewer_run_id,
+    )?;
+    let (purpose, status, terminal_reason) =
+        run_state(&row.purpose, &row.status, row.terminal_reason)?;
     Ok(RunSummary {
         id: row.id,
         owner,
@@ -1664,12 +1655,9 @@ fn summary_from_db(row: RunSummaryDbRow) -> Result<RunSummary, CacheError> {
             .transpose()?,
         retry_of: row.retry_of,
         error: row.error,
-        queued_at: row
-            .queued_at
-            .parse()
-            .map_err(|_| CacheError::Corrupt("run queued_at".into()))?,
-        started_at: parse_optional_timestamp(row.started_at, "run started_at")?,
-        ended_at: parse_optional_timestamp(row.ended_at, "run ended_at")?,
+        queued_at: timestamp(row.queued_at, "run queued_at")?,
+        started_at: optional_timestamp(row.started_at, "run started_at")?,
+        ended_at: optional_timestamp(row.ended_at, "run ended_at")?,
         latest_activity: row.latest_activity,
         last_event_sequence: row.last_event_sequence.max(0) as u64,
         mode: RunMode::parse(&row.mode).ok_or_else(|| CacheError::Corrupt("run mode".into()))?,
@@ -1825,7 +1813,8 @@ fn update_run_row(conn: &Connection, run: &RunRecord) -> Result<(), CacheError> 
 fn load_run_on(conn: &Connection, id: &str) -> Result<Option<RunRecord>, CacheError> {
     let sql = format!("SELECT {RUN_COLUMNS} FROM runs WHERE id=?1");
     let row = conn
-        .query_row(&sql, params![id], read_run_db_row)
+        .prepare_cached(&sql)?
+        .query_row(params![id], read_run_db_row)
         .optional()?;
     row.map(|row| {
         let steps = load_steps_on(conn, &row.id)?;
@@ -1871,9 +1860,7 @@ fn event_from_row(
         run_id,
         sequence: sequence.max(0) as u64,
         event_id,
-        occurred_at: occurred_at
-            .parse()
-            .map_err(|_| CacheError::Corrupt("event occurred_at".into()))?,
+        occurred_at: timestamp(occurred_at, "event occurred_at")?,
         event: serde_json::from_str(&payload)?,
         truncated,
     })
@@ -1926,7 +1913,7 @@ fn load_event_by_id(
 /// them as notes. Its last words are notes too: the view decides whether
 /// they are still narration or the answer.
 fn load_steps_on(conn: &Connection, run_id: &str) -> Result<Vec<RunStep>, CacheError> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT payload_json FROM run_events
          WHERE run_id=?1 AND kind IN ('text','tool_call','tool_result','legacy_step','steer','steer_landed')
          ORDER BY sequence",
@@ -2594,17 +2581,6 @@ impl Cache {
         Ok(cache)
     }
 
-    /// Compatibility entry point for callers written before preserving
-    /// migrations. The boolean used to mean "reset"; resets no longer happen,
-    /// so it is always false. New callers should use `open_with_outcome`.
-    pub fn open_checked(
-        db_path: &Path,
-        avatar_dir: Option<PathBuf>,
-    ) -> Result<(Self, bool), CacheError> {
-        let (cache, _) = Self::open_with_outcome(db_path, avatar_dir)?;
-        Ok((cache, false))
-    }
-
     pub fn open_with_outcome(
         db_path: &Path,
         avatar_dir: Option<PathBuf>,
@@ -3021,7 +2997,7 @@ impl Cache {
     }
 
     fn load_messages(&self, thread_id: &str) -> Result<Vec<CommentMessage>, CacheError> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id, origin, author_kind, author, author_model, body, run_id, created_at,
                     github_id, node_id, html_url, diff_hunk, reactions_json
              FROM comment_messages WHERE thread_id = ?1 ORDER BY created_at, rowid",
@@ -4319,9 +4295,7 @@ impl Cache {
                 repo,
                 key,
                 label,
-                created_at: created_at
-                    .parse()
-                    .map_err(|_| CacheError::Corrupt("grant created_at".into()))?,
+                created_at: timestamp(created_at, "grant created_at")?,
             });
         }
         Ok(grants)
@@ -6120,8 +6094,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("perch.db");
         {
-            let (c, reset) = Cache::open_checked(&path, None).unwrap();
-            assert!(!reset, "a new file is not a reset");
+            let (c, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+            assert_eq!(outcome, CacheOpen::Created, "a new file is not a reset");
             c.insert_item(&pr_item(7)).unwrap();
             c.set_meta("schema_version", "6").unwrap();
         }
@@ -6140,8 +6114,8 @@ mod tests {
         )
         .unwrap();
         drop(conn);
-        let (c, reset) = Cache::open_checked(&path, None).unwrap();
-        assert!(!reset, "a current database is kept");
+        let (c, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+        assert_eq!(outcome, CacheOpen::Current, "a current database is kept");
         assert_eq!(c.load_items().unwrap().len(), 1);
     }
 

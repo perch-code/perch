@@ -20,6 +20,7 @@ use perch_syntax::{Language, LineSpans};
 use crate::review::code_refs::{Found, NameAsk, Named};
 use crate::review::doc::{self, Card, CardId, Doc, Reveals};
 use crate::review::picture::Picture;
+use crate::review::timeline::count_of;
 
 /// Where a file is from: the worktree, which is what the review is of, or
 /// outside it, a dependency or the standard library reached from a
@@ -947,10 +948,6 @@ pub fn drafts_summary(drafts: &[Draft]) -> String {
     parts.join(", ")
 }
 
-fn count_of(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
-}
-
 /// What the reader is told once the submission is done and not every
 /// draft posted, from the counts the backend answered with: nothing when
 /// they all did. `review` says a review posted; `posted` counts the
@@ -1198,6 +1195,18 @@ pub struct LiveDoc {
     pub doc: RwSignal<Arc<Doc>>,
     pub cursor: RwSignal<Cursor>,
     pub content: Option<floem::ViewId>,
+}
+
+impl LiveDoc {
+    /// What `editor`, built over `doc`, holds.
+    pub fn of(editor: &floem::views::TextEditor, doc: RwSignal<Arc<Doc>>) -> Self {
+        Self {
+            handle: editor.doc(),
+            doc,
+            cursor: editor.editor().cursor,
+            content: editor.editor().editor_view_id.get_untracked(),
+        }
+    }
 }
 
 /// The file an editor shows. A reload of it under the same scope is set
@@ -1610,7 +1619,7 @@ pub struct ReviewState {
     pub files: RwSignal<HashMap<String, Arc<LoadedFile>>>,
     /// Paths whose load is in flight, so a tab can show a spinner and a
     /// second click does not queue the work twice.
-    pub loading: RwSignal<HashMap<String, ()>>,
+    pub loading: RwSignal<HashSet<String>>,
     /// Display line the cursor sits on.
     pub cursor_line: RwSignal<usize>,
     /// Bumped whenever the active file's content changes, to rebuild the
@@ -2021,7 +2030,7 @@ impl ReviewState {
             tabs: RwSignal::new(Vec::new()),
             active: RwSignal::new(None),
             files: RwSignal::new(HashMap::new()),
-            loading: RwSignal::new(HashMap::new()),
+            loading: RwSignal::new(HashSet::new()),
             cursor_line: RwSignal::new(0),
             editor_epoch: RwSignal::new(0),
             docs: RwSignal::new(None),
@@ -2230,7 +2239,7 @@ impl ReviewState {
         self.tabs.set(Vec::new());
         self.active.set(None);
         self.files.set(HashMap::new());
-        self.loading.set(HashMap::new());
+        self.loading.set(HashSet::new());
         self.changed_only.set(true);
         self.lsp_status.set(ServerStatuses::default());
         self.comment_threads.set(Arc::new(Vec::new()));
@@ -2447,11 +2456,7 @@ impl ReviewState {
             self.code_seen.set(pane.code_seen);
             self.tree_wanted.set(false);
             if !paths.is_empty() {
-                self.loading.update(|loading| {
-                    for path in &paths {
-                        loading.insert(path.clone(), ());
-                    }
-                });
+                self.loading.update(|loading| loading.extend(paths.iter().cloned()));
             }
         });
         paths
@@ -2661,23 +2666,27 @@ impl ReviewState {
     /// Whether GitHub lets the reader delete the line comment with this
     /// node id, as the discussion read it. Tracked.
     pub fn may_delete_line_comment(&self, node_id: &str) -> bool {
-        self.discussion.with(|d| {
-            d.as_ref().is_some_and(|d| {
-                d.review_comments
-                    .iter()
-                    .any(|c| c.node_id == node_id && c.viewer_can_delete)
-            })
-        })
+        self.line_comment_allows(node_id, |c| c.viewer_can_delete)
     }
 
     /// Whether GitHub lets the reader edit the line comment with this
     /// node id, as the discussion read it. Tracked.
     pub fn may_update_line_comment(&self, node_id: &str) -> bool {
+        self.line_comment_allows(node_id, |c| c.viewer_can_update)
+    }
+
+    /// Whether the discussion holds a line comment with this node id that
+    /// `allows` says yes to. Tracked.
+    fn line_comment_allows(
+        &self,
+        node_id: &str,
+        allows: impl Fn(&perch_github::ReviewComment) -> bool,
+    ) -> bool {
         self.discussion.with(|d| {
             d.as_ref().is_some_and(|d| {
                 d.review_comments
                     .iter()
-                    .any(|c| c.node_id == node_id && c.viewer_can_update)
+                    .any(|c| c.node_id == node_id && allows(c))
             })
         })
     }
@@ -2695,40 +2704,24 @@ impl ReviewState {
         {
             return Some(CommentPlace::IssueBody);
         }
-        let in_discussion = self.discussion.with_untracked(|d| {
-            d.as_ref().and_then(|d| {
-                if d.node_id == node_id {
-                    Some(CommentPlace::PullRequestBody)
-                } else if d.reviews.iter().any(|r| r.node_id == node_id) {
-                    Some(CommentPlace::Review)
-                } else {
-                    None
-                }
-            })
-        });
-        if in_discussion.is_some() {
-            return in_discussion;
-        }
-        let in_conversation = self
+        if self
             .issue_comments
             .with_untracked(|comments| comments.iter().any(|c| c.node_id == node_id))
-            || self.discussion.with_untracked(|d| {
-                d.as_ref()
-                    .is_some_and(|d| d.comments.iter().any(|c| c.node_id == node_id))
-            });
-        if in_conversation {
+        {
             return Some(CommentPlace::Conversation);
         }
-        let on_a_line = self.discussion.with_untracked(|d| {
-            d.as_ref()
-                .is_some_and(|d| d.review_comments.iter().any(|c| c.node_id == node_id))
-        }) || self.comment_threads.with_untracked(|threads| {
-            threads
-                .iter()
-                .flat_map(|t| &t.messages)
-                .any(|m| m.node_id.as_deref() == Some(node_id))
-        });
-        on_a_line.then_some(CommentPlace::Line)
+        self.discussion
+            .with_untracked(|d| d.as_ref()?.place_of(node_id))
+            .or_else(|| {
+                self.comment_threads
+                    .with_untracked(|threads| {
+                        threads
+                            .iter()
+                            .flat_map(|t| &t.messages)
+                            .any(|m| m.node_id.as_deref() == Some(node_id))
+                    })
+                    .then_some(CommentPlace::Line)
+            })
     }
 
     /// Show `body` for what the reader is editing on GitHub, before
@@ -2757,30 +2750,13 @@ impl ReviewState {
                 }
             });
         }
-        let in_discussion = self.discussion.with_untracked(|d| {
-            d.as_ref().is_some_and(|d| {
-                d.node_id == node_id
-                    || d.reviews.iter().any(|r| r.node_id == node_id)
-                    || d.comments.iter().any(|c| c.node_id == node_id)
-                    || d.review_comments.iter().any(|c| c.node_id == node_id)
-            })
-        });
-        if in_discussion {
+        if self
+            .discussion
+            .with_untracked(|d| d.as_ref().is_some_and(|d| d.place_of(node_id).is_some()))
+        {
             self.discussion.update(|d| {
                 if let Some(d) = d {
-                    let d = Arc::make_mut(d);
-                    if d.node_id == node_id {
-                        d.body = body.to_string();
-                    }
-                    for r in d.reviews.iter_mut().filter(|r| r.node_id == node_id) {
-                        r.body = body.to_string();
-                    }
-                    for c in d.comments.iter_mut().filter(|c| c.node_id == node_id) {
-                        c.body = body.to_string();
-                    }
-                    for c in d.review_comments.iter_mut().filter(|c| c.node_id == node_id) {
-                        c.body = body.to_string();
-                    }
+                    Arc::make_mut(d).set_body(node_id, body);
                 }
             });
         }
@@ -2841,10 +2817,10 @@ impl ReviewState {
                     .find(|c| c.node_id == node_id)
                     .map(|c| c.user.clone());
                 let line = d.review_comments.iter().any(|c| c.node_id == node_id);
-                (author.is_some() || line).then_some((author, line))
+                (author.is_some() || line).then_some(author)
             })
         });
-        if let Some((author, _)) = in_discussion {
+        if let Some(author) = in_discussion {
             place = place.or(Some(if author.is_some() {
                 CommentPlace::Conversation
             } else {
@@ -3409,7 +3385,20 @@ impl ReviewState {
     }
 
     pub fn is_loading(&self, path: &str) -> bool {
-        self.loading.with(|m| m.contains_key(path))
+        self.loading.with(|m| m.contains(path))
+    }
+
+    /// Mark `path` loading unless it is loaded or loading already.
+    /// Returns true when the caller should ask the backend to load it.
+    pub fn begin_load(&self, path: &str) -> bool {
+        let wanted = !self.files.with_untracked(|m| m.contains_key(path))
+            && !self.loading.with_untracked(|m| m.contains(path));
+        if wanted {
+            self.loading.update(|m| {
+                m.insert(path.to_string());
+            });
+        }
+        wanted
     }
 
     /// Focus a tab, opening one if the file is not already open.
@@ -3443,13 +3432,7 @@ impl ReviewState {
         self.editor_epoch.update(|e| *e += 1);
         self.keep_composer_in_view(composer_was_in_code);
 
-        let needs_load = self.file(path).is_none() && !self.is_loading(path);
-        if needs_load {
-            self.loading.update(|m| {
-                m.insert(path.to_string(), ());
-            });
-        }
-        needs_load
+        self.begin_load(path)
     }
 
     /// The open file changed under an open composer. One that was drawn in
@@ -3710,7 +3693,7 @@ impl ReviewState {
         let loading = self.loading.get_untracked();
         self.reload_loaded(|path| {
             !loaded.contains_key(path)
-                || loading.contains_key(path)
+                || loading.contains(path)
                 || entry(&old, path) != entry(&files, path)
         })
     }
@@ -3723,7 +3706,7 @@ impl ReviewState {
     /// marked loading.
     fn reload_loaded(&self, wanted: impl Fn(&str) -> bool) -> Vec<String> {
         let mut paths: Vec<String> = self.files.with(|m| m.keys().cloned().collect());
-        for path in self.loading.with(|m| m.keys().cloned().collect::<Vec<_>>()) {
+        for path in self.loading.with(|m| m.iter().cloned().collect::<Vec<_>>()) {
             if !paths.contains(&path) {
                 paths.push(path);
             }
@@ -3741,8 +3724,7 @@ impl ReviewState {
             paths.insert(0, active);
         }
         paths.retain(|p| wanted(p));
-        self.loading
-            .set(paths.iter().map(|p| (p.clone(), ())).collect());
+        self.loading.set(paths.iter().cloned().collect());
         paths
     }
 
@@ -4296,31 +4278,36 @@ impl ReviewState {
     /// Fold a run event into the thread list in place, so the running block
     /// updates without a reload.
     pub fn apply_run_event(&self, run_id: &str, event: &perch_agent::RunEvent) {
-        self.comment_threads.update(|threads| {
-            let mut all: Vec<CommentThread> = threads.as_ref().clone();
-            for thread in &mut all {
-                for message in &mut thread.messages {
-                    if let Some(run) = message.run.as_mut().filter(|r| r.id == run_id) {
-                        crate::ask::apply_run_event(run, event);
-                    }
-                }
-            }
-            *threads = Arc::new(all);
+        self.change_run(run_id, |run| {
+            crate::ask::apply_run_event(run, event);
         });
     }
 
     /// The reader told run `run_id` something while it worked.
     pub fn apply_steer(&self, run_id: &str, text: &str) {
+        self.change_run(run_id, |run| crate::ask::apply_steer(run, text));
+    }
+
+    /// Change run `run_id` where a message holds it. Every agent's steps
+    /// come through here, so a run no thread shown holds, as another
+    /// item's, changes nothing and tells no one.
+    fn change_run(&self, run_id: &str, change: impl Fn(&mut perch_github::RunRecord)) {
+        let holds = |t: &CommentThread| {
+            t.messages
+                .iter()
+                .any(|m| m.run.as_ref().is_some_and(|r| r.id == run_id))
+        };
+        if !self.comment_threads.with_untracked(|threads| threads.iter().any(holds)) {
+            return;
+        }
         self.comment_threads.update(|threads| {
-            let mut all: Vec<CommentThread> = threads.as_ref().clone();
-            for thread in &mut all {
-                for message in &mut thread.messages {
-                    if let Some(run) = message.run.as_mut().filter(|r| r.id == run_id) {
-                        crate::ask::apply_steer(run, text);
-                    }
-                }
+            for run in Arc::make_mut(threads)
+                .iter_mut()
+                .flat_map(|t| t.messages.iter_mut())
+                .filter_map(|m| m.run.as_mut().filter(|r| r.id == run_id))
+            {
+                change(run);
             }
-            *threads = Arc::new(all);
         });
     }
 

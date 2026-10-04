@@ -193,8 +193,17 @@ fn publish_finding(ctx: &Ctx, finding: Finding) {
 
 fn finding_summary(ctx: &Ctx, finding: Finding) -> Result<ReviewFindingSummary, String> {
     let observations = cache(ctx, |cache| cache.list_finding_observations(&finding.id))?;
+    summary_of(ctx, finding, &observations)
+}
+
+/// A finding as `observations` show it: who reported it, the reviews it was
+/// seen in, and the latest one's severity, backend, and model.
+fn summary_of(
+    ctx: &Ctx,
+    finding: Finding,
+    observations: &[Observation],
+) -> Result<ReviewFindingSummary, String> {
     let latest = observations.last();
-    let latest_attempt_id = latest.map(|observation| observation.attempt_id.clone());
     let mut attempts = HashMap::new();
     let mut attributions = BTreeSet::new();
     let mut seen_in_reviews = BTreeSet::new();
@@ -212,9 +221,7 @@ fn finding_summary(ctx: &Ctx, finding: Finding) -> Result<ReviewFindingSummary, 
         }
         attempts.insert(attempt.id.clone(), attempt);
     }
-    let attempt = latest_attempt_id
-        .as_deref()
-        .and_then(|attempt_id| attempts.get(attempt_id));
+    let attempt = latest.and_then(|observation| attempts.get(&observation.attempt_id));
     let original_review_number = match finding.created_group_id.as_deref() {
         Some(group_id) => {
             cache(ctx, |cache| cache.load_review_group(group_id))?.map(|group| group.number)
@@ -231,7 +238,7 @@ fn finding_summary(ctx: &Ctx, finding: Finding) -> Result<ReviewFindingSummary, 
         backend: attempt.map(|attempt| attempt.backend.clone()),
         model: attempt.map(|attempt| attempt.model.clone()),
         original_review_number,
-        title: reported_title(&observations),
+        title: reported_title(observations),
     })
 }
 
@@ -358,45 +365,7 @@ fn historical_finding_summaries(
             }
         }
 
-        let latest = observations.last();
-        let mut attempts = HashMap::new();
-        let mut attributions = BTreeSet::new();
-        let mut seen_in_reviews = BTreeSet::new();
-        for attempt_id in observations
-            .iter()
-            .map(|observation| observation.attempt_id.as_str())
-            .collect::<BTreeSet<_>>()
-        {
-            let Some(attempt) = cache(ctx, |cache| cache.load_reviewer_attempt(attempt_id))? else {
-                continue;
-            };
-            attributions.insert(attribution(ctx, &attempt)?);
-            if let Some(seen_group) =
-                cache(ctx, |cache| cache.load_review_group(&attempt.group_id))?
-            {
-                seen_in_reviews.insert(seen_group.number);
-            }
-            attempts.insert(attempt.id.clone(), attempt);
-        }
-        let latest_attempt = latest.and_then(|observation| attempts.get(&observation.attempt_id));
-        let original_review_number = match finding.created_group_id.as_deref() {
-            Some(group_id) => {
-                cache(ctx, |cache| cache.load_review_group(group_id))?.map(|created| created.number)
-            }
-            None => None,
-        };
-        summaries.push(ReviewFindingSummary {
-            finding,
-            severity: latest
-                .map(|observation| observation.severity)
-                .unwrap_or(perch_github::FindingSeverity::Unknown),
-            attributions: attributions.into_iter().collect(),
-            seen_in_reviews: seen_in_reviews.into_iter().collect(),
-            backend: latest_attempt.map(|attempt| attempt.backend.clone()),
-            model: latest_attempt.map(|attempt| attempt.model.clone()),
-            original_review_number,
-            title: reported_title(&observations),
-        });
+        summaries.push(summary_of(ctx, finding, &observations)?);
     }
     Ok(summaries)
 }
@@ -1840,7 +1809,7 @@ fn line_count(bytes: &[u8]) -> u32 {
         .unwrap_or(u32::MAX)
 }
 
-fn stored_process_event(event: &perch_agent::RunEvent) -> Option<StoredRunEvent> {
+pub(super) fn stored_process_event(event: &perch_agent::RunEvent) -> Option<StoredRunEvent> {
     match event {
         perch_agent::RunEvent::Started { session_id, model } => Some(StoredRunEvent::Started {
             session_id: session_id.clone(),
@@ -1883,11 +1852,13 @@ fn stored_process_event(event: &perch_agent::RunEvent) -> Option<StoredRunEvent>
             cost_usd: None,
             duration_ms: None,
         }),
-        // The matching tool call is the stored activity; the report itself
-        // goes into the preserved native response.
-        perch_agent::RunEvent::Report { .. }
-        | perch_agent::RunEvent::Approval { .. }
-        | perch_agent::RunEvent::Finished { .. }
+        // The matching tool call is the stored activity. A review keeps the
+        // report itself in its preserved native response; a discussion keeps
+        // only the tool call that carried it.
+        perch_agent::RunEvent::Report { .. } | perch_agent::RunEvent::Approval { .. } => None,
+        // Terminal state is committed only after `wait` proves the child
+        // and its process group have been reaped.
+        perch_agent::RunEvent::Finished { .. }
         | perch_agent::RunEvent::Failed { .. }
         | perch_agent::RunEvent::Stopped { .. } => None,
     }
@@ -3214,7 +3185,7 @@ fn review_anchor(
     })
 }
 
-fn git_side(side: Side) -> DiffSide {
+pub(super) fn git_side(side: Side) -> DiffSide {
     match side {
         Side::Left => DiffSide::Left,
         Side::Right => DiffSide::Right,

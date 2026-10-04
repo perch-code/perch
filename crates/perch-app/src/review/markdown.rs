@@ -1635,7 +1635,7 @@ fn block_view(block: Block, ctx: Ctx) -> AnyView {
             ctx.size,
             theme::weight_body(),
             ctx.color,
-            prose_leading(ctx.size),
+            prose_leading(),
             ctx.refs,
         ),
         Block::Image(image) => image_view(image, ctx),
@@ -1645,7 +1645,7 @@ fn block_view(block: Block, ctx: Ctx) -> AnyView {
             .style(|s| s.padding_left(10.0).border_left(3.0).border_color(theme::border()))
             .into_any(),
         Block::Quote { alert: Some(alert), blocks } => alert_view(alert, blocks, ctx),
-        Block::List { start, tight, items } => list_view(start, tight, items, ctx),
+        Block::List { start, items, .. } => list_view(start, items, ctx),
         Block::Code { lang, text } => code_view(text, lang, ctx),
         Block::Suggestion { text, original } => suggestion_view(text, original, ctx.foot),
         Block::Table { align, head, rows } => table_view(align, head, rows, ctx),
@@ -1685,7 +1685,7 @@ fn image_view(image: Image, ctx: Ctx) -> AnyView {
                 ctx.size,
                 theme::weight_body(),
                 ctx.color,
-                prose_leading(ctx.size),
+                prose_leading(),
                 ctx.refs,
             ),
         },
@@ -1736,7 +1736,7 @@ fn details_view(summary: Vec<Span>, blocks: Vec<Block>, ctx: Ctx) -> AnyView {
     });
     let head = Stack::horizontal((
         chevron,
-        prose_view(summary, ctx.size, theme::weight_body(), ctx.color, prose_leading(ctx.size), None, false)
+        prose_view(summary, ctx.size, theme::weight_body(), ctx.color, prose_leading(), None, false)
             .style(|s| s.min_width(0.0).flex_shrink(1.0_f32)),
     ))
     .on_event_stop(el::Click, move |_, _| open.update(|open| *open = !*open))
@@ -1775,13 +1775,13 @@ fn heading_leading(level: u8, body: f32) -> LineHeightValue {
         1 => 8.0,
         2 | 3 => 7.0,
         4 => 6.0,
-        _ => return prose_leading(body),
+        _ => return prose_leading(),
     };
     LineHeightValue::Pt((space(body) * units) as f32)
 }
 
 /// The prose's leading.
-fn prose_leading(_body: f32) -> LineHeightValue {
+fn prose_leading() -> LineHeightValue {
     LineHeightValue::Normal(theme::PROSE_LINE_HEIGHT)
 }
 
@@ -1839,7 +1839,7 @@ fn bullet(depth: usize) -> &'static str {
     }
 }
 
-fn list_view(start: Option<u64>, _tight: bool, items: Vec<Item>, ctx: Ctx) -> AnyView {
+fn list_view(start: Option<u64>, items: Vec<Item>, ctx: Ctx) -> AnyView {
     let inner = Ctx { depth: ctx.depth + 1, ..ctx };
     // One column for every marker in the list, wide enough for its
     // last number, so the text lines up down the list and the numbers
@@ -2113,7 +2113,7 @@ fn cell_view(spans: Vec<Span>, align: Align, ctx: Ctx, kind: Cell) -> AnyView {
     // a width of its own, even a percentage, would throw the column's
     // measure off. A table is set a step under the prose, as Codex sets it.
     let size = small_size(ctx.size);
-    let text = prose_view(spans, size, weight, ctx.color, prose_leading(size), ctx.refs, false);
+    let text = prose_view(spans, size, weight, ctx.color, prose_leading(), ctx.refs, false);
     Container::new(text)
         .style(move |s| {
             let s = s.padding_horiz(10.0).padding_vert(5.0);
@@ -2137,7 +2137,7 @@ fn footnotes_view(notes: Vec<Vec<Block>>, ctx: Ctx) -> AnyView {
     let items = notes.into_iter().map(|blocks| Item { checked: None, blocks }).collect();
     Stack::vertical((
         Empty::new().style(|s| s.width_full().height(1.0).background(theme::border())),
-        list_view(Some(1), false, items, small),
+        list_view(Some(1), items, small),
     ))
     .style(|s| s.flex_col().width_full().gap(8.0).margin_top(8.0))
     .into_any()
@@ -2330,7 +2330,7 @@ mod tests {
     fn laid(spans: &[Span]) -> (String, Vec<(Range<usize>, Target)>, Vec<Strike>) {
         let links = plan(spans, None).links;
         let (text, _, links, strikes, _) =
-            layout(spans, 14.0, theme::weight_body(), theme::fg, prose_leading(14.0), links);
+            layout(spans, 14.0, theme::weight_body(), theme::fg, prose_leading(), links);
         (text, links, strikes)
     }
 
@@ -2433,7 +2433,7 @@ mod tests {
         assert_eq!(&text[links[0].0.clone()], "it");
         let plan = plan(&spans, None);
         let (_, attrs, _, _, formulas) =
-            layout(&spans, 14.0, theme::weight_body(), theme::fg, prose_leading(14.0), plan.links);
+            layout(&spans, 14.0, theme::weight_body(), theme::fg, prose_leading(), plan.links);
         assert_eq!(formulas.len(), 1);
         assert_eq!(formulas[0].index, 4);
         let boxes = attrs.inline_boxes();
@@ -3112,7 +3112,7 @@ mod tests {
         let spans = spans_of("A `regular: Option<WalGcPolicy>` field");
         let links = vec![(18..29, local("src/gc.rs:3"))];
         let (text, attrs, links, _, _) =
-            layout(&spans, 14.0, theme::weight_body(), theme::fg, prose_leading(14.0), links);
+            layout(&spans, 14.0, theme::weight_body(), theme::fg, prose_leading(), links);
         assert_eq!(&text[18..29], "WalGcPolicy");
         assert_eq!(links.len(), 1);
         // Three pieces of code: before, the link in the links' colour,

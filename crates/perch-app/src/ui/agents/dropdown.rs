@@ -29,7 +29,7 @@ use super::model::{
     active_groups_with_reviews, elapsed_label, history_runs_with_reviews, AgentRunStatus,
     AgentRunSummary,
 };
-use super::{queue_position, request_agent_runs, status_color};
+use super::{queue_position, status_color};
 
 /// How many finished runs the dropdown lists.
 pub const RECENT_RUNS: usize = 15;
@@ -84,12 +84,10 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
     let click_backend = backend.clone();
     let key_backend = backend.clone();
     let button = button
-        .on_event_stop(el::Click, move |_, _| {
-            toggle(app, review, &click_backend, Some(button_id))
-        })
+        .on_event_stop(el::Click, move |_, _| toggle(review, &click_backend, Some(button_id)))
         .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
             if matches!(key.code, Code::Enter | Code::Space) {
-                toggle(app, review, &key_backend, Some(button_id));
+                toggle(review, &key_backend, Some(button_id));
                 EventPropagation::Stop
             } else {
                 EventPropagation::Continue
@@ -158,28 +156,23 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
 
 /// Open the dropdown, or shut it when it is open. `opener` gets the
 /// keyboard back when it shuts.
-pub fn toggle(
-    app: AppState,
-    review: ReviewState,
-    backend: &Backend,
-    opener: Option<floem::ViewId>,
-) {
+pub fn toggle(review: ReviewState, backend: &Backend, opener: Option<floem::ViewId>) {
     if review.agents_dropdown_open.get_untracked() {
         close(review, true);
     } else {
-        open(app, review, backend, opener);
+        open(review, backend, opener);
     }
 }
 
 /// Open the dropdown over whatever else hangs from the bar, and ask for
 /// the runs it lists.
-pub fn open(app: AppState, review: ReviewState, backend: &Backend, opener: Option<floem::ViewId>) {
+pub fn open(review: ReviewState, backend: &Backend, opener: Option<floem::ViewId>) {
     crate::review::review_menu::close(review, false);
     crate::ui::usage::close(review, false);
     crate::ui::feedback::close(review, false);
     review.agents_dropdown_opener.set(opener);
     review.agents_dropdown_open.set(true);
-    request_agent_runs(app, backend, RECENT_RUNS);
+    backend.load_agent_runs(RECENT_RUNS);
 }
 
 /// Shut the dropdown, giving the keyboard back to what had it when it
@@ -579,7 +572,6 @@ mod tests {
             ]
             .iter()
             .map(perch_github::RunSummary::from),
-            false,
         );
         settle(&mut harness);
         (harness, app, review)

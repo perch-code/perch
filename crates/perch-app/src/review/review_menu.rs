@@ -26,7 +26,7 @@ use crate::review::model::ReviewState;
 use crate::review::{review_launch, submit_review};
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::{clickable, sidebar_glyph};
+use crate::ui::widgets::{clickable, icon_action, sidebar_glyph};
 
 /// The button, dark on a pull request the reader can review and quiet on
 /// a branch, and the popover under it. It says what is happening: a
@@ -203,7 +203,7 @@ pub(crate) fn close(state: ReviewState, restore_focus: bool) {
 
 fn popover(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let submitting = Memo::new(move |_| submit_review::is_shown(state));
-    let close_button = submit_review::icon_action(
+    let close_button = icon_action(
         SidebarIcon::Close,
         "review-close",
         move || state.submit_review_pending.with(Option::is_none),

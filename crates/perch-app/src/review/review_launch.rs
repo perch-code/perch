@@ -9,9 +9,7 @@ use floem::event::EventPropagation;
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
-use floem::views::{
-    dyn_container, text_editor, Container, Decorators, Empty, Label, Stack,
-};
+use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
@@ -22,7 +20,7 @@ use crate::review::model::{
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::menu::{Menu, MenuExt};
-use crate::ui::widgets::{clickable, editor_box, lay_out_every_line, sidebar_glyph};
+use crate::ui::widgets::{clickable, editor_box, prose_editor, sidebar_glyph};
 
 /// Keep the open item's reviews loaded, and the launcher's choices in step
 /// with what the reviewers support while the Review popover is open.
@@ -660,10 +658,11 @@ fn instructions_box(state: ReviewState, run: Rc<dyn Fn()>) -> impl IntoView {
 
     use crate::review::threads::cmd_enter;
 
-    let editor = text_editor(state.review_launcher_instructions.get_untracked())
-        .placeholder("Instructions for the reviewers (optional)".to_string())
-        .editor_style(|s| s.hide_gutter(true).selection_color(theme::selection_bg()));
-    lay_out_every_line(editor.editor());
+    let editor = prose_editor(
+        state.review_launcher_instructions.get_untracked(),
+        "Instructions for the reviewers (optional)",
+        None,
+    );
     let editor = editor
         .pre_command(move |cmd| {
             if cmd_enter(&cmd) {

@@ -23,10 +23,11 @@ pub enum Checked {
     Full,
 }
 
-/// Where an item's history stands on its Agents section.
+/// Where a history loaded a page at a time stands: an item's runs on its
+/// Agents section, or a run's events in its detail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct ItemRunsPage {
-    /// Older runs are left to load.
+pub struct HistoryPage {
+    /// Older entries are left to load.
     pub has_more: bool,
     /// A page is on its way.
     pub loading: bool,
@@ -207,8 +208,7 @@ pub struct AppState {
         RwSignal<HashMap<String, Arc<Vec<perch_github::comments::RunEventRecord>>>>,
     /// Per-detail pagination state. Event pages are retained only for runs
     /// the reader has opened, and fetched from newest toward oldest.
-    pub agent_run_events_has_more: RwSignal<HashMap<String, bool>>,
-    pub agent_run_events_loading: RwSignal<HashSet<String>>,
+    pub agent_run_events_pages: RwSignal<HashMap<String, HistoryPage>>,
     /// Whether the reader asked for the tree in the drawer on the right.
     /// Whether it shows is `tree_shown`: only on Code.
     pub tree_open: RwSignal<bool>,
@@ -234,15 +234,9 @@ pub struct AppState {
     /// keyboard when it was opened by a shortcut, to hand it back to when
     /// the drawer shuts.
     pub drawer_opener: RwSignal<Option<floem::ViewId>>,
-    pub agent_history_loading: RwSignal<bool>,
-    pub agent_history_has_more: RwSignal<bool>,
-    /// A load that received no answer within the UI's bounded wait. A later
-    /// authoritative page clears this again.
-    pub agent_history_load_failed: RwSignal<bool>,
-    pub agent_history_load_token: RwSignal<u64>,
     /// Each item's history for its Agents section, by item: whether older runs
     /// are left to load, and whether a page is on its way.
-    pub item_runs: RwSignal<HashMap<String, ItemRunsPage>>,
+    pub item_runs: RwSignal<HashMap<String, HistoryPage>>,
     /// Review group rows are expanded by default; this records the explicit
     /// collapses so newly admitted reviewer children are immediately visible.
     pub collapsed_agent_review_groups: RwSignal<HashSet<String>>,
@@ -373,8 +367,7 @@ impl AppState {
             pull_request_drafts: RwSignal::new(HashMap::new()),
             issue_drafts: RwSignal::new(HashMap::new()),
             agent_run_events: RwSignal::new(HashMap::new()),
-            agent_run_events_has_more: RwSignal::new(HashMap::new()),
-            agent_run_events_loading: RwSignal::new(HashSet::new()),
+            agent_run_events_pages: RwSignal::new(HashMap::new()),
             tree_open: RwSignal::new(false),
             drawer_width: RwSignal::new(crate::theme::DRAWER_WIDTH),
             drawer_resizing: RwSignal::new(false),
@@ -383,11 +376,7 @@ impl AppState {
             main_pane: RwSignal::new((0.0, 0.0)),
             agents_clock_armed: RwSignal::new(false),
             drawer_opener: RwSignal::new(None),
-            agent_history_loading: RwSignal::new(false),
-            agent_history_has_more: RwSignal::new(false),
             item_runs: RwSignal::new(HashMap::new()),
-            agent_history_load_failed: RwSignal::new(false),
-            agent_history_load_token: RwSignal::new(0),
             collapsed_agent_review_groups: RwSignal::new(HashSet::new()),
             pending_agent_navigation: RwSignal::new(None),
             agent_navigation_token: RwSignal::new(0),
@@ -452,8 +441,13 @@ impl AppState {
         copy(self.viewer, data.viewer);
         copy(self.agent_runs, data.agent_runs);
         copy(self.agent_run_events, data.agent_run_events);
-        copy(self.agent_run_events_has_more, data.agent_run_events_has_more);
-        copy(self.agent_history_has_more, data.agent_history_has_more);
+        // A page on its way was asked for by the other window.
+        self.agent_run_events_pages.set(data.agent_run_events_pages.with_untracked(|pages| {
+            pages
+                .iter()
+                .map(|(id, page)| (id.clone(), HistoryPage { loading: false, ..*page }))
+                .collect()
+        }));
         copy(self.item_runs, data.item_runs);
         copy(self.review_capabilities, data.review_capabilities);
         copy(self.review_preferences, data.review_preferences);
@@ -478,19 +472,6 @@ impl AppState {
             copy(to.run_changes, data.run_changes);
             copy(to.layout, settings.layout);
         }
-    }
-
-    /// Replace the summaries loaded at startup or by History pagination.
-    /// Active records win by id; repeated pages are harmless.
-    pub fn merge_agent_runs(
-        &self,
-        runs: impl IntoIterator<Item = perch_github::RunSummary>,
-        has_more: bool,
-    ) {
-        self.merge_run_summaries(runs);
-        self.agent_history_has_more.set(has_more);
-        self.agent_history_loading.set(false);
-        self.agent_history_load_failed.set(false);
     }
 
     /// Ask for a page of an item's runs for its Agents section: the first, or
@@ -520,13 +501,15 @@ impl AppState {
         runs: impl IntoIterator<Item = perch_github::RunSummary>,
         has_more: bool,
     ) {
-        self.merge_run_summaries(runs);
+        self.merge_agent_runs(runs);
         self.item_runs.update(|all| {
-            all.insert(item_id, ItemRunsPage { has_more, loading: false });
+            all.insert(item_id, HistoryPage { has_more, loading: false });
         });
     }
 
-    fn merge_run_summaries(&self, runs: impl IntoIterator<Item = perch_github::RunSummary>) {
+    /// Replace the summaries loaded at startup or by History pagination.
+    /// Active records win by id; repeated pages are harmless.
+    pub fn merge_agent_runs(&self, runs: impl IntoIterator<Item = perch_github::RunSummary>) {
         self.agent_runs.update(|current| {
             let mut merged = current.as_ref().clone();
             for run in runs {
@@ -696,55 +679,34 @@ impl AppState {
             .unwrap_or_else(|| Arc::new(Vec::new()))
     }
 
-    /// Start a bounded Agents-page request. The token fences an older timeout
-    /// from turning a newer successful request into an error.
-    pub fn begin_agent_history_load(&self) -> u64 {
-        let token = self
-            .agent_history_load_token
-            .get_untracked()
-            .wrapping_add(1);
-        self.agent_history_load_token.set(token);
-        self.agent_history_loading.set(true);
-        self.agent_history_load_failed.set(false);
-        token
-    }
-
-    /// Mark a still-current request as unanswered. Returns whether this call
-    /// changed the visible state, which keeps timeout tests deterministic.
-    pub fn time_out_agent_history_load(&self, token: u64) -> bool {
-        if self.agent_history_load_token.get_untracked() != token
-            || !self.agent_history_loading.get_untracked()
-        {
-            return false;
-        }
-        self.agent_history_loading.set(false);
-        self.agent_history_load_failed.set(true);
-        true
-    }
-
     /// Apply one authoritative record after an event was persisted.
     pub fn update_agent_run(&self, run: &perch_github::RunRecord) {
         let summary = AgentRunSummary::from_record(run);
-        if self
-            .agent_run(&summary.id)
-            .is_some_and(|current| !current.can_replace_with(&summary))
-        {
+        // Where it goes and whether it just finished, or nothing for an
+        // older snapshot or the same one again.
+        let found = self.agent_runs.with_untracked(|runs| {
+            let Some(index) = runs.iter().position(|existing| existing.id == summary.id) else {
+                return Some((None, false));
+            };
+            let previous = &runs[index];
+            (previous.can_replace_with(&summary) && *previous != summary).then(|| {
+                let completed_now = previous.status.is_active() && !summary.status.is_active();
+                (Some(index), completed_now)
+            })
+        });
+        let Some((index, completed_now)) = found else {
             return;
-        }
-        let completed_now = self
-            .agent_run(&summary.id)
-            .is_some_and(|previous| previous.status.is_active() && !summary.status.is_active());
-        let completed_id = summary.id.clone();
+        };
+        let completed_id = completed_now.then(|| summary.id.clone());
         self.agent_runs.update(|current| {
-            let mut all = current.as_ref().clone();
-            match all.iter().position(|existing| existing.id == summary.id) {
+            let all = Arc::make_mut(current);
+            match index {
                 Some(index) => all[index] = summary,
                 None => all.push(summary),
             }
-            *current = Arc::new(all);
         });
-        if completed_now {
-            self.show_agent_completion(completed_id);
+        if let Some(id) = completed_id {
+            self.show_agent_completion(id);
         }
     }
 
@@ -964,10 +926,9 @@ impl AppState {
             events.sort_by_key(|event| event.sequence);
             all.insert(run.id.clone(), Arc::new(events));
         });
-        self.agent_run_events_has_more
-            .update(|pages| _ = pages.insert(run.id.clone(), has_more));
-        self.agent_run_events_loading
-            .update(|loading| _ = loading.remove(&run.id));
+        let page = HistoryPage { has_more, loading: false };
+        self.agent_run_events_pages
+            .update(|pages| _ = pages.insert(run.id.clone(), page));
     }
 
     pub fn merge_agent_run_events(
@@ -993,25 +954,19 @@ impl AppState {
             merged.sort_by_key(|event| event.sequence);
             all.insert(run_id.to_string(), Arc::new(merged));
         });
-        self.agent_run_events_has_more
-            .update(|pages| _ = pages.insert(run_id.to_string(), has_more));
-        self.agent_run_events_loading
-            .update(|loading| _ = loading.remove(run_id));
+        let page = HistoryPage { has_more, loading: false };
+        self.agent_run_events_pages
+            .update(|pages| _ = pages.insert(run_id.to_string(), page));
     }
 
     pub fn set_agent_run_events_loading(&self, run_id: &str) {
-        self.agent_run_events_loading
-            .update(|loading| _ = loading.insert(run_id.to_string()));
+        self.agent_run_events_pages
+            .update(|pages| pages.entry(run_id.to_string()).or_default().loading = true);
     }
 
-    pub fn agent_run_events_page_state(&self, run_id: &str) -> (bool, bool) {
-        let has_more = self
-            .agent_run_events_has_more
-            .with(|pages| pages.get(run_id).copied().unwrap_or(false));
-        let loading = self
-            .agent_run_events_loading
-            .with(|runs| runs.contains(run_id));
-        (has_more, loading)
+    pub fn agent_run_events_page_state(&self, run_id: &str) -> HistoryPage {
+        self.agent_run_events_pages
+            .with(|pages| pages.get(run_id).copied().unwrap_or_default())
     }
 
     /// Keep an open run's detail live without retaining every transcript
@@ -1122,32 +1077,21 @@ impl AppState {
     /// Remove summaries only when an authoritative owner snapshot proves
     /// their durable record was deleted. History pages remain additive.
     fn retain_agent_runs(&self, keep: impl Fn(&AgentRunSummary) -> bool) {
-        let mut removed = HashSet::new();
-        self.agent_runs.update(|current| {
-            let kept: Vec<_> = current
-                .iter()
-                .filter_map(|run| {
-                    if keep(run) {
-                        Some(run.clone())
-                    } else {
-                        removed.insert(run.id.clone());
-                        None
-                    }
-                })
-                .collect();
-            if !removed.is_empty() {
-                *current = Arc::new(kept);
-            }
+        let removed: HashSet<String> = self.agent_runs.with_untracked(|runs| {
+            runs.iter()
+                .filter(|run| !keep(run))
+                .map(|run| run.id.clone())
+                .collect()
         });
         if removed.is_empty() {
             return;
         }
+        self.agent_runs
+            .update(|current| Arc::make_mut(current).retain(&keep));
         self.agent_run_events
             .update(|events| events.retain(|run_id, _| !removed.contains(run_id)));
-        self.agent_run_events_has_more
+        self.agent_run_events_pages
             .update(|pages| pages.retain(|run_id, _| !removed.contains(run_id)));
-        self.agent_run_events_loading
-            .update(|runs| runs.retain(|run_id| !removed.contains(run_id)));
         self.drop_toasts(|kind| matches!(kind, ToastKind::AgentRun(id) if removed.contains(id)));
     }
 
@@ -1531,7 +1475,7 @@ impl AppState {
                 self.append_open_agent_record(&run_id, perch_github::RunEvent::Steer { text: text.clone() });
                 review.apply_steer(&run_id, &text);
             }
-            Event::AgentRuns { runs, has_more } => self.merge_agent_runs(runs, has_more),
+            Event::AgentRuns { runs } => self.merge_agent_runs(runs),
             Event::ItemRuns {
                 item_id,
                 runs,
@@ -1777,7 +1721,9 @@ impl AppState {
                             self.leave_review(review)
                         }
                         Some(i) => {
-                            review.item.set(Some(Arc::new(i.clone())));
+                            if review.item.with_untracked(|c| c.as_deref() != Some(i)) {
+                                review.item.set(Some(Arc::new(i.clone())));
+                            }
                             if !i.is_archived() {
                                 self.agent_archived_owner.set(None);
                             }
@@ -4007,7 +3953,7 @@ mod tests {
         }]);
         review
             .loading
-            .update(|loading| _ = loading.insert("src/old.rs".into(), ()));
+            .update(|loading| _ = loading.insert("src/old.rs".into()));
         review.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
         app.expect_item_navigation("new", 41);
 
@@ -4015,7 +3961,7 @@ mod tests {
 
         assert!(review.is_item("new"));
         assert!(review.tabs.with(Vec::is_empty));
-        assert!(review.loading.with(HashMap::is_empty));
+        assert!(review.loading.with(HashSet::is_empty));
         assert_eq!(review.lsp_status.get(), Default::default());
     }
 
@@ -4313,8 +4259,8 @@ mod tests {
         app.begin_item_review(review, "Open", "same", 61);
         app.apply_with_review(review_ready_at_scope("same", 61, 610), review);
         review.loading.update(|loading| {
-            loading.insert("src/loaded.rs".into(), ());
-            loading.insert("src/failed.rs".into(), ());
+            loading.insert("src/loaded.rs".into());
+            loading.insert("src/failed.rs".into());
         });
         let file = Arc::new(crate::backend::build_loaded_file(
             "src/loaded.rs".into(),
@@ -4349,10 +4295,10 @@ mod tests {
         assert!(!review.files.with(|files| files.contains_key("src/loaded.rs")));
         assert!(review
             .loading
-            .with(|loading| loading.contains_key("src/loaded.rs")));
+            .with(|loading| loading.contains("src/loaded.rs")));
         assert!(review
             .loading
-            .with(|loading| loading.contains_key("src/failed.rs")));
+            .with(|loading| loading.contains("src/failed.rs")));
 
         app.apply_with_review(
             Event::FileLoaded {
@@ -4377,10 +4323,10 @@ mod tests {
         assert!(review.files.with(|files| files.contains_key("src/loaded.rs")));
         assert!(!review
             .loading
-            .with(|loading| loading.contains_key("src/loaded.rs")));
+            .with(|loading| loading.contains("src/loaded.rs")));
         assert!(!review
             .loading
-            .with(|loading| loading.contains_key("src/failed.rs")));
+            .with(|loading| loading.contains("src/failed.rs")));
     }
 
     /// A new list under the scope held, as a look after an agent's edit
@@ -6009,18 +5955,6 @@ mod tests {
     }
 
     #[test]
-    fn only_the_current_agent_history_request_can_time_out() {
-        let app = AppState::new();
-        let stale = app.begin_agent_history_load();
-        let current = app.begin_agent_history_load();
-        assert!(!app.time_out_agent_history_load(stale));
-        assert!(app.agent_history_loading.get());
-        assert!(app.time_out_agent_history_load(current));
-        assert!(!app.agent_history_loading.get());
-        assert!(app.agent_history_load_failed.get());
-    }
-
-    #[test]
     fn a_summary_refresh_keeps_already_hydrated_detail() {
         let app = AppState::new();
         let run = perch_github::RunRecord {
@@ -6043,7 +5977,7 @@ mod tests {
         };
         app.update_agent_run(&run);
 
-        app.merge_agent_runs([perch_github::RunSummary::from(&run)], false);
+        app.merge_agent_runs([perch_github::RunSummary::from(&run)]);
 
         let retained = app.agent_run("run").unwrap();
         assert_eq!(retained.response, "hydrated answer");

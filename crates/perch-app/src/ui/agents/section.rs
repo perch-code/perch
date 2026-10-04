@@ -820,7 +820,7 @@ mod tests {
     }
 
     fn add(app: AppState, records: &[perch_github::RunRecord]) {
-        app.merge_agent_runs(records.iter().map(perch_github::RunSummary::from), false);
+        app.merge_agent_runs(records.iter().map(perch_github::RunSummary::from));
     }
 
     fn settle(harness: &mut HeadlessHarness) {
@@ -965,7 +965,7 @@ mod tests {
         app.item_runs.update(|pages| {
             pages.insert(
                 "pr".into(),
-                crate::state::ItemRunsPage {
+                crate::state::HistoryPage {
                     has_more: true,
                     loading: false,
                 },

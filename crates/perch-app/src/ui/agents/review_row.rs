@@ -24,11 +24,11 @@ use crate::review::review_launch;
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
-use crate::ui::widgets::{badge, clickable};
+use crate::ui::widgets::{badge, clickable, icon_action};
 
 use super::model::{duration_label, seconds_between, AgentReviewRunGroup, AgentRunStatus};
 use super::section::run_row;
-use super::{icon_action, status_mark, STATUS_MARK};
+use super::{status_mark, STATUS_MARK};
 
 /// How far a review's findings and reviewers are set in under its title:
 /// past its mark, to where the title starts.
@@ -368,7 +368,7 @@ fn group_actions(
         .map(|summary| {
             let group_id = summary.group.id.clone();
             crate::review::cards::tip(
-                icon_action(SidebarIcon::Stop, "review-group stop", move || {
+                icon_action(SidebarIcon::Stop, "review-group stop", || true, move || {
                     backend.stop_review_group(&group_id)
                 }),
                 "Stop review".to_string(),
@@ -378,7 +378,12 @@ fn group_actions(
         .unwrap_or_else(|| Empty::new().into_any());
     let open = match open {
         Some(open) => crate::review::cards::tip(
-            icon_action(SidebarIcon::ArrowUpRight, "review-group open snapshot", move || open()),
+            icon_action(
+                SidebarIcon::ArrowUpRight,
+                "review-group open snapshot",
+                || true,
+                move || open(),
+            ),
             "Open snapshot".to_string(),
         )
         .into_any(),

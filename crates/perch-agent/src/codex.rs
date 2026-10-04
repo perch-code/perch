@@ -135,7 +135,7 @@ impl CodexParser {
     }
 }
 
-fn command_call(id: String, item: &Value) -> RunEvent {
+pub(crate) fn command_call(id: String, item: &Value) -> RunEvent {
     let command = strip_shell(&str_of(item, "command"));
     RunEvent::ToolCall {
         id,
@@ -148,7 +148,7 @@ fn command_call(id: String, item: &Value) -> RunEvent {
 /// An error is shown as a step that failed, not as the end of the run: a
 /// notice like "recorded with another model" precedes a turn that goes on
 /// to complete, and an API error precedes the `turn.failed` that ends it.
-fn failed_step(id: String, message: &str) -> Vec<RunEvent> {
+pub(crate) fn failed_step(id: String, message: &str) -> Vec<RunEvent> {
     vec![
         RunEvent::ToolCall {
             id: id.clone(),

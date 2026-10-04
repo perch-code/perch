@@ -18,9 +18,7 @@ use floem::event::EventPropagation;
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::Position;
-use floem::views::{
-    dyn_container, text_editor, Container, Decorators, Empty, Label, ScrollExt, Stack, TextInput,
-};
+use floem::views::{dyn_container, Container, Decorators, Empty, Label, ScrollExt, Stack, TextInput};
 use floem::AnyView;
 use jiff::Timestamp;
 
@@ -32,11 +30,11 @@ use crate::feedback::{
 use crate::icons::{self, SidebarIcon};
 use crate::review::cards::tip;
 use crate::review::model::{AgentChoice, ReviewState};
-use crate::review::open_pull::action_button;
+use crate::review::timeline::count_of;
 use crate::state::{AppState, Checked, ToastOpen, Tone};
 use crate::theme;
 use crate::ui::widgets::{
-    checkbox, clickable, editor_box, icon_in, lay_out_every_line, sidebar_glyph,
+    action_button, checkbox, clickable, editor_box, icon_in, prose_editor, sidebar_glyph,
 };
 
 /// The dropdown's three pages.
@@ -577,16 +575,7 @@ fn text_box(
     disabled: impl Fn() -> bool + 'static,
     write: impl Fn(String) + 'static,
 ) -> impl IntoView {
-    let editor = text_editor(initial)
-        .placeholder(placeholder)
-        .editor_style(|s| s.hide_gutter(true).selection_color(theme::selection_bg()));
-    let doc = editor.editor().doc();
-    let editor = editor.styling(crate::review::composer_styling::ComposerStyling::new(
-        doc,
-        review.next_token(),
-    ));
-    lay_out_every_line(editor.editor());
-    let editor = editor
+    let editor = prose_editor(initial, placeholder, Some(review.next_token()))
         .update(move |update| {
             if let Some(editor) = update.editor {
                 write(editor.doc().text().to_string());
@@ -1018,7 +1007,7 @@ fn preview(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
                 move || {
                     format!(
                         "Redacted {} you added. Check it and file again.",
-                        plural(n, "value", "values")
+                        count_of(n, "value", "values")
                     )
                 },
                 "feedback-caught",
@@ -1033,7 +1022,7 @@ fn preview(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
                 move || {
                     format!(
                         "Redacted {}: tokens, emails, your user name and other repositories.",
-                        plural(n, "value", "values")
+                        count_of(n, "value", "values")
                     )
                 },
                 "feedback-redacted",
@@ -1173,14 +1162,6 @@ fn preview(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
     parts.push(body.into_any());
     parts.push(similar.into_any());
     frame(parts, footer, "feedback-preview-page")
-}
-
-fn plural(n: usize, one: &str, many: &str) -> String {
-    if n == 1 {
-        format!("1 {one}")
-    } else {
-        format!("{n} {many}")
-    }
 }
 
 /// The token can't open issues on Perch's repository: copy the body and

@@ -15,7 +15,7 @@ use std::path::Path;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::sanitize::{clean, strip_format_chars};
+use crate::sanitize::{clean, fence_around, one_line, strip_format_chars};
 
 /// Everything said, in the shape the files are written from.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -718,15 +718,6 @@ fn render_checks(checks: &[CheckEntry]) -> String {
         writeln!(out, "{line}").unwrap();
     }
     out
-}
-
-fn one_line(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn fence_around(value: &str) -> String {
-    let longest = value.split(|c| c != '`').map(str::len).max().unwrap_or(0);
-    "`".repeat(longest.max(2) + 1)
 }
 
 #[cfg(test)]
