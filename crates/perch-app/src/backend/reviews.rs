@@ -2450,8 +2450,10 @@ async fn reconcile_and_ingest(ctx: &Ctx, input: ReconciliationInput<'_>) -> Resu
                     materially_different.then(|| ReviewThreadMessage {
                         id: perch_github::comments::new_id(),
                         body: format!(
-                            "Seen again by {} / {} in review #{}:\n\n{}",
-                            attempt.backend, attempt.model, group.number, reported.body
+                            "Seen again by {} in review #{}:\n\n{}",
+                            reviewer_name(attempt),
+                            group.number,
+                            reported.body
                         ),
                     }),
                 )
@@ -2468,7 +2470,7 @@ async fn reconcile_and_ingest(ctx: &Ctx, input: ReconciliationInput<'_>) -> Resu
                     body: if draft {
                         draft_message(reported)
                     } else {
-                        finding_message(reported, attempt, group.number)
+                        finding_message(reported, attempt)
                     },
                 };
                 (
@@ -3415,20 +3417,22 @@ fn finding_evidence(finding: &ReviewFinding, note: Option<String>) -> ReviewEvid
     }
 }
 
-fn finding_message(
-    finding: &ReviewFinding,
-    attempt: &ReviewerAttempt,
-    review_number: u64,
-) -> String {
+/// A finding as the reviewer reports it in Perch's thread, signed as a
+/// byline names the agent, so it still says who found it once the reader
+/// posts it. The reader can edit it first, the signature too.
+fn finding_message(finding: &ReviewFinding, attempt: &ReviewerAttempt) -> String {
     format!(
-        "**{} · {}**\n\n{}\n\n_Reported by {} / {} in review #{}._",
+        "**{} · {}**\n\n{}\n\n_Reported by {}._",
         severity_label(finding.severity),
         finding.title,
         finding.body,
-        attempt.backend,
-        attempt.model,
-        review_number
+        reviewer_name(attempt),
     )
+}
+
+/// The reviewer as a byline names an agent: "Claude Opus 5.5 (xhigh)".
+fn reviewer_name(attempt: &ReviewerAttempt) -> String {
+    crate::review::threads::agent_name(&attempt.backend, &attempt.model, &attempt.effort)
 }
 
 /// A finding as the reader's draft says it on the pull request: what the

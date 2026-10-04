@@ -318,8 +318,11 @@ pub fn composer_view(
     let follow_up = composer.thread_id.is_some();
     // Under a thread whose agent is at work, what is typed goes to that
     // run, which reads it after its current step. The box is built again
-    // when the run ends, as a follow-up's.
-    let steering_run = composer.thread_id.as_ref().and_then(|id| {
+    // when the run ends, as a follow-up's. An edit is never a steer: it
+    // saves the message it is in place of.
+    let editing_reviewer = edits_reviewer(state, &composer);
+    let editing = composer.editing.is_some();
+    let steering_run = composer.thread_id.as_ref().filter(|_| !editing).and_then(|id| {
         state.comment_threads.with_untracked(|threads| {
             threads
                 .iter()
@@ -426,6 +429,14 @@ pub fn composer_view(
             let Some(item_id) = state.item.with(|i| i.as_ref().map(|i| i.id.clone())) else {
                 return;
             };
+            // A reviewer's words, edited, stay where they are, Perch's.
+            if editing_reviewer {
+                if let Some(id) = &composer.editing {
+                    backend.edit_reviewer_message(&item_id, id, question.trim());
+                    state.composer_sent();
+                }
+                return;
+            }
             // An issue comment posts at once, so it is asked about first:
             // the footer names the pull request or issue, and the next
             // send goes.
@@ -695,7 +706,7 @@ pub fn composer_view(
             theme::COMPOSER_MAX_HEIGHT,
         ),
         composer_error_line(state),
-        composer_footer(app, state, send, posting_here, steering),
+        composer_footer(app, state, send, posting_here, steering, editing_reviewer),
         resize_cursor_sheet(Grip::composer(state)),
     ))
     .debug_name("composer-box")
@@ -943,14 +954,25 @@ enum FooterMode {
 /// github.com/owner/repo/pull/12?` (or `.../issues/12`) with Post and
 /// Cancel, and after Close
 /// with comment it asks whether to close; while this composer's comment
-/// or close goes, it says so and offers nothing.
+/// or close goes, it says so and offers nothing. A reviewer's message
+/// being edited goes nowhere, so it has Save alone.
 fn composer_footer(
     app: AppState,
     state: ReviewState,
     send: Rc<dyn Fn()>,
     posting: impl Fn() -> bool + Copy + 'static,
     steering: bool,
+    editing_reviewer: bool,
 ) -> impl IntoView {
+    if editing_reviewer {
+        return Stack::horizontal((
+            Empty::new().style(|s| s.flex_grow(1.0_f32)),
+            send_button(|| "Save".to_string(), send).debug_name("composer-send"),
+        ))
+        .debug_name("composer-edit-footer")
+        .style(|s| s.items_center().width_full().gap(6.0).margin_top(8.0))
+        .into_any();
+    }
     // A steer goes to the agent at work, whatever the pickers say, so it
     // has none: only when the agent reads it.
     if steering {
@@ -1249,6 +1271,19 @@ fn mode_switch(app: AppState, state: ReviewState) -> impl IntoView {
         } else {
             Empty::new().into_any()
         }
+    })
+}
+
+/// Whether `composer` edits what a reviewer said, rather than a draft.
+fn edits_reviewer(state: ReviewState, composer: &Composer) -> bool {
+    let Some(id) = composer.editing.as_deref() else {
+        return false;
+    };
+    state.comment_threads.with_untracked(|threads| {
+        threads
+            .iter()
+            .flat_map(|t| &t.messages)
+            .any(|m| m.id == id && matches!(m.author, Author::Agent { .. }))
     })
 }
 
@@ -2879,7 +2914,10 @@ fn local_message_view(
         && (finished || message.run.is_none());
     let text = message_body(state, &thread, &body, None);
     let actions = if settled {
-        agent_actions(app, state, thread.clone(), body.clone(), text.id(), hovered)
+        // Only what a reviewer said is the reader's to edit; an answer
+        // stays as its run left it.
+        let editable = message.run.is_none().then(|| message.id.clone());
+        agent_actions(app, state, thread.clone(), body.clone(), editable, text.id(), hovered)
     } else {
         Empty::new().into_any()
     };
@@ -2982,15 +3020,31 @@ fn pending_answer_view(
 /// thread's last message, bound for GitHub, with the answer as the text:
 /// a follow-up the reader edits and sends as their own, a draft where the
 /// thread takes one and an issue comment where it has no reply to make.
-/// Nothing remembers where it came from.
+/// Nothing remembers where it came from. A reviewer's message, `editable`,
+/// also has Edit, which opens the composer in its place, for the reader
+/// to trim a finding before posting it.
 fn agent_actions(
     app: AppState,
     state: ReviewState,
     thread: CommentThread,
     body: String,
+    editable: Option<String>,
     scope: floem::ViewId,
     hovered: RwSignal<bool>,
 ) -> floem::AnyView {
+    let edit = editable.map(|id| {
+        let (thread_id, anchor, body) = (thread.id.clone(), thread.anchor.clone(), body.clone());
+        let edit: Rc<dyn Fn()> = Rc::new(move || {
+            state.open_composer_with(
+                Some(thread_id.clone()),
+                anchor.clone(),
+                body.clone(),
+                Destination::GitHub,
+                Some(id.clone()),
+            );
+        });
+        cards::hover_action(hovered, SidebarIcon::Pencil, "Edit", "edit-finding", edit).into_any()
+    });
     let (thread_id, anchor) = (thread.id.clone(), thread.anchor.clone());
     let whole = body.clone();
     let quote: Rc<dyn Fn(Option<String>)> = Rc::new(move |selected| {
@@ -3027,6 +3081,7 @@ fn agent_actions(
             },
         ),
         cards::hover_action(hovered, SidebarIcon::Copy, "Copy", "copy-message", copy),
+        edit.unwrap_or_else(|| Empty::new().into_any()),
     ))
     .debug_name("agent-actions")
     .style(|s| s.items_center().gap(4.0).flex_shrink(0.0_f32))
@@ -5585,6 +5640,66 @@ mod tests {
         assert_eq!(composer.anchor, thread.anchor);
         assert_eq!(composer.editing, None, "a new draft, not an edit");
         assert_eq!(state.composer_draft.get(), "because");
+        assert!(find(root_id, "edit-finding").is_none(), "an answer is not edited");
+    }
+
+    /// A finding's message has Edit under the pointer, so the reader can
+    /// trim what the reviewer said, its signature too, before posting it.
+    /// Edit opens the composer in the message's row with the text and
+    /// Save alone, and a save asks the backend to rewrite that message.
+    #[test]
+    fn a_findings_message_is_edited_in_its_row_and_saved() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_pull_request();
+        let thread = finding_thread("**High · Lock**\n\nTaken twice.\n\n_Reported by Claude._");
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = messages_view(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
+            .style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+        let root_id = harness.root_id();
+        let edit = find(root_id, "edit-finding").expect("a finding offers Edit");
+        let at = find(root_id, "RichText").expect("the text").get_visual_rect_no_clip().center();
+        harness.pointer_move(at.x, at.y);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(harness.get_layout_rect(edit).width(), 24.0);
+
+        let c = edit.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        let composer = state.composer.get().expect("Edit opened the composer");
+        assert_eq!(composer.editing.as_deref(), Some("f1"));
+        assert_eq!(composer.thread_id.as_deref(), Some("finding-1"));
+        assert_eq!(state.composer_draft.get(), thread.messages[0].body);
+        harness.rebuild();
+        harness.paint();
+        let root_id = harness.root_id();
+        assert!(find(root_id, "edit-finding").is_none(), "the composer took the row");
+        assert!(find(root_id, "Label: \"Save\"").is_some());
+        assert!(find(root_id, "Label: \"Add to review\"").is_none());
+        assert!(find(root_id, "composer-destination").is_none(), "it goes nowhere");
+
+        let text_box = state.composer_box.get().expect("the box registered itself");
+        assert!(harness.is_focused(text_box));
+        harness.dispatch_event(key(Key::Character("a".into()), Code::KeyA, Modifiers::META));
+        harness.dispatch_event(key(Key::Named(NamedKey::Backspace), Code::Backspace, Modifiers::empty()));
+        for ch in "Taken twice.".chars() {
+            harness.dispatch_event(key(Key::Character(ch.to_string()), Code::KeyA, Modifiers::empty()));
+        }
+        harness.dispatch_event(enter(Modifiers::META));
+        harness.rebuild();
+        match commands.try_recv() {
+            Ok(Command::EditReviewerMessage { item_id, message_id, body }) => {
+                assert_eq!(item_id, "item-1");
+                assert_eq!(message_id, "f1");
+                assert_eq!(body, "Taken twice.");
+            }
+            other => panic!("Cmd-Enter did not rewrite the finding: {other:?}"),
+        }
+        assert!(state.composer.get().is_none(), "saving closes the edit");
     }
 
     /// A finding's thread is Perch's own, on the lines the reviewer

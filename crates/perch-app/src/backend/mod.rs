@@ -609,6 +609,13 @@ pub enum Command {
         body: String,
         editing: Option<String>,
     },
+    /// The reader's words for what a reviewer said in a finding's
+    /// thread, in place of the reviewer's.
+    EditReviewerMessage {
+        item_id: String,
+        message_id: String,
+        body: String,
+    },
     /// Throw a draft away, and its thread when nothing else was in it.
     DeleteDraft {
         item_id: String,
@@ -3285,6 +3292,14 @@ impl Backend {
         });
     }
 
+    pub fn edit_reviewer_message(&self, item_id: &str, message_id: &str, body: &str) {
+        let _ = self.commands.send(Command::EditReviewerMessage {
+            item_id: item_id.to_string(),
+            message_id: message_id.to_string(),
+            body: body.to_string(),
+        });
+    }
+
     pub fn delete_draft(&self, item_id: &str, message_id: &str) {
         let _ = self.commands.send(Command::DeleteDraft {
             item_id: item_id.to_string(),
@@ -4660,6 +4675,13 @@ async fn run(
                 editing,
             } => {
                 save_draft(&ctx, &item_id, thread_id, anchor, body, editing);
+            }
+            Command::EditReviewerMessage {
+                item_id,
+                message_id,
+                body,
+            } => {
+                edit_reviewer_message(&ctx, &item_id, &message_id, &body);
             }
             Command::DeleteDraft {
                 item_id,
@@ -16402,6 +16424,17 @@ fn save_draft(
         return;
     }
     ctx.send_threads(item_id);
+}
+
+/// Put the reader's words in place of a reviewer's, and in the review
+/// archive, which keeps the finding threads.
+fn edit_reviewer_message(ctx: &Ctx, item_id: &str, message_id: &str, body: &str) {
+    if let Some(Err(e)) = ctx.with_cache(|c| c.update_reviewer_message_body(message_id, body)) {
+        ctx.notice(format!("Could not save the edit: {e}"));
+        return;
+    }
+    ctx.send_threads(item_id);
+    reviews::export_item(ctx, item_id);
 }
 
 /// Throw a draft away. A thread that was only on its way to GitHub for

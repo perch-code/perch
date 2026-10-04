@@ -3218,6 +3218,22 @@ impl Cache {
         Ok(())
     }
 
+    /// Rewrite what a reviewer said in a finding's thread, its time
+    /// unchanged: the reader trims a finding before posting it. Only a
+    /// message Perch alone has, from an agent that answered no question;
+    /// an answer stays as its run left it.
+    pub fn update_reviewer_message_body(&self, id: &str, body: &str) -> Result<(), CacheError> {
+        let changed = self.conn.execute(
+            "UPDATE comment_messages SET body = ?2
+             WHERE id = ?1 AND origin = 'local' AND author_kind = 'agent' AND run_id IS NULL",
+            params![id, body],
+        )?;
+        if changed == 0 {
+            return Err(CacheError::Corrupt(format!("no reviewer message {id}")));
+        }
+        Ok(())
+    }
+
     /// Turn a thread towards GitHub, or back into one of Perch's own.
     pub fn set_thread_origin(&self, id: &str, origin: ThreadOrigin) -> Result<(), CacheError> {
         let changed = self.conn.execute(
@@ -7100,6 +7116,33 @@ mod tests {
             c.update_comment_message_body("nowhere", "no"),
             Err(CacheError::Corrupt(_))
         ));
+    }
+
+    #[test]
+    fn a_findings_body_is_rewritten_and_an_answers_is_not() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut t = comment_thread("t1", "w");
+        t.messages[1].id = "finding".into();
+        t.messages[1].run = None;
+        c.insert_comment_thread(&t).unwrap();
+        c.insert_comment_thread(&comment_thread("t2", "w")).unwrap();
+
+        c.update_reviewer_message_body("finding", "trimmed").unwrap();
+        let threads = c.load_comment_threads("w").unwrap();
+        let m = threads
+            .iter()
+            .flat_map(|t| &t.messages)
+            .find(|m| m.id == "finding")
+            .unwrap();
+        assert_eq!(m.body, "trimmed");
+        assert_eq!(m.created_at, stamp("2026-09-18T10:00:14Z"), "its time stays");
+
+        for id in ["t2-m2", "t1-m1", "nowhere"] {
+            assert!(
+                matches!(c.update_reviewer_message_body(id, "no"), Err(CacheError::Corrupt(_))),
+                "{id}"
+            );
+        }
     }
 
     #[test]
