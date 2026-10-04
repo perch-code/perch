@@ -752,6 +752,8 @@ fn checks_from_contexts(
     let mut runs = Vec::<Check>::new();
     let mut check_run_keys = std::collections::HashMap::<CheckRunKey, usize>::new();
     let mut superseded = Vec::<Check>::new();
+    // A failed job a newer run did again. GitHub's aggregate still counts it.
+    let mut replaced_failure = false;
     for ParsedCheck { check, key, suite } in &parsed {
         // A workflow run on the same commit, for the same event, that
         // started later stands for the workflow. While it runs, a job it
@@ -771,14 +773,18 @@ fn checks_from_contexts(
                         ..check.clone()
                     });
                 }
+                replaced_failure |= check.state.is_failing();
                 continue;
             }
         }
         let check = check.clone();
         if let Some(key) = key.clone() {
             match check_run_keys.get(&key).copied() {
-                Some(index) if is_newer_check(&check, &runs[index]) => runs[index] = check,
-                Some(_) => {}
+                Some(index) if is_newer_check(&check, &runs[index]) => {
+                    replaced_failure |= runs[index].state.is_failing();
+                    runs[index] = check;
+                }
+                Some(_) => replaced_failure |= check.state.is_failing(),
                 None => {
                     check_run_keys.insert(key, runs.len());
                     runs.push(check);
@@ -801,9 +807,23 @@ fn checks_from_contexts(
         }
     }
 
+    // When the only failures are ones a newer run replaced (slatedb#2145:
+    // a job cancelled as the next run began), the rows say what the
+    // checks are, not the aggregate.
+    let replaced_only = replaced_failure
+        && runs
+            .iter()
+            .all(|check| check.state.is_passing() || check.state.is_pending());
     let state = match aggregate_state.as_str() {
         "SUCCESS" => CheckState::Passing,
         "PENDING" | "EXPECTED" => CheckState::Running,
+        "FAILURE" | "ERROR" if replaced_only => {
+            if runs.iter().any(|check| check.state.is_pending()) {
+                CheckState::Running
+            } else {
+                CheckState::Passing
+            }
+        }
         "FAILURE" | "ERROR" => CheckState::Failing {
             workflow: runs
                 .iter()
@@ -1263,6 +1283,63 @@ mod tests {
         let checks = rerun_rollup("COMPLETED");
         let go = checks.runs.iter().find(|c| c.name == "bindings-go").unwrap();
         assert_eq!(go.state, CheckRunState::Success);
+    }
+
+    /// slatedb#2145: the next run of PR Checks cancelled the first run's
+    /// last job as it began. GitHub's aggregate still says FAILURE.
+    fn cancelled_by_next_run(second_windows: Option<&str>) -> Checks {
+        let run = |name: &str, conclusion: Option<&str>, started: &str, suite: u64| {
+            let status = if conclusion.is_some() { "COMPLETED" } else { "IN_PROGRESS" };
+            let running = suite == 2 && second_windows.is_none();
+            serde_json::json!({
+                "__typename": "CheckRun",
+                "name": name,
+                "status": status,
+                "conclusion": conclusion,
+                "started_at": started,
+                "check_suite": {
+                    "database_id": suite,
+                    "status": if running { "IN_PROGRESS" } else { "COMPLETED" },
+                    "workflow_run": {
+                        "event": "pull_request",
+                        "workflow": { "name": "PR Checks" },
+                    },
+                },
+            })
+        };
+        let contexts = serde_json::json!([
+            run("tests", Some("SUCCESS"), "2026-10-04T08:18:44Z", 1),
+            run("tests", Some("SUCCESS"), "2026-10-04T08:41:56Z", 2),
+            run("windows", Some("CANCELLED"), "2026-10-04T08:28:32Z", 1),
+            run("windows", second_windows, "2026-10-04T08:55:42Z", 2),
+            {"__typename": "StatusContext", "context": "license/cla", "state": "SUCCESS"},
+        ]);
+        checks_from_contexts(Some("FAILURE".into()), serde_json::from_value(contexts).unwrap())
+    }
+
+    #[test]
+    fn a_failure_a_newer_run_replaced_does_not_fail_the_checks() {
+        let passed = cancelled_by_next_run(Some("SUCCESS"));
+        assert_eq!(passed.state, CheckState::Passing);
+        assert!(passed.runs.iter().all(|check| check.state.is_passing()));
+
+        assert_eq!(cancelled_by_next_run(None).state, CheckState::Running);
+
+        let failed = cancelled_by_next_run(Some("FAILURE"));
+        assert!(matches!(failed.state, CheckState::Failing { .. }));
+    }
+
+    #[test]
+    fn a_failure_the_rows_do_not_hold_still_fails_the_checks() {
+        let contexts = serde_json::json!([{
+            "__typename": "CheckRun",
+            "name": "test",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+        }]);
+        let checks =
+            checks_from_contexts(Some("FAILURE".into()), serde_json::from_value(contexts).unwrap());
+        assert!(matches!(checks.state, CheckState::Failing { .. }));
     }
 
     #[test]
