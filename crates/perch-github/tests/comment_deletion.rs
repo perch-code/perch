@@ -126,12 +126,13 @@ async fn each_place_is_edited_by_its_own_mutation_and_answers_the_kept_body() {
         .update_comment("IC_1", CommentPlace::Conversation, "fixed")
         .await
         .unwrap();
-    assert_eq!(kept, "fixed");
+    assert_eq!(kept.body, "fixed");
+    assert_eq!(kept.updated_at, None);
     let kept = github
         .update_comment("PRRC_2", CommentPlace::Line, "also fixed")
         .await
         .unwrap();
-    assert_eq!(kept, "also fixed");
+    assert_eq!(kept.body, "also fixed");
 
     let requests = requests.lock().unwrap();
     let query = |i: usize| requests[i].body["query"].as_str().unwrap().to_string();
@@ -160,7 +161,9 @@ async fn a_description_and_a_review_summary_are_edited_by_their_own_mutations() 
         ("PRR_1", CommentPlace::Review, "lgtm"),
     ];
     for (id, place, body) in places {
-        assert_eq!(github.update_comment(id, place, body).await.unwrap(), body);
+        let kept = github.update_comment(id, place, body).await.unwrap();
+        assert_eq!(kept.body, body);
+        assert_eq!(kept.updated_at, None, "an answer without its time still reads");
     }
 
     let requests = requests.lock().unwrap();

@@ -1,15 +1,17 @@
-//! A description edited from Perch is read again from GitHub, not from a
-//! read of the pull request kept from moments before the edit.
+//! A description edited from Perch, or a pull request closed or merged
+//! from it, is read again from GitHub, not from a read of the pull
+//! request kept from moments before.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use perch_github::{CommentPlace, GitHub};
+use perch_github::{CommentPlace, GitHub, MergeMethod};
 
 #[derive(Debug)]
 struct Request {
+    method: String,
     path: String,
     if_none_match: Option<String>,
     body: String,
@@ -41,7 +43,9 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
     let mut reader = BufReader::new(stream.try_clone().ok()?);
     let mut start = String::new();
     reader.read_line(&mut start).ok()?;
-    let path = start.split_whitespace().nth(1)?.to_string();
+    let mut words = start.split_whitespace();
+    let method = words.next()?.to_string();
+    let path = words.next()?.to_string();
     let mut content_length = 0usize;
     let mut if_none_match = None;
     loop {
@@ -60,6 +64,7 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
     let mut body = vec![0u8; content_length];
     reader.read_exact(&mut body).ok()?;
     Some(Request {
+        method,
         path,
         if_none_match,
         body: String::from_utf8_lossy(&body).into_owned(),
@@ -120,7 +125,7 @@ fn serve_an_edit() -> (String, Arc<Mutex<Vec<Request>>>) {
         if request.path == "/graphql" && request.body.contains("updatePullRequest") {
             edited.store(true, Ordering::SeqCst);
             return Reply::ok(
-                r#"{"data":{"updatePullRequest":{"pullRequest":{"body":"After.","number":7,"repository":{"nameWithOwner":"Octo/Perch"}}}}}"#,
+                r#"{"data":{"updatePullRequest":{"pullRequest":{"body":"After.","number":7,"repository":{"nameWithOwner":"Octo/Perch"},"updatedAt":"2026-10-04T12:00:00Z"}}}}"#,
             );
         }
         if request.path == "/graphql" {
@@ -142,7 +147,7 @@ fn pull_reads(requests: &Mutex<Vec<Request>>) -> usize {
         .lock()
         .unwrap()
         .iter()
-        .filter(|r| r.path == "/repos/octo/perch/pulls/7")
+        .filter(|r| r.method == "GET" && r.path == "/repos/octo/perch/pulls/7")
         .count()
 }
 
@@ -168,7 +173,8 @@ async fn a_discussion_read_right_after_a_description_edit_asks_github_for_the_ne
         .update_comment("PR_7", CommentPlace::PullRequestBody, "After.")
         .await
         .unwrap();
-    assert_eq!(kept, "After.");
+    assert_eq!(kept.body, "After.");
+    assert_eq!(kept.updated_at, Some("2026-10-04T12:00:00Z".parse().unwrap()));
     let discussion = github.fetch_discussion("octo/perch", 7).await.unwrap();
 
     assert_eq!(discussion.body, "After.");
@@ -177,5 +183,55 @@ async fn a_discussion_read_right_after_a_description_edit_asks_github_for_the_ne
     let edit = requests.iter().find(|r| r.path == "/graphql").unwrap();
     assert!(edit
         .body
-        .contains("pullRequest { body number repository { nameWithOwner } }"));
+        .contains("pullRequest { body number repository { nameWithOwner } updatedAt }"));
+}
+
+/// A pull request whose description becomes "Done." once it is closed
+/// or merged, under any casing of its repository's name.
+fn serve_a_close() -> (String, Arc<Mutex<Vec<Request>>>) {
+    let done = Arc::new(AtomicBool::new(false));
+    spawn(move |request| {
+        let path = request.path.to_ascii_lowercase();
+        if request.method == "PATCH" && path == "/repos/octo/perch/pulls/7" {
+            done.store(true, Ordering::SeqCst);
+            return Reply::ok(pull("Done."));
+        }
+        if request.method == "PUT" && path == "/repos/octo/perch/pulls/7/merge" {
+            done.store(true, Ordering::SeqCst);
+            return Reply::ok(r#"{"sha":"m","merged":true,"message":"Merged"}"#);
+        }
+        if request.path == "/graphql" {
+            return Reply::ok(r#"{"data":{"nodes":[]}}"#);
+        }
+        if request.path == "/repos/octo/perch/pulls/7" {
+            return if done.load(Ordering::SeqCst) {
+                Reply::tagged(r#""done""#, pull("Done."))
+            } else {
+                Reply::tagged(r#""before""#, pull("Before."))
+            };
+        }
+        Reply::ok("[]")
+    })
+}
+
+#[tokio::test]
+async fn a_discussion_read_right_after_a_close_or_a_merge_asks_github_again() {
+    for merge in [false, true] {
+        let (base, requests) = serve_a_close();
+        let github = GitHub::with_base_uri("token", &base).unwrap();
+
+        github.fetch_pull_request("octo/perch", 7).await.unwrap();
+        if merge {
+            github
+                .merge_pull_request("Octo/Perch", 7, "h", MergeMethod::Squash, None)
+                .await
+                .unwrap();
+        } else {
+            github.close_pull_request("Octo/Perch", 7).await.unwrap();
+        }
+        let discussion = github.fetch_discussion("octo/perch", 7).await.unwrap();
+
+        assert_eq!(discussion.body, "Done.", "merge: {merge}");
+        assert_eq!(pull_reads(&requests), 2, "merge: {merge}");
+    }
 }

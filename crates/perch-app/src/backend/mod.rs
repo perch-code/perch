@@ -9980,7 +9980,7 @@ async fn update_github_comment(
     match updated {
         Ok(kept) => {
             tracing::info!(item = item_id, node_id, ?place, "edited a comment on GitHub");
-            rewrite_cached_comment(ctx, item_id, node_id, &kept);
+            rewrite_cached_comment(ctx, item_id, node_id, place, &kept);
         }
         Err(message) => {
             tracing::info!(item = item_id, node_id, %message, "comment not edited");
@@ -9995,30 +9995,43 @@ async fn update_github_comment(
 
 /// Read the open item again after a comment on it was edited or deleted:
 /// GitHub's answer then shows, and a change it refused is undone where
-/// the view made it ahead. Offline, nothing can be read, and what was
-/// kept is shown again.
+/// the view made it ahead. Where the conversation could not be read, or
+/// offline, what was kept is shown again.
 async fn read_after_comment_change(ctx: &Ctx, item_id: &str) {
-    let pull_request = ctx.slot.lock().ok().and_then(|slot| {
+    let open = ctx.slot.lock().ok().and_then(|slot| {
         slot.as_ref()
             .filter(|open| open.item_id == item_id)
-            .map(|open| open.pull_request.clone())
+            .map(|open| (open.pull_request.clone(), open.issue.clone()))
     });
-    let read = match pull_request {
-        None => return,
-        Some(Some(pr)) => {
+    let Some((pull_request, issue)) = open else {
+        return;
+    };
+    let read = match (pull_request, issue) {
+        (Some(pr), _) => {
             let discussion_generation = ctx.discussion_requests.begin(item_id);
-            fetch_discussion(ctx, item_id, &pr, discussion_generation).await;
-            true
+            fetch_discussion(ctx, item_id, &pr, discussion_generation).await
         }
-        Some(None) => {
-            let read = refresh_open_item(ctx, item_id).await;
+        (None, Some(issue)) => {
+            // Read here, not through `refresh_open_item`, which does nothing
+            // while a refresh is under way, and that one's answer may be
+            // from before the change.
+            let read = match ctx.github() {
+                Some(github) => {
+                    let discussion_generation = ctx.discussion_requests.begin(item_id);
+                    refresh_open_issue(ctx, &github, item_id, &issue.0, discussion_generation)
+                        .await
+                        == Some(true)
+                }
+                None => false,
+            };
             // The refresh tells the view of an issue only when its row
             // changed, and a refused edit leaves the row as it was.
             show_kept_issue(ctx, item_id);
             read
         }
+        (None, None) => return,
     };
-    if !read || ctx.github().is_none() {
+    if !read {
         show_kept_comments(ctx, item_id);
     }
 }
@@ -10088,27 +10101,58 @@ async fn refresh_open_overview(ctx: &Ctx, item_id: &str) {
 /// old one before the network answers. It is written under the fence a
 /// reaction uses: a read that began before the edit cannot put the old
 /// one back. An issue's description is shown from its item, so it goes
-/// there too.
-fn rewrite_cached_comment(ctx: &Ctx, item_id: &str, node_id: &str, body: &str) {
+/// there too, with the time GitHub gives the edit: the row then turns
+/// away a read of the issue from before it. A question asked next is
+/// prompted with a description, so it goes in the open item too.
+fn rewrite_cached_comment(
+    ctx: &Ctx,
+    item_id: &str,
+    node_id: &str,
+    place: CommentPlace,
+    edited: &perch_github::EditedComment,
+) {
+    let body = edited.body.as_str();
     let _ = ctx.discussion_requests.fence_with(item_id, || {
         edit_kept_discussion(ctx, item_id, "could not keep the edited comment", |d| {
             d.set_body(node_id, body)
         })
     });
+    if place == CommentPlace::PullRequestBody {
+        if let Ok(mut guard) = ctx.slot.lock() {
+            if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
+                open.body = Some(body.to_string());
+            }
+        }
+    }
     let Some(mut item) = ctx.item(item_id) else {
         return;
     };
     let Some(ItemSubject::Issue(issue)) = item.subject.as_mut() else {
         return;
     };
-    if node_id.is_empty() || issue.node_id != node_id || issue.body == body {
+    if node_id.is_empty() || issue.node_id != node_id {
         return;
     }
+    let updated_at = edited
+        .updated_at
+        .map_or(issue.updated_at, |at| issue.updated_at.max(at));
+    let changed = issue.body != body || issue.updated_at != updated_at;
     issue.body = body.to_string();
-    if let Some(Err(error)) = ctx.with_cache(|cache| cache.update_item(&item)) {
-        tracing::warn!(item = item_id, %error, "could not keep the edited description");
+    issue.updated_at = updated_at;
+    let issue = issue.clone();
+    if changed {
+        if let Some(Err(error)) = ctx.with_cache(|cache| cache.update_item(&item)) {
+            tracing::warn!(item = item_id, %error, "could not keep the edited description");
+        }
+        ctx.send_items();
     }
-    ctx.send_items();
+    if let Ok(mut guard) = ctx.slot.lock() {
+        if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
+            if let Some(kept) = open.issue.as_ref() {
+                open.issue = Some(Arc::new((issue, kept.1.clone())));
+            }
+        }
+    }
 }
 
 /// Take a comment GitHub deleted out of the kept discussion, so the next
@@ -10502,11 +10546,18 @@ async fn show_applied_suggestion(ctx: &Ctx, item_id: &str, navigation_id: u64, s
 
 /// Put a comment GitHub just took on an issue in its kept comments, the
 /// open item's prompt context and the view, the way a fetch of them
-/// would. With nothing kept to add it to, the issue is fetched again.
+/// would. It is kept under the fence a reaction uses, so a refresh that
+/// began before the post cannot take it out again. With nothing kept to
+/// add it to, the issue is fetched again.
 async fn show_posted_issue_comment(ctx: &Ctx, item_id: &str, comment: &perch_github::IssueComment) {
-    let posted = edit_kept_discussion(ctx, item_id, "could not cache the posted comment", |d| {
-        push_new_comment(d, comment)
-    });
+    let posted = ctx
+        .discussion_requests
+        .fence_with(item_id, || {
+            edit_kept_discussion(ctx, item_id, "could not cache the posted comment", |d| {
+                push_new_comment(d, comment)
+            })
+        })
+        .flatten();
     let Some((discussion, _)) = posted else {
         refresh_open_item(ctx, item_id).await;
         return;
@@ -12610,19 +12661,27 @@ async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) -> bool {
         );
     } else if let Some(issue) = issue {
         let (issue, _) = &*issue;
-        return refresh_open_issue(ctx, &github, item_id, issue).await;
+        let discussion_generation = ctx.discussion_requests.begin(item_id);
+        return refresh_open_issue(ctx, &github, item_id, issue, discussion_generation)
+            .await
+            .is_some();
     }
     true
 }
 
 /// Fetch an open issue again, with its conversation and timeline, keep
-/// it, and show it. False when GitHub could not be reached about it.
+/// it, and show it. The conversation is kept and shown only while
+/// `discussion_generation` is the item's latest, as a pull request's
+/// discussion is, so a read that began before an edit or a deletion does
+/// not undo it. None when GitHub could not be reached about the issue;
+/// otherwise whether its conversation was read and kept.
 async fn refresh_open_issue(
     ctx: &Ctx,
     github: &GitHub,
     item_id: &str,
     issue: &perch_github::Issue,
-) -> bool {
+    discussion_generation: u64,
+) -> Option<bool> {
     let IssueView {
         issue: fresh,
         conversation,
@@ -12631,17 +12690,24 @@ async fn refresh_open_issue(
         Ok(fetched) => fetched,
         Err(e) => {
             tracing::info!(item = item_id, error = %e, "could not fetch the issue again");
-            return false;
+            return None;
         }
     };
     let Some(issue) = install_fetched_issue(ctx, item_id, fresh, read_nodes) else {
-        return true;
+        return Some(false);
     };
     let Some((comments, events)) = conversation else {
-        return true;
+        return Some(false);
     };
     let body_reactions = issue.reactions.clone();
-    keep_issue_comments(ctx, item_id, &issue, &comments, &events);
+    let kept = ctx
+        .discussion_requests
+        .with_current(item_id, discussion_generation, || {
+            keep_issue_comments(ctx, item_id, &issue, &comments, &events)
+        });
+    if kept.is_none() {
+        return Some(false);
+    }
     // A question asked next is prompted with these.
     if let Ok(mut guard) = ctx.slot.lock() {
         if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
@@ -12660,7 +12726,7 @@ async fn refresh_open_issue(
             body_reactions,
         });
     }
-    true
+    Some(true)
 }
 
 /// Keep an issue just fetched on its row and in the open view, unless the
@@ -14427,15 +14493,17 @@ async fn open_own_checkout(
 }
 
 /// Fetch what was said on a pull request and cache it for the reader.
-/// A fetch error is a line in the popup, not a failed review.
+/// A fetch error is a line in the popup, not a failed review. Whether
+/// the discussion was fetched and kept: not while a later read or change
+/// has taken its place.
 async fn fetch_discussion(
     ctx: &Ctx,
     item_id: &str,
     pr: &perch_github::PullRequest,
     discussion_generation: u64,
-) {
+) -> bool {
     let Some(github) = ctx.github() else {
-        return;
+        return false;
     };
     let discussion = match github.fetch_discussion(&pr.repo_full_name, pr.number).await {
         Ok(d) => d,
@@ -14446,7 +14514,7 @@ async fn fetch_discussion(
                     "Could not fetch the discussion: {e}"
                 )));
             }
-            return;
+            return false;
         }
     };
 
@@ -14459,9 +14527,10 @@ async fn fetch_discussion(
             ctx.with_cache(|c| c.store_discussion(item_id, &discussion))
         });
     if committed.is_none() {
-        return;
+        return false;
     }
     publish_discussion(ctx, item_id, discussion);
+    true
 }
 
 /// Show a discussion just cached, if the item is still the one open: the
@@ -19579,7 +19648,11 @@ mod tests {
         };
 
         let older_read = ctx.discussion_requests.begin(&item.id);
-        rewrite_cached_comment(&ctx, &item.id, "IC_1", "fixed");
+        let fixed = perch_github::EditedComment {
+            body: "fixed".into(),
+            updated_at: None,
+        };
+        rewrite_cached_comment(&ctx, &item.id, "IC_1", CommentPlace::Conversation, &fixed);
         assert_eq!(kept().comments[0].body, "fixed");
         assert!(!ctx.discussion_requests.is_current(&item.id, older_read));
 
@@ -19593,6 +19666,266 @@ mod tests {
             .discussion_requests
             .with_current(&item.id, read_after, || ())
             .is_some());
+    }
+
+    /// What GitHub answers `GET /repos/a/b/issues/<number>/comments` with:
+    /// the one comment `store_commented_discussion` keeps, `IC_1`, saying
+    /// `body`.
+    fn issue_comments_json(body: &str) -> String {
+        serde_json::json!([{
+            "id": 1,
+            "node_id": "IC_1",
+            "user": { "login": "chris" },
+            "body": body,
+            "created_at": "2026-09-15T09:14:00Z",
+        }])
+        .to_string()
+    }
+
+    /// A refresh of an issue that began before GitHub took an edit of its
+    /// description and the deletion of a comment answers with both as
+    /// they were. Neither comes back: not on the row, not in the kept
+    /// conversation or the open item, not on screen.
+    #[tokio::test]
+    async fn an_issue_refresh_that_began_before_an_edit_and_a_deletion_does_not_undo_them() {
+        // GitHub cannot be read after the changes, so the reads after them
+        // leave things as the changes did, until it answers the refresh
+        // with the issue as it was before them.
+        let stale = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let answering = stale.clone();
+        let (base, _) = serve_by_body(move |method, path, _, body| {
+            let path = path.split('?').next().unwrap_or(path);
+            let stale = answering.load(std::sync::atomic::Ordering::SeqCst);
+            match (method, path) {
+                ("POST", "/graphql") if body.contains("updateIssue(") => (
+                    "200 OK",
+                    r#"{"data":{"updateIssue":{"issue":{"body":"Rewritten","number":8,"repository":{"nameWithOwner":"a/b"},"updatedAt":"2026-09-16T12:00:00Z"}}}}"#
+                        .to_string(),
+                ),
+                ("POST", "/graphql") if body.contains("deleteIssueComment(") => (
+                    "200 OK",
+                    r#"{"data":{"deleteIssueComment":{"clientMutationId":null}}}"#.to_string(),
+                ),
+                ("GET", "/repos/a/b/issues/8") if stale => ("200 OK", editable_issue_json(8)),
+                ("GET", "/repos/a/b/issues/8/comments") if stale => {
+                    ("200 OK", issue_comments_json("q"))
+                }
+                ("GET", _) if stale => ("200 OK", "[]".to_string()),
+                _ => ("502 Bad Gateway", "{}".to_string()),
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let item = store_editable_issue(&ctx, 8);
+        store_commented_discussion(&ctx, &item);
+        open_issue_in_slot(&ctx, &item);
+        let github = ctx.github().unwrap();
+
+        let older_read = ctx.discussion_requests.begin(&item.id);
+        update_github_comment(&ctx, &item.id, "I_8", CommentPlace::IssueBody, "Rewritten").await;
+        delete_github_comment(&ctx, &item.id, "IC_1", CommentPlace::Conversation).await;
+        let _: Vec<Event> = received.try_iter().collect();
+        stale.store(true, std::sync::atomic::Ordering::SeqCst);
+        let read = refresh_open_issue(&ctx, &github, &item.id, item.issue().unwrap(), older_read).await;
+
+        assert_eq!(read, Some(false));
+        let row = ctx.item(&item.id).unwrap();
+        let kept = row.issue().unwrap();
+        assert_eq!(kept.body, "Rewritten");
+        assert_eq!(kept.updated_at, "2026-09-16T12:00:00Z".parse().unwrap());
+        let discussion = kept_discussion(&ctx, &item.id).unwrap();
+        assert!(discussion.comments.is_empty(), "{:?}", discussion.comments);
+        let open = ctx.slot.lock().unwrap().as_ref().unwrap().issue.clone().unwrap();
+        assert!(open.1.iter().all(|c| c.node_id != "IC_1"), "{:?}", open.1);
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                Event::IssueUpdated { .. } | Event::IssueComments { .. }
+            )),
+            "{events:?}"
+        );
+    }
+
+    /// The read after an edit of an issue's comment asks GitHub even while
+    /// a refresh of the issue is under way, whose answer may be from
+    /// before the edit.
+    #[tokio::test]
+    async fn the_read_after_an_issue_edit_is_not_left_to_a_refresh_under_way() {
+        let (base, paths) = serve_by_body(|method, path, _, body| {
+            let path = path.split('?').next().unwrap_or(path);
+            match (method, path) {
+                ("POST", "/graphql") if body.contains("updateIssueComment(") => (
+                    "200 OK",
+                    r#"{"data":{"updateIssueComment":{"issueComment":{"body":"fixed"}}}}"#.to_string(),
+                ),
+                ("GET", "/repos/a/b/issues/8") => ("200 OK", editable_issue_json(8)),
+                ("GET", "/repos/a/b/issues/8/comments") => ("200 OK", issue_comments_json("fixed")),
+                ("GET", _) => ("200 OK", "[]".to_string()),
+                _ => ("404 Not Found", "{}".to_string()),
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let item = store_editable_issue(&ctx, 8);
+        store_commented_discussion(&ctx, &item);
+        open_issue_in_slot(&ctx, &item);
+        ctx.refreshing.lock().unwrap().insert(item.id.clone());
+
+        update_github_comment(&ctx, &item.id, "IC_1", CommentPlace::Conversation, "fixed").await;
+
+        let asked = paths.lock().unwrap().clone();
+        assert!(asked.iter().any(|p| p == "/repos/a/b/issues/8"), "{asked:?}");
+        let events: Vec<Event> = received.try_iter().collect();
+        let shown = events.iter().rev().find_map(|e| match e {
+            Event::IssueComments { comments, .. } => Some(comments.clone()),
+            _ => None,
+        });
+        let shown = shown.unwrap_or_else(|| panic!("the view is not told: {events:?}"));
+        assert_eq!(shown[0].body, "fixed");
+    }
+
+    /// A refused edit or deletion of an issue's comment is undone even
+    /// when the read after it gets the issue but not its comments: the
+    /// view is shown the kept ones.
+    #[tokio::test]
+    async fn a_refused_issue_comment_change_is_undone_when_the_comments_cannot_be_read() {
+        let (base, _) = serve_by_body(|method, path, _, body| {
+            let path = path.split('?').next().unwrap_or(path);
+            match (method, path) {
+                ("POST", "/graphql") if body.contains("mutation") => (
+                    "200 OK",
+                    r#"{"data":null,"errors":[{"message":"Resource not accessible by integration"}]}"#
+                        .to_string(),
+                ),
+                ("GET", "/repos/a/b/issues/8") => ("200 OK", editable_issue_json(8)),
+                ("GET", "/repos/a/b/issues/8/comments") => ("502 Bad Gateway", "{}".to_string()),
+                ("GET", _) => ("200 OK", "[]".to_string()),
+                _ => ("404 Not Found", "{}".to_string()),
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let item = store_editable_issue(&ctx, 8);
+        store_commented_discussion(&ctx, &item);
+        open_issue_in_slot(&ctx, &item);
+        let shown = || {
+            let events: Vec<Event> = received.try_iter().collect();
+            events
+                .iter()
+                .rev()
+                .find_map(|e| match e {
+                    Event::IssueComments { comments, .. } => Some(comments.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("the view is not told: {events:?}"))
+        };
+
+        update_github_comment(&ctx, &item.id, "IC_1", CommentPlace::Conversation, "fixed").await;
+        assert_eq!(shown()[0].body, "q");
+
+        delete_github_comment(&ctx, &item.id, "IC_1", CommentPlace::Conversation).await;
+        assert_eq!(shown()[0].node_id, "IC_1");
+    }
+
+    /// An edit of a pull request's description, or the deletion of one of
+    /// its comments, that GitHub never heard is undone: the read after it
+    /// cannot reach GitHub either, and the view is shown the kept
+    /// discussion.
+    #[tokio::test]
+    async fn a_pull_request_change_github_never_hears_shows_the_kept_discussion_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let item = store_pull(&ctx, 7);
+        store_commented_discussion(&ctx, &item);
+        edit_kept_discussion(&ctx, &item.id, "", |d| {
+            d.node_id = "PR_7".into();
+            d.body = "As written".into();
+            true
+        });
+        open_in_slot(&ctx, &item);
+        let shown = || {
+            let events: Vec<Event> = received.try_iter().collect();
+            events
+                .iter()
+                .rev()
+                .find_map(|e| match e {
+                    Event::DiscussionReady { discussion, .. } => Some(discussion.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("the view is not told: {events:?}"))
+        };
+
+        update_github_comment(&ctx, &item.id, "PR_7", CommentPlace::PullRequestBody, "New words").await;
+        assert_eq!(shown().body, "As written");
+
+        delete_github_comment(&ctx, &item.id, "IC_1", CommentPlace::Conversation).await;
+        assert_eq!(shown().comments[0].node_id, "IC_1");
+    }
+
+    /// A question is prompted with the open item's description as the open
+    /// item holds it, so an edit GitHub took goes there, even when the
+    /// read after it fails.
+    #[tokio::test]
+    async fn a_description_edit_github_takes_reaches_what_a_question_is_prompted_with() {
+        let (base, _) = serve_by_body(|method, path, _, body| match (method, path) {
+            ("POST", "/graphql") if body.contains("updateIssue(") => (
+                "200 OK",
+                r#"{"data":{"updateIssue":{"issue":{"body":"Rewritten"}}}}"#.to_string(),
+            ),
+            ("POST", "/graphql") if body.contains("updatePullRequest(") => (
+                "200 OK",
+                r#"{"data":{"updatePullRequest":{"pullRequest":{"body":"New words"}}}}"#.to_string(),
+            ),
+            _ => ("404 Not Found", "{}".to_string()),
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(dir.path(), &base, &[]);
+
+        let issue = store_editable_issue(&ctx, 8);
+        open_issue_in_slot(&ctx, &issue);
+        update_github_comment(&ctx, &issue.id, "I_8", CommentPlace::IssueBody, "Rewritten").await;
+        let open = ctx.slot.lock().unwrap().as_ref().unwrap().issue.clone().unwrap();
+        assert_eq!(open.0.body, "Rewritten");
+
+        let pull = store_pull(&ctx, 7);
+        open_in_slot(&ctx, &pull);
+        update_github_comment(&ctx, &pull.id, "PR_7", CommentPlace::PullRequestBody, "New words").await;
+        let body = ctx.slot.lock().unwrap().as_ref().unwrap().body.clone();
+        assert_eq!(body.as_deref(), Some("New words"));
+    }
+
+    /// A comment posted on an issue goes into the kept conversation under
+    /// the fence an edit uses, so a refresh that began before the post,
+    /// and answers without the comment, does not take it out again.
+    #[tokio::test]
+    async fn an_issue_refresh_that_began_before_a_post_keeps_the_posted_comment() {
+        let (base, _) = serve_by_body(|method, path, _, _| {
+            let path = path.split('?').next().unwrap_or(path);
+            match (method, path) {
+                ("GET", "/repos/a/b/issues/8") => ("200 OK", editable_issue_json(8)),
+                ("GET", "/repos/a/b/issues/8/comments") => ("200 OK", issue_comments_json("q")),
+                ("GET", _) => ("200 OK", "[]".to_string()),
+                _ => ("404 Not Found", "{}".to_string()),
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(dir.path(), &base, &[]);
+        let item = store_editable_issue(&ctx, 8);
+        store_commented_discussion(&ctx, &item);
+        open_issue_in_slot(&ctx, &item);
+        let github = ctx.github().unwrap();
+        let mut posted = kept_discussion(&ctx, &item.id).unwrap().comments[0].clone();
+        posted.id = 2;
+        posted.node_id = "IC_2".into();
+        posted.body = "And another thing".into();
+
+        let older_read = ctx.discussion_requests.begin(&item.id);
+        show_posted_issue_comment(&ctx, &item.id, &posted).await;
+        refresh_open_issue(&ctx, &github, &item.id, item.issue().unwrap(), older_read).await;
+
+        let kept = kept_discussion(&ctx, &item.id).unwrap();
+        assert!(kept.comments.iter().any(|c| c.node_id == "IC_2"), "{:?}", kept.comments);
     }
 
     #[tokio::test]

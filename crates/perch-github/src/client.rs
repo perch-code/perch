@@ -129,6 +129,16 @@ impl CheckProbe {
     }
 }
 
+/// What GitHub kept of an edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditedComment {
+    pub body: String,
+    /// For a description, when its pull request or issue last changed by
+    /// GitHub's clock, which the edit moved. None for anything else, or
+    /// when GitHub did not say.
+    pub updated_at: Option<Timestamp>,
+}
+
 /// Outcome of a notifications poll.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListResult {
@@ -461,6 +471,7 @@ impl GitHub {
 
     /// Merge exactly the head the user confirmed. GitHub rejects the request
     /// with 409 if the pull request moved before this reaches the server.
+    /// A merge forgets the kept read of the pull request, as a close does.
     pub async fn merge_pull_request(
         &self,
         repo_full_name: &str,
@@ -490,12 +501,15 @@ impl GitHub {
             .await
             .map_err(map_octocrab_error)?;
         let body = self.finish_response(response, &[StatusCode::OK], &format!("PUT {path}")).await?;
+        self.forget_pull_request(repo_full_name, number);
         serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))
     }
 
     /// Close a pull request without merging it: `PATCH /pulls/{number}`
     /// with `state: closed`, which answers with the pull request as it
-    /// now stands.
+    /// now stands. The kept read of it is forgotten, so the discussion
+    /// read after the close asks GitHub rather than taking a read from
+    /// moments before it as current.
     pub async fn close_pull_request(
         &self,
         repo_full_name: &str,
@@ -519,9 +533,19 @@ impl GitHub {
         let body = self
             .finish_response(response, &[StatusCode::OK], &format!("PATCH {path}"))
             .await?;
+        self.forget_pull_request(repo_full_name, number);
         let payload: PullPayload =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
         Ok(payload.into_pull_request(repo_full_name))
+    }
+
+    /// Forget the kept read of a pull request that just changed, under any
+    /// casing of its repository's name.
+    fn forget_pull_request(&self, repo_full_name: &str, number: u64) {
+        self.responses
+            .lock()
+            .unwrap()
+            .remove_any_case(&format!("/repos/{repo_full_name}/pulls/{number}"));
     }
 
     /// Submit a final review of exactly the pull-request head the reader saw,
@@ -1271,7 +1295,8 @@ impl GitHub {
     /// Edit a comment on GitHub, by its GraphQL id: one in the
     /// conversation, one on a line of a pull request, a pull request's or
     /// an issue's description, or a review's summary. The answer is the
-    /// body GitHub keeps. GitHub refuses a reader who is neither its
+    /// body GitHub keeps, and for a description when its pull request or
+    /// issue last changed. GitHub refuses a reader who is neither its
     /// author nor able to write to the repository.
     ///
     /// A description's edit forgets the kept read of its pull request or
@@ -1282,7 +1307,7 @@ impl GitHub {
         node_id: &str,
         place: CommentPlace,
         body: &str,
-    ) -> Result<String, Error> {
+    ) -> Result<EditedComment, Error> {
         if node_id.is_empty() {
             return Err(Error::Decode("the comment has no node id".into()));
         }
@@ -1308,7 +1333,7 @@ impl GitHub {
             ),
         };
         let fields = if read_at.is_some() {
-            "body number repository { nameWithOwner }"
+            "body number repository { nameWithOwner } updatedAt"
         } else {
             "body"
         };
@@ -1325,6 +1350,10 @@ impl GitHub {
             .and_then(serde_json::Value::as_str)
             .map(str::to_string)
             .ok_or_else(|| Error::Decode("GitHub answered the edit without the comment".into()))?;
+        let updated_at = answer
+            .and_then(|comment| comment.get("updatedAt"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|at| at.parse().ok());
         if let (Some(read_at), Some(answer)) = (read_at, answer) {
             let number = answer.get("number").and_then(serde_json::Value::as_u64);
             let repo = answer
@@ -1337,7 +1366,10 @@ impl GitHub {
                     .remove_any_case(&format!("/repos/{repo}/{read_at}/{number}"));
             }
         }
-        Ok(kept)
+        Ok(EditedComment {
+            body: kept,
+            updated_at,
+        })
     }
 
     /// Whether the reader gave each of these issues a 👍, how many did,
@@ -1973,18 +2005,8 @@ impl GitHub {
     /// which is what `list_threads` does too. A hundred a page and a
     /// hundred pages is more discussion than any pull request has.
     async fn list_all<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<Vec<T>, Error> {
-        self.list_pages(path, LIST_MAX_PAGES).await
-    }
-
-    /// The same, stopping after `max_pages`. For a list whose tail nobody
-    /// reads.
-    async fn list_pages<T: serde::de::DeserializeOwned>(
-        &self,
-        path: &str,
-        max_pages: usize,
-    ) -> Result<Vec<T>, Error> {
         let mut all = Vec::new();
-        for page in 1..=max_pages {
+        for page in 1..=LIST_MAX_PAGES {
             let body = self.get_text(&page_path(path, page)).await?;
             let items: Vec<T> =
                 serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
