@@ -2536,9 +2536,10 @@ mod tests {
         };
 
         // A line first is dropped as the menu is drawn.
+        let reveal = format!("Reveal in {}", crate::ui::widgets::FILE_MANAGER);
         assert_eq!(
             menu(&[]).outline()[..2],
-            ["—", "Reveal in Finder"],
+            ["—", reveal.as_str()],
             "nothing held or trusted"
         );
         let held = menu(&[rust]);
@@ -2622,7 +2623,8 @@ mod tests {
         // Nothing held: no warning, and nothing to trust in the menu.
         assert_eq!(rect(&harness, "untrusted").width(), 0.0);
         open_menu(&mut harness);
-        assert!(named(harness.root_id(), "menu-row:Reveal in Finder").is_some());
+        let reveal = format!("menu-row:Reveal in {}", crate::ui::widgets::FILE_MANAGER);
+        assert!(named(harness.root_id(), &reveal).is_some());
         assert!(named(harness.root_id(), "menu-row:Trust").is_none());
         crate::ui::menu::close();
         settle(&mut harness);

@@ -27,7 +27,7 @@ use crate::ui::menu::{Menu, MenuExt, Shortcut};
 use crate::ui::nav_row;
 use crate::ui::widgets::{
     confirmation, copy_to_clipboard, icon_button, open_in_browser, open_in_terminal,
-    reveal_in_finder, sidebar_glyph, state_glyph,
+    reveal_in_file_manager, sidebar_glyph, state_glyph,
 };
 
 /// Opening an item. Shared by every row.
@@ -419,13 +419,13 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
                             })
                     }
                 })
-                .item("Finder", move |i| {
+                .item(crate::ui::widgets::FILE_MANAGER, move |i| {
                     let p = reveal.clone();
                     i.icon(SidebarIcon::Folder)
                         .enabled(on_disk)
                         .action(move || {
                             if let Some(p) = &p {
-                                reveal_in_finder(p)
+                                reveal_in_file_manager(p)
                             }
                         })
                 })

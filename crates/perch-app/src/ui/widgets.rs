@@ -27,10 +27,24 @@ pub fn open_in_browser(url: &str) {
     #[cfg(test)]
     OPENED.with(|opened| opened.borrow_mut().push(url.to_string()));
     #[cfg(not(test))]
-    if let Err(e) = std::process::Command::new("open").arg(url).spawn() {
+    if let Err(e) = std::process::Command::new(OPENER).arg(url).spawn() {
         tracing::warn!(url, error = %e, "could not open link");
     }
 }
+
+/// What hands a link or a folder to the app the desktop picks for it.
+const OPENER: &str = if cfg!(target_os = "macos") {
+    "open"
+} else {
+    "xdg-open"
+};
+
+/// The app that shows a folder, by the name a menu gives it.
+pub const FILE_MANAGER: &str = if cfg!(target_os = "macos") {
+    "Finder"
+} else {
+    "File Manager"
+};
 
 /// Follow a link out of GitHub's or an agent's text: a pull request or
 /// an issue opens in Perch, and anything else in the browser. Open on
@@ -162,21 +176,60 @@ pub fn name_label(
 /// Note this deliberately does not make children transparent to the pointer:
 /// a selectable label does not swallow clicks, and `pointer_events_none` on
 /// the view that owns the handler would stop it receiving them at all.
-/// Show a directory in the Finder.
-pub fn reveal_in_finder(path: &std::path::Path) {
-    let _ = std::process::Command::new("open")
-        .arg("-R")
-        .arg(path)
-        .spawn();
+/// Show a directory in the Finder, selected in its parent. Elsewhere there
+/// is no common way to select a file, so the directory itself opens in
+/// the file manager.
+pub fn reveal_in_file_manager(path: &std::path::Path) {
+    let mut command = std::process::Command::new(OPENER);
+    if cfg!(target_os = "macos") {
+        command.arg("-R");
+    }
+    if let Err(e) = command.arg(path).spawn() {
+        tracing::warn!(path = %path.display(), error = %e, "could not show folder");
+    }
 }
 
-/// Open a Terminal window in a directory.
+/// Open a terminal window in a directory: Terminal on macOS. Elsewhere
+/// `$TERMINAL`, as the reader set it, then the common ones in turn; each
+/// starts in the directory it is spawned in.
 pub fn open_in_terminal(path: &std::path::Path) {
-    let _ = std::process::Command::new("open")
-        .arg("-a")
-        .arg("Terminal")
-        .arg(path)
-        .spawn();
+    if cfg!(target_os = "macos") {
+        let _ = std::process::Command::new("open")
+            .arg("-a")
+            .arg("Terminal")
+            .arg(path)
+            .spawn();
+        return;
+    }
+    let chosen = std::env::var("TERMINAL")
+        .ok()
+        .filter(|t| !t.trim().is_empty());
+    let candidates = chosen.iter().map(String::as_str).chain([
+        "x-terminal-emulator",
+        "xdg-terminal-exec",
+        "xfce4-terminal",
+        "gnome-terminal",
+        "konsole",
+        "kitty",
+        "alacritty",
+        "foot",
+        "wezterm",
+        "xterm",
+    ]);
+    for candidate in candidates {
+        let mut words = candidate.split_whitespace();
+        let Some(program) = words.next() else {
+            continue;
+        };
+        let spawned = std::process::Command::new(program)
+            .args(words)
+            .current_dir(path)
+            .spawn();
+        if spawned.is_ok() {
+            return;
+        }
+    }
+    tracing::warn!(path = %path.display(), "no terminal found; set $TERMINAL");
 }
 
 pub fn copy_to_clipboard(text: String) {
@@ -225,9 +278,9 @@ pub fn worktree_menu(
     }
     menu = menu
         .separator()
-        .item("Reveal in Finder", move |item| {
+        .item(format!("Reveal in {FILE_MANAGER}"), move |item| {
             item.icon(SidebarIcon::Folder)
-                .action(move || reveal_in_finder(&reveal))
+                .action(move || reveal_in_file_manager(&reveal))
         })
         .item("Open in Terminal", move |item| {
             item.icon(SidebarIcon::Terminal)
