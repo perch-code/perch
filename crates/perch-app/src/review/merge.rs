@@ -61,13 +61,16 @@ struct MergeSnapshot {
 /// The commit message being confirmed for a squash or a merge commit.
 /// It starts as GitHub's own and outlives the confirmation, which a
 /// status refresh puts away, so what was typed is there when it opens
-/// again for the same head and method.
+/// again for the same head and method. Left as GitHub's, it follows
+/// GitHub's, which an edit of the description changes.
 #[derive(Clone, Copy)]
 struct MessageDraft {
     title: RwSignal<String>,
     body: RwSignal<String>,
     /// The item, head and method the text was filled for.
     filled_for: RwSignal<Option<(String, String, MergeMethod)>>,
+    /// GitHub's message the text was filled with.
+    filled_with: RwSignal<CommitMessage>,
 }
 
 impl MessageDraft {
@@ -76,24 +79,33 @@ impl MessageDraft {
             title: RwSignal::new(String::new()),
             body: RwSignal::new(String::new()),
             filled_for: RwSignal::new(None),
+            filled_with: RwSignal::new(CommitMessage::default()),
         }
     }
 
     /// Put GitHub's message in, unless the draft is already this
-    /// request's.
+    /// request's: then only GitHub's message changed since, over text
+    /// the reader hasn't touched.
     fn fill(self, request: &MergeConfirmation, default: Option<&CommitMessage>) {
         let key = (
             request.item_id.clone(),
             request.head_sha.clone(),
             request.method,
         );
-        if self.filled_for.with_untracked(|filled| filled.as_ref() == Some(&key)) {
+        let default = default.cloned().unwrap_or_default();
+        let ours = self.filled_for.with_untracked(|filled| filled.as_ref() == Some(&key));
+        let stale = self.filled_with.with_untracked(|filled| {
+            *filled != default
+                && self.title.with_untracked(|title| *title == filled.title)
+                && self.body.with_untracked(|body| *body == filled.body)
+        });
+        if ours && !stale {
             return;
         }
-        let default = default.cloned().unwrap_or_default();
-        self.title.set(default.title);
-        self.body.set(default.body);
+        self.title.set(default.title.clone());
+        self.body.set(default.body.clone());
         self.filled_for.set(Some(key));
+        self.filled_with.set(default);
     }
 
     fn message(self) -> CommitMessage {
@@ -1767,6 +1779,64 @@ mod tests {
             )),
             "{sent:?}"
         );
+    }
+
+    /// GitHub's message read again, as it is after the description is
+    /// edited, reaches a draft the reader left as GitHub's, and not one
+    /// they typed in.
+    #[test]
+    fn a_squash_message_left_as_githubs_follows_githubs() {
+        let root = TestRoot::new();
+        let state = review_state(MergeState::Clean, false);
+        let read = |title: &str, body: &str| {
+            state.pull_request_overview.update(|overview| {
+                let mut read = (**overview.as_ref().unwrap()).clone();
+                read.squash_message = CommitMessage {
+                    title: title.into(),
+                    body: body.into(),
+                };
+                *overview = Some(Arc::new(read));
+            });
+        };
+        read("Merge support (#42)", "* Add the merge box");
+        let message = MessageDraft::new();
+        let view = merge_section(
+            state,
+            Rc::new(Backend::detached()),
+            RwSignal::new(MergeMethod::Squash),
+            RwSignal::new(false),
+            RwSignal::new(None::<MergeConfirmation>),
+            message,
+        );
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
+        let press = |harness: &mut HeadlessHarness, name: &str| {
+            harness.rebuild();
+            harness.paint();
+            let id = named(harness.root_id(), name).unwrap_or_else(|| panic!("no view {name}"));
+            id.request_focus();
+            harness.rebuild();
+            harness.dispatch_event(key(Code::Enter));
+            harness.rebuild();
+            harness.paint();
+        };
+
+        press(&mut harness, "merge-action:Squash-and-merge");
+        assert_eq!(message.body.get_untracked(), "* Add the merge box");
+
+        // Read again with the description edited, the draft untouched.
+        press(&mut harness, "merge-action:Cancel");
+        read("Merge support (#42)", "* Add the merge box\n* Say why");
+        press(&mut harness, "merge-action:Squash-and-merge");
+        assert_eq!(message.title.get_untracked(), "Merge support (#42)");
+        assert_eq!(message.body.get_untracked(), "* Add the merge box\n* Say why");
+
+        // Typed in, then read again: the typing stays.
+        message.title.set("Add a merge box (#42)".into());
+        press(&mut harness, "merge-action:Cancel");
+        read("Merge support (#42)", "* Something else");
+        press(&mut harness, "merge-action:Squash-and-merge");
+        assert_eq!(message.title.get_untracked(), "Add a merge box (#42)");
+        assert_eq!(message.body.get_untracked(), "* Add the merge box\n* Say why");
     }
 
     #[test]

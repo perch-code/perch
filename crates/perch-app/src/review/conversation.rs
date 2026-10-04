@@ -1974,6 +1974,40 @@ mod tests {
         assert_eq!(state.discussion.get().unwrap().reviews[0].body, "Looks right.");
     }
 
+    /// An emptied edit of the description asks for a description, not
+    /// about the pull request: Update comment sends it empty. A comment's
+    /// and a review summary's ask for what goes in them.
+    #[test]
+    fn an_emptied_edit_says_what_goes_in_it() {
+        use crate::review::model::Destination;
+        let mut discussion = discussion();
+        discussion.node_id = "PR_57".into();
+        discussion.viewer_can_update = true;
+        discussion.comments[0].node_id = "IC_1".into();
+        discussion.comments[0].viewer_can_update = true;
+        discussion.reviews[0].node_id = "PRR_9".into();
+        discussion.reviews[0].viewer_can_update = true;
+        let (mut harness, _, state) =
+            app_harness_on(crate::backend::Backend::detached(), discussion);
+        let cases = [
+            ("card:description", "PR_57", "Add-a-description…"),
+            ("card:comment", "IC_1", "Leave-a-comment…"),
+            ("card:review", "PRR_9", "Leave-a-review…"),
+        ];
+        for (name, id, placeholder) in cases {
+            state.open_composer_with(None, None, String::new(), Destination::GitHub, Some(id.into()));
+            harness.rebuild();
+            harness.paint();
+            let card = find(harness.root_id(), name).unwrap();
+            let editor = find(card, "comment-editor").expect("the card holds the editor");
+            let mut all = Vec::new();
+            names(editor, &mut all);
+            let shown: Vec<_> = all.iter().filter(|n| n.contains("composer-placeholder:")).collect();
+            let wanted = format!("composer-placeholder:{placeholder}");
+            assert!(shown.len() == 1 && shown[0].contains(&wanted), "{name}: {shown:?}");
+        }
+    }
+
     /// A comment GitHub did not say the reader may edit has no Edit.
     #[test]
     fn a_comment_the_reader_may_not_edit_offers_no_edit() {

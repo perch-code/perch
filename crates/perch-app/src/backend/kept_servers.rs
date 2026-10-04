@@ -24,6 +24,11 @@ const KEPT: usize = 2;
 /// How long a server is kept unshown before it is stopped.
 const KEEP_FOR: Duration = Duration::from_secs(10 * 60);
 
+/// How long the files a server was given have to close before it is set
+/// aside. A server that stopped reading leaves the closes blocked on a
+/// full pipe, and one kept that way would never be reached to be stopped.
+const CLOSE_WAIT: Duration = Duration::from_secs(3);
+
 struct Kept {
     window: WindowId,
     client: Arc<perch_lsp::Client>,
@@ -38,9 +43,20 @@ impl KeptServers {
     /// Set aside `client`, which `window` no longer shows. The files it was
     /// given are closed first, so it reads them from disk when taken up
     /// again. The oldest past `KEPT` is stopped, and this one is stopped
-    /// after `KEEP_FOR` unless it is taken up before.
+    /// after `KEEP_FOR` unless it is taken up before. One whose files
+    /// can't be closed within `CLOSE_WAIT` is stopped instead of kept.
     pub(super) async fn keep(&self, window: WindowId, client: Arc<perch_lsp::Client>) {
-        client.close_documents().await;
+        if tokio::time::timeout(CLOSE_WAIT, client.close_documents())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                server = client.kind().name(),
+                "language server stopped, not kept: its files could not be closed"
+            );
+            tokio::spawn(async move { client.shutdown().await });
+            return;
+        }
         let since = Instant::now();
         let overflow = {
             let Ok(mut kept) = self.0.lock() else {
@@ -255,5 +271,75 @@ mod tests {
         let memory = tree_memory(ps, &[10, 30]);
         assert_eq!(memory.len(), 1, "not pid 1, nor one ps doesn't list");
         assert_eq!(memory[&10], 5300);
+    }
+
+    /// A server that answers the handshake and then reads nothing more.
+    const DEAF_SERVER: &str = r#"
+import json, sys, time
+length = None
+while True:
+    line = sys.stdin.buffer.readline()
+    if not line:
+        sys.exit(0)
+    if line in (b"\r\n", b"\n"):
+        break
+    name, _, value = line.decode().partition(":")
+    if name.lower() == "content-length":
+        length = int(value)
+message = json.loads(sys.stdin.buffer.read(length))
+body = json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {"capabilities": {}}}).encode()
+sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+sys.stdout.buffer.flush()
+time.sleep(600)
+"#;
+
+    /// Whether a process is running, as `kill -0` finds it.
+    fn alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    /// A server that stopped reading can't take its files' closes: it is
+    /// stopped rather than kept, and setting it aside doesn't wait on it
+    /// for good.
+    #[tokio::test]
+    async fn a_server_that_cannot_take_its_closes_is_stopped_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("server.py");
+        std::fs::write(&script, DEAF_SERVER).unwrap();
+        let spec = perch_lsp::ServerSpec {
+            kind: perch_lsp::ServerKind::RustAnalyzer,
+            binary: "python3".into(),
+            args: vec![script.display().to_string()],
+            options: serde_json::Value::Null,
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let client = perch_lsp::Client::start(spec, dir.path(), tx).await.unwrap();
+        let pid = client.pid().unwrap();
+
+        // A file too big for the pipe: its open blocks holding the
+        // server's input, and every close after it waits.
+        let path = dir.path().join("lib.rs");
+        let (opening, opened) = (client.clone(), path.clone());
+        tokio::spawn(async move { opening.did_open(&opened, &"x".repeat(1 << 20)).await });
+        while client.given(&path).is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let kept = KeptServers::default();
+        let keeping = kept.keep(1, client);
+        let waited = tokio::time::timeout(CLOSE_WAIT + Duration::from_secs(2), keeping).await;
+        assert!(waited.is_ok(), "set aside for good");
+        assert!(kept.clients().is_empty(), "kept");
+        let gone = async {
+            while alive(pid) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        };
+        let gone = tokio::time::timeout(Duration::from_secs(15), gone).await;
+        assert!(gone.is_ok(), "still running");
     }
 }

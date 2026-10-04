@@ -331,7 +331,10 @@ pub fn composer_view(
         })
     });
     let steering = steering_run.is_some();
-    let placeholder = if steering {
+    let editing_placeholder = edit_kind.as_ref().and_then(EditKind::placeholder);
+    let placeholder = if let Some(placeholder) = editing_placeholder {
+        placeholder.to_string()
+    } else if steering {
         "Steer…".to_string()
     } else if follow_up {
         "Follow up…".to_string()
@@ -347,7 +350,7 @@ pub fn composer_view(
     let draft = state.composer_draft.get_untracked();
     // Markdown as it is typed: bold, italics, code and links take their
     // styles in the box, the way they will in the thread.
-    let editor = prose_editor(draft.clone(), placeholder, Some(state.next_token()));
+    let editor = prose_editor(draft.clone(), placeholder.clone(), Some(state.next_token()));
     let doc_editor = editor.editor().clone();
     let read_text = Rc::new(move || doc_editor.doc().text().to_string());
     // `@` offers people and files. A file goes to an agent as `@path`, as
@@ -624,7 +627,10 @@ pub fn composer_view(
             s.size_full()
                 .font_family(theme::FONT_STACK.to_string())
                 .font_size(theme::TEXT_BODY)
-        });
+        })
+        // The box draws its placeholder itself, in no view of its own. The
+        // name is dashed, so no search for words on screen finds it.
+        .debug_name(format!("composer-placeholder:{}", placeholder.replace(' ', "-")));
     // Take the keyboard as soon as the composer appears.
     //
     // Two things have to be right for that. Focus is asked of the editor's
@@ -1304,6 +1310,21 @@ impl EditKind {
             EditKind::Draft => None,
             EditKind::Reviewer => Some("Save"),
             EditKind::Posted { .. } => Some("Update comment"),
+        }
+    }
+
+    /// What the box says when emptied, for an edit of something on
+    /// GitHub: what goes in it, not a question. An edit of the reader's
+    /// draft or a reviewer's words says what the composer would.
+    fn placeholder(&self) -> Option<&'static str> {
+        match self {
+            EditKind::Posted { .. } if self.edits_description() => Some("Add a description…"),
+            EditKind::Posted {
+                place: perch_github::CommentPlace::Review,
+                ..
+            } => Some("Leave a review…"),
+            EditKind::Posted { .. } => Some("Leave a comment…"),
+            EditKind::Draft | EditKind::Reviewer => None,
         }
     }
 
