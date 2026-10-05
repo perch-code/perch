@@ -10,7 +10,7 @@ use std::sync::Arc;
 use floem::event::EventPropagation;
 use floem::peniko::Color;
 use floem::prelude::*;
-use floem::reactive::{Effect, RwSignal, SignalGet, SignalUpdate, SignalWith};
+use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::views::{dyn_container, dyn_stack, Container, Decorators, Empty, Label, Stack, TextInput};
 use floem::AnyView;
 use perch_github::{
@@ -23,7 +23,7 @@ use crate::backend::Backend;
 use crate::icons::{state_color, SidebarIcon};
 use crate::review::model::ReviewState;
 use crate::review::timeline::short_sha;
-use crate::state::Checked;
+use crate::state::{AppState, Checked};
 use crate::theme;
 use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::widgets::{
@@ -56,6 +56,11 @@ struct MergeSnapshot {
     selected_method: MergeMethod,
     bypass_requirements: bool,
     confirmation: Option<MergeConfirmation>,
+    /// Whether Push can bring the pull request to the worktree, which is
+    /// what keeps Merge from a worktree with unpushed commits.
+    can_push: bool,
+    push_pending: bool,
+    push_error: Option<String>,
 }
 
 /// The commit message being confirmed for a squash or a merge commit.
@@ -162,8 +167,9 @@ struct MergeFacts {
 }
 
 /// One restrained surface between the conversation and its composer.
-pub fn surface(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+pub fn surface(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let checks_expanded = RwSignal::new(true);
+    let can_push = Memo::new(move |_| crate::review::summary::can_push(app, state));
     // GitHub's common default, and the least surprising default when it is
     // enabled. `effective_method` falls back to another repository-enabled
     // method when squash is unavailable.
@@ -219,6 +225,7 @@ pub fn surface(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                         bypass_requirements,
                         confirmation,
                         message,
+                        can_push,
                     ),
                 ))
                 .style(|s| s.flex_col().width_full()),
@@ -594,6 +601,7 @@ fn merge_section(
     bypass_requirements: RwSignal<bool>,
     confirmation: RwSignal<Option<MergeConfirmation>>,
     message: MessageDraft,
+    can_push: Memo<bool>,
 ) -> impl IntoView {
     dyn_container(
         move || MergeSnapshot {
@@ -616,6 +624,9 @@ fn merge_section(
             selected_method: selected_method.get(),
             bypass_requirements: bypass_requirements.get(),
             confirmation: confirmation.get(),
+            can_push: can_push.get(),
+            push_pending: state.push_pending.get(),
+            push_error: state.push_error.get(),
         },
         move |snapshot| {
             merge_content(
@@ -674,6 +685,7 @@ fn merge_content(
         status,
         error_line(snapshot.overview_error.clone(), "merge-overview-error"),
         error_line(snapshot.merge_error.clone(), "merge-error"),
+        error_line(snapshot.push_error.clone(), "merge-push-error"),
         controls,
     ))
     .style(|s| {
@@ -805,6 +817,22 @@ fn merge_controls(
         }
         MergeDecision::Loading => {
             merge_button("Checking status…".to_string(), false, || false, || {}).into_any()
+        }
+        // Unpushed commits are the one thing keeping Merge, and Push is
+        // what clears them; the pull request is fetched again after.
+        MergeDecision::Disabled(DisabledReason::StaleCheckout)
+            if snapshot.can_push || snapshot.push_pending =>
+        {
+            let label = if snapshot.push_pending {
+                "Pushing…".to_string()
+            } else {
+                push_label(item.divergence().and_then(|d| d.ahead))
+            };
+            let pending = snapshot.push_pending;
+            merge_button(label, true, move || !pending, move || {
+                crate::review::summary::push(state, &backend)
+            })
+            .into_any()
         }
         MergeDecision::Disabled(_) => {
             merge_button("Merge unavailable".to_string(), false, || false, || {}).into_any()
@@ -1375,6 +1403,14 @@ fn disabled_copy(
     (title, detail.to_string())
 }
 
+fn push_label(ahead: Option<u32>) -> String {
+    match ahead {
+        Some(1) => "Push 1 commit".to_string(),
+        Some(n) if n > 1 => format!("Push {n} commits"),
+        _ => "Push".to_string(),
+    }
+}
+
 fn conflicts_url(html_url: &str) -> Option<String> {
     let html_url = html_url.trim_end_matches('/');
     (!html_url.is_empty()).then(|| format!("{html_url}/conflicts"))
@@ -1678,7 +1714,7 @@ mod tests {
     fn rendered_surface_shows_checks_and_supports_keyboard_bypass_confirmation() {
         let root = TestRoot::new();
         let state = review_state(MergeState::Blocked, true);
-        let view = surface(state, Rc::new(Backend::detached()));
+        let view = surface(crate::state::AppState::new(), state, Rc::new(Backend::detached()));
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         harness.rebuild();
         harness.paint();
@@ -1704,6 +1740,66 @@ mod tests {
         harness.paint();
 
         assert!(named(harness.root_id(), "merge-action:Confirm-bypass-and-merge").is_some());
+    }
+
+    /// A worktree with commits its pull request lacks can't merge, and the
+    /// merge box pushes them instead.
+    #[test]
+    fn unpushed_commits_turn_merge_into_push() {
+        use crate::backend::Command;
+
+        let root = TestRoot::new();
+        let state = review_state(MergeState::Clean, false);
+        state.item.update(|slot| {
+            let mut item = (**slot.as_ref().unwrap()).clone();
+            item.subject = Some(perch_github::ItemSubject::PullRequest((*pull_request("head-42")).clone()));
+            let checkout = item.checkout.as_mut().unwrap();
+            checkout.head_sha = "head-43".into();
+            checkout.divergence = Some(perch_github::Divergence {
+                head: "head-43".into(),
+                pr_head: "head-42".into(),
+                ahead: 2,
+                behind: 0,
+            });
+            *slot = Some(Arc::new(item));
+        });
+        let (backend, mut commands) = Backend::recording();
+        let view = merge_section(
+            state,
+            Rc::new(backend),
+            RwSignal::new(MergeMethod::Squash),
+            RwSignal::new(false),
+            RwSignal::new(None::<MergeConfirmation>),
+            MessageDraft::new(),
+            Memo::new(|_| true),
+        );
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+
+        let push = named(harness.root_id(), "merge-action:Push-2-commits").expect("Push in the merge box");
+        assert!(named(harness.root_id(), "merge-action:Merge-unavailable").is_none());
+        push.request_focus();
+        harness.rebuild();
+        harness.dispatch_event(key(Code::Enter));
+        harness.rebuild();
+        harness.paint();
+
+        let sent: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+        assert!(
+            sent.iter().any(|c| matches!(c, Command::PushBranch { item_id } if item_id == "item-42")),
+            "{sent:?}"
+        );
+        assert!(state.push_pending.get_untracked());
+        assert!(named(harness.root_id(), "merge-action:Pushing…").is_some());
+
+        // A refused push says why, and Push comes back.
+        state.push_pending.set(false);
+        state.push_error.set(Some("The remote has commits this branch doesn't.".into()));
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "merge-push-error").is_some());
+        assert!(named(harness.root_id(), "merge-action:Push-2-commits").is_some());
     }
 
     /// Squash confirms with GitHub's message to start with; what is typed
@@ -1734,6 +1830,7 @@ mod tests {
             bypass,
             confirmation,
             message,
+            Memo::new(|_| false),
         );
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         let press = |harness: &mut HeadlessHarness, name: &str| {
@@ -1807,6 +1904,7 @@ mod tests {
             RwSignal::new(false),
             RwSignal::new(None::<MergeConfirmation>),
             message,
+            Memo::new(|_| false),
         );
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         let press = |harness: &mut HeadlessHarness, name: &str| {
@@ -1857,7 +1955,7 @@ mod tests {
         merged.merged = true;
         merged.merged_by = Some("criccomini".into());
         state.pull_request.set(Some(Arc::new(merged.clone())));
-        let view = surface(state, Rc::new(Backend::detached()));
+        let view = surface(crate::state::AppState::new(), state, Rc::new(Backend::detached()));
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         harness.rebuild();
         harness.paint();

@@ -830,6 +830,17 @@ pub(crate) fn can_push(app: AppState, state: ReviewState) -> bool {
     })
 }
 
+/// Push the item's branch to its pull request, as Push does here and in
+/// the merge box.
+pub(crate) fn push(state: ReviewState, backend: &Backend) {
+    let Some(item_id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone())) else {
+        return;
+    };
+    state.push_pending.set(true);
+    state.push_error.set(None);
+    backend.push_branch(&item_id);
+}
+
 /// Push, beside `3 unpushed`, and what stopped the last one.
 fn push_button(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let shown = Memo::new(move |_| can_push(app, state) || state.push_pending.get());
@@ -845,15 +856,7 @@ fn push_button(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
             "push-branch",
             false,
             move || !state.push_pending.get() && !state.offline.get(),
-            move || {
-                let Some(item_id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
-                else {
-                    return;
-                };
-                state.push_pending.set(true);
-                state.push_error.set(None);
-                backend.push_branch(&item_id);
-            },
+            move || push(state, &backend),
         )
         .style(|s| s.height(22.0).padding_horiz(8.0)),
         Label::derived(move || state.push_error.get().unwrap_or_default())

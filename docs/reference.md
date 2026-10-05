@@ -554,8 +554,9 @@ request: Perch does it when you press the button.
 
 On a pull request of yours whose worktree is ahead of it and not behind, the
 Branch row has **Push** beside `3 unpushed`. It pushes the same way, and the
-pull request is fetched again, so Submit review and Merge come back. Behind or
-diverged has no button, since that push would need force.
+pull request is fetched again, so Submit review and Merge come back. The merge
+box at the foot of Conversation has it too, as **Push 3 commits** where Merge
+would be. Behind or diverged has no button, since that push would need force.
 
 ## Agents
 

@@ -115,7 +115,7 @@ pub fn view(
             .style(|s| s.flex_col().width_full()),
             // What GitHub says of the item, white, then what Perch has
             // done about it, grey, over the ask box, which is grey too.
-            crate::review::merge::surface(state, backend.clone()),
+            crate::review::merge::surface(app, state, backend.clone()),
             crate::review::open_pull::surface(app, state, backend.clone()),
             crate::review::close_as_issue::surface(app, state, backend.clone()),
             crate::ui::agents::section::section(app, state, summary_backend),
