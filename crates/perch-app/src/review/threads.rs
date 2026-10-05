@@ -2601,15 +2601,29 @@ pub fn follow_up(
                 .apply_if(empty.get(), |s| s.hide())
         })
         .into_any(),
-        ThreadFace::Inline => Container::new(reply)
-            .debug_name("reply-bar")
-            .style(move |s| {
-                s.width_full()
-                    .padding_horiz(theme::INLINE_THREAD_INSET)
-                    .padding_bottom(theme::INLINE_THREAD_INSET)
-                    .apply_if(empty.get(), |s| s.hide())
-            })
-            .into_any(),
+        // A white message's room under its text is room over the box; a
+        // grey band's is inside the grey, so under one the box takes the
+        // inset it has at its sides and foot, or it meets the band's edge.
+        ThreadFace::Inline => {
+            let band_thread = thread_id.clone();
+            let after_band = Memo::new(move |_| {
+                state.comment_threads.with(|t| {
+                    t.iter()
+                        .find(|t| t.id == band_thread)
+                        .is_some_and(|t| Lane::of(t).last().is_some_and(|l| *l != Lane::Flush))
+                })
+            });
+            Container::new(reply)
+                .debug_name("reply-bar")
+                .style(move |s| {
+                    s.width_full()
+                        .padding_horiz(theme::INLINE_THREAD_INSET)
+                        .padding_bottom(theme::INLINE_THREAD_INSET)
+                        .apply_if(after_band.get(), |s| s.padding_top(theme::INLINE_THREAD_INSET))
+                        .apply_if(empty.get(), |s| s.hide())
+                })
+                .into_any()
+        }
     };
     Stack::vertical((
         bar,
@@ -6183,6 +6197,34 @@ mod tests {
                 assert!(find(*row, "comment-rail").is_some(), "{face:?}: row {i}'s rail");
             }
         }
+    }
+
+    /// In the code, under a thread that ends on a grey band, the Follow up
+    /// box is set off from the band by the inset it has at its sides; under
+    /// a white message the message's own room is enough.
+    #[test]
+    fn the_inline_follow_up_box_stands_off_a_grey_band_above_it() {
+        let mut offsets = Vec::new();
+        for ends_private in [true, false] {
+            let root = TestRoot::new();
+            let app = AppState::new();
+            let state = state_with_item();
+            let mut thread = github_thread_with_private_messages();
+            if !ends_private {
+                thread.messages.push(draft_under(&thread));
+            }
+            state.comment_threads.set(Arc::new(vec![thread.clone()]));
+            let (backend, _commands) = crate::backend::Backend::recording();
+            let view = follow_up(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Inline)
+                .style(|s| s.width(600.0));
+            let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+            harness.rebuild();
+            harness.paint();
+            let bar = find(harness.root_id(), "reply-bar").unwrap().get_visual_rect_no_clip();
+            let line = find(harness.root_id(), "Follow up").unwrap().get_visual_rect_no_clip();
+            offsets.push(line.y0 - bar.y0);
+        }
+        assert_eq!(offsets[0] - offsets[1], theme::INLINE_THREAD_INSET, "{offsets:?}");
     }
 
     /// Folded, a GitHub thread that holds the reader's asks says how many,
