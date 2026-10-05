@@ -246,11 +246,11 @@ pub fn view(
         remember(at);
     })
     // Sent as the window opens and whenever macOS switches between light
-    // and dark.
+    // and dark, which `[ui] appearance` can overrule.
     .on_event_cont(
         floem::event::listener::ThemeChanged,
         |_, theme: &floem::window::Theme| {
-            crate::theme::set_appearance((*theme).into());
+            crate::theme::system_appearance((*theme).into());
         },
     )
     .on_event_cont(floem::event::listener::WindowGainedFocus, move |_, _| {

@@ -30,6 +30,29 @@ pub fn appearance() -> Appearance {
     APPEARANCE.with(|a| a.get())
 }
 
+thread_local! {
+    /// `[ui] appearance`, when it names one: the appearance the colours
+    /// keep whatever the system says.
+    static PREFERRED: std::cell::Cell<Option<Appearance>> = const { std::cell::Cell::new(None) };
+}
+
+/// Keeps the colours in `appearance` from now on, or, with `None`, has
+/// them follow the system. From `[ui] appearance`, before any window.
+pub fn prefer(appearance: Option<Appearance>) {
+    PREFERRED.set(appearance);
+    if let Some(appearance) = appearance {
+        set_appearance(appearance);
+    }
+}
+
+/// The appearance a window says the system is in. Taken unless `[ui]
+/// appearance` names one.
+pub fn system_appearance(to: Appearance) {
+    if PREFERRED.get().is_none() {
+        set_appearance(to);
+    }
+}
+
 /// Switches every colour, from the window's theme. A no-op when nothing
 /// changes, since every style that read a colour would run again.
 pub fn set_appearance(to: Appearance) {
@@ -38,6 +61,26 @@ pub fn set_appearance(to: Appearance) {
             a.set(to);
         }
     });
+}
+
+impl Appearance {
+    /// The one `[ui] appearance` names, or `None` for the system's.
+    pub fn chosen(choice: perch_github::config::Appearance) -> Option<Self> {
+        match choice {
+            perch_github::config::Appearance::System => None,
+            perch_github::config::Appearance::Light => Some(Appearance::Light),
+            perch_github::config::Appearance::Dark => Some(Appearance::Dark),
+        }
+    }
+}
+
+impl From<Appearance> for floem::window::Theme {
+    fn from(appearance: Appearance) -> Self {
+        match appearance {
+            Appearance::Light => floem::window::Theme::Light,
+            Appearance::Dark => floem::window::Theme::Dark,
+        }
+    }
 }
 
 impl From<floem::window::Theme> for Appearance {
@@ -1289,6 +1332,24 @@ mod tests {
 
     /// The branch pill's arrow is set in the code font, and the italic
     /// file, which fontique takes for the upright, has no glyph for it.
+    /// `[ui] appearance` holds whatever the system says; with none named,
+    /// the system's is taken.
+    #[test]
+    fn a_chosen_appearance_holds_against_the_systems() {
+        use perch_github::config::Appearance as Choice;
+        prefer(Appearance::chosen(Choice::Dark));
+        assert_eq!(appearance(), Appearance::Dark);
+        system_appearance(Appearance::Light);
+        assert_eq!(appearance(), Appearance::Dark, "the system does not overrule it");
+
+        prefer(Appearance::chosen(Choice::System));
+        system_appearance(Appearance::Light);
+        assert_eq!(appearance(), Appearance::Light, "the system's is taken");
+        system_appearance(Appearance::Dark);
+        assert_eq!(appearance(), Appearance::Dark);
+        set_appearance(Appearance::Light);
+    }
+
     #[test]
     fn code_font_draws_the_arrow() {
         install_code_font(None);

@@ -231,6 +231,22 @@ pub struct UiConfig {
     /// there it is SF Mono, as the rest of the system's code is.
     #[serde(default)]
     pub code_font: Option<String>,
+    /// Light or dark whatever the system says, or the system's, as it
+    /// changes.
+    #[serde(default)]
+    pub appearance: Appearance,
+}
+
+/// `[ui] appearance`.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    /// The system's, followed as it changes. Where the system says
+    /// nothing, as on X11, light.
+    #[default]
+    System,
+    Light,
+    Dark,
 }
 
 /// `[lsp]`: the language servers Perch runs.
@@ -1197,6 +1213,16 @@ network = ["index.crates.io"]
         assert_eq!(Config::fallback().ui.code_font, None);
         let c: Config = toml::from_str("[ui]\ncode_font = \"Fira Code\"").unwrap();
         assert_eq!(c.ui.code_font.as_deref(), Some("Fira Code"));
+    }
+
+    #[test]
+    fn the_appearance_is_the_systems_unless_named() {
+        assert_eq!(Config::fallback().ui.appearance, Appearance::System);
+        let c: Config = toml::from_str("[ui]\nappearance = \"dark\"").unwrap();
+        assert_eq!(c.ui.appearance, Appearance::Dark);
+        let c: Config = toml::from_str("[ui]\nappearance = \"light\"").unwrap();
+        assert_eq!(c.ui.appearance, Appearance::Light);
+        assert!(toml::from_str::<Config>("[ui]\nappearance = \"dim\"").is_err());
     }
 
     #[test]

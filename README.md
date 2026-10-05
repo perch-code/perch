@@ -186,6 +186,17 @@ or another family you name:
 code_font = "Fira Code"
 ```
 
+Perch is light or dark as the system is. To keep it one or the other, set
+`appearance` to `"light"` or `"dark"` (`"system"` is the default):
+
+```toml
+[ui]
+appearance = "dark"
+```
+
+On Linux the system's setting doesn't reach Perch under X11, so there it
+is light unless `appearance` says otherwise.
+
 ## Agent safety
 
 Agents read pull requests, comments and code that anyone could have written,
