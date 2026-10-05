@@ -1,10 +1,10 @@
 //! The popup at the window's bottom right: an agent run that finished, a
 //! line the reader should see, such as something that could not be done
-//! or a poll that failed, or an offer to install a language server or to
-//! trust the code one would run. One at a time, each up for a few seconds
-//! but the offer, which waits. An error or a warning has Report, which
-//! starts a bug report about it; a line that names somewhere to go, such
-//! as a filed issue, goes there when clicked.
+//! or a poll that failed, or an offer to install or start a language
+//! server or to trust the code one would run. One at a time, each up for
+//! a few seconds but the offer, which waits. An error or a warning has
+//! Report, which starts a bug report about it; a line that names somewhere
+//! to go, such as a filed issue, goes there when clicked.
 
 use std::rc::Rc;
 
@@ -57,7 +57,7 @@ pub fn toast(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
                     (message(state, review, token, text, tone, reportable).into_any(), go)
                 }
                 ToastKind::Server(offer) => (
-                    server_offer(state, backend.clone(), token, offer).into_any(),
+                    server_offer(state, review, backend.clone(), token, offer).into_any(),
                     None,
                 ),
             };
@@ -186,13 +186,20 @@ fn message(
     .style(|s| s.items_center().width_full().gap(9.0))
 }
 
-/// An offer to install a language server, or to trust an item's code and
-/// start the servers held back for it: its line, the button that runs the
-/// install, with the command as its tip, or Trust and start, and the close
-/// that turns it down for the session. While an install runs, the line
-/// says so and the buttons go. An offer to trust has an Always trust box
-/// under its line for each server it would start.
-fn server_offer(state: AppState, backend: Rc<Backend>, token: u64, offer: ServerOffer) -> impl IntoView {
+/// An offer to install a language server, to start one that isn't
+/// running, or to trust an item's code and start the servers held back
+/// for it: its line, the button that runs the install, with the command
+/// as its tip, or Start, or Trust and start, and the close that turns it
+/// down for the session. While an install runs, the line says so and the
+/// buttons go. An offer to trust has an Always trust box under its line
+/// for each server it would start.
+fn server_offer(
+    state: AppState,
+    review: ReviewState,
+    backend: Rc<Backend>,
+    token: u64,
+    offer: ServerOffer,
+) -> impl IntoView {
     let kind = offer.kind;
     let installs = offer.trust.is_none();
     let installing = move || installs && state.installing_servers.with(|i| i.contains(&kind));
@@ -228,6 +235,14 @@ fn server_offer(state: AppState, backend: Rc<Backend>, token: u64, offer: Server
                 .style(move |s| s.apply_if(installing(), |s| s.hide()));
             crate::review::cards::tip(button, shown).into_any()
         }
+        // Starting says so at once, so a goto asked before the server's
+        // own word comes says it is starting, not that it hasn't.
+        (None, None) if offer.start => offer_button(offer.action, move || {
+            state.dismiss_toast(token);
+            review.set_server_status(kind, perch_lsp::Status::Starting);
+            backend.start_language_server_here(kind);
+        })
+        .into_any(),
         (None, None) => Empty::new().into_any(),
     };
     let key = offer.key.clone();
@@ -476,6 +491,52 @@ mod tests {
             press("other").is_empty(),
             "the toast was about another item"
         );
+    }
+
+    /// Start takes the toast down, says the server is starting, and asks
+    /// the backend to start it.
+    #[test]
+    fn start_starts_the_server_its_toast_names() {
+        use std::rc::Rc;
+
+        use floem::headless::{HeadlessHarness, TestRoot};
+        use floem::prelude::*;
+
+        use crate::backend::{Backend, Command};
+        use crate::review::model::ReviewState;
+        use crate::state::{AppState, ServerOffer};
+
+        let state = AppState::new();
+        let review = ReviewState::new();
+        state.review.set(Some(review));
+        let (backend, mut commands) = Backend::recording();
+        let root = TestRoot::new();
+        let view = crate::ui::app_view(state, review, Rc::new(backend));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        let rust = perch_lsp::ServerKind::RustAnalyzer;
+        let text = "No definition found for `alpha` (rust-analyzer not started)";
+        state.offer_server(ServerOffer::start(rust, text.into()), true);
+        harness.rebuild();
+        harness.paint();
+        let toast = named(harness.root_id(), "toast").expect("no toast");
+        assert!(named(toast, text).is_some());
+        let button = named(toast, "Start").expect("no Start");
+        let at = button.get_visual_rect_no_clip().center();
+        harness.click(at.x, at.y);
+        harness.rebuild();
+        harness.paint();
+        assert!(state.current_toast().is_none(), "the toast goes");
+        assert_eq!(
+            review.lsp_status.get_untracked().get(rust),
+            Some(&perch_lsp::Status::Starting)
+        );
+        let started = std::iter::from_fn(|| commands.try_recv().ok())
+            .filter_map(|command| match command {
+                Command::StartLanguageServer { kind, .. } => Some(kind),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(started, [rust]);
     }
 
     /// Under the line, an Always trust box for each server held, the box

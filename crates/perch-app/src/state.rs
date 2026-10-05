@@ -78,14 +78,16 @@ pub enum ToastKind {
         open: Option<ToastOpen>,
     },
     /// A language server that isn't there, or is out of date, with the
-    /// button that installs it; or one held back until the reader trusts
-    /// the code, with the button that does. It stays until it's closed or
-    /// the install ends; other news shows over it meanwhile.
+    /// button that installs it; one held back until the reader trusts the
+    /// code, with the button that does; or one that isn't running, with
+    /// the button that starts it. It stays until it's closed or the
+    /// install ends; other news shows over it meanwhile.
     Server(ServerOffer),
 }
 
-/// A toast's offer to install or update a language server, or to start
-/// the ones held back for an item whose code the reader hasn't trusted.
+/// A toast's offer to install or update a language server, to start the
+/// ones held back for an item whose code the reader hasn't trusted, or to
+/// start one that isn't running.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerOffer {
     pub kind: perch_lsp::ServerKind,
@@ -100,6 +102,9 @@ pub struct ServerOffer {
     /// What the reader is asked to trust, for an offer to start servers
     /// held back for an item: its button is Trust and start.
     pub trust: Option<TrustAsk>,
+    /// Whether its button starts the open item's server, which hasn't
+    /// started or has failed.
+    pub start: bool,
 }
 
 /// An offer's ask to trust an item's code.
@@ -123,6 +128,22 @@ impl ServerOffer {
             action: "Install",
             key: missing.describe(),
             trust: None,
+            start: false,
+        }
+    }
+
+    /// The offer to start the open item's server of `kind`, which hasn't
+    /// started or has failed. `text` is what the goto that found it out
+    /// says.
+    pub fn start(kind: perch_lsp::ServerKind, text: String) -> Self {
+        ServerOffer {
+            kind,
+            text,
+            install: None,
+            action: "Start",
+            key: format!("start {}", kind.name()),
+            trust: None,
+            start: true,
         }
     }
 
@@ -172,6 +193,7 @@ impl ServerOffer {
                 repo: item.repo_full_name.clone(),
                 kinds: kinds.to_vec(),
             }),
+            start: false,
         }
     }
 }
@@ -992,6 +1014,14 @@ impl AppState {
     fn drop_offers(&self, kind: perch_lsp::ServerKind) {
         self.drop_toasts(|toast| {
             matches!(toast, ToastKind::Server(offer) if offer.kind == kind && offer.trust.is_none())
+        });
+    }
+
+    /// Take down the offer to start `kind`: it has said something since,
+    /// so the line the offer gave is out of date.
+    fn drop_start_offers(&self, kind: perch_lsp::ServerKind) {
+        self.drop_toasts(|toast| {
+            matches!(toast, ToastKind::Server(offer) if offer.kind == kind && offer.start)
         });
     }
 
@@ -1941,6 +1971,7 @@ impl AppState {
                 status,
             } => {
                 if self.accepts_navigation(navigation_id) {
+                    self.drop_start_offers(kind);
                     // Before the status, so what shows a name asks again as
                     // the status reaches it.
                     if status == perch_lsp::Status::Ready {
@@ -2795,6 +2826,7 @@ impl AppState {
                             install: Some(install),
                             action: "Update",
                             trust: None,
+                            start: false,
                         },
                         false,
                     );
@@ -4314,6 +4346,30 @@ mod tests {
             true,
         );
         assert_eq!(offers(&app)[0].text, "No definition found for `x`: …");
+    }
+
+    /// The offer to start a server comes down once the server says
+    /// anything, as when a file of its language opening starts it.
+    #[test]
+    fn an_offer_to_start_goes_once_its_server_speaks() {
+        let _root = floem::headless::TestRoot::new();
+        let app = AppState::new();
+        let review = ReviewState::new();
+        app.begin_item_review(review, "Open", "a", 91);
+        app.apply_with_review(review_ready("a", 91), review);
+        let rust = perch_lsp::ServerKind::RustAnalyzer;
+        app.offer_server(ServerOffer::start(rust, "No definition found for `x`".into()), true);
+        assert_eq!(offers(&app).len(), 1);
+        assert_eq!(offers(&app)[0].action, "Start");
+        app.apply_with_review(
+            Event::LspStatus {
+                navigation_id: 91,
+                kind: rust,
+                status: perch_lsp::Status::Starting,
+            },
+            review,
+        );
+        assert!(offers(&app).is_empty());
     }
 
     /// A server held for want of trust asks once for the item, naming

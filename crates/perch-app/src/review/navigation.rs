@@ -317,15 +317,25 @@ fn server_ready(state: ReviewState, noun: &str, symbol: &Symbol) -> bool {
     let why = state
         .lsp_status
         .with_untracked(|s| s.unusable_reason(&symbol.path));
-    match why {
-        Some(why) => {
-            state
-                .pending_notice
-                .set(Some(format!("No {noun} found for `{}` ({why})", symbol.text)));
-            false
-        }
-        None => true,
+    let Some(why) = why else {
+        return true;
+    };
+    let text = format!("No {noun} found for `{}` ({why})", symbol.text);
+    // One that hasn't started, or has failed, says so with the offer to
+    // start it, once there is a checkout for it to start in.
+    let startable = perch_lsp::ServerKind::for_path(&symbol.path).filter(|kind| {
+        state.ready.get_untracked()
+            && state.lsp_status.with_untracked(|s| {
+                matches!(s.get(*kind), None | Some(perch_lsp::Status::Failed { .. }))
+            })
+    });
+    match startable {
+        Some(kind) => state
+            .pending_offer
+            .set(Some(crate::state::ServerOffer::start(kind, text))),
+        None => state.pending_notice.set(Some(text)),
     }
+    false
 }
 
 /// `F12`: the definition of the symbol at the caret.
@@ -1086,6 +1096,50 @@ mod tests {
             "No definition found for `alpha`: rust-analyzer would run the build scripts and \
              proc macros in slatedb/slatedb on perch/pr-812."
         );
+    }
+
+    /// Over a server that hasn't started, or has failed, a click offers
+    /// to start it. With no checkout yet there is nothing to start it in,
+    /// and the click only says why.
+    #[test]
+    fn a_cmd_click_over_a_server_not_running_offers_to_start_it() {
+        let (mut harness, app, state, mut commands) = app_harness();
+        let doc = stacked_doc(state);
+        let rust = perch_lsp::ServerKind::RustAnalyzer;
+        let (x, y) = point_of(doc.offset_of_row(3) + 6);
+        let mut click = |harness: &mut HeadlessHarness| {
+            cmd_click_at(harness, x, y);
+            harness.rebuild();
+            harness.paint();
+            assert!(definitions_asked(&mut commands).is_empty());
+            let toast = app.current_toast()?;
+            app.dismiss_toast(toast.token);
+            Some(toast.kind)
+        };
+        let start = |text: &str| {
+            Some(crate::state::ToastKind::Server(
+                crate::state::ServerOffer::start(rust, text.into()),
+            ))
+        };
+
+        state.lsp_status.set(crate::review::model::ServerStatuses::default());
+        assert_eq!(
+            click(&mut harness),
+            start("No definition found for `alpha` (rust-analyzer not started)")
+        );
+        state.set_server_status(rust, perch_lsp::Status::Failed {
+            reason: "gone".into(),
+        });
+        assert_eq!(
+            click(&mut harness),
+            start("No definition found for `alpha` (rust-analyzer failed: gone)")
+        );
+        state.ready.set(false);
+        assert!(matches!(
+            click(&mut harness),
+            Some(crate::state::ToastKind::Message { text, .. })
+                if text == "No definition found for `alpha` (rust-analyzer failed: gone)"
+        ));
     }
 
     #[test]
