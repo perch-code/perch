@@ -429,24 +429,12 @@ async fn collect(ctx: &Ctx, request: &PrepareRequest) -> FeedbackContext {
             "release"
         }
     ));
-    perch.push(format!(
-        "Launched from: {}",
-        if std::os::unix::process::parent_id() == 1 {
-            "Finder"
-        } else {
-            "a terminal"
-        }
-    ));
+    perch.push(format!("Launched from: {}", launched_from()));
 
-    let product = run(Path::new("sw_vers"), &["-productVersion"]).await;
-    let build = run(Path::new("sw_vers"), &["-buildVersion"]).await;
-    let macos = match (&product, &build) {
-        (Ok(product), Ok(build)) => format!("{product} ({build})"),
-        (Ok(product), Err(_)) => product.clone(),
-        (Err(why), _) => why.clone(),
-    };
+    let os = os_facts().await;
     let arch = std::env::consts::ARCH;
-    let mut system = vec![format!("macOS: {macos}"), format!("Architecture: {arch}")];
+    let mut system = os.lines;
+    system.push(format!("Architecture: {arch}"));
     system.extend(request.facts.display.iter().cloned());
 
     let agent = &config.agent;
@@ -530,10 +518,7 @@ async fn collect(ctx: &Ctx, request: &PrepareRequest) -> FeedbackContext {
 
     let log = crate::log_file::recent(&crate::log_file::dir(), feedback::LOG_LINES);
 
-    let mut summary = format!(
-        "Perch {version} ({commit}) · macOS {} {arch}",
-        macos_short(&product, &build)
-    );
+    let mut summary = format!("Perch {version} ({commit}) · {} {arch}", os.short);
     if let Some(v) = claude.1 {
         summary.push_str(&format!(" · Claude Code {v}"));
     }
@@ -581,11 +566,113 @@ async fn collect(ctx: &Ctx, request: &PrepareRequest) -> FeedbackContext {
     }
 }
 
-fn macos_short(product: &Result<String, String>, build: &Result<String, String>) -> String {
-    match (product, build) {
-        (Ok(product), Ok(build)) => format!("{product} ({build})"),
-        (Ok(product), Err(_)) => product.clone(),
-        _ => "unknown".to_string(),
+/// What Diagnostics says of the operating system: its lines under
+/// System, and the few words the summary gives it.
+struct OsFacts {
+    lines: Vec<String>,
+    short: String,
+}
+
+/// Where Perch was started from. A Finder or Dock launch on macOS is
+/// launchd's child; elsewhere a launch from the desktop has no terminal.
+fn launched_from() -> &'static str {
+    if cfg!(target_os = "macos") {
+        if std::os::unix::process::parent_id() == 1 {
+            "Finder"
+        } else {
+            "a terminal"
+        }
+    } else {
+        use std::io::IsTerminal;
+        if std::io::stdin().is_terminal() {
+            "a terminal"
+        } else {
+            "the desktop"
+        }
+    }
+}
+
+/// macOS's version and build: `macOS: 15.6 (24G84)`.
+#[cfg(target_os = "macos")]
+async fn os_facts() -> OsFacts {
+    let product = run(Path::new("sw_vers"), &["-productVersion"]).await;
+    let build = run(Path::new("sw_vers"), &["-buildVersion"]).await;
+    let version = match (product, build) {
+        (Ok(product), Ok(build)) => Ok(format!("{product} ({build})")),
+        (Ok(product), Err(_)) => Ok(product),
+        (Err(why), _) => Err(why),
+    };
+    OsFacts {
+        lines: vec![format!("macOS: {}", version.as_ref().unwrap_or_else(|why| why))],
+        short: format!("macOS {}", version.as_deref().unwrap_or("unknown")),
+    }
+}
+
+/// The distribution, the kernel, and the session it draws in, which is
+/// where a window's or a key's trouble on Linux usually lies.
+#[cfg(not(target_os = "macos"))]
+async fn os_facts() -> OsFacts {
+    let release = std::fs::read_to_string("/etc/os-release")
+        .or_else(|_| std::fs::read_to_string("/usr/lib/os-release"))
+        .unwrap_or_default();
+    let name = os_name(&release);
+    let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map(|k| k.trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+    let session = session(
+        var("XDG_SESSION_TYPE").as_deref(),
+        var("WAYLAND_DISPLAY").is_some(),
+        var("DISPLAY").is_some(),
+        var("XDG_CURRENT_DESKTOP").as_deref(),
+    );
+    OsFacts {
+        lines: vec![
+            format!("OS: {name}"),
+            format!("Kernel: {kernel}"),
+            format!("Session: {session}"),
+        ],
+        short: name,
+    }
+}
+
+/// The distribution as os-release names it: its pretty name, else its
+/// name and version, else plain Linux.
+#[cfg(not(target_os = "macos"))]
+fn os_name(release: &str) -> String {
+    let field = |key: &str| {
+        release.lines().find_map(|line| {
+            let value = line.strip_prefix(key)?.strip_prefix('=')?.trim();
+            let value = value.trim_matches(|c| c == '"' || c == '\'');
+            (!value.is_empty()).then(|| value.to_string())
+        })
+    };
+    field("PRETTY_NAME")
+        .or_else(|| {
+            let name = field("NAME")?;
+            Some(match field("VERSION_ID") {
+                Some(version) => format!("{name} {version}"),
+                None => name,
+            })
+        })
+        .unwrap_or_else(|| "Linux".to_string())
+}
+
+/// `X11, XFCE` or `Wayland, GNOME`: the display server, from the session
+/// type or else the sockets the session gives, then the desktop.
+#[cfg(not(target_os = "macos"))]
+fn session(kind: Option<&str>, wayland: bool, x11: bool, desktop: Option<&str>) -> String {
+    let server = match kind.map(str::to_ascii_lowercase).as_deref() {
+        Some("wayland") => "Wayland".to_string(),
+        Some("x11") => "X11".to_string(),
+        Some("tty") | None if wayland => "Wayland".to_string(),
+        Some("tty") | None if x11 => "X11".to_string(),
+        Some(other) => other.to_string(),
+        None => "unknown".to_string(),
+    };
+    match desktop {
+        Some(desktop) => format!("{server}, {}", desktop.replace(':', "/")),
+        None => server,
     }
 }
 
@@ -877,6 +964,29 @@ fn repo_summary(value: &toml::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn a_distribution_is_named_as_os_release_names_it() {
+        assert_eq!(os_name("NAME=\"Manjaro Linux\"\nPRETTY_NAME=\"Manjaro Linux\"\nBUILD_ID=rolling\n"), "Manjaro Linux");
+        assert_eq!(
+            os_name("NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nPRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\n"),
+            "Ubuntu 24.04.1 LTS"
+        );
+        assert_eq!(os_name("NAME=Fedora\nVERSION_ID=42\n"), "Fedora 42", "no pretty name");
+        assert_eq!(os_name("NAME=Alpine\nPRETTY_NAME=\n"), "Alpine");
+        assert_eq!(os_name(""), "Linux");
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn a_session_is_its_display_server_and_desktop() {
+        assert_eq!(session(Some("x11"), false, true, Some("XFCE")), "X11, XFCE");
+        assert_eq!(session(Some("wayland"), true, true, Some("ubuntu:GNOME")), "Wayland, ubuntu/GNOME");
+        assert_eq!(session(None, true, true, None), "Wayland", "the socket says so");
+        assert_eq!(session(Some("tty"), false, true, Some("KDE")), "X11, KDE");
+        assert_eq!(session(None, false, false, None), "unknown");
+    }
 
     #[test]
     fn versions_come_out_of_version_lines() {

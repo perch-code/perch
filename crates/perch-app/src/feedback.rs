@@ -98,7 +98,7 @@ pub struct Section {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct FeedbackContext {
     /// `Perch 0.1.0 (a1b2c3d) · macOS 15.6 (24G84) arm64 · Claude Code
-    /// 2.1.230 · Codex 0.160.0`.
+    /// 2.1.230 · Codex 0.160.0`, or `· Ubuntu 24.04.1 LTS x86_64 ·` on Linux.
     pub summary: String,
     pub sections: Vec<Section>,
     pub log: Vec<String>,
@@ -697,7 +697,7 @@ pub fn prompt(
         body.trim()
     };
     format!(
-        "Someone using Perch, a macOS app for GitHub pull requests with coding agents, is \
+        "Someone using Perch, a desktop app for GitHub pull requests with coding agents, is \
 reporting a {kind} to Perch's maintainers. Find out why it happened on this machine.\n\n\
 ## Their report\n\nTitle: {title}\n\n{body}\n\n\
 ## What Perch collected\n\n{summary}\n\n{diagnostics}\n\
