@@ -61,6 +61,10 @@ struct MergeSnapshot {
     can_push: bool,
     push_pending: bool,
     push_error: Option<String>,
+    /// Whether the reader may mark a draft ready for review, and a change
+    /// to or from a draft under way.
+    may_set_draft: bool,
+    draft_pending: Option<bool>,
 }
 
 /// The commit message being confirmed for a squash or a merge commit.
@@ -170,6 +174,7 @@ struct MergeFacts {
 pub fn surface(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let checks_expanded = RwSignal::new(true);
     let can_push = Memo::new(move |_| crate::review::summary::can_push(app, state));
+    let may_set_draft = Memo::new(move |_| crate::review::summary::may_set_draft(app, state));
     // GitHub's common default, and the least surprising default when it is
     // enabled. `effective_method` falls back to another repository-enabled
     // method when squash is unavailable.
@@ -226,6 +231,7 @@ pub fn surface(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                         confirmation,
                         message,
                         can_push,
+                        may_set_draft,
                     ),
                 ))
                 .style(|s| s.flex_col().width_full()),
@@ -602,6 +608,7 @@ fn merge_section(
     confirmation: RwSignal<Option<MergeConfirmation>>,
     message: MessageDraft,
     can_push: Memo<bool>,
+    may_set_draft: Memo<bool>,
 ) -> impl IntoView {
     dyn_container(
         move || MergeSnapshot {
@@ -627,6 +634,8 @@ fn merge_section(
             can_push: can_push.get(),
             push_pending: state.push_pending.get(),
             push_error: state.push_error.get(),
+            may_set_draft: may_set_draft.get(),
+            draft_pending: state.draft_pending.get(),
         },
         move |snapshot| {
             merge_content(
@@ -831,6 +840,23 @@ fn merge_controls(
             let pending = snapshot.push_pending;
             merge_button(label, true, move || !pending, move || {
                 crate::review::summary::push(state, &backend)
+            })
+            .into_any()
+        }
+        // A draft can't be merged, and Ready for review is what clears it.
+        // Held while it goes and the pull request is read again, so the
+        // merge state from before it does not show between.
+        MergeDecision::Disabled(DisabledReason::Draft)
+            if snapshot.draft_pending.is_some() || (pull.draft && snapshot.may_set_draft) =>
+        {
+            let pending = snapshot.draft_pending.is_some();
+            let label = if snapshot.draft_pending == Some(false) {
+                "Marking ready for review…"
+            } else {
+                "Ready for review"
+            };
+            merge_button(label.to_string(), true, move || !pending, move || {
+                crate::review::summary::set_draft(state, &backend, false)
             })
             .into_any()
         }
@@ -1772,6 +1798,7 @@ mod tests {
             RwSignal::new(None::<MergeConfirmation>),
             MessageDraft::new(),
             Memo::new(|_| true),
+            Memo::new(|_| false),
         );
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         harness.rebuild();
@@ -1802,6 +1829,82 @@ mod tests {
         assert!(named(harness.root_id(), "merge-action:Push-2-commits").is_some());
     }
 
+    /// A draft's merge box marks it ready for review, for a reader who may,
+    /// and holds the button until the pull request has been read again.
+    #[test]
+    fn a_draft_is_marked_ready_from_the_merge_box() {
+        use crate::backend::Command;
+
+        let root = TestRoot::new();
+        let state = review_state(MergeState::Draft, false);
+        state.pull_request.update(|pull| {
+            let mut draft = (**pull.as_ref().unwrap()).clone();
+            draft.draft = true;
+            *pull = Some(Arc::new(draft));
+        });
+        let may_set_draft = RwSignal::new(false);
+        let (backend, mut commands) = Backend::recording();
+        let view = merge_section(
+            state,
+            Rc::new(backend),
+            RwSignal::new(MergeMethod::Squash),
+            RwSignal::new(false),
+            RwSignal::new(None::<MergeConfirmation>),
+            MessageDraft::new(),
+            Memo::new(|_| false),
+            Memo::new(move |_| may_set_draft.get()),
+        );
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+
+        // Nobody who may change it: nothing to press.
+        assert!(named(harness.root_id(), "merge-action:Merge-unavailable").is_some());
+        assert!(named(harness.root_id(), "merge-action:Ready-for-review").is_none());
+
+        may_set_draft.set(true);
+        harness.rebuild();
+        harness.paint();
+        let ready = named(harness.root_id(), "merge-action:Ready-for-review").expect("Ready for review");
+        ready.request_focus();
+        harness.rebuild();
+        harness.dispatch_event(key(Code::Enter));
+        harness.rebuild();
+        harness.paint();
+
+        let sent: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+        assert!(
+            sent.iter().any(|c| matches!(
+                c,
+                Command::SetDraft { item_id, draft: false } if item_id == "item-42"
+            )),
+            "{sent:?}"
+        );
+        assert_eq!(state.draft_pending.get_untracked(), Some(false));
+        assert!(named(harness.root_id(), "merge-action:Marking-ready-for-review…").is_some());
+
+        // GitHub's answer is in, the merge state not yet: still held.
+        state.pull_request.update(|pull| {
+            let mut ready = (**pull.as_ref().unwrap()).clone();
+            ready.draft = false;
+            *pull = Some(Arc::new(ready));
+        });
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "merge-action:Marking-ready-for-review…").is_some());
+
+        // Read again: the merge box is a merge box.
+        state.pull_request_overview.update(|overview| {
+            let mut fresh = (**overview.as_ref().unwrap()).clone();
+            fresh.merge_state = MergeState::Clean;
+            *overview = Some(Arc::new(fresh));
+        });
+        state.draft_pending.set(None);
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "merge-action:Squash-and-merge").is_some());
+    }
+
     /// Squash confirms with GitHub's message to start with; what is typed
     /// is what goes, and it outlives the confirmation for the same head.
     #[test]
@@ -1830,6 +1933,7 @@ mod tests {
             bypass,
             confirmation,
             message,
+            Memo::new(|_| false),
             Memo::new(|_| false),
         );
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
@@ -1904,6 +2008,7 @@ mod tests {
             RwSignal::new(false),
             RwSignal::new(None::<MergeConfirmation>),
             message,
+            Memo::new(|_| false),
             Memo::new(|_| false),
         );
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);

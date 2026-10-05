@@ -523,6 +523,88 @@ async fn closing_patches_the_pull_request_closed_and_reads_back_its_state() {
 }
 
 #[tokio::test]
+async fn marking_ready_asks_for_the_id_then_names_it_in_the_mutation() {
+    let (base, requests) = spawn(vec![
+        Response::new(
+            "200 OK",
+            r#"{"data":{"repository":{"pullRequest":{"id":"PR_kw1","isDraft":true}}}}"#,
+        ),
+        Response::new(
+            "200 OK",
+            r#"{"data":{"markPullRequestReadyForReview":{"pullRequest":{"isDraft":false}}}}"#,
+        ),
+        Response::new(
+            "200 OK",
+            r#"{"data":{"repository":{"pullRequest":{"id":"PR_kw1","isDraft":false}}}}"#,
+        ),
+        Response::new(
+            "200 OK",
+            r#"{"data":{"convertPullRequestToDraft":{"pullRequest":{"isDraft":true}}}}"#,
+        ),
+    ]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    assert!(!github.set_pull_request_draft("a/b", 42, false).await.unwrap());
+    assert!(github.set_pull_request_draft("a/b", 42, true).await.unwrap());
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    assert!(requests.iter().all(|r| r.method == "POST" && r.path == "/graphql"));
+    let asked = |i: usize| -> serde_json::Value { serde_json::from_str(&requests[i].body).unwrap() };
+    let lookup = asked(0);
+    assert_eq!(lookup["variables"]["owner"], "a");
+    assert_eq!(lookup["variables"]["name"], "b");
+    assert_eq!(lookup["variables"]["number"], 42);
+    let ready = asked(1);
+    let query = ready["query"].as_str().unwrap();
+    assert!(query.starts_with("mutation("), "{query}");
+    assert!(
+        query.contains("markPullRequestReadyForReview(input: {pullRequestId: $pull})"),
+        "{query}"
+    );
+    assert_eq!(ready["variables"]["pull"], "PR_kw1");
+    let to_draft = asked(3);
+    assert!(to_draft["query"].as_str().unwrap().contains("convertPullRequestToDraft("));
+    assert_eq!(to_draft["variables"]["pull"], "PR_kw1");
+}
+
+#[tokio::test]
+async fn a_pull_request_already_as_asked_is_not_changed() {
+    let (base, requests) = spawn(vec![Response::new(
+        "200 OK",
+        r#"{"data":{"repository":{"pullRequest":{"id":"PR_kw1","isDraft":true}}}}"#,
+    )]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    assert!(github.set_pull_request_draft("a/b", 42, true).await.unwrap());
+    assert_eq!(requests.lock().unwrap().len(), 1, "no mutation");
+}
+
+#[tokio::test]
+async fn a_draft_change_github_refuses_is_an_error() {
+    let (base, _) = spawn(vec![
+        Response::new(
+            "200 OK",
+            r#"{"data":{"repository":{"pullRequest":{"id":"PR_kw1","isDraft":false}}}}"#,
+        ),
+        Response::new(
+            "200 OK",
+            r#"{"data":{"convertPullRequestToDraft":null},"errors":[{"message":"Resource not accessible by integration"}]}"#,
+        ),
+        Response::new("200 OK", r#"{"data":{"repository":{"pullRequest":null}}}"#),
+    ]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let refused = github.set_pull_request_draft("a/b", 42, true).await.unwrap_err();
+    assert!(
+        matches!(&refused, Error::Graphql(message) if message.contains("not accessible")),
+        "{refused:?}"
+    );
+    let missing = github.set_pull_request_draft("a/b", 43, true).await.unwrap_err();
+    assert!(matches!(missing, Error::Decode(_)), "{missing:?}");
+}
+
+#[tokio::test]
 async fn closing_an_issue_patches_it_closed_with_the_reason() {
     let (base, requests) = spawn(vec![Response::new(
         "200 OK",

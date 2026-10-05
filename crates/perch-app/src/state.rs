@@ -2728,6 +2728,11 @@ impl AppState {
                     review.pull_error.set(Some(message));
                 }
             }
+            Event::DraftSet { item_id } => {
+                if review.is_item(&item_id) {
+                    review.draft_pending.set(None);
+                }
+            }
             Event::BranchPushed { item_id } => {
                 if review.is_item(&item_id) {
                     review.push_pending.set(false);
@@ -2915,7 +2920,8 @@ impl AppState {
             | Event::OpenPullRequestStep { .. }
             | Event::OpenPullRequestFailed { .. }
             | Event::BranchPushed { .. }
-            | Event::BranchPushFailed { .. } => {}
+            | Event::BranchPushFailed { .. }
+            | Event::DraftSet { .. } => {}
             // What the reader did sends the whole list, so whatever a poll
             // was holding back is in it.
             Event::Items(items) => {

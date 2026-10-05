@@ -1566,6 +1566,9 @@ pub struct ReviewState {
     /// `composer_resizing` are for a comment's.
     pub pull_body_height: RwSignal<Option<f64>>,
     pub pull_body_resizing: RwSignal<bool>,
+    /// A change of the pull request to a draft (true) or out of one
+    /// (false) under way.
+    pub draft_pending: RwSignal<Option<bool>>,
     /// A Push to the pull request under way, and what stopped the last.
     pub push_pending: RwSignal<bool>,
     pub push_error: RwSignal<Option<String>>,
@@ -2023,6 +2026,7 @@ impl ReviewState {
             pull_error: RwSignal::new(None),
             pull_body_height: RwSignal::new(None),
             pull_body_resizing: RwSignal::new(false),
+            draft_pending: RwSignal::new(None),
             push_pending: RwSignal::new(false),
             push_error: RwSignal::new(None),
             describing: RwSignal::new(false),
@@ -2228,6 +2232,7 @@ impl ReviewState {
         self.pull_bases.set(None);
         self.pull_step.set(None);
         self.pull_error.set(None);
+        self.draft_pending.set(None);
         self.push_pending.set(false);
         self.push_error.set(None);
         self.describing.set(false);

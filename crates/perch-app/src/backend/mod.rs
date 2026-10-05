@@ -689,6 +689,12 @@ pub enum Command {
         token: u64,
         commit: crate::review::suggestion::Commit,
     },
+    /// Convert the item's pull request to a draft, or mark it ready for
+    /// review. `DraftSet` answers either way; a refusal is a notice.
+    SetDraft {
+        item_id: String,
+        draft: bool,
+    },
     /// Close the item's pull request without merging it, posting `body`
     /// as an issue comment first when it says anything. `token` is the
     /// same kind as `PostIssueComment`'s.
@@ -1070,6 +1076,11 @@ pub enum Event {
     OpenPullRequestFailed {
         item_id: String,
         message: String,
+    },
+    /// A `SetDraft` is over, whether GitHub took it or not, and the pull
+    /// request has been read again if it did.
+    DraftSet {
+        item_id: String,
     },
     BranchPushed {
         item_id: String,
@@ -2752,6 +2763,16 @@ impl Backend {
             title: title.to_string(),
             body: body.to_string(),
             base: base.to_string(),
+            draft,
+        });
+    }
+
+    /// Convert the item's pull request to a draft, or mark it ready for
+    /// review. The item comes back with GitHub's answer, then `DraftSet`
+    /// once it has been read again.
+    pub fn set_draft(&self, item_id: &str, draft: bool) {
+        let _ = self.commands.send(Command::SetDraft {
+            item_id: item_id.to_string(),
             draft,
         });
     }
@@ -4895,6 +4916,12 @@ async fn run(
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     commit_suggestion(&ctx, &item_id, token, commit).await;
+                });
+            }
+            Command::SetDraft { item_id, draft } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    set_draft(&ctx, &item_id, draft).await;
                 });
             }
             Command::ClosePullRequest {
@@ -10894,6 +10921,60 @@ async fn show_posted_comment(
         let discussion_generation = ctx.discussion_requests.begin(item_id);
         fetch_discussion(ctx, item_id, pull_request, discussion_generation).await;
     }
+}
+
+/// Convert the item's pull request to a draft, or mark it ready for
+/// review, and put GitHub's answer in the item. The pull request is read
+/// again before `DraftSet`, so the merge box is not left between GitHub's
+/// answer and a merge state from before it.
+async fn set_draft(ctx: &Ctx, item_id: &str, draft: bool) {
+    if change_draft(ctx, item_id, draft).await {
+        refresh_open_item(ctx, item_id).await;
+    }
+    if ctx.is_open(item_id) {
+        let _ = ctx.events.send(Event::DraftSet {
+            item_id: item_id.to_string(),
+        });
+    }
+}
+
+/// `set_draft` up to GitHub's answer, kept in the item. Whether GitHub
+/// answered at all.
+async fn change_draft(ctx: &Ctx, item_id: &str, draft: bool) -> bool {
+    let Some(pull_request) = ctx.item(item_id).and_then(|item| item.pull_request().cloned()) else {
+        return false;
+    };
+    if !pull_request.is_open() || pull_request.merged {
+        ctx.notice("This pull request is no longer open");
+        return false;
+    }
+    let Some(github) = ctx.github() else {
+        ctx.notice("GitHub is unavailable while Perch is offline");
+        return false;
+    };
+    let (repo_full_name, number) = (&pull_request.repo_full_name, pull_request.number);
+    let doing = if draft {
+        "convert the pull request to a draft"
+    } else {
+        "mark the pull request ready for review"
+    };
+    let now_draft = match github.set_pull_request_draft(repo_full_name, number, draft).await {
+        Ok(now_draft) => now_draft,
+        Err(error) => {
+            tracing::info!(item = item_id, draft, %error, "draft state not changed");
+            ctx.notice(format!("GitHub could not {doing}: {error}"));
+            return false;
+        }
+    };
+    if now_draft != draft {
+        ctx.notice(format!("GitHub did not {doing}"));
+    }
+    // Read again: the item may have moved while GitHub answered.
+    if let Some(mut pull_request) = ctx.item(item_id).and_then(|item| item.pull_request().cloned()) {
+        pull_request.draft = now_draft;
+        install_pull_request_snapshot(ctx, item_id, pull_request, None);
+    }
+    true
 }
 
 /// Close the item's pull request, saying `body` in its conversation
@@ -24772,6 +24853,76 @@ read eof || true
             ]
         );
         assert!(sent[0].ends_with(r#"{"assignees":["criccomini"]}"#), "{sent:?}");
+    }
+
+    /// Marking a draft ready asks GitHub by the pull request's node id and
+    /// puts the answer in the item and the open view, then says it is over;
+    /// a refusal is a notice and changes nothing.
+    #[tokio::test]
+    async fn marking_a_draft_ready_puts_githubs_answer_in_the_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let refusing = refuse.clone();
+        let (base, _) = serve_by_body(move |method, path, _, body| match (method, path) {
+            ("POST", "/graphql") if body.contains("pullRequest(number") => (
+                "200 OK",
+                r#"{"data":{"repository":{"pullRequest":{"id":"PR_9","isDraft":true}}}}"#.to_string(),
+            ),
+            ("POST", "/graphql") if body.contains("markPullRequestReadyForReview") => {
+                if refusing.load(std::sync::atomic::Ordering::SeqCst) {
+                    (
+                        "200 OK",
+                        r#"{"data":{"markPullRequestReadyForReview":null},"errors":[{"message":"Resource not accessible by integration"}]}"#
+                            .to_string(),
+                    )
+                } else {
+                    (
+                        "200 OK",
+                        r#"{"data":{"markPullRequestReadyForReview":{"pullRequest":{"isDraft":false}}}}"#.to_string(),
+                    )
+                }
+            }
+            _ => ("404 Not Found", "{}".to_string()),
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let mut pull = store_pull(&ctx, 9);
+        pull.subject = pull.pull_request().cloned().map(|mut pr| {
+            pr.draft = true;
+            ItemSubject::PullRequest(pr)
+        });
+        ctx.with_cache(|c| c.update_item(&pull)).unwrap().unwrap();
+        open_in_slot(&ctx, &pull);
+
+        refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        set_draft(&ctx, &pull.id, false).await;
+        assert!(ctx.item(&pull.id).unwrap().pull_request().unwrap().draft);
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            matches!(
+                &events[..],
+                [Event::Notice(notice), Event::DraftSet { item_id }]
+                    if notice.starts_with("GitHub could not mark the pull request ready for review")
+                        && item_id == &pull.id
+            ),
+            "{events:?}"
+        );
+
+        refuse.store(false, std::sync::atomic::Ordering::SeqCst);
+        set_draft(&ctx, &pull.id, false).await;
+        assert!(!ctx.item(&pull.id).unwrap().pull_request().unwrap().draft);
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Event::PullRequestUpdated { pull_request, .. } if !pull_request.draft
+            )),
+            "{events:?}"
+        );
+        assert!(matches!(events.last(), Some(Event::DraftSet { .. })), "{events:?}");
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::Notice(n) if n.contains("ready for review"))),
+            "{events:?}"
+        );
     }
 
     /// Closing an issue posts the comment, closes it with the reason, and

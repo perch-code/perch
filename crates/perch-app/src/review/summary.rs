@@ -139,7 +139,7 @@ pub fn summary(
             move || has_checks(state),
             checks_pill(state),
         ),
-        status_row(state),
+        status_row(app, state, backend.clone()),
         row(
             SidebarIcon::Folder,
             "Worktree",
@@ -322,7 +322,7 @@ fn dyn_row<T: Clone + PartialEq + 'static, V: IntoView + 'static>(
 /// number as the sidebar's rows say them. A worktree of the reader's own
 /// has no state, and its row is its repository alone; one with no GitHub
 /// remote has no row.
-fn status_row(state: ReviewState) -> impl IntoView {
+fn status_row(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let subject = move || subject_state(state);
     // A memo, so the row is rebuilt when the glyph or the name changes
     // and not on every refresh of the pull request: the pill and the
@@ -342,7 +342,7 @@ fn status_row(state: ReviewState) -> impl IntoView {
                 name,
                 move || subject().is_some() || !repo_of(state).is_empty(),
                 Stack::horizontal((
-                    state_pill(state),
+                    state_pill(app, state, backend.clone()),
                     Label::derived(move || repo_of(state))
                         .debug_name("repository line")
                         .on_event_stop(el::Click, move |_, _| {
@@ -423,22 +423,112 @@ fn state_word(state: SubjectState) -> &'static str {
     }
 }
 
+/// Whether the reader may convert the pull request to a draft or mark it
+/// ready for review: GitHub lets its author, and anyone who may write to
+/// the repository. Not offline, and not from an old review's snapshot.
+pub(crate) fn may_set_draft(app: AppState, state: ReviewState) -> bool {
+    if state.offline.get() || state.historical_review.with(Option::is_some) {
+        return false;
+    }
+    let viewer = app.viewer.with(|v| v.as_ref().map(|(login, _)| login.clone()));
+    let writes = state.pull_request_overview.with(|overview| {
+        overview.as_ref().is_some_and(|overview| {
+            matches!(
+                overview.viewer_permission,
+                Some(
+                    perch_github::RepositoryPermission::Admin
+                        | perch_github::RepositoryPermission::Maintain
+                        | perch_github::RepositoryPermission::Write
+                )
+            )
+        })
+    });
+    state.pull_request.with(|pull| {
+        pull.as_ref().is_some_and(|pull| {
+            let authored = viewer
+                .as_deref()
+                .is_some_and(|viewer| viewer.eq_ignore_ascii_case(&pull.author_login));
+            pull.is_open() && !pull.merged && (authored || writes)
+        })
+    })
+}
+
+/// Convert the pull request to a draft, or mark it ready for review, as
+/// the state pill's menu and the merge box do.
+pub(crate) fn set_draft(state: ReviewState, backend: &Backend, draft: bool) {
+    let Some(item_id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone())) else {
+        return;
+    };
+    state.draft_pending.set(Some(draft));
+    backend.set_draft(&item_id, draft);
+}
+
+/// The state pill's menu: Ready for review on a draft, Convert to draft
+/// on an open pull request, greyed while either is under way.
+fn draft_menu(state: ReviewState, backend: Rc<Backend>, subject: SubjectState) -> Menu {
+    let pending = state.draft_pending.get_untracked();
+    let (label, draft) = match (subject, pending) {
+        (_, Some(false)) => ("Marking ready for review…", false),
+        (_, Some(true)) => ("Converting to draft…", true),
+        (SubjectState::PrDraft, None) => ("Ready for review", false),
+        (SubjectState::PrOpen, None) => ("Convert to draft", true),
+        _ => return Menu::new(),
+    };
+    Menu::new().item(label, move |item| {
+        item.enabled(pending.is_none())
+            .action(move || set_draft(state, &backend, draft))
+    })
+}
+
 /// Open, Draft, Merged, Closed: the state's icon and its word, in the
 /// state's colour on a wash of it. A branch has no state, and no pill.
-fn state_pill(state: ReviewState) -> impl IntoView {
+/// An open pull request's or a draft's opens a menu to change between
+/// the two, when the reader may.
+fn state_pill(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    // The overview, and the write access it says the reader has, is read
+    // again on each refresh. What it said is kept meanwhile, so the menu
+    // does not go for the moment of each one.
+    let changeable = Memo::new(move |prev: Option<&(Option<(String, u64)>, bool)>| {
+        let pull = state
+            .pull_request
+            .with(|p| p.as_ref().map(|p| (p.repo_full_name.clone(), p.number)));
+        let reading = state.pull_request_overview_loading.get()
+            && state.pull_request_overview.with(Option::is_none);
+        let kept = prev.is_some_and(|(was, may)| *may && reading && *was == pull);
+        let may = kept || may_set_draft(app, state);
+        (pull, may)
+    });
+    let key = Memo::new(move |_| {
+        let subject = subject_state(state);
+        let changes = changeable.with(|(_, may)| *may)
+            && matches!(subject, Some(SubjectState::PrOpen | SubjectState::PrDraft));
+        (subject, changes)
+    });
     dyn_container(
-        move || subject_state(state),
-        move |s| match s {
-            Some(state) => {
-                let color = move || icons::state_color(state);
-                Stack::horizontal((
-                    floem::views::svg(move || icons::state_icon(state))
-                        .style(move |s| s.size(14.0, 14.0).color(color()).margin_right(5.0)),
-                    Label::derived(move || state_word(state).to_string()).style(move |s| {
+        move || key.get(),
+        move |(s, changes)| match s {
+            Some(subject) => {
+                let color = move || icons::state_color(subject);
+                let pill = Stack::horizontal((
+                    floem::views::svg(move || icons::state_icon(subject)).style(move |s| {
+                        s.size(14.0, 14.0)
+                            .color(color())
+                            .margin_right(5.0)
+                            .pointer_events_none()
+                    }),
+                    Label::derived(move || state_word(subject).to_string()).style(move |s| {
                         s.font_size(theme::TEXT_SECTION)
                             .font_weight(theme::weight_emphasis())
                             .color(color())
                             .selectable(false)
+                            .pointer_events_none()
+                    }),
+                    sidebar_glyph(SidebarIcon::ChevronDown, color).style(move |s| {
+                        s.size(10.0, 10.0)
+                            .margin_left(5.0)
+                            .flex_shrink(0.0_f32)
+                            .pointer_events_none()
+                            .apply_if(!changes, |s| s.hide())
                     }),
                 ))
                 .debug_name("state pill")
@@ -446,12 +536,24 @@ fn state_pill(state: ReviewState) -> impl IntoView {
                     s.items_center()
                         .height(theme::STATE_PILL_HEIGHT)
                         .padding_left(7.0)
-                        .padding_right(9.0)
+                        .padding_right(if changes { 8.0 } else { 9.0 })
                         .background(color().with_alpha(theme::STATE_WASH))
                         .border_radius(theme::STATE_PILL_HEIGHT / 2.0)
                         .flex_shrink(0.0_f32)
-                })
-                .into_any()
+                        .apply_if(changes, |s| {
+                            s.hover(|s| {
+                                s.background(color().with_alpha(theme::STATE_WASH * 2.0))
+                                    .cursor(CursorStyle::Pointer)
+                            })
+                        })
+                });
+                if changes {
+                    let backend = backend.clone();
+                    pill.dropdown(move || draft_menu(state, backend.clone(), subject))
+                        .into_any()
+                } else {
+                    pill.into_any()
+                }
             }
             None => Empty::new().into_any(),
         },
@@ -2311,6 +2413,96 @@ mod tests {
         ] {
             assert!(!state_word(s).is_empty(), "{s:?}");
         }
+    }
+
+    #[test]
+    fn the_author_or_a_writer_may_change_an_open_pull_request_to_or_from_a_draft() {
+        let _root = floem::headless::TestRoot::new();
+        let app = AppState::new();
+        app.viewer.set(Some(("U".into(), String::new())));
+        let state = ReviewState::new();
+        let with = |author: &str, change: &dyn Fn(&mut perch_github::PullRequest)| {
+            let mut pr = pull_request(7);
+            pr.author_login = author.into();
+            change(&mut pr);
+            state.pull_request.set(Some(Arc::new(pr)));
+        };
+        let permission = |permission: Option<perch_github::RepositoryPermission>| {
+            state.pull_request_overview.set(permission.map(|permission| {
+                Arc::new(perch_github::PullRequestOverview {
+                    head_sha: "h".into(),
+                    mergeable: perch_github::MergeableState::Mergeable,
+                    merge_state: perch_github::MergeState::Clean,
+                    review_decision: None,
+                    viewer_can_merge_as_admin: false,
+                    viewer_permission: Some(permission),
+                    allowed_merge_methods: Default::default(),
+                    checks: perch_github::Checks {
+                        state: CheckState::Passing,
+                        url: None,
+                        runs: Vec::new(),
+                    },
+                    squash_message: Default::default(),
+                    merge_message: Default::default(),
+                })
+            }));
+        };
+        with("u", &|_| {});
+        assert!(may_set_draft(app, state), "its author, in any case");
+        with("u", &|pr| pr.draft = true);
+        assert!(may_set_draft(app, state));
+        with("someone", &|_| {});
+        assert!(!may_set_draft(app, state), "someone else's, with no word on access");
+        permission(Some(perch_github::RepositoryPermission::Triage));
+        assert!(!may_set_draft(app, state));
+        permission(Some(perch_github::RepositoryPermission::Write));
+        assert!(may_set_draft(app, state), "someone who may write to the repository");
+        with("u", &|pr| pr.merged = true);
+        assert!(!may_set_draft(app, state));
+        with("u", &|pr| pr.state = "closed".into());
+        assert!(!may_set_draft(app, state));
+        with("u", &|_| {});
+        state.offline.set(true);
+        assert!(!may_set_draft(app, state));
+    }
+
+    #[test]
+    fn the_state_pill_s_menu_changes_a_pull_request_to_or_from_a_draft() {
+        use crate::backend::Command;
+
+        let _root = floem::headless::TestRoot::new();
+        let state = ReviewState::new();
+        let mut item = Item::new("slatedb/slatedb", "2026-09-20T09:00:00Z".parse().unwrap());
+        item.id = "pr".into();
+        state.item.set(Some(Arc::new(item)));
+        let (backend, mut commands) = Backend::recording();
+        let backend = Rc::new(backend);
+
+        let menu = draft_menu(state, backend.clone(), SubjectState::PrDraft);
+        assert_eq!(menu.outline(), ["Ready for review"]);
+        menu.choose("Ready for review");
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::SetDraft { item_id, draft: false }) if item_id == "pr"
+        ));
+        assert_eq!(state.draft_pending.get_untracked(), Some(false));
+        // Under way: said, and not to be pressed again.
+        assert_eq!(
+            draft_menu(state, backend.clone(), SubjectState::PrDraft).outline(),
+            ["(Marking ready for review…)"]
+        );
+
+        state.draft_pending.set(None);
+        let menu = draft_menu(state, backend.clone(), SubjectState::PrOpen);
+        assert_eq!(menu.outline(), ["Convert to draft"]);
+        menu.choose("Convert to draft");
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::SetDraft { item_id, draft: true }) if item_id == "pr"
+        ));
+
+        state.draft_pending.set(None);
+        assert!(draft_menu(state, backend, SubjectState::PrMerged).is_empty());
     }
 
     #[test]

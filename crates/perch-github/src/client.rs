@@ -539,6 +539,92 @@ impl GitHub {
         Ok(payload.into_pull_request(repo_full_name))
     }
 
+    /// Convert a pull request to a draft, or mark it ready for review, and
+    /// read back whether it is a draft after. Only GraphQL does this, and
+    /// it names the pull request by its node id, so the id is asked for
+    /// first; one already as asked is left alone. The kept read of the
+    /// pull request is forgotten, as a close does.
+    pub async fn set_pull_request_draft(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+        draft: bool,
+    ) -> Result<bool, Error> {
+        let (owner, name) = repo_parts(repo_full_name)?;
+
+        #[derive(serde::Deserialize)]
+        struct Data {
+            repository: Option<Repository>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Repository {
+            #[serde(rename = "pullRequest")]
+            pull_request: Option<PullNode>,
+        }
+        #[derive(serde::Deserialize)]
+        struct PullNode {
+            id: String,
+            #[serde(rename = "isDraft")]
+            is_draft: bool,
+        }
+        #[derive(serde::Deserialize)]
+        struct Changed {
+            #[serde(
+                default,
+                rename = "convertPullRequestToDraft",
+                alias = "markPullRequestReadyForReview"
+            )]
+            payload: Option<ChangedPayload>,
+        }
+        #[derive(serde::Deserialize)]
+        struct ChangedPayload {
+            #[serde(rename = "pullRequest")]
+            pull_request: Option<ChangedPull>,
+        }
+        #[derive(serde::Deserialize)]
+        struct ChangedPull {
+            #[serde(rename = "isDraft")]
+            is_draft: bool,
+        }
+
+        let payload = serde_json::json!({
+            "query": "query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) { id isDraft }
+  }
+}",
+            "variables": { "owner": owner, "name": name, "number": number },
+        });
+        let data: Data = self.graphql(&payload, "pull request id").await?;
+        let pull = data
+            .repository
+            .and_then(|repository| repository.pull_request)
+            .ok_or_else(|| {
+                Error::Decode(format!("GitHub has no pull request {repo_full_name}#{number}"))
+            })?;
+        if pull.is_draft == draft {
+            return Ok(draft);
+        }
+        let field = if draft {
+            "convertPullRequestToDraft"
+        } else {
+            "markPullRequestReadyForReview"
+        };
+        let payload = serde_json::json!({
+            "query": format!(
+                "mutation($pull: ID!) {{ {field}(input: {{pullRequestId: $pull}}) {{ pullRequest {{ isDraft }} }} }}"
+            ),
+            "variables": { "pull": pull.id },
+        });
+        let changed: Changed = self.graphql(&payload, "set draft").await?;
+        self.forget_pull_request(repo_full_name, number);
+        changed
+            .payload
+            .and_then(|payload| payload.pull_request)
+            .map(|pull| pull.is_draft)
+            .ok_or_else(|| Error::Decode("GitHub answered without the pull request".into()))
+    }
+
     /// Forget the kept read of a pull request that just changed, under any
     /// casing of its repository's name, and keep no answer to a read of it
     /// asked before.
