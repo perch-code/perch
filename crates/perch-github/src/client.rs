@@ -540,7 +540,8 @@ impl GitHub {
     }
 
     /// Forget the kept read of a pull request that just changed, under any
-    /// casing of its repository's name.
+    /// casing of its repository's name, and keep no answer to a read of it
+    /// asked before.
     fn forget_pull_request(&self, repo_full_name: &str, number: u64) {
         self.responses
             .lock()
@@ -1300,8 +1301,9 @@ impl GitHub {
     /// author nor able to write to the repository.
     ///
     /// A description's edit forgets the kept read of its pull request or
-    /// issue, so the discussion read after it asks GitHub rather than
-    /// taking a read from moments before the edit as current.
+    /// issue, and keeps no answer to a read of it asked before, so the
+    /// discussion read after it asks GitHub rather than taking a read from
+    /// moments before the edit as current.
     pub async fn update_comment(
         &self,
         node_id: &str,
@@ -2074,14 +2076,25 @@ impl GitHub {
     /// own when it has one, else, on a 304, the one kept beside the body.
     /// A kept one can be out of date, since a page's tag says nothing of
     /// the pages after it.
+    ///
+    /// An answer to a read asked before a change forgot `path` goes to
+    /// the caller alone: GitHub may have answered from before the change,
+    /// and kept, the answer would count as current.
     async fn get_linked(&self, path: &str) -> Result<(String, Option<String>), Error> {
-        let known = self.responses.lock().unwrap().get(path);
+        let (known, forgets) = {
+            let mut responses = self.responses.lock().unwrap();
+            (responses.get(path), responses.forgets())
+        };
         let fetched = self
             .get(path, conditional(known.as_ref().map(|k| k.etag.as_str())))
             .await?;
         let link = header_str(&fetched.headers, LINK.as_str());
+        let mut responses = self.responses.lock().unwrap();
+        let keep = !responses.forgotten_since(path, forgets);
         if fetched.status == StatusCode::NOT_MODIFIED {
-            self.responses.lock().unwrap().confirm(path);
+            if keep {
+                responses.confirm(path);
+            }
             return match known {
                 Some(known) => Ok((known.body.to_string(), link.or(known.link))),
                 None => Err(Error::Status {
@@ -2090,17 +2103,18 @@ impl GitHub {
                 }),
             };
         }
-        let mut responses = self.responses.lock().unwrap();
-        match header_str(&fetched.headers, ETAG.as_str()) {
-            Some(etag) => responses.put(
-                path,
-                Known {
-                    etag,
-                    body: fetched.body.as_str().into(),
-                    link: link.clone(),
-                },
-            ),
-            None => responses.remove(path),
+        if keep {
+            match header_str(&fetched.headers, ETAG.as_str()) {
+                Some(etag) => responses.put(
+                    path,
+                    Known {
+                        etag,
+                        body: fetched.body.as_str().into(),
+                        link: link.clone(),
+                    },
+                ),
+                None => responses.remove(path),
+            }
         }
         Ok((fetched.body, link))
     }

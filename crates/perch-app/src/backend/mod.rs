@@ -2319,7 +2319,31 @@ struct DiscussionRequests {
 #[derive(Debug, Default)]
 struct Generations {
     latest: std::collections::HashMap<String, u64>,
+    /// The generation of each item's newest read, which a fence after it
+    /// leaves behind `latest`.
+    begun: std::collections::HashMap<String, u64>,
     held: std::collections::HashSet<String>,
+}
+
+impl Generations {
+    /// Advance the item's generation, and answer the new one.
+    fn advance(&mut self, item_id: &str) -> u64 {
+        let generation = self
+            .latest
+            .get(item_id)
+            .copied()
+            .unwrap_or_default()
+            .saturating_add(1);
+        self.latest.insert(item_id.to_string(), generation);
+        generation
+    }
+
+    /// Advance the item's generation for a read, and answer the new one.
+    fn begin(&mut self, item_id: &str) -> u64 {
+        let generation = self.advance(item_id);
+        self.begun.insert(item_id.to_string(), generation);
+        generation
+    }
 }
 
 impl DiscussionRequests {
@@ -2327,14 +2351,21 @@ impl DiscussionRequests {
         let Ok(mut latest) = self.latest.lock() else {
             return 0;
         };
-        let generation = latest
-            .latest
-            .get(item_id)
-            .copied()
-            .unwrap_or_default()
-            .saturating_add(1);
-        latest.latest.insert(item_id.to_string(), generation);
-        generation
+        latest.begin(item_id)
+    }
+
+    /// A new generation for the read `generation` named, when a fence
+    /// turned it away and nothing else did: what it read is read again,
+    /// after the change, rather than dropped, since a reaction, unlike an
+    /// edit, has no read after it. None while a newer read is under way,
+    /// which stands in for it, or while a submission holds the item, which
+    /// reads it again itself.
+    fn again(&self, item_id: &str, generation: u64) -> Option<u64> {
+        let mut latest = self.latest.lock().ok()?;
+        let fenced = latest.begun.get(item_id).copied() == Some(generation)
+            && latest.latest.get(item_id).copied() != Some(generation)
+            && !latest.held.contains(item_id);
+        fenced.then(|| latest.begin(item_id))
     }
 
     fn is_current(&self, item_id: &str, generation: u64) -> bool {
@@ -2372,14 +2403,19 @@ impl DiscussionRequests {
     /// without writing after it.
     fn fence_with<T>(&self, item_id: &str, commit: impl FnOnce() -> T) -> Option<T> {
         let mut latest = self.latest.lock().ok()?;
-        let generation = latest
-            .latest
-            .get(item_id)
-            .copied()
-            .unwrap_or_default()
-            .saturating_add(1);
-        latest.latest.insert(item_id.to_string(), generation);
+        latest.advance(item_id);
         let result = commit();
+        drop(latest);
+        Some(result)
+    }
+
+    /// `fence_with` for a commit that may find nothing to change: the
+    /// generation advances only when `commit` answers something, so no
+    /// read under way is turned away for a write that was not made.
+    fn fence_if<T>(&self, item_id: &str, commit: impl FnOnce() -> Option<T>) -> Option<T> {
+        let mut latest = self.latest.lock().ok()?;
+        let result = commit()?;
+        latest.advance(item_id);
         drop(latest);
         Some(result)
     }
@@ -10548,18 +10584,29 @@ async fn show_applied_suggestion(ctx: &Ctx, item_id: &str, navigation_id: u64, s
 /// open item's prompt context and the view, the way a fetch of them
 /// would. It is kept under the fence a reaction uses, so a refresh that
 /// began before the post cannot take it out again. With nothing kept to
-/// add it to, the issue is fetched again.
+/// add it to, nothing is fenced and the issue is fetched again, here and
+/// not through `refresh_open_item`, which does nothing while a refresh is
+/// under way, and that one's answer may be from before the post.
 async fn show_posted_issue_comment(ctx: &Ctx, item_id: &str, comment: &perch_github::IssueComment) {
-    let posted = ctx
-        .discussion_requests
-        .fence_with(item_id, || {
-            edit_kept_discussion(ctx, item_id, "could not cache the posted comment", |d| {
-                push_new_comment(d, comment)
-            })
+    // Whichever window has the issue open now, which the posting one may
+    // have left.
+    let view = ctx.view_for(item_id);
+    let ctx = &view;
+    let posted = ctx.discussion_requests.fence_if(item_id, || {
+        edit_kept_discussion(ctx, item_id, "could not cache the posted comment", |d| {
+            push_new_comment(d, comment)
         })
-        .flatten();
+    });
     let Some((discussion, _)) = posted else {
-        refresh_open_item(ctx, item_id).await;
+        let issue = ctx.slot.lock().ok().and_then(|slot| {
+            slot.as_ref()
+                .filter(|open| open.item_id == item_id)
+                .and_then(|open| open.issue.clone())
+        });
+        if let (Some(issue), Some(github)) = (issue, ctx.github()) {
+            let discussion_generation = ctx.discussion_requests.begin(item_id);
+            refresh_open_issue(ctx, &github, item_id, &issue.0, discussion_generation).await;
+        }
         return;
     };
     if let Ok(mut guard) = ctx.slot.lock() {
@@ -12654,6 +12701,10 @@ async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) -> bool {
             return true;
         }
         let status_generation = begin_pull_request_status(ctx, item_id, &pr);
+        // Begun once nothing can turn back, so a read under way is not
+        // turned away for one that never happens. A snapshot read sent
+        // before a change is not taken as current by the discussion: the
+        // change forgets it, sent or not.
         let discussion_generation = ctx.discussion_requests.begin(item_id);
         tokio::join!(
             fetch_discussion(ctx, item_id, &pr, discussion_generation),
@@ -12673,8 +12724,9 @@ async fn refresh_open_item_inner(ctx: &Ctx, item_id: &str) -> bool {
 /// it, and show it. The conversation is kept and shown only while
 /// `discussion_generation` is the item's latest, as a pull request's
 /// discussion is, so a read that began before an edit or a deletion does
-/// not undo it. None when GitHub could not be reached about the issue;
-/// otherwise whether its conversation was read and kept.
+/// not undo it. A read a change alone turned away, such as a reaction,
+/// is read once more. None when GitHub could not be reached about the
+/// issue; otherwise whether its conversation was read and kept.
 async fn refresh_open_issue(
     ctx: &Ctx,
     github: &GitHub,
@@ -12682,32 +12734,44 @@ async fn refresh_open_issue(
     issue: &perch_github::Issue,
     discussion_generation: u64,
 ) -> Option<bool> {
-    let IssueView {
-        issue: fresh,
-        conversation,
-        read_nodes,
-    } = match fetch_issue_view(github, &issue.repo_full_name, issue.number).await {
-        Ok(fetched) => fetched,
-        Err(e) => {
-            tracing::info!(item = item_id, error = %e, "could not fetch the issue again");
-            return None;
+    let mut discussion_generation = discussion_generation;
+    let mut once_more = true;
+    let (issue, comments, events) = loop {
+        let IssueView {
+            issue: fresh,
+            conversation,
+            read_nodes,
+        } = match fetch_issue_view(github, &issue.repo_full_name, issue.number).await {
+            Ok(fetched) => fetched,
+            Err(e) => {
+                tracing::info!(item = item_id, error = %e, "could not fetch the issue again");
+                return None;
+            }
+        };
+        let Some(fresh) = install_fetched_issue(ctx, item_id, fresh, read_nodes) else {
+            return Some(false);
+        };
+        let Some((comments, events)) = conversation else {
+            return Some(false);
+        };
+        let kept = ctx
+            .discussion_requests
+            .with_current(item_id, discussion_generation, || {
+                keep_issue_comments(ctx, item_id, &fresh, &comments, &events)
+            });
+        if kept.is_some() {
+            break (fresh, comments, events);
         }
-    };
-    let Some(issue) = install_fetched_issue(ctx, item_id, fresh, read_nodes) else {
-        return Some(false);
-    };
-    let Some((comments, events)) = conversation else {
-        return Some(false);
+        if !once_more {
+            return Some(false);
+        }
+        let Some(next) = ctx.discussion_requests.again(item_id, discussion_generation) else {
+            return Some(false);
+        };
+        discussion_generation = next;
+        once_more = false;
     };
     let body_reactions = issue.reactions.clone();
-    let kept = ctx
-        .discussion_requests
-        .with_current(item_id, discussion_generation, || {
-            keep_issue_comments(ctx, item_id, &issue, &comments, &events)
-        });
-    if kept.is_none() {
-        return Some(false);
-    }
     // A question asked next is prompted with these.
     if let Ok(mut guard) = ctx.slot.lock() {
         if let Some(open) = guard.as_mut().filter(|c| c.item_id == item_id) {
@@ -14285,6 +14349,10 @@ fn refetch_opened_pull_request<'a>(
             return;
         }
         let status_generation = begin_pull_request_status(ctx, item_id, &pr);
+        // Begun once nothing can turn back, so a read under way is not
+        // turned away for one that never happens. A snapshot read sent
+        // before a change is not taken as current by the discussion: the
+        // change forgets it, sent or not.
         let discussion_generation = ctx.discussion_requests.begin(item_id);
         tokio::join!(
             fetch_discussion(ctx, item_id, &pr, discussion_generation),
@@ -14495,7 +14563,8 @@ async fn open_own_checkout(
 /// Fetch what was said on a pull request and cache it for the reader.
 /// A fetch error is a line in the popup, not a failed review. Whether
 /// the discussion was fetched and kept: not while a later read or change
-/// has taken its place.
+/// has taken its place. One a change alone turned away, such as a
+/// reaction, is fetched once more.
 async fn fetch_discussion(
     ctx: &Ctx,
     item_id: &str,
@@ -14505,32 +14574,43 @@ async fn fetch_discussion(
     let Some(github) = ctx.github() else {
         return false;
     };
-    let discussion = match github.fetch_discussion(&pr.repo_full_name, pr.number).await {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!(repo = %pr.repo_full_name, number = pr.number, error = %e, "could not fetch the discussion");
-            if ctx.discussion_requests.is_current(item_id, discussion_generation) {
-                let _ = ctx.events.send(Event::Notice(format!(
-                    "Could not fetch the discussion: {e}"
-                )));
+    let mut discussion_generation = discussion_generation;
+    let mut once_more = true;
+    loop {
+        let discussion = match github.fetch_discussion(&pr.repo_full_name, pr.number).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(repo = %pr.repo_full_name, number = pr.number, error = %e, "could not fetch the discussion");
+                if ctx.discussion_requests.is_current(item_id, discussion_generation) {
+                    let _ = ctx.events.send(Event::Notice(format!(
+                        "Could not fetch the discussion: {e}"
+                    )));
+                }
+                return false;
             }
+        };
+
+        let committed = ctx
+            .discussion_requests
+            .with_current(item_id, discussion_generation, || {
+                // Kept whole, so the next open paints it before the network
+                // answers. The generation check and this cache write share one
+                // lock with review-submission fences.
+                ctx.with_cache(|c| c.store_discussion(item_id, &discussion))
+            });
+        if committed.is_some() {
+            publish_discussion(ctx, item_id, discussion);
+            return true;
+        }
+        if !once_more {
             return false;
         }
-    };
-
-    let committed = ctx
-        .discussion_requests
-        .with_current(item_id, discussion_generation, || {
-            // Kept whole, so the next open paints it before the network
-            // answers. The generation check and this cache write share one
-            // lock with review-submission fences.
-            ctx.with_cache(|c| c.store_discussion(item_id, &discussion))
-        });
-    if committed.is_none() {
-        return false;
+        let Some(next) = ctx.discussion_requests.again(item_id, discussion_generation) else {
+            return false;
+        };
+        discussion_generation = next;
+        once_more = false;
     }
-    publish_discussion(ctx, item_id, discussion);
-    true
 }
 
 /// Show a discussion just cached, if the item is still the one open: the
@@ -19007,6 +19087,37 @@ mod tests {
     }
 
     #[test]
+    fn a_read_only_a_fence_turned_away_may_read_again() {
+        let requests = DiscussionRequests::default();
+        let read = requests.begin("item");
+        assert_eq!(requests.again("item", read), None, "nothing turned it away");
+        requests.fence_with("item", || ());
+        let again = requests.again("item", read).expect("a fence alone turned it away");
+        assert!(requests.is_current("item", again));
+        assert_eq!(requests.again("item", read), None, "the read again stands for it");
+
+        let older = requests.begin("item");
+        let newer = requests.begin("item");
+        requests.fence_with("item", || ());
+        assert_eq!(requests.again("item", older), None, "the newer read stands for it");
+        {
+            let _hold = requests.hold("item");
+            assert_eq!(requests.again("item", newer), None, "the submission reads itself");
+        }
+        assert!(requests.again("item", newer).is_some());
+    }
+
+    #[test]
+    fn a_fence_with_nothing_to_change_turns_no_read_away() {
+        let requests = DiscussionRequests::default();
+        let read = requests.begin("item");
+        assert_eq!(requests.fence_if("item", || None::<()>), None);
+        assert!(requests.is_current("item", read));
+        assert_eq!(requests.fence_if("item", || Some(())), Some(()));
+        assert!(!requests.is_current("item", read));
+    }
+
+    #[test]
     fn a_discussion_cache_commit_cannot_cross_a_submission_fence() {
         let requests = Arc::new(DiscussionRequests::default());
         let cached = Arc::new(Mutex::new("initial"));
@@ -19928,16 +20039,46 @@ mod tests {
         assert_eq!(body.as_deref(), Some("New words"));
     }
 
+    /// What GitHub answers `GET /repos/a/b/issues/<number>/comments` with
+    /// once `IC_2`, saying "And another thing", was posted after `IC_1`.
+    fn issue_comments_with_a_post_json() -> String {
+        serde_json::json!([
+            {
+                "id": 1,
+                "node_id": "IC_1",
+                "user": { "login": "chris" },
+                "body": "q",
+                "created_at": "2026-09-15T09:14:00Z",
+            },
+            {
+                "id": 2,
+                "node_id": "IC_2",
+                "user": { "login": "chris" },
+                "body": "And another thing",
+                "created_at": "2026-09-15T09:20:00Z",
+            },
+        ])
+        .to_string()
+    }
+
     /// A comment posted on an issue goes into the kept conversation under
     /// the fence an edit uses, so a refresh that began before the post,
-    /// and answers without the comment, does not take it out again.
+    /// and answers without the comment, does not take it out again. The
+    /// refresh reads once more instead, and GitHub then has the comment.
     #[tokio::test]
     async fn an_issue_refresh_that_began_before_a_post_keeps_the_posted_comment() {
-        let (base, _) = serve_by_body(|method, path, _, _| {
+        let listed = std::sync::atomic::AtomicUsize::new(0);
+        let (base, _) = serve_by_body(move |method, path, _, _| {
             let path = path.split('?').next().unwrap_or(path);
             match (method, path) {
                 ("GET", "/repos/a/b/issues/8") => ("200 OK", editable_issue_json(8)),
-                ("GET", "/repos/a/b/issues/8/comments") => ("200 OK", issue_comments_json("q")),
+                ("GET", "/repos/a/b/issues/8/comments") => {
+                    if listed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                        ("200 OK", issue_comments_json("q"))
+                    } else {
+                        ("200 OK", issue_comments_with_a_post_json())
+                    }
+                }
                 ("GET", _) => ("200 OK", "[]".to_string()),
                 _ => ("404 Not Found", "{}".to_string()),
             }
@@ -19955,10 +20096,260 @@ mod tests {
 
         let older_read = ctx.discussion_requests.begin(&item.id);
         show_posted_issue_comment(&ctx, &item.id, &posted).await;
-        refresh_open_issue(&ctx, &github, &item.id, item.issue().unwrap(), older_read).await;
+        let read = refresh_open_issue(&ctx, &github, &item.id, item.issue().unwrap(), older_read).await;
 
+        assert_eq!(read, Some(true));
         let kept = kept_discussion(&ctx, &item.id).unwrap();
         assert!(kept.comments.iter().any(|c| c.node_id == "IC_2"), "{:?}", kept.comments);
+    }
+
+    /// A comment posted on an issue with no conversation kept to put it in
+    /// has the issue read again, even while a refresh is under way, whose
+    /// answer may be from before the post.
+    #[tokio::test]
+    async fn an_issue_comment_posted_with_nothing_kept_is_read_while_a_refresh_is_under_way() {
+        let (base, paths) = serve_by_body(|method, path, _, _| {
+            let path = path.split('?').next().unwrap_or(path);
+            match (method, path) {
+                ("GET", "/repos/a/b/issues/8") => ("200 OK", editable_issue_json(8)),
+                ("GET", "/repos/a/b/issues/8/comments") => {
+                    ("200 OK", issue_comments_with_a_post_json())
+                }
+                ("GET", _) => ("200 OK", "[]".to_string()),
+                _ => ("404 Not Found", "{}".to_string()),
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let item = store_editable_issue(&ctx, 8);
+        open_issue_in_slot(&ctx, &item);
+        let posted = perch_github::IssueComment {
+            id: 2,
+            node_id: "IC_2".into(),
+            user: "chris".into(),
+            user_avatar_url: String::new(),
+            body: "And another thing".into(),
+            created_at: "2026-09-15T09:20:00Z".parse().unwrap(),
+            updated_at: None,
+            html_url: String::new(),
+            reactions: Default::default(),
+            viewer_can_delete: false,
+            viewer_can_update: false,
+        };
+        ctx.refreshing.lock().unwrap().insert(item.id.clone());
+        let refresh_under_way = ctx.discussion_requests.begin(&item.id);
+
+        show_posted_issue_comment(&ctx, &item.id, &posted).await;
+
+        let asked = paths.lock().unwrap().clone();
+        assert!(asked.iter().any(|p| p == "/repos/a/b/issues/8"), "{asked:?}");
+        assert!(!ctx.discussion_requests.is_current(&item.id, refresh_under_way));
+        let kept = kept_discussion(&ctx, &item.id).unwrap();
+        assert!(kept.comments.iter().any(|c| c.node_id == "IC_2"), "{:?}", kept.comments);
+        let events: Vec<Event> = received.try_iter().collect();
+        let shown = events.iter().rev().find_map(|e| match e {
+            Event::IssueComments { comments, .. } => Some(comments.clone()),
+            _ => None,
+        });
+        let shown = shown.unwrap_or_else(|| panic!("the view is not told: {events:?}"));
+        assert!(shown.iter().any(|c| c.node_id == "IC_2"), "{shown:?}");
+    }
+
+    /// A comment posted on an issue with no conversation kept is read
+    /// again in the window that has the issue open, though the window it
+    /// was posted from has moved on.
+    #[tokio::test]
+    async fn an_issue_comment_posted_with_nothing_kept_is_read_where_the_issue_is_open() {
+        let (base, paths) = serve_by_body(|method, path, _, _| {
+            let path = path.split('?').next().unwrap_or(path);
+            match (method, path) {
+                ("GET", "/repos/a/b/issues/8") => ("200 OK", editable_issue_json(8)),
+                ("GET", "/repos/a/b/issues/8/comments") => {
+                    ("200 OK", issue_comments_with_a_post_json())
+                }
+                ("GET", _) => ("200 OK", "[]".to_string()),
+                _ => ("404 Not Found", "{}".to_string()),
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(dir.path(), &base, &[]);
+        two_windows(&ctx);
+        let item = store_editable_issue(&ctx, 8);
+        open_issue_in_slot(&ctx.for_window(2), &item);
+        let posted = perch_github::IssueComment {
+            id: 2,
+            node_id: "IC_2".into(),
+            user: "chris".into(),
+            user_avatar_url: String::new(),
+            body: "And another thing".into(),
+            created_at: "2026-09-15T09:20:00Z".parse().unwrap(),
+            updated_at: None,
+            html_url: String::new(),
+            reactions: Default::default(),
+            viewer_can_delete: false,
+            viewer_can_update: false,
+        };
+
+        show_posted_issue_comment(&ctx.for_window(1), &item.id, &posted).await;
+
+        let asked = paths.lock().unwrap().clone();
+        assert!(asked.iter().any(|p| p == "/repos/a/b/issues/8"), "{asked:?}");
+        let kept = kept_discussion(&ctx, &item.id).unwrap();
+        assert!(kept.comments.iter().any(|c| c.node_id == "IC_2"), "{:?}", kept.comments);
+    }
+
+    /// A read of a pull request's discussion, or of an issue's, that a
+    /// reaction turned away is read once more, after the reaction: what
+    /// it found since the last read is kept and shown, not dropped.
+    #[tokio::test]
+    async fn a_read_a_reaction_turned_away_is_read_once_more() {
+        let answer = r#"{"data":{"addReaction":{"subject":{"reactionGroups":[
+            {"content":"THUMBS_UP","viewerHasReacted":true,"reactors":{"totalCount":1}}]}}}}"#;
+        let (base, _) = serve_by_body(move |method, path, _, body| {
+            let path = path.split('?').next().unwrap_or(path);
+            match (method, path) {
+                ("POST", "/graphql") if body.contains("addReaction") => {
+                    ("200 OK", answer.to_string())
+                }
+                ("GET", "/repos/a/b/pulls/7") => ("200 OK", PULL_7.to_string()),
+                ("GET", "/repos/a/b/issues/8") => ("200 OK", editable_issue_json(8)),
+                ("GET", "/repos/a/b/issues/7/comments" | "/repos/a/b/issues/8/comments") => {
+                    ("200 OK", issue_comments_with_a_post_json())
+                }
+                ("GET", _) => ("200 OK", "[]".to_string()),
+                _ => ("404 Not Found", "{}".to_string()),
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let github = ctx.github().unwrap();
+        let has_the_post = |item: &Item| {
+            let kept = kept_discussion(&ctx, &item.id).unwrap();
+            kept.comments.iter().any(|c| c.node_id == "IC_2")
+        };
+
+        let pull = store_pull(&ctx, 7);
+        store_commented_discussion(&ctx, &pull);
+        open_in_slot(&ctx, &pull);
+        let older_read = ctx.discussion_requests.begin(&pull.id);
+        set_reaction(&ctx, &pull.id, "IC_1", ReactionKind::ThumbsUp, true).await;
+        let read = fetch_discussion(&ctx, &pull.id, pull.pull_request().unwrap(), older_read).await;
+        assert!(read);
+        assert!(has_the_post(&pull));
+
+        let issue = store_editable_issue(&ctx, 8);
+        store_commented_discussion(&ctx, &issue);
+        open_issue_in_slot(&ctx, &issue);
+        let _: Vec<Event> = received.try_iter().collect();
+        let older_read = ctx.discussion_requests.begin(&issue.id);
+        set_reaction(&ctx, &issue.id, "IC_1", ReactionKind::ThumbsUp, true).await;
+        let read = refresh_open_issue(&ctx, &github, &issue.id, issue.issue().unwrap(), older_read).await;
+        assert_eq!(read, Some(true));
+        assert!(has_the_post(&issue));
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Event::IssueComments { comments, .. } if comments.iter().any(|c| c.node_id == "IC_2")
+            )),
+            "{events:?}"
+        );
+    }
+
+    /// A refresh of a pull request whose read of it was under way when
+    /// GitHub took an edit reads the discussion only after that read
+    /// answers, so it keeps what GitHub has after the edit.
+    #[tokio::test]
+    async fn a_refresh_whose_pull_request_read_straddles_an_edit_keeps_the_edit() {
+        let (asked, was_asked) = std::sync::mpsc::channel();
+        let (answer, to_answer) = std::sync::mpsc::channel::<()>();
+        let hold = Mutex::new(Some((asked, to_answer)));
+        let edited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let taken = edited.clone();
+        let (base, _) = serve_by_body(move |method, path, _, _| {
+            let path = path.split('?').next().unwrap_or(path);
+            match (method, path) {
+                ("GET", "/repos/a/b/pulls/7") => {
+                    if let Some((asked, answer)) = hold.lock().unwrap().take() {
+                        let _ = asked.send(());
+                        let _ = answer.recv();
+                    }
+                    ("200 OK", PULL_7.to_string())
+                }
+                ("GET", "/repos/a/b/issues/7/comments") => {
+                    let body = if taken.load(std::sync::atomic::Ordering::SeqCst) { "fixed" } else { "q" };
+                    ("200 OK", issue_comments_json(body))
+                }
+                ("GET", _) => ("200 OK", "[]".to_string()),
+                _ => ("404 Not Found", "{}".to_string()),
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(dir.path(), &base, &[]);
+        let item = store_pull(&ctx, 7);
+        store_commented_discussion(&ctx, &item);
+        open_in_slot(&ctx, &item);
+
+        let refresh = tokio::spawn({
+            let (ctx, item_id) = (ctx.clone(), item.id.clone());
+            async move { refresh_open_item(&ctx, &item_id).await }
+        });
+        tokio::task::spawn_blocking(move || was_asked.recv().unwrap())
+            .await
+            .unwrap();
+        edited.store(true, std::sync::atomic::Ordering::SeqCst);
+        let fixed = perch_github::EditedComment {
+            body: "fixed".into(),
+            updated_at: None,
+        };
+        rewrite_cached_comment(&ctx, &item.id, "IC_1", CommentPlace::Conversation, &fixed);
+        answer.send(()).unwrap();
+        refresh.await.unwrap();
+
+        let kept = kept_discussion(&ctx, &item.id).unwrap();
+        assert_eq!(kept.comments[0].body, "fixed");
+    }
+
+    /// A refresh that finds, once its read of the pull request answers,
+    /// that the item is no longer the one open reads nothing more, and
+    /// leaves a read already under way free to keep what it read.
+    #[tokio::test]
+    async fn a_refresh_that_gives_up_leaves_a_read_under_way_to_commit() {
+        let (asked, was_asked) = std::sync::mpsc::channel();
+        let (answer, to_answer) = std::sync::mpsc::channel::<()>();
+        let hold = Mutex::new(Some((asked, to_answer)));
+        let (base, _) = serve_by_body(move |method, path, _, _| {
+            let path = path.split('?').next().unwrap_or(path);
+            match (method, path) {
+                ("GET", "/repos/a/b/pulls/7") => {
+                    if let Some((asked, answer)) = hold.lock().unwrap().take() {
+                        let _ = asked.send(());
+                        let _ = answer.recv();
+                    }
+                    ("200 OK", PULL_7.to_string())
+                }
+                ("GET", _) => ("200 OK", "[]".to_string()),
+                _ => ("404 Not Found", "{}".to_string()),
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(dir.path(), &base, &[]);
+        let item = store_pull(&ctx, 7);
+        open_in_slot(&ctx, &item);
+        let under_way = ctx.discussion_requests.begin(&item.id);
+
+        let refresh = tokio::spawn({
+            let (ctx, item_id) = (ctx.clone(), item.id.clone());
+            async move { refresh_open_item(&ctx, &item_id).await }
+        });
+        tokio::task::spawn_blocking(move || was_asked.recv().unwrap())
+            .await
+            .unwrap();
+        *ctx.slot.lock().unwrap() = None;
+        answer.send(()).unwrap();
+        refresh.await.unwrap();
+
+        assert!(ctx.discussion_requests.is_current(&item.id, under_way));
     }
 
     #[tokio::test]

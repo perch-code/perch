@@ -71,39 +71,45 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
     })
 }
 
-/// Answer each request as `route` says. A request asked with the tag its
-/// answer would carry gets a 304, as GitHub's would.
+/// Answer each request as `route` says, each on its own thread, so one
+/// `route` holds back does not hold back the rest. A request asked with
+/// the tag its answer would carry gets a 304, as GitHub's would.
 fn spawn(
-    route: impl Fn(&Request) -> Reply + Send + 'static,
+    route: impl Fn(&Request) -> Reply + Send + Sync + 'static,
 ) -> (String, Arc<Mutex<Vec<Request>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let seen = requests.clone();
+    let route = Arc::new(route);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            let Some(request) = read_request(&mut stream) else {
-                continue;
-            };
-            let reply = route(&request);
-            let unchanged = reply.etag.is_some() && reply.etag == request.if_none_match.as_deref();
-            let etag = reply
-                .etag
-                .map(|etag| format!("ETag: {etag}\r\n"))
-                .unwrap_or_default();
-            let wire = if unchanged {
-                format!("HTTP/1.1 304 Not Modified\r\n{etag}Connection: close\r\n\r\n")
-            } else {
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{etag}Connection: close\r\n\r\n{}",
-                    reply.body.len(),
-                    reply.body,
-                )
-            };
-            seen.lock().unwrap().push(request);
-            let _ = stream.write_all(wire.as_bytes());
-            let _ = stream.flush();
+            let (route, seen) = (route.clone(), seen.clone());
+            std::thread::spawn(move || {
+                let Some(request) = read_request(&mut stream) else {
+                    return;
+                };
+                let reply = route(&request);
+                let unchanged =
+                    reply.etag.is_some() && reply.etag == request.if_none_match.as_deref();
+                let etag = reply
+                    .etag
+                    .map(|etag| format!("ETag: {etag}\r\n"))
+                    .unwrap_or_default();
+                let wire = if unchanged {
+                    format!("HTTP/1.1 304 Not Modified\r\n{etag}Connection: close\r\n\r\n")
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{etag}Connection: close\r\n\r\n{}",
+                        reply.body.len(),
+                        reply.body,
+                    )
+                };
+                seen.lock().unwrap().push(request);
+                let _ = stream.write_all(wire.as_bytes());
+                let _ = stream.flush();
+            });
         }
     });
     (format!("http://{address}"), requests)
@@ -120,7 +126,18 @@ fn pull(body: &str) -> String {
 /// taken. GitHub names its repository `Octo/Perch` in the edit's answer,
 /// cased unlike the `octo/perch` the reader asked for it under.
 fn serve_an_edit() -> (String, Arc<Mutex<Vec<Request>>>) {
-    let edited = Arc::new(AtomicBool::new(false));
+    serve_an_edit_holding(None)
+}
+
+/// `serve_an_edit`, with the first read of the pull request held, when
+/// `hold` is given, until the test lets it go: `hold` says when it is
+/// asked, and is told when to answer. It answers with the description
+/// as it was before the edit, as GitHub would have when it was asked.
+fn serve_an_edit_holding(
+    hold: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+) -> (String, Arc<Mutex<Vec<Request>>>) {
+    let edited = AtomicBool::new(false);
+    let hold = Mutex::new(hold);
     spawn(move |request| {
         if request.path == "/graphql" && request.body.contains("updatePullRequest") {
             edited.store(true, Ordering::SeqCst);
@@ -132,6 +149,12 @@ fn serve_an_edit() -> (String, Arc<Mutex<Vec<Request>>>) {
             return Reply::ok(r#"{"data":{"nodes":[]}}"#);
         }
         if request.path == "/repos/octo/perch/pulls/7" {
+            let held = hold.lock().unwrap().take();
+            if let Some((asked, answer)) = held {
+                let _ = asked.send(());
+                let _ = answer.recv();
+                return Reply::tagged(r#""before""#, pull("Before."));
+            }
             return if edited.load(Ordering::SeqCst) {
                 Reply::tagged(r#""after""#, pull("After."))
             } else {
@@ -184,6 +207,36 @@ async fn a_discussion_read_right_after_a_description_edit_asks_github_for_the_ne
     assert!(edit
         .body
         .contains("pullRequest { body number repository { nameWithOwner } updatedAt }"));
+}
+
+/// A read of the pull request asked before its description was edited,
+/// and answered after, says what it said before. Its answer is not kept,
+/// so the discussion read after the edit asks GitHub rather than taking
+/// it as current.
+#[tokio::test]
+async fn a_pull_request_read_asked_before_a_description_edit_is_not_kept_as_current() {
+    let (asked, was_asked) = std::sync::mpsc::channel();
+    let (answer, to_answer) = std::sync::mpsc::channel();
+    let (base, requests) = serve_an_edit_holding(Some((asked, to_answer)));
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let early = tokio::spawn({
+        let github = github.clone();
+        async move { github.fetch_pull_request("octo/perch", 7).await }
+    });
+    tokio::task::spawn_blocking(move || was_asked.recv().unwrap())
+        .await
+        .unwrap();
+    github
+        .update_comment("PR_7", CommentPlace::PullRequestBody, "After.")
+        .await
+        .unwrap();
+    answer.send(()).unwrap();
+    early.await.unwrap().unwrap();
+    let discussion = github.fetch_discussion("octo/perch", 7).await.unwrap();
+
+    assert_eq!(discussion.body, "After.");
+    assert_eq!(pull_reads(&requests), 2, "the discussion asked GitHub again");
 }
 
 /// A pull request whose description becomes "Done." once it is closed

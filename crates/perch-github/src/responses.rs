@@ -13,6 +13,11 @@ use std::time::{Duration, Instant};
 /// comments run to a few megabytes, so this holds several open at once.
 pub(crate) const BUDGET_BYTES: usize = 32 * 1024 * 1024;
 
+/// How many forgotten paths are remembered for the reads still out when
+/// they were forgotten. Past it the oldest goes, and every read asked
+/// before that forget is taken as asked before a forget of its own path.
+const FORGOTTEN_KEPT: usize = 256;
+
 /// A kept body and the tag GitHub sent with it.
 #[derive(Clone)]
 pub(crate) struct Known {
@@ -36,6 +41,15 @@ pub(crate) struct Responses {
     bytes: usize,
     budget: usize,
     clock: u64,
+    /// How many times a path was forgotten, which a read notes as it is
+    /// asked.
+    forgets: u64,
+    /// Each path forgotten, lowercased, by the count of forgets when it
+    /// last was.
+    forgotten: HashMap<String, u64>,
+    /// Reads asked before this many forgets are taken as asked before a
+    /// forget of their own path: the forgets let go from `forgotten`.
+    forgotten_floor: u64,
 }
 
 impl Responses {
@@ -45,6 +59,9 @@ impl Responses {
             bytes: 0,
             budget,
             clock: 0,
+            forgets: 0,
+            forgotten: HashMap::new(),
+            forgotten_floor: 0,
         }
     }
 
@@ -110,7 +127,9 @@ impl Responses {
 
     /// Forget what was read at `path` however its letters were cased:
     /// GitHub takes a repository's name in any case, so the same read can
-    /// be kept under more than one spelling.
+    /// be kept under more than one spelling. A read of it already asked
+    /// may answer from before the change that forgot it, so its answer is
+    /// not kept either: see [`Self::forgotten_since`].
     pub fn remove_any_case(&mut self, path: &str) {
         let spellings: Vec<String> = self
             .entries
@@ -121,6 +140,38 @@ impl Responses {
         for spelling in spellings {
             self.remove(&spelling);
         }
+        self.forgets += 1;
+        self.forgotten
+            .insert(path.to_ascii_lowercase(), self.forgets);
+        if self.forgotten.len() > FORGOTTEN_KEPT {
+            let oldest = self
+                .forgotten
+                .iter()
+                .min_by_key(|(_, at)| **at)
+                .map(|(kept, at)| (kept.clone(), *at));
+            if let Some((kept, at)) = oldest {
+                self.forgotten.remove(&kept);
+                self.forgotten_floor = self.forgotten_floor.max(at);
+            }
+        }
+    }
+
+    /// How many times a path has been forgotten: what a read notes as it
+    /// is asked, to tell [`Self::forgotten_since`] when that was.
+    pub fn forgets(&self) -> u64 {
+        self.forgets
+    }
+
+    /// Whether `path`, in any casing, was forgotten since `forgets` were
+    /// counted. An answer to a read asked then may be from before the
+    /// change that forgot it: the reader may have it, but it is not kept,
+    /// nor taken as current.
+    pub fn forgotten_since(&self, path: &str, forgets: u64) -> bool {
+        forgets < self.forgotten_floor
+            || self
+                .forgotten
+                .get(&path.to_ascii_lowercase())
+                .is_some_and(|at| *at > forgets)
     }
 }
 
@@ -205,6 +256,34 @@ mod tests {
         assert!(r.get("/repos/a/b/pulls/7").is_none());
         assert!(r.get("/repos/a/b/pulls/7/comments").is_some());
         assert_eq!(r.bytes, 37);
+    }
+
+    #[test]
+    fn a_read_asked_before_its_path_was_forgotten_is_told_so() {
+        let mut r = Responses::new(1000);
+        let before = r.forgets();
+        r.remove_any_case("/repos/A/B/pulls/7");
+        let after = r.forgets();
+        assert!(r.forgotten_since("/repos/a/b/pulls/7", before));
+        assert!(!r.forgotten_since("/repos/a/b/pulls/7", after));
+        assert!(!r.forgotten_since("/repos/a/b/pulls/7/comments", before));
+        r.remove_any_case("/repos/a/b/pulls/7");
+        assert!(r.forgotten_since("/repos/a/b/pulls/7", after));
+    }
+
+    #[test]
+    fn a_forget_let_go_still_tells_every_read_asked_before_it() {
+        let mut r = Responses::new(1000);
+        let before = r.forgets();
+        r.remove_any_case("/repos/a/b/pulls/0");
+        let after = r.forgets();
+        for n in 1..=FORGOTTEN_KEPT {
+            r.remove_any_case(&format!("/repos/a/b/pulls/{n}"));
+        }
+        assert_eq!(r.forgotten.len(), FORGOTTEN_KEPT);
+        assert!(r.forgotten_since("/repos/a/b/pulls/0", before));
+        assert!(r.forgotten_since("/repos/a/b/issues/1", before));
+        assert!(!r.forgotten_since("/repos/a/b/issues/1", after));
     }
 
     #[test]
