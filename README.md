@@ -128,7 +128,7 @@ others as you open their files:
 | Rust | rust-analyzer | the checkout's rustup toolchain | `rustup component add` (needs rustup) |
 | Go | gopls | `PATH`, `~/go/bin` | `go install` (needs Go) |
 | TypeScript, JavaScript | typescript-language-server | `PATH`, with the TypeScript installed with it | `npm install` (needs Node) |
-| Java | jdtls | `PATH` (Homebrew's) | a checksummed download from Eclipse (needs a JDK 21+) |
+| Java | jdtls | `PATH` (Homebrew's, or a distribution's) | a checksummed download from Eclipse (needs a JDK 21+) |
 | Python | ty | `PATH` | a checksummed download from GitHub (needs nothing else) |
 
 When a server is missing, a toast says so with an **Install** button; its
@@ -138,6 +138,11 @@ pins. rust-analyzer goes into the checkout's toolchain, where it matches
 the compiler; the others go in `~/.perch/servers`. Perch never installs Go,
 Node or a JDK, and never runs `npm install` in a checkout, so a TypeScript
 checkout without `node_modules` can't resolve its packages' types.
+
+The download runs on a JDK 21 or later. On macOS that is the one
+`/usr/libexec/java_home` picks, else `JAVA_HOME`. Elsewhere it is
+`JAVA_HOME`, else the JDK the `java` on `PATH` belongs to, else the newest
+in `/usr/lib/jvm`.
 
 rust-analyzer and jdtls run the checkout's own code as they load it:
 rust-analyzer its build scripts and proc macros, jdtls its Gradle or Maven
