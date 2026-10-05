@@ -13,8 +13,13 @@ use std::process::{Command, Stdio};
 
 use semver::Version;
 
-/// The release's file Perch installs from: `Perch.app`, tarred.
-pub const ASSET: &str = "Perch-macos-arm64.tar.gz";
+/// The release's file Perch installs from: `Perch.app` for this
+/// processor, tarred.
+pub const ASSET: &str = if cfg!(target_arch = "x86_64") {
+    "Perch-macos-x86_64.tar.gz"
+} else {
+    "Perch-macos-arm64.tar.gz"
+};
 
 /// What the updater has to offer the window.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,6 +234,15 @@ mod tests {
         assert_eq!(newer("v0.1.0", &v("0.2.0")), None);
         assert_eq!(newer("v0.2.0", &v("0.2.0-beta.1")), Some(v("0.2.0")));
         assert_eq!(newer("nightly", &v("0.1.0")), None);
+    }
+
+    #[test]
+    fn the_asset_is_the_build_for_this_processor() {
+        let arch = match std::env::consts::ARCH {
+            "aarch64" => "arm64",
+            other => other,
+        };
+        assert_eq!(ASSET, format!("Perch-macos-{arch}.tar.gz"));
     }
 
     #[test]

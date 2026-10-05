@@ -17,12 +17,14 @@ worktree behind every item.
 
 ## Install
 
-Perch runs on Apple Silicon Macs. With `gh` signed in to an account that can
-read this repository, install the latest release with:
+Perch runs on Apple Silicon and Intel Macs. With `gh` signed in to an account
+that can read this repository, install the latest release with:
 
 ```bash
 gh release download --repo perch-code/perch --pattern Perch-macos-arm64.tar.gz -O - | tar -xz -C /Applications
 ```
+
+On an Intel Mac, download `Perch-macos-x86_64.tar.gz` instead.
 
 Downloading through `gh` rather than a browser keeps macOS from quarantining
 the app, which isn't notarized.
@@ -235,7 +237,9 @@ a matching tag:
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
-The release workflow builds `Perch.app` on an Apple Silicon runner and
-publishes `Perch-macos-arm64.tar.gz` to a GitHub release. A running Perch
-finds it within six hours. A tag with a hyphen, like `v0.2.0-beta.1`, becomes
+The release workflow builds `Perch.app` on an Apple Silicon runner, once
+natively and once cross-compiled for Intel, and publishes
+`Perch-macos-arm64.tar.gz` and `Perch-macos-x86_64.tar.gz` to a GitHub
+release. A running Perch finds the one for its processor within six hours.
+A release without it is skipped. A tag with a hyphen, like `v0.2.0-beta.1`, becomes
 a prerelease, which neither the updater nor `gh release download` picks up.
