@@ -448,6 +448,18 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     new_work::open(state, key_backend);
                     return EventPropagation::Stop;
                 }
+                // New Window and Open… are the Perch menu's on macOS. Off
+                // it there is no menu to hold them, so their keys are here.
+                if !cfg!(target_os = "macos") {
+                    if key.code == Code::KeyN && key.modifiers == OS_MOD | Modifiers::SHIFT {
+                        crate::windows::open_new();
+                        return EventPropagation::Stop;
+                    }
+                    if key.code == Code::KeyO && key.modifiers == OS_MOD {
+                        open_box::show(state, focused_descendant(cx, root_id));
+                        return EventPropagation::Stop;
+                    }
+                }
                 // Cmd-[ shuts it, with what was typed kept, from its
                 // message box too.
                 if key.code == Code::BracketLeft
@@ -1561,6 +1573,34 @@ mod tests {
         harness.paint();
         assert!(!state.open_box.open.get());
         assert!(named(harness.root_id(), "open-box-panel").is_none());
+    }
+
+    /// Off macOS, with no Perch menu, Ctrl-O puts Open…'s box up and
+    /// Ctrl-Shift-N is New Window's, not Ctrl-N's new work.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn ctrl_o_puts_the_open_box_up_and_ctrl_shift_n_is_not_new_work() {
+        let state = AppState::new();
+        let review = ReviewState::new();
+        state.review.set(Some(review));
+        let root = TestRoot::new();
+        let view = app_view(state, review, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+
+        harness.dispatch_event(key(Code::KeyN, Key::Character("N".into()), OS_MOD | Modifiers::SHIFT));
+        harness.rebuild();
+        assert!(!state.new_work.open.get(), "New Window is not new work");
+
+        harness.dispatch_event(key(Code::KeyO, Key::Character("o".into()), OS_MOD));
+        harness.rebuild();
+        harness.paint();
+        harness.rebuild();
+        harness.paint();
+        assert!(state.open_box.open.get());
+        let text = named(harness.root_id(), "open-box-text").expect("no box");
+        assert!(harness.is_focused(text), "the box has the keyboard");
     }
 
     /// Start work asks first: Escape cancels with nothing cut, and Enter
