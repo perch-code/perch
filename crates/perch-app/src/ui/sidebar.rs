@@ -69,7 +69,8 @@ fn lights_strip(state: AppState, backend: Rc<Backend>) -> impl IntoView {
 }
 
 /// The lane the native traffic lights occupy, then the drawer control right
-/// after them, as Codex has it.
+/// after them, as Codex has it. Off macOS there are no lights in the
+/// window's content, and the lane is only padding before the control.
 ///
 /// The drawer's strip starts with this while the drawer is open. While it is
 /// shut there is no drawer, and the bar over the main pane starts with it

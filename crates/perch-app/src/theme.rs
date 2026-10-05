@@ -380,8 +380,13 @@ pub const SIDEBAR_MIN_WIDTH: f64 = 320.0;
 pub const SIDEBAR_MAX_WIDTH: f64 = 520.0;
 /// The lane the traffic lights sit in, at the left of whichever bar is at
 /// the top left: the drawer's strip, or the main pane's bar while the
-/// drawer is shut.
-pub const ACTIVITY_RAIL_WIDTH: f64 = 72.0;
+/// drawer is shut. Off macOS the window keeps the system's title bar, with
+/// its own buttons, and the lane is only a bar's usual padding.
+pub const ACTIVITY_RAIL_WIDTH: f64 = if cfg!(target_os = "macos") {
+    72.0
+} else {
+    REVIEW_HEADER_PADDING
+};
 /// An item row in the sidebar: two lines of text and the glyph beside them.
 pub const ROW_HEIGHT: f64 = 68.0;
 /// The drawer on the right, which holds the open item's files as a tree,
