@@ -347,7 +347,7 @@ pub fn find(kind: ServerKind, root: &Path, env: &Env) -> Result<ServerSpec, Miss
     match kind {
         ServerKind::RustAnalyzer => find_rust_analyzer(root, env),
         ServerKind::Gopls => find_gopls(env),
-        ServerKind::TypescriptLanguageServer => find_typescript_language_server(root, env),
+        ServerKind::TypescriptLanguageServer => find_typescript_language_server(env),
         ServerKind::Jdtls => find_jdtls(root, env),
     }
 }
@@ -629,39 +629,43 @@ pub fn start_warnings(kind: ServerKind, root: &Path) -> Vec<String> {
 const TYPESCRIPT_LANGUAGE_SERVER_PIN: &str = "6.0.1";
 const TYPESCRIPT_PIN: &str = "6.0.3";
 
-/// typescript-language-server on `PATH`, else Perch's own. It runs the
-/// checkout's own TypeScript when the checkout has one with a tsserver,
-/// else the one installed beside it. Missing, Perch installs both with npm
-/// into its own directory, without their install scripts.
-fn find_typescript_language_server(root: &Path, env: &Env) -> Result<ServerSpec, Missing> {
+/// The first typescript-language-server to read `tsserver.path` from its
+/// initialization options. An older one ignores it and runs the
+/// checkout's TypeScript.
+const TYPESCRIPT_LANGUAGE_SERVER_TAKES_TSSERVER: &str = "2.1.0";
+
+/// typescript-language-server on `PATH` with the TypeScript it would load
+/// by itself, else Perch's own with the TypeScript installed beside it.
+/// Perch never runs a checkout's own TypeScript, since a pull request
+/// could put any tsserver.js there; and it always names the tsserver,
+/// since typescript-language-server would otherwise pick the checkout's
+/// itself. So a server on `PATH` that can't be given one gives way to
+/// Perch's: one with no TypeScript of its own, one too old to take the
+/// name, or one Perch can't place in its package, such as a version
+/// manager's shim. Missing, Perch installs both with npm into its own
+/// directory, without their install scripts.
+fn find_typescript_language_server(env: &Env) -> Result<ServerSpec, Missing> {
     let kind = ServerKind::TypescriptLanguageServer;
-    let users = env.which(kind.name());
-    let perchs = || newest_install(env, kind).map(|(_, dir)| dir);
-    let (binary, beside) = match users {
-        Some(binary) => (Some(binary), None),
-        None => match perchs() {
-            Some(dir) => (
-                Some(dir.join("node_modules/.bin").join(kind.name())).filter(|p| p.is_file()),
-                Some(dir.join("node_modules/typescript/lib")),
-            ),
-            None => (None, None),
-        },
+    let users = || {
+        let binary = env.which(kind.name())?;
+        let tsserver = typescript_of_server(&binary)?;
+        Some((binary, tsserver))
     };
-    if let Some(binary) = binary {
-        let checkouts = root.join("node_modules/typescript/lib");
-        let tsserver = [Some(checkouts), beside]
-            .into_iter()
-            .flatten()
-            .find(|lib| lib.join("tsserver.js").is_file());
-        let mut options = serde_json::json!({ "hostInfo": "perch" });
-        if let Some(lib) = tsserver {
-            options["tsserver"] = serde_json::json!({ "path": lib.display().to_string() });
-        }
+    let perchs = || {
+        let (_, dir) = newest_install(env, kind)?;
+        let binary = dir.join("node_modules/.bin").join(kind.name());
+        let tsserver = tsserver(&dir.join("node_modules/typescript/lib"))?;
+        binary.is_file().then_some((binary, tsserver))
+    };
+    if let Some((binary, tsserver)) = users().or_else(perchs) {
         return Ok(ServerSpec {
             kind,
             binary,
             args: vec!["--stdio".into()],
-            options,
+            options: serde_json::json!({
+                "hostInfo": "perch",
+                "tsserver": { "path": tsserver.display().to_string() },
+            }),
         });
     }
     let (Some(npm), Some(_)) = (env.which("npm"), env.which("node")) else {
@@ -678,6 +682,49 @@ fn find_typescript_language_server(root: &Path, env: &Env) -> Result<ServerSpec,
         install: Some(Box::new(typescript_install(&npm, env))),
         toolchain: None,
     })
+}
+
+/// The tsserver of the TypeScript the typescript-language-server at
+/// `binary` loads by itself, when that server takes the tsserver Perch
+/// names. Node resolves it from the server's own file, its links
+/// followed, through the `node_modules` of each directory above, and
+/// stops at the first TypeScript there: the package's own, or a global
+/// install's beside it. A server whose file isn't in its package, as a
+/// wrapper script, might be any version, so it gets none.
+fn typescript_of_server(binary: &Path) -> Option<PathBuf> {
+    let real = std::fs::canonicalize(binary).ok()?;
+    let package = real.ancestors().skip(1).find_map(|dir| {
+        let package = package_json(&dir.join("package.json"))?;
+        (package["name"] == "typescript-language-server").then_some(package)
+    })?;
+    let version = package["version"].as_str()?;
+    if compare_versions(version, TYPESCRIPT_LANGUAGE_SERVER_TAKES_TSSERVER).is_lt() {
+        return None;
+    }
+    let typescript = real
+        .ancestors()
+        .skip(1)
+        .filter(|dir| dir.file_name().is_none_or(|name| name != "node_modules"))
+        .map(|dir| dir.join("node_modules/typescript"))
+        .find(|typescript| typescript.exists())?;
+    tsserver(&typescript.join("lib"))
+}
+
+/// `lib`'s tsserver.js, its links resolved, when typescript-language-server
+/// would take it as the tsserver Perch names: the package it's in says its
+/// version. The server reads that same package.json, and given a tsserver
+/// whose package has no version it warns and falls back to the checkout's.
+fn tsserver(lib: &Path) -> Option<PathBuf> {
+    let tsserver = std::fs::canonicalize(lib.join("tsserver.js")).ok()?;
+    let package = package_json(&tsserver.parent()?.parent()?.join("package.json"))?;
+    let versioned = package["version"].as_str().is_some_and(|v| !v.is_empty());
+    let named = tsserver.file_name().is_some_and(|name| name == "tsserver.js");
+    (versioned && named && tsserver.is_file()).then_some(tsserver)
+}
+
+/// The package.json at `path`, parsed.
+fn package_json(path: &Path) -> Option<serde_json::Value> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
 /// npm's install of typescript-language-server and its TypeScript into
@@ -1054,7 +1101,47 @@ mod tests {
         fn rust(&self) -> Result<ServerSpec, Missing> {
             find(ServerKind::RustAnalyzer, &self.path("checkout"), &self.env())
         }
+
+        /// A TypeScript package at `sub` with a tsserver, and
+        /// `package_json`; its tsserver.js, links resolved.
+        fn typescript(&self, sub: &str, package_json: &str) -> PathBuf {
+            let lib = self.path(sub).join("lib");
+            std::fs::create_dir_all(&lib).unwrap();
+            std::fs::write(lib.join("tsserver.js"), "").unwrap();
+            std::fs::write(self.path(sub).join("package.json"), package_json).unwrap();
+            std::fs::canonicalize(lib.join("tsserver.js")).unwrap()
+        }
+
+        /// typescript-language-server `version` in a global npm install
+        /// under `global`, linked from `bin` as npm links it: the link, and
+        /// the package's directory.
+        fn global_typescript_server(&self, version: &str) -> (PathBuf, PathBuf) {
+            let package = self.path("global/lib/node_modules/typescript-language-server");
+            std::fs::create_dir_all(package.join("lib")).unwrap();
+            std::fs::write(package.join("lib/cli.mjs"), "").unwrap();
+            let manifest =
+                format!(r#"{{ "name": "typescript-language-server", "version": "{version}" }}"#);
+            std::fs::write(package.join("package.json"), manifest).unwrap();
+            let link = self.path("bin/typescript-language-server");
+            if link.symlink_metadata().is_err() {
+                std::os::unix::fs::symlink(package.join("lib/cli.mjs"), &link).unwrap();
+            }
+            (link, package)
+        }
+
+        /// Perch's own install of typescript-language-server `version`,
+        /// with its TypeScript: the server's binary.
+        fn perchs_typescript_server(&self, version: &str) -> PathBuf {
+            let into = format!("servers/typescript-language-server/{version}");
+            let bin = self.path(&into).join("node_modules/.bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::write(bin.join("typescript-language-server"), "").unwrap();
+            self.typescript(&format!("{into}/node_modules/typescript"), TYPESCRIPT_PACKAGE);
+            bin.join("typescript-language-server")
+        }
     }
+
+    const TYPESCRIPT_PACKAGE: &str = r#"{ "name": "typescript", "version": "6.0.3" }"#;
 
     #[test]
     fn rust_analyzer_is_the_checkout_toolchains() {
@@ -1190,16 +1277,19 @@ mod tests {
         assert_eq!(gopls(&fake).unwrap().binary, on_path);
     }
 
-    /// The TypeScript server: the user's, else Perch's, running the
-    /// checkout's TypeScript when it has a tsserver; missing, npm into
-    /// Perch's directory without install scripts, or nothing without Node.
+    /// The TypeScript server: the user's with the TypeScript it would load
+    /// itself, else Perch's with the one beside it, and never the
+    /// checkout's; missing, npm into Perch's directory without install
+    /// scripts, or nothing without Node.
     #[test]
-    fn the_typescript_server_runs_the_checkouts_typescript() {
+    fn the_typescript_server_never_runs_the_checkouts_typescript() {
         let fake = Fake::new();
         let kind = ServerKind::TypescriptLanguageServer;
         let ts = |fake: &Fake| find(kind, &fake.path("checkout"), &fake.env());
+        // One a pull request could have put there.
+        fake.typescript("checkout/node_modules/typescript", TYPESCRIPT_PACKAGE);
         assert_eq!(ts(&fake).unwrap_err().needs, Some(Need::Node));
-        fake.tool("npm", "exit 0");
+        let npm = fake.tool("npm", "exit 0");
         assert_eq!(ts(&fake).unwrap_err().needs, Some(Need::Node), "npm without node");
         fake.tool("node", "exit 0");
         let missing = ts(&fake).unwrap_err();
@@ -1213,30 +1303,100 @@ mod tests {
             )
         );
 
-        // Perch's own, with the TypeScript installed beside it.
+        // Perch's own, once the TypeScript installed beside it says its
+        // version.
         let bin = into.join("node_modules/.bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("typescript-language-server"), "").unwrap();
-        let beside = into.join("node_modules/typescript/lib");
-        std::fs::create_dir_all(&beside).unwrap();
-        std::fs::write(beside.join("tsserver.js"), "").unwrap();
+        let perchs = "servers/typescript-language-server/6.0.1/node_modules/typescript";
+        fake.typescript(perchs, "{}");
+        assert!(ts(&fake).is_err(), "nor the checkout's instead");
+        let beside = fake.typescript(perchs, TYPESCRIPT_PACKAGE);
         let spec = ts(&fake).unwrap();
         assert_eq!(spec.binary, bin.join("typescript-language-server"));
         assert_eq!(spec.args, ["--stdio"]);
         assert_eq!(spec.options["tsserver"]["path"], beside.display().to_string());
 
-        // The checkout's own TypeScript, when it has a tsserver: 7 doesn't.
-        let checkouts = fake.path("checkout/node_modules/typescript/lib");
-        std::fs::create_dir_all(&checkouts).unwrap();
-        assert_eq!(ts(&fake).unwrap().options["tsserver"]["path"], beside.display().to_string());
-        std::fs::write(checkouts.join("tsserver.js"), "").unwrap();
-        assert_eq!(
-            ts(&fake).unwrap().options["tsserver"]["path"],
-            checkouts.display().to_string()
-        );
+        // The user's, linked from PATH. With no TypeScript of its own, as
+        // a version manager's shim, Perch's runs instead. One beside the
+        // link isn't the server's: node follows the link first.
+        let (users, package) = fake.global_typescript_server("6.0.1");
+        fake.typescript("bin/node_modules/typescript", TYPESCRIPT_PACKAGE);
+        assert_eq!(ts(&fake).unwrap().binary, bin.join("typescript-language-server"));
+        // A global install's TypeScript beside the server's package.
+        let globals = "global/lib/node_modules/typescript";
+        fake.typescript(globals, r#"{ "version": "" }"#);
+        assert_eq!(ts(&fake).unwrap().binary, bin.join("typescript-language-server"));
+        let global = fake.typescript(globals, TYPESCRIPT_PACKAGE);
+        let spec = ts(&fake).unwrap();
+        assert_eq!(spec.binary, users);
+        assert_eq!(spec.options["tsserver"]["path"], global.display().to_string());
+        // The package's own, nearer, as node would find it first. Node
+        // stops there, so one with no tsserver, as 7, isn't passed over
+        // for the global one.
+        let owns = "global/lib/node_modules/typescript-language-server/node_modules/typescript";
+        let own = fake.typescript(owns, TYPESCRIPT_PACKAGE);
+        assert_eq!(ts(&fake).unwrap().options["tsserver"]["path"], own.display().to_string());
+        std::fs::remove_file(&own).unwrap();
+        assert_eq!(ts(&fake).unwrap().binary, bin.join("typescript-language-server"));
 
-        let users = fake.tool("typescript-language-server", "exit 0");
+        // With no TypeScript of its own and no Perch's, it's missing.
+        std::fs::remove_dir_all(fake.path(globals)).unwrap();
+        std::fs::remove_dir_all(package.join("node_modules")).unwrap();
+        std::fs::remove_dir_all(fake.path("servers/typescript-language-server")).unwrap();
+        let missing = ts(&fake).unwrap_err();
+        assert_eq!(missing.needs, None);
+        assert_eq!(missing.install.as_deref(), Some(&typescript_install(&npm, &fake.env())));
+    }
+
+    /// typescript-language-server takes a tsserver only when the package
+    /// it's in says its version, and falls back to the checkout's
+    /// otherwise. A linked one is named as the file it links to.
+    #[test]
+    fn a_typescript_says_its_version() {
+        let fake = Fake::new();
+        let file = fake.typescript("typescript", TYPESCRIPT_PACKAGE);
+        let lib = file.parent().unwrap().to_path_buf();
+        assert_eq!(tsserver(&lib), Some(file.clone()));
+        for package in ["", "nonsense", "[]", "{}", r#"{ "version": "" }"#, r#"{ "version": 6 }"#] {
+            fake.typescript("typescript", package);
+            assert_eq!(tsserver(&lib), None, "{package}");
+        }
+        fake.typescript("typescript", TYPESCRIPT_PACKAGE);
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(tsserver(&lib), None, "no tsserver.js");
+
+        let elsewhere = fake.typescript("elsewhere", "{}");
+        std::os::unix::fs::symlink(&elsewhere, &file).unwrap();
+        assert_eq!(tsserver(&lib), None, "linked to one without a version");
+        fake.typescript("elsewhere", TYPESCRIPT_PACKAGE);
+        assert_eq!(tsserver(&lib), Some(elsewhere));
+    }
+
+    /// A server on `PATH` older than 2.1, which ignores the tsserver Perch
+    /// names, or one Perch can't place in its package, as a wrapper
+    /// script, gives way to Perch's, whatever TypeScript is near it; with
+    /// no Perch's, it's missing.
+    #[test]
+    fn an_old_or_wrapped_server_on_path_gives_way_to_perchs() {
+        let fake = Fake::new();
+        let kind = ServerKind::TypescriptLanguageServer;
+        let ts = |fake: &Fake| find(kind, &fake.path("checkout"), &fake.env());
+        let npm = fake.tool("npm", "exit 0");
+        fake.tool("node", "exit 0");
+        let (users, _) = fake.global_typescript_server("2.0.1");
+        fake.typescript("global/lib/node_modules/typescript", TYPESCRIPT_PACKAGE);
+        let missing = ts(&fake).unwrap_err();
+        assert_eq!(missing.install.as_deref(), Some(&typescript_install(&npm, &fake.env())));
+        let perchs = fake.perchs_typescript_server("6.0.1");
+        assert_eq!(ts(&fake).unwrap().binary, perchs);
+        fake.global_typescript_server("2.1.0");
         assert_eq!(ts(&fake).unwrap().binary, users);
+
+        std::fs::remove_file(&users).unwrap();
+        fake.tool("typescript-language-server", "exec node /elsewhere/lib/cli.mjs \"$@\"");
+        fake.typescript("node_modules/typescript", TYPESCRIPT_PACKAGE);
+        assert_eq!(ts(&fake).unwrap().binary, perchs);
     }
 
     #[test]
@@ -1333,10 +1493,8 @@ mod tests {
         fake.tool("node", "exit 0");
         let npm = fake.tool("npm", "exit 0");
         let kind = ServerKind::TypescriptLanguageServer;
+        fake.perchs_typescript_server("5.1.0");
         let old = fake.path("servers/typescript-language-server/5.1.0");
-        let bin = old.join("node_modules/.bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("typescript-language-server"), "").unwrap();
         let spec = find(kind, &fake.path("checkout"), &fake.env()).unwrap();
         let old_one = outdated(&spec, &fake.env()).unwrap();
         assert_eq!(old_one.installed, "5.1.0");
@@ -1349,7 +1507,8 @@ mod tests {
         let spec = find(kind, &fake.path("checkout"), &fake.env()).unwrap();
         assert_eq!(outdated(&spec, &fake.env()), None);
         // The user's own: never Perch's to update.
-        fake.tool("typescript-language-server", "exit 0");
+        fake.global_typescript_server("5.1.3");
+        fake.typescript("global/lib/node_modules/typescript", TYPESCRIPT_PACKAGE);
         std::fs::rename(
             fake.path("servers/typescript-language-server/6.0.1"),
             fake.path("servers/typescript-language-server/5.0.0"),

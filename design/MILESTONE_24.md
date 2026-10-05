@@ -147,7 +147,7 @@ For each kind, the first of these that exists:
 1. **The project's own.** For rust-analyzer, the checkout toolchain's,
    from `rustup which rust-analyzer` with `RUSTUP_AUTO_INSTALL=0`, as now.
    The other kinds have no per-project binary. The TypeScript server is
-   told to use the checkout's `node_modules/typescript/lib` (see
+   never given the checkout's TypeScript (see
    [TypeScript and JavaScript](#typescript-and-javascript)), whichever
    binary runs it.
 2. **The user's**, on `PATH` (with the install dirs `main` adds).
@@ -259,12 +259,15 @@ deliberate: one click, and from then on the server is the toolchain's.
 ### TypeScript and JavaScript
 
 - `typescript-language-server --stdio`.
-- Initialization options: `tsserver.path` is the checkout's
-  `node_modules/typescript/lib` when it has a `tsserver.js`, so the
-  project's own TypeScript answers. TypeScript 7, the native port, has
-  none, so a checkout on it falls back like one without TypeScript: to the
-  `typescript` installed beside the server (Perch's own) or, for a `PATH`
-  server, unset. Perch pins typescript-language-server 6.0.1 and
+- Initialization options: `tsserver.path` is always set, to the
+  TypeScript the server was installed with: for a `PATH` server, the one
+  node would load from the server's own package; for Perch's own, the
+  `typescript` installed beside it. Never the checkout's: a pull request
+  could put any `tsserver.js` in its `node_modules`, and left unset,
+  typescript-language-server would pick the checkout's itself. A `PATH`
+  server older than 2.1.0 (which ignores `tsserver.path`), without a
+  TypeScript of its own, or not in its package (a version manager's shim)
+  gives way to Perch's. Perch pins typescript-language-server 6.0.1 and
   TypeScript 6.0.3, the last with a tsserver.
 - The warning is told once as the server starts, from `start_warnings`.
 - A checkout with a `package.json` at its root and no `node_modules` gets

@@ -100,7 +100,7 @@ others as you open their files:
 |---|---|---|---|
 | Rust | rust-analyzer | the checkout's rustup toolchain | `rustup component add` (needs rustup) |
 | Go | gopls | `PATH`, `~/go/bin` | `go install` (needs Go) |
-| TypeScript, JavaScript | typescript-language-server | `PATH` | `npm install` (needs Node) |
+| TypeScript, JavaScript | typescript-language-server | `PATH`, with the TypeScript installed with it | `npm install` (needs Node) |
 | Java | jdtls | `PATH` (Homebrew's) | a checksummed download from Eclipse (needs a JDK 21+) |
 
 When a server is missing, a toast says so with an **Install** button; its
@@ -113,7 +113,10 @@ checkout without `node_modules` can't resolve its packages' types.
 
 Language servers run project code: rust-analyzer runs build scripts and
 proc macros, and jdtls runs a Gradle build when it imports one. Keep that
-in mind on a pull request from someone you don't know.
+in mind on a pull request from someone you don't know. Perch never lets
+typescript-language-server run a checkout's own TypeScript, which a pull
+request could replace; a server on `PATH` older than 2.1, or without a
+TypeScript of its own, gives way to Perch's.
 
 ## Agent safety
 
