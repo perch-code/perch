@@ -467,11 +467,7 @@ fn find_jdtls(root: &Path, env: &Env) -> Result<ServerSpec, Missing> {
             toolchain: None,
         });
     };
-    let config = if std::env::consts::ARCH == "aarch64" {
-        "config_mac_arm"
-    } else {
-        "config_mac"
-    };
+    let config = jdtls_config(std::env::consts::OS, std::env::consts::ARCH);
     let args = [
         NO_METADATA_AT_ROOT,
         "-Declipse.application=org.eclipse.jdt.ls.core.id1",
@@ -501,6 +497,20 @@ fn find_jdtls(root: &Path, env: &Env) -> Result<ServerSpec, Missing> {
         args,
         options,
     })
+}
+
+/// The launcher configuration Eclipse ships for a platform, by Rust's
+/// names for its OS and architecture. The `config_ss_*` ones beside them
+/// are for an install the user can't write to, which Perch's never is.
+fn jdtls_config(os: &str, arch: &str) -> &'static str {
+    let arm = arch == "aarch64";
+    match os {
+        "macos" if arm => "config_mac_arm",
+        "macos" => "config_mac",
+        "windows" => "config_win",
+        _ if arm => "config_linux_arm",
+        _ => "config_linux",
+    }
 }
 
 /// Eclipse's `.project`, `.classpath` and `.settings` go in jdtls's data
@@ -1778,7 +1788,12 @@ mod tests {
         let at = |flag: &str| spec.args.iter().position(|a| a == flag).unwrap();
         assert_eq!(spec.args[at("-jar") + 1], launcher.display().to_string());
         assert_eq!(spec.args[at("-data") + 1], data.display().to_string());
-        assert!(spec.args[at("-configuration") + 1].starts_with(&into.display().to_string()));
+        assert_eq!(
+            spec.args[at("-configuration") + 1],
+            into.join(jdtls_config(std::env::consts::OS, std::env::consts::ARCH))
+                .display()
+                .to_string()
+        );
         assert_eq!(
             spec.options["extendedClientCapabilities"]["classFileContentsSupport"],
             true
@@ -1826,6 +1841,17 @@ mod tests {
         assert_eq!(find_jdk(&env), Some(newer.clone()), "JAVA_HOME first");
         let env = Env { java_home: Some(old.clone()), ..fake.env() };
         assert_eq!(find_jdk(&env), Some(new), "an old JAVA_HOME is passed over");
+    }
+
+    /// Each platform's own launcher configuration, as the download names
+    /// them.
+    #[test]
+    fn jdtls_is_configured_for_the_platform_it_runs_on() {
+        assert_eq!(jdtls_config("macos", "aarch64"), "config_mac_arm");
+        assert_eq!(jdtls_config("macos", "x86_64"), "config_mac");
+        assert_eq!(jdtls_config("linux", "x86_64"), "config_linux");
+        assert_eq!(jdtls_config("linux", "aarch64"), "config_linux_arm");
+        assert_eq!(jdtls_config("windows", "x86_64"), "config_win");
     }
 
     #[test]
