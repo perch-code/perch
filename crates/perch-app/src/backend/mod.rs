@@ -17095,12 +17095,19 @@ fn wanted_servers(worktree: &Path, files: &[perch_git::ChangedFile]) -> Vec<perc
 }
 
 /// Start the server of the kind a newly opened file wants, when the
-/// window has none of that kind for its worktree yet.
+/// window has none of that kind for its worktree yet, or the one it has
+/// has ended.
 async fn start_server_for_file(ctx: &Ctx, navigation_id: u64, path: &str) {
     let Some(kind) = perch_lsp::ServerKind::for_path(path) else {
         return;
     };
-    if !ctx.language_servers.lock().await.contains_key(&kind) {
+    let wanted = ctx
+        .language_servers
+        .lock()
+        .await
+        .get(&kind)
+        .is_none_or(|client| client.has_ended());
+    if wanted {
         start_server(ctx, navigation_id, kind).await;
     }
 }
@@ -17111,7 +17118,6 @@ async fn start_server_for_file(ctx: &Ctx, navigation_id: u64, path: &str) {
 /// leaves that start to finish.
 async fn start_server(ctx: &Ctx, navigation_id: u64, kind: perch_lsp::ServerKind) {
     let checkout = &ctx.slot;
-    let slot = &ctx.language_servers;
     let events = &ctx.events;
     let navigation_requests = &ctx.navigation_requests;
     let Some(worktree) = checkout.lock().ok().and_then(|g| {
@@ -17166,27 +17172,54 @@ async fn start_server(ctx: &Ctx, navigation_id: u64, kind: perch_lsp::ServerKind
         }
         Err(_) => return,
     };
+    show_server(ctx, navigation_id, &worktree, spec).await;
+}
+
+/// Put the server `spec` runs for `worktree` on show: the one already on
+/// show, else one this window set aside, else a new one. One on show that
+/// has ended gives way to a new one; any other it takes the place of is
+/// set aside.
+async fn show_server(ctx: &Ctx, navigation_id: u64, worktree: &Path, spec: perch_lsp::ServerSpec) {
+    let checkout = &ctx.slot;
+    let slot = &ctx.language_servers;
+    let events = &ctx.events;
+    let navigation_requests = &ctx.navigation_requests;
+    let kind = spec.kind;
 
     let serves = |client: &perch_lsp::Client| {
-        client.root() == worktree.as_path() && client.binary() == spec.binary.as_path()
+        client.root() == worktree && client.binary() == spec.binary.as_path()
     };
-    if let Some(client) = slot.lock().await.get(&kind).filter(|c| serves(c)) {
-        client.tell_status_again();
-        return;
+    {
+        let mut language_servers = slot.lock().await;
+        match language_servers.get(&kind) {
+            // Crashed, or killed for output that couldn't be read: a new
+            // one starts in its place.
+            Some(client) if client.has_ended() => {
+                tracing::info!(server = kind.name(), "language server let go: it has ended");
+                if let Some(ended) = language_servers.remove(&kind) {
+                    kept_servers::let_go(ended);
+                }
+            }
+            Some(client) if serves(client) => {
+                client.tell_status_again();
+                return;
+            }
+            _ => {}
+        }
     }
 
-    let client = match ctx.kept_servers.take(ctx.window, &worktree, kind, &spec.binary) {
+    let client = match ctx.kept_servers.take(ctx.window, worktree, kind, &spec.binary) {
         Some(client) => {
             tracing::info!(server = kind.name(), "language server taken up again");
             client
         }
         None => {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-            forward_language_server_events(ctx, &worktree, kind, &spec.binary, rx);
-            match perch_lsp::Client::start(spec, &worktree, tx).await {
+            forward_language_server_events(ctx, worktree, kind, &spec.binary, rx);
+            match perch_lsp::Client::start(spec, worktree, tx).await {
                 Ok(client) => {
                     tracing::info!(server = kind.name(), "language server started");
-                    for message in perch_lsp::start_warnings(kind, &worktree) {
+                    for message in perch_lsp::start_warnings(kind, worktree) {
                         send_if_current(
                             navigation_requests,
                             checkout,
@@ -26457,5 +26490,98 @@ read eof || true
             "{events:?}"
         );
         assert!(ctx.item(&item.id).unwrap().is_closed());
+    }
+
+    /// A language server that answers the lifecycle requests and, given a
+    /// number of seconds, exits on its own that long after the handshake.
+    const ENDING_SERVER: &str = r#"
+import json, sys, time
+while True:
+    length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            sys.exit(0)
+        if line in (b"\r\n", b"\n"):
+            break
+        name, _, value = line.decode().partition(":")
+        if name.lower() == "content-length":
+            length = int(value)
+    message = json.loads(sys.stdin.buffer.read(length))
+    method = message.get("method")
+    if method == "exit":
+        sys.exit(0)
+    if method == "initialized" and len(sys.argv) > 1:
+        time.sleep(float(sys.argv[1]))
+        sys.exit(1)
+    if "id" in message:
+        result = {"capabilities": {}} if method == "initialize" else None
+        body = json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}).encode()
+        sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+        sys.stdout.buffer.flush()
+"#;
+
+    /// A language server that has ended, crashed say, answers nothing: it
+    /// is let go rather than set aside, one that ends once set aside is not
+    /// taken up again, and one on show gives way to a new one at the next
+    /// start rather than being told failed again.
+    #[tokio::test]
+    async fn a_language_server_that_has_ended_gives_way_to_a_new_one() {
+        use perch_lsp::ServerKind;
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let tree = tempfile::tempdir().unwrap();
+        let worktree = std::fs::canonicalize(tree.path()).unwrap();
+        let item = store_pull(&ctx, 11);
+        open_in_slot(&ctx, &item);
+        let navigation_id = ctx.navigation_requests.begin_current();
+        if let Some(open) = ctx.slot.lock().unwrap().as_mut() {
+            open.checkout.worktree = worktree.clone();
+            open.navigation_id = navigation_id;
+        }
+        let script = worktree.join("server.py");
+        std::fs::write(&script, ENDING_SERVER).unwrap();
+        let spec = |ends_after: Option<&str>| perch_lsp::ServerSpec {
+            kind: ServerKind::Gopls,
+            binary: "python3".into(),
+            args: std::iter::once(script.display().to_string())
+                .chain(ends_after.map(String::from))
+                .collect(),
+            options: serde_json::Value::Null,
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ending = perch_lsp::Client::start(spec(Some("0.5")), &worktree, tx)
+            .await
+            .unwrap();
+
+        ctx.kept_servers.keep(ctx.window, ending.clone()).await;
+        assert_eq!(ctx.kept_servers.clients().len(), 1, "set aside while it runs");
+        let ended = async {
+            while !ending.has_ended() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), ended)
+            .await
+            .expect("the server ends");
+        let python = Path::new("python3");
+        let taken = ctx.kept_servers.take(ctx.window, &worktree, ServerKind::Gopls, python);
+        assert!(taken.is_none(), "taken up again once ended");
+        assert!(ctx.kept_servers.clients().is_empty(), "still set aside once ended");
+        ctx.kept_servers.keep(ctx.window, ending.clone()).await;
+        assert!(ctx.kept_servers.clients().is_empty(), "set aside once ended");
+
+        ctx.language_servers
+            .lock()
+            .await
+            .insert(ServerKind::Gopls, ending.clone());
+        show_server(&ctx, navigation_id, &worktree, spec(None)).await;
+        let shown = ctx.language_servers.lock().await.get(&ServerKind::Gopls).cloned();
+        let shown = shown.expect("a server on show");
+        assert!(!Arc::ptr_eq(&shown, &ending), "the one that ended is still on show");
+        assert!(!shown.has_ended());
+        assert_ne!(shown.pid(), ending.pid(), "no new process");
+        assert!(ctx.kept_servers.clients().is_empty(), "the one that ended is set aside");
+        shown.shutdown().await;
     }
 }

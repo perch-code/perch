@@ -44,8 +44,17 @@ impl KeptServers {
     /// given are closed first, so it reads them from disk when taken up
     /// again. The oldest past `KEPT` is stopped, and this one is stopped
     /// after `KEEP_FOR` unless it is taken up before. One whose files
-    /// can't be closed within `CLOSE_WAIT` is stopped instead of kept.
+    /// can't be closed within `CLOSE_WAIT` is stopped instead of kept, and
+    /// one that has ended is let go.
     pub(super) async fn keep(&self, window: WindowId, client: Arc<perch_lsp::Client>) {
+        if client.has_ended() {
+            tracing::info!(
+                server = client.kind().name(),
+                "language server let go, not kept: it has ended"
+            );
+            let_go(client);
+            return;
+        }
         if tokio::time::timeout(CLOSE_WAIT, client.close_documents())
             .await
             .is_err()
@@ -111,7 +120,9 @@ impl KeptServers {
     }
 
     /// The server of `kind` that `window` set aside for `root`, run by
-    /// `binary`, taken back out.
+    /// `binary`, taken back out. Those that have ended since they were set
+    /// aside are let go first: taken up, a crashed one would stand in the
+    /// way of a new one.
     pub(super) fn take(
         &self,
         window: WindowId,
@@ -119,6 +130,23 @@ impl KeptServers {
         kind: perch_lsp::ServerKind,
         binary: &Path,
     ) -> Option<Arc<perch_lsp::Client>> {
+        let ended: Vec<_> = match self.0.lock() {
+            Ok(mut kept) => {
+                let (ended, running) = std::mem::take(&mut *kept)
+                    .into_iter()
+                    .partition(|k: &Kept| k.client.has_ended());
+                *kept = running;
+                ended
+            }
+            Err(_) => Vec::new(),
+        };
+        for kept in ended {
+            tracing::info!(
+                server = kept.client.kind().name(),
+                "kept language server let go: it has ended"
+            );
+            let_go(kept.client);
+        }
         self.take_where(|k| {
             k.window == window
                 && k.client.root() == root
@@ -192,6 +220,14 @@ impl KeptServers {
         let i = kept.iter().position(wanted)?;
         Some(kept.remove(i).client)
     }
+}
+
+/// Let go of a server that has ended. Stopped all the same, which is quick
+/// for one that's gone: a failure it has yet to tell would read as that of
+/// the one that takes its place, and one whose output closed while it ran
+/// on is killed.
+pub(super) fn let_go(client: Arc<perch_lsp::Client>) {
+    tokio::spawn(async move { client.shutdown().await });
 }
 
 /// The resident memory in KB of each of `pids`, with that of every process

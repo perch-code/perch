@@ -50,6 +50,10 @@ const EXIT_GRACE: Duration = Duration::from_secs(3);
 /// How long a killed server is waited on to be gone.
 const KILL_WAIT: Duration = Duration::from_secs(1);
 
+/// How long a server that exits during its start is waited on to say why:
+/// its error output is read for up to half a second once its output closes.
+const EXIT_WAIT: Duration = Duration::from_secs(1);
+
 /// What the client tells the caller about, outside of request replies.
 #[derive(Debug, Clone)]
 pub enum ServerEvent {
@@ -117,6 +121,9 @@ pub struct Client {
     kill: mpsc::UnboundedSender<String>,
     /// True once the server process has ended and been reaped.
     ended: tokio::sync::watch::Receiver<bool>,
+    /// True once the read loop is done: `exited` set, what was waiting
+    /// failed, and the failure told unless stopping.
+    read_ended: tokio::sync::watch::Receiver<bool>,
     /// The server process, for a bug report's memory and uptime.
     pid: Option<u32>,
     /// When it was started.
@@ -126,7 +133,7 @@ pub struct Client {
 impl Client {
     /// Start a server rooted at `root` and drive its output into `events`.
     /// A server whose handshake fails is killed before the error comes
-    /// back.
+    /// back; one that exits during it fails with what it said.
     pub async fn start(
         spec: ServerSpec,
         root: &Path,
@@ -182,6 +189,7 @@ impl Client {
         let stopping = Arc::new(AtomicBool::new(false));
         let (kill, mut kill_asked) = mpsc::unbounded_channel::<String>();
         let (ended_tx, ended) = tokio::sync::watch::channel(false);
+        let (read_ended_tx, read_ended) = tokio::sync::watch::channel(false);
 
         let client = Arc::new(Self {
             stdin: Arc::new(Mutex::new(stdin)),
@@ -196,6 +204,7 @@ impl Client {
             stopping: stopping.clone(),
             kill,
             ended,
+            read_ended,
             pid,
             started: std::time::Instant::now(),
         });
@@ -234,6 +243,7 @@ impl Client {
                         reason: client.exited_error().to_string(),
                     }));
                 }
+                let _ = read_ended_tx.send(true);
             });
         }
 
@@ -271,11 +281,25 @@ impl Client {
         });
 
         if let Err(error) = client.initialize(root).await {
+            // A server that exited on its own is told failed by the read
+            // loop, with what it said on its way out, and that is the error
+            // too: rustup's proxy quits at once, maybe before the handshake
+            // reaches it, and a write that fails knows nothing of why. Any
+            // other end is no failure of the server's own: the caller tells
+            // why it did not start, and the read loop is not to tell a
+            // vaguer failure over that.
+            let error = match error {
+                Error::Exited | Error::ExitedSaying(_) if client.exit_noted(EXIT_WAIT).await => {
+                    client.exited_error()
+                }
+                error => {
+                    client.stopping.store(true, Ordering::Relaxed);
+                    error
+                }
+            };
             // Nothing holds a server whose start failed to stop it later,
-            // and the tasks above keep it running. Its end is no failure of
-            // its own: the caller tells why it did not start, and the read
-            // loop is not to tell a vaguer failure over that.
-            client.stopping.store(true, Ordering::Relaxed);
+            // and the tasks above keep it running. One already gone is
+            // left as it is.
             let _ = client.kill.send(format!("its start failed: {error}"));
             client.ended(KILL_WAIT).await;
             return Err(error);
@@ -390,6 +414,13 @@ impl Client {
     /// How long ago the server was started.
     pub fn age(&self) -> Duration {
         self.started.elapsed()
+    }
+
+    /// Whether the server has ended: crashed, say, or killed for output
+    /// that could not be read. One whose output has closed answers nothing
+    /// more, though its process may not be gone yet.
+    pub fn has_ended(&self) -> bool {
+        *self.ended.borrow() || self.exited.get().is_some()
     }
 
     /// The status last sent.
@@ -873,6 +904,14 @@ impl Client {
         // An error is the reaping task gone, and the process with it.
         let waited = tokio::time::timeout(wait, ended.wait_for(|ended| *ended)).await;
         waited.is_ok()
+    }
+
+    /// Wait up to `wait` for the read loop to note that the server has
+    /// exited, and why, and say whether it has.
+    async fn exit_noted(&self, wait: Duration) -> bool {
+        let mut noted = self.read_ended.clone();
+        let _ = tokio::time::timeout(wait, noted.wait_for(|noted| *noted)).await;
+        self.exited.get().is_some()
     }
 }
 
@@ -1397,6 +1436,44 @@ mod tests {
             ],
             kind: ServerKind::RustAnalyzer,
             options: Value::Null,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let started = std::time::Instant::now();
+        let error = Client::start(spec, &std::env::temp_dir(), tx)
+            .await
+            .err()
+            .expect("the start fails");
+        assert!(started.elapsed() < LIFECYCLE_TIMEOUT, "{:?}", started.elapsed());
+        assert_eq!(
+            error.to_string(),
+            "the language server exited: unknown binary 'rust-analyzer'"
+        );
+        let mut statuses = Vec::new();
+        while let Ok(ServerEvent::Status(status)) = rx.try_recv() {
+            statuses.push(status);
+        }
+        assert_eq!(
+            statuses.last(),
+            Some(&Status::Failed { reason: error.to_string() })
+        );
+    }
+
+    /// A server that stops reading before the handshake reaches it fails
+    /// the start with what it says on its way out, not with the failed
+    /// write's bare exit, and is told failed with it.
+    #[tokio::test]
+    async fn a_server_that_exits_before_the_handshake_reaches_it_fails_with_its_reason() {
+        let spec = ServerSpec {
+            binary: PathBuf::from("sh"),
+            args: vec![
+                "-c".into(),
+                "exec 0<&-; sleep 0.2; echo \"error: unknown binary 'rust-analyzer'\" >&2; exit 1"
+                    .into(),
+            ],
+            kind: ServerKind::RustAnalyzer,
+            // Too big for the pipe: the handshake is still being written
+            // when the server closes its input, and the write fails.
+            options: json!({ "padding": "x".repeat(1 << 20) }),
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let started = std::time::Instant::now();
