@@ -3875,6 +3875,7 @@ async fn run(
         item_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
         root_cuts: Arc::new(tokio::sync::Mutex::new(())),
         avatars,
+        assignments: Arc::default(),
         seen_notifications: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         refreshing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         reading_notifications: Default::default(),
@@ -5645,6 +5646,9 @@ struct Ctx {
     root_cuts: Arc<tokio::sync::Mutex<()>>,
     /// The avatar download limit, shared by everything that wants a face.
     avatars: Arc<Semaphore>,
+    /// Held while assignees change. GitHub answers each change with the
+    /// whole list, so answers taken out of order would undo a change.
+    assignments: Arc<tokio::sync::Mutex<()>>,
     /// Notifications already acted on, by id and time, so one GitHub keeps
     /// returning does not refresh an open item again on every poll.
     seen_notifications: Arc<std::sync::Mutex<std::collections::HashSet<(String, Timestamp)>>>,
@@ -9934,8 +9938,9 @@ async fn assignable_users(ctx: &Ctx, repo_full_name: &str) {
 /// Assign `login` to the item's issue or pull request, or take them off
 /// it, and put GitHub's answer in the item. GitHub drops an assignee it
 /// will not take without refusing, so a login missing from the answer is
-/// a notice too.
+/// a notice too. One change at a time, as the Assign menu sends several.
 async fn set_assigned(ctx: &Ctx, item_id: &str, login: &str, assign: bool) {
+    let _one_at_a_time = ctx.assignments.lock().await;
     let Some(item) = ctx.item(item_id) else {
         return;
     };
@@ -18693,6 +18698,7 @@ mod tests {
             item_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             root_cuts: Arc::new(tokio::sync::Mutex::new(())),
             avatars: Arc::new(Semaphore::new(1)),
+            assignments: Arc::default(),
             seen_notifications: Default::default(),
             refreshing: Default::default(),
             reading_notifications: Default::default(),

@@ -1321,8 +1321,9 @@ fn assign_button(
 /// The Assign menu: the reader first, then whoever is assigned, then the
 /// rest of the repository's assignable users in GitHub's order, each
 /// checked while assigned and named after their login. Picking one
-/// assigns them or takes them off. GitHub assigns ten at most, so with
-/// ten the rest are greyed.
+/// assigns them or takes them off and leaves the menu up for the next,
+/// and the box over them narrows them by login or name. GitHub assigns
+/// ten at most, so with ten the rest are greyed.
 fn assign_menu(
     viewer: Option<&str>,
     assigned: &[String],
@@ -1345,15 +1346,16 @@ fn assign_menu(
             people.push((login.to_string(), name_of(login)));
         }
     }
-    let full = assigned.len() >= perch_github::MAX_ASSIGNEES;
-    people.into_iter().fold(Menu::new(), |menu, (login, name)| {
+    let menu = Menu::new()
+        .filter("Filter assignees")
+        .most_checked(perch_github::MAX_ASSIGNEES);
+    people.into_iter().fold(menu, |menu, (login, name)| {
         let on = assigned.iter().any(|a| a.eq_ignore_ascii_case(&login));
         let set = set.clone();
         menu.item(login.clone(), move |item| {
             let item = item
                 .checked(on)
-                .enabled(on || !full)
-                .action(move || set(login.clone(), !on));
+                .toggle(move |assign| set(login.clone(), assign));
             match name {
                 Some(name) => item.detail(name),
                 None => item,
@@ -1820,26 +1822,35 @@ mod tests {
             menu.outline(),
             ["criccomini", "✓ rohan", "✓ FiV0", "agavra", "cadonna"]
         );
+        // Each pick flips one, with the menu still up for the next.
         menu.choose("criccomini");
         menu.choose("rohan");
         menu.choose("FiV0");
+        menu.choose("rohan");
         assert_eq!(
             *picked.borrow(),
             [
                 ("criccomini".to_string(), true),
                 ("rohan".to_string(), false),
                 ("FiV0".to_string(), false),
+                ("rohan".to_string(), true),
             ]
+        );
+        assert_eq!(
+            menu.outline(),
+            ["✓ criccomini", "✓ rohan", "FiV0", "agavra", "cadonna"]
         );
 
         // Ten assigned is GitHub's most: the rest are greyed, and the ten
-        // can still be taken off.
+        // can still be taken off, which frees the rest.
         let ten: Vec<String> = (0..10).map(|n| format!("u{n}")).collect();
         let menu = assign_menu(Some("criccomini"), &ten, &users, set);
         let outline = menu.outline();
         assert_eq!(outline[0], "(criccomini)");
         assert_eq!(outline[1], "✓ u0");
         assert_eq!(outline.last().unwrap(), "(rohan)");
+        menu.choose("u0");
+        assert_eq!(menu.outline()[0], "criccomini");
     }
 
     #[test]

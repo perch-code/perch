@@ -12,9 +12,13 @@
 //! Right and Left open and shut a submenu, Enter or Space picks, Escape
 //! backs out, a letter goes to the next row it starts, and a row's
 //! shortcut picks that row. Picking puts the menu away first and gives
-//! the keyboard back to whatever had it, then runs the row. A row that
+//! the keyboard back to whatever had it, then runs the row, except a row
+//! that toggles: it flips its check and leaves the menu up. A row that
 //! can be taken out of its list shows a × while it is lit; the × or
-//! Delete takes the row out and leaves the menu up.
+//! Delete takes the row out and leaves the menu up. A menu with a filter
+//! has a box over its rows that keeps only those matching what is typed;
+//! the box has the keyboard, but for the keys that move, pick and back
+//! out.
 //!
 //! One menu is up at a time, app-wide, as with native menus.
 
@@ -25,10 +29,15 @@ use std::time::{Duration, Instant};
 
 use floem::event::EventPropagation;
 use floem::kurbo::{Point, Rect, Size};
+use floem::peniko::Brush;
 use floem::prelude::*;
-use floem::reactive::{RwSignal, Scope, SignalGet, SignalUpdate, SignalWith};
+use floem::reactive::{Effect, RwSignal, Scope, SignalGet, SignalTrack, SignalUpdate, SignalWith};
 use floem::ui_events::pointer::PointerButton;
-use floem::views::{dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack};
+use floem::views::editor::SelectionColor;
+use floem::views::{
+    dyn_stack, Container, Decorators, Empty, Label, PlaceholderTextClass, ScrollExt, Stack,
+    TextInput,
+};
 use floem::{View, ViewId};
 
 use crate::icons::SidebarIcon;
@@ -42,6 +51,10 @@ pub struct Menu {
     enabled: bool,
     icon: Option<SidebarIcon>,
     return_focus: Option<ViewId>,
+    /// What the filter box shows while it is empty, for a menu with one.
+    filter: Option<String>,
+    /// The most rows that may be checked at once.
+    most_checked: Option<usize>,
 }
 
 enum Entry {
@@ -55,13 +68,17 @@ pub struct Item {
     label: String,
     icon: Option<SidebarIcon>,
     /// Whether it is checked, for a row of a set; none for a command.
-    checked: Option<bool>,
+    /// A row that toggles flips it while the menu is up.
+    checked: Option<Cell<bool>>,
     enabled: bool,
     shortcut: Option<Shortcut>,
     /// Words at the row's end in the shortcut's place, such as when a
     /// snooze ends.
     detail: Option<String>,
     action: Option<Rc<dyn Fn()>>,
+    /// What picking a row that toggles does in place of `action`, with
+    /// the check's new state.
+    toggle: Option<Rc<dyn Fn(bool)>>,
     /// What the row's × does, for a row that can be taken out of its list.
     remove: Option<Rc<dyn Fn()>>,
     /// Taken out while the menu is up.
@@ -81,6 +98,8 @@ impl Menu {
             enabled: true,
             icon: None,
             return_focus: None,
+            filter: None,
+            most_checked: None,
         }
     }
 
@@ -93,6 +112,7 @@ impl Menu {
             shortcut: None,
             detail: None,
             action: None,
+            toggle: None,
             remove: None,
             gone: Cell::new(false),
         };
@@ -135,6 +155,21 @@ impl Menu {
         self
     }
 
+    /// A box over the rows that keeps only those whose name or detail has
+    /// what is typed in it, in any case, showing `placeholder` while it is
+    /// empty. It has the keyboard while the menu is up.
+    pub fn filter(mut self, placeholder: impl Into<String>) -> Self {
+        self.filter = Some(placeholder.into());
+        self
+    }
+
+    /// No more than `most` rows checked at once: with that many, the rows
+    /// that are not are greyed.
+    pub fn most_checked(mut self, most: usize) -> Self {
+        self.most_checked = Some(most);
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
         !self.entries.iter().any(|e| !matches!(e, Entry::Separator))
     }
@@ -162,10 +197,11 @@ impl Menu {
     pub fn outline(&self) -> Vec<String> {
         self.entries
             .iter()
-            .map(|e| match e {
+            .enumerate()
+            .map(|(index, e)| match e {
                 Entry::Item(i) => {
-                    let mark = if i.checked == Some(true) { "✓ " } else { "" };
-                    if i.enabled {
+                    let mark = if i.is_checked() { "✓ " } else { "" };
+                    if self.live(index) {
                         format!("{mark}{}", i.label)
                     } else {
                         format!("{mark}({})", i.label)
@@ -187,20 +223,60 @@ impl Menu {
         })
     }
 
-    /// Pick the row named `label`, as a click on it would. Panics when
-    /// there is none, or it is greyed.
+    /// Pick the row named `label`, as a click on it would: a row that
+    /// toggles flips. Panics when there is none, or it is greyed.
     #[cfg(test)]
     pub fn choose(&self, label: &str) {
-        let item = self
+        let (index, item) = self
             .entries
             .iter()
-            .find_map(|e| match e {
-                Entry::Item(i) if i.label == label => Some(i),
+            .enumerate()
+            .find_map(|(index, e)| match e {
+                Entry::Item(i) if i.label == label => Some((index, i)),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no {label:?} in {:?}", self.outline()));
-        assert!(item.enabled, "{label:?} is greyed");
-        (item.action.as_ref().expect("no action"))();
+        assert!(self.live(index), "{label:?} is greyed");
+        match &item.toggle {
+            Some(toggle) => toggle(item.flip()),
+            None => (item.action.as_ref().expect("no action"))(),
+        }
+    }
+
+    /// Whether as many rows are checked as may be.
+    fn full(&self) -> bool {
+        self.most_checked.is_some_and(|most| {
+            let checked = self
+                .entries
+                .iter()
+                .filter(|e| matches!(e, Entry::Item(i) if i.is_checked()))
+                .count();
+            checked >= most
+        })
+    }
+
+    /// Whether row `index` can be picked, whatever is typed: not greyed,
+    /// not taken out, and not one more check than the menu takes.
+    fn live(&self, index: usize) -> bool {
+        match &self.entries[index] {
+            Entry::Item(i) => {
+                let over = i.checked.is_some() && !i.is_checked() && self.full();
+                i.enabled && !i.gone.get() && !over
+            }
+            Entry::Submenu { menu, .. } => menu.enabled,
+            Entry::Separator => false,
+        }
+    }
+
+    /// Whether row `index` has `typed`, already in lower case, in its name
+    /// or its detail.
+    fn matches(&self, index: usize, typed: &str) -> bool {
+        let has = |text: &str| text.to_lowercase().contains(typed);
+        match &self.entries[index] {
+            Entry::Item(i) => has(&i.label) || i.detail.as_deref().is_some_and(has),
+            Entry::Submenu { label, .. } => has(label),
+            Entry::Separator => false,
+        }
     }
 }
 
@@ -209,7 +285,15 @@ impl Item {
     /// that is on. A menu with any such row keeps room for the check on
     /// every row, so the names line up whichever is checked.
     pub fn checked(mut self, checked: bool) -> Self {
-        self.checked = Some(checked);
+        self.checked = Some(Cell::new(checked));
+        self
+    }
+
+    /// A check that picking flips, leaving the menu up, for a set any
+    /// number of which may be on: `toggled` runs with the new state.
+    pub fn toggle(mut self, toggled: impl Fn(bool) + 'static) -> Self {
+        self.checked.get_or_insert_with(|| Cell::new(false));
+        self.toggle = Some(Rc::new(toggled));
         self
     }
 
@@ -249,33 +333,26 @@ impl Item {
         self
     }
 
-    fn selectable(&self) -> bool {
-        self.enabled && !self.gone.get()
+    fn is_checked(&self) -> bool {
+        self.checked.as_ref().is_some_and(Cell::get)
+    }
+
+    /// Flip the check, and say what it is now.
+    fn flip(&self) -> bool {
+        let Some(checked) = &self.checked else {
+            return false;
+        };
+        checked.set(!checked.get());
+        checked.get()
     }
 }
 
 impl Entry {
-    fn selectable(&self) -> bool {
-        match self {
-            Entry::Item(i) => i.selectable(),
-            Entry::Submenu { menu, .. } => menu.enabled,
-            Entry::Separator => false,
-        }
-    }
-
     fn label(&self) -> &str {
         match self {
             Entry::Item(i) => &i.label,
             Entry::Submenu { label, .. } => label,
             Entry::Separator => "",
-        }
-    }
-
-    fn height(&self) -> f64 {
-        match self {
-            Entry::Separator => SEPARATOR_HEIGHT,
-            Entry::Item(i) if i.gone.get() => 0.0,
-            _ => ROW_HEIGHT,
         }
     }
 }
@@ -474,8 +551,11 @@ struct Level {
     /// Its size as first laid out, before it was placed.
     measured: RwSignal<Option<Size>>,
     rows: Rc<RefCell<Vec<Option<ViewId>>>>,
-    /// How many rows have been taken out, for the views to redraw by.
-    removed: RwSignal<usize>,
+    /// How many times a row has been taken out or its check flipped, for
+    /// the views to redraw by.
+    changed: RwSignal<usize>,
+    /// What is in the filter box, for a menu with one.
+    query: RwSignal<String>,
 }
 
 /// The menu while it is up.
@@ -555,7 +635,7 @@ fn open(anchor: Anchor, menu: Menu, min_width: f64, keyboard: bool, restore: Opt
     });
     let first = host.level(0, Rc::new(menu), anchor);
     if keyboard {
-        first.highlight.set(first.menu.step(None, 1));
+        first.highlight.set(first.step(None, 1));
     }
     host.levels.set(vec![first]);
     let view = scope.enter(|| host_view(host.clone()));
@@ -563,11 +643,39 @@ fn open(anchor: Anchor, menu: Menu, min_width: f64, keyboard: bool, restore: Opt
     OPEN.with(|open| *open.borrow_mut() = Some(host));
 }
 
-impl Menu {
+impl Level {
+    /// What is typed in the filter box, trimmed and in lower case, as rows
+    /// are matched against it. Tracked, as are changes to the rows.
+    fn typed(&self) -> String {
+        self.changed.track();
+        self.query.with(|q| q.trim().to_lowercase())
+    }
+
+    /// Whether row `index` is drawn for `typed`: not taken out, and
+    /// matching it. Lines have rules of their own.
+    fn shown(&self, index: usize, typed: &str) -> bool {
+        match &self.menu.entries[index] {
+            Entry::Item(i) if i.gone.get() => false,
+            _ => self.menu.matches(index, typed),
+        }
+    }
+
+    /// Whether the line at `index` is drawn for `typed`: with rows drawn
+    /// on both sides of it.
+    fn line_shown(&self, index: usize, typed: &str) -> bool {
+        let n = self.menu.entries.len();
+        (0..index).any(|i| self.shown(i, typed)) && (index + 1..n).any(|i| self.shown(i, typed))
+    }
+
+    fn selectable(&self, index: usize, typed: &str) -> bool {
+        self.menu.live(index) && self.shown(index, typed)
+    }
+
     /// The next row from `from` that can be picked, `by` rows on,
     /// wrapping: the first (or last) with nothing picked.
     fn step(&self, from: Option<usize>, by: isize) -> Option<usize> {
-        let n = self.entries.len() as isize;
+        let typed = self.typed();
+        let n = self.menu.entries.len() as isize;
         if n == 0 {
             return None;
         }
@@ -578,7 +686,7 @@ impl Menu {
         };
         for _ in 0..n {
             at = (at + by).rem_euclid(n);
-            if self.entries[at as usize].selectable() {
+            if self.selectable(at as usize, &typed) {
                 return Some(at as usize);
             }
         }
@@ -587,7 +695,14 @@ impl Menu {
 
     /// Where row `index` starts, down from the top of the panel's content.
     fn row_top(&self, index: usize) -> f64 {
-        GUTTER + self.entries[..index].iter().map(Entry::height).sum::<f64>()
+        let typed = self.typed();
+        let height = |i: usize| match &self.menu.entries[i] {
+            Entry::Separator if self.line_shown(i, &typed) => SEPARATOR_HEIGHT,
+            Entry::Separator => 0.0,
+            _ if self.shown(i, &typed) => ROW_HEIGHT,
+            _ => 0.0,
+        };
+        GUTTER + (0..index).map(height).sum::<f64>()
     }
 }
 
@@ -604,7 +719,8 @@ impl Host {
             highlight: RwSignal::new(None),
             measured: RwSignal::new(None),
             rows: Rc::new(RefCell::new(rows)),
-            removed: RwSignal::new(0),
+            changed: RwSignal::new(0),
+            query: RwSignal::new(String::new()),
         })
     }
 
@@ -654,7 +770,7 @@ impl Host {
         }
         if keyboard {
             if let Some(child) = self.levels.with_untracked(|l| l.get(depth + 1).cloned()) {
-                child.highlight.set(child.menu.step(None, 1));
+                child.highlight.set(child.step(None, 1));
             }
         }
     }
@@ -666,22 +782,32 @@ impl Host {
         }
     }
 
-    /// Pick row `index` of the panel `depth` deep: run an item, open a
-    /// submenu.
+    /// Pick row `index` of the panel `depth` deep: run an item, flip a
+    /// row that toggles, open a submenu.
     fn activate(&self, depth: usize, index: usize, keyboard: bool) {
         let Some(level) = self.levels.with_untracked(|l| l.get(depth).cloned()) else {
             return;
         };
-        match level.menu.entries.get(index) {
-            Some(Entry::Item(item)) if item.enabled => {
-                let action = item.action.clone();
-                self.close();
-                if let Some(action) = action {
-                    action();
+        if index >= level.menu.entries.len() || !level.menu.live(index) {
+            return;
+        }
+        match &level.menu.entries[index] {
+            Entry::Item(item) => match item.toggle.clone() {
+                Some(toggle) => {
+                    let on = item.flip();
+                    level.changed.update(|n| *n += 1);
+                    toggle(on);
                 }
-            }
-            Some(Entry::Submenu { .. }) => self.open_submenu(depth, index, keyboard),
-            _ => {}
+                None => {
+                    let action = item.action.clone();
+                    self.close();
+                    if let Some(action) = action {
+                        action();
+                    }
+                }
+            },
+            Entry::Submenu { .. } => self.open_submenu(depth, index, keyboard),
+            Entry::Separator => {}
         }
     }
 
@@ -697,33 +823,46 @@ impl Host {
         let Some(remove) = item.remove.clone() else {
             return;
         };
-        if !item.selectable() {
+        if !level.menu.live(index) {
             return;
         }
         item.gone.set(true);
-        level.removed.update(|n| *n += 1);
-        // The press on the × took the keyboard from the menu.
-        if let Some(keys) = self.keys.get() {
-            keys.request_focus();
-        }
+        level.changed.update(|n| *n += 1);
         level
             .highlight
-            .set(if keyboard { level.menu.step(Some(index), 1) } else { None });
+            .set(if keyboard { level.step(Some(index), 1) } else { None });
         remove();
     }
 
-    fn key_down(&self, key: &KeyboardEvent) {
+    /// A key while the menu is up. With a filter, the box has the keys
+    /// that type, edit and move along what is typed, and whatever an
+    /// input method is composing with.
+    fn key_down(&self, key: &KeyboardEvent) -> EventPropagation {
         let Some(level) = self.levels.with_untracked(|l| l.last().cloned()) else {
-            return;
+            return EventPropagation::Stop;
         };
         let depth = level.depth;
         let at = level.highlight.get_untracked();
         let plain = key.modifiers.is_empty();
+        let typing = depth == 0 && level.menu.filter.is_some();
+        let edits = matches!(
+            key.code,
+            Code::Space
+                | Code::Backspace
+                | Code::Delete
+                | Code::ArrowLeft
+                | Code::ArrowRight
+                | Code::Home
+                | Code::End
+        );
+        if typing && (key.is_composing || edits) {
+            return EventPropagation::Continue;
+        }
         match key.code {
-            Code::ArrowDown if plain => level.highlight.set(level.menu.step(at, 1)),
-            Code::ArrowUp if plain => level.highlight.set(level.menu.step(at, -1)),
-            Code::Home | Code::PageUp if plain => level.highlight.set(level.menu.step(None, 1)),
-            Code::End | Code::PageDown if plain => level.highlight.set(level.menu.step(None, -1)),
+            Code::ArrowDown if plain => level.highlight.set(level.step(at, 1)),
+            Code::ArrowUp if plain => level.highlight.set(level.step(at, -1)),
+            Code::Home | Code::PageUp if plain => level.highlight.set(level.step(None, 1)),
+            Code::End | Code::PageDown if plain => level.highlight.set(level.step(None, -1)),
             Code::ArrowRight if plain => {
                 if let Some(at) = at {
                     self.open_submenu(depth, at, true);
@@ -742,17 +881,26 @@ impl Host {
                 }
             }
             _ => {
+                // A bare key in a box is typed, not a shortcut.
                 let shortcut = level.menu.entries.iter().position(|e| match e {
-                    Entry::Item(i) => i.enabled && i.shortcut.is_some_and(|s| s.matches(key)),
+                    Entry::Item(i) => {
+                        i.enabled
+                            && i.shortcut.is_some_and(|s| {
+                                s.matches(key) && !(typing && s.modifiers.is_empty())
+                            })
+                    }
                     _ => false,
                 });
                 if let Some(index) = shortcut {
                     self.activate(depth, index, true);
+                } else if typing {
+                    return EventPropagation::Continue;
                 } else if let (true, Key::Character(c)) = (plain, &key.key) {
                     self.type_select(&level, c);
                 }
             }
         }
+        EventPropagation::Stop
     }
 
     /// A letter: the next row, after the one picked, whose name starts
@@ -764,9 +912,10 @@ impl Host {
         }
         let n = level.menu.entries.len();
         let from = level.highlight.get_untracked().map_or(0, |i| i + 1);
+        let shown = level.typed();
         let found = (0..n).map(|k| (from + k) % n).find(|&i| {
-            let entry = &level.menu.entries[i];
-            entry.selectable() && entry.label().to_lowercase().starts_with(&typed)
+            level.selectable(i, &shown)
+                && level.menu.entries[i].label().to_lowercase().starts_with(&typed)
         });
         if found.is_some() {
             level.highlight.set(found);
@@ -791,21 +940,28 @@ fn host_view(host: Rc<Host>) -> impl View {
         move |level| panel(panel_host.clone(), level),
     );
     let root_id = root.id();
-    host.keys.set(Some(root_id));
+    // A filter's box, when there is one, has the keyboard instead.
+    if host.keys.get().is_none() {
+        host.keys.set(Some(root_id));
+    }
     root.on_event_stop(el::PointerDown, move |_, _| press_host.close())
         .on_event_stop(el::PointerWheel, move |_, _| wheel_host.close())
         .on_event_cont(el::PointerMove, move |_, _| move_host.moved.set(true))
-        .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-            key_host.key_down(key);
-            EventPropagation::Stop
-        })
+        // Caught on the way down, ahead of a filter's box.
+        .on_event_with_config(
+            el::KeyDown,
+            floem::context::EventCallbackConfig {
+                phases: floem::context::Phases::CAPTURE_AND_TARGET,
+            },
+            move |_, key: &KeyboardEvent| key_host.key_down(key),
+        )
         .on_event_cont(el::UpdatePhaseLayout, move |_, _| {
             let size = root_id.get_layout_rect().size();
             if size.width > 0.0 && layout_host.window.get_untracked() != size {
                 layout_host.window.set(size);
             }
             if !asked.replace(true) {
-                root_id.request_focus();
+                layout_host.keys.get().unwrap_or(root_id).request_focus();
             }
         })
         .on_cleanup({
@@ -843,15 +999,21 @@ fn panel(host: Rc<Host>, level: Level) -> impl IntoView {
             Entry::Separator => separator(&level, index).into_any(),
             _ => row(host.clone(), &level, index, entry, checks, icons).into_any(),
         })
+        .chain(menu.filter.is_some().then(|| no_matches(&level).into_any()))
         .collect::<Vec<_>>();
+    let filter = menu
+        .filter
+        .clone()
+        .filter(|_| level.depth == 0)
+        .map(|placeholder| filter_box(&host, &level, placeholder));
     let highlight = level.highlight;
-    let scroll_menu = menu.clone();
+    let scroll_level = level.clone();
     let content = Stack::vertical_from_iter(rows)
         .style(|s| s.flex_col().min_width_full().padding(GUTTER))
         .scroll()
         .ensure_visible(move || match highlight.get() {
             Some(i) => {
-                let top = scroll_menu.row_top(i);
+                let top = scroll_level.row_top(i);
                 Rect::new(0.0, top - GUTTER, 1.0, top + ROW_HEIGHT + GUTTER)
             }
             None => Rect::ZERO,
@@ -875,14 +1037,22 @@ fn panel(host: Rc<Host>, level: Level) -> impl IntoView {
     } else {
         MIN_WIDTH
     };
-    let panel = Container::new(content);
+    let panel = Stack::vertical((
+        filter.map_or_else(|| Empty::new().into_any(), IntoView::into_any),
+        content,
+    ));
     let panel_id = panel.id();
     let enter_host = host.clone();
     let leave_host = host.clone();
     let press_host = host.clone();
     panel
+        // A press on a row takes the keyboard from the menu, so it is
+        // handed back.
         .on_event_stop(el::PointerDown, move |_, _| {
-            press_host.pressed_inside.set(true)
+            press_host.pressed_inside.set(true);
+            if let Some(keys) = press_host.keys.get() {
+                keys.request_focus();
+            }
         })
         .on_event_stop(el::PointerWheel, |_, _| {})
         .on_event_cont(el::UpdatePhaseLayout, move |_, _| {
@@ -934,7 +1104,15 @@ fn panel(host: Rc<Host>, level: Level) -> impl IntoView {
             match measured.get() {
                 Some(size) if window.width > 0.0 => {
                     let at = place(anchor, size, window);
-                    s.inset_left(at.x).inset_top(at.y).width(size.width)
+                    let s = s.inset_left(at.x).width(size.width);
+                    // Over the view it hangs from, it keeps its bottom
+                    // edge by the view as rows go.
+                    match anchor {
+                        Anchor::Below(r) if at.y + size.height <= r.y0 => {
+                            s.inset_bottom(window.height - at.y - size.height)
+                        }
+                        _ => s.inset_top(at.y),
+                    }
                 }
                 // Laid out once in the corner to be measured, where the
                 // pointer must not find it.
@@ -945,26 +1123,72 @@ fn panel(host: Rc<Host>, level: Level) -> impl IntoView {
 
 /// The line at `index`, gone with every row on one side of it.
 fn separator(level: &Level, index: usize) -> impl IntoView {
-    let menu = level.menu.clone();
-    let removed = level.removed;
-    let shown = move |entries: &[Entry]| {
-        entries.iter().any(|e| match e {
-            Entry::Item(i) => !i.gone.get(),
-            Entry::Submenu { .. } => true,
-            Entry::Separator => false,
-        })
-    };
+    let level = level.clone();
     Container::new(
         Empty::new().style(|s| s.height(1.0).width_full().background(theme::menu_separator())),
     )
     .style(move |s| {
-        removed.track();
-        let alone = !shown(&menu.entries[..index]) || !shown(&menu.entries[index + 1..]);
+        let alone = !level.line_shown(index, &level.typed());
         s.height(SEPARATOR_HEIGHT)
             .flex_shrink(0.0_f32)
             .items_center()
             .padding_horiz(ROW_PADDING)
             .apply_if(alone, |s| s.hide())
+    })
+}
+
+/// A filter's box, over the rows. It has the keyboard from the start, and
+/// typing lights the first row left.
+fn filter_box(host: &Host, level: &Level, placeholder: String) -> impl IntoView {
+    let input = TextInput::new(level.query)
+        .placeholder(placeholder)
+        .debug_name("menu-filter")
+        .style(|s| {
+            s.width_full()
+                .min_width(0.0)
+                .height(ROW_HEIGHT)
+                .padding_horiz(ROW_PADDING)
+                .background(theme::canvas())
+                .hover(|s| s.background(theme::canvas()))
+                .border(1.0)
+                .border_color(theme::border())
+                .border_radius(ROW_RADIUS)
+                .focus(|s| s.border_color(theme::accent()))
+                .set(SelectionColor, Brush::Solid(theme::selection_bg()))
+                .class(PlaceholderTextClass, |s| s.color(theme::fg_subtle()))
+        });
+    host.keys.set(Some(input.view_id()));
+    let level = level.clone();
+    Effect::new(move |last: Option<String>| {
+        let typed = level.query.get();
+        if last.is_some_and(|last| last != typed) && !typed.trim().is_empty() {
+            let first = Effect::untrack(|| level.step(None, 1));
+            level.highlight.set(first);
+        }
+        typed
+    });
+    Container::new(input).style(|s| {
+        s.padding(GUTTER)
+            .padding_bottom(0.0)
+            .flex_shrink(0.0_f32)
+    })
+}
+
+/// What a filter shows when no row has what is typed.
+fn no_matches(level: &Level) -> impl IntoView {
+    let level = level.clone();
+    Container::new(Label::derived(|| "No matches".to_string()).style(|s| {
+        s.color(theme::fg_subtle()).selectable(false)
+    }))
+    .debug_name("menu-no-matches")
+    .style(move |s| {
+        let typed = level.typed();
+        let any = (0..level.menu.entries.len()).any(|i| level.shown(i, &typed));
+        s.height(ROW_HEIGHT)
+            .flex_shrink(0.0_f32)
+            .items_center()
+            .padding_horiz(ROW_PADDING)
+            .apply_if(any, |s| s.hide())
     })
 }
 
@@ -978,30 +1202,46 @@ fn row(
     checks: bool,
     icons: bool,
 ) -> impl IntoView {
-    let (label, icon, checked, shortcut, detail, submenu) = match entry {
+    let (label, icon, shortcut, detail, submenu, enabled) = match entry {
         Entry::Item(i) => (
             i.label.clone(),
             i.icon,
-            i.checked == Some(true),
             i.shortcut,
             i.detail.clone(),
             false,
+            i.enabled,
         ),
-        Entry::Submenu { label, menu } => (label.clone(), menu.icon, false, None, None, true),
+        Entry::Submenu { label, menu } => {
+            (label.clone(), menu.icon, None, None, true, menu.enabled)
+        }
         Entry::Separator => unreachable!("a separator is not a row"),
     };
     let removable = matches!(entry, Entry::Item(i) if i.remove.is_some());
-    let enabled = entry.selectable();
+    // Greyed for good. A row of a full set greys only its name, as it
+    // shows no check and has no icon.
     let fg = if enabled { theme::fg } else { theme::fg_subtle };
     let highlight = level.highlight;
     let depth = level.depth;
-    let removed = level.removed;
     let menu = level.menu.clone();
+    let live = {
+        let menu = menu.clone();
+        move || menu.live(index)
+    };
 
+    let check_level = level.clone();
+    let check_name = format!("menu-check:{}", entry.label());
     let check = checks.then(|| {
         Container::new(
             sidebar_glyph(SidebarIcon::Check, fg)
-                .style(move |s| s.size(14.0, 14.0).apply_if(!checked, |s| s.hide())),
+                .style(move |s| {
+                    check_level.changed.track();
+                    let checked = matches!(
+                        &check_level.menu.entries[index],
+                        Entry::Item(i) if i.is_checked()
+                    );
+                    s.size(14.0, 14.0).apply_if(!checked, |s| s.hide())
+                })
+                .debug_name(check_name),
         )
         .style(|s| {
             s.width(16.0)
@@ -1018,8 +1258,15 @@ fn row(
             .style(|s| s.width(16.0).flex_shrink(0.0_f32))
             .into_any(),
     });
+    let name_level = level.clone();
     let name = Label::derived(move || label.clone()).style(move |s| {
-        s.color(fg())
+        name_level.changed.track();
+        let fg = if name_level.menu.live(index) {
+            theme::fg()
+        } else {
+            theme::fg_subtle()
+        };
+        s.color(fg)
             .text_ellipsis()
             .min_width(0.0)
             .flex_grow(1.0_f32)
@@ -1094,8 +1341,10 @@ fn row(
     level.rows.borrow_mut()[index] = Some(row_id);
     let enter_host = host.clone();
     let up_host = host.clone();
+    let enter_live = live.clone();
+    let style_level = level.clone();
     row.on_event_cont(el::PointerEnter, move |_, _| {
-        if !enabled {
+        if !enter_live() {
             if highlight.get_untracked().is_some() {
                 highlight.set(None);
             }
@@ -1114,7 +1363,7 @@ fn row(
     .on_event_stop(el::PointerUp, move |cx, up: &PointerButtonEvent| {
         let dragged = up_host.moved.get() && up_host.opened.elapsed() >= RELEASE_GRACE;
         let released = up_host.pressed_inside.get() || dragged;
-        if !(enabled && released) {
+        if !(live() && released) {
             return;
         }
         let at = cx.world_transform.inverse() * up.state.logical_point();
@@ -1131,16 +1380,15 @@ fn row(
     })
     .debug_name(format!("menu-row:{}", entry.label()))
     .style(move |s| {
-        let lit = enabled && highlight.get() == Some(index);
-        removed.track();
-        let gone = matches!(&menu.entries[index], Entry::Item(i) if i.gone.get());
+        let typed = style_level.typed();
+        let lit = menu.live(index) && highlight.get() == Some(index);
         s.height(ROW_HEIGHT)
             .flex_shrink(0.0_f32)
             .items_center()
             .padding_horiz(ROW_PADDING)
             .border_radius(ROW_RADIUS)
             .apply_if(lit, |s| s.background(theme::menu_hover()))
-            .apply_if(gone, |s| s.hide())
+            .apply_if(!style_level.shown(index, &typed), |s| s.hide())
     })
 }
 
@@ -1495,6 +1743,114 @@ mod tests {
         harness.dispatch_event(named_key(Code::Enter, NamedKey::Enter));
         settle(&mut harness);
         assert_eq!(*log.borrow(), vec!["x perch", "x slatedb", "add"]);
+        assert!(!is_open());
+    }
+
+    /// Three people, one checked, at most two of whom may be, behind a
+    /// filter.
+    fn people(log: Rc<RefCell<Vec<String>>>) -> Menu {
+        let toggled = |login: &'static str| {
+            let log = log.clone();
+            move |on: bool| log.borrow_mut().push(format!("{login} {}", if on { "on" } else { "off" }))
+        };
+        Menu::new()
+            .filter("Filter people")
+            .most_checked(2)
+            .item("agavra", |i| {
+                i.detail("Almog Gavra").checked(true).toggle(toggled("agavra"))
+            })
+            .item("rohan", |i| i.detail("Rohan Desai").toggle(toggled("rohan")))
+            .item("vigneshc", |i| i.toggle(toggled("vigneshc")))
+    }
+
+    fn click_row(harness: &mut HeadlessHarness, name: &str) {
+        let at = rect(harness, &format!("menu-row:{name}")).center();
+        harness.pointer_move(at.x, at.y);
+        settle(harness);
+        harness.click(at.x, at.y);
+        settle(harness);
+    }
+
+    fn type_text(harness: &mut HeadlessHarness, text: &str) {
+        for c in text.chars() {
+            let code = Code::from_str(&format!("Key{}", c.to_ascii_uppercase())).unwrap();
+            harness.dispatch_event(key(code, Key::Character(c.to_string())));
+        }
+        settle(harness);
+    }
+
+    #[test]
+    fn a_row_that_toggles_flips_in_place_and_a_full_set_greys_the_rest() {
+        let (mut harness, log) = window_with((40.0, 30.0), (600.0, 400.0), people);
+        open_it(&mut harness);
+        assert!(!rect(&harness, "menu-check:agavra").is_zero_area());
+        assert!(rect(&harness, "menu-check:rohan").is_zero_area());
+
+        click_row(&mut harness, "rohan");
+        assert_eq!(*log.borrow(), vec!["rohan on"]);
+        assert!(is_open(), "the menu stays up");
+        assert!(!rect(&harness, "menu-check:rohan").is_zero_area(), "checked now");
+
+        // Two is the most: the third is greyed and does nothing.
+        click_row(&mut harness, "vigneshc");
+        assert_eq!(*log.borrow(), vec!["rohan on"]);
+        click_row(&mut harness, "agavra");
+        click_row(&mut harness, "vigneshc");
+        assert_eq!(*log.borrow(), vec!["rohan on", "agavra off", "vigneshc on"]);
+        assert!(rect(&harness, "menu-check:agavra").is_zero_area());
+        assert!(is_open());
+        close();
+    }
+
+    #[test]
+    fn a_filter_keeps_the_rows_with_what_is_typed_and_keeps_the_keyboard() {
+        let (mut harness, log) = window_with((40.0, 30.0), (600.0, 400.0), people);
+        open_it(&mut harness);
+        let filter = named(harness.root_id(), "menu-filter").expect("a box");
+        assert!(harness.is_focused(filter), "the box has the keyboard");
+        let panel = rect(&harness, "menu-panel:0");
+        assert!(rect(&harness, "menu-filter").y1 < rect(&harness, "menu-row:agavra").y0);
+
+        // By name, not only login: Rohan Desai.
+        type_text(&mut harness, "desai");
+        assert!(rect(&harness, "menu-row:agavra").is_zero_area());
+        assert!(rect(&harness, "menu-row:vigneshc").is_zero_area());
+        assert!(!rect(&harness, "menu-row:rohan").is_zero_area());
+        assert!(rect(&harness, "menu-no-matches").is_zero_area());
+        let narrowed = rect(&harness, "menu-panel:0");
+        assert_eq!(narrowed.y0, panel.y0, "it shrinks from the bottom");
+        assert!(narrowed.height() < panel.height());
+
+        // The first row left is lit: Enter flips it, and the box keeps
+        // the keyboard.
+        harness.dispatch_event(named_key(Code::Enter, NamedKey::Enter));
+        settle(&mut harness);
+        assert_eq!(*log.borrow(), vec!["rohan on"]);
+        assert!(is_open());
+        assert!(harness.is_focused(filter));
+
+        for _ in 0.."desai".len() {
+            harness.dispatch_event(named_key(Code::Backspace, NamedKey::Backspace));
+        }
+        type_text(&mut harness, "zz");
+        assert!(rect(&harness, "menu-row:rohan").is_zero_area());
+        assert!(!rect(&harness, "menu-no-matches").is_zero_area());
+
+        // The arrows move through the rows left; a click keeps the
+        // keyboard in the box.
+        harness.dispatch_event(named_key(Code::Backspace, NamedKey::Backspace));
+        harness.dispatch_event(named_key(Code::Backspace, NamedKey::Backspace));
+        type_text(&mut harness, "a");
+        harness.dispatch_event(named_key(Code::ArrowDown, NamedKey::ArrowDown));
+        harness.dispatch_event(named_key(Code::Enter, NamedKey::Enter));
+        settle(&mut harness);
+        assert_eq!(*log.borrow(), vec!["rohan on", "rohan off"]);
+        click_row(&mut harness, "agavra");
+        assert_eq!(*log.borrow(), vec!["rohan on", "rohan off", "agavra off"]);
+        assert!(harness.is_focused(filter));
+
+        harness.dispatch_event(named_key(Code::Escape, NamedKey::Escape));
+        settle(&mut harness);
         assert!(!is_open());
     }
 
