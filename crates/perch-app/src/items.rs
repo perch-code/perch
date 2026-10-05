@@ -915,7 +915,9 @@ pub fn work_allowed(item: &Item, viewer: Option<&str>) -> bool {
 /// Whether rust-analyzer or jdtls, which run a checkout's own code as they
 /// load it, may start on `item` without asking.
 ///
-/// `[repo.lsp] trust` decides first. Then the reader's answer for the item
+/// `[repo.lsp] trust` decides first, and so does Always trust for the
+/// server on the item's repository (`server_trusted`), each as the reader's
+/// say on everything there. Then the reader's answer for the item
 /// (`granted`): Trust and start, or the `false` a branch cut from
 /// untrusted code starts with, which outranks the rules below, so a pull
 /// request the reader opens from such a branch asks too. Else only the
@@ -929,8 +931,9 @@ pub fn code_trusted(
     viewer: Option<&str>,
     config: &perch_github::Config,
     granted: Option<bool>,
+    server_trusted: bool,
 ) -> bool {
-    if config.lsp_trusted(&item.repo_full_name) {
+    if server_trusted || config.lsp_trusted(&item.repo_full_name) {
         return true;
     }
     if let Some(granted) = granted {
@@ -941,10 +944,11 @@ pub fn code_trusted(
 
 /// Whether a branch cut from `source` starts out untrusted: it holds the
 /// source's code, and the reader neither trusted the source (`granted`)
-/// nor wrote it. Neither the config nor `[repo.lsp] trust` counts here.
-/// The cut is the reader's own branch by the rule, so without its `false`
-/// a stranger's code would pass as the reader's once the repository was
-/// added to the config, or once `[repo.lsp] trust` was turned off.
+/// nor wrote it. Neither the config, `[repo.lsp] trust` nor Always trust
+/// counts here. The cut is the reader's own branch by the rule, so without
+/// its `false` a stranger's code would pass as the reader's once the
+/// repository was added to the config, or once `[repo.lsp] trust` or
+/// Always trust was turned off.
 pub fn cut_inherits_distrust(source: &Item, viewer: Option<&str>, granted: Option<bool>) -> bool {
     !granted.unwrap_or_else(|| readers_own_code(source, viewer))
 }
@@ -1388,7 +1392,7 @@ mod tests {
         notes.resolve(None); // local/notes, as the startup scan resolves it
         config.repo = vec![perch, slatedb, notes];
         let trusted = |item: &Item, viewer: Option<&str>, granted: Option<bool>| {
-            code_trusted(item, viewer, &config, granted)
+            code_trusted(item, viewer, &config, granted, false)
         };
         let with_head = |item: &Item, head: Option<&str>| {
             let mut item = item.clone();
@@ -1425,6 +1429,9 @@ mod tests {
         // [repo.lsp] trust decides first.
         assert!(trusted(&find("slatedb-pr"), Some("someone-else"), None));
         assert!(trusted(&find("slatedb-pr"), Some("someone-else"), Some(false)));
+        // So does Always trust for the server, in the config or not.
+        assert!(!trusted(&elsewhere, Some("someone-else"), Some(false)));
+        assert!(code_trusted(&elsewhere, Some("someone-else"), &config, Some(false), true));
 
         let branch = find("branch");
         assert!(trusted(&branch, None, None));
@@ -1443,7 +1450,7 @@ mod tests {
         let mut note = branch.clone();
         note.repo_full_name = "local/notes".into();
         assert!(trusted(&note, None, None));
-        assert!(!code_trusted(&note, None, &perch_github::Config::default(), None));
+        assert!(!code_trusted(&note, None, &perch_github::Config::default(), None, false));
     }
 
     /// A branch cut from someone else's code starts untrusted wherever it

@@ -16,7 +16,7 @@ use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
-use crate::state::{AppState, ServerOffer, ToastKind, ToastOpen, Tone};
+use crate::state::{AppState, Checked, ServerOffer, ToastKind, ToastOpen, Tone, TrustAsk};
 use crate::theme;
 use crate::ui::{agents, widgets};
 
@@ -184,7 +184,8 @@ fn message(
 /// start the servers held back for it: its line, the button that runs the
 /// install, with the command as its tip, or Trust and start, and the close
 /// that turns it down for the session. While an install runs, the line
-/// says so and the buttons go.
+/// says so and the buttons go. An offer to trust has an Always trust box
+/// under its line for each server it would start.
 fn server_offer(state: AppState, backend: Rc<Backend>, token: u64, offer: ServerOffer) -> impl IntoView {
     let kind = offer.kind;
     let installs = offer.trust.is_none();
@@ -206,8 +207,9 @@ fn server_offer(state: AppState, backend: Rc<Backend>, token: u64, offer: Server
             .flex_basis(0.0)
     });
     let button = match (offer.trust.clone(), offer.install.clone()) {
-        (Some(item_id), _) => offer_button(offer.action, move || {
-            trust_and_start(state, &backend, &item_id)
+        (Some(ask), _) => offer_button(offer.action, move || {
+            let everywhere = state.trust_everywhere.get_untracked();
+            trust_and_start(state, &backend, &ask.item_id, everywhere)
         })
         .into_any(),
         (None, Some(install)) => {
@@ -227,19 +229,71 @@ fn server_offer(state: AppState, backend: Rc<Backend>, token: u64, offer: Server
         state.decline_offer(token, &key)
     })
     .style(move |s| s.apply_if(installing(), |s| s.hide()));
-    Stack::horizontal((dot(theme::draft), line, button, close))
-        .style(|s| s.items_center().width_full().gap(9.0))
+    let top = Stack::horizontal((dot(theme::draft), line, button, close))
+        .style(|s| s.items_center().width_full().gap(9.0));
+    match offer.trust {
+        Some(ask) => Stack::vertical((top, always_trust(state, ask)))
+            .style(|s| s.width_full().gap(2.0))
+            .into_any(),
+        None => top.into_any(),
+    }
+}
+
+/// The Always trust boxes under a trust offer's line, one for each server
+/// held back. A box ticked when Trust and start is pressed trusts that
+/// server on everything in the item's repository, so nothing there asks
+/// for it again; one left empty trusts the item alone. A click on the
+/// words ticks the box too.
+fn always_trust(state: AppState, ask: TrustAsk) -> impl IntoView {
+    let rows = ask.kinds.into_iter().map(move |kind| {
+        let toggle = move || {
+            state.trust_everywhere.update(|ticked| match ticked.iter().position(|k| *k == kind) {
+                Some(at) => _ = ticked.remove(at),
+                None => ticked.push(kind),
+            })
+        };
+        let ticked = move || match state.trust_everywhere.with(|ticked| ticked.contains(&kind)) {
+            true => Checked::Full,
+            false => Checked::Empty,
+        };
+        let words = format!("Always trust {} in {}", kind.name(), ask.repo);
+        Stack::horizontal((
+            widgets::checkbox(ticked, toggle),
+            Label::new(words.clone()).style(|s| {
+                s.font_size(theme::TEXT_META)
+                    .color(theme::fg_muted())
+                    .text_wrap()
+                    .min_width(0.0)
+                    .flex_grow(1.0_f32)
+                    .flex_basis(0.0)
+                    .margin_left(2.0)
+                    .selectable(false)
+            }),
+        ))
+        .on_event_stop(el::Click, move |_, _| toggle())
+        .debug_name(words)
+        .style(|s| widgets::clickable(s).items_center().width_full())
+    });
+    // The box under the line's first letter: the dot and the gap after it
+    // are 18px, and the box sits 5px into its 26px target. The target's
+    // own 5px under it stands in for the card's padding.
+    Stack::vertical_from_iter(rows).style(|s| s.width_full().padding_left(13.0).margin_bottom(-5.0))
 }
 
 /// Trust and start, from the toast or the worktree menu: trust `item_id`'s
-/// code for good and start what was held back for it. The offers to trust
-/// go either way. The ask was about the item it named, so once another is
+/// code for good, and `everywhere` on all of its repository, and start
+/// what was held back for it. The offers to trust go either way. The ask was about the item it named, so once another is
 /// open a click only takes them down; the backend checks again that the
 /// item is still on show before it records anything.
-pub(crate) fn trust_and_start(state: AppState, backend: &Backend, item_id: &str) {
+pub(crate) fn trust_and_start(
+    state: AppState,
+    backend: &Backend,
+    item_id: &str,
+    everywhere: Vec<perch_lsp::ServerKind>,
+) {
     state.drop_trust_offers(None);
     if state.open_item.get_untracked().as_deref() == Some(item_id) {
-        backend.trust_language_servers(item_id);
+        backend.trust_language_servers(item_id, everywhere);
     }
 }
 
@@ -400,5 +454,77 @@ mod tests {
             press("other").is_empty(),
             "the toast was about another item"
         );
+    }
+
+    /// Under the line, an Always trust box for each server held, the box
+    /// under the line's first letter, inside the card. A click on the
+    /// words ticks it, and Trust and start then sends the server to trust
+    /// on the whole repository. A new ask starts with it empty.
+    #[test]
+    fn always_trust_is_ticked_and_sent_with_trust_and_start() {
+        use std::rc::Rc;
+
+        use floem::headless::{HeadlessHarness, TestRoot};
+        use floem::prelude::*;
+
+        use crate::backend::{Backend, Command};
+        use crate::review::model::ReviewState;
+        use crate::state::{AppState, ServerOffer};
+
+        let state = AppState::new();
+        let review = ReviewState::new();
+        state.review.set(Some(review));
+        let (backend, mut commands) = Backend::recording();
+        let root = TestRoot::new();
+        let view = crate::ui::app_view(state, review, Rc::new(backend));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        let settle = |harness: &mut HeadlessHarness| {
+            harness.rebuild();
+            harness.paint();
+        };
+        let now = "2026-09-20T12:00:00Z".parse().unwrap();
+        let mut item = perch_github::Item::new("slatedb/slatedb", now);
+        item.id = "pr".into();
+        item.subject = Some(perch_github::ItemSubject::PullRequest(
+            crate::review::header::tests::pull_request(2125),
+        ));
+        let rust = perch_lsp::ServerKind::RustAnalyzer;
+        let jdtls = perch_lsp::ServerKind::Jdtls;
+        state.open_item.set(Some("pr".into()));
+        state.offer_server(ServerOffer::held(&item, &[rust, jdtls]), false);
+        settle(&mut harness);
+
+        let toast = named(harness.root_id(), "toast").expect("no toast");
+        let card = toast.get_visual_rect_no_clip();
+        let line = named(toast, &ServerOffer::held(&item, &[rust, jdtls]).text)
+            .expect("no line")
+            .get_visual_rect_no_clip();
+        let row = named(toast, "Always trust rust-analyzer in slatedb/slatedb")
+            .expect("no box for rust-analyzer")
+            .get_visual_rect_no_clip();
+        assert!(named(toast, "Always trust jdtls in slatedb/slatedb").is_some());
+        assert!(row.y0 >= line.y1, "under the line");
+        assert!(row.y1 <= card.y1, "inside the card");
+        // The drawn box is 16px, 5px into the row's 26px target.
+        assert!((row.x0 + 5.0 - line.x0).abs() < 1.0, "{row:?} {line:?}");
+
+        harness.click(row.x1 - 20.0, row.center().y);
+        settle(&mut harness);
+        assert_eq!(state.trust_everywhere.get_untracked(), [rust]);
+        let toast = named(harness.root_id(), "toast").expect("the toast stays");
+        let button = named(toast, "Trust and start").expect("no Trust and start");
+        let at = button.get_visual_rect_no_clip().center();
+        harness.click(at.x, at.y);
+        settle(&mut harness);
+        let sent: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok())
+            .filter_map(|command| match command {
+                Command::TrustLanguageServers { everywhere, .. } => Some(everywhere),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, [vec![rust]]);
+
+        state.offer_server(ServerOffer::held(&item, &[rust]), false);
+        assert!(state.trust_everywhere.get_untracked().is_empty(), "a new ask starts empty");
     }
 }

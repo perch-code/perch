@@ -97,9 +97,19 @@ pub struct ServerOffer {
     pub action: &'static str,
     /// Under which a closed offer stays closed for the session.
     pub key: String,
-    /// The item whose code the reader is asked to trust, for an offer to
-    /// start servers held back for it: its button is Trust and start.
-    pub trust: Option<String>,
+    /// What the reader is asked to trust, for an offer to start servers
+    /// held back for an item: its button is Trust and start.
+    pub trust: Option<TrustAsk>,
+}
+
+/// An offer's ask to trust an item's code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustAsk {
+    pub item_id: String,
+    /// The item's repository, which an Always trust box covers.
+    pub repo: String,
+    /// The servers held back, each with its own Always trust box.
+    pub kinds: Vec<perch_lsp::ServerKind>,
 }
 
 impl ServerOffer {
@@ -157,7 +167,11 @@ impl ServerOffer {
             install: None,
             action: "Trust and start",
             key: format!("trust {}", item.id),
-            trust: Some(item.id.clone()),
+            trust: Some(TrustAsk {
+                item_id: item.id.clone(),
+                repo: item.repo_full_name.clone(),
+                kinds: kinds.to_vec(),
+            }),
         }
     }
 }
@@ -310,6 +324,13 @@ pub struct AppState {
     pub installing_servers: RwSignal<HashSet<perch_lsp::ServerKind>>,
     /// The server offers closed this session, by their keys.
     pub declined_offers: RwSignal<HashSet<String>>,
+    /// The servers whose Always trust box is ticked on the trust offer up,
+    /// which its Trust and start trusts on all of the item's repository.
+    /// Unticked with each new offer.
+    pub trust_everywhere: RwSignal<Vec<perch_lsp::ServerKind>>,
+    /// The servers the reader trusts on everything in a repository, as
+    /// `(repository, server)`, from the backend.
+    pub trusted_servers: RwSignal<Vec<(String, perch_lsp::ServerKind)>>,
     /// Send Feedback's draft. One for the app: every window's state holds
     /// the same signal (`windows::window`).
     pub feedback: RwSignal<Option<crate::feedback::FeedbackDraft>>,
@@ -439,6 +460,8 @@ impl AppState {
             toast_token: RwSignal::new(0),
             installing_servers: RwSignal::new(HashSet::new()),
             declined_offers: RwSignal::new(HashSet::new()),
+            trust_everywhere: RwSignal::new(Vec::new()),
+            trusted_servers: RwSignal::new(Vec::new()),
             feedback: RwSignal::new(None),
             recent_problems: RwSignal::new(VecDeque::new()),
             review_capabilities: RwSignal::new(Arc::new(Vec::new())),
@@ -482,6 +505,7 @@ impl AppState {
         }
         copy(self.avatars, data.avatars);
         copy(self.repos, data.repos);
+        copy(self.trusted_servers, data.trusted_servers);
         copy(self.github_hosts, data.github_hosts);
         copy(self.browse, data.browse);
         copy(self.items, data.items);
@@ -875,6 +899,7 @@ impl AppState {
                         if let ToastKind::Server(up) = &mut toast.kind {
                             if up.key == offer.key {
                                 up.text = offer.text.clone();
+                                up.trust = offer.trust.clone();
                             }
                         }
                     }
@@ -903,6 +928,7 @@ impl AppState {
                             if let ToastKind::Server(up) = &mut toast.kind {
                                 if up.key == offer.key {
                                     up.text = offer.text.clone();
+                                    up.trust = offer.trust.clone();
                                 }
                             }
                         }
@@ -911,7 +937,47 @@ impl AppState {
             }
             return;
         }
+        if offer.trust.is_some() {
+            self.trust_everywhere.set(Vec::new());
+        }
         self.show_toast(ToastKind::Server(offer));
+    }
+
+    /// Put `offer`'s line and ask on the trust offer up with its key, which
+    /// named a server no longer held, and untick that server's box. No
+    /// offer comes up for it: only one already up changes.
+    fn narrow_trust_offer(&self, offer: ServerOffer) {
+        let Some(ask) = offer.trust.clone() else {
+            return;
+        };
+        let up = self.toasts.with_untracked(|toasts| {
+            toasts.iter().any(|toast| {
+                matches!(&toast.kind, ToastKind::Server(up) if up.key == offer.key && up.trust != offer.trust)
+            })
+        });
+        if !up {
+            return;
+        }
+        self.toasts.update(|toasts| {
+            for toast in toasts.iter_mut() {
+                if let ToastKind::Server(up) = &mut toast.kind {
+                    if up.key == offer.key {
+                        up.text = offer.text.clone();
+                        up.trust = offer.trust.clone();
+                    }
+                }
+            }
+        });
+        self.trust_everywhere.update(|ticked| ticked.retain(|kind| ask.kinds.contains(kind)));
+    }
+
+    /// Whether the reader trusts `kind` on everything in `repo`.
+    pub fn trusts_everywhere(&self, repo: &str, kind: perch_lsp::ServerKind) -> bool {
+        self.trusted_servers.with_untracked(|trusted| {
+            trusted
+                .iter()
+                .any(|(r, k)| *k == kind && r.eq_ignore_ascii_case(repo))
+        })
     }
 
     /// The reader closed an offer: it stays closed for the session.
@@ -935,7 +1001,8 @@ impl AppState {
         self.drop_toasts(|toast| {
             matches!(
                 toast,
-                ToastKind::Server(ServerOffer { trust: Some(id), .. }) if Some(id.as_str()) != keep
+                ToastKind::Server(ServerOffer { trust: Some(ask), .. })
+                    if Some(ask.item_id.as_str()) != keep
             )
         });
     }
@@ -1919,8 +1986,15 @@ impl AppState {
                     // start in another window: the offer has nothing left
                     // to start. Only then: a status from another server,
                     // before this item's Held came, says nothing of it.
-                    if released && review.lsp_status.with_untracked(|s| s.held().is_empty()) {
-                        self.drop_trust_offers(None);
+                    // One of several moved on, as after Always Trust for
+                    // it alone, leaves the offer naming the rest.
+                    if released {
+                        let left = review.lsp_status.with_untracked(|s| s.held());
+                        if left.is_empty() {
+                            self.drop_trust_offers(None);
+                        } else if let Some(item) = review.item.get_untracked() {
+                            self.narrow_trust_offer(ServerOffer::held(&item, &left));
+                        }
                     }
                     // After it, so the hover and the uses asked again are
                     // asked of a server that is ready.
@@ -2824,6 +2898,7 @@ impl AppState {
                 }
             }
             Event::Repos(repos) => self.repos.set(repos),
+            Event::TrustedServers(trusted) => self.trusted_servers.set(trusted),
             Event::GithubHosts(hosts) => self.github_hosts.set(hosts),
             Event::OpenReferenceResolved { navigation_id, kind } => {
                 crate::ui::open_box::resolved(*self, navigation_id, kind)
@@ -4263,7 +4338,7 @@ mod tests {
             "rust-analyzer would run the build scripts and proc macros in slatedb/slatedb."
         );
         assert_eq!(offered[0].action, "Trust and start");
-        assert_eq!(offered[0].trust.as_deref(), Some("a"));
+        assert_eq!(offered[0].trust.as_ref().map(|t| t.item_id.as_str()), Some("a"));
         assert_eq!(offered[0].key, "trust a");
 
         // A second kind held joins the same toast.
@@ -4310,6 +4385,50 @@ mod tests {
         assert_eq!(offers(&app).len(), 1);
         app.apply_with_review(status(94, rust, perch_lsp::Status::Starting), review);
         assert!(offers(&app).is_empty());
+    }
+
+    /// One of two servers held moving on, as after Always Trust for it
+    /// from the worktree menu, leaves the offer naming the other, with
+    /// only its box still ticked. The last one moving on takes it down.
+    #[test]
+    fn a_trust_offer_narrows_to_the_servers_still_held() {
+        let _root = floem::headless::TestRoot::new();
+        let app = AppState::new();
+        let review = ReviewState::new();
+        app.begin_item_review(review, "Open", "a", 91);
+        app.apply_with_review(review_ready("a", 91), review);
+        let (rust, jdtls) = (perch_lsp::ServerKind::RustAnalyzer, perch_lsp::ServerKind::Jdtls);
+        let status = |kind, status| Event::LspStatus {
+            navigation_id: 91,
+            kind,
+            status,
+        };
+        app.apply_with_review(status(rust, perch_lsp::Status::Held), review);
+        app.apply_with_review(status(jdtls, perch_lsp::Status::Held), review);
+        app.trust_everywhere.set(vec![rust, jdtls]);
+
+        app.apply_with_review(status(rust, perch_lsp::Status::Starting), review);
+        let offered = offers(&app);
+        assert_eq!(offered.len(), 1);
+        assert_eq!(offered[0].text, "jdtls would run the Gradle or Maven build in slatedb/slatedb.");
+        assert_eq!(offered[0].trust.as_ref().map(|t| t.kinds.clone()), Some(vec![jdtls]));
+        assert_eq!(app.trust_everywhere.get_untracked(), [jdtls]);
+
+        app.apply_with_review(status(jdtls, perch_lsp::Status::Starting), review);
+        assert!(offers(&app).is_empty());
+    }
+
+    /// The servers trusted on a repository come from the backend, and
+    /// match the repository in any case.
+    #[test]
+    fn trusted_servers_match_a_repository_in_any_case() {
+        let _root = floem::headless::TestRoot::new();
+        let app = AppState::new();
+        let rust = perch_lsp::ServerKind::RustAnalyzer;
+        app.apply(Event::TrustedServers(vec![("SlateDB/slatedb".into(), rust)]));
+        assert!(app.trusts_everywhere("slatedb/SLATEDB", rust));
+        assert!(!app.trusts_everywhere("slatedb/slatedb", perch_lsp::ServerKind::Jdtls));
+        assert!(!app.trusts_everywhere("slatedb/other", rust));
     }
 
     /// A goto's ask says what it couldn't find. A Held for the same

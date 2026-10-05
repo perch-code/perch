@@ -40,10 +40,11 @@ mod review_store;
 /// mark hides, for the Inbox's Done list. Version 33 lets a mark be a
 /// snooze, which lapses at a time. Version 34 keeps the reader's answer on
 /// running an item's code in a language server, and starts the branches
-/// already cut from a pull request untrusted. Schemas 13 through 23
+/// already cut from a pull request untrusted. Version 35 keeps the servers
+/// the reader trusts on everything in a repository. Schemas 13 through 23
 /// migrate in place so local conversations and agent history are never
 /// discarded.
-pub const SCHEMA_VERSION: u32 = 34;
+pub const SCHEMA_VERSION: u32 = 35;
 
 /// Metadata key holding the validator for the cached notifications snapshot.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
@@ -168,6 +169,18 @@ const LSP_TRUST_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS item_lsp_trust (
     item_id  TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
     trusted  INTEGER NOT NULL
+);
+"#;
+
+/// The language servers the reader trusts on everything in a repository,
+/// anyone's pull request included, from Always trust: rust-analyzer or
+/// jdtls by name. A repository matches without regard to case, as the
+/// config's do.
+const REPO_LSP_TRUST_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS repo_lsp_trust (
+    repo    TEXT NOT NULL COLLATE NOCASE,
+    server  TEXT NOT NULL,
+    PRIMARY KEY (repo, server)
 );
 "#;
 
@@ -459,6 +472,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
         tx.execute_batch(GRANT_SCHEMA)?;
         tx.execute_batch(ACTIVITY_SCHEMA)?;
         tx.execute_batch(LSP_TRUST_SCHEMA)?;
+        tx.execute_batch(REPO_LSP_TRUST_SCHEMA)?;
         tx.execute(
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
@@ -524,6 +538,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             31 => add_dismissed_thread_column(&tx)?,
             32 => add_snoozed_until_column(&tx)?,
             33 => add_code_trust_table(&tx)?,
+            34 => tx.execute_batch(REPO_LSP_TRUST_SCHEMA)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -4386,6 +4401,43 @@ impl Cache {
         Ok(())
     }
 
+    /// Whether the reader trusts the language server named `server` on
+    /// everything in `repo`.
+    pub fn repo_server_trusted(&self, repo: &str, server: &str) -> Result<bool, CacheError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM repo_lsp_trust WHERE repo = ?1 AND server = ?2)",
+            params![repo, server],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Every repository and server the reader trusts on everything there,
+    /// as `(repository, server)` in the spelling first written.
+    pub fn repo_server_trust(&self) -> Result<Vec<(String, String)>, CacheError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT repo, server FROM repo_lsp_trust ORDER BY repo, server")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Trust the language server named `server` on everything in `repo`
+    /// from now on, or stop.
+    pub fn set_repo_server_trust(&self, repo: &str, server: &str, trusted: bool) -> Result<(), CacheError> {
+        if trusted {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO repo_lsp_trust (repo, server) VALUES (?1, ?2)",
+                params![repo, server],
+            )?;
+        } else {
+            self.conn.execute(
+                "DELETE FROM repo_lsp_trust WHERE repo = ?1 AND server = ?2",
+                params![repo, server],
+            )?;
+        }
+        Ok(())
+    }
+
     /// Insert a branch cut from another item, `untrusted` when it holds
     /// code the reader hasn't trusted: in one transaction, so the row is
     /// never there without what it starts out with.
@@ -6698,6 +6750,48 @@ mod tests {
         let d = branch_item("d");
         assert!(c.insert_cut_item(&d, true).is_err());
         assert!(c.load_item(&d.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_server_is_trusted_on_a_repository_one_server_at_a_time() {
+        let c = Cache::open_in_memory().unwrap();
+        let rust = |repo: &str| c.repo_server_trusted(repo, "rust-analyzer").unwrap();
+        assert!(!rust("slatedb/slatedb"));
+
+        c.set_repo_server_trust("slatedb/slatedb", "rust-analyzer", true).unwrap();
+        c.set_repo_server_trust("SlateDB/SlateDB", "rust-analyzer", true).unwrap();
+        assert!(rust("SLATEDB/slatedb"), "in any case");
+        assert!(!rust("slatedb/other"));
+        assert!(!c.repo_server_trusted("slatedb/slatedb", "jdtls").unwrap(), "one server");
+        assert_eq!(
+            c.repo_server_trust().unwrap(),
+            [("slatedb/slatedb".to_string(), "rust-analyzer".to_string())],
+            "once, as first written"
+        );
+
+        c.set_repo_server_trust("slatedb/slatedb", "jdtls", true).unwrap();
+        c.set_repo_server_trust("SlateDB/slatedb", "rust-analyzer", false).unwrap();
+        assert!(!rust("slatedb/slatedb"));
+        assert_eq!(
+            c.repo_server_trust().unwrap(),
+            [("slatedb/slatedb".to_string(), "jdtls".to_string())]
+        );
+    }
+
+    #[test]
+    fn schema_34_gains_a_table_of_servers_trusted_on_a_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            cache.conn.execute_batch("DROP TABLE repo_lsp_trust").unwrap();
+            cache.set_meta("schema_version", "34").unwrap();
+        }
+        let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+        assert_eq!(outcome, CacheOpen::Migrated { from: 34, to: SCHEMA_VERSION });
+        assert!(cache.repo_server_trust().unwrap().is_empty());
+        cache.set_repo_server_trust("a/b", "jdtls", true).unwrap();
+        assert!(cache.repo_server_trusted("a/b", "jdtls").unwrap());
     }
 
     #[test]

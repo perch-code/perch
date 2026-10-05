@@ -193,39 +193,31 @@ pub(crate) fn copied() -> Vec<String> {
     COPIED.with(|copied| std::mem::take(&mut *copied.borrow_mut()))
 }
 
-/// What the worktree menu's Trust and Start names and runs: the servers
-/// held back until the reader trusts the code, and what trusts it.
-pub type TrustEntry = (Vec<perch_lsp::ServerKind>, std::rc::Rc<dyn Fn()>);
+/// A row the worktree menu starts with, about trusting the code: its
+/// name, its icon and what it does.
+pub type TrustRow = (String, SidebarIcon, std::rc::Rc<dyn Fn()>);
 
 /// The menu every worktree offers: where it is, and how to get there.
 ///
 /// Remove Worktree is appended when the caller passes a way to do it: the
-/// review header offers it for a worktree Perch made. Trust and Start goes
-/// first when the caller passes the servers held back until the reader
-/// trusts the code, and a way to trust it: it is still there once the
-/// toast that asked has gone.
+/// review header offers it for a worktree Perch made. The `trust` rows go
+/// first, such as Trust and Start while a server waits for the reader to
+/// trust the code: they are still there once the toast that asked has
+/// gone.
 pub fn worktree_menu(
     path: std::path::PathBuf,
     on_archive: Option<std::rc::Rc<dyn Fn()>>,
-    on_trust: Option<TrustEntry>,
+    trust: Vec<TrustRow>,
 ) -> crate::ui::menu::Menu {
     use crate::ui::menu::Menu;
 
     let (reveal, terminal, copy) = (path.clone(), path.clone(), path);
     let mut menu = Menu::new();
-    if let Some((held, trust)) = on_trust {
-        let names = held
-            .iter()
-            .map(|kind| kind.name())
-            .collect::<Vec<_>>()
-            .join(" and ");
-        menu = menu
-            .item(format!("Trust and Start {names}"), move |item| {
-                item.icon(SidebarIcon::Check).action(move || trust())
-            })
-            .separator();
+    for (label, icon, action) in trust {
+        menu = menu.item(label, move |item| item.icon(icon).action(move || action()));
     }
     menu = menu
+        .separator()
         .item("Reveal in Finder", move |item| {
             item.icon(SidebarIcon::Folder).action(move || reveal_in_finder(&reveal))
         })

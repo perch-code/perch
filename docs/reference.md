@@ -383,12 +383,20 @@ someone else's fork, as `gh pr checkout` does, starts them too. On anything
 else, such as someone else's pull request, a branch you cut from one, or a
 repository not in your config, they wait, and a toast names the item with
 **Trust and start**. Perch remembers that answer for the item, commits pushed
-to it later included; deleting the item forgets it. While they wait, the
-Worktree row on Conversation has a warning, and its menu has **Trust and
-Start** once the toast is closed. After upgrading, a branch you had already
-cut from a pull request, your own included, asks once. gopls and
-typescript-language-server start either way. To start them on everything in
-a repository, anyone's pull requests included:
+to it later included; deleting the item forgets it. Under the toast's line
+each server held has a box, **Always trust rust-analyzer in
+slatedb/slatedb**: ticked when you press Trust and start, that server starts
+on every item in the repository from then on, anyone's pull requests
+included, and no toast asks for it there again. Leave it empty and the next
+pull request or worktree there asks again. While they wait, the Worktree row
+on Conversation has a warning, and its menu has **Trust and Start** and
+**Always Trust** for each server held, once the toast is closed. On any item
+in a repository, the menu has **Stop Trusting** for each server trusted on
+all of it, which stops that server wherever nothing else trusts the code and
+asks again. After upgrading, a branch you had already cut from a pull
+request, your own included, asks once. gopls and typescript-language-server
+start either way. To start every server on everything in a repository,
+anyone's pull requests included:
 
 ```toml
 [[repo]]

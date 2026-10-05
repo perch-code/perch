@@ -1080,7 +1080,7 @@ mod tests {
         let Some(crate::state::ToastKind::Server(offer)) = toast else {
             panic!("no ask");
         };
-        assert_eq!(offer.trust.as_deref(), Some("wt"));
+        assert_eq!(offer.trust.as_ref().map(|t| t.item_id.as_str()), Some("wt"));
         assert_eq!(
             offer.text,
             "No definition found for `alpha`: rust-analyzer would run the build scripts and \

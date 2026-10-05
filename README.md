@@ -119,11 +119,16 @@ branch is in that repository or your fork. On anything else, such as someone
 else's pull request, a branch you cut from one, or a repository not in your
 config, a toast says what would run, with **Trust and start**. Perch
 remembers that for the item, commits pushed to it later included; deleting
-the item forgets it. While they wait, the Worktree row on Conversation has a
-warning, and its menu has **Trust and Start** once the toast is closed. After
-upgrading, a branch you had already cut from a pull request, your own
-included, asks once. gopls and typescript-language-server start either way.
-To trust everything in a repository, pull requests from anyone included:
+the item forgets it. Tick **Always trust rust-analyzer in slatedb/slatedb**
+under the toast's line before pressing it, and that server starts on
+everything in the repository from then on without asking; each server has
+its own box. While they wait, the Worktree row on Conversation has a
+warning, and its menu has **Trust and Start** and **Always Trust** once the
+toast is closed. The same menu, on any item in the repository, has **Stop
+Trusting** for a server trusted there. After upgrading, a branch you had
+already cut from a pull request, your own included, asks once. gopls and
+typescript-language-server start either way. To trust every server on
+everything in a repository, pull requests from anyone included:
 
 ```toml
 [[repo]]

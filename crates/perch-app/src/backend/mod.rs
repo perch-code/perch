@@ -355,10 +355,21 @@ pub enum Command {
     },
     /// Trust the code of `item_id`, the item open in `navigation_id`, for
     /// good, as its toast's Trust and start says, and start the servers
-    /// held back for it. Nothing is recorded for an item no longer on show.
+    /// held back for it. `everywhere` are the servers its Always trust
+    /// boxes were ticked for, trusted on everything in the item's
+    /// repository too. Nothing is recorded for an item no longer on show.
     TrustLanguageServers {
         navigation_id: u64,
         item_id: String,
+        everywhere: Vec<perch_lsp::ServerKind>,
+    },
+    /// Trust `kind` on everything in `repo`, or stop, as the worktree
+    /// menu's Always trust row says: start what that holds back, or hold
+    /// what it no longer covers.
+    TrustServerInRepo {
+        repo: String,
+        kind: perch_lsp::ServerKind,
+        trusted: bool,
     },
     /// Ask the language server about a position. `token` lets the UI drop an
     /// answer that arrives after the pointer has moved on.
@@ -852,6 +863,9 @@ pub enum Event {
     /// item context. Sent at startup, and again when Add repository adds
     /// one.
     Repos(Vec<perch_github::DeclaredRepo>),
+    /// The servers the reader trusts on everything in a repository, as
+    /// `(repository, server)`: sent at startup and after each change.
+    TrustedServers(Vec<(String, perch_lsp::ServerKind)>),
     /// `[work]` from the config, for the new-work view.
     WorkDefaults(perch_github::WorkDefaults),
     /// The hosts a pull request's or an issue's URL is read on, for
@@ -3502,12 +3516,23 @@ impl Backend {
         });
     }
 
-    /// Trust `item_id`'s code and start what was held for it.
-    pub fn trust_language_servers(&self, item_id: &str) {
+    /// Trust `item_id`'s code, and `everywhere` on all of its repository,
+    /// and start what was held for it.
+    pub fn trust_language_servers(&self, item_id: &str, everywhere: Vec<perch_lsp::ServerKind>) {
         let navigation_id = self.navigation_requests.current_id().unwrap_or(0);
         let _ = self.commands.send(Command::TrustLanguageServers {
             navigation_id,
             item_id: item_id.to_string(),
+            everywhere,
+        });
+    }
+
+    /// Trust `kind` on everything in `repo`, or stop.
+    pub fn trust_server_in_repo(&self, repo: &str, kind: perch_lsp::ServerKind, trusted: bool) {
+        let _ = self.commands.send(Command::TrustServerInRepo {
+            repo: repo.to_string(),
+            kind,
+            trusted,
         });
     }
 
@@ -3717,6 +3742,7 @@ async fn run(
     let _ = events.send(Event::Repos(config.declared_repos()));
     let _ = events.send(Event::WorkDefaults(config.work.clone()));
     let _ = events.send(Event::GithubHosts(config.github_hosts()));
+    send_trusted_servers(&cache, &events);
     let mut initial_notifications = Vec::new();
     let mut initial_faces = RowFaces::default();
     if let Some(cache) = cache.as_ref() {
@@ -4964,9 +4990,16 @@ async fn run(
             Command::TrustLanguageServers {
                 navigation_id,
                 item_id,
+                everywhere,
             } => {
                 let ctx = ctx.clone();
-                tokio::spawn(async move { trust_language_servers(&ctx, navigation_id, &item_id).await });
+                tokio::spawn(async move {
+                    trust_language_servers(&ctx, navigation_id, &item_id, &everywhere).await
+                });
+            }
+            Command::TrustServerInRepo { repo, kind, trusted } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { trust_server_in_repo(&ctx, &repo, kind, trusted).await });
             }
             Command::Hover {
                 token,
@@ -17294,29 +17327,49 @@ async fn start_server_for_file(ctx: &Ctx, navigation_id: u64, path: &str) {
         .await
         .get(&kind)
         .is_some_and(|client| client.root() == worktree.as_path() && !client.has_ended());
-    let trusted = || kind.project_code().is_none() || item_code_trusted(ctx, &item_id);
+    let trusted = || kind.project_code().is_none() || item_code_trusted(ctx, &item_id, kind);
     if !serving || !trusted() {
         start_server(ctx, navigation_id, kind).await;
     }
 }
 
-/// Whether `item`'s code may run in rust-analyzer or jdtls without asking,
-/// by what the cache and config say now (see `items::code_trusted`). Any
-/// read that fails, or no cache, is untrusted.
-fn code_trusted_now(ctx: &Ctx, item: &Item) -> bool {
+/// Whether `item`'s code may run in `kind`, rust-analyzer or jdtls,
+/// without asking, by what the cache and config say now (see
+/// `items::code_trusted`). Any read that fails, or no cache, is untrusted.
+fn code_trusted_now(ctx: &Ctx, item: &Item, kind: perch_lsp::ServerKind) -> bool {
     let read = ctx.with_cache(|c| -> Result<_, CacheError> {
-        Ok((c.meta("viewer.login")?, c.item_code_trust(&item.id)?))
+        Ok((
+            c.meta("viewer.login")?,
+            c.item_code_trust(&item.id)?,
+            c.repo_server_trusted(&item.repo_full_name, kind.name())?,
+        ))
     });
-    let Some(Ok((viewer, granted))) = read else {
+    let Some(Ok((viewer, granted, everywhere))) = read else {
         return false;
     };
-    crate::items::code_trusted(item, viewer.as_deref(), &ctx.config(), granted)
+    crate::items::code_trusted(item, viewer.as_deref(), &ctx.config(), granted, everywhere)
 }
 
 /// `code_trusted_now` for the item with an id; an item with no row is
 /// untrusted.
-fn item_code_trusted(ctx: &Ctx, item_id: &str) -> bool {
-    ctx.item(item_id).is_some_and(|item| code_trusted_now(ctx, &item))
+fn item_code_trusted(ctx: &Ctx, item_id: &str, kind: perch_lsp::ServerKind) -> bool {
+    ctx.item(item_id).is_some_and(|item| code_trusted_now(ctx, &item, kind))
+}
+
+/// Tell every window which servers the reader trusts on everything in a
+/// repository. A server name no build knows is left out.
+fn send_trusted_servers(cache: &SharedCache, events: &EventSender<Event>) {
+    let trusted = cache
+        .as_ref()
+        .and_then(|cache| cache.lock().ok()?.repo_server_trust().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(repo, server)| {
+            let kind = perch_lsp::ServerKind::ALL.into_iter().find(|k| k.name() == server)?;
+            Some((repo, kind))
+        })
+        .collect();
+    let _ = events.send(Event::TrustedServers(trusted));
 }
 
 /// Whether a branch cut from `source` starts out untrusted (see
@@ -17351,7 +17404,7 @@ async fn start_server(ctx: &Ctx, navigation_id: u64, kind: perch_lsp::ServerKind
     // Before `find`, which for rust-analyzer runs rustup in the worktree,
     // where the checkout's toolchain file can name a binary of its own;
     // and before a server on show or set aside for the worktree is taken up.
-    if kind.project_code().is_some() && !item_code_trusted(ctx, &item_id) {
+    if kind.project_code().is_some() && !item_code_trusted(ctx, &item_id, kind) {
         hold_server(ctx, navigation_id, &worktree, kind).await;
         return;
     }
@@ -17597,10 +17650,16 @@ async fn start_held_servers_everywhere(ctx: &Ctx) {
 }
 
 /// The reader trusted the open item's code: remember it for the item, and
-/// start what was held for it, in every window showing it. A click that
-/// lands after another item began opening trusts nothing: the toast was
-/// about the item it named, not the one coming.
-async fn trust_language_servers(ctx: &Ctx, navigation_id: u64, item_id: &str) {
+/// `everywhere` for its repository, and start what was held for it, in
+/// every window showing it, or for `everywhere` in every window. A click
+/// that lands after another item began opening trusts nothing: the toast
+/// was about the item it named, not the one coming.
+async fn trust_language_servers(
+    ctx: &Ctx,
+    navigation_id: u64,
+    item_id: &str,
+    everywhere: &[perch_lsp::ServerKind],
+) {
     let on_show = ctx
         .navigation_requests
         .with_current(navigation_id, || {
@@ -17614,7 +17673,20 @@ async fn trust_language_servers(ctx: &Ctx, navigation_id: u64, item_id: &str) {
         tracing::info!(item = item_id, "trust asked for an item no longer on show; nothing recorded");
         return;
     }
-    match ctx.with_cache(|c| c.trust_item_code(item_id)) {
+    let repo = match everywhere {
+        [] => None,
+        _ => ctx.item(item_id).map(|item| item.repo_full_name),
+    };
+    let recorded = ctx.with_cache(|c| -> Result<(), CacheError> {
+        c.trust_item_code(item_id)?;
+        if let Some(repo) = &repo {
+            for kind in everywhere {
+                c.set_repo_server_trust(repo, kind.name(), true)?;
+            }
+        }
+        Ok(())
+    });
+    match recorded {
         Some(Ok(())) => {}
         Some(Err(error)) => {
             tracing::warn!(%error, item = item_id, "could not record that an item's code is trusted");
@@ -17626,6 +17698,12 @@ async fn trust_language_servers(ctx: &Ctx, navigation_id: u64, item_id: &str) {
             return;
         }
     }
+    if repo.is_some() {
+        send_trusted_servers(&ctx.cache, &ctx.events);
+        // Another window may hold one for other code in the repository.
+        start_held_servers_everywhere(ctx).await;
+        return;
+    }
     for view in ctx.views() {
         let open = view.slot.lock().ok().and_then(|g| {
             g.as_ref()
@@ -17634,6 +17712,78 @@ async fn trust_language_servers(ctx: &Ctx, navigation_id: u64, item_id: &str) {
         });
         if let Some((navigation_id, worktree)) = open {
             start_held_servers(&view, navigation_id, &worktree).await;
+        }
+    }
+}
+
+/// Always trust, from the worktree menu: trust `kind` on everything in
+/// `repo` and start what that held back in any window, or stop trusting
+/// it and hold what that no longer covers.
+async fn trust_server_in_repo(ctx: &Ctx, repo: &str, kind: perch_lsp::ServerKind, trusted: bool) {
+    let what = if trusted { "trust" } else { "stop trusting" };
+    match ctx.with_cache(|c| c.set_repo_server_trust(repo, kind.name(), trusted)) {
+        Some(Ok(())) => {}
+        Some(Err(error)) => {
+            tracing::warn!(%error, repo, server = kind.name(), trusted, "could not record a server's trust on a repository");
+            ctx.notice(format!("Could not {what} {} in {repo}: {error}", kind.name()));
+            return;
+        }
+        None => {
+            ctx.notice(format!(
+                "Could not {what} {} in {repo}: the local database is unavailable",
+                kind.name()
+            ));
+            return;
+        }
+    }
+    send_trusted_servers(&ctx.cache, &ctx.events);
+    if trusted {
+        start_held_servers_everywhere(ctx).await;
+    } else {
+        hold_untrusted_servers(ctx, kind).await;
+    }
+}
+
+/// Once the reader stops trusting `kind` on a repository: a server of
+/// `kind` on show for code no longer trusted goes back through the gate in
+/// `start_server`, which holds it and asks again, and one set aside for
+/// such code stops. Left running, either would go on loading the code
+/// unasked, as a push to the checkout does.
+async fn hold_untrusted_servers(ctx: &Ctx, kind: perch_lsp::ServerKind) {
+    for view in ctx.views() {
+        let open = view
+            .slot
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|c| (c.navigation_id, c.item_id.clone())));
+        let Some((navigation_id, item_id)) = open else {
+            continue;
+        };
+        let shown = view.language_servers.lock().await.contains_key(&kind);
+        if shown && !item_code_trusted(&view, &item_id, kind) {
+            start_server(&view, navigation_id, kind).await;
+        }
+    }
+    let kept: Vec<_> = ctx
+        .kept_servers
+        .clients()
+        .into_iter()
+        .filter(|client| client.kind() == kind)
+        .collect();
+    if kept.is_empty() {
+        return;
+    }
+    let items = ctx
+        .with_cache(|c| c.load_items())
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    for client in kept {
+        let trusted = items
+            .iter()
+            .find(|item| item.checkout.as_ref().is_some_and(|c| c.path == client.root()))
+            .is_some_and(|item| code_trusted_now(ctx, item, kind));
+        if !trusted {
+            ctx.kept_servers.stop_kind_at(client.root(), kind).await;
         }
     }
 }
@@ -21214,7 +21364,7 @@ while True:
         assert_eq!(lsp_statuses(&received), [(kind, Status::Held)]);
 
         let _claim = claim_at_x(&ctx, kind);
-        trust_language_servers(&ctx, navigation_id, &item.id).await;
+        trust_language_servers(&ctx, navigation_id, &item.id, &[]).await;
 
         assert_eq!(
             ctx.with_cache(|c| c.item_code_trust(&item.id).unwrap()).unwrap(),
@@ -21238,7 +21388,7 @@ while True:
         let trust = || ctx.with_cache(|c| c.item_code_trust(&item.id).unwrap()).unwrap();
 
         ctx.navigation_requests.begin_current();
-        trust_language_servers(&ctx, navigation_id, &item.id).await;
+        trust_language_servers(&ctx, navigation_id, &item.id, &[]).await;
         assert_eq!(trust(), None, "another navigation began");
         assert!(held_at_x(&ctx, kind));
 
@@ -21247,9 +21397,102 @@ while True:
             open.navigation_id = next;
             open.item_id = "other".into();
         }
-        trust_language_servers(&ctx, next, &item.id).await;
+        trust_language_servers(&ctx, next, &item.id, &[]).await;
         assert_eq!(trust(), None, "another item is open");
         assert!(held_at_x(&ctx, kind));
+    }
+
+    /// An Always trust box ticked with Trust and start trusts that server
+    /// on everything in the item's repository, in the config or not, and
+    /// every window is told: another pull request there starts it unasked.
+    /// Another server still asks.
+    #[tokio::test]
+    async fn always_trust_covers_the_repository_for_its_server_alone() {
+        use perch_lsp::{ServerKind, Status};
+        let kind = ServerKind::RustAnalyzer;
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let (item, navigation_id) = open_pull_seven(&ctx, Some("chris"));
+        start_server(&ctx, navigation_id, kind).await;
+        assert_eq!(lsp_statuses(&received), [(kind, Status::Held)]);
+
+        let _claim = claim_at_x(&ctx, kind);
+        trust_language_servers(&ctx, navigation_id, &item.id, &[kind]).await;
+
+        let told: Vec<_> = received
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::TrustedServers(trusted) => Some(trusted),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(told, [vec![("a/b".to_string(), kind)]]);
+        assert!(!held_at_x(&ctx, kind));
+        let other = store_pull(&ctx, 8);
+        assert!(item_code_trusted(&ctx, &other.id, kind), "another pull request there");
+        assert!(!item_code_trusted(&ctx, &other.id, ServerKind::Jdtls), "jdtls asks for itself");
+    }
+
+    /// Stop Trusting holds the server again where nothing else trusts the
+    /// code: the one on show stops and the window is asked again, one set
+    /// aside for a stranger's pull request stops, and one set aside for a
+    /// pull request trusted for itself stays.
+    #[tokio::test]
+    async fn stop_trusting_a_server_on_a_repository_holds_it_again() {
+        use perch_lsp::{ServerKind, Status};
+        let kind = ServerKind::RustAnalyzer;
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &["a/b"]);
+        open_pull_seven(&ctx, Some("chris"));
+        let trees: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+        let paths: Vec<_> = trees
+            .iter()
+            .map(|tree| std::fs::canonicalize(tree.path()).unwrap())
+            .collect();
+        if let Some(open) = ctx.slot.lock().unwrap().as_mut() {
+            open.checkout.worktree = paths[0].clone();
+        }
+        let checked_out = |number: u64, path: &Path| {
+            let mut item = store_pull(&ctx, number);
+            item.checkout = Some(ItemCheckout {
+                branch: format!("perch/pr-{number}"),
+                base_ref: "main".into(),
+                head_sha: "h".into(),
+                path: path.to_path_buf(),
+                owned: true,
+                on_disk: true,
+                churn: None,
+                last_seen_head: None,
+                divergence: None,
+                source: None,
+            });
+            ctx.with_cache(|c| c.update_item(&item)).unwrap().unwrap();
+            item
+        };
+        checked_out(8, &paths[1]);
+        let trusted = checked_out(9, &paths[2]);
+        ctx.with_cache(|c| c.trust_item_code(&trusted.id)).unwrap().unwrap();
+        ctx.with_cache(|c| c.set_repo_server_trust("a/b", kind.name(), true))
+            .unwrap()
+            .unwrap();
+        let shown = named_server(&paths[0], kind, "-").await;
+        ctx.language_servers.lock().await.insert(kind, shown);
+        let kept_stranger = named_server(&paths[1], kind, "-").await;
+        let kept_trusted = named_server(&paths[2], kind, "-").await;
+        ctx.kept_servers.keep(NO_WINDOW, kept_stranger).await;
+        ctx.kept_servers.keep(NO_WINDOW, kept_trusted.clone()).await;
+
+        trust_server_in_repo(&ctx, "A/B", kind, false).await;
+
+        assert!(!ctx
+            .with_cache(|c| c.repo_server_trusted("a/b", kind.name()).unwrap())
+            .unwrap());
+        assert_eq!(lsp_statuses(&received), [(kind, Status::Held)]);
+        assert!(ctx.language_servers.lock().await.is_empty());
+        let kept = ctx.kept_servers.clients();
+        assert_eq!(kept.len(), 1, "the stranger's stops");
+        assert!(Arc::ptr_eq(&kept[0], &kept_trusted), "one trusted for itself stays");
+        kept_trusted.shutdown().await;
     }
 
     /// A file of the open item's is never given to a server on show for
@@ -21461,12 +21704,16 @@ while True:
     fn trust_and_start_sends_the_item_with_the_latest_navigation() {
         let (backend, mut commands) = Backend::recording();
         let navigation_id = backend.navigation_requests.begin_current();
-        backend.trust_language_servers("pr");
+        backend.trust_language_servers("pr", vec![perch_lsp::ServerKind::Jdtls]);
         match commands.try_recv() {
             Ok(Command::TrustLanguageServers {
                 navigation_id: sent,
                 item_id,
-            }) => assert_eq!((sent, item_id.as_str()), (navigation_id, "pr")),
+                everywhere,
+            }) => assert_eq!(
+                (sent, item_id.as_str(), everywhere),
+                (navigation_id, "pr", vec![perch_lsp::ServerKind::Jdtls])
+            ),
             other => panic!("{other:?}"),
         }
     }
@@ -26563,7 +26810,7 @@ read eof || true
         assert_eq!(item.from_item_id.as_deref(), Some(pr.id.as_str()));
         assert_eq!(item.title(), "pull 7");
         assert!(item.subject.is_none(), "no pull request until the reader opens one");
-        assert!(!item_code_trusted(&ctx, &id), "someone else's pull request's code");
+        assert!(!item_code_trusted(&ctx, &id, perch_lsp::ServerKind::RustAnalyzer), "someone else's pull request's code");
 
         let ready = open_pull::readiness(&ctx, &id, None).await.unwrap();
         assert_eq!(ready.base, "main");
@@ -26592,7 +26839,7 @@ read eof || true
 
             let id = start_work(&ctx, &pr.id, 0).await.expect("work starts from the pull request");
             assert_eq!(answer(&id), Some(false), "{declared:?}");
-            assert!(!item_code_trusted(&ctx, &id));
+            assert!(!item_code_trusted(&ctx, &id, perch_lsp::ServerKind::RustAnalyzer));
 
             let forked = start_work(&ctx, &id, 0).await.expect("work starts from the branch");
             assert_ne!(forked, id);

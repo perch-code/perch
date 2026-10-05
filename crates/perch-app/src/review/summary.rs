@@ -615,14 +615,50 @@ fn held_tip(kinds: &[perch_lsp::ServerKind]) -> String {
     }
 }
 
+/// The worktree menu's rows about trusting `item`'s code, with `held` the
+/// servers waiting for it: Trust and Start for the item, then, for each
+/// server waiting, Always Trust it on everything in the item's repository,
+/// and for each one trusted there already, Stop Trusting.
+fn trust_rows(
+    app: AppState,
+    backend: &Rc<Backend>,
+    item: &Item,
+    held: &[perch_lsp::ServerKind],
+) -> Vec<crate::ui::widgets::TrustRow> {
+    let mut rows = Vec::new();
+    if !held.is_empty() {
+        let names = held.iter().map(|kind| kind.name()).collect::<Vec<_>>().join(" and ");
+        let (backend, id) = (backend.clone(), item.id.clone());
+        let start = Rc::new(move || crate::ui::toast::trust_and_start(app, &backend, &id, Vec::new()));
+        rows.push((format!("Trust and Start {names}"), SidebarIcon::Check, start as Rc<dyn Fn()>));
+    }
+    let repo = &item.repo_full_name;
+    for kind in perch_lsp::ServerKind::ALL {
+        let trusted = app.trusts_everywhere(repo, kind);
+        if !trusted && !held.contains(&kind) {
+            continue;
+        }
+        let (label, icon) = match trusted {
+            true => (format!("Stop Trusting {} in {repo}", kind.name()), SidebarIcon::Stop),
+            false => (format!("Always Trust {} in {repo}", kind.name()), SidebarIcon::Repository),
+        };
+        let (backend, repo) = (backend.clone(), repo.clone());
+        let flip = Rc::new(move || backend.trust_server_in_repo(&repo, kind, !trusted));
+        rows.push((label, icon, flip as Rc<dyn Fn()>));
+    }
+    rows
+}
+
 /// The worktree's directory name, and a menu of ways to get there.
 ///
 /// This is what makes the checkout a place rather than a cache: the name
 /// on screen is the name in the Finder and in a shell.
 ///
 /// While a language server waits for the reader to trust the code, a
-/// warning sits by the name and the menu starts with Trust and Start. The
-/// toast that asked goes once it is closed; this stays while they wait.
+/// warning sits by the name and the menu starts with Trust and Start, and
+/// Always Trust for each server waiting. The toast that asked goes once it
+/// is closed; this stays while they wait. A server trusted on everything
+/// in the repository has Stop Trusting there instead.
 fn directory(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     // Read by the warning's style, not the container's key: a key on the
     // statuses would rebuild the chip with every one a server sends.
@@ -655,19 +691,9 @@ fn directory(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl In
             });
             // Read as the menu opens, for the item open then.
             let menu_backend = backend.clone();
-            let trust = move || {
-                let held = state.lsp_status.with_untracked(|s| s.held());
-                let item_id = state
-                    .item
-                    .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))?;
-                if held.is_empty() {
-                    return None;
-                }
-                let backend = menu_backend.clone();
-                let trust = Rc::new(move || {
-                    crate::ui::toast::trust_and_start(app, &backend, &item_id);
-                }) as Rc<dyn Fn()>;
-                Some((held, trust))
+            let trust = move || match state.item.get_untracked() {
+                Some(item) => trust_rows(app, &menu_backend, &item, &state.lsp_status.with_untracked(|s| s.held())),
+                None => Vec::new(),
             };
             // The notice's caution colour, as the pill over the rows has it.
             let warning = tip_with(
@@ -2061,6 +2087,52 @@ mod tests {
             }
         }
         assert_eq!(revoked, ["g1"]);
+    }
+
+    /// The worktree menu offers Always Trust for each server held, and
+    /// Stop Trusting for each one trusted on the whole repository, held
+    /// or not; each sends the repository and the server.
+    #[test]
+    fn the_worktree_menu_trusts_a_server_on_the_repository_and_stops() {
+        use crate::backend::Command;
+        let _root = floem::headless::TestRoot::new();
+        let app = AppState::new();
+        let (backend, mut commands) = Backend::recording();
+        let backend = Rc::new(backend);
+        let mut item = branch_item("slatedb/slatedb");
+        item.id = "branch".into();
+        let rust = perch_lsp::ServerKind::RustAnalyzer;
+        let menu = |held: &[perch_lsp::ServerKind]| {
+            crate::ui::widgets::worktree_menu("/w".into(), None, trust_rows(app, &backend, &item, held))
+        };
+        let mut sent = || {
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .filter_map(|command| match command {
+                    Command::TrustServerInRepo { repo, kind, trusted } => Some((repo, kind, trusted)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // A line first is dropped as the menu is drawn.
+        assert_eq!(menu(&[]).outline()[..2], ["—", "Reveal in Finder"], "nothing held or trusted");
+        let held = menu(&[rust]);
+        assert_eq!(
+            held.outline()[..3],
+            [
+                "Trust and Start rust-analyzer",
+                "Always Trust rust-analyzer in slatedb/slatedb",
+                "—"
+            ]
+        );
+        held.choose("Always Trust rust-analyzer in slatedb/slatedb");
+        assert_eq!(sent(), [("slatedb/slatedb".to_string(), rust, true)]);
+
+        app.apply(crate::backend::Event::TrustedServers(vec![("SlateDB/SlateDB".into(), rust)]));
+        let trusted = menu(&[]);
+        assert_eq!(trusted.outline()[0], "Stop Trusting rust-analyzer in slatedb/slatedb");
+        trusted.choose("Stop Trusting rust-analyzer in slatedb/slatedb");
+        assert_eq!(sent(), [("slatedb/slatedb".to_string(), rust, false)]);
     }
 
     #[test]
