@@ -1883,12 +1883,14 @@ mod tests {
             })
         };
 
-        // The caret starts at the top; Cmd-Down takes it to the end.
-        harness.dispatch_event(key(
-            Key::Named(NamedKey::ArrowDown),
-            Code::ArrowDown,
-            Modifiers::META,
-        ));
+        // The caret starts at the top; Cmd-Down takes it to the end, and
+        // Ctrl-End off macOS.
+        let (to_end, to_end_code, to_end_modifiers) = if cfg!(target_os = "macos") {
+            (NamedKey::ArrowDown, Code::ArrowDown, Modifiers::META)
+        } else {
+            (NamedKey::End, Code::End, Modifiers::CONTROL)
+        };
+        harness.dispatch_event(key(Key::Named(to_end), to_end_code, to_end_modifiers));
         harness.paint();
         let (at, end) = scrolled();
         assert!(end > 0.0, "the summary is longer than its box");
