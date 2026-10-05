@@ -376,7 +376,6 @@ fn card_view(
             cards::event_row(
                 app,
                 state,
-                backend,
                 event,
                 pull.map(|p| p.author_login.clone()),
                 link,

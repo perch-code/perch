@@ -114,6 +114,20 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             }
         });
     }
+    // And the commits they link are shown on Files from here.
+    {
+        let backend = backend.clone();
+        floem::reactive::Effect::new(move |_| {
+            let Some(scope) = review.pending_scope.get() else {
+                return;
+            };
+            review.pending_scope.set(None);
+            let item_id = review.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone()));
+            if let Some(item_id) = item_id {
+                backend.set_scope(&item_id, scope);
+            }
+        });
+    }
     // What the review has to tell the reader goes up in the popup from
     // here, which is where the app state is.
     floem::reactive::Effect::new(move |_| {

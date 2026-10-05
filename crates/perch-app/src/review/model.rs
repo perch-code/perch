@@ -1886,6 +1886,9 @@ pub struct ReviewState {
     /// An offer to install the server a goto wanted, drained by the root
     /// view as the notice is.
     pub pending_offer: RwSignal<Option<crate::state::ServerOffer>>,
+    /// A scope for the diff, asked for by a commit a comment links,
+    /// drained by the root view, which holds the backend handle.
+    pub pending_scope: RwSignal<Option<Scope>>,
     /// The servers to start again, as their installs land, drained by the
     /// root view, which holds the backend.
     pub pending_server_starts: RwSignal<Vec<perch_lsp::ServerKind>>,
@@ -2125,6 +2128,7 @@ impl ReviewState {
             pending_names: RwSignal::new(Vec::new()),
             pending_notice: RwSignal::new(None),
             pending_offer: RwSignal::new(None),
+            pending_scope: RwSignal::new(None),
             pending_server_starts: RwSignal::new(Vec::new()),
             pending_ready: RwSignal::new(Vec::new()),
             jump_to_line: RwSignal::new(None),
@@ -2294,6 +2298,7 @@ impl ReviewState {
         self.names.set(HashMap::new());
         self.pending_names.set(Vec::new());
         self.pending_open.set(None);
+        self.pending_scope.set(None);
         // The bar goes with the files it was over; what it was looking
         // for stays, for the next item.
         self.find_open.set(false);
@@ -3095,6 +3100,58 @@ impl ReviewState {
                 self.pending_open.set(Some(path.to_string()));
             }
         }
+    }
+
+    /// The SHAs, in full, of the commits the review knows: the pull
+    /// request's, as GitHub's timeline lists them, and the checkout's
+    /// over the base, among them a branch's that are not pushed. Tracked.
+    pub fn known_commits(&self) -> Vec<String> {
+        let mut known: Vec<String> = self.discussion.with(|d| {
+            d.iter()
+                .flat_map(|d| &d.events)
+                .filter_map(|e| match &e.kind {
+                    PullEventKind::Committed { sha, .. } => Some(sha.clone()),
+                    _ => None,
+                })
+                .collect()
+        });
+        self.commits.with(|c| known.extend(c.iter().map(|c| c.sha.clone())));
+        known.sort_unstable();
+        known.dedup();
+        known
+    }
+
+    /// The subject of a commit the review knows, by its SHA, in full or
+    /// cut short.
+    pub fn commit_subject(&self, sha: &str) -> Option<String> {
+        let checkout = self.commits.with_untracked(|c| {
+            c.iter().find(|c| c.sha.starts_with(sha)).map(|c| c.subject.clone())
+        });
+        checkout.or_else(|| {
+            self.discussion.with_untracked(|d| {
+                d.iter().flat_map(|d| &d.events).find_map(|e| match &e.kind {
+                    PullEventKind::Committed { sha: s, subject, .. } if s.starts_with(sha) => {
+                        Some(subject.clone())
+                    }
+                    _ => None,
+                })
+            })
+        })
+    }
+
+    /// Show a commit's changes by themselves on Files, by its SHA, in
+    /// full or cut short, when the checkout has it: whether it does. A
+    /// checkout that has not fetched a push yet lacks its commits.
+    pub fn show_commit(&self, sha: &str) -> bool {
+        let full = self
+            .commits
+            .with_untracked(|c| c.iter().find(|c| c.sha.starts_with(sha)).map(|c| c.sha.clone()));
+        let Some(sha) = full else {
+            return false;
+        };
+        self.pending_scope.set(Some(Scope::Commit { sha }));
+        self.show_tab(ItemTab::Code);
+        true
     }
 
     /// Go to what a name in a comment or an answer names, on Code: one

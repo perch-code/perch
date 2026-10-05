@@ -1760,7 +1760,6 @@ fn more_row(more: usize) -> impl IntoView {
 pub fn event_row(
     app: AppState,
     state: ReviewState,
-    backend: Rc<Backend>,
     event: PullEvent,
     author: Option<String>,
     link: Option<(u64, String)>,
@@ -1817,7 +1816,7 @@ pub fn event_row(
         dyn_stack(
             move || pieces.clone().into_iter().enumerate(),
             |(i, piece)| format!("{i}:{}", piece.text()),
-            move |(_, piece)| event_piece(state, backend.clone(), piece),
+            move |(_, piece)| event_piece(state, piece),
         )
         .style(|s| s.items_center().gap(4.0).min_width(0.0)),
         match link {
@@ -1854,7 +1853,7 @@ pub fn event_row(
 }
 
 /// One piece of an event's line.
-fn event_piece(state: ReviewState, backend: Rc<Backend>, piece: Piece) -> floem::AnyView {
+fn event_piece(state: ReviewState, piece: Piece) -> floem::AnyView {
     if piece.text().is_empty() {
         return Empty::new().into_any();
     }
@@ -1866,7 +1865,7 @@ fn event_piece(state: ReviewState, backend: Rc<Backend>, piece: Piece) -> floem:
             let on_head = sha.clone();
             Label::derived(move || short.clone())
                 .debug_name("event commit")
-                .on_event_stop(el::Click, move |_, _| open_commit(state, &backend, &sha))
+                .on_event_stop(el::Click, move |_, _| open_commit(state, &sha))
                 .style(move |s| {
                     let opens = pull_url(state).is_some() || has_commit(state, &on_head);
                     let s = s
@@ -1956,20 +1955,13 @@ fn pull_url(state: ReviewState) -> Option<String> {
 }
 
 /// Open a head commit: on Files, as the one commit's changes, when the
-/// checkout has it, and else under the pull request on GitHub. A
-/// checkout that has not fetched a push yet lacks its commits.
-fn open_commit(state: ReviewState, backend: &Backend, sha: &str) {
-    let item_id = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone()));
-    match item_id {
-        Some(item_id) if has_commit(state, sha) => {
-            backend.set_scope(&item_id, perch_git::Scope::Commit { sha: sha.to_string() });
-            state.show_tab(ItemTab::Code);
-        }
-        _ => {
-            if let Some(url) = floem::reactive::Effect::untrack(|| pull_url(state)) {
-                open_in_browser(&format!("{url}/commits/{sha}"));
-            }
-        }
+/// checkout has it, and else under the pull request on GitHub.
+fn open_commit(state: ReviewState, sha: &str) {
+    if state.show_commit(sha) {
+        return;
+    }
+    if let Some(url) = floem::reactive::Effect::untrack(|| pull_url(state)) {
+        open_in_browser(&format!("{url}/commits/{sha}"));
     }
 }
 
@@ -2345,7 +2337,6 @@ pub(crate) fn finding_controls(
                     _ => absent(),
                 };
 
-                let sha_backend = backend.clone();
                 let provenance = Stack::horizontal((
                     sidebar_glyph(SidebarIcon::Agents, theme::fg_subtle)
                         .style(|s| s.size(12.0, 12.0).flex_shrink(0.0_f32)),
@@ -2360,7 +2351,7 @@ pub(crate) fn finding_controls(
                                 Label::derived(move || short_sha(&sha).to_string())
                                     .debug_name("finding-checked-sha")
                                     .on_event_stop(el::Click, move |_, _| {
-                                        open_commit(state, &sha_backend, &open)
+                                        open_commit(state, &open)
                                     })
                                     .style(|s| {
                                         underlined_link(

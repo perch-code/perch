@@ -21,6 +21,13 @@
 //! block that names something is drawn as linked text rather than a
 //! label, in the same font, to carry the links.
 //!
+//! A commit written by its SHA links as well, as GitHub links one, when
+//! the review knows it: it is the pull request's or the checkout's.
+//! GitHub links the SHA of any commit in the repository; one only the
+//! base has is left as written here. A click shows the commit's changes
+//! on Files when the checkout has it, and its page on GitHub when not,
+//! as a link to a commit's page does.
+//!
 //! A `<details>` block folds as GitHub folds one: its summary with a
 //! chevron, shut until clicked.
 //!
@@ -176,9 +183,16 @@ pub fn parse(text: &str) -> Vec<Block> {
 /// links to that repository's issue or pull request. With no repository,
 /// or a local one, only `owner/repo#12` is linked.
 pub fn parse_in(text: &str, repo: Option<&str>) -> Vec<Block> {
+    parse_naming(text, repo, &[])
+}
+
+/// [`parse_in`], with a bare SHA linked to the commit of `repo`'s it
+/// names among `commits`, written in full.
+fn parse_naming(text: &str, repo: Option<&str>, commits: &[String]) -> Vec<Block> {
     let repo = repo.filter(|r| r.contains('/') && !perch_github::config::is_local(r));
     let mut builder = Builder {
         repo,
+        commits,
         events: Parser::new_ext(text, OPTIONS).peekable(),
         numbers: Vec::new(),
         definitions: HashMap::new(),
@@ -206,6 +220,8 @@ struct Builder<'a> {
     events: Peekable<Parser<'a>>,
     /// The repository a bare `#12` is an issue of.
     repo: Option<&'a str>,
+    /// The commits a bare SHA may name, in full.
+    commits: &'a [String],
     /// Footnote labels in the order they were first referenced; a label's
     /// number is its index plus one.
     numbers: Vec<String>,
@@ -490,10 +506,10 @@ impl<'a> Builder<'a> {
         self.inline(event, spans, style);
     }
 
-    /// The gathered text, with any bare address, issue reference or
-    /// mention in it linked, as GitHub links one and the parser does not. Inside a link
-    /// they are the link's own text. A `:shortcode:` outside an address
-    /// is its emoji.
+    /// The gathered text, with any bare address, issue reference,
+    /// mention or commit in it linked, as GitHub links one and the parser
+    /// does not. Inside a link they are the link's own text. A
+    /// `:shortcode:` outside an address is its emoji.
     fn flush_text(&mut self, spans: &mut Vec<Span>, style: &Marks) {
         if self.text.is_empty() {
             return;
@@ -514,12 +530,28 @@ impl<'a> Builder<'a> {
             if !address {
                 let run = emojify(run);
                 for (piece, link) in issue_refs(&run, self.repo) {
-                    if link.is_some() || self.repo.is_none() {
+                    let Some(repo) = self.repo.filter(|_| link.is_none()) else {
                         push_text(spans, &Span { link, ..style.span() }, piece);
                         continue;
-                    }
+                    };
                     for (piece, link) in mentions(piece) {
-                        push_text(spans, &Span { link, ..style.span() }, piece);
+                        if link.is_some() {
+                            push_text(spans, &Span { link, ..style.span() }, piece);
+                            continue;
+                        }
+                        // A commit is drawn as GitHub draws one: its
+                        // SHA cut to seven, in the code font.
+                        for (piece, sha) in commit_refs(piece, self.commits) {
+                            let s = match sha {
+                                Some(sha) => Span {
+                                    code: true,
+                                    link: Some(format!("https://github.com/{repo}/commit/{sha}")),
+                                    ..style.span()
+                                },
+                                None => style.span(),
+                            };
+                            push_text(spans, &s, sha.map_or(piece, |sha| &sha[..SHORT_SHA]));
+                        }
                     }
                 }
                 continue;
@@ -1440,6 +1472,63 @@ fn mentions(text: &str) -> Vec<(&str, Option<String>)> {
     out
 }
 
+/// How much of a commit's SHA GitHub shows, and the least it links.
+const SHORT_SHA: usize = 7;
+
+/// The words of `text` that could be a commit's SHA, as GitHub reads
+/// one: 7 to 40 lowercase hex digits standing alone. One glued to a word,
+/// or after `#`, `@`, `/`, `&`, `.` or `-`, is part of something else: a
+/// colour, a path, a branch, a version.
+fn sha_words(text: &str) -> Vec<Range<usize>> {
+    let hex = |c: char| matches!(c, '0'..='9' | 'a'..='f');
+    let glue = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-');
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let Some(start) = text[at..].find(hex).map(|i| at + i) {
+        let end = text[start..].find(|c| !hex(c)).map_or(text.len(), |i| start + i);
+        at = end;
+        let before = text[..start].chars().next_back();
+        if (SHORT_SHA..=40).contains(&(end - start))
+            && !before.is_some_and(|c| glue(c) || matches!(c, '#' | '@' | '/' | '&' | '.'))
+            && !text[end..].chars().next().is_some_and(glue)
+        {
+            out.push(start..end);
+        }
+    }
+    out
+}
+
+/// Split `text` into runs, with the SHAs that name one of `commits`,
+/// written in full, and that commit. A SHA that two of them start with
+/// names neither.
+fn commit_refs<'t, 'c>(text: &'t str, commits: &'c [String]) -> Vec<(&'t str, Option<&'c str>)> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    for word in sha_words(text) {
+        let Some(sha) = named_commit(&text[word.clone()], commits) else {
+            continue;
+        };
+        if word.start > from {
+            out.push((&text[from..word.start], None));
+        }
+        out.push((&text[word.clone()], Some(sha)));
+        from = word.end;
+    }
+    if from < text.len() {
+        out.push((&text[from..], None));
+    }
+    out
+}
+
+/// The one of `commits`, written in full, that `written` starts.
+fn named_commit<'c>(written: &str, commits: &'c [String]) -> Option<&'c str> {
+    let mut named = commits.iter().filter(|sha| sha.starts_with(written));
+    match (named.next(), named.next()) {
+        (Some(sha), None) => Some(sha),
+        _ => None,
+    }
+}
+
 /// An issue or pull request's address, written as GitHub writes it:
 /// `#12` in `repo`, `owner/repo#12` elsewhere, and `(comment)` after it
 /// when the address is to one of its comments.
@@ -1477,19 +1566,46 @@ pub fn render_in(text: &str, repo: &str) -> impl IntoView {
 /// symbols of the review's worktree they name linked to Code. The same
 /// as `render_in` for an item with no checkout.
 pub fn render_linked(text: &str, state: ReviewState) -> impl IntoView {
+    let ctx = Ctx {
+        size: theme::TEXT_BODY,
+        color: theme::fg,
+        depth: 0,
+        refs: Refs::of(state),
+        foot: None,
+    };
+    passage(review_body(text, state, move |blocks| stack(blocks, ctx)))
+}
+
+/// `text` parsed in the review's repository and drawn by `draw`, with
+/// each commit it names by SHA that the review knows linked. Text that
+/// has no SHA in it is drawn once; text that does is drawn again when
+/// the commits it names change, as the pull request's and the checkout's
+/// land.
+fn review_body(text: &str, state: ReviewState, draw: impl Fn(Vec<Block>) -> AnyView + 'static) -> AnyView {
     let repo = state
         .item
         .with_untracked(|i| i.as_ref().map(|i| i.repo_full_name.clone()));
-    passage(stack(
-        parse_in(text, repo.as_deref()),
-        Ctx {
-            size: theme::TEXT_BODY,
-            color: theme::fg,
-            depth: 0,
-            refs: Refs::of(state),
-            foot: None,
-        },
-    ))
+    let written: Vec<String> = sha_words(text).into_iter().map(|w| text[w].to_string()).collect();
+    if written.is_empty() {
+        return draw(parse_in(text, repo.as_deref()));
+    }
+    let named = Memo::new(move |_| {
+        let known = state.known_commits();
+        let mut named: Vec<String> = written
+            .iter()
+            .filter_map(|w| named_commit(w, &known).map(str::to_string))
+            .collect();
+        named.sort_unstable();
+        named.dedup();
+        named
+    });
+    let text = text.to_string();
+    floem::views::dyn_container(
+        move || named.get(),
+        move |named| draw(parse_naming(&text, repo.as_deref(), &named)),
+    )
+    .style(|s| s.width_full())
+    .into_any()
 }
 
 /// What a suggested change has under it, such as Apply suggestion: a
@@ -1517,19 +1633,14 @@ pub fn render_suggesting(
     original: Option<Original>,
     foot: Option<Foot>,
 ) -> impl IntoView {
-    let repo = state
-        .item
-        .with_untracked(|i| i.as_ref().map(|i| i.repo_full_name.clone()));
-    passage(stack(
-        suggesting(parse_in(text, repo.as_deref()), &original),
-        Ctx {
-            size: theme::TEXT_BODY,
-            color: theme::fg,
-            depth: 0,
-            refs: Refs::of(state),
-            foot,
-        },
-    ))
+    let ctx = Ctx {
+        size: theme::TEXT_BODY,
+        color: theme::fg,
+        depth: 0,
+        refs: Refs::of(state),
+        foot,
+    };
+    passage(review_body(text, state, move |blocks| stack(suggesting(blocks, &original), ctx)))
 }
 
 /// The blocks with each `suggestion` fence made a suggested change to
@@ -2184,9 +2295,9 @@ fn prose_view(
 }
 
 /// What a run of spans links: every link's destination, one that is a
-/// path into the worktree opening in Files rather than the browser, and,
-/// with a review to look in, the code its code spans name. A link's runs
-/// split by another style are one link.
+/// path into the worktree or a commit the checkout has opening in Files
+/// rather than the browser, and, with a review to look in, the code its
+/// code spans name. A link's runs split by another style are one link.
 fn plan(spans: &[Span], refs: Option<Refs>) -> Plan {
     let mut plan = Plan::default();
     let mut urls: Vec<(Range<usize>, String)> = Vec::new();
@@ -2210,7 +2321,10 @@ fn plan(spans: &[Span], refs: Option<Refs>) -> Plan {
     }
     for (range, url) in urls {
         let target = refs
-            .and_then(|refs| Some(refs.file_target(refs.file_for_url(&url)?)))
+            .and_then(|refs| {
+                refs.commit_target(&url)
+                    .or_else(|| Some(refs.file_target(refs.file_for_url(&url)?)))
+            })
             .unwrap_or(Target::Url(url));
         plan.links.push((range, target));
     }
@@ -2654,6 +2768,54 @@ mod tests {
                 Span { text: "@b".into(), code: true, ..Default::default() },
             ])]
         );
+    }
+
+    #[test]
+    fn a_commit_the_review_knows_links_by_its_sha_as_github_links_one() {
+        let fix = format!("89af92ef{}", "0".repeat(32));
+        let commit = |text: &str, sha: &str| Span {
+            text: text.into(),
+            code: true,
+            link: Some(format!("https://github.com/o/r/commit/{sha}")),
+            ..Default::default()
+        };
+        let commits = [fix.clone()];
+        // Cut to seven, in the code font; a word that is only hex, or a
+        // SHA no known commit has, is left as written.
+        assert_eq!(
+            parse_naming("Fixed in 89af92ef. Not deadbee, 89af92e1 or 1234567.", Some("o/r"), &commits),
+            vec![Block::Paragraph(vec![
+                plain("Fixed in "),
+                commit("89af92e", &fix),
+                plain(". Not deadbee, 89af92e1 or 1234567."),
+            ])]
+        );
+        assert_eq!(parse_naming(&fix, Some("o/r"), &commits), vec![Block::Paragraph(vec![commit("89af92e", &fix)])]);
+        // Not inside a link, a code span or an address, and not without
+        // a repository on GitHub to link to.
+        assert_eq!(
+            parse_naming("[89af92e](https://x.y) `89af92e` https://x.y/89af92e", Some("o/r"), &commits),
+            vec![Block::Paragraph(vec![
+                Span { text: "89af92e".into(), link: Some("https://x.y".into()), ..Default::default() },
+                plain(" "),
+                Span { text: "89af92e".into(), code: true, ..Default::default() },
+                plain(" "),
+                Span { text: "https://x.y/89af92e".into(), link: Some("https://x.y/89af92e".into()), ..Default::default() },
+            ])]
+        );
+        for repo in [None, Some("local/perch")] {
+            assert_eq!(parse_naming("89af92e", repo, &commits), vec![Block::Paragraph(vec![plain("89af92e")])]);
+        }
+        // A SHA two commits start with names neither.
+        let twin = format!("89af92e{}", "1".repeat(33));
+        assert_eq!(named_commit("89af92e", &[fix.clone(), twin.clone()]), None);
+        assert_eq!(named_commit("89af92e1", &[fix.clone(), twin.clone()]), Some(twin.as_str()));
+
+        let words = |text: &str| -> Vec<String> { sha_words(text).into_iter().map(|w| text[w].to_string()).collect() };
+        assert_eq!(words("abc1234, (abc12345) \"abc1234\" abc1234."), vec!["abc1234", "abc12345", "abc1234", "abc1234"]);
+        assert_eq!(words(&"a".repeat(40)).len(), 1);
+        assert!(words(&format!("abc123 {} ABC1234 Abc1234 xabc1234 abc1234x abc1234_", "a".repeat(41))).is_empty());
+        assert!(words("#abc1234 @abc1234 a/abc1234 &abc1234 v1.abc1234 fix-abc1234 abc1234-dirty éabc1234").is_empty());
     }
 
     #[test]
@@ -3422,6 +3584,60 @@ mod tests {
             h.click(links[0].x, links[0].y);
             assert_eq!(state.pending_jump.get(), Some(("src/manifest.rs".into(), 39, 4)));
             assert!(state.pending_names.get().is_empty(), "nothing here is a name");
+        }
+
+        /// A commit named by its SHA links once the review knows it: one
+        /// the checkout has shows on Files by itself, and one only the pull
+        /// request on GitHub has opens there.
+        #[test]
+        fn a_commit_named_by_its_sha_opens_on_files_or_on_github() {
+            use crate::review::model::ItemTab;
+            use perch_github::{Discussion, PullEvent, PullEventKind};
+            let (here, away) = (format!("89af92ef{}", "0".repeat(32)), format!("1b2c3d4e{}", "0".repeat(32)));
+            let (mut h, state) = linked_harness(&format!("Fixed in {}, then {}.", &here[..8], &away[..12]), &[]);
+            assert!(links_on_first_line(&mut h, 0).is_empty(), "no commit is known yet");
+
+            state.commits.set(Arc::new(vec![perch_git::Commit {
+                sha: here.clone(),
+                subject: "Flush on close".into(),
+                body: String::new(),
+                author: "Chris".into(),
+                authored_at: "2026-10-05T09:00:00Z".parse().unwrap(),
+            }]));
+            let mut discussion = Discussion::default();
+            discussion.events.push(PullEvent::new(
+                PullEventKind::Committed {
+                    sha: away.clone(),
+                    author: "Chris".into(),
+                    login: String::new(),
+                    subject: "Fence the manifest".into(),
+                },
+                "2026-10-05T10:00:00Z".parse().unwrap(),
+                "",
+            ));
+            state.discussion.set(Some(Arc::new(discussion)));
+            h.rebuild();
+            h.paint();
+            let mut all = Vec::new();
+            find_all(h.root_id(), "LinkedText", &mut all);
+            let text = crate::review::linked_text::with_text(all[0], str::to_string);
+            assert_eq!(text.as_deref(), Some("Fixed in 89af92e, then 1b2c3d4."));
+            let links = links_on_first_line(&mut h, 0);
+            assert_eq!(links.len(), 2, "{links:?}");
+
+            crate::ui::widgets::opened();
+            h.click(links[0].x, links[0].y);
+            assert_eq!(state.pending_scope.get(), Some(perch_git::Scope::Commit { sha: here.clone() }));
+            assert_eq!(state.tab.get(), ItemTab::Code);
+            assert!(crate::ui::widgets::opened().is_empty());
+
+            state.pending_scope.set(None);
+            h.click(links[1].x, links[1].y);
+            assert_eq!(state.pending_scope.get(), None);
+            assert_eq!(
+                crate::ui::widgets::opened(),
+                vec![format!("https://github.com/slatedb/slatedb/commit/{away}")]
+            );
         }
 
         /// A cell whose text waits on a name's answer is drawn again when

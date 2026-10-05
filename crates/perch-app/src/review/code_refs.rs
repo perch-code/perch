@@ -131,6 +131,18 @@ fn github_lines(anchor: &str) -> Option<(usize, Option<usize>)> {
     }
 }
 
+/// The SHA in a commit's address on GitHub,
+/// `https://github.com/<repo>/commit/<sha>`, when the commit is `repo`'s.
+/// The SHA may be cut short, to no fewer than seven digits.
+fn commit_in<'u>(url: &'u str, repo: &str) -> Option<&'u str> {
+    let path = url.strip_prefix("https://github.com/")?;
+    let path = path.split(['?', '#']).next().unwrap_or_default();
+    let (named, sha) = path.split_once("/commit/")?;
+    let sha = sha.strip_suffix('/').unwrap_or(sha);
+    let hex = sha.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'));
+    (named.eq_ignore_ascii_case(repo) && hex && (7..=40).contains(&sha.len())).then_some(sha)
+}
+
 /// A symbol someone named, as they wrote it: `Db`, `Db::open`,
 /// `DbOptions.ttl`, `flush()`, with the byte range of each identifier in
 /// `text`, qualifiers first.
@@ -819,6 +831,29 @@ impl Refs {
         }
     }
 
+    /// A link to a commit of the item's repository on GitHub, as a SHA
+    /// in a comment links one: a click shows its changes on Files when the
+    /// checkout has it, and goes to GitHub when it does not. Its subject is
+    /// its tip, when the review knows it. `None` for any other address.
+    pub fn commit_target(&self, url: &str) -> Option<Target> {
+        let repo = self
+            .state
+            .item
+            .with_untracked(|i| i.as_ref().map(|i| i.repo_full_name.clone()))?;
+        let sha = commit_in(url, &repo)?.to_string();
+        let state = self.state;
+        let tip = state.commit_subject(&sha).unwrap_or_else(|| url.to_string());
+        let url = url.to_string();
+        Some(Target::Local {
+            tip,
+            open: Rc::new(move || {
+                if !state.show_commit(&sha) {
+                    crate::ui::widgets::open_in_browser(&url);
+                }
+            }),
+        })
+    }
+
     /// Open a file a link names, at its line when it has one, on Files.
     pub fn go(&self, link: &FileLink) {
         let at = link
@@ -998,6 +1033,19 @@ mod tests {
             line,
             column,
         })
+    }
+
+    #[test]
+    fn a_commit_address_is_read_for_its_sha_in_its_repository() {
+        let full = "89af92ef".repeat(5);
+        let url = |path: &str| format!("https://github.com/{path}");
+        assert_eq!(commit_in(&url(&format!("o/r/commit/{full}")), "o/r"), Some(full.as_str()));
+        assert_eq!(commit_in(&url("O/R/commit/89af92e/"), "o/r"), Some("89af92e"));
+        assert_eq!(commit_in(&url("o/r/commit/89af92e#diff-1"), "o/r"), Some("89af92e"));
+        for path in ["x/r/commit/89af92e", "o/r/commit/89af92", "o/r/commit/89AF92E", "o/r/commits/89af92e", "o/r/pull/1"] {
+            assert_eq!(commit_in(&url(path), "o/r"), None, "{path}");
+        }
+        assert_eq!(commit_in("http://github.com/o/r/commit/89af92e", "o/r"), None);
     }
 
     #[test]
