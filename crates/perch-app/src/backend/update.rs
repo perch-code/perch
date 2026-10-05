@@ -91,9 +91,10 @@ async fn fetch(ctx: &Ctx) -> Result<Option<Fetched>, String> {
     if let Some(app) = update::staged(&dir, &version) {
         return Ok(Some(Fetched { version, app }));
     }
-    let asset = release
-        .asset(update::ASSET)
-        .ok_or_else(|| format!("{} has no {}", release.tag_name, update::ASSET))?;
+    let Some(asset) = release.asset(update::ASSET) else {
+        tracing::info!("{} has no {}", release.tag_name, update::ASSET);
+        return Ok(None);
+    };
     tracing::info!("downloading Perch {version}");
     let tarball = github
         .download_release_asset(asset)
