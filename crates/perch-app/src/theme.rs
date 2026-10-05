@@ -1116,6 +1116,19 @@ pub fn match_fg() -> Color {
     pick(rgb(0x0969da), rgb(0x4493f8))
 }
 
+/// The fonts `main` installs before the first window, once for the test
+/// process, for a test that lays code out as the app would. Off macOS
+/// `CODE_FONT_STACK` names no family until this registers one, and code
+/// falls back to a proportional face whose characters are other widths.
+#[cfg(test)]
+pub(crate) fn install_fonts_for_tests() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        install_code_font(None);
+        install_symbol_fallbacks();
+    });
+}
+
 /// A test's check that a view goes dark with the system: that after a
 /// switch, nothing on screen still holds a colour only the light palette
 /// has. A view that took a `Color` when it was built, where it wanted an
