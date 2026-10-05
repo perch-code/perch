@@ -1956,8 +1956,17 @@ mod tests {
         assert!(find(row, "1d").is_some(), "the age is a day, short");
         assert!(title.y1 <= byline.y0, "the title is over the byline");
         assert!(title.x1 <= age.x0, "the age is at the title's right end");
-        assert_eq!(age.x1, rect.x1 - 13.0, "the age ends at the row's inset");
-        assert_eq!(figures.x1, age.x1, "the figures end under the age");
+        // Right-aligned text's edges are within float noise of where they
+        // go: its width is fractional, and the layout sums it back out.
+        let near = |a: f64, b: f64| (a - b).abs() < 0.01;
+        assert!(
+            near(age.x1, rect.x1 - 13.0),
+            "the age ends at the row's inset: {age:?}"
+        );
+        assert!(
+            near(figures.x1, age.x1),
+            "the figures end under the age: {figures:?}"
+        );
         assert_eq!(avatar.x0, title.x0, "the avatar starts under the title");
         assert_eq!(
             avatar.width(),
@@ -1981,13 +1990,16 @@ mod tests {
         assert_eq!((thread_rect.x0, thread_rect.x1), (rect.x0, rect.x1));
         assert_eq!(thread_rect.height(), rect.height());
         let thread_age = find(thread, "row age").unwrap().get_visual_rect_no_clip();
-        assert_eq!(thread_age.x1, age.x1);
-        assert_eq!(
-            find(thread, "row figures")
-                .unwrap()
-                .get_visual_rect_no_clip()
-                .x1,
-            age.x1
+        assert!(
+            near(thread_age.x1, age.x1),
+            "the ages line up: {thread_age:?}"
+        );
+        let thread_figures = find(thread, "row figures")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        assert!(
+            near(thread_figures.x1, age.x1),
+            "and the figures: {thread_figures:?}"
         );
         assert!(find(thread, "#11").is_some(), "the number");
         assert!(
