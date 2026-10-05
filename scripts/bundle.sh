@@ -3,12 +3,17 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-cargo build --release -p perch-app
-TARGET="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+cargo build --release --locked -p perch-app
+METADATA="$(cargo metadata --no-deps --format-version 1)"
+TARGET="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])' <<<"$METADATA")"
+# The app's version is the workspace's, so a release only bumps Cargo.toml.
+VERSION="$(python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "perch-app"))' <<<"$METADATA")"
 APP="$TARGET/Perch.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$TARGET/release/perch" "$APP/Contents/MacOS/perch"
 cp assets/Info.plist "$APP/Contents/Info.plist"
+plutil -replace CFBundleShortVersionString -string "$VERSION" "$APP/Contents/Info.plist"
+plutil -replace CFBundleVersion -string "$VERSION" "$APP/Contents/Info.plist"
 cp assets/Perch.icns "$APP/Contents/Resources/Perch.icns"
 codesign --force --sign - "$APP"
-echo "Built $APP"
+echo "Built $APP ($VERSION)"

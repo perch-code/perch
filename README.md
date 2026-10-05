@@ -17,7 +17,17 @@ worktree behind every item.
 
 ## Install
 
-Build Perch from source.
+Perch runs on Apple Silicon Macs. With `gh` signed in to an account that can
+read this repository, install or update to the latest release with:
+
+```bash
+gh release download --repo perch-code/perch --pattern Perch-macos-arm64.tar.gz -O - | tar -xz -C /Applications
+```
+
+Quit Perch before updating. Downloading through `gh` rather than a browser
+keeps macOS from quarantining the app, which isn't notarized.
+
+To build from source instead:
 
 ```bash
 ./scripts/bundle.sh
@@ -207,3 +217,17 @@ closed or you haven't opened it in 14 days. The branch stays, and Restore
 Worktree brings the directory back. Like `git worktree remove`, it counts
 files git ignores, such as `.env`, as disposable. Worktrees under your
 `roots` are yours, and Perch never removes them.
+
+## Releasing
+
+Bump `version` under `[workspace.package]` in `Cargo.toml`, commit, then push
+a matching tag:
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+The release workflow builds `Perch.app` on an Apple Silicon runner and
+publishes `Perch-macos-arm64.tar.gz` to a GitHub release. A tag with a hyphen,
+like `v0.2.0-beta.1`, becomes a prerelease, which `gh release download` skips
+by default.
