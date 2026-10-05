@@ -219,7 +219,13 @@ fn progress(group: &AgentReviewRunGroup) -> impl IntoView {
         .summary
         .as_ref()
         .filter(|summary| summary.group.status.is_active())
-        .map(|summary| summary.attempts.iter().map(|attempt| attempt.phase).collect())
+        .map(|summary| {
+            summary
+                .attempts
+                .iter()
+                .map(|attempt| attempt.phase)
+                .collect()
+        })
         .unwrap_or_default();
     let shown = !phases.is_empty();
     Stack::horizontal_from_iter(phases.into_iter().map(|phase| {
@@ -262,7 +268,12 @@ fn status_line(review: ReviewState, summary: ReviewGroupSummary) -> impl IntoVie
     let mut lines = vec![Stack::horizontal((
         review_launch::count_chips(&summary).style(move |s| s.apply_if(!chips, |s| s.hide())),
         Label::derived(move || {
-            if chips { "\u{b7} code changed since" } else { "Code changed since" }.to_string()
+            if chips {
+                "\u{b7} code changed since"
+            } else {
+                "Code changed since"
+            }
+            .to_string()
         })
         .debug_name("review-group-newer")
         .style(move |s| {
@@ -338,8 +349,8 @@ fn group_actions(
             let summary = summary.clone();
             openable.then(|| -> Rc<dyn Fn()> {
                 Rc::new(move || {
-                    let request_id = backend
-                        .open_review_snapshot(&summary.group.item_id, &summary.group.id);
+                    let request_id =
+                        backend.open_review_snapshot(&summary.group.item_id, &summary.group.id);
                     app.begin_historical_review(review, summary.clone(), request_id);
                 })
             })
@@ -368,9 +379,12 @@ fn group_actions(
         .map(|summary| {
             let group_id = summary.group.id.clone();
             crate::review::cards::tip(
-                icon_action(SidebarIcon::Stop, "review-group stop", || true, move || {
-                    backend.stop_review_group(&group_id)
-                }),
+                icon_action(
+                    SidebarIcon::Stop,
+                    "review-group stop",
+                    || true,
+                    move || backend.stop_review_group(&group_id),
+                ),
                 "Stop review".to_string(),
             )
             .into_any()
@@ -467,7 +481,10 @@ fn findings(app: AppState, review: ReviewState, summary: ReviewGroupSummary) -> 
         },
     )
     // Nothing at all while a running review has found nothing yet.
-    .style(move |s| s.width_full().apply_if(!done && rows.with(|r| r.is_empty()), |s| s.hide()))
+    .style(move |s| {
+        s.width_full()
+            .apply_if(!done && rows.with(|r| r.is_empty()), |s| s.hide())
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -507,7 +524,11 @@ fn finding_row(
         badge(move || severity.to_string(), ink, fill, None),
         Label::derived(move || line.clone()).style(move |s| {
             s.font_size(theme::TEXT_META)
-                .color(if faded { theme::fg_subtle() } else { theme::fg() })
+                .color(if faded {
+                    theme::fg_subtle()
+                } else {
+                    theme::fg()
+                })
                 .text_ellipsis()
                 .min_width(0.0)
                 .flex_grow(1.0_f32)
@@ -555,7 +576,9 @@ fn finding_row(
             .min_height(32.0)
             .padding_left(10.0)
             .padding_right(4.0)
-            .apply_if(!first, |s| s.border_top(1.0).border_color(theme::border_muted()))
+            .apply_if(!first, |s| {
+                s.border_top(1.0).border_color(theme::border_muted())
+            })
     });
     crate::review::cards::track_hover(row, hovered)
 }
@@ -667,6 +690,9 @@ mod tests {
             "Parsing scheduler_options repeats the parse."
         );
         assert_eq!(finding_line("Plain words."), "Plain words.");
-        assert_eq!(finding_line("Why does `fence` take it?"), "Why does fence take it?");
+        assert_eq!(
+            finding_line("Why does `fence` take it?"),
+            "Why does fence take it?"
+        );
     }
 }

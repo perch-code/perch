@@ -20,8 +20,8 @@ pub mod hover;
 pub mod images;
 pub mod linked_text;
 pub mod markdown;
-pub mod math;
 pub mod markdown_toolbar;
+pub mod math;
 pub mod mention;
 pub mod merge;
 pub mod model;
@@ -29,10 +29,10 @@ pub mod navigation;
 pub mod open_pull;
 pub mod picture;
 pub mod rail;
-pub mod run_view;
 pub mod references;
 pub mod review_launch;
 pub mod review_menu;
+pub mod run_view;
 pub mod scope;
 pub mod start_work;
 pub mod sticky;
@@ -210,7 +210,9 @@ fn moved_head(state: ReviewState) -> Option<String> {
             .and_then(|item| item.checkout.as_ref())
             .is_some_and(|checkout| checkout.head_sha != head)
     });
-    let left_behind = state.stale_head.with(|stale| stale.as_deref() == Some(head.as_str()));
+    let left_behind = state
+        .stale_head
+        .with(|stale| stale.as_deref() == Some(head.as_str()));
     (behind && !left_behind).then_some(head)
 }
 

@@ -294,10 +294,17 @@ fn server_ready(state: ReviewState, noun: &str, symbol: &Symbol) -> bool {
     });
     // A server that isn't there says so with the offer to install it.
     if let Some(missing) = missing {
-        let text = format!("No {noun} found for `{}`: {}", symbol.text, missing.describe());
+        let text = format!(
+            "No {noun} found for `{}`: {}",
+            symbol.text,
+            missing.describe()
+        );
         state
             .pending_offer
-            .set(Some(crate::state::ServerOffer::missing(&missing, Some(text))));
+            .set(Some(crate::state::ServerOffer::missing(
+                &missing,
+                Some(text),
+            )));
         return false;
     }
     // A server held for want of trust says so with the offer to trust it.
@@ -471,7 +478,9 @@ fn symbol_menu(
         let ed = ed.clone();
         let symbol = symbol.clone();
         menu = menu.item(label, move |item| {
-            let keys = entry.accelerator().and_then(crate::ui::menu::Shortcut::parse);
+            let keys = entry
+                .accelerator()
+                .and_then(crate::ui::menu::Shortcut::parse);
             let item = match keys {
                 Some(accelerator) => item.accelerator(accelerator),
                 None => item,
@@ -525,7 +534,10 @@ fn track(state: ReviewState, backend: &Rc<Backend>, symbol: Option<Symbol>) {
     }
     state.pointer_symbol.set(symbol.clone());
     let Some(symbol) = symbol else { return };
-    if !state.lsp_status.with_untracked(|s| s.usable_for(&symbol.path)) {
+    if !state
+        .lsp_status
+        .with_untracked(|s| s.usable_for(&symbol.path))
+    {
         return;
     }
     let backend = backend.clone();
@@ -627,7 +639,10 @@ mod tests {
         state.set_phase(Phase::Ready);
         state.tab.set(ItemTab::Code);
         state.composer_autofocus.set(false);
-        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
+        state.set_server_status(
+            perch_lsp::ServerKind::RustAnalyzer,
+            perch_lsp::Status::Ready,
+        );
 
         let file = Arc::new(crate::backend::build_loaded_file(
             "src/x.rs".into(),
@@ -853,8 +868,12 @@ mod tests {
         let mut sent = move || {
             std::iter::from_fn(|| commands.try_recv().ok())
                 .map(|c| match c {
-                    Command::Hover { line, character, .. } => format!("hover {line}:{character}"),
-                    Command::DocumentHighlight { line, character, .. } => {
+                    Command::Hover {
+                        line, character, ..
+                    } => format!("hover {line}:{character}"),
+                    Command::DocumentHighlight {
+                        line, character, ..
+                    } => {
                         format!("highlight {line}:{character}")
                     }
                     other => format!("{other:?}"),
@@ -871,7 +890,10 @@ mod tests {
         state.ask_again(&backend, perch_lsp::ServerKind::Gopls);
         assert_eq!(sent(), Vec::<String>::new(), "not its server");
 
-        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
+        state.set_server_status(
+            perch_lsp::ServerKind::RustAnalyzer,
+            perch_lsp::Status::Ready,
+        );
         state.ask_again(&backend, perch_lsp::ServerKind::RustAnalyzer);
         assert_eq!(sent(), ["highlight 0:3", "hover 0:3"]);
         assert_ne!(state.highlight_ask.get().unwrap().0, token, "a new ask");
@@ -880,7 +902,9 @@ mod tests {
 
         // Answered this time: ready again asks nothing.
         state.finish_highlights(state.highlight_ask.get().unwrap().0, vec![(0, 3, 8)]);
-        state.hover.update(|h| h.as_mut().unwrap().markdown = "fn alpha()".into());
+        state
+            .hover
+            .update(|h| h.as_mut().unwrap().markdown = "fn alpha()".into());
         state.ask_again(&backend, perch_lsp::ServerKind::RustAnalyzer);
         assert_eq!(sent(), Vec::<String>::new());
 
@@ -979,9 +1003,12 @@ mod tests {
 
         // With the server gone, the caret is placed and nothing is asked.
         state.goto.set(None);
-        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Failed {
-            reason: "gone".into(),
-        });
+        state.set_server_status(
+            perch_lsp::ServerKind::RustAnalyzer,
+            perch_lsp::Status::Failed {
+                reason: "gone".into(),
+            },
+        );
         let offset = doc.offset_of_row(0) + 4;
         let (x, y) = point_of(offset);
         cmd_click_at(&mut harness, x, y);
@@ -999,9 +1026,12 @@ mod tests {
 
         // rust-analyzer whose workspace did not load: the hand still shows,
         // so the click says why nothing opens.
-        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Unhealthy {
-            message: "Failed to load workspaces".into(),
-        });
+        state.set_server_status(
+            perch_lsp::ServerKind::RustAnalyzer,
+            perch_lsp::Status::Unhealthy {
+                message: "Failed to load workspaces".into(),
+            },
+        );
         let (x, y) = point_of(doc.offset_of_row(3) + 6);
         cmd_click_at(&mut harness, x, y);
         harness.rebuild();
@@ -1015,7 +1045,10 @@ mod tests {
 
         // Ready, the click asks; an answer with nothing in it says so.
         app.notify("", crate::state::Tone::Error);
-        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
+        state.set_server_status(
+            perch_lsp::ServerKind::RustAnalyzer,
+            perch_lsp::Status::Ready,
+        );
         cmd_click_at(&mut harness, x, y);
         harness.rebuild();
         assert_eq!(
@@ -1049,7 +1082,9 @@ mod tests {
         harness.rebuild();
         assert_eq!(
             app.notice().as_deref(),
-            Some("No definition found for `alpha` (the language server reported: content modified)")
+            Some(
+                "No definition found for `alpha` (the language server reported: content modified)"
+            )
         );
 
         // Asked while it was loading, it says so, rather than reading as
@@ -1058,7 +1093,9 @@ mod tests {
         cmd_click_at(&mut harness, x, y);
         harness.rebuild();
         let ask = state.goto.get().expect("a definition is on its way");
-        let loading = perch_lsp::Error::Loading { server: "rust-analyzer" };
+        let loading = perch_lsp::Error::Loading {
+            server: "rust-analyzer",
+        };
         state.finish_goto(ask.token, Err(loading.to_string()));
         harness.rebuild();
         assert_eq!(
@@ -1122,14 +1159,19 @@ mod tests {
             ))
         };
 
-        state.lsp_status.set(crate::review::model::ServerStatuses::default());
+        state
+            .lsp_status
+            .set(crate::review::model::ServerStatuses::default());
         assert_eq!(
             click(&mut harness),
             start("No definition found for `alpha` (rust-analyzer not started)")
         );
-        state.set_server_status(rust, perch_lsp::Status::Failed {
-            reason: "gone".into(),
-        });
+        state.set_server_status(
+            rust,
+            perch_lsp::Status::Failed {
+                reason: "gone".into(),
+            },
+        );
         assert_eq!(
             click(&mut harness),
             start("No definition found for `alpha` (rust-analyzer failed: gone)")
@@ -1299,7 +1341,11 @@ mod tests {
         let epoch = state.editor_epoch.get();
         state.go_to_file("src/y.rs", None);
         harness.rebuild();
-        assert_eq!(state.editor_epoch.get(), epoch, "the open file was not opened again");
+        assert_eq!(
+            state.editor_epoch.get(),
+            epoch,
+            "the open file was not opened again"
+        );
 
         harness.dispatch_event(key(
             Code::Minus,
@@ -1518,7 +1564,10 @@ mod tests {
     #[test]
     fn the_type_definition_answers_as_a_definition_does() {
         let state = ReviewState::new();
-        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
+        state.set_server_status(
+            perch_lsp::ServerKind::RustAnalyzer,
+            perch_lsp::Status::Ready,
+        );
         let (backend, mut commands) = crate::backend::Backend::recording();
         let symbol = Symbol {
             path: "src/x.rs".into(),
@@ -1583,10 +1632,7 @@ mod tests {
             ]
         );
         for keys in entries.iter().filter_map(|e| e.accelerator()) {
-            assert!(
-                crate::ui::menu::Shortcut::parse(keys).is_some(),
-                "{keys}"
-            );
+            assert!(crate::ui::menu::Shortcut::parse(keys).is_some(), "{keys}");
         }
         assert_eq!(Entry::for_symbol(None), vec![Entry::Copy]);
         assert_eq!(Entry::Copy.label(None), "Copy");

@@ -50,13 +50,16 @@ pub fn apply_run_event(
             // A note among the steps as well, where it was said, as the
             // stored run has it when it is read back.
             if !text.trim().is_empty() {
-                add_step(run, RunStep {
-                    summary: text.trim().to_string(),
-                    ok: true,
-                    note: true,
-                    pending: false,
-                    user: false,
-                });
+                add_step(
+                    run,
+                    RunStep {
+                        summary: text.trim().to_string(),
+                        ok: true,
+                        note: true,
+                        pending: false,
+                        user: false,
+                    },
+                );
             }
             run.final_result = Some(match run.final_result.take() {
                 Some(mut prior) if !prior.is_empty() => {
@@ -126,13 +129,16 @@ pub fn apply_run_event(
                 .as_deref()
                 .map(|tool| format!("{tool}: {message}"))
                 .unwrap_or_else(|| message.clone());
-            add_step(run, RunStep {
-                summary: summary.clone(),
-                ok: false,
-                note: false,
-                pending: false,
-                user: false,
-            });
+            add_step(
+                run,
+                RunStep {
+                    summary: summary.clone(),
+                    ok: false,
+                    note: false,
+                    pending: false,
+                    user: false,
+                },
+            );
             run.latest_activity = Some(summary);
         }
         RunEvent::Usage {
@@ -245,7 +251,11 @@ pub async fn discover(agent: &mut perch_github::AgentConfig) -> Vec<String> {
     let problems = find_agents(agent).await;
     if agent.models.is_empty()
         && !agent.codex.models.contains(&agent.model)
-        && agent.codex.models.iter().any(|m| m == perch_github::CODEX_DEFAULT_MODEL)
+        && agent
+            .codex
+            .models
+            .iter()
+            .any(|m| m == perch_github::CODEX_DEFAULT_MODEL)
     {
         agent.model = perch_github::CODEX_DEFAULT_MODEL.into();
     }
@@ -476,7 +486,10 @@ async fn ask(
         (None, None) => None,
     };
     let body = match &pr {
-        Some(_) => discussion.as_ref().map(|d| d.body.clone()).unwrap_or_default(),
+        Some(_) => discussion
+            .as_ref()
+            .map(|d| d.body.clone())
+            .unwrap_or_default(),
         None => String::new(),
     };
     let checks = match &pr {
@@ -528,9 +541,9 @@ async fn ask(
         .map(|pr| pr.author_login.clone())
         .or(issue.as_ref().map(|(i, _)| i.author_login.clone()))
         .unwrap_or_default();
-    let archive = discussion.as_ref().map(|d| {
-        crate::context::archive(d, target, &checkout.head_sha, &opener, checks.as_ref())
-    });
+    let archive = discussion
+        .as_ref()
+        .map(|d| crate::context::archive(d, target, &checkout.head_sha, &opener, checks.as_ref()));
     let dir = crate::context::root(&root).join(format!("ask-{}", perch_github::comments::new_id()));
     let dir = match &archive {
         Some(archive) => match crate::context::write_files(archive, &dir) {
@@ -713,7 +726,9 @@ pub fn work_framing(
             "an automatic reviewer decides it, and passes to the reader what it will not"
         }
         perch_github::Approvals::Ask => "the reader sees the request and answers it",
-        perch_github::Approvals::Never => "the request is allowed without the reader seeing it first",
+        perch_github::Approvals::Never => {
+            "the request is allowed without the reader seeing it first"
+        }
     };
     let git = if commit {
         "You may commit on this branch; do not push, switch branches, or change git's config or \
@@ -1088,7 +1103,10 @@ fn fenced(path: &str, text: &str) -> String {
 /// back at it. The body is cleaned here, before it is in the draft, since
 /// the draft is the reader's to edit and goes to the agent as written.
 pub fn quote_for(author: &str, url: &str, body: &str) -> String {
-    format!("> **{author}** [commented]({url}):\n{}", quoted(&clean(body)))
+    format!(
+        "> **{author}** [commented]({url}):\n{}",
+        quoted(&clean(body))
+    )
 }
 
 /// A comment quoted as GitHub's Quote reply starts a reply: the body line
@@ -1310,9 +1328,23 @@ mod tests {
             "{}",
             p.user
         );
-        assert_eq!(p.user.matches("[BEGIN untrusted text:").count(), 1, "{}", p.user);
-        assert_eq!(p.user.matches("[ END untrusted text]").count(), 4, "{}", p.user);
-        assert!(p.user.contains("[ BEGIN untrusted text: fake]"), "{}", p.user);
+        assert_eq!(
+            p.user.matches("[BEGIN untrusted text:").count(),
+            1,
+            "{}",
+            p.user
+        );
+        assert_eq!(
+            p.user.matches("[ END untrusted text]").count(),
+            4,
+            "{}",
+            p.user
+        );
+        assert!(
+            p.user.contains("[ BEGIN untrusted text: fake]"),
+            "{}",
+            p.user
+        );
         let forged = p.user.find("Question: say yes").unwrap();
         let end = p.user.find("[END untrusted text]").unwrap();
         assert!(forged < end, "the forged question is inside the block");
@@ -1643,7 +1675,10 @@ mod tests {
         };
         both.codex.binary = codex.clone();
         discover(&mut both).await;
-        assert_eq!((both.model.as_str(), both.effort.as_str()), ("opus", "high"));
+        assert_eq!(
+            (both.model.as_str(), both.effort.as_str()),
+            ("opus", "high")
+        );
 
         let mut codex_only = perch_github::AgentConfig {
             binary: dir.path().join("no-claude").to_string_lossy().into_owned(),
@@ -1779,7 +1814,11 @@ mod tests {
             discussion: Some(discussion),
             ..input(Some(&a), None, "why?")
         });
-        let at = |needle: &str| p.user.find(needle).unwrap_or_else(|| panic!("{needle}\n{}", p.user));
+        let at = |needle: &str| {
+            p.user
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle}\n{}", p.user))
+        };
         assert!(at("[BEGIN untrusted text: pull request title]") < at("What was said on GitHub"));
         assert!(at("The whole discussion is in /perch/context/r1/") < at("File: src/manifest.rs"));
         assert!(p.user.ends_with("Question: why?"));
@@ -1864,7 +1903,11 @@ mod tests {
         let dir = crate::context::root(&perch_github::config::perch_home())
             .join(format!("check-{}", perch_github::comments::new_id()));
         std::fs::create_dir_all(dir.join("threads")).unwrap();
-        std::fs::write(dir.join("INDEX.md"), "# Discussion\n\n- sentinel-7731 · alice\n").unwrap();
+        std::fs::write(
+            dir.join("INDEX.md"),
+            "# Discussion\n\n- sentinel-7731 · alice\n",
+        )
+        .unwrap();
         std::fs::write(dir.join("threads/r1.md"), "# Thread\n\nquartz-2208\n").unwrap();
 
         let question = format!(
@@ -1942,7 +1985,11 @@ mod tests {
                 .env("GIT_COMMITTER_EMAIL", "t@t")
                 .output()
                 .unwrap();
-            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         };
         // Under the home directory, not the temporary one: a Work run may
@@ -1967,7 +2014,17 @@ mod tests {
             let Some(model) = model else { continue };
             let name = backend.name().replace(' ', "-").to_lowercase();
             let worktree = tmp.path().join(format!("wt-{name}"));
-            git(&root, &["worktree", "add", "-q", "-b", &name, worktree.to_str().unwrap()]);
+            git(
+                &root,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    &name,
+                    worktree.to_str().unwrap(),
+                ],
+            );
             let head = git(&worktree, &["rev-parse", "HEAD"]);
             let escape = perch_github::config::home_dir()
                 .join(format!("perch-escape-{}", perch_github::comments::new_id()));
@@ -1983,7 +2040,10 @@ mod tests {
                  7. Run `git init -q nested`.",
                 escape.display()
             );
-            let prompt = Prompt { system: None, user: question };
+            let prompt = Prompt {
+                system: None,
+                user: question,
+            };
             let spec = run_spec(
                 &config.agent,
                 backend,
@@ -2014,7 +2074,11 @@ mod tests {
 
             let escaped = escape.exists();
             let _ = std::fs::remove_file(&escape);
-            assert!(worktree.join("hello.txt").is_file(), "{} could not edit the worktree", backend.name());
+            assert!(
+                worktree.join("hello.txt").is_file(),
+                "{} could not edit the worktree",
+                backend.name()
+            );
             assert!(!escaped, "{} wrote outside the worktree", backend.name());
             let committed = git(&worktree, &["rev-parse", "HEAD"]) != head;
             match backend {
@@ -2036,7 +2100,11 @@ mod tests {
                 "{} wrote its settings",
                 backend.name()
             );
-            assert!(!worktree.join("nested/.git").exists(), "{} made a nested .git", backend.name());
+            assert!(
+                !worktree.join("nested/.git").exists(),
+                "{} made a nested .git",
+                backend.name()
+            );
         }
     }
 
@@ -2088,7 +2156,10 @@ mod tests {
             question: String,
             decide: impl Fn(&perch_agent::ApprovalRequest) -> perch_agent::Decision,
         ) -> (Vec<perch_agent::ApprovalRequest>, String) {
-            let prompt = Prompt { system: None, user: question };
+            let prompt = Prompt {
+                system: None,
+                user: question,
+            };
             let spec = run_spec(
                 &config.agent,
                 backend,
@@ -2126,7 +2197,17 @@ mod tests {
             let Some(model) = model else { continue };
             let name = backend.name().replace(' ', "-").to_lowercase();
             let worktree = tmp.path().join(format!("wt-{name}"));
-            git(&root, &["worktree", "add", "-q", "-b", &name, worktree.to_str().unwrap()]);
+            git(
+                &root,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "-b",
+                    &name,
+                    worktree.to_str().unwrap(),
+                ],
+            );
             let escape = perch_github::config::home_dir()
                 .join(format!("perch-escape-{}", perch_github::comments::new_id()));
             let question = format!(
@@ -2137,9 +2218,7 @@ mod tests {
                  2. echo x > {}",
                 escape.display()
             );
-            let about_host = |r: &perch_agent::ApprovalRequest| {
-                r.subject.contains("example.com")
-            };
+            let about_host = |r: &perch_agent::ApprovalRequest| r.subject.contains("example.com");
             let (asked, text) = run_work(
                 &config,
                 backend,
@@ -2158,21 +2237,46 @@ mod tests {
             .await;
             let escaped = escape.exists();
             let _ = std::fs::remove_file(&escape);
-            assert!(asked.iter().any(about_host), "{} asked about the host: {asked:?}", backend.name());
-            assert!(!escaped, "{} wrote outside the worktree after a denial", backend.name());
-            assert!(text.contains("200"), "{} reached the host once allowed: {text}", backend.name());
+            assert!(
+                asked.iter().any(about_host),
+                "{} asked about the host: {asked:?}",
+                backend.name()
+            );
+            assert!(
+                !escaped,
+                "{} wrote outside the worktree after a denial",
+                backend.name()
+            );
+            assert!(
+                text.contains("200"),
+                "{} reached the host once allowed: {text}",
+                backend.name()
+            );
         }
 
         // The commit grant, for Claude Code.
         let worktree = tmp.path().join("wt-commit");
-        git(&root, &["worktree", "add", "-q", "-b", "commit", worktree.to_str().unwrap()]);
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "commit",
+                worktree.to_str().unwrap(),
+            ],
+        );
         let head = git(&worktree, &["rev-parse", "HEAD"]);
         let (_, text) = run_work(
             &config,
             perch_agent::Backend::ClaudeCode,
             "haiku",
             &worktree,
-            perch_agent::WorkGrant { commit: true, ..perch_agent::WorkGrant::default() },
+            perch_agent::WorkGrant {
+                commit: true,
+                ..perch_agent::WorkGrant::default()
+            },
             "Run these, one shell command each, and report each result: \
              1. printf 'hi\\n' > hello.txt && git add hello.txt && git commit -q -m hello \
              2. git config core.hooksPath /tmp/perch-hooks. \
@@ -2181,8 +2285,15 @@ mod tests {
             |_| perch_agent::Decision::deny("No."),
         )
         .await;
-        assert_ne!(git(&worktree, &["rev-parse", "HEAD"]), head, "committed with the grant: {text}");
-        assert!(git(&root, &["config", "--get", "core.hooksPath"]).is_empty(), "hooks untouched");
+        assert_ne!(
+            git(&worktree, &["rev-parse", "HEAD"]),
+            head,
+            "committed with the grant: {text}"
+        );
+        assert!(
+            git(&root, &["config", "--get", "core.hooksPath"]).is_empty(),
+            "hooks untouched"
+        );
     }
 
     /// Run by hand: `cargo test -p perch-app real_agents_review_themselves
@@ -2248,7 +2359,11 @@ mod tests {
             }
             eprintln!("{}: {:?}\n{text}\n", backend.name(), run.wait().await);
             assert_eq!(asked, 0, "{} asked Perch", backend.name());
-            assert!(text.contains("200"), "{} got through: {text}", backend.name());
+            assert!(
+                text.contains("200"),
+                "{} got through: {text}",
+                backend.name()
+            );
         }
     }
 
@@ -2353,8 +2468,14 @@ mod tests {
         // are the history, each an untrusted block, and the framing is
         // the first prompt's.
         let history = vec![
-            (Author::GitHubUser("rohan".into()), "Why the fence?".to_string()),
-            (Author::GitHubUser("chris".into()), "For the manifest.".to_string()),
+            (
+                Author::GitHubUser("rohan".into()),
+                "Why the fence?".to_string(),
+            ),
+            (
+                Author::GitHubUser("chris".into()),
+                "For the manifest.".to_string(),
+            ),
         ];
         let anchor = anchor(41, 41);
         let p = follow_up_prompt(&PromptInput {
@@ -2371,7 +2492,10 @@ mod tests {
             "{}",
             p.user
         );
-        assert!(!p.user.contains("Reader:"), "nothing of the reader's came before");
+        assert!(
+            !p.user.contains("Reader:"),
+            "nothing of the reader's came before"
+        );
     }
 
     #[test]

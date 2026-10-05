@@ -4,7 +4,7 @@ use floem::event::EventPropagation;
 use floem::peniko::Color;
 use floem::prelude::*;
 use floem::style::Style;
-use floem::views::{Container, Decorators, Empty, Label, Stack, dyn_container, img, svg};
+use floem::views::{dyn_container, img, svg, Container, Decorators, Empty, Label, Stack};
 use perch_github::SubjectState;
 
 use crate::icons::{self, SidebarIcon};
@@ -164,12 +164,19 @@ pub fn name_label(
 /// the view that owns the handler would stop it receiving them at all.
 /// Show a directory in the Finder.
 pub fn reveal_in_finder(path: &std::path::Path) {
-    let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    let _ = std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn();
 }
 
 /// Open a Terminal window in a directory.
 pub fn open_in_terminal(path: &std::path::Path) {
-    let _ = std::process::Command::new("open").arg("-a").arg("Terminal").arg(path).spawn();
+    let _ = std::process::Command::new("open")
+        .arg("-a")
+        .arg("Terminal")
+        .arg(path)
+        .spawn();
 }
 
 pub fn copy_to_clipboard(text: String) {
@@ -219,10 +226,12 @@ pub fn worktree_menu(
     menu = menu
         .separator()
         .item("Reveal in Finder", move |item| {
-            item.icon(SidebarIcon::Folder).action(move || reveal_in_finder(&reveal))
+            item.icon(SidebarIcon::Folder)
+                .action(move || reveal_in_finder(&reveal))
         })
         .item("Open in Terminal", move |item| {
-            item.icon(SidebarIcon::Terminal).action(move || open_in_terminal(&terminal))
+            item.icon(SidebarIcon::Terminal)
+                .action(move || open_in_terminal(&terminal))
         })
         .item("Copy Path", move |item| {
             item.icon(SidebarIcon::Copy)
@@ -331,7 +340,9 @@ pub(crate) fn prose_editor(
     let editor = match markdown {
         Some(id) => {
             let doc = editor.editor().doc();
-            editor.styling(crate::review::composer_styling::ComposerStyling::new(doc, id))
+            editor.styling(crate::review::composer_styling::ComposerStyling::new(
+                doc, id,
+            ))
         }
         None => editor,
     };
@@ -363,7 +374,10 @@ pub(crate) fn underlined_link(s: floem::style::Style) -> floem::style::Style {
 /// floem draws an SVG in the view's text colour rather than the markup's
 /// fills, so the colour has to be set on the view or every icon comes out
 /// the same near-black as the body text.
-pub fn icon_in(source: impl Fn() -> String + 'static, color: impl Fn() -> Color + 'static) -> impl IntoView {
+pub fn icon_in(
+    source: impl Fn() -> String + 'static,
+    color: impl Fn() -> Color + 'static,
+) -> impl IntoView {
     svg(source).style(move |s| s.size(16.0, 16.0).color(color()))
 }
 
@@ -391,10 +405,13 @@ pub fn checkbox(
     let for_glyph = checked.clone();
 
     let box_ = Container::new(
-        dyn_container(move || for_glyph(), |checked| match checked {
-            Checked::Empty => Empty::new().into_any(),
-            Checked::Full => sidebar_glyph(SidebarIcon::Check, theme::canvas).into_any(),
-        })
+        dyn_container(
+            move || for_glyph(),
+            |checked| match checked {
+                Checked::Empty => Empty::new().into_any(),
+                Checked::Full => sidebar_glyph(SidebarIcon::Check, theme::canvas).into_any(),
+            },
+        )
         .style(|s| s.size(12.0, 12.0).items_center().justify_center()),
     )
     .style(move |s| {
@@ -405,9 +422,11 @@ pub fn checkbox(
             .border_radius(4.0)
             .border(1.5);
         if checked() == Checked::Empty {
-            base.background(theme::canvas()).border_color(theme::border())
+            base.background(theme::canvas())
+                .border_color(theme::border())
         } else {
-            base.background(theme::accent()).border_color(theme::accent())
+            base.background(theme::accent())
+                .border_color(theme::accent())
         }
     });
 
@@ -549,7 +568,11 @@ pub(crate) fn action_button(
     Container::new(Label::derived(label).style(move |s| {
         s.font_size(theme::TEXT_BADGE)
             .font_weight(theme::weight_emphasis())
-            .color(if prominent { theme::canvas() } else { theme::fg_muted() })
+            .color(if prominent {
+                theme::canvas()
+            } else {
+                theme::fg_muted()
+            })
             .selectable(false)
             .pointer_events_none()
     }))
@@ -574,15 +597,24 @@ pub(crate) fn action_button(
             .items_center()
             .justify_center()
             .flex_shrink(0.0_f32)
-            .background(if prominent { theme::fg() } else { theme::canvas() })
+            .background(if prominent {
+                theme::fg()
+            } else {
+                theme::canvas()
+            })
             .border(1.0)
-            .border_color(if prominent { theme::fg() } else { theme::border() })
+            .border_color(if prominent {
+                theme::fg()
+            } else {
+                theme::border()
+            })
             .border_radius(theme::RADIUS)
             .keyboard_navigable()
             .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
             .set_disabled(!available)
             .apply_if(!available, |s| {
-                s.opacity(0.45_f32).cursor(floem::style::CursorStyle::Default)
+                s.opacity(0.45_f32)
+                    .cursor(floem::style::CursorStyle::Default)
             })
             .apply_if(available, |s| {
                 s.hover(move |s| {
@@ -638,9 +670,12 @@ pub(crate) fn icon_action(
             .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
             .set_disabled(!available)
             .apply_if(!available, |s| {
-                s.opacity(0.45_f32).cursor(floem::style::CursorStyle::Default)
+                s.opacity(0.45_f32)
+                    .cursor(floem::style::CursorStyle::Default)
             })
-            .apply_if(available, |s| s.hover(|s| s.background(theme::canvas_hover())))
+            .apply_if(available, |s| {
+                s.hover(|s| s.background(theme::canvas_hover()))
+            })
     })
     .debug_name(debug)
     .into_view()
@@ -655,12 +690,14 @@ pub(crate) fn error_line(message: Option<String>, debug: &'static str) -> floem:
     Stack::horizontal((
         sidebar_glyph(SidebarIcon::Warning, theme::closed)
             .style(|s| s.size(14.0, 14.0).margin_right(7.0).flex_shrink(0.0_f32)),
-        Label::derived(move || message.clone()).debug_name(debug).style(|s| {
-            s.min_width(0.0)
-                .flex_grow(1.0_f32)
-                .font_size(theme::TEXT_META)
-                .color(theme::closed())
-        }),
+        Label::derived(move || message.clone())
+            .debug_name(debug)
+            .style(|s| {
+                s.min_width(0.0)
+                    .flex_grow(1.0_f32)
+                    .font_size(theme::TEXT_META)
+                    .color(theme::closed())
+            }),
     ))
     .style(|s| s.width_full().items_start())
     .into_any()
@@ -679,7 +716,12 @@ pub fn avatar_radius(size: f64, url: &str) -> f64 {
 /// A circular avatar, or an app's rounded square, that falls back to a
 /// tinted initial until the image arrives, so a row never reflows when
 /// the download lands.
-pub fn avatar(state: AppState, url: impl Fn() -> String + 'static, size: f64, seed: String) -> impl IntoView {
+pub fn avatar(
+    state: AppState,
+    url: impl Fn() -> String + 'static,
+    size: f64,
+    seed: String,
+) -> impl IntoView {
     // Every face reads the one map of avatars, and a dyn_container rebuilds
     // on every write to what it reads. Keyed on the map itself, each face
     // arriving rebuilt every face on screen, decoding its picture again: at
@@ -809,20 +851,23 @@ pub fn news_pill(
     let hovered = RwSignal::new(false);
     Container::new(
         Stack::horizontal((
-            Label::derived(label).style(|s| {
-                s.font_size(theme::TEXT_META)
-                    .color(theme::news_fg())
-            }),
-            Label::new("Refresh").debug_name("news refresh").style(move |s| {
-                s.height(22.0)
-                    .items_center()
-                    .padding_horiz(9.0)
-                    .font_size(theme::TEXT_META)
-                    .font_weight(theme::weight_emphasis())
-                    .color(theme::news_fg())
-                    .background(if hovered.get() { theme::news_button_hover() } else { theme::canvas() })
-                    .border_radius(11.0)
-            }),
+            Label::derived(label).style(|s| s.font_size(theme::TEXT_META).color(theme::news_fg())),
+            Label::new("Refresh")
+                .debug_name("news refresh")
+                .style(move |s| {
+                    s.height(22.0)
+                        .items_center()
+                        .padding_horiz(9.0)
+                        .font_size(theme::TEXT_META)
+                        .font_weight(theme::weight_emphasis())
+                        .color(theme::news_fg())
+                        .background(if hovered.get() {
+                            theme::news_button_hover()
+                        } else {
+                            theme::canvas()
+                        })
+                        .border_radius(11.0)
+                }),
         ))
         .debug_name("news pill oval")
         .on_event_stop(el::Click, move |_, _| {
@@ -1020,7 +1065,11 @@ mod tests {
         let mut harness = HeadlessHarness::new_with_size(root, view, 100.0, 100.0);
         harness.rebuild();
         let initial = shown();
-        assert!(!initial.debug_name().contains("Img"), "{}", initial.debug_name());
+        assert!(
+            !initial.debug_name().contains("Img"),
+            "{}",
+            initial.debug_name()
+        );
 
         // Someone else's face changes nothing here.
         app.apply(crate::backend::Event::Avatar {
@@ -1037,7 +1086,11 @@ mod tests {
         });
         harness.rebuild();
         let picture = shown();
-        assert!(picture.debug_name().contains("Img"), "{}", picture.debug_name());
+        assert!(
+            picture.debug_name().contains("Img"),
+            "{}",
+            picture.debug_name()
+        );
 
         // And the picture stays put while others keep arriving.
         for n in 0..3 {

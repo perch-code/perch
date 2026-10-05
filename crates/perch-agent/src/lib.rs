@@ -30,12 +30,12 @@ use tokio::sync::watch;
 use tokio::sync::Notify;
 
 pub use codex::CodexParser;
-pub use interactive::{ApprovalKind, ApprovalRequest, Decision};
-use interactive::{ClaudeHost, CodexServer, CodexThread, Conversation};
 pub use discover::{
     codex_catalog, codex_default_model, find_binary, install_dirs, parse_codex_catalog,
     path_with_install_dirs, CodexModel,
 };
+pub use interactive::{ApprovalKind, ApprovalRequest, Decision};
+use interactive::{ClaudeHost, CodexServer, CodexThread, Conversation};
 pub use parse::{parse_line, summarize_tool_call};
 pub use review::{
     assess_review_capability, detect_review_capability, extract_review, preserve_native_response,
@@ -445,7 +445,10 @@ pub fn codex_work_entries(cwd: &std::path::Path, grant: &WorkGrant) -> Vec<(Stri
         entries.push((real_path(path).to_string_lossy().into_owned(), "write"));
     }
     let git_is_dir = real.join(".git").is_dir();
-    for name in WORK_PROTECTED.iter().filter(|name| !(grant.commit && git_is_dir && **name == ".git")) {
+    for name in WORK_PROTECTED
+        .iter()
+        .filter(|name| !(grant.commit && git_is_dir && **name == ".git"))
+    {
         entries.push((real.join(name).to_string_lossy().into_owned(), "read"));
     }
     if grant.commit {
@@ -455,7 +458,10 @@ pub fn codex_work_entries(cwd: &std::path::Path, grant: &WorkGrant) -> Vec<(Stri
             .iter()
             .flat_map(|dir| GIT_CONTROL.map(|name| dir.join(name)))
             .chain([common.join("worktrees"), common.join("modules")]);
-        entries.extend(dirs.iter().map(|dir| (dir.to_string_lossy().into_owned(), "write")));
+        entries.extend(
+            dirs.iter()
+                .map(|dir| (dir.to_string_lossy().into_owned(), "write")),
+        );
         entries.extend(guarded.map(|path| (path.to_string_lossy().into_owned(), "read")));
     } else {
         for dir in linked_git_dirs(&real) {
@@ -655,8 +661,16 @@ impl RunSpec {
                 }
                 let (edits, protected) = work_edit_rules(&self.cwd);
                 (
-                    WORK_TOOLS.iter().map(|t| t.to_string()).chain(edits).collect(),
-                    NETWORK_TOOLS.iter().map(|t| t.to_string()).chain(protected).collect(),
+                    WORK_TOOLS
+                        .iter()
+                        .map(|t| t.to_string())
+                        .chain(edits)
+                        .collect(),
+                    NETWORK_TOOLS
+                        .iter()
+                        .map(|t| t.to_string())
+                        .chain(protected)
+                        .collect(),
                 )
             }
         };
@@ -695,10 +709,20 @@ impl RunSpec {
             Mode::Work(grant) => Some(grant),
             Mode::Ask => None,
         };
-        let trust = if grant.is_some_and(|g| g.trust) { "trusted" } else { "untrusted" };
+        let trust = if grant.is_some_and(|g| g.trust) {
+            "trusted"
+        } else {
+            "untrusted"
+        };
         let mut projects = serde_json::Map::new();
-        projects.insert(self.cwd.to_string_lossy().into_owned(), serde_json::json!({"trust_level": trust}));
-        projects.insert(real_path(&self.cwd).to_string_lossy().into_owned(), serde_json::json!({"trust_level": trust}));
+        projects.insert(
+            self.cwd.to_string_lossy().into_owned(),
+            serde_json::json!({"trust_level": trust}),
+        );
+        projects.insert(
+            real_path(&self.cwd).to_string_lossy().into_owned(),
+            serde_json::json!({"trust_level": trust}),
+        );
         let mcp: serde_json::Map<String, serde_json::Value> = codex_user_mcp_servers()
             .into_iter()
             .map(|name| (name, serde_json::json!({"enabled": false})))
@@ -709,12 +733,14 @@ impl RunSpec {
             "mcp_servers": mcp,
         });
         if let Some(grant) = grant {
-            let filesystem: serde_json::Map<String, serde_json::Value> = codex_work_entries(&self.cwd, grant)
-                .into_iter()
-                .map(|(path, access)| (path, serde_json::json!(access)))
-                .collect();
+            let filesystem: serde_json::Map<String, serde_json::Value> =
+                codex_work_entries(&self.cwd, grant)
+                    .into_iter()
+                    .map(|(path, access)| (path, serde_json::json!(access)))
+                    .collect();
             config["default_permissions"] = serde_json::json!(CODEX_WORK_PROFILE);
-            config["permissions"] = serde_json::json!({CODEX_WORK_PROFILE: {"filesystem": filesystem}});
+            config["permissions"] =
+                serde_json::json!({CODEX_WORK_PROFILE: {"filesystem": filesystem}});
         }
         CodexThread {
             cwd: self.cwd.to_string_lossy().into_owned(),
@@ -723,7 +749,12 @@ impl RunSpec {
             prompt: self.prompt.clone(),
             developer_instructions: self.system.clone(),
             resume: self.resume.clone(),
-            approval_policy: if grant.is_some() { "on-request" } else { "never" }.to_string(),
+            approval_policy: if grant.is_some() {
+                "on-request"
+            } else {
+                "never"
+            }
+            .to_string(),
             reviewer: grant.map(|g| if g.auto_review { "auto_review" } else { "user" }.to_string()),
             sandbox: grant.is_none().then(|| "read-only".to_string()),
             config,
@@ -735,12 +766,23 @@ impl RunSpec {
     /// the thread's config turns them all off as well. The MCP servers
     /// would run outside the sandbox, and a prompt could call them.
     fn codex_args(&self) -> Vec<String> {
-        let mut args: Vec<String> = ["app-server", "--disable", "plugins", "--disable", "hooks", "--disable", "apps"]
-            .iter()
-            .map(|a| a.to_string())
-            .collect();
+        let mut args: Vec<String> = [
+            "app-server",
+            "--disable",
+            "plugins",
+            "--disable",
+            "hooks",
+            "--disable",
+            "apps",
+        ]
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
         for name in codex_user_mcp_servers() {
-            if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            if name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
                 args.extend(["-c".into(), format!("mcp_servers.{name}.enabled=false")]);
             }
         }
@@ -778,7 +820,10 @@ pub fn prompt_path(path: &std::path::Path) -> String {
 
 /// `prompt_path` with the home passed in, so it can be tested.
 pub fn prompt_path_in(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
-    match home.filter(|h| h.is_absolute()).and_then(|h| path.strip_prefix(h).ok()) {
+    match home
+        .filter(|h| h.is_absolute())
+        .and_then(|h| path.strip_prefix(h).ok())
+    {
         Some(rest) if rest.as_os_str().is_empty() => "~".into(),
         Some(rest) => format!("~/{}", rest.display()),
         None => path.display().to_string(),
@@ -911,7 +956,12 @@ impl Parser {
 
     /// `more`: the line ends a turn and another follows, so a result in
     /// it is not the run's.
-    fn parse_print_line(&mut self, line: &str, value: &serde_json::Value, more: bool) -> Vec<RunEvent> {
+    fn parse_print_line(
+        &mut self,
+        line: &str,
+        value: &serde_json::Value,
+        more: bool,
+    ) -> Vec<RunEvent> {
         match &mut self.kind {
             ParserKind::Claude {
                 pending_permission_denial,
@@ -1351,7 +1401,15 @@ impl Run {
     pub fn spawn(spec: RunSpec, events: UnboundedSender<RunEvent>) -> Result<Run, Error> {
         let args = spec.args();
         let conversation = Some(spec.conversation());
-        Self::spawn_process(spec.backend, spec.binary, spec.cwd, args, None, conversation, events)
+        Self::spawn_process(
+            spec.backend,
+            spec.binary,
+            spec.cwd,
+            args,
+            None,
+            conversation,
+            events,
+        )
     }
 
     /// Answer approval request `id`. False when the run cannot ask, or
@@ -1469,7 +1527,10 @@ impl Run {
         });
         let (outcome_tx, outcome) = watch::channel(None);
         let (inputs_tx, inputs_rx) = tokio::sync::mpsc::unbounded_channel();
-        let opening = conversation.as_mut().map(Conversation::opening).unwrap_or_default();
+        let opening = conversation
+            .as_mut()
+            .map(Conversation::opening)
+            .unwrap_or_default();
         let mut io = Io {
             stdin: child.stdin.take(),
             inputs: conversation.is_some().then_some(inputs_rx),
@@ -2024,10 +2085,18 @@ mod tests {
         };
         let args = spec.args();
         assert_eq!(args[0], "-p");
-        assert!(!args.contains(&"why?".to_string()), "the prompt goes on stdin");
-        assert!(args.windows(2).any(|w| w == ["--input-format", "stream-json"]));
+        assert!(
+            !args.contains(&"why?".to_string()),
+            "the prompt goes on stdin"
+        );
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--input-format", "stream-json"]));
         assert!(args.contains(&"--replay-user-messages".to_string()));
-        assert!(!args.contains(&"--permission-prompt-tool".to_string()), "a question never asks");
+        assert!(
+            !args.contains(&"--permission-prompt-tool".to_string()),
+            "a question never asks"
+        );
         assert!(args.windows(2).any(|w| w == ["--effort", "high"]));
         assert!(args
             .windows(2)
@@ -2147,7 +2216,12 @@ mod tests {
     /// No Work command line ever turns a boundary off without asking.
     fn assert_nothing_bypassed(args: &[String]) {
         for arg in args {
-            for bad in ["bypassPermissions", "dangerously", "danger-full-access", "acceptEdits"] {
+            for bad in [
+                "bypassPermissions",
+                "dangerously",
+                "danger-full-access",
+                "acceptEdits",
+            ] {
                 assert!(!arg.contains(bad), "{bad} in {arg}");
             }
         }
@@ -2171,59 +2245,116 @@ mod tests {
                 let spec = work(Backend::ClaudeCode, grant.clone(), resume);
                 let args = spec.args();
                 assert_nothing_bypassed(&args);
-                assert!(args.windows(2).any(|w| w == ["--input-format", "stream-json"]));
-                assert!(args.windows(2).any(|w| w == ["--permission-prompt-tool", "stdio"]));
-                assert!(!args.contains(&"do it".to_string()), "the prompt goes on stdin");
+                assert!(args
+                    .windows(2)
+                    .any(|w| w == ["--input-format", "stream-json"]));
+                assert!(args
+                    .windows(2)
+                    .any(|w| w == ["--permission-prompt-tool", "stdio"]));
+                assert!(
+                    !args.contains(&"do it".to_string()),
+                    "the prompt goes on stdin"
+                );
                 assert!(!args.contains(&"--".to_string()));
                 assert!(matches!(spec.conversation(), Conversation::Claude(_)));
                 let allowed = args.iter().position(|a| a == "--allowedTools").unwrap();
                 let denied = args.iter().position(|a| a == "--disallowedTools").unwrap();
                 let allowed = &args[allowed + 1..denied];
                 let denied = &args[denied + 1..];
-                assert!(!allowed.contains(&"Bash".to_string()), "Bash listed would skip asking: {allowed:?}");
-                assert!(allowed.contains(&format!("Edit(/{root}/**)")), "{allowed:?}");
+                assert!(
+                    !allowed.contains(&"Bash".to_string()),
+                    "Bash listed would skip asking: {allowed:?}"
+                );
+                assert!(
+                    allowed.contains(&format!("Edit(/{root}/**)")),
+                    "{allowed:?}"
+                );
                 for tool in ["WebFetch", "WebSearch"] {
                     assert!(denied.contains(&tool.to_string()), "{tool}: {denied:?}");
                 }
                 for name in [".git", ".claude", ".codex", ".mcp.json", "**/.git"] {
-                    assert!(denied.contains(&format!("Write(/{root}/{name}/**)")), "{name}: {denied:?}");
+                    assert!(
+                        denied.contains(&format!("Write(/{root}/{name}/**)")),
+                        "{name}: {denied:?}"
+                    );
                 }
                 let sandbox = &settings_of(&args)["sandbox"];
                 let deny_write = sandbox["filesystem"]["denyWrite"].as_array().unwrap();
-                assert!(deny_write.contains(&serde_json::json!(format!("{root}/*/**/.git"))), "{deny_write:?}");
+                assert!(
+                    deny_write.contains(&serde_json::json!(format!("{root}/*/**/.git"))),
+                    "{deny_write:?}"
+                );
                 assert_eq!(sandbox["enabled"], true);
                 assert_eq!(sandbox["autoAllowBashIfSandboxed"], true);
-                assert_eq!(sandbox["allowUnsandboxedCommands"], true, "it may ask to leave");
+                assert_eq!(
+                    sandbox["allowUnsandboxedCommands"], true,
+                    "it may ask to leave"
+                );
                 assert_eq!(sandbox["failIfUnavailable"], true);
-                assert!(sandbox["network"].get("strictAllowlist").is_none(), "an unlisted host asks");
-                assert_eq!(sandbox["network"]["allowedDomains"], serde_json::json!(grant.network));
+                assert!(
+                    sandbox["network"].get("strictAllowlist").is_none(),
+                    "an unlisted host asks"
+                );
+                assert_eq!(
+                    sandbox["network"]["allowedDomains"],
+                    serde_json::json!(grant.network)
+                );
                 let allow_write = sandbox["filesystem"]["allowWrite"].as_array().unwrap();
                 assert_eq!(allow_write[0], root.as_str(), "the worktree first");
                 assert!(args.windows(2).any(|w| w == ["--setting-sources", "user"]));
-                assert_eq!(args.windows(2).any(|w| w[0] == "--resume"), resume.is_some());
+                assert_eq!(
+                    args.windows(2).any(|w| w[0] == "--resume"),
+                    resume.is_some()
+                );
             }
         }
-        let ask = RunSpec { mode: Mode::Ask, ..work(Backend::ClaudeCode, WorkGrant::default(), None) };
-        assert!(matches!(ask.conversation(), Conversation::Claude(_)), "a question can be steered too");
+        let ask = RunSpec {
+            mode: Mode::Ask,
+            ..work(Backend::ClaudeCode, WorkGrant::default(), None)
+        };
+        assert!(
+            matches!(ask.conversation(), Conversation::Claude(_)),
+            "a question can be steered too"
+        );
         assert!(!ask.args().contains(&"--permission-prompt-tool".to_string()));
     }
 
     #[test]
     fn the_automatic_reviewer_is_each_cli_s_own() {
-        let auto = WorkGrant { auto_review: true, ..WorkGrant::default() };
+        let auto = WorkGrant {
+            auto_review: true,
+            ..WorkGrant::default()
+        };
         let claude = work(Backend::ClaudeCode, auto.clone(), None).args();
-        assert!(claude.windows(2).any(|w| w == ["--permission-mode", "auto"]));
+        assert!(claude
+            .windows(2)
+            .any(|w| w == ["--permission-mode", "auto"]));
         assert!(!claude.iter().any(|a| a.contains("bypassPermissions")));
         let asking = work(Backend::ClaudeCode, WorkGrant::default(), None).args();
-        assert!(asking.windows(2).any(|w| w == ["--permission-mode", "default"]));
-        let ask = RunSpec { mode: Mode::Ask, ..work(Backend::ClaudeCode, WorkGrant::default(), None) }.args();
-        assert!(ask.windows(2).any(|w| w == ["--permission-mode", "default"]), "a question never is");
+        assert!(asking
+            .windows(2)
+            .any(|w| w == ["--permission-mode", "default"]));
+        let ask = RunSpec {
+            mode: Mode::Ask,
+            ..work(Backend::ClaudeCode, WorkGrant::default(), None)
+        }
+        .args();
+        assert!(
+            ask.windows(2)
+                .any(|w| w == ["--permission-mode", "default"]),
+            "a question never is"
+        );
 
         let Conversation::Codex(server) = work(Backend::Codex, auto, None).conversation() else {
             unreachable!()
         };
-        assert_eq!(server_thread(&server).reviewer.as_deref(), Some("auto_review"));
-        let Conversation::Codex(server) = work(Backend::Codex, WorkGrant::default(), None).conversation() else {
+        assert_eq!(
+            server_thread(&server).reviewer.as_deref(),
+            Some("auto_review")
+        );
+        let Conversation::Codex(server) =
+            work(Backend::Codex, WorkGrant::default(), None).conversation()
+        else {
             unreachable!()
         };
         assert_eq!(server_thread(&server).reviewer.as_deref(), Some("user"));
@@ -2236,10 +2367,19 @@ mod tests {
         std::fs::write(real.join(".mcp.json"), "{}").unwrap();
         let spec = RunSpec {
             cwd: real.clone(),
-            ..work(Backend::ClaudeCode, WorkGrant { trust: true, ..WorkGrant::default() }, None)
+            ..work(
+                Backend::ClaudeCode,
+                WorkGrant {
+                    trust: true,
+                    ..WorkGrant::default()
+                },
+                None,
+            )
         };
         let args = spec.args();
-        assert!(args.windows(2).any(|w| w == ["--setting-sources", "user,project,local"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--setting-sources", "user,project,local"]));
         assert!(args
             .windows(2)
             .any(|w| w[0] == "--mcp-config" && w[1] == real.join(".mcp.json").to_string_lossy()));
@@ -2252,7 +2392,18 @@ mod tests {
         let spec = work(Backend::Codex, full_grant(), None);
         let args = spec.args();
         assert_nothing_bypassed(&args);
-        assert_eq!(&args[..7], ["app-server", "--disable", "plugins", "--disable", "hooks", "--disable", "apps"]);
+        assert_eq!(
+            &args[..7],
+            [
+                "app-server",
+                "--disable",
+                "plugins",
+                "--disable",
+                "hooks",
+                "--disable",
+                "apps"
+            ]
+        );
         let Conversation::Codex(server) = spec.conversation() else {
             panic!("a Codex Work run talks to an app-server");
         };
@@ -2266,13 +2417,27 @@ mod tests {
         assert_eq!(filesystem[format!("{root}/.claude")], "read");
         assert_eq!(filesystem[format!("{root}/*/**/.git")], "deny");
         assert!(filesystem.get("network").is_none());
-        assert_eq!(config["projects"][root.as_str()]["trust_level"], "untrusted");
+        assert_eq!(
+            config["projects"][root.as_str()]["trust_level"],
+            "untrusted"
+        );
 
-        let trusted = work(Backend::Codex, WorkGrant { trust: true, ..WorkGrant::default() }, Some("th-1"));
-        let Conversation::Codex(server) = trusted.conversation() else { unreachable!() };
-        assert_eq!(server_thread(&server).config["projects"][root.as_str()]["trust_level"], "trusted");
+        let trusted = work(
+            Backend::Codex,
+            WorkGrant {
+                trust: true,
+                ..WorkGrant::default()
+            },
+            Some("th-1"),
+        );
+        let Conversation::Codex(server) = trusted.conversation() else {
+            unreachable!()
+        };
+        assert_eq!(
+            server_thread(&server).config["projects"][root.as_str()]["trust_level"],
+            "trusted"
+        );
         assert_eq!(server_thread(&server).resume.as_deref(), Some("th-1"));
-
     }
 
     #[test]
@@ -2280,19 +2445,42 @@ mod tests {
         let real = std::fs::canonicalize("/tmp").unwrap();
         let root = real.to_string_lossy().to_string();
         for resume in [None, Some("th-1")] {
-            let spec = RunSpec { mode: Mode::Ask, ..work(Backend::Codex, full_grant(), resume) };
+            let spec = RunSpec {
+                mode: Mode::Ask,
+                ..work(Backend::Codex, full_grant(), resume)
+            };
             let args = spec.args();
             assert_nothing_bypassed(&args);
-            assert_eq!(&args[..7], ["app-server", "--disable", "plugins", "--disable", "hooks", "--disable", "apps"]);
-            let Conversation::Codex(server) = spec.conversation() else { unreachable!() };
+            assert_eq!(
+                &args[..7],
+                [
+                    "app-server",
+                    "--disable",
+                    "plugins",
+                    "--disable",
+                    "hooks",
+                    "--disable",
+                    "apps"
+                ]
+            );
+            let Conversation::Codex(server) = spec.conversation() else {
+                unreachable!()
+            };
             let thread = server_thread(&server);
             assert_eq!(thread.sandbox.as_deref(), Some("read-only"));
             assert_eq!(thread.approval_policy, "never");
             assert_eq!(thread.reviewer, None);
             assert_eq!(thread.resume.as_deref(), resume);
-            assert!(thread.config.get("default_permissions").is_none(), "no Work profile");
+            assert!(
+                thread.config.get("default_permissions").is_none(),
+                "no Work profile"
+            );
             assert!(thread.config.get("permissions").is_none());
-            assert_eq!(thread.config["projects"][root.as_str()]["trust_level"], "untrusted", "never trusted");
+            assert_eq!(
+                thread.config["projects"][root.as_str()]["trust_level"],
+                "untrusted",
+                "never trusted"
+            );
             assert_eq!(thread.config["model_reasoning_effort"], "high");
         }
     }
@@ -2307,14 +2495,25 @@ mod tests {
         std::fs::write(own.join("commondir"), "../..\n").unwrap();
         let worktree = real.join("wt");
         std::fs::create_dir_all(&worktree).unwrap();
-        std::fs::write(worktree.join(".git"), format!("gitdir: {}\n", own.display())).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", own.display()),
+        )
+        .unwrap();
 
         for grant in [WorkGrant::default(), full_grant()] {
             let entries = codex_work_entries(&worktree, &grant);
             let access = |path: &std::path::Path| {
-                entries.iter().find(|(p, _)| *p == path.to_string_lossy()).map(|(_, a)| *a)
+                entries
+                    .iter()
+                    .find(|(p, _)| *p == path.to_string_lossy())
+                    .map(|(_, a)| *a)
             };
-            assert_eq!(access(&worktree.join("*/**/.git")), Some("deny"), "{entries:?}");
+            assert_eq!(
+                access(&worktree.join("*/**/.git")),
+                Some("deny"),
+                "{entries:?}"
+            );
             assert_eq!(access(&worktree.join(".git")), Some("read"), "{entries:?}");
             assert_eq!(access(&own), Some("read"), "{entries:?}");
             assert_eq!(access(&common), Some("read"), "{entries:?}");
@@ -2322,7 +2521,10 @@ mod tests {
             // would keep git from reading the worktree's own `.git`.
             let denied: Vec<_> = entries.iter().filter(|(_, a)| *a == "deny").collect();
             assert_eq!(denied.len(), 1, "{denied:?}");
-            assert!(denied.iter().all(|(p, _)| p.ends_with("/*/**/.git")), "{denied:?}");
+            assert!(
+                denied.iter().all(|(p, _)| p.ends_with("/*/**/.git")),
+                "{denied:?}"
+            );
         }
     }
 
@@ -2342,19 +2544,41 @@ mod tests {
         std::fs::write(own.join("commondir"), "../..\n").unwrap();
         let worktree = real.join("wt");
         std::fs::create_dir_all(&worktree).unwrap();
-        std::fs::write(worktree.join(".git"), format!("gitdir: {}\n", own.display())).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", own.display()),
+        )
+        .unwrap();
 
-        let grant = WorkGrant { commit: true, ..WorkGrant::default() };
-        let settings: serde_json::Value = serde_json::from_str(&claude_work_settings(&worktree, &grant)).unwrap();
-        let allow = settings["sandbox"]["filesystem"]["allowWrite"].as_array().unwrap();
-        let deny = settings["sandbox"]["filesystem"]["denyWrite"].as_array().unwrap();
-        let has = |list: &Vec<serde_json::Value>, path: &std::path::Path| list.contains(&serde_json::json!(path.to_string_lossy()));
+        let grant = WorkGrant {
+            commit: true,
+            ..WorkGrant::default()
+        };
+        let settings: serde_json::Value =
+            serde_json::from_str(&claude_work_settings(&worktree, &grant)).unwrap();
+        let allow = settings["sandbox"]["filesystem"]["allowWrite"]
+            .as_array()
+            .unwrap();
+        let deny = settings["sandbox"]["filesystem"]["denyWrite"]
+            .as_array()
+            .unwrap();
+        let has = |list: &Vec<serde_json::Value>, path: &std::path::Path| {
+            list.contains(&serde_json::json!(path.to_string_lossy()))
+        };
         assert!(has(allow, &common) && has(allow, &own), "{allow:?}");
         assert!(!has(deny, &common) && !has(deny, &own), "{deny:?}");
-        for guarded in [common.join("config"), common.join("hooks"), own.join("config.worktree"), own.join("commondir")] {
+        for guarded in [
+            common.join("config"),
+            common.join("hooks"),
+            own.join("config.worktree"),
+            own.join("commondir"),
+        ] {
             assert!(has(deny, &guarded), "{} in {deny:?}", guarded.display());
         }
-        assert!(has(deny, &worktree.join(".git")), "the pointer file itself stays read-only");
+        assert!(
+            has(deny, &worktree.join(".git")),
+            "the pointer file itself stays read-only"
+        );
 
         // What git uses elsewhere: the other worktrees, the ones added
         // later, the submodules, and a `.git` the run makes below its own.
@@ -2367,7 +2591,10 @@ mod tests {
         ] {
             assert!(has(deny, &guarded), "{} in {deny:?}", guarded.display());
         }
-        assert!(!has(deny, &common.join("worktrees")), "denying it would deny the run's own: {deny:?}");
+        assert!(
+            !has(deny, &common.join("worktrees")),
+            "denying it would deny the run's own: {deny:?}"
+        );
     }
 
     #[test]
@@ -2380,11 +2607,23 @@ mod tests {
         std::fs::write(own.join("commondir"), "../..\n").unwrap();
         let worktree = real.join("wt");
         std::fs::create_dir_all(&worktree).unwrap();
-        std::fs::write(worktree.join(".git"), format!("gitdir: {}\n", own.display())).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", own.display()),
+        )
+        .unwrap();
 
-        let grant = WorkGrant { commit: true, ..WorkGrant::default() };
+        let grant = WorkGrant {
+            commit: true,
+            ..WorkGrant::default()
+        };
         let entries = codex_work_entries(&worktree, &grant);
-        let access = |path: &std::path::Path| entries.iter().find(|(p, _)| *p == path.to_string_lossy()).map(|(_, a)| *a);
+        let access = |path: &std::path::Path| {
+            entries
+                .iter()
+                .find(|(p, _)| *p == path.to_string_lossy())
+                .map(|(_, a)| *a)
+        };
         assert_eq!(access(&common), Some("write"), "{entries:?}");
         assert_eq!(access(&own), Some("write"), "{entries:?}");
         // The run's own directory is more specific than `worktrees/`, so
@@ -2399,7 +2638,12 @@ mod tests {
             own.join("commondir"),
             worktree.join(".git"),
         ] {
-            assert_eq!(access(&guarded), Some("read"), "{} in {entries:?}", guarded.display());
+            assert_eq!(
+                access(&guarded),
+                Some("read"),
+                "{} in {entries:?}",
+                guarded.display()
+            );
         }
         let denied: Vec<_> = entries.iter().filter(|(_, a)| *a == "deny").collect();
         assert_eq!(denied.len(), 1, "a glob deny stops reads too: {denied:?}");
@@ -2408,10 +2652,25 @@ mod tests {
         let git = main.join(".git");
         std::fs::create_dir_all(git.join("worktrees/elsewhere")).unwrap();
         let entries = codex_work_entries(&main, &grant);
-        let access = |path: &std::path::Path| entries.iter().find(|(p, _)| *p == path.to_string_lossy()).map(|(_, a)| *a);
+        let access = |path: &std::path::Path| {
+            entries
+                .iter()
+                .find(|(p, _)| *p == path.to_string_lossy())
+                .map(|(_, a)| *a)
+        };
         assert_eq!(access(&git), Some("write"), "{entries:?}");
-        for guarded in [git.join("config"), git.join("hooks"), git.join("worktrees"), git.join("modules")] {
-            assert_eq!(access(&guarded), Some("read"), "{} in {entries:?}", guarded.display());
+        for guarded in [
+            git.join("config"),
+            git.join("hooks"),
+            git.join("worktrees"),
+            git.join("modules"),
+        ] {
+            assert_eq!(
+                access(&guarded),
+                Some("read"),
+                "{} in {entries:?}",
+                guarded.display()
+            );
         }
     }
 
@@ -2423,17 +2682,35 @@ mod tests {
         let linked = git.join("worktrees/elsewhere");
         std::fs::create_dir_all(&linked).unwrap();
 
-        let grant = WorkGrant { commit: true, ..WorkGrant::default() };
-        let settings: serde_json::Value = serde_json::from_str(&claude_work_settings(&worktree, &grant)).unwrap();
-        let allow = settings["sandbox"]["filesystem"]["allowWrite"].as_array().unwrap();
-        let deny = settings["sandbox"]["filesystem"]["denyWrite"].as_array().unwrap();
-        let has = |list: &Vec<serde_json::Value>, path: &std::path::Path| list.contains(&serde_json::json!(path.to_string_lossy()));
+        let grant = WorkGrant {
+            commit: true,
+            ..WorkGrant::default()
+        };
+        let settings: serde_json::Value =
+            serde_json::from_str(&claude_work_settings(&worktree, &grant)).unwrap();
+        let allow = settings["sandbox"]["filesystem"]["allowWrite"]
+            .as_array()
+            .unwrap();
+        let deny = settings["sandbox"]["filesystem"]["denyWrite"]
+            .as_array()
+            .unwrap();
+        let has = |list: &Vec<serde_json::Value>, path: &std::path::Path| {
+            list.contains(&serde_json::json!(path.to_string_lossy()))
+        };
         assert!(has(allow, &git) && !has(deny, &git), "{allow:?} {deny:?}");
-        for guarded in [git.join("config"), git.join("hooks"), linked, git.join("modules"), worktree.join("*/**/.git")] {
+        for guarded in [
+            git.join("config"),
+            git.join("hooks"),
+            linked,
+            git.join("modules"),
+            worktree.join("*/**/.git"),
+        ] {
             assert!(has(deny, &guarded), "{} in {deny:?}", guarded.display());
         }
         assert!(
-            !deny.iter().any(|path| path.as_str().is_some_and(|p| p.ends_with("/**/.git") && !p.ends_with("/*/**/.git"))),
+            !deny.iter().any(|path| path
+                .as_str()
+                .is_some_and(|p| p.ends_with("/**/.git") && !p.ends_with("/*/**/.git"))),
             "`**/.git` would match the top-level `.git` too: {deny:?}"
         );
     }
@@ -2448,15 +2725,30 @@ mod tests {
         std::fs::write(own.join("commondir"), "../..\n").unwrap();
         let worktree = real.join("wt");
         std::fs::create_dir_all(&worktree).unwrap();
-        std::fs::write(worktree.join(".git"), format!("gitdir: {}\n", own.display())).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", own.display()),
+        )
+        .unwrap();
 
         assert_eq!(linked_git_dirs(&worktree), [own.clone(), common.clone()]);
         let settings: serde_json::Value =
             serde_json::from_str(&claude_work_settings(&worktree, &WorkGrant::default())).unwrap();
-        let denied = settings["sandbox"]["filesystem"]["denyWrite"].as_array().unwrap();
-        assert!(denied.contains(&serde_json::json!(common.to_string_lossy())), "{denied:?}");
-        assert!(denied.contains(&serde_json::json!(own.to_string_lossy())), "{denied:?}");
-        assert!(linked_git_dirs(&real).is_empty(), "no .git file, nothing linked");
+        let denied = settings["sandbox"]["filesystem"]["denyWrite"]
+            .as_array()
+            .unwrap();
+        assert!(
+            denied.contains(&serde_json::json!(common.to_string_lossy())),
+            "{denied:?}"
+        );
+        assert!(
+            denied.contains(&serde_json::json!(own.to_string_lossy())),
+            "{denied:?}"
+        );
+        assert!(
+            linked_git_dirs(&real).is_empty(),
+            "no .git file, nothing linked"
+        );
     }
 
     #[test]
@@ -2608,7 +2900,9 @@ mod tests {
     fn codex_efforts_pass_by_their_own_name() {
         let mut spec = codex(None);
         spec.effort = Effort::Ultra;
-        let Conversation::Codex(server) = spec.conversation() else { unreachable!() };
+        let Conversation::Codex(server) = spec.conversation() else {
+            unreachable!()
+        };
         let thread = server_thread(&server);
         assert_eq!(thread.effort, "ultra");
         assert_eq!(thread.config["model_reasoning_effort"], "ultra");
@@ -2621,7 +2915,11 @@ mod tests {
             let mut spec = claude(Effort::Low);
             spec.backend = backend;
             spec.prompt = "-1 comes back here. Why?".into();
-            assert!(!spec.args().contains(&spec.prompt), "{}: the prompt goes on stdin", backend.name());
+            assert!(
+                !spec.args().contains(&spec.prompt),
+                "{}: the prompt goes on stdin",
+                backend.name()
+            );
         }
     }
 
@@ -2668,9 +2966,21 @@ mod tests {
             "~/.perch/context/review-1"
         );
         assert_eq!(named("/Users/kumarujjawal", Some(home)), "~");
-        assert_eq!(named("/Users/kumarujjawalx/.perch", Some(home)), "/Users/kumarujjawalx/.perch");
-        assert_eq!(named("/srv/perch/context/r1", Some(home)), "/srv/perch/context/r1");
-        assert_eq!(named("/Users/kumarujjawal/.perch", None), "/Users/kumarujjawal/.perch");
-        assert_eq!(named("/x/.perch", Some(std::path::Path::new(""))), "/x/.perch");
+        assert_eq!(
+            named("/Users/kumarujjawalx/.perch", Some(home)),
+            "/Users/kumarujjawalx/.perch"
+        );
+        assert_eq!(
+            named("/srv/perch/context/r1", Some(home)),
+            "/srv/perch/context/r1"
+        );
+        assert_eq!(
+            named("/Users/kumarujjawal/.perch", None),
+            "/Users/kumarujjawal/.perch"
+        );
+        assert_eq!(
+            named("/x/.perch", Some(std::path::Path::new(""))),
+            "/x/.perch"
+        );
     }
 }

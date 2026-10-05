@@ -16,7 +16,10 @@ pub struct RepoId {
 
 impl RepoId {
     pub fn new(owner: impl Into<String>, repo: impl Into<String>) -> Self {
-        Self { owner: owner.into(), repo: repo.into() }
+        Self {
+            owner: owner.into(),
+            repo: repo.into(),
+        }
     }
 
     /// Parse `owner/repo`, as it appears in a notification.
@@ -216,7 +219,10 @@ mod tests {
     fn dotted_repository_names_survive_sanitising() {
         let store = Store::new("/tmp/perch");
         let id = RepoId::new("rust-lang", "docs.rs");
-        assert!(store.bare_path(&id).to_string_lossy().ends_with("docs.rs.git"));
+        assert!(store
+            .bare_path(&id)
+            .to_string_lossy()
+            .ends_with("docs.rs.git"));
     }
 
     #[test]

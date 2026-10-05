@@ -36,7 +36,9 @@ pub async fn resolve(config: &mut Config, git: &Git) {
             continue;
         };
         match perch_git::remotes(git, &root).await {
-            Ok(remotes) => entry.resolve(perch_git::github_remote(&remotes, &hosts).map(|(_, slug)| slug)),
+            Ok(remotes) => {
+                entry.resolve(perch_git::github_remote(&remotes, &hosts).map(|(_, slug)| slug))
+            }
             Err(e) => {
                 config.warnings.push(format!(
                     "config.toml: {} could not be read ({e}); {} is taken as a local repository",
@@ -77,7 +79,11 @@ mod tests {
             .env("GIT_COMMITTER_EMAIL", "t@t")
             .output()
             .expect("git runs");
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// A repository on `main` with one commit, and no remote unless the
@@ -112,8 +118,19 @@ mod tests {
         init_repo(&plain);
         let forked = tmp.path().join("fork");
         init_repo(&forked);
-        git(&forked, &["remote", "add", "origin", "git@github.com:me/fork.git"]);
-        git(&forked, &["remote", "add", "upstream", "https://github.com/them/project.git"]);
+        git(
+            &forked,
+            &["remote", "add", "origin", "git@github.com:me/fork.git"],
+        );
+        git(
+            &forked,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                "https://github.com/them/project.git",
+            ],
+        );
 
         let mut config = Config::default();
         config.repo = vec![roots_only(&plain), roots_only(&forked)];
@@ -121,7 +138,11 @@ mod tests {
 
         assert_eq!(config.declared(), ["local/notes", "them/project"]);
         assert!(config.is_declared("LOCAL/notes"));
-        assert_eq!(config.display_name("them/project"), "fork", "the name is still the root's, as it was before the scan");
+        assert_eq!(
+            config.display_name("them/project"),
+            "fork",
+            "the name is still the root's, as it was before the scan"
+        );
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     }
 
@@ -135,7 +156,11 @@ mod tests {
         config.repo = vec![roots_only(&not_git)];
         resolve(&mut config, &Git::new(None)).await;
 
-        assert_eq!(config.declared(), ["local/plain-dir"], "still there, so the sidebar can name it");
+        assert_eq!(
+            config.declared(),
+            ["local/plain-dir"],
+            "still there, so the sidebar can name it"
+        );
         assert_eq!(config.warnings.len(), 1, "{:?}", config.warnings);
         let warning = &config.warnings[0];
         assert!(warning.starts_with("config.toml: "), "{warning}");
@@ -154,7 +179,15 @@ mod tests {
         let repo = tmp.path().join("widgets");
         std::fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-q", "-b", "develop"]);
-        git(&repo, &["remote", "add", "origin", "https://github.com/acme/widgets.git"]);
+        git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/acme/widgets.git",
+            ],
+        );
 
         let mut config = Config::default();
         config.repo = vec![roots_only(&repo)];
@@ -169,7 +202,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let clone = tmp.path().join("project");
         init_repo(&clone);
-        git(&clone, &["remote", "add", "origin", "https://github.com/them/project.git"]);
+        git(
+            &clone,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/them/project.git",
+            ],
+        );
 
         let mut config = Config::default();
         config.repo = vec![github("them/project"), roots_only(&clone)];
@@ -177,6 +218,10 @@ mod tests {
 
         assert_eq!(config.declared(), ["them/project"]);
         assert_eq!(config.warnings.len(), 1, "{:?}", config.warnings);
-        assert!(config.warnings[0].contains("already declares"), "{}", config.warnings[0]);
+        assert!(
+            config.warnings[0].contains("already declares"),
+            "{}",
+            config.warnings[0]
+        );
     }
 }

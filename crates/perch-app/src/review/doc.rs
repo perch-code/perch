@@ -94,7 +94,12 @@ fn estimate_rows_of<'a>(bodies: impl Iterator<Item = &'a str>, collapsed: bool) 
         return COLLAPSED_ROWS;
     }
     let lines: usize = bodies
-        .map(|body| body.lines().map(|l| l.chars().count().div_ceil(ESTIMATE_COLUMNS).max(1)).sum::<usize>() + ROWS_PER_MESSAGE)
+        .map(|body| {
+            body.lines()
+                .map(|l| l.chars().count().div_ceil(ESTIMATE_COLUMNS).max(1))
+                .sum::<usize>()
+                + ROWS_PER_MESSAGE
+        })
         .sum();
     lines + CARD_CHROME_ROWS
 }
@@ -187,7 +192,10 @@ impl Doc {
     /// The row a card's first spacer is on, if the document has rows for
     /// it. A card under a folded line has none.
     pub fn first_spacer_row(&self, card: &CardId) -> Option<usize> {
-        self.cards.iter().find(|(c, _)| c == card).map(|(_, row)| *row)
+        self.cards
+            .iter()
+            .find(|(c, _)| c == card)
+            .map(|(_, row)| *row)
     }
 
     /// The rows a card has, from its first spacer to past its last.
@@ -228,7 +236,12 @@ impl Doc {
             return None;
         };
         let same = |r: &DocRow| matches!(r, DocRow::Divider { run: other, .. } if other == run);
-        let first = row - self.rows[..row].iter().rev().take_while(|r| same(r)).count();
+        let first = row
+            - self.rows[..row]
+                .iter()
+                .rev()
+                .take_while(|r| same(r))
+                .count();
         let end = row + self.rows[row..].iter().take_while(|r| same(r)).count();
         Some(first..end)
     }
@@ -319,7 +332,11 @@ impl Doc {
     pub fn nearest_display_line(&self, row: usize) -> Option<usize> {
         (row..self.len())
             .find_map(|r| self.display_line(r))
-            .or_else(|| (0..row.min(self.len())).rev().find_map(|r| self.display_line(r)))
+            .or_else(|| {
+                (0..row.min(self.len()))
+                    .rev()
+                    .find_map(|r| self.display_line(r))
+            })
     }
 }
 
@@ -358,7 +375,14 @@ impl Builder {
     fn push_cards(&mut self, cards: &[Card], display: usize) {
         for card in cards.iter().filter(|c| c.after_display_line == display) {
             for row in 0..card.rows {
-                self.push(DocRow::Spacer { card: card.id.clone(), row }, "", None);
+                self.push(
+                    DocRow::Spacer {
+                        card: card.id.clone(),
+                        row,
+                    },
+                    "",
+                    None,
+                );
             }
         }
     }
@@ -413,16 +437,30 @@ impl Builder {
 fn tint_of(row: Row) -> Tint {
     match row {
         Row::Deleted { .. } => Tint::Deleted,
-        Row::Head { status: LineStatus::Added, .. } => Tint::Added,
-        Row::Head { status: LineStatus::Modified, .. } => Tint::Modified,
-        Row::Head { status: LineStatus::Unchanged, .. } => Tint::Plain,
+        Row::Head {
+            status: LineStatus::Added,
+            ..
+        } => Tint::Added,
+        Row::Head {
+            status: LineStatus::Modified,
+            ..
+        } => Tint::Modified,
+        Row::Head {
+            status: LineStatus::Unchanged,
+            ..
+        } => Tint::Plain,
     }
 }
 
 /// The display line of each head line, by head line. The buffer keeps the
 /// head's lines in order, so the table is the head rows' positions.
 fn display_of_heads(buffer: &DisplayBuffer) -> Vec<usize> {
-    buffer.rows.iter().enumerate().filter_map(|(display, row)| row.head_line().map(|_| display)).collect()
+    buffer
+        .rows
+        .iter()
+        .enumerate()
+        .filter_map(|(display, row)| row.head_line().map(|_| display))
+        .collect()
 }
 
 /// The document of the stacked layout: the unified buffer with each fold
@@ -440,7 +478,14 @@ pub fn build(buffer: &DisplayBuffer, folds: &[Run], cards: &[Card]) -> Doc {
     while display < buffer.len() {
         if let Some(run) = folds.get(next_fold).filter(|r| r.first == display) {
             for &expand in run.expanders(buffer.len()) {
-                out.push(DocRow::Divider { run: next_fold, expand }, "", None);
+                out.push(
+                    DocRow::Divider {
+                        run: next_fold,
+                        expand,
+                    },
+                    "",
+                    None,
+                );
             }
             next_fold += 1;
             display = run.last + 1;
@@ -448,7 +493,10 @@ pub fn build(buffer: &DisplayBuffer, folds: &[Run], cards: &[Card]) -> Doc {
         }
         let row = buffer.rows[display];
         out.push(
-            DocRow::Line { display, tint: tint_of(row) },
+            DocRow::Line {
+                display,
+                tint: tint_of(row),
+            },
             lines.get(display).copied().unwrap_or(""),
             row.head_line(),
         );
@@ -507,8 +555,22 @@ pub fn build_split(
             }
             if let Some(run) = folds.get(next_fold).filter(|r| r.first == display) {
                 for &expand in run.expanders(buffer.len()) {
-                    left.push(DocRow::Divider { run: next_fold, expand }, "", None);
-                    right.push(DocRow::Divider { run: next_fold, expand }, "", None);
+                    left.push(
+                        DocRow::Divider {
+                            run: next_fold,
+                            expand,
+                        },
+                        "",
+                        None,
+                    );
+                    right.push(
+                        DocRow::Divider {
+                            run: next_fold,
+                            expand,
+                        },
+                        "",
+                        None,
+                    );
                 }
                 next_fold += 1;
                 skip_to = Some(run.last);
@@ -524,7 +586,11 @@ pub fn build_split(
                     None | Some(LineStatus::Modified) => Tint::Deleted,
                     Some(_) => Tint::Plain,
                 };
-                left.push(DocRow::Line { display: b, tint }, base_lines.get(b).copied().unwrap_or(""), None);
+                left.push(
+                    DocRow::Line { display: b, tint },
+                    base_lines.get(b).copied().unwrap_or(""),
+                    None,
+                );
             }
         }
         match (display, head_status) {
@@ -534,7 +600,11 @@ pub fn build_split(
                     LineStatus::Modified => Tint::Modified,
                     LineStatus::Unchanged => Tint::Plain,
                 };
-                right.push(DocRow::Line { display: d, tint }, head_lines.get(d).copied().unwrap_or(""), head_line);
+                right.push(
+                    DocRow::Line { display: d, tint },
+                    head_lines.get(d).copied().unwrap_or(""),
+                    head_line,
+                );
             }
             _ => right.push(DocRow::Filler, "", None),
         }
@@ -580,7 +650,12 @@ impl Run {
     /// A run of the default folds, which is its own default.
     pub fn new(first: usize, last: usize, first_head: usize) -> Self {
         let last_head = first_head + (last - first);
-        Self { first, last, first_head, default_heads: (first_head, last_head) }
+        Self {
+            first,
+            last,
+            first_head,
+            default_heads: (first_head, last_head),
+        }
     }
 
     /// The head line `last` is.
@@ -623,13 +698,21 @@ impl Run {
     /// The head lines Down reveals: the first `REVEAL_STEP` of the run,
     /// which follow the code above the divider.
     pub fn top(&self) -> (usize, usize) {
-        (self.first_head, (self.first_head + REVEAL_STEP - 1).min(self.last_head()))
+        (
+            self.first_head,
+            (self.first_head + REVEAL_STEP - 1).min(self.last_head()),
+        )
     }
 
     /// The head lines Up reveals: the last `REVEAL_STEP` of the run,
     /// which lead into the code below the divider.
     pub fn bottom(&self) -> (usize, usize) {
-        ((self.last_head() + 1).saturating_sub(REVEAL_STEP).max(self.first_head), self.last_head())
+        (
+            (self.last_head() + 1)
+                .saturating_sub(REVEAL_STEP)
+                .max(self.first_head),
+            self.last_head(),
+        )
     }
 
     /// The head lines All reveals: every one.
@@ -658,7 +741,11 @@ impl HunkRange {
             1 => format!("{}", before + 1),
             n => format!("{},{n}", before + 1),
         };
-        format!("@@ -{} +{} @@", side(self.old_before, self.old_count), side(self.new_before, self.new_count))
+        format!(
+            "@@ -{} +{} @@",
+            side(self.old_before, self.old_count),
+            side(self.new_before, self.new_count)
+        )
     }
 }
 
@@ -681,7 +768,10 @@ pub fn hunks_below(buffer: &DisplayBuffer, folds: &[Run]) -> Vec<Option<HunkRang
     for row in &buffer.rows {
         match row {
             Row::Deleted { .. } => old += 1,
-            Row::Head { status: LineStatus::Unchanged, .. } => {
+            Row::Head {
+                status: LineStatus::Unchanged,
+                ..
+            } => {
                 old += 1;
                 new += 1;
             }
@@ -702,7 +792,12 @@ pub fn hunks_below(buffer: &DisplayBuffer, folds: &[Run]) -> Vec<Option<HunkRang
                 return None;
             }
             let ((old_before, new_before), (old_end, new_end)) = (before[start], before[end]);
-            Some(HunkRange { old_before, old_count: old_end - old_before, new_before, new_count: new_end - new_before })
+            Some(HunkRange {
+                old_before,
+                old_count: old_end - old_before,
+                new_before,
+                new_count: new_end - new_before,
+            })
         })
         .collect()
 }
@@ -711,13 +806,19 @@ pub fn hunks_below(buffer: &DisplayBuffer, folds: &[Run]) -> Vec<Option<HunkRang
 /// it, `@@ -1473,6 +1509,7 @@ impl Manifest {`, with the context git
 /// would give it from `base`, the base file's text, when there is one.
 /// `None` where `hunks_below` has no hunk.
-pub fn hunk_labels(buffer: &DisplayBuffer, base: Option<&str>, folds: &[Run]) -> Vec<Option<String>> {
+pub fn hunk_labels(
+    buffer: &DisplayBuffer,
+    base: Option<&str>,
+    folds: &[Run],
+) -> Vec<Option<String>> {
     let base: Option<Vec<&str>> = base.map(|base| base.lines().collect());
     hunks_below(buffer, folds)
         .into_iter()
         .map(|hunk| {
             let hunk = hunk?;
-            let context = base.as_deref().and_then(|base| perch_git::hunk_context(base, hunk.old_before));
+            let context = base
+                .as_deref()
+                .and_then(|base| perch_git::hunk_context(base, hunk.old_before));
             Some(match context {
                 Some(context) => format!("{} {context}", hunk.header()),
                 None => hunk.header(),
@@ -784,7 +885,9 @@ pub fn runs(buffer: &DisplayBuffer, anchors: &[(usize, usize)]) -> Vec<Run> {
         if first > last || last - first < 2 * CONTEXT_LINES {
             continue;
         }
-        let Some(first_head) = buffer.head_line(first) else { continue };
+        let Some(first_head) = buffer.head_line(first) else {
+            continue;
+        };
         out.push(Run::new(first, last, first_head));
     }
     out
@@ -878,7 +981,10 @@ pub fn reset_ranges(folds: &[Run], defaults: &[Run], divider: Run) -> Vec<(usize
         if folds.iter().any(|f| f.default_heads == run.default_heads) {
             continue;
         }
-        let carrier = folds.iter().rfind(|f| f.last < run.first).or_else(|| folds.first());
+        let carrier = folds
+            .iter()
+            .rfind(|f| f.last < run.first)
+            .or_else(|| folds.first());
         if carrier == Some(&divider) {
             out.push(run.default_heads);
         }
@@ -956,7 +1062,9 @@ fn region_by(
         return None;
     }
     let mut suffix = 0;
-    while suffix < shorter - prefix && same(old, old.len() - 1 - suffix, new, new.len() - 1 - suffix) {
+    while suffix < shorter - prefix
+        && same(old, old.len() - 1 - suffix, new, new.len() - 1 - suffix)
+    {
         suffix += 1;
     }
     let (old_end, new_end) = (old.len() - suffix, new.len() - suffix);
@@ -1026,7 +1134,13 @@ mod tests {
         assert_eq!(doc.text, b.text);
         assert_eq!(
             doc.rows,
-            vec![line(0, Tint::Plain), line(1, Tint::Deleted), line(2, Tint::Modified), line(3, Tint::Plain), line(4, Tint::Deleted)]
+            vec![
+                line(0, Tint::Plain),
+                line(1, Tint::Deleted),
+                line(2, Tint::Modified),
+                line(3, Tint::Plain),
+                line(4, Tint::Deleted)
+            ]
         );
         for display in 0..b.len() {
             assert_eq!(doc.display_line(display), Some(display));
@@ -1034,7 +1148,11 @@ mod tests {
             assert_eq!(doc.head_line(display), b.head_line(display));
         }
         for head in 0..3 {
-            assert_eq!(doc.row_of_head(head), b.display_line(head), "head line {head}");
+            assert_eq!(
+                doc.row_of_head(head),
+                b.display_line(head),
+                "head line {head}"
+            );
         }
         assert_eq!(doc.row_of_head(3), None, "no fourth head line");
     }
@@ -1047,10 +1165,18 @@ mod tests {
         let doc = build(&buffer("a\nb\nc\n", "a\nB\nc\n"), &[], &[]);
         assert_eq!(doc.head_position(0), Some((0, 0)));
         let ghost: usize = doc.text.lines().take(1).map(|l| l.len() + 1).sum();
-        assert_eq!(doc.head_position(ghost), None, "a deleted line has no position in the head file");
+        assert_eq!(
+            doc.head_position(ghost),
+            None,
+            "a deleted line has no position in the head file"
+        );
         let after: usize = doc.text.lines().take(2).map(|l| l.len() + 1).sum();
         assert_eq!(doc.head_position(after), Some((1, 0)));
-        assert_eq!(doc.head_position(after + 1), Some((1, 1)), "columns are byte offsets within the line");
+        assert_eq!(
+            doc.head_position(after + 1),
+            Some((1, 1)),
+            "columns are byte offsets within the line"
+        );
     }
 
     #[test]
@@ -1068,7 +1194,14 @@ mod tests {
     fn the_two_sides_have_the_same_rows_and_an_unchanged_file_is_untinted() {
         let (left, right) = split("a\nb\nc\n", "a\nb\nc\n");
         assert_eq!(lines(&left), lines(&right));
-        assert_eq!(left.rows, vec![line(0, Tint::Plain), line(1, Tint::Plain), line(2, Tint::Plain)]);
+        assert_eq!(
+            left.rows,
+            vec![
+                line(0, Tint::Plain),
+                line(1, Tint::Plain),
+                line(2, Tint::Plain)
+            ]
+        );
         assert_eq!(right.rows, left.rows);
     }
 
@@ -1077,10 +1210,28 @@ mod tests {
         let (left, right) = split("a\nb\n", "a\nx\nb\n");
         assert_eq!(lines(&left), vec!["a", "", "b"]);
         assert_eq!(lines(&right), vec!["a", "x", "b"]);
-        assert_eq!(left.rows, vec![line(0, Tint::Plain), DocRow::Filler, line(1, Tint::Plain)]);
-        assert_eq!(right.rows, vec![line(0, Tint::Plain), line(1, Tint::Added), line(2, Tint::Plain)]);
-        assert_eq!(left.display_line(1), None, "a filler is no line of the base");
-        assert_eq!(left.display_line(2), Some(1), "the base's second line is on the third row");
+        assert_eq!(
+            left.rows,
+            vec![line(0, Tint::Plain), DocRow::Filler, line(1, Tint::Plain)]
+        );
+        assert_eq!(
+            right.rows,
+            vec![
+                line(0, Tint::Plain),
+                line(1, Tint::Added),
+                line(2, Tint::Plain)
+            ]
+        );
+        assert_eq!(
+            left.display_line(1),
+            None,
+            "a filler is no line of the base"
+        );
+        assert_eq!(
+            left.display_line(2),
+            Some(1),
+            "the base's second line is on the third row"
+        );
     }
 
     #[test]
@@ -1088,10 +1239,20 @@ mod tests {
         let (left, right) = split("a\nb\nc\n", "a\nc\n");
         assert_eq!(lines(&left), vec!["a", "b", "c"]);
         assert_eq!(lines(&right), vec!["a", "", "c"]);
-        assert_eq!(left.rows, vec![line(0, Tint::Plain), line(1, Tint::Deleted), line(2, Tint::Plain)]);
+        assert_eq!(
+            left.rows,
+            vec![
+                line(0, Tint::Plain),
+                line(1, Tint::Deleted),
+                line(2, Tint::Plain)
+            ]
+        );
         // The right's lines are the unified buffer's display lines, which
         // has the ghost of b at display line 1: c is display line 2.
-        assert_eq!(right.rows, vec![line(0, Tint::Plain), DocRow::Filler, line(2, Tint::Plain)]);
+        assert_eq!(
+            right.rows,
+            vec![line(0, Tint::Plain), DocRow::Filler, line(2, Tint::Plain)]
+        );
         assert_eq!(right.head_line(2), Some(1));
         assert_eq!(right.row_of_head(1), Some(2));
     }
@@ -1114,11 +1275,23 @@ mod tests {
         assert_eq!(lines(&right), vec!["a", "B", "B2", "B3", "c"]);
         assert_eq!(
             left.rows,
-            vec![line(0, Tint::Plain), line(1, Tint::Deleted), DocRow::Filler, DocRow::Filler, line(2, Tint::Plain)]
+            vec![
+                line(0, Tint::Plain),
+                line(1, Tint::Deleted),
+                DocRow::Filler,
+                DocRow::Filler,
+                line(2, Tint::Plain)
+            ]
         );
         assert_eq!(
             right.rows,
-            vec![line(0, Tint::Plain), line(2, Tint::Modified), line(3, Tint::Modified), line(4, Tint::Modified), line(5, Tint::Plain)]
+            vec![
+                line(0, Tint::Plain),
+                line(2, Tint::Modified),
+                line(3, Tint::Modified),
+                line(4, Tint::Modified),
+                line(5, Tint::Plain)
+            ]
         );
     }
 
@@ -1128,12 +1301,19 @@ mod tests {
         let head = "one\n2\nthree\nfour and a half\nfive\nsix\n";
         let (left, right) = split(base, head);
         let left_text: Vec<&str> = lines(&left).into_iter().filter(|l| !l.is_empty()).collect();
-        let right_text: Vec<&str> = lines(&right).into_iter().filter(|l| !l.is_empty()).collect();
+        let right_text: Vec<&str> = lines(&right)
+            .into_iter()
+            .filter(|l| !l.is_empty())
+            .collect();
         assert_eq!(left_text, base.lines().collect::<Vec<_>>());
         assert_eq!(right_text, head.lines().collect::<Vec<_>>());
-        let base_lines: Vec<usize> = (0..left.len()).filter_map(|r| left.display_line(r)).collect();
+        let base_lines: Vec<usize> = (0..left.len())
+            .filter_map(|r| left.display_line(r))
+            .collect();
         assert_eq!(base_lines, (0..5).collect::<Vec<_>>());
-        let head_lines: Vec<usize> = (0..right.len()).filter_map(|r| right.head_line(r)).collect();
+        let head_lines: Vec<usize> = (0..right.len())
+            .filter_map(|r| right.head_line(r))
+            .collect();
         assert_eq!(head_lines, (0..6).collect::<Vec<_>>());
     }
 
@@ -1154,10 +1334,18 @@ mod tests {
         let (_, right) = split("a\nb\nc\nd\n", "a\nB\nc\n");
         assert_eq!(right.display_line(1), Some(2));
         assert_eq!(right.display_line(3), None);
-        assert_eq!(right.nearest_display_line(3), Some(3), "the row above, c, when nothing follows");
+        assert_eq!(
+            right.nearest_display_line(3),
+            Some(3),
+            "the row above, c, when nothing follows"
+        );
         assert_eq!(right.row_of_head(2), Some(2));
         assert_eq!(right.row_of_display(2), Some(1));
-        assert_eq!(right.row_of_display(1), None, "the ghost is on no row of the head side");
+        assert_eq!(
+            right.row_of_display(1),
+            None,
+            "the ghost is on no row of the head side"
+        );
         // A click on the filler row is nowhere; on B it is head line 1.
         let filler: usize = right.text.lines().take(3).map(|l| l.len() + 1).sum();
         assert_eq!(right.head_position(filler), None);
@@ -1173,12 +1361,26 @@ mod tests {
         let fold = Run::new(5, 10, 4);
         let doc = build(&b, &[fold], &[]);
         assert_eq!(doc.len(), b.len() - 6 + 1);
-        assert_eq!(doc.rows[5], DocRow::Divider { run: 0, expand: Expand::All });
-        assert_eq!(doc.text.lines().nth(5), Some(""), "the divider's row is blank text");
+        assert_eq!(
+            doc.rows[5],
+            DocRow::Divider {
+                run: 0,
+                expand: Expand::All
+            }
+        );
+        assert_eq!(
+            doc.text.lines().nth(5),
+            Some(""),
+            "the divider's row is blank text"
+        );
         assert_eq!(doc.rows[6], line(11, Tint::Plain));
         assert_eq!(doc.row_of_display(7), None);
         assert_eq!(doc.row_of_display(11), Some(6));
-        assert_eq!(doc.row_of_head(10), Some(6), "head line 10 is display line 11");
+        assert_eq!(
+            doc.row_of_head(10),
+            Some(6),
+            "head line 10 is display line 11"
+        );
         assert_eq!(doc.display_line(5), None);
         assert_eq!(doc.nearest_display_line(5), Some(11));
         assert_eq!(doc.head_line(5), None);
@@ -1187,12 +1389,22 @@ mod tests {
     #[test]
     fn a_card_reserves_its_rows_under_its_line() {
         let b = two_changes(4);
-        let card = Card { id: CardId::Thread("t1".into()), after_display_line: 2, rows: 3 };
+        let card = Card {
+            id: CardId::Thread("t1".into()),
+            after_display_line: 2,
+            rows: 3,
+        };
         let doc = build(&b, &[], std::slice::from_ref(&card));
         assert_eq!(doc.len(), b.len() + 3);
         assert_eq!(doc.rows[2], line(2, Tint::Plain));
         for row in 0..3 {
-            assert_eq!(doc.rows[3 + row], DocRow::Spacer { card: card.id.clone(), row });
+            assert_eq!(
+                doc.rows[3 + row],
+                DocRow::Spacer {
+                    card: card.id.clone(),
+                    row
+                }
+            );
             assert_eq!(doc.text.lines().nth(3 + row), Some(""));
         }
         assert_eq!(doc.rows[6], line(3, Tint::Plain));
@@ -1208,23 +1420,60 @@ mod tests {
     #[test]
     fn two_cards_under_one_line_stack_in_the_order_they_were_given() {
         let b = two_changes(4);
-        let first = Card { id: CardId::Thread("t1".into()), after_display_line: 2, rows: 2 };
-        let second = Card { id: CardId::Thread("t2".into()), after_display_line: 2, rows: 1 };
+        let first = Card {
+            id: CardId::Thread("t1".into()),
+            after_display_line: 2,
+            rows: 2,
+        };
+        let second = Card {
+            id: CardId::Thread("t2".into()),
+            after_display_line: 2,
+            rows: 1,
+        };
         let doc = build(&b, &[], &[first.clone(), second.clone()]);
         assert_eq!(doc.len(), b.len() + 3);
         assert_eq!(doc.rows[2], line(2, Tint::Plain));
-        assert_eq!(doc.rows[3], DocRow::Spacer { card: first.id.clone(), row: 0 });
-        assert_eq!(doc.rows[4], DocRow::Spacer { card: first.id.clone(), row: 1 });
-        assert_eq!(doc.rows[5], DocRow::Spacer { card: second.id.clone(), row: 0 });
+        assert_eq!(
+            doc.rows[3],
+            DocRow::Spacer {
+                card: first.id.clone(),
+                row: 0
+            }
+        );
+        assert_eq!(
+            doc.rows[4],
+            DocRow::Spacer {
+                card: first.id.clone(),
+                row: 1
+            }
+        );
+        assert_eq!(
+            doc.rows[5],
+            DocRow::Spacer {
+                card: second.id.clone(),
+                row: 0
+            }
+        );
         assert_eq!(doc.rows[6], line(3, Tint::Plain));
-        assert_eq!(doc.cards(), &[(first.id.clone(), 3), (second.id.clone(), 5)]);
+        assert_eq!(
+            doc.cards(),
+            &[(first.id.clone(), 3), (second.id.clone(), 5)]
+        );
         // Given the other way round, they stack the other way round.
         let doc = build(&b, &[], &[second.clone(), first.clone()]);
         assert_eq!(doc.cards(), &[(second.id, 3), (first.id, 4)]);
         // A card under a folded line is not placed, and is not a card of
         // the document.
-        let folded = Card { id: CardId::Thread("t3".into()), after_display_line: 7, rows: 2 };
-        let doc = build(&two_changes(20), &[Run::new(5, 10, 4)], std::slice::from_ref(&folded));
+        let folded = Card {
+            id: CardId::Thread("t3".into()),
+            after_display_line: 7,
+            rows: 2,
+        };
+        let doc = build(
+            &two_changes(20),
+            &[Run::new(5, 10, 4)],
+            std::slice::from_ref(&folded),
+        );
         assert!(doc.cards().is_empty());
         assert_eq!(doc.first_spacer_row(&folded.id), None);
     }
@@ -1233,19 +1482,41 @@ mod tests {
     fn a_readers_card_a_github_card_and_the_composer_under_one_line_stack_in_that_order() {
         let b = two_changes(4);
         let cards = [
-            Card { id: CardId::Thread("t1".into()), after_display_line: 2, rows: 2 },
-            Card { id: CardId::Thread("gh-7".into()), after_display_line: 2, rows: 3 },
-            Card { id: CardId::Composer, after_display_line: 2, rows: 1 },
+            Card {
+                id: CardId::Thread("t1".into()),
+                after_display_line: 2,
+                rows: 2,
+            },
+            Card {
+                id: CardId::Thread("gh-7".into()),
+                after_display_line: 2,
+                rows: 3,
+            },
+            Card {
+                id: CardId::Composer,
+                after_display_line: 2,
+                rows: 1,
+            },
         ];
         let doc = build(&b, &[], &cards);
         assert_eq!(doc.len(), b.len() + 6);
         assert_eq!(doc.rows[2], line(2, Tint::Plain));
-        assert_eq!(doc.cards(), &[(CardId::Thread("t1".into()), 3), (CardId::Thread("gh-7".into()), 5), (CardId::Composer, 8)]);
+        assert_eq!(
+            doc.cards(),
+            &[
+                (CardId::Thread("t1".into()), 3),
+                (CardId::Thread("gh-7".into()), 5),
+                (CardId::Composer, 8)
+            ]
+        );
         assert_eq!(doc.card_span(&CardId::Thread("t1".into())), Some(3..5));
         assert_eq!(doc.card_span(&CardId::Thread("gh-7".into())), Some(5..8));
         assert_eq!(doc.card_span(&CardId::Composer), Some(8..9));
         for row in 3..9 {
-            assert!(matches!(doc.rows[row], DocRow::Spacer { .. }), "row {row} is a spacer");
+            assert!(
+                matches!(doc.rows[row], DocRow::Spacer { .. }),
+                "row {row} is a spacer"
+            );
             assert_eq!(doc.line(row), "");
         }
         assert_eq!(doc.rows[9], line(3, Tint::Plain));
@@ -1257,7 +1528,14 @@ mod tests {
         let alignment = perch_git::alignment(&diff, &base, &head);
         let (left, right) = build_split(&alignment, &base, &b, &[], &cards);
         assert_eq!(left.len(), right.len());
-        assert_eq!(right.cards(), &[(CardId::Thread("t1".into()), 2), (CardId::Thread("gh-7".into()), 4), (CardId::Composer, 7)]);
+        assert_eq!(
+            right.cards(),
+            &[
+                (CardId::Thread("t1".into()), 2),
+                (CardId::Thread("gh-7".into()), 4),
+                (CardId::Composer, 7)
+            ]
+        );
         assert_eq!(left.cards(), right.cards());
     }
 
@@ -1286,7 +1564,14 @@ mod tests {
                     id: format!("m{i}"),
                     thread_id: "t1".into(),
                     origin: ThreadOrigin::Local,
-                    author: if i % 2 == 0 { Author::User } else { Author::Agent { backend: "claude-code".into(), model: "sonnet".into() } },
+                    author: if i % 2 == 0 {
+                        Author::User
+                    } else {
+                        Author::Agent {
+                            backend: "claude-code".into(),
+                            model: "sonnet".into(),
+                        }
+                    },
                     body: body.to_string(),
                     created_at: at,
                     run: None,
@@ -1305,7 +1590,10 @@ mod tests {
         // One line, its byline and gap, and the header, the Follow up box
         // and the foot.
         let (message, chrome) = (ROWS_PER_MESSAGE, CARD_CHROME_ROWS);
-        assert_eq!(estimate_rows(&thread_of(&["why?"]), false), 1 + message + chrome);
+        assert_eq!(
+            estimate_rows(&thread_of(&["why?"]), false),
+            1 + message + chrome
+        );
         // A question and a three-line answer with a blank line in it:
         // every line counts, blank ones too, since they are gaps.
         assert_eq!(
@@ -1314,7 +1602,10 @@ mod tests {
         );
         // A line wraps at eighty columns: 200 characters are three rows.
         let long_line = "x".repeat(200);
-        assert_eq!(estimate_rows(&thread_of(&[&long_line]), false), 3 + message + chrome);
+        assert_eq!(
+            estimate_rows(&thread_of(&[&long_line]), false),
+            3 + message + chrome
+        );
         assert_eq!(
             estimate_rows(&thread_of(&[&"y".repeat(80)]), false),
             1 + message + chrome,
@@ -1326,7 +1617,10 @@ mod tests {
 
     #[test]
     fn a_long_thread_is_all_its_lines() {
-        let hundred_lines = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let hundred_lines = (0..100)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert_eq!(
             estimate_rows(&thread_of(&["why?", &hundred_lines]), false),
             (1 + ROWS_PER_MESSAGE) + (100 + ROWS_PER_MESSAGE) + CARD_CHROME_ROWS,
@@ -1335,8 +1629,14 @@ mod tests {
 
     #[test]
     fn a_collapsed_thread_is_the_same_rows_whatever_it_holds() {
-        let hundred_lines = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
-        assert_eq!(estimate_rows(&thread_of(&["why?", &hundred_lines]), true), COLLAPSED_ROWS);
+        let hundred_lines = (0..100)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            estimate_rows(&thread_of(&["why?", &hundred_lines]), true),
+            COLLAPSED_ROWS
+        );
         assert_eq!(estimate_rows(&thread_of(&["why?"]), true), COLLAPSED_ROWS);
         assert_eq!(estimate_rows(&thread_of(&[]), true), COLLAPSED_ROWS);
     }
@@ -1374,15 +1674,49 @@ mod tests {
         // Display: ghost(old), new, l1..l10, ghost(old end), new end. Fold
         // l4 to l7, and put a card under l2.
         let fold = Run::new(5, 8, 4);
-        let card = Card { id: CardId::Thread("gh-7".into()), after_display_line: 3, rows: 2 };
+        let card = Card {
+            id: CardId::Thread("gh-7".into()),
+            after_display_line: 3,
+            rows: 2,
+        };
         let (left, right) = build_split(&alignment, base, &b, &[fold], &[card]);
         assert_eq!(left.len(), right.len());
-        let divider = right.rows.iter().position(|r| matches!(r, DocRow::Divider { .. })).unwrap();
-        assert_eq!(left.rows[divider], DocRow::Divider { run: 0, expand: Expand::All });
-        let spacer = right.rows.iter().position(|r| matches!(r, DocRow::Spacer { .. })).unwrap();
-        assert_eq!(left.rows[spacer], DocRow::Spacer { card: CardId::Thread("gh-7".into()), row: 0 });
-        assert_eq!(left.rows[spacer + 1], DocRow::Spacer { card: CardId::Thread("gh-7".into()), row: 1 });
-        assert_eq!(right.rows[spacer - 1], line(3, Tint::Plain), "the card is under l2");
+        let divider = right
+            .rows
+            .iter()
+            .position(|r| matches!(r, DocRow::Divider { .. }))
+            .unwrap();
+        assert_eq!(
+            left.rows[divider],
+            DocRow::Divider {
+                run: 0,
+                expand: Expand::All
+            }
+        );
+        let spacer = right
+            .rows
+            .iter()
+            .position(|r| matches!(r, DocRow::Spacer { .. }))
+            .unwrap();
+        assert_eq!(
+            left.rows[spacer],
+            DocRow::Spacer {
+                card: CardId::Thread("gh-7".into()),
+                row: 0
+            }
+        );
+        assert_eq!(
+            left.rows[spacer + 1],
+            DocRow::Spacer {
+                card: CardId::Thread("gh-7".into()),
+                row: 1
+            }
+        );
+        assert_eq!(
+            right.rows[spacer - 1],
+            line(3, Tint::Plain),
+            "the card is under l2"
+        );
         // The folded lines are on no row, and the ones around them are.
         assert_eq!(right.row_of_head(5), None);
         assert_eq!(right.row_of_head(2), Some(spacer - 1));
@@ -1400,18 +1734,52 @@ mod tests {
         let diff = file_diff(base, head);
         let alignment = perch_git::alignment(&diff, base, head);
         let b = DisplayBuffer::unified(head, base, &diff);
-        let card = Card { id: CardId::Composer, after_display_line: 2, rows: 1 };
+        let card = Card {
+            id: CardId::Composer,
+            after_display_line: 2,
+            rows: 1,
+        };
         let (left, right) = build_split(&alignment, base, &b, &[], &[card]);
         assert_eq!(
             left.rows,
-            vec![line(0, Tint::Plain), line(1, Tint::Deleted), line(2, Tint::Deleted), DocRow::Spacer { card: CardId::Composer, row: 0 }]
+            vec![
+                line(0, Tint::Plain),
+                line(1, Tint::Deleted),
+                line(2, Tint::Deleted),
+                DocRow::Spacer {
+                    card: CardId::Composer,
+                    row: 0
+                }
+            ]
         );
         assert_eq!(
             right.rows,
-            vec![line(0, Tint::Plain), DocRow::Filler, DocRow::Filler, DocRow::Spacer { card: CardId::Composer, row: 0 }]
+            vec![
+                line(0, Tint::Plain),
+                DocRow::Filler,
+                DocRow::Filler,
+                DocRow::Spacer {
+                    card: CardId::Composer,
+                    row: 0
+                }
+            ]
         );
-        let stacked = build(&b, &[], &[Card { id: CardId::Composer, after_display_line: 2, rows: 1 }]);
-        assert_eq!(stacked.rows[3], DocRow::Spacer { card: CardId::Composer, row: 0 });
+        let stacked = build(
+            &b,
+            &[],
+            &[Card {
+                id: CardId::Composer,
+                after_display_line: 2,
+                rows: 1,
+            }],
+        );
+        assert_eq!(
+            stacked.rows[3],
+            DocRow::Spacer {
+                card: CardId::Composer,
+                row: 0
+            }
+        );
     }
 
     #[test]
@@ -1425,18 +1793,47 @@ mod tests {
         let diff = file_diff(base, head);
         let alignment = perch_git::alignment(&diff, base, head);
         let b = DisplayBuffer::unified(head, base, &diff);
-        let under_ghost = Card { id: CardId::Thread("t1".into()), after_display_line: 1, rows: 2 };
-        let under_line = Card { id: CardId::Thread("gh-9".into()), after_display_line: 2, rows: 1 };
+        let under_ghost = Card {
+            id: CardId::Thread("t1".into()),
+            after_display_line: 1,
+            rows: 2,
+        };
+        let under_line = Card {
+            id: CardId::Thread("gh-9".into()),
+            after_display_line: 2,
+            rows: 1,
+        };
         let spacers = [
-            DocRow::Spacer { card: CardId::Thread("t1".into()), row: 0 },
-            DocRow::Spacer { card: CardId::Thread("t1".into()), row: 1 },
-            DocRow::Spacer { card: CardId::Thread("gh-9".into()), row: 0 },
+            DocRow::Spacer {
+                card: CardId::Thread("t1".into()),
+                row: 0,
+            },
+            DocRow::Spacer {
+                card: CardId::Thread("t1".into()),
+                row: 1,
+            },
+            DocRow::Spacer {
+                card: CardId::Thread("gh-9".into()),
+                row: 0,
+            },
         ];
-        let (left, right) = build_split(&alignment, base, &b, &[], &[under_ghost.clone(), under_line.clone()]);
-        assert_eq!(left.rows[..2], [line(0, Tint::Plain), line(1, Tint::Deleted)]);
+        let (left, right) = build_split(
+            &alignment,
+            base,
+            &b,
+            &[],
+            &[under_ghost.clone(), under_line.clone()],
+        );
+        assert_eq!(
+            left.rows[..2],
+            [line(0, Tint::Plain), line(1, Tint::Deleted)]
+        );
         assert_eq!(left.rows[2..5], spacers[..]);
         assert_eq!(left.rows[5], line(2, Tint::Plain));
-        assert_eq!(right.rows[..2], [line(0, Tint::Plain), line(2, Tint::Modified)]);
+        assert_eq!(
+            right.rows[..2],
+            [line(0, Tint::Plain), line(2, Tint::Modified)]
+        );
         assert_eq!(right.rows[2..5], spacers[..]);
         assert_eq!(right.rows[5], line(3, Tint::Plain));
         assert_eq!(left.len(), right.len());
@@ -1460,11 +1857,24 @@ mod tests {
 
     #[test]
     fn a_run_that_would_hide_six_lines_or_fewer_is_shown_whole_and_one_that_hides_seven_folds() {
-        assert!(runs(&two_changes(6), &[]).is_empty(), "nothing left past the context");
-        assert!(runs(&two_changes(7), &[]).is_empty(), "one hidden line is worse than the line");
-        assert!(runs(&two_changes(12), &[]).is_empty(), "six hidden lines are still shown");
+        assert!(
+            runs(&two_changes(6), &[]).is_empty(),
+            "nothing left past the context"
+        );
+        assert!(
+            runs(&two_changes(7), &[]).is_empty(),
+            "one hidden line is worse than the line"
+        );
+        assert!(
+            runs(&two_changes(12), &[]).is_empty(),
+            "six hidden lines are still shown"
+        );
         let thirteen = runs(&two_changes(13), &[]);
-        assert_eq!(thirteen, vec![Run::new(5, 11, 4)], "seven hidden lines fold");
+        assert_eq!(
+            thirteen,
+            vec![Run::new(5, 11, 4)],
+            "seven hidden lines fold"
+        );
     }
 
     #[test]
@@ -1473,7 +1883,11 @@ mod tests {
         // Head line 20 is "line 19", display line 21.
         let runs = runs(&b, &[(20, 20)]);
         assert_eq!(runs.len(), 2);
-        assert_eq!(runs[0], Run::new(5, 17, 4), "18, 19 and 20 stay before the anchor");
+        assert_eq!(
+            runs[0],
+            Run::new(5, 17, 4),
+            "18, 19 and 20 stay before the anchor"
+        );
         assert_eq!(runs[1], Run::new(25, 38, 24), "22, 23 and 24 stay after it");
     }
 
@@ -1489,7 +1903,8 @@ mod tests {
     }
 
     #[test]
-    fn the_first_and_last_runs_keep_three_lines_toward_the_change_and_fold_from_line_one_or_to_the_end() {
+    fn the_first_and_last_runs_keep_three_lines_toward_the_change_and_fold_from_line_one_or_to_the_end(
+    ) {
         // Display: line 0..19 at 0 to 19, ghost(old) at 20, new at 21,
         // line 20..39 at 22 to 41.
         let b = one_change(20, 20);
@@ -1502,13 +1917,23 @@ mod tests {
         // An edge run keeps its three lines of context toward the change and
         // folds the rest, when the rest is more than six lines.
         assert!(runs(&one_change(6, 6), &[]).is_empty());
-        assert!(runs(&one_change(9, 9), &[]).is_empty(), "six left at each end are shown");
-        assert_eq!(runs(&one_change(10, 10), &[]).len(), 2, "seven left at each end fold");
+        assert!(
+            runs(&one_change(9, 9), &[]).is_empty(),
+            "six left at each end are shown"
+        );
+        assert_eq!(
+            runs(&one_change(10, 10), &[]).len(),
+            2,
+            "seven left at each end fold"
+        );
     }
 
     #[test]
     fn a_buffer_that_is_one_run_has_nothing_to_fold_around() {
-        let b = buffer("a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n", "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n");
+        let b = buffer(
+            "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n",
+            "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n",
+        );
         assert!(runs(&b, &[]).is_empty());
         assert!(runs(&DisplayBuffer::plain("a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n"), &[]).is_empty());
     }
@@ -1528,7 +1953,12 @@ mod tests {
     /// A piece of the first of `two_runs`, which folds back to head lines
     /// 4 to 37.
     fn piece(first: usize, last: usize, first_head: usize) -> Run {
-        Run { first, last, first_head, default_heads: (4, 37) }
+        Run {
+            first,
+            last,
+            first_head,
+            default_heads: (4, 37),
+        }
     }
 
     #[test]
@@ -1536,7 +1966,10 @@ mod tests {
         let mut reveals = Reveals::default();
         // Up on the first run: its first twenty head lines, 4 to 23.
         reveals.add(4, 23);
-        assert_eq!(reveals.apply(&two_runs()), vec![piece(25, 38, 24), Run::new(45, 60, 43)]);
+        assert_eq!(
+            reveals.apply(&two_runs()),
+            vec![piece(25, 38, 24), Run::new(45, 60, 43)]
+        );
         // Down on the second, its last twenty, is more than it has: it
         // is gone.
         reveals.add(39, 58);
@@ -1572,7 +2005,15 @@ mod tests {
         let mut reveals = Reveals::default();
         let (a, z) = run.bottom();
         reveals.add(a, z);
-        assert_eq!(reveals.apply(&[run]), vec![Run { first: 5, last: 11, first_head: 4, default_heads: (4, 30) }]);
+        assert_eq!(
+            reveals.apply(&[run]),
+            vec![Run {
+                first: 5,
+                last: 11,
+                first_head: 4,
+                default_heads: (4, 30)
+            }]
+        );
         // A jump's worth near the top of a run leaves a short piece above
         // it, which is shown, and the rest below, which is not.
         let mut reveals = Reveals::default();
@@ -1599,7 +2040,15 @@ mod tests {
         reveals.add(30, 50);
         assert_eq!(
             reveals.apply(&two_runs()),
-            vec![piece(5, 30, 4), Run { first: 53, last: 60, first_head: 51, default_heads: (43, 58) }]
+            vec![
+                piece(5, 30, 4),
+                Run {
+                    first: 53,
+                    last: 60,
+                    first_head: 51,
+                    default_heads: (43, 58)
+                }
+            ]
         );
     }
 
@@ -1629,8 +2078,16 @@ mod tests {
     fn a_divider_holds_githubs_expanders_for_where_its_run_is_and_how_long() {
         let len = 100;
         // Between two changes: Down over Up past one step, All within it.
-        assert_eq!(Run::new(5, 25, 4).expanders(len), &[Expand::Down, Expand::Up], "twenty-one lines");
-        assert_eq!(Run::new(5, 24, 4).expanders(len), &[Expand::All], "twenty lines");
+        assert_eq!(
+            Run::new(5, 25, 4).expanders(len),
+            &[Expand::Down, Expand::Up],
+            "twenty-one lines"
+        );
+        assert_eq!(
+            Run::new(5, 24, 4).expanders(len),
+            &[Expand::All],
+            "twenty lines"
+        );
         // At the top of the file there is no code above to grow down, and
         // at the bottom none below to grow up, however long the run.
         assert_eq!(Run::new(0, 60, 0).expanders(len), &[Expand::Up]);
@@ -1647,15 +2104,35 @@ mod tests {
         let run = runs(&b, &[])[0];
         let doc = build(&b, &[run], &[]);
         assert_eq!(doc.len(), 44 - 34 + 2);
-        assert_eq!(doc.rows[5], DocRow::Divider { run: 0, expand: Expand::Down });
-        assert_eq!(doc.rows[6], DocRow::Divider { run: 0, expand: Expand::Up });
+        assert_eq!(
+            doc.rows[5],
+            DocRow::Divider {
+                run: 0,
+                expand: Expand::Down
+            }
+        );
+        assert_eq!(
+            doc.rows[6],
+            DocRow::Divider {
+                run: 0,
+                expand: Expand::Up
+            }
+        );
         assert_eq!((doc.run_of(5), doc.run_of(6)), (Some(run), Some(run)));
         assert_eq!(doc.divider_span(5), Some(5..7));
         assert_eq!(doc.divider_span(6), Some(5..7));
         assert_eq!(doc.divider_span(4), None);
         assert_eq!(doc.divider_span(7), None);
-        assert_eq!((doc.line(5), doc.line(6)), ("", ""), "the divider's rows are blank text");
-        assert_eq!(doc.row_of_head(38), Some(7), "the line after the run follows both rows");
+        assert_eq!(
+            (doc.line(5), doc.line(6)),
+            ("", ""),
+            "the divider's rows are blank text"
+        );
+        assert_eq!(
+            doc.row_of_head(38),
+            Some(7),
+            "the line after the run follows both rows"
+        );
         assert_eq!(doc.hidden_lines(), 34, "two rows hide the run once");
 
         // The split has the same two rows at the same rows on both sides.
@@ -1665,10 +2142,26 @@ mod tests {
         let alignment = perch_git::alignment(&diff, &base, &head);
         let (left, right) = build_split(&alignment, &base, &b, &[run], &[]);
         assert_eq!(left.len(), right.len());
-        let row = right.rows.iter().position(|r| matches!(r, DocRow::Divider { .. })).unwrap();
+        let row = right
+            .rows
+            .iter()
+            .position(|r| matches!(r, DocRow::Divider { .. }))
+            .unwrap();
         for side in [&left, &right] {
-            assert_eq!(side.rows[row], DocRow::Divider { run: 0, expand: Expand::Down });
-            assert_eq!(side.rows[row + 1], DocRow::Divider { run: 0, expand: Expand::Up });
+            assert_eq!(
+                side.rows[row],
+                DocRow::Divider {
+                    run: 0,
+                    expand: Expand::Down
+                }
+            );
+            assert_eq!(
+                side.rows[row + 1],
+                DocRow::Divider {
+                    run: 0,
+                    expand: Expand::Up
+                }
+            );
             assert_eq!(side.divider_span(row + 1), Some(row..row + 2));
         }
     }
@@ -1694,7 +2187,15 @@ mod tests {
         let b = two_changes(40);
         let folds = runs(&b, &[]);
         let hunks = hunks_below(&b, &folds);
-        assert_eq!(hunks, vec![Some(HunkRange { old_before: 38, old_count: 4, new_before: 38, new_count: 4 })]);
+        assert_eq!(
+            hunks,
+            vec![Some(HunkRange {
+                old_before: 38,
+                old_count: 4,
+                new_before: 38,
+                new_count: 4
+            })]
+        );
         assert_eq!(hunks[0].unwrap().header(), "@@ -39,4 +39,4 @@");
 
         // A run that ends the file has nothing below it, and no header.
@@ -1711,7 +2212,12 @@ mod tests {
 
     #[test]
     fn a_hunk_header_leaves_off_a_count_of_one_and_numbers_an_empty_side_by_the_line_before() {
-        let hunk = |old_before, old_count, new_before, new_count| HunkRange { old_before, old_count, new_before, new_count };
+        let hunk = |old_before, old_count, new_before, new_count| HunkRange {
+            old_before,
+            old_count,
+            new_before,
+            new_count,
+        };
         assert_eq!(hunk(9, 1, 9, 2).header(), "@@ -10 +10,2 @@");
         assert_eq!(hunk(4, 0, 4, 3).header(), "@@ -4,0 +5,3 @@");
         assert_eq!(hunk(0, 0, 0, 1).header(), "@@ -0,0 +1 @@");
@@ -1731,34 +2237,58 @@ mod tests {
         // Lines 31 to 33 of the body, the change, and three more: the hunk
         // starts at base line 31, and the nearest line above that starts an
         // identifier is the impl's.
-        assert_eq!(labels[0].as_deref(), Some("@@ -31,7 +31,7 @@ impl Manifest {"));
+        assert_eq!(
+            labels[0].as_deref(),
+            Some("@@ -31,7 +31,7 @@ impl Manifest {")
+        );
         assert_eq!(labels[1], None);
         // With no base there is no context, only the header.
-        assert_eq!(hunk_labels(&b, None, &folds)[0].as_deref(), Some("@@ -31,7 +31,7 @@"));
+        assert_eq!(
+            hunk_labels(&b, None, &folds)[0].as_deref(),
+            Some("@@ -31,7 +31,7 @@")
+        );
     }
 
     #[test]
     fn the_hunk_below_a_divider_runs_to_the_next_divider_and_grows_with_a_reveal() {
         // Three changes twenty lines apart: two runs, and the hunk below
         // the first ends where the second begins.
-        let base = format!("old top\n{}old mid\n{}old bottom\n", context(0, 20), context(20, 20));
-        let head = format!("new top\n{}new mid\n{}new bottom\n", context(0, 20), context(20, 20));
+        let base = format!(
+            "old top\n{}old mid\n{}old bottom\n",
+            context(0, 20),
+            context(20, 20)
+        );
+        let head = format!(
+            "new top\n{}new mid\n{}new bottom\n",
+            context(0, 20),
+            context(20, 20)
+        );
         let b = buffer(&base, &head);
         let all = runs(&b, &[]);
         assert_eq!(all.len(), 2);
         let hunks = hunks_below(&b, &all);
         // Three lines, the rewritten middle, three lines: seven of each.
-        assert_eq!((hunks[0].unwrap().old_count, hunks[0].unwrap().new_count), (7, 7));
+        assert_eq!(
+            (hunks[0].unwrap().old_count, hunks[0].unwrap().new_count),
+            (7, 7)
+        );
         // With the second run open, the first's hunk runs to the end.
         let hunks = hunks_below(&b, &all[..1]);
-        assert_eq!((hunks[0].unwrap().old_count, hunks[0].unwrap().new_count), (3 + 1 + 20 + 1, 3 + 1 + 20 + 1));
+        assert_eq!(
+            (hunks[0].unwrap().old_count, hunks[0].unwrap().new_count),
+            (3 + 1 + 20 + 1, 3 + 1 + 20 + 1)
+        );
     }
 
     #[test]
     fn a_fold_past_the_end_of_a_shorter_buffer_has_no_hunk() {
         // The folds of a longer file, read once against the shorter one a
         // reload brought, before the doc catches up.
-        let long = format!("old top\n{}old mid\n{}old bottom\n", context(0, 20), context(20, 20));
+        let long = format!(
+            "old top\n{}old mid\n{}old bottom\n",
+            context(0, 20),
+            context(20, 20)
+        );
         let folds = runs(&buffer(&long, &long.replace("old", "new")), &[]);
         assert_eq!(folds.len(), 2);
         let short = format!("old top\n{}old mid\n", context(0, 20));
@@ -1774,7 +2304,11 @@ mod tests {
         reveals.add(4, 23);
         reveals.add(43, 62);
         reveals.add(23, 4);
-        assert_eq!(reveals.iter().collect::<Vec<_>>(), vec![(4, 23), (43, 62)], "a range is one however it was given");
+        assert_eq!(
+            reveals.iter().collect::<Vec<_>>(),
+            vec![(4, 23), (43, 62)],
+            "a range is one however it was given"
+        );
         assert!(reveals.overlaps(4, 37));
         assert!(!reveals.overlaps(24, 42));
         reveals.remove_overlapping(4, 37);
@@ -1784,10 +2318,17 @@ mod tests {
 
     #[test]
     fn a_run_revealed_whole_has_its_reset_on_the_nearest_divider_above_or_else_the_first() {
-        let defaults = vec![Run::new(5, 38, 4), Run::new(45, 60, 43), Run::new(70, 90, 68)];
+        let defaults = vec![
+            Run::new(5, 38, 4),
+            Run::new(45, 60, 43),
+            Run::new(70, 90, 68),
+        ];
         // Nothing revealed: each divider stands for its own run alone.
         for run in &defaults {
-            assert_eq!(reset_ranges(&defaults, &defaults, *run), vec![run.default_heads]);
+            assert_eq!(
+                reset_ranges(&defaults, &defaults, *run),
+                vec![run.default_heads]
+            );
         }
         // All on the second run: the first run's divider carries it, and
         // the third's does not.
@@ -1796,7 +2337,10 @@ mod tests {
         reveals.add(a, z);
         let folds = reveals.apply(&defaults);
         assert_eq!(folds, vec![defaults[0], defaults[2]]);
-        assert_eq!(reset_ranges(&folds, &defaults, folds[0]), vec![(4, 37), (43, 58)]);
+        assert_eq!(
+            reset_ranges(&folds, &defaults, folds[0]),
+            vec![(4, 37), (43, 58)]
+        );
         assert_eq!(reset_ranges(&folds, &defaults, folds[1]), vec![(68, 88)]);
         // All on the first run: nothing is above it, so the divider below
         // carries it.
@@ -1804,7 +2348,10 @@ mod tests {
         let (a, z) = defaults[0].whole();
         reveals.add(a, z);
         let folds = reveals.apply(&defaults);
-        assert_eq!(reset_ranges(&folds, &defaults, folds[0]), vec![(43, 58), (4, 37)]);
+        assert_eq!(
+            reset_ranges(&folds, &defaults, folds[0]),
+            vec![(43, 58), (4, 37)]
+        );
         assert_eq!(reset_ranges(&folds, &defaults, folds[1]), vec![(68, 88)]);
         // The first run cut in two by a jump, and the second taken whole:
         // the lower piece is the nearest divider above the second.
@@ -1817,7 +2364,10 @@ mod tests {
         assert_eq!(folds[0].default_heads, (4, 37));
         assert_eq!(folds[1].default_heads, (4, 37));
         assert_eq!(reset_ranges(&folds, &defaults, folds[0]), vec![(4, 37)]);
-        assert_eq!(reset_ranges(&folds, &defaults, folds[1]), vec![(4, 37), (43, 58)]);
+        assert_eq!(
+            reset_ranges(&folds, &defaults, folds[1]),
+            vec![(4, 37), (43, 58)]
+        );
         // Every run revealed: no divider, and nothing to carry a Reset.
         assert!(Reveals::from_iter([(0, 100)]).apply(&defaults).is_empty());
     }
@@ -1844,8 +2394,16 @@ mod tests {
         assert_eq!(doc.run_of(4), None);
         assert_eq!(doc.hidden_lines(), 34);
         assert_eq!(doc.line(5), "", "the divider's text is blank");
-        assert_eq!(doc.line(7), "line 37", "display line 39 follows the divider");
-        assert_eq!(doc.offset_of_row(7), doc.offset_of_row(5) + 2, "the divider is two newlines");
+        assert_eq!(
+            doc.line(7),
+            "line 37",
+            "display line 39 follows the divider"
+        );
+        assert_eq!(
+            doc.offset_of_row(7),
+            doc.offset_of_row(5) + 2,
+            "the divider is two newlines"
+        );
         assert_eq!(doc.offset_of_row(doc.len()), doc.text.len());
 
         // Up: the last twenty head lines of the run, 18 to 37, come back,
@@ -1855,8 +2413,22 @@ mod tests {
         reveals.add(a, z);
         let doc = folded(&b, &reveals);
         assert_eq!(doc.len(), 11 + 20);
-        assert_eq!(doc.run_of(5), Some(Run { first: 5, last: 18, first_head: 4, default_heads: (4, 37) }));
-        assert_eq!(doc.rows[5], DocRow::Divider { run: 0, expand: Expand::All });
+        assert_eq!(
+            doc.run_of(5),
+            Some(Run {
+                first: 5,
+                last: 18,
+                first_head: 4,
+                default_heads: (4, 37)
+            })
+        );
+        assert_eq!(
+            doc.rows[5],
+            DocRow::Divider {
+                run: 0,
+                expand: Expand::All
+            }
+        );
         assert_eq!(doc.hidden_lines(), 14);
         assert_eq!(doc.row_of_head(18), Some(6));
         assert_eq!(doc.row_of_head(17), None);
@@ -1879,7 +2451,12 @@ mod tests {
         // Three changes, each fifty unchanged lines apart, and the middle
         // one grown from one line to three so the two sides do not pair
         // row for row: three runs, the last to the end of the file.
-        let base = format!("old top\n{}old mid\n{}old bottom\n{}", context(0, 50), context(50, 50), context(100, 50));
+        let base = format!(
+            "old top\n{}old mid\n{}old bottom\n{}",
+            context(0, 50),
+            context(50, 50),
+            context(100, 50)
+        );
         let head = format!(
             "new top\n{}new mid\nnew mid 2\nnew mid 3\n{}new bottom\n{}",
             context(0, 50),
@@ -1904,15 +2481,23 @@ mod tests {
 
         let (left, right) = build_split(&alignment, &base, &b, &folds, &[]);
         assert_eq!(left.len(), right.len());
-        let rows: Vec<usize> = (0..right.len()).filter(|r| right.run_of(*r).is_some()).collect();
-        let dividers = rows.iter().filter(|r| right.divider_span(**r).is_some_and(|s| s.start == **r)).count();
+        let rows: Vec<usize> = (0..right.len())
+            .filter(|r| right.run_of(*r).is_some())
+            .collect();
+        let dividers = rows
+            .iter()
+            .filter(|r| right.divider_span(**r).is_some_and(|s| s.start == **r))
+            .count();
         assert_eq!(dividers, 4);
         // The first run's lower piece is still longer than a step, so its
         // divider is two rows; the second's two pieces and the last run
         // are one each.
         assert_eq!(rows.len(), 5);
         for row in &rows {
-            assert_eq!(left.rows[*row], right.rows[*row], "the divider is on both sides at row {row}");
+            assert_eq!(
+                left.rows[*row], right.rows[*row],
+                "the divider is on both sides at row {row}"
+            );
         }
         assert_eq!(left.hidden_lines(), right.hidden_lines());
         // The same folds hide the same lines in the stacked document; the
@@ -1924,11 +2509,19 @@ mod tests {
         // base line beside it is on the same row of the base side.
         for head in a..=z {
             let row = right.row_of_head(head).expect("a revealed line is shown");
-            assert_eq!(left.display_line(row), Some(head), "unchanged lines pair with their own number");
+            assert_eq!(
+                left.display_line(row),
+                Some(head),
+                "unchanged lines pair with their own number"
+            );
         }
         for head in (middle - CONTEXT_LINES)..=(middle + CONTEXT_LINES) {
             let row = right.row_of_head(head).expect("a revealed line is shown");
-            assert_eq!(left.display_line(row), Some(head - 2), "after the grown change the base is two lines behind");
+            assert_eq!(
+                left.display_line(row),
+                Some(head - 2),
+                "after the grown change the base is two lines behind"
+            );
         }
     }
 
@@ -1937,7 +2530,9 @@ mod tests {
         let b = two_changes(40);
         let doc = build(&b, &runs(&b, &[(20, 20)]), &[]);
         // Two dividers, with head lines 17 to 23 between them.
-        let dividers: Vec<usize> = (0..doc.len()).filter(|r| doc.run_of(*r).is_some()).collect();
+        let dividers: Vec<usize> = (0..doc.len())
+            .filter(|r| doc.run_of(*r).is_some())
+            .collect();
         assert_eq!(dividers.len(), 2);
         for head in 17..=23 {
             assert!(doc.row_of_head(head).is_some(), "head line {head} is shown");
@@ -1951,7 +2546,10 @@ mod tests {
     /// The text after replacing the region's old bytes with the new.
     fn edited(old: &Doc, new: &Doc, region: &Region) -> String {
         let mut text = old.text.clone();
-        text.replace_range(region.old_bytes.clone(), &new.text[region.new_bytes.clone()]);
+        text.replace_range(
+            region.old_bytes.clone(),
+            &new.text[region.new_bytes.clone()],
+        );
         text
     }
 
@@ -1970,10 +2568,20 @@ mod tests {
         assert_eq!(region.old_rows, 5..7);
         assert_eq!(region.new_rows, 5..26);
         assert_eq!(region.row_delta(), 19);
-        assert_eq!(new.rows[5], DocRow::Divider { run: 0, expand: Expand::All });
+        assert_eq!(
+            new.rows[5],
+            DocRow::Divider {
+                run: 0,
+                expand: Expand::All
+            }
+        );
         assert_eq!(new.rows[6], line(19, Tint::Plain));
         assert_eq!(new.rows[25], line(38, Tint::Plain));
-        assert_eq!(region.old_bytes.len(), 2, "the divider's two blank lines and their newlines");
+        assert_eq!(
+            region.old_bytes.len(),
+            2,
+            "the divider's two blank lines and their newlines"
+        );
         assert_eq!(region.byte_delta() as usize, region.new_bytes.len() - 2);
         assert_eq!(edited(&old, &new, &region), new.text);
     }
@@ -2015,8 +2623,16 @@ mod tests {
         // Three changes, two runs. Revealing the whole of the first run
         // takes its divider out of the folds, so the second run becomes
         // run 0; the divider standing for it is the same divider.
-        let base = format!("old top\n{}old mid\n{}old bottom\n", context(0, 20), context(20, 20));
-        let head = format!("new top\n{}new mid\n{}new bottom\n", context(0, 20), context(20, 20));
+        let base = format!(
+            "old top\n{}old mid\n{}old bottom\n",
+            context(0, 20),
+            context(20, 20)
+        );
+        let head = format!(
+            "new top\n{}new mid\n{}new bottom\n",
+            context(0, 20),
+            context(20, 20)
+        );
         let b = buffer(&base, &head);
         let all = runs(&b, &[]);
         assert_eq!(all.len(), 2);
@@ -2032,7 +2648,16 @@ mod tests {
         assert_eq!(region.new_rows, 5..(5 + all[0].len()));
         assert_eq!(edited(&old, &new, &region), new.text);
         let second = (0..new.len()).find(|r| new.run_of(*r).is_some()).unwrap();
-        assert_eq!(new.rows[second], DocRow::Divider { run: 0, expand: Expand::All });
-        assert!(second >= region.new_rows.end, "the second divider is in the common suffix");
+        assert_eq!(
+            new.rows[second],
+            DocRow::Divider {
+                run: 0,
+                expand: Expand::All
+            }
+        );
+        assert!(
+            second >= region.new_rows.end,
+            "the second divider is in the common suffix"
+        );
     }
 }

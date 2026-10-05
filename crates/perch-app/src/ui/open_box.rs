@@ -125,8 +125,9 @@ pub fn target(state: AppState, text: &str) -> Result<(String, Reference), String
     };
     let repo = match reference.repo.clone() {
         Some(repo) => repo,
-        None => default_repo(state)
-            .ok_or_else(|| "Which repository? Type owner/repo#57".to_string())?,
+        None => {
+            default_repo(state).ok_or_else(|| "Which repository? Type owner/repo#57".to_string())?
+        }
     };
     Ok((repo, reference))
 }
@@ -194,7 +195,10 @@ pub fn open_link(state: AppState, backend: &Backend, url: &str) -> bool {
     };
     let kind = (kind == ItemKind::PullRequest).then_some(kind);
     let navigation_id = backend.open_reference(&repo, reference.number, kind);
-    state.open_box.link.set(Some((navigation_id, url.to_string())));
+    state
+        .open_box
+        .link
+        .set(Some((navigation_id, url.to_string())));
     true
 }
 
@@ -407,7 +411,11 @@ mod tests {
             f.tab = crate::items::SidebarTab::Browse;
             f.repository = Some("c/picked".into());
         });
-        assert_eq!(target(state, "#5").unwrap().0, "c/picked", "the one Browse is showing");
+        assert_eq!(
+            target(state, "#5").unwrap().0,
+            "c/picked",
+            "the one Browse is showing"
+        );
 
         let review = crate::review::model::ReviewState::new();
         review.item.set(Some(std::sync::Arc::new(Item::new(
@@ -556,13 +564,19 @@ mod tests {
         };
         state.begin_open("Reading the pull request", navigation_id + 1);
         failed(state, navigation_id, "No #9 in a/b".into());
-        assert_eq!(review.phase.get(), Phase::Preparing, "the other open's card stays");
+        assert_eq!(
+            review.phase.get(),
+            Phase::Preparing,
+            "the other open's card stays"
+        );
     }
 
     #[test]
     fn a_link_to_an_item_opens_here_and_one_github_cant_place_goes_to_the_browser() {
         let state = AppState::new();
-        state.review.set(Some(crate::review::model::ReviewState::new()));
+        state
+            .review
+            .set(Some(crate::review::model::ReviewState::new()));
         state.github_hosts.set(vec!["ghe.example.com".into()]);
         let (backend, mut commands) = Backend::recording();
 
@@ -589,19 +603,32 @@ mod tests {
             (repo_full_name, number, kind, navigation_id)
         };
         let (repo, number, kind, _) = asked("https://github.com/a/b/pull/7/files");
-        assert_eq!((repo.as_str(), number, kind), ("a/b", 7, Some(ItemKind::PullRequest)));
+        assert_eq!(
+            (repo.as_str(), number, kind),
+            ("a/b", 7, Some(ItemKind::PullRequest))
+        );
         let (repo, number, kind, _) = asked("https://ghe.example.com/c/d/issues/9#issuecomment-1");
-        assert_eq!((repo.as_str(), number, kind), ("c/d", 9, None), "GitHub says which");
+        assert_eq!(
+            (repo.as_str(), number, kind),
+            ("c/d", 9, None),
+            "GitHub says which"
+        );
         assert!(!state.open_box.open.get(), "no box goes up");
 
         let (_, _, _, navigation_id) = asked("https://github.com/a/b/issues/3");
         resolved(state, navigation_id, ItemKind::PullRequest);
-        assert!(state.accepts_navigation(navigation_id), "the open is the window's");
+        assert!(
+            state.accepts_navigation(navigation_id),
+            "the open is the window's"
+        );
 
         crate::ui::widgets::opened();
         let (_, _, _, navigation_id) = asked("https://github.com/a/b/issues/4");
         failed(state, navigation_id, "No #4 in a/b".into());
-        assert_eq!(crate::ui::widgets::opened(), vec!["https://github.com/a/b/issues/4"]);
+        assert_eq!(
+            crate::ui::widgets::opened(),
+            vec!["https://github.com/a/b/issues/4"]
+        );
         assert!(state.open_box.error.get().is_none(), "the box says nothing");
     }
 }

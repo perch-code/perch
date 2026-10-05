@@ -543,41 +543,43 @@ fn syntax_tag() -> Color {
 pub fn syntax_color(capture: usize) -> Color {
     // The order here mirrors CAPTURES exactly.
     const COLORS: &[fn() -> Color] = &[
-        syntax_function,   // attribute
-        syntax_comment,    // comment
-        syntax_number,     // constant
-        syntax_number,     // constant.builtin
-        syntax_type,       // constructor
-        syntax_string,     // escape
-        syntax_function,   // function
-        syntax_function,   // function.builtin
-        syntax_function,   // function.macro
-        syntax_function,   // function.method
-        syntax_keyword,    // keyword
-        syntax_type,       // label
-        syntax_number,     // number
-        syntax_keyword,    // operator
-        syntax_variable,   // property
-        syntax_punct,      // punctuation
-        syntax_punct,      // punctuation.bracket
-        syntax_punct,      // punctuation.delimiter
-        syntax_string,     // string
-        syntax_string,     // string.special
-        syntax_tag,        // tag
-        syntax_type,       // type
-        syntax_type,       // type.builtin
-        syntax_variable,   // variable
-        syntax_keyword,    // variable.builtin
-        syntax_variable,   // variable.parameter
-        syntax_punct,      // punctuation.special
-        syntax_default,    // text.emphasis
-        syntax_string,     // text.literal
-        accent,            // text.reference
-        syntax_default,    // text.strong
-        syntax_default,    // text.title
-        accent,            // text.uri
+        syntax_function, // attribute
+        syntax_comment,  // comment
+        syntax_number,   // constant
+        syntax_number,   // constant.builtin
+        syntax_type,     // constructor
+        syntax_string,   // escape
+        syntax_function, // function
+        syntax_function, // function.builtin
+        syntax_function, // function.macro
+        syntax_function, // function.method
+        syntax_keyword,  // keyword
+        syntax_type,     // label
+        syntax_number,   // number
+        syntax_keyword,  // operator
+        syntax_variable, // property
+        syntax_punct,    // punctuation
+        syntax_punct,    // punctuation.bracket
+        syntax_punct,    // punctuation.delimiter
+        syntax_string,   // string
+        syntax_string,   // string.special
+        syntax_tag,      // tag
+        syntax_type,     // type
+        syntax_type,     // type.builtin
+        syntax_variable, // variable
+        syntax_keyword,  // variable.builtin
+        syntax_variable, // variable.parameter
+        syntax_punct,    // punctuation.special
+        syntax_default,  // text.emphasis
+        syntax_string,   // text.literal
+        accent,          // text.reference
+        syntax_default,  // text.strong
+        syntax_default,  // text.title
+        accent,          // text.uri
     ];
-    COLORS.get(capture).map_or_else(syntax_default, |color| color())
+    COLORS
+        .get(capture)
+        .map_or_else(syntax_default, |color| color())
 }
 
 /// Code metrics, as Codex sets its diffs: 12px at 1.8, which is 21.6 and
@@ -1039,7 +1041,13 @@ pub(crate) mod dark_check {
             SERVED.with(|served| served.borrow().iter().copied().unzip());
         let light_only: HashSet<Rgba> = lights.difference(&darks).copied().collect();
         let mut found = Vec::new();
-        walk(harness, harness.root_id(), &mut Vec::new(), &light_only, &mut found);
+        walk(
+            harness,
+            harness.root_id(),
+            &mut Vec::new(),
+            &light_only,
+            &mut found,
+        );
         found
     }
 
@@ -1058,8 +1066,17 @@ pub(crate) mod dark_check {
         for (prop, color) in colors(&harness.get_computed_style(id)) {
             let [r, g, b, a] = rgba(color);
             if light_only.contains(&[r, g, b, a]) {
-                let at = names.iter().rev().take(4).rev().cloned().collect::<Vec<_>>().join(" > ");
-                found.push(format!("{at} [{id:?}]: {prop} #{r:02x}{g:02x}{b:02x}{a:02x}"));
+                let at = names
+                    .iter()
+                    .rev()
+                    .take(4)
+                    .rev()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" > ");
+                found.push(format!(
+                    "{at} [{id:?}]: {prop} #{r:02x}{g:02x}{b:02x}{a:02x}"
+                ));
             }
         }
         for child in id.children() {
@@ -1140,9 +1157,15 @@ mod tests {
         for stack in [FONT_STACK, CODE_FONT_STACK] {
             let ids = glyphs(stack, "A \u{222a} B, \u{2200}x \u{2115}");
             assert_eq!(ids.len(), 11, "{stack}: one glyph a character: {ids:?}");
-            assert!(ids.iter().all(|&id| id != 0), "{stack}: a .notdef among {ids:?}");
+            assert!(
+                ids.iter().all(|&id| id != 0),
+                "{stack}: a .notdef among {ids:?}"
+            );
         }
         let ids = glyphs(FONT_STACK, "\u{3b1} \u{222a} \u{3b2}");
-        assert!(ids.iter().all(|&id| id != 0), "Greek: a .notdef among {ids:?}");
+        assert!(
+            ids.iter().all(|&id| id != 0),
+            "Greek: a .notdef among {ids:?}"
+        );
     }
 }

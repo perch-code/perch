@@ -828,9 +828,11 @@ impl Host {
         }
         item.gone.set(true);
         level.changed.update(|n| *n += 1);
-        level
-            .highlight
-            .set(if keyboard { level.step(Some(index), 1) } else { None });
+        level.highlight.set(if keyboard {
+            level.step(Some(index), 1)
+        } else {
+            None
+        });
         remove();
     }
 
@@ -915,7 +917,10 @@ impl Host {
         let shown = level.typed();
         let found = (0..n).map(|k| (from + k) % n).find(|&i| {
             level.selectable(i, &shown)
-                && level.menu.entries[i].label().to_lowercase().starts_with(&typed)
+                && level.menu.entries[i]
+                    .label()
+                    .to_lowercase()
+                    .starts_with(&typed)
         });
         if found.is_some() {
             level.highlight.set(found);
@@ -1124,9 +1129,11 @@ fn panel(host: Rc<Host>, level: Level) -> impl IntoView {
 /// The line at `index`, gone with every row on one side of it.
 fn separator(level: &Level, index: usize) -> impl IntoView {
     let level = level.clone();
-    Container::new(
-        Empty::new().style(|s| s.height(1.0).width_full().background(theme::menu_separator())),
-    )
+    Container::new(Empty::new().style(|s| {
+        s.height(1.0)
+            .width_full()
+            .background(theme::menu_separator())
+    }))
     .style(move |s| {
         let alone = !level.line_shown(index, &level.typed());
         s.height(SEPARATOR_HEIGHT)
@@ -1167,19 +1174,16 @@ fn filter_box(host: &Host, level: &Level, placeholder: String) -> impl IntoView 
         }
         typed
     });
-    Container::new(input).style(|s| {
-        s.padding(GUTTER)
-            .padding_bottom(0.0)
-            .flex_shrink(0.0_f32)
-    })
+    Container::new(input).style(|s| s.padding(GUTTER).padding_bottom(0.0).flex_shrink(0.0_f32))
 }
 
 /// What a filter shows when no row has what is typed.
 fn no_matches(level: &Level) -> impl IntoView {
     let level = level.clone();
-    Container::new(Label::derived(|| "No matches".to_string()).style(|s| {
-        s.color(theme::fg_subtle()).selectable(false)
-    }))
+    Container::new(
+        Label::derived(|| "No matches".to_string())
+            .style(|s| s.color(theme::fg_subtle()).selectable(false)),
+    )
     .debug_name("menu-no-matches")
     .style(move |s| {
         let typed = level.typed();
@@ -1717,18 +1721,28 @@ mod tests {
         let (mut harness, log) = window_with((40.0, 30.0), (600.0, 400.0), recent);
         open_it(&mut harness);
         let first = rect(&harness, "menu-row:perch");
-        assert!(rect(&harness, "menu-cross:perch").is_zero_area(), "hidden until lit");
+        assert!(
+            rect(&harness, "menu-cross:perch").is_zero_area(),
+            "hidden until lit"
+        );
         harness.pointer_move(first.center().x, first.center().y);
         settle(&mut harness);
         let cross = rect(&harness, "menu-cross:perch");
         assert!(!cross.is_zero_area(), "lit, it shows");
-        assert!(cross.x1 <= first.x1 && cross.x0 > first.center().x, "at the row's end");
+        assert!(
+            cross.x1 <= first.x1 && cross.x0 > first.center().x,
+            "at the row's end"
+        );
 
         harness.click(cross.center().x, cross.center().y);
         settle(&mut harness);
         assert_eq!(*log.borrow(), vec!["x perch"]);
         assert!(is_open());
-        assert_eq!(rect(&harness, "menu-row:slatedb").y0, first.y0, "the next row takes its place");
+        assert_eq!(
+            rect(&harness, "menu-row:slatedb").y0,
+            first.y0,
+            "the next row takes its place"
+        );
         assert!(
             !rect(&harness, "menu-cross:slatedb").is_zero_area(),
             "under the pointer now, it is lit"
@@ -1751,15 +1765,22 @@ mod tests {
     fn people(log: Rc<RefCell<Vec<String>>>) -> Menu {
         let toggled = |login: &'static str| {
             let log = log.clone();
-            move |on: bool| log.borrow_mut().push(format!("{login} {}", if on { "on" } else { "off" }))
+            move |on: bool| {
+                log.borrow_mut()
+                    .push(format!("{login} {}", if on { "on" } else { "off" }))
+            }
         };
         Menu::new()
             .filter("Filter people")
             .most_checked(2)
             .item("agavra", |i| {
-                i.detail("Almog Gavra").checked(true).toggle(toggled("agavra"))
+                i.detail("Almog Gavra")
+                    .checked(true)
+                    .toggle(toggled("agavra"))
             })
-            .item("rohan", |i| i.detail("Rohan Desai").toggle(toggled("rohan")))
+            .item("rohan", |i| {
+                i.detail("Rohan Desai").toggle(toggled("rohan"))
+            })
             .item("vigneshc", |i| i.toggle(toggled("vigneshc")))
     }
 
@@ -1789,7 +1810,10 @@ mod tests {
         click_row(&mut harness, "rohan");
         assert_eq!(*log.borrow(), vec!["rohan on"]);
         assert!(is_open(), "the menu stays up");
-        assert!(!rect(&harness, "menu-check:rohan").is_zero_area(), "checked now");
+        assert!(
+            !rect(&harness, "menu-check:rohan").is_zero_area(),
+            "checked now"
+        );
 
         // Two is the most: the third is greyed and does nothing.
         click_row(&mut harness, "vigneshc");

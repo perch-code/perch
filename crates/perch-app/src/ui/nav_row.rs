@@ -194,19 +194,21 @@ fn face_stack(state: AppState, faces: impl Fn() -> Vec<Face> + 'static) -> impl 
     dyn_container(
         move || faces.get(),
         move |faces| {
-            Stack::horizontal_from_iter(faces.into_iter().rev().enumerate().map(move |(i, face)| {
-                let radius = avatar_radius(AVATAR, &face.url) + FACE_RING;
-                let url = face.url;
-                Container::new(avatar(state, move || url.clone(), AVATAR, face.seed))
-                    .debug_name(format!("row face:{i}"))
-                    .class(FaceRing)
-                    .style(move |s| {
-                        s.padding(FACE_RING)
-                            .margin(-FACE_RING)
-                            .border_radius(radius)
-                            .apply_if(i > 0, |s| s.margin_left(FACE_STEP - AVATAR - FACE_RING))
-                    })
-            }))
+            Stack::horizontal_from_iter(faces.into_iter().rev().enumerate().map(
+                move |(i, face)| {
+                    let radius = avatar_radius(AVATAR, &face.url) + FACE_RING;
+                    let url = face.url;
+                    Container::new(avatar(state, move || url.clone(), AVATAR, face.seed))
+                        .debug_name(format!("row face:{i}"))
+                        .class(FaceRing)
+                        .style(move |s| {
+                            s.padding(FACE_RING)
+                                .margin(-FACE_RING)
+                                .border_radius(radius)
+                                .apply_if(i > 0, |s| s.margin_left(FACE_STEP - AVATAR - FACE_RING))
+                        })
+                },
+            ))
             .into_any()
         },
     )
@@ -429,23 +431,24 @@ pub fn more_button(menu: impl Fn() -> Menu + 'static) -> impl IntoView {
 }
 
 /// A round button at a row's end that drops `menu` down.
-pub fn menu_button(glyph: SidebarIcon, name: &'static str, menu: impl Fn() -> Menu + 'static) -> impl IntoView {
-    Container::new(
-        sidebar_glyph(glyph, theme::fg_subtle)
-            .style(|s| s.pointer_events_none()),
-    )
-    .dropdown(menu)
-    // The row underneath is a button too.
-    .on_event_stop(el::Click, |_, _| {})
-    .debug_name(name)
-    .style(|s| {
-        clickable(s)
-            .size(26.0, 26.0)
-            .items_center()
-            .justify_center()
-            .border_radius(13.0)
-            .hover(|s| s.background(theme::badge_bg()).cursor(CursorStyle::Pointer))
-    })
+pub fn menu_button(
+    glyph: SidebarIcon,
+    name: &'static str,
+    menu: impl Fn() -> Menu + 'static,
+) -> impl IntoView {
+    Container::new(sidebar_glyph(glyph, theme::fg_subtle).style(|s| s.pointer_events_none()))
+        .dropdown(menu)
+        // The row underneath is a button too.
+        .on_event_stop(el::Click, |_, _| {})
+        .debug_name(name)
+        .style(|s| {
+            clickable(s)
+                .size(26.0, 26.0)
+                .items_center()
+                .justify_center()
+                .border_radius(13.0)
+                .hover(|s| s.background(theme::badge_bg()).cursor(CursorStyle::Pointer))
+        })
 }
 
 #[cfg(test)]

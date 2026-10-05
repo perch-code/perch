@@ -72,11 +72,17 @@ pub struct BaseBranch {
 
 impl BaseBranch {
     pub fn local(name: &str) -> Self {
-        Self { name: name.to_string(), remote: None }
+        Self {
+            name: name.to_string(),
+            remote: None,
+        }
     }
 
     pub fn on(remote: &str, name: &str) -> Self {
-        Self { name: name.to_string(), remote: Some(remote.to_string()) }
+        Self {
+            name: name.to_string(),
+            remote: Some(remote.to_string()),
+        }
     }
 
     /// `origin/fix`, or `fix` for a local branch: what git calls it in a
@@ -147,14 +153,23 @@ fn tempfile_path(worktree: &Path) -> PathBuf {
 /// as its parent. The worktree's own index, `HEAD` and files are as they
 /// were. Nothing points at the commit, so a caller that keeps it past the
 /// next `gc` gives it a ref or copies it out.
-pub(crate) async fn commit_worktree(git: &Git, worktree: &Path, message: &str) -> Result<String, Error> {
+pub(crate) async fn commit_worktree(
+    git: &Git,
+    worktree: &Path,
+    message: &str,
+) -> Result<String, Error> {
     let index = tempfile_path(worktree);
     let result = commit_with_index(git, worktree, &index, message).await;
     let _ = std::fs::remove_file(&index);
     result
 }
 
-async fn commit_with_index(git: &Git, worktree: &Path, index: &Path, message: &str) -> Result<String, Error> {
+async fn commit_with_index(
+    git: &Git,
+    worktree: &Path,
+    index: &Path,
+    message: &str,
+) -> Result<String, Error> {
     let env: [(&str, &std::ffi::OsStr); 5] = [
         ("GIT_INDEX_FILE", index.as_os_str()),
         ("GIT_AUTHOR_NAME", "Perch".as_ref()),
@@ -162,16 +177,32 @@ async fn commit_with_index(git: &Git, worktree: &Path, index: &Path, message: &s
         ("GIT_COMMITTER_NAME", "Perch".as_ref()),
         ("GIT_COMMITTER_EMAIL", "perch@localhost".as_ref()),
     ];
-    git.run_env(Some(worktree), ["read-tree", "HEAD"], &env, QUERY_TIMEOUT).await?;
-    git.run_env(Some(worktree), ["add", "-A", "--", "."], &env, WORKTREE_TIMEOUT)
+    git.run_env(Some(worktree), ["read-tree", "HEAD"], &env, QUERY_TIMEOUT)
         .await?;
-    let tree = git.run_env(Some(worktree), ["write-tree"], &env, QUERY_TIMEOUT).await?;
+    git.run_env(
+        Some(worktree),
+        ["add", "-A", "--", "."],
+        &env,
+        WORKTREE_TIMEOUT,
+    )
+    .await?;
+    let tree = git
+        .run_env(Some(worktree), ["write-tree"], &env, QUERY_TIMEOUT)
+        .await?;
     // `commit.gpgSign` would otherwise ask for a key for a commit no one
     // else sees.
     let commit = git
         .run_env(
             Some(worktree),
-            ["commit-tree", "--no-gpg-sign", tree.trim(), "-p", "HEAD", "-m", message],
+            [
+                "commit-tree",
+                "--no-gpg-sign",
+                tree.trim(),
+                "-p",
+                "HEAD",
+                "-m",
+                message,
+            ],
             &env,
             QUERY_TIMEOUT,
         )
@@ -276,7 +307,9 @@ impl Preparer {
         mut on_step: impl FnMut(Step) + Send,
     ) -> Result<Prefetched, Error> {
         let bare = self.ensure_bare(id, &mut on_step).await?;
-        let previous = self.resolve(&bare, &format!("refs/perch/pull/{number}/head")).await;
+        let previous = self
+            .resolve(&bare, &format!("refs/perch/pull/{number}/head"))
+            .await;
         on_step(Step::Fetching);
         self.fetch_pull(&bare, "origin", number, base_ref).await?;
         Ok(Prefetched { previous })
@@ -302,7 +335,10 @@ impl Preparer {
         // prefetch read it before it fetched.
         let previous = match prefetched {
             Some(prefetched) => prefetched.previous,
-            None => self.resolve(&bare, &format!("refs/perch/pull/{number}/head")).await,
+            None => {
+                self.resolve(&bare, &format!("refs/perch/pull/{number}/head"))
+                    .await
+            }
         };
 
         // A fetch is a round trip to GitHub, most of the time an open takes.
@@ -317,7 +353,11 @@ impl Preparer {
 
         let merge_base = self
             .git
-            .run(Some(&bare), ["merge-base", &base_local, head_sha], QUERY_TIMEOUT)
+            .run(
+                Some(&bare),
+                ["merge-base", &base_local, head_sha],
+                QUERY_TIMEOUT,
+            )
             .await?
             .trim()
             .to_string();
@@ -347,7 +387,11 @@ impl Preparer {
                 // here, so check it out as it is. The head check below
                 // brings it up to date.
                 self.git
-                    .run(Some(&bare), ["worktree", "add", &path, branch], WORKTREE_TIMEOUT)
+                    .run(
+                        Some(&bare),
+                        ["worktree", "add", &path, branch],
+                        WORKTREE_TIMEOUT,
+                    )
                     .await?;
             } else {
                 self.git
@@ -372,13 +416,19 @@ impl Preparer {
         let (head_sha, stale) = if on_disk == head_sha {
             (head_sha.to_string(), None)
         } else if self.is_dirty(&worktree).await?
-            || !self.came_from_pull(&worktree, &on_disk, head_sha, previous.as_deref()).await
+            || !self
+                .came_from_pull(&worktree, &on_disk, head_sha, previous.as_deref())
+                .await
         {
             (on_disk, Some(head_sha.to_string()))
         } else {
             // HEAD is attached to the branch, so this moves the branch too.
             self.git
-                .run(Some(&worktree), ["reset", "--hard", head_sha], WORKTREE_TIMEOUT)
+                .run(
+                    Some(&worktree),
+                    ["reset", "--hard", head_sha],
+                    WORKTREE_TIMEOUT,
+                )
                 .await?;
             (head_sha.to_string(), None)
         };
@@ -427,7 +477,12 @@ impl Preparer {
                     staging.to_string_lossy().into_owned(),
                 ],
                 CLONE_TIMEOUT,
-                |p: Progress| on_step(Step::Cloning { phase: p.phase, percent: p.percent }),
+                |p: Progress| {
+                    on_step(Step::Cloning {
+                        phase: p.phase,
+                        percent: p.percent,
+                    })
+                },
             )
             .await?;
 
@@ -453,7 +508,11 @@ impl Preparer {
         if has_bare {
             if let Ok(target) = self
                 .git
-                .run(Some(&bare), ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], QUERY_TIMEOUT)
+                .run(
+                    Some(&bare),
+                    ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+                    QUERY_TIMEOUT,
+                )
                 .await
             {
                 if let Some(name) = target.trim().strip_prefix("refs/remotes/origin/") {
@@ -464,7 +523,11 @@ impl Preparer {
             }
             if let Ok(name) = self
                 .git
-                .run(Some(&bare), ["config", "--get", DEFAULT_BRANCH_KEY], QUERY_TIMEOUT)
+                .run(
+                    Some(&bare),
+                    ["config", "--get", DEFAULT_BRANCH_KEY],
+                    QUERY_TIMEOUT,
+                )
                 .await
             {
                 let name = name.trim();
@@ -483,7 +546,11 @@ impl Preparer {
         };
         let out = self
             .git
-            .run(cwd, ["ls-remote", "--symref", &remote, "HEAD"], FETCH_TIMEOUT)
+            .run(
+                cwd,
+                ["ls-remote", "--symref", &remote, "HEAD"],
+                FETCH_TIMEOUT,
+            )
             .await?;
 
         let Some(name) = parse_symref_head(&out) else {
@@ -492,7 +559,11 @@ impl Preparer {
         if has_bare {
             if let Err(e) = self
                 .git
-                .run(Some(&bare), ["config", DEFAULT_BRANCH_KEY, &name], QUERY_TIMEOUT)
+                .run(
+                    Some(&bare),
+                    ["config", DEFAULT_BRANCH_KEY, &name],
+                    QUERY_TIMEOUT,
+                )
                 .await
             {
                 tracing::debug!(error = %e, "could not remember the default branch");
@@ -536,7 +607,11 @@ impl Preparer {
             // the remote again rather than repeating what it remembered.
             let _ = self
                 .git
-                .run(Some(&bare), ["config", "--unset", DEFAULT_BRANCH_KEY], QUERY_TIMEOUT)
+                .run(
+                    Some(&bare),
+                    ["config", "--unset", DEFAULT_BRANCH_KEY],
+                    QUERY_TIMEOUT,
+                )
                 .await;
             return Err(e);
         }
@@ -544,12 +619,16 @@ impl Preparer {
         let home = self.store.home_path(id);
 
         if !home.join(".git").exists() {
-            std::fs::create_dir_all(self.store.homes_dir()).map_err(|e| Error::Io(e.to_string()))?;
+            std::fs::create_dir_all(self.store.homes_dir())
+                .map_err(|e| Error::Io(e.to_string()))?;
             // As in `prepare`: a directory an interrupted run left behind,
             // or a registration of one that is gone, would make `worktree
             // add` refuse.
             let _ = std::fs::remove_dir_all(&home);
-            let _ = self.git.run(Some(&bare), ["worktree", "prune"], WORKTREE_TIMEOUT).await;
+            let _ = self
+                .git
+                .run(Some(&bare), ["worktree", "prune"], WORKTREE_TIMEOUT)
+                .await;
 
             let path = home.to_string_lossy().into_owned();
             // `-B`: the bare clone's own copy of the branch is whatever the
@@ -567,7 +646,11 @@ impl Preparer {
 
         if let Err(e) = self
             .git
-            .run(Some(&home), ["merge", "--ff-only", &fetched], WORKTREE_TIMEOUT)
+            .run(
+                Some(&home),
+                ["merge", "--ff-only", &fetched],
+                WORKTREE_TIMEOUT,
+            )
             .await
         {
             tracing::warn!(
@@ -619,14 +702,22 @@ impl Preparer {
             branch = format!("{wanted}-{n}");
         }
 
-        let worktree = self.add_worktree(repo, id, &branch, &["-b", &branch], from).await?;
+        let worktree = self
+            .add_worktree(repo, id, &branch, &["-b", &branch], from)
+            .await?;
         Ok(Cut { branch, worktree })
     }
 
     /// Whether a new branch can't have this name: `repo` has a branch of
     /// it, a worktree sits at the path it maps to, or the caller has it
     /// spoken for.
-    pub async fn branch_taken(&self, repo: &Path, id: &RepoId, branch: &str, reserved: &[String]) -> bool {
+    pub async fn branch_taken(
+        &self,
+        repo: &Path,
+        id: &RepoId,
+        branch: &str,
+        reserved: &[String],
+    ) -> bool {
         reserved.iter().any(|r| r == branch)
             || self.branch_exists(repo, branch).await
             || self.store.worktree_path(id, branch).join(".git").exists()
@@ -635,7 +726,12 @@ impl Preparer {
     /// The branches of one of the reader's clones that new work can start
     /// from: its local branches and `remote`'s, newest first, `base`
     /// first of all. No network.
-    pub async fn local_bases(&self, repo: &Path, remote: Option<&str>, base: &str) -> Result<Vec<BaseBranch>, Error> {
+    pub async fn local_bases(
+        &self,
+        repo: &Path,
+        remote: Option<&str>,
+        base: &str,
+    ) -> Result<Vec<BaseBranch>, Error> {
         let mut args = vec![
             "for-each-ref".to_string(),
             "--sort=-committerdate".to_string(),
@@ -745,7 +841,11 @@ impl Preparer {
     /// For a notice about a fetch that failed.
     pub async fn age_of(&self, repo: &Path, rev: &str) -> Option<String> {
         self.git
-            .run(Some(repo), ["log", "-1", "--format=%cr", rev, "--"], QUERY_TIMEOUT)
+            .run(
+                Some(repo),
+                ["log", "-1", "--format=%cr", rev, "--"],
+                QUERY_TIMEOUT,
+            )
             .await
             .ok()
             .map(|s| s.trim().to_string())
@@ -777,7 +877,11 @@ impl Preparer {
     pub async fn repository_of(&self, checkout: &Path) -> Result<PathBuf, Error> {
         let out = self
             .git
-            .run(Some(checkout), ["worktree", "list", "--porcelain"], QUERY_TIMEOUT)
+            .run(
+                Some(checkout),
+                ["worktree", "list", "--porcelain"],
+                QUERY_TIMEOUT,
+            )
             .await?;
         out.lines()
             .find_map(|line| line.strip_prefix("worktree "))
@@ -797,15 +901,22 @@ impl Preparer {
     ) -> Result<PathBuf, Error> {
         let worktree = self.store.worktree_path(id, branch);
         if worktree.join(".git").exists() {
-            return Err(Error::Io(format!("{} is already a checkout", worktree.display())));
+            return Err(Error::Io(format!(
+                "{} is already a checkout",
+                worktree.display()
+            )));
         }
-        std::fs::create_dir_all(self.store.worktrees_dir()).map_err(|e| Error::Io(e.to_string()))?;
+        std::fs::create_dir_all(self.store.worktrees_dir())
+            .map_err(|e| Error::Io(e.to_string()))?;
         // Not a checkout, so anything at the path is a leftover from an
         // interrupted run, and empty of git's knowledge.
         if worktree.exists() {
             std::fs::remove_dir_all(&worktree).map_err(|e| Error::Io(e.to_string()))?;
         }
-        let _ = self.git.run(Some(repo), ["worktree", "prune"], WORKTREE_TIMEOUT).await;
+        let _ = self
+            .git
+            .run(Some(repo), ["worktree", "prune"], WORKTREE_TIMEOUT)
+            .await;
 
         let path = worktree.to_string_lossy().into_owned();
         let mut args = vec!["worktree", "add"];
@@ -820,7 +931,13 @@ impl Preparer {
     /// new head, or behind the head the last fetch saw, which a force push
     /// has since replaced. Anything else was committed here, and resetting
     /// would leave it reachable from nothing but the reflog.
-    async fn came_from_pull(&self, worktree: &Path, on_disk: &str, head: &str, previous: Option<&str>) -> bool {
+    async fn came_from_pull(
+        &self,
+        worktree: &Path,
+        on_disk: &str,
+        head: &str,
+        previous: Option<&str>,
+    ) -> bool {
         if self.is_ancestor(worktree, on_disk, head).await {
             return true;
         }
@@ -834,7 +951,11 @@ impl Preparer {
     /// A commit git cannot find is not an ancestor of anything.
     pub async fn is_ancestor(&self, repo: &Path, a: &str, b: &str) -> bool {
         self.git
-            .run(Some(repo), ["merge-base", "--is-ancestor", a, b], QUERY_TIMEOUT)
+            .run(
+                Some(repo),
+                ["merge-base", "--is-ancestor", a, b],
+                QUERY_TIMEOUT,
+            )
             .await
             .is_ok()
     }
@@ -842,7 +963,16 @@ impl Preparer {
     /// The commit a ref names, or `None` when there is no such ref.
     async fn resolve(&self, repo: &Path, name: &str) -> Option<String> {
         self.git
-            .run(Some(repo), ["rev-parse", "--verify", "--quiet", &format!("{name}^{{commit}}")], QUERY_TIMEOUT)
+            .run(
+                Some(repo),
+                [
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("{name}^{{commit}}"),
+                ],
+                QUERY_TIMEOUT,
+            )
             .await
             .ok()
             .map(|s| s.trim().to_string())
@@ -853,7 +983,12 @@ impl Preparer {
         self.git
             .run(
                 Some(bare),
-                ["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")],
+                [
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{branch}"),
+                ],
                 QUERY_TIMEOUT,
             )
             .await
@@ -869,7 +1004,13 @@ impl Preparer {
     /// The base is also written under a ref that names the branch it came
     /// from, which is how `has_pull` knows a retargeted pull request needs
     /// fetching again.
-    pub async fn fetch_pull(&self, bare: &Path, from: &str, number: u64, base_ref: &str) -> Result<(), Error> {
+    pub async fn fetch_pull(
+        &self,
+        bare: &Path,
+        from: &str,
+        number: u64,
+        base_ref: &str,
+    ) -> Result<(), Error> {
         self.git
             .run(
                 Some(bare),
@@ -1000,10 +1141,19 @@ impl Preparer {
     /// Record a worktree as it is, as a commit, without touching it, as
     /// [`commit_worktree`] does. The commit is kept at `reference`, a ref
     /// under `refs/perch/`, so `gc` keeps it.
-    pub async fn record_worktree(&self, worktree: &Path, reference: &str, message: &str) -> Result<String, Error> {
+    pub async fn record_worktree(
+        &self,
+        worktree: &Path,
+        reference: &str,
+        message: &str,
+    ) -> Result<String, Error> {
         let commit = commit_worktree(&self.git, worktree, message).await?;
         self.git
-            .run(Some(worktree), ["update-ref", reference, &commit], QUERY_TIMEOUT)
+            .run(
+                Some(worktree),
+                ["update-ref", reference, &commit],
+                QUERY_TIMEOUT,
+            )
             .await?;
         Ok(commit)
     }
@@ -1020,16 +1170,31 @@ impl Preparer {
 
     /// `(files, added, removed)` between two commits, binary files
     /// counted as files with no lines.
-    pub async fn change_count(&self, repo: &Path, from: &str, to: &str) -> Result<(u32, u32, u32), Error> {
+    pub async fn change_count(
+        &self,
+        repo: &Path,
+        from: &str,
+        to: &str,
+    ) -> Result<(u32, u32, u32), Error> {
         let out = self
             .git
-            .run(Some(repo), ["diff", "--numstat", "--no-renames", from, to], QUERY_TIMEOUT)
+            .run(
+                Some(repo),
+                ["diff", "--numstat", "--no-renames", from, to],
+                QUERY_TIMEOUT,
+            )
             .await?;
         let mut counts = (0, 0, 0);
         for line in out.lines() {
             let mut parts = line.split('\t');
-            let added = parts.next().and_then(|n| n.parse::<u32>().ok()).unwrap_or(0);
-            let removed = parts.next().and_then(|n| n.parse::<u32>().ok()).unwrap_or(0);
+            let added = parts
+                .next()
+                .and_then(|n| n.parse::<u32>().ok())
+                .unwrap_or(0);
+            let removed = parts
+                .next()
+                .and_then(|n| n.parse::<u32>().ok())
+                .unwrap_or(0);
             counts.0 += 1;
             counts.1 += added;
             counts.2 += removed;
@@ -1043,7 +1208,11 @@ impl Preparer {
         let Ok(entries) = std::fs::read_dir(self.store.worktrees_dir()) else {
             return Vec::new();
         };
-        entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()
+        entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect()
     }
 
     /// Read a blob at a commit. Used for the base side of a diff and for
@@ -1055,7 +1224,11 @@ impl Preparer {
         path: &str,
     ) -> Result<String, Error> {
         self.git
-            .run(Some(bare), ["show", &format!("{commit}:{path}")], QUERY_TIMEOUT)
+            .run(
+                Some(bare),
+                ["show", &format!("{commit}:{path}")],
+                QUERY_TIMEOUT,
+            )
             .await
     }
 
@@ -1069,11 +1242,17 @@ impl Preparer {
 /// mode, so a key that wants a passphrase or a host not yet known fails the
 /// command instead of waiting on a prompt nobody can see.
 async fn batch_ssh(plain: &Git, repo: &Path) -> String {
-    let ssh = std::env::var("GIT_SSH_COMMAND").ok().filter(|s| !s.is_empty());
+    let ssh = std::env::var("GIT_SSH_COMMAND")
+        .ok()
+        .filter(|s| !s.is_empty());
     let ssh = match ssh {
         Some(ssh) => ssh,
         None => plain
-            .run(Some(repo), ["config", "--get", "core.sshCommand"], QUERY_TIMEOUT)
+            .run(
+                Some(repo),
+                ["config", "--get", "core.sshCommand"],
+                QUERY_TIMEOUT,
+            )
             .await
             .map(|s| s.trim().to_string())
             .ok()
@@ -1167,7 +1346,10 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let labels: Vec<String> = order_bases(&refs, None, "main").iter().map(BaseBranch::label).collect();
+        let labels: Vec<String> = order_bases(&refs, None, "main")
+            .iter()
+            .map(BaseBranch::label)
+            .collect();
         assert_eq!(labels, ["main", "b", "a"]);
     }
 
@@ -1194,7 +1376,17 @@ mod tests {
         let remote = dir.join("remote.git");
         let seed = dir.join("seed");
         std::fs::create_dir_all(&seed).unwrap();
-        git(dir, &["init", "-q", "--bare", "-b", "main", remote.to_str().unwrap()]);
+        git(
+            dir,
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                remote.to_str().unwrap(),
+            ],
+        );
         git(&seed, &["init", "-q", "-b", "main"]);
         git(&seed, &["config", "user.name", "Perch Test"]);
         git(&seed, &["config", "user.email", "perch@example.com"]);
@@ -1203,7 +1395,15 @@ mod tests {
         git(&seed, &["commit", "-q", "-m", "first"]);
         git(&seed, &["push", "-q", remote.to_str().unwrap(), "main"]);
         let clone = dir.join("clone");
-        git(dir, &["clone", "-q", remote.to_str().unwrap(), clone.to_str().unwrap()]);
+        git(
+            dir,
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+        );
         git(&clone, &["config", "user.name", "Perch Test"]);
         git(&clone, &["config", "user.email", "perch@example.com"]);
         git(&clone, &["checkout", "-q", "-b", "feature"]);
@@ -1223,7 +1423,10 @@ mod tests {
         let (remote, clone) = clone_with_feature(dir.path());
         let preparer = preparer(dir.path());
 
-        preparer.push_branch(&clone, "origin", "feature", true).await.unwrap();
+        preparer
+            .push_branch(&clone, "origin", "feature", true)
+            .await
+            .unwrap();
 
         assert_eq!(
             git(&remote, &["rev-parse", "refs/heads/feature"]),
@@ -1233,7 +1436,10 @@ mod tests {
             git(&clone, &["rev-parse", "--abbrev-ref", "feature@{upstream}"]),
             "origin/feature"
         );
-        preparer.push_branch(&clone, "origin", "feature", true).await.unwrap();
+        preparer
+            .push_branch(&clone, "origin", "feature", true)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1265,7 +1471,15 @@ mod tests {
         // Someone else's commit on the remote's feature, one this clone
         // doesn't have.
         let other = dir.path().join("other");
-        git(dir.path(), &["clone", "-q", remote.to_str().unwrap(), other.to_str().unwrap()]);
+        git(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                other.to_str().unwrap(),
+            ],
+        );
         git(&other, &["config", "user.name", "Other"]);
         git(&other, &["config", "user.email", "other@example.com"]);
         git(&other, &["checkout", "-q", "-b", "feature"]);
@@ -1307,7 +1521,10 @@ mod tests {
             said(" ! [remote rejected] HEAD -> feature (protected branch hook declined)"),
             PushError::Other(_)
         ));
-        assert!(matches!(PushError::from_git(Error::Timeout), PushError::Other(Error::Timeout)));
+        assert!(matches!(
+            PushError::from_git(Error::Timeout),
+            PushError::Other(Error::Timeout)
+        ));
     }
 
     #[tokio::test]

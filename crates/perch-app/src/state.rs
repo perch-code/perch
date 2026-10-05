@@ -544,12 +544,21 @@ impl AppState {
         copy(self.agent_runs, data.agent_runs);
         copy(self.agent_run_events, data.agent_run_events);
         // A page on its way was asked for by the other window.
-        self.agent_run_events_pages.set(data.agent_run_events_pages.with_untracked(|pages| {
-            pages
-                .iter()
-                .map(|(id, page)| (id.clone(), HistoryPage { loading: false, ..*page }))
-                .collect()
-        }));
+        self.agent_run_events_pages
+            .set(data.agent_run_events_pages.with_untracked(|pages| {
+                pages
+                    .iter()
+                    .map(|(id, page)| {
+                        (
+                            id.clone(),
+                            HistoryPage {
+                                loading: false,
+                                ..*page
+                            },
+                        )
+                    })
+                    .collect()
+            }));
         copy(self.item_runs, data.item_runs);
         copy(self.review_capabilities, data.review_capabilities);
         copy(self.review_preferences, data.review_preferences);
@@ -584,7 +593,9 @@ impl AppState {
             .then(|| {
                 self.agent_runs.with_untracked(|runs| {
                     runs.iter()
-                        .filter(|run| run.item_id.as_deref() == Some(item_id) && !run.status.is_active())
+                        .filter(|run| {
+                            run.item_id.as_deref() == Some(item_id) && !run.status.is_active()
+                        })
                         .filter_map(|run| run.ended_at.map(|ended_at| (ended_at, run.id.clone())))
                         .min()
                         .map(|(ended_at, id)| perch_github::RunHistoryCursor { ended_at, id })
@@ -605,7 +616,13 @@ impl AppState {
     ) {
         self.merge_agent_runs(runs);
         self.item_runs.update(|all| {
-            all.insert(item_id, HistoryPage { has_more, loading: false });
+            all.insert(
+                item_id,
+                HistoryPage {
+                    has_more,
+                    loading: false,
+                },
+            );
         });
     }
 
@@ -818,11 +835,12 @@ impl AppState {
         use crate::update::UpdateStatus;
         let before = self.update.get_untracked();
         match &status {
-            UpdateStatus::Ready { version, .. }
-                if !matches!(&before, UpdateStatus::Ready { version: v, .. } if v == version) =>
+            UpdateStatus::Ready { version, .. } if !matches!(&before, UpdateStatus::Ready { version: v, .. } if v == version) =>
             {
                 self.notify(
-                    format!("Perch {version} is ready. Restart from the drawer's footer to update."),
+                    format!(
+                        "Perch {version} is ready. Restart from the drawer's footer to update."
+                    ),
                     Tone::Success,
                 );
             }
@@ -863,9 +881,9 @@ impl AppState {
     fn remember_problem(&self, text: &str, tone: Tone) {
         let at = Timestamp::now();
         let repeated = self.recent_problems.with_untracked(|problems| {
-            problems.back().is_some_and(|last| {
-                last.text == text && (at - last.at).get_seconds().abs() < 3
-            })
+            problems
+                .back()
+                .is_some_and(|last| last.text == text && (at - last.at).get_seconds().abs() < 3)
         });
         if repeated {
             return;
@@ -928,7 +946,11 @@ impl AppState {
     /// be answered for want of the server, which offers it again whatever
     /// was closed.
     pub fn offer_server(&self, offer: ServerOffer, asked: bool) {
-        if !asked && self.declined_offers.with_untracked(|d| d.contains(&offer.key)) {
+        if !asked
+            && self
+                .declined_offers
+                .with_untracked(|d| d.contains(&offer.key))
+        {
             return;
         }
         let shown = self.toasts.with_untracked(|toasts| {
@@ -1015,7 +1037,8 @@ impl AppState {
                 }
             }
         });
-        self.trust_everywhere.update(|ticked| ticked.retain(|kind| ask.kinds.contains(kind)));
+        self.trust_everywhere
+            .update(|ticked| ticked.retain(|kind| ask.kinds.contains(kind)));
     }
 
     /// Whether the reader trusts `kind` on everything in `repo`.
@@ -1029,7 +1052,8 @@ impl AppState {
 
     /// The reader closed an offer: it stays closed for the session.
     pub fn decline_offer(&self, token: u64, key: &str) {
-        self.declined_offers.update(|d| _ = d.insert(key.to_string()));
+        self.declined_offers
+            .update(|d| _ = d.insert(key.to_string()));
         self.dismiss_toast(token);
     }
 
@@ -1045,9 +1069,9 @@ impl AppState {
     /// Take down the offer to start `kind`: it has said something since,
     /// so the line the offer gave is out of date.
     fn drop_start_offers(&self, kind: perch_lsp::ServerKind) {
-        self.drop_toasts(|toast| {
-            matches!(toast, ToastKind::Server(offer) if offer.kind == kind && offer.start)
-        });
+        self.drop_toasts(
+            |toast| matches!(toast, ToastKind::Server(offer) if offer.kind == kind && offer.start),
+        );
     }
 
     /// Take down the offers to trust an item's code, but `keep`'s: the
@@ -1142,7 +1166,10 @@ impl AppState {
             events.sort_by_key(|event| event.sequence);
             all.insert(run.id.clone(), Arc::new(events));
         });
-        let page = HistoryPage { has_more, loading: false };
+        let page = HistoryPage {
+            has_more,
+            loading: false,
+        };
         self.agent_run_events_pages
             .update(|pages| _ = pages.insert(run.id.clone(), page));
     }
@@ -1170,7 +1197,10 @@ impl AppState {
             merged.sort_by_key(|event| event.sequence);
             all.insert(run_id.to_string(), Arc::new(merged));
         });
-        let page = HistoryPage { has_more, loading: false };
+        let page = HistoryPage {
+            has_more,
+            loading: false,
+        };
         self.agent_run_events_pages
             .update(|pages| _ = pages.insert(run_id.to_string(), page));
     }
@@ -1466,7 +1496,10 @@ impl AppState {
                     review.item.set(Some(item));
                     review.stale_head.set(stale_head);
                     review.pull_request.set(pull_request);
-                    let paths = review.files_reload.try_update(std::mem::take).unwrap_or_default();
+                    let paths = review
+                        .files_reload
+                        .try_update(std::mem::take)
+                        .unwrap_or_default();
                     if !paths.is_empty() {
                         self.reload.update(|reload| reload.extend(paths));
                     }
@@ -1524,7 +1557,12 @@ impl AppState {
                 if let Some(draft) = draft {
                     self.start_work_draft.set(None);
                     if review.composer.with_untracked(Option::is_none) {
-                        review.open_composer(None, None, draft, crate::review::threads::defaults(*self));
+                        review.open_composer(
+                            None,
+                            None,
+                            draft,
+                            crate::review::threads::defaults(*self),
+                        );
                     }
                 }
             }
@@ -1562,7 +1600,9 @@ impl AppState {
                 review.offline.set(false);
                 review.upstream_changed.set(false);
                 review.head_moved.set(None);
-                review.pull_request_overview_loading.set(pull_request.is_open());
+                review
+                    .pull_request_overview_loading
+                    .set(pull_request.is_open());
                 review.pull_request.set(Some(pull_request));
                 review.issue.set(None);
                 review.issue_comments.set(Arc::new(Vec::new()));
@@ -1694,7 +1734,10 @@ impl AppState {
                 review.apply_run_event(&run_id, &event);
             }
             Event::AgentSteer { run_id, text } => {
-                self.append_open_agent_record(&run_id, perch_github::RunEvent::Steer { text: text.clone() });
+                self.append_open_agent_record(
+                    &run_id,
+                    perch_github::RunEvent::Steer { text: text.clone() },
+                );
                 review.apply_steer(&run_id, &text);
             }
             Event::AgentRuns { runs } => self.merge_agent_runs(runs),
@@ -1984,7 +2027,9 @@ impl AppState {
                 // The checkout of a pull request already showing: Code says
                 // why, and the conversation can still be read.
                 if review.files_pending.with_untracked(Option::is_some) {
-                    review.files_pending.set(Some(Preparing::Failed { message }));
+                    review
+                        .files_pending
+                        .set(Some(Preparing::Failed { message }));
                     return;
                 }
                 review.preparing.set(Preparing::Failed { message });
@@ -2008,7 +2053,10 @@ impl AppState {
                     if let perch_lsp::Status::Failed { .. } | perch_lsp::Status::Unhealthy { .. } =
                         &status
                     {
-                        if review.lsp_status.with_untracked(|s| s.get(kind) != Some(&status)) {
+                        if review
+                            .lsp_status
+                            .with_untracked(|s| s.get(kind) != Some(&status))
+                        {
                             self.complain(status.describe(kind));
                         }
                     }
@@ -2072,7 +2120,9 @@ impl AppState {
                 });
                 if wanted {
                     review.set_server_status(kind, perch_lsp::Status::Starting);
-                    review.pending_server_starts.update(|starts| starts.push(kind));
+                    review
+                        .pending_server_starts
+                        .update(|starts| starts.push(kind));
                 }
                 self.apply(Event::LspInstalled { kind, install });
             }
@@ -2111,7 +2161,11 @@ impl AppState {
                     symbols.insert(path, outline);
                 });
             }
-            Event::LspCallHierarchy { token, items, place } => {
+            Event::LspCallHierarchy {
+                token,
+                items,
+                place,
+            } => {
                 review.finish_prepare_hierarchy(token, items, place);
             }
             Event::LspNames { token, answers } => {
@@ -2250,12 +2304,10 @@ impl AppState {
                             && pull.head_sha == head_sha
                     })
                 });
-                let is_current_generation = status_generation
-                    >= review.pull_request_status_generation.get_untracked();
+                let is_current_generation =
+                    status_generation >= review.pull_request_status_generation.get_untracked();
                 if review.is_item(&item_id) && is_current_subject && is_current_generation {
-                    review
-                        .pull_request_status_generation
-                        .set(status_generation);
+                    review.pull_request_status_generation.set(status_generation);
                     review.checks.set(Some(checks));
                 }
             }
@@ -2273,12 +2325,10 @@ impl AppState {
                             && pull.head_sha == head_sha
                     })
                 });
-                let is_current_generation = status_generation
-                    >= review.pull_request_status_generation.get_untracked();
+                let is_current_generation =
+                    status_generation >= review.pull_request_status_generation.get_untracked();
                 if review.is_item(&item_id) && is_current_subject && is_current_generation {
-                    review
-                        .pull_request_status_generation
-                        .set(status_generation);
+                    review.pull_request_status_generation.set(status_generation);
                     review.pull_request_overview.set(None);
                     review.pull_request_overview_error.set(None);
                     review.pull_request_overview_loading.set(true);
@@ -2298,12 +2348,10 @@ impl AppState {
                             && pull.head_sha == overview.head_sha
                     })
                 });
-                let is_current_generation = status_generation
-                    >= review.pull_request_status_generation.get_untracked();
+                let is_current_generation =
+                    status_generation >= review.pull_request_status_generation.get_untracked();
                 if review.is_item(&item_id) && is_current_subject && is_current_generation {
-                    review
-                        .pull_request_status_generation
-                        .set(status_generation);
+                    review.pull_request_status_generation.set(status_generation);
                     review.pull_request_overview.set(Some(overview));
                     review.pull_request_overview_loading.set(false);
                     review.pull_request_overview_error.set(None);
@@ -2325,12 +2373,10 @@ impl AppState {
                             && pull.head_sha == head_sha
                     })
                 });
-                let is_current_generation = status_generation
-                    >= review.pull_request_status_generation.get_untracked();
+                let is_current_generation =
+                    status_generation >= review.pull_request_status_generation.get_untracked();
                 if review.is_item(&item_id) && is_current_subject && is_current_generation {
-                    review
-                        .pull_request_status_generation
-                        .set(status_generation);
+                    review.pull_request_status_generation.set(status_generation);
                     review.pull_request_overview.set(None);
                     review.pull_request_overview_loading.set(false);
                     review.pull_request_overview_error.set(Some(message));
@@ -2777,7 +2823,9 @@ impl AppState {
                         crate::backend::DescriptionOutcome::Written { title, body }
                             if crate::review::open_pull::typed(*self, &item_id) =>
                         {
-                            review.description_offer.set(Some((title.clone(), body.clone())));
+                            review
+                                .description_offer
+                                .set(Some((title.clone(), body.clone())));
                         }
                         crate::backend::DescriptionOutcome::Failed(message) => {
                             review.description_error.set(Some(message.clone()));
@@ -2802,7 +2850,9 @@ impl AppState {
                         crate::backend::DescriptionOutcome::Written { title, body }
                             if crate::review::close_as_issue::typed(*self, &item_id) =>
                         {
-                            review.issue_draft_offer.set(Some((title.clone(), body.clone())));
+                            review
+                                .issue_draft_offer
+                                .set(Some((title.clone(), body.clone())));
                         }
                         crate::backend::DescriptionOutcome::Failed(message) => {
                             review.issue_draft_error.set(Some(message.clone()));
@@ -2887,13 +2937,18 @@ impl AppState {
                 self.participants.update(|m| m.extend(found));
             }
             // Start work's prompt, held until its worktree opens.
-            Event::StartWorkDraft { navigation_id, prompt } => {
+            Event::StartWorkDraft {
+                navigation_id,
+                prompt,
+            } => {
                 if self.accepts_navigation(navigation_id) {
                     self.start_work_draft.set(Some((navigation_id, prompt)));
                 }
             }
             // What was typed went to GitHub, so the form's draft goes.
-            Event::PullRequestOpened { item_id, notice, .. } => {
+            Event::PullRequestOpened {
+                item_id, notice, ..
+            } => {
                 self.pull_request_drafts.update(|drafts| {
                     drafts.remove(&item_id);
                 });
@@ -2978,9 +3033,10 @@ impl AppState {
             Event::Repos(repos) => self.repos.set(repos),
             Event::TrustedServers(trusted) => self.trusted_servers.set(trusted),
             Event::GithubHosts(hosts) => self.github_hosts.set(hosts),
-            Event::OpenReferenceResolved { navigation_id, kind } => {
-                crate::ui::open_box::resolved(*self, navigation_id, kind)
-            }
+            Event::OpenReferenceResolved {
+                navigation_id,
+                kind,
+            } => crate::ui::open_box::resolved(*self, navigation_id, kind),
             Event::OpenReferenceFailed {
                 navigation_id,
                 message,
@@ -2990,7 +3046,9 @@ impl AppState {
                 page,
                 poll,
                 result,
-            } => self.browse.update(|all| all.entry(query).or_default().take(page, poll, result)),
+            } => self
+                .browse
+                .update(|all| all.entry(query).or_default().take(page, poll, result)),
             Event::Meta { key, value } => match key.as_str() {
                 "item_filters" => match crate::items::ItemFilters::parse(&value) {
                     Ok(f) => self.item_filters.set(f),
@@ -3034,17 +3092,23 @@ impl AppState {
             Event::ApprovalRequested(view) => {
                 if let Some(review) = self.review.get_untracked() {
                     review.approvals.update(|pending| {
-                        if !pending.iter().any(|p| p.run_id == view.run_id && p.id == view.id) {
+                        if !pending
+                            .iter()
+                            .any(|p| p.run_id == view.run_id && p.id == view.id)
+                        {
                             pending.push(view);
                         }
                     });
                 }
             }
-            Event::ApprovalSettled { run_id, approval_id } => {
+            Event::ApprovalSettled {
+                run_id,
+                approval_id,
+            } => {
                 if let Some(review) = self.review.get_untracked() {
-                    review
-                        .approvals
-                        .update(|pending| pending.retain(|p| !(p.run_id == run_id && p.id == approval_id)));
+                    review.approvals.update(|pending| {
+                        pending.retain(|p| !(p.run_id == run_id && p.id == approval_id))
+                    });
                 }
             }
             Event::Grants { repo, grants } => {
@@ -3149,7 +3213,9 @@ impl AppState {
             Event::Status(status) => {
                 // Polls are quiet once one has gone through.
                 if status == Status::Refreshing
-                    && self.status.with_untracked(|s| matches!(s, Status::Idle { .. }))
+                    && self
+                        .status
+                        .with_untracked(|s| matches!(s, Status::Idle { .. }))
                 {
                     return;
                 }
@@ -3305,7 +3371,8 @@ impl AppState {
     /// Whether the drawer is showing local items: either of Worktrees'
     /// views.
     fn shows_items(&self) -> bool {
-        self.item_filters.with_untracked(|f| f.tab == SidebarTab::Worktrees)
+        self.item_filters
+            .with_untracked(|f| f.tab == SidebarTab::Worktrees)
     }
 
     /// Whether a poll's items would change which rows the drawer shows,
@@ -3314,7 +3381,9 @@ impl AppState {
     fn holds_items(&self, incoming: &[Item]) -> bool {
         self.shows_items()
             && !self.items.with_untracked(Vec::is_empty)
-            && self.items.with_untracked(|shown| self.visible_item_ids(shown))
+            && self
+                .items
+                .with_untracked(|shown| self.visible_item_ids(shown))
                 != self.visible_item_ids(incoming)
     }
 
@@ -3322,18 +3391,30 @@ impl AppState {
     fn holds_notifications(&self, incoming: &[Thread]) -> bool {
         self.item_filters.with_untracked(|f| f.tab) == SidebarTab::Inbox
             && !self.notifications.with_untracked(Vec::is_empty)
-            && self.notifications.with_untracked(|shown| self.visible_thread_ids(shown))
+            && self
+                .notifications
+                .with_untracked(|shown| self.visible_thread_ids(shown))
                 != self.visible_thread_ids(incoming)
     }
 
     /// GitHub's threads under the drawer's filters: the inbox's, or under
     /// View › Done and View › Snoozed the ones put away so.
     pub fn visible_inbox(&self) -> Vec<Thread> {
-        let (inbox, repository) = self.item_filters.with(|f| (f.inbox.clone(), f.repository.clone()));
+        let (inbox, repository) = self
+            .item_filters
+            .with(|f| (f.inbox.clone(), f.repository.clone()));
         let query = self.item_query.get();
-        let viewer = self.viewer.with(|viewer| viewer.as_ref().map(|(login, _)| login.clone()));
+        let viewer = self
+            .viewer
+            .with(|viewer| viewer.as_ref().map(|(login, _)| login.clone()));
         self.inbox_source(inbox.view).with(|threads| {
-            crate::inbox::filter(threads, &inbox, viewer.as_deref(), repository.as_deref(), &query)
+            crate::inbox::filter(
+                threads,
+                &inbox,
+                viewer.as_deref(),
+                repository.as_deref(),
+                &query,
+            )
         })
     }
 
@@ -3350,16 +3431,26 @@ impl AppState {
     /// filters, in order. None under View › Done or Snoozed, which a poll
     /// of the inbox does not move.
     fn visible_thread_ids(&self, threads: &[Thread]) -> Vec<String> {
-        let (inbox, repository) = self.item_filters.with_untracked(|f| (f.inbox.clone(), f.repository.clone()));
+        let (inbox, repository) = self
+            .item_filters
+            .with_untracked(|f| (f.inbox.clone(), f.repository.clone()));
         if inbox.view.is_put_away() {
             return Vec::new();
         }
         let query = self.item_query.get_untracked();
-        let viewer = self.viewer.with_untracked(|viewer| viewer.as_ref().map(|(login, _)| login.clone()));
-        crate::inbox::filter(threads, &inbox, viewer.as_deref(), repository.as_deref(), &query)
-            .into_iter()
-            .map(|thread| thread.id)
-            .collect()
+        let viewer = self
+            .viewer
+            .with_untracked(|viewer| viewer.as_ref().map(|(login, _)| login.clone()));
+        crate::inbox::filter(
+            threads,
+            &inbox,
+            viewer.as_deref(),
+            repository.as_deref(),
+            &query,
+        )
+        .into_iter()
+        .map(|thread| thread.id)
+        .collect()
     }
 
     /// Whether the inbox has an unread notification about the item's pull
@@ -3367,9 +3458,9 @@ impl AppState {
     /// under Unread Only. A branch with no subject has nothing to be
     /// unread.
     pub fn item_unread(&self, item: &Item) -> bool {
-        item.subject
-            .as_ref()
-            .is_some_and(|subject| self.subject_unread(subject.repo_full_name(), subject.kind(), subject.number()))
+        item.subject.as_ref().is_some_and(|subject| {
+            self.subject_unread(subject.repo_full_name(), subject.kind(), subject.number())
+        })
     }
 
     /// The ids of the rows `items` would give on the drawer's tab, in
@@ -3378,12 +3469,17 @@ impl AppState {
         let mut filters = self.item_filters.get_untracked();
         filters.query = self.item_query.get_untracked();
         let unread = |item: &Item| self.item_unread(item);
-        crate::items::local_items(items, &filters, &unread).into_iter().map(|item| item.id).collect()
+        crate::items::local_items(items, &filters, &unread)
+            .into_iter()
+            .map(|item| item.id)
+            .collect()
     }
 
     /// The search Browse is showing, if it is the tab and has one.
     pub fn browse_query(&self) -> Option<String> {
-        let github = self.repos.with(|repos| crate::items::github_repositories(repos));
+        let github = self
+            .repos
+            .with(|repos| crate::items::github_repositories(repos));
         self.item_filters.with(|f| f.browse_query(&github))
     }
 
@@ -3392,13 +3488,21 @@ impl AppState {
     /// the rows only moved. `None` when nothing is held back.
     pub fn held_back_news(&self) -> Option<String> {
         let (new, noun) = if let Some(query) = self.browse_query() {
-            let held = self.browse.with(|all| all.get(&query).and_then(|page| page.held.clone()))?;
+            let held = self
+                .browse
+                .with(|all| all.get(&query).and_then(|page| page.held.clone()))?;
             let shown: HashSet<(String, u64)> = self.browse.with_untracked(|all| {
                 all.get(&query)
                     .map(|page| page.hits.iter().map(hit_key).collect())
                     .unwrap_or_default()
             });
-            (held.0.iter().filter(|hit| !shown.contains(&hit_key(hit))).count(), "result")
+            (
+                held.0
+                    .iter()
+                    .filter(|hit| !shown.contains(&hit_key(hit)))
+                    .count(),
+                "result",
+            )
         } else if self.item_filters.with(|f| f.tab) == SidebarTab::Inbox {
             if self.item_filters.with(|f| f.inbox.view).is_put_away() {
                 return None;
@@ -3410,7 +3514,10 @@ impl AppState {
                 .into_iter()
                 .collect();
             let ids = self.visible_thread_ids(&incoming);
-            (ids.iter().filter(|id| !shown.contains(*id)).count(), "notification")
+            (
+                ids.iter().filter(|id| !shown.contains(*id)).count(),
+                "notification",
+            )
         } else {
             let incoming = self.pending_items.get()?;
             let shown: HashSet<String> = self
@@ -3468,7 +3575,8 @@ impl AppState {
         let mut filters = self.item_filters.get();
         filters.query = self.item_query.get();
         let unread = |item: &Item| self.item_unread(item);
-        self.items.with(|items| crate::items::local_items(items, &filters, &unread))
+        self.items
+            .with(|items| crate::items::local_items(items, &filters, &unread))
     }
 
     pub fn avatar_for(&self, url: &str) -> Option<Arc<Vec<u8>>> {
@@ -3511,7 +3619,10 @@ impl BrowsePage {
         if page == 1 {
             let first = (found.hits.len()).min(self.hits.len());
             let same_rows = self.hits.len() >= found.hits.len()
-                && self.hits[..first].iter().map(hit_key).eq(found.hits.iter().map(hit_key));
+                && self.hits[..first]
+                    .iter()
+                    .map(hit_key)
+                    .eq(found.hits.iter().map(hit_key));
             if poll && self.pages > 0 && !same_rows {
                 self.held = Some((found.hits, found.more));
             } else if poll && same_rows && self.pages > 1 {
@@ -3525,7 +3636,12 @@ impl BrowsePage {
             }
         } else if page == self.pages + 1 {
             let known: HashSet<(String, u64)> = self.hits.iter().map(hit_key).collect();
-            self.hits.extend(found.hits.into_iter().filter(|hit| !known.contains(&hit_key(hit))));
+            self.hits.extend(
+                found
+                    .hits
+                    .into_iter()
+                    .filter(|hit| !known.contains(&hit_key(hit))),
+            );
             self.more = found.more;
             self.pages = page;
         }
@@ -3860,7 +3976,10 @@ mod tests {
         }
     }
 
-    fn found(hits: Vec<perch_github::SearchHit>, more: bool) -> Result<perch_github::SearchPage, String> {
+    fn found(
+        hits: Vec<perch_github::SearchHit>,
+        more: bool,
+    ) -> Result<perch_github::SearchPage, String> {
         Ok(perch_github::SearchPage { hits, more })
     }
 
@@ -3883,14 +4002,29 @@ mod tests {
         assert_eq!(numbers(&page), [1, 2, 3]);
         assert_eq!(page.pages, 2);
         page.take(2, false, found(vec![hit(9, "late")], false));
-        assert_eq!(numbers(&page), [1, 2, 3], "a page already taken is not taken again");
+        assert_eq!(
+            numbers(&page),
+            [1, 2, 3],
+            "a page already taken is not taken again"
+        );
 
-        page.take(1, true, found(vec![hit(1, "one, renamed"), hit(2, "two")], true));
-        assert_eq!(page.hits[0].title, "one, renamed", "a change inside a row goes in");
+        page.take(
+            1,
+            true,
+            found(vec![hit(1, "one, renamed"), hit(2, "two")], true),
+        );
+        assert_eq!(
+            page.hits[0].title, "one, renamed",
+            "a change inside a row goes in"
+        );
         assert_eq!(numbers(&page), [1, 2, 3], "and the later page stays");
         assert!(page.held.is_none());
 
-        page.take(1, true, found(vec![hit(4, "four"), hit(1, "one"), hit(2, "two")], true));
+        page.take(
+            1,
+            true,
+            found(vec![hit(4, "four"), hit(1, "one"), hit(2, "two")], true),
+        );
         assert_eq!(numbers(&page), [1, 2, 3], "the rows stay put");
         assert!(page.held.is_some());
         page.show_held();
@@ -3902,7 +4036,11 @@ mod tests {
         assert_eq!(numbers(&page), [4, 1, 2], "the last results stay");
         page.take(1, false, found(vec![hit(5, "five")], false));
         assert!(page.error.is_none());
-        assert_eq!(numbers(&page), [5], "picking the view again takes what it finds");
+        assert_eq!(
+            numbers(&page),
+            [5],
+            "picking the view again takes what it finds"
+        );
     }
 
     #[test]
@@ -3913,7 +4051,12 @@ mod tests {
             f.browse.view = crate::items::BrowseView::Yours;
         });
         let query = app.browse_query().unwrap();
-        let result = |hits, poll| Event::BrowseResults { query: query.clone(), page: 1, poll, result: found(hits, false) };
+        let result = |hits, poll| Event::BrowseResults {
+            query: query.clone(),
+            page: 1,
+            poll,
+            result: found(hits, false),
+        };
         app.apply(result(vec![hit(1, "one")], false));
         assert_eq!(app.held_back_news(), None);
         app.apply(result(vec![hit(2, "two"), hit(1, "one")], true));
@@ -4057,7 +4200,10 @@ mod tests {
         assert_eq!(review.phase.get(), Phase::Ready);
         assert!(review.ready.get());
         assert!(review.pull_request.get().is_some());
-        assert!(review.has_files(), "Code is there to show the checkout coming");
+        assert!(
+            review.has_files(),
+            "Code is there to show the checkout coming"
+        );
 
         app.apply_with_review(
             Event::ReviewProgress {
@@ -4067,7 +4213,11 @@ mod tests {
             },
             review,
         );
-        assert_eq!(review.phase.get(), Phase::Ready, "the conversation stays up");
+        assert_eq!(
+            review.phase.get(),
+            Phase::Ready,
+            "the conversation stays up"
+        );
         assert!(matches!(
             review.files_pending.get(),
             Some(Preparing::Working { message, .. }) if message == "Fetching the pull request"
@@ -4129,7 +4279,11 @@ mod tests {
         app.begin_agent_run_navigation("other".into(), "run-7".into(), 32);
         app.begin_review(review, "Reading the discussion");
         app.apply_with_review(review_ready("other", 32), review);
-        assert_eq!(review.pending_run_reveal.get(), None, "asked before the threads are here");
+        assert_eq!(
+            review.pending_run_reveal.get(),
+            None,
+            "asked before the threads are here"
+        );
         app.apply_with_review(
             Event::CommentThreads {
                 item_id: "other".into(),
@@ -4246,7 +4400,10 @@ mod tests {
         review
             .loading
             .update(|loading| _ = loading.insert("src/old.rs".into()));
-        review.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
+        review.set_server_status(
+            perch_lsp::ServerKind::RustAnalyzer,
+            perch_lsp::Status::Ready,
+        );
         app.expect_item_navigation("new", 41);
 
         app.apply_with_review(review_ready("new", 41), review);
@@ -4309,7 +4466,10 @@ mod tests {
     fn an_accepted_same_item_ready_fences_the_old_lsp_status() {
         let app = AppState::new();
         let review = review_of("same");
-        review.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
+        review.set_server_status(
+            perch_lsp::ServerKind::RustAnalyzer,
+            perch_lsp::Status::Ready,
+        );
         app.expect_item_navigation("same", 42);
 
         app.apply_with_review(review_ready("same", 42), review);
@@ -4360,7 +4520,10 @@ mod tests {
         app.apply_with_review(missing(), review);
         let offered = offers(&app);
         assert_eq!(offered.len(), 1);
-        assert_eq!(offered[0].text, "rust-analyzer isn't installed for Rust 1.98.1.");
+        assert_eq!(
+            offered[0].text,
+            "rust-analyzer isn't installed for Rust 1.98.1."
+        );
         assert_eq!(offered[0].action, "Install");
         app.apply_with_review(missing(), review);
         assert_eq!(offers(&app).len(), 1, "the same offer is up once");
@@ -4370,7 +4533,10 @@ mod tests {
         assert_eq!(app.notice().as_deref(), Some("Could not post"));
         let news = app.current_toast().unwrap().token;
         app.dismiss_toast(news);
-        assert!(matches!(app.current_toast().unwrap().kind, ToastKind::Server(_)));
+        assert!(matches!(
+            app.current_toast().unwrap().kind,
+            ToastKind::Server(_)
+        ));
 
         let token = app.current_toast().unwrap().token;
         app.decline_offer(token, &offered[0].key);
@@ -4380,7 +4546,10 @@ mod tests {
 
         // A goto that wanted the server offers it again, with its line.
         app.offer_server(
-            ServerOffer::missing(&missing_rust(), Some("No definition found for `x`: …".into())),
+            ServerOffer::missing(
+                &missing_rust(),
+                Some("No definition found for `x`: …".into()),
+            ),
             true,
         );
         assert_eq!(offers(&app)[0].text, "No definition found for `x`: …");
@@ -4396,7 +4565,10 @@ mod tests {
         app.begin_item_review(review, "Open", "a", 91);
         app.apply_with_review(review_ready("a", 91), review);
         let rust = perch_lsp::ServerKind::RustAnalyzer;
-        app.offer_server(ServerOffer::start(rust, "No definition found for `x`".into()), true);
+        app.offer_server(
+            ServerOffer::start(rust, "No definition found for `x`".into()),
+            true,
+        );
         assert_eq!(offers(&app).len(), 1);
         assert_eq!(offers(&app)[0].action, "Start");
         app.apply_with_review(
@@ -4443,7 +4615,10 @@ mod tests {
             "rust-analyzer would run the build scripts and proc macros in slatedb/slatedb."
         );
         assert_eq!(offered[0].action, "Trust and start");
-        assert_eq!(offered[0].trust.as_ref().map(|t| t.item_id.as_str()), Some("a"));
+        assert_eq!(
+            offered[0].trust.as_ref().map(|t| t.item_id.as_str()),
+            Some("a")
+        );
         assert_eq!(offered[0].key, "trust a");
 
         // A second kind held joins the same toast.
@@ -4502,7 +4677,10 @@ mod tests {
         let review = ReviewState::new();
         app.begin_item_review(review, "Open", "a", 91);
         app.apply_with_review(review_ready("a", 91), review);
-        let (rust, jdtls) = (perch_lsp::ServerKind::RustAnalyzer, perch_lsp::ServerKind::Jdtls);
+        let (rust, jdtls) = (
+            perch_lsp::ServerKind::RustAnalyzer,
+            perch_lsp::ServerKind::Jdtls,
+        );
         let status = |kind, status| Event::LspStatus {
             navigation_id: 91,
             kind,
@@ -4515,8 +4693,14 @@ mod tests {
         app.apply_with_review(status(rust, perch_lsp::Status::Starting), review);
         let offered = offers(&app);
         assert_eq!(offered.len(), 1);
-        assert_eq!(offered[0].text, "jdtls would run the Gradle or Maven build in slatedb/slatedb.");
-        assert_eq!(offered[0].trust.as_ref().map(|t| t.kinds.clone()), Some(vec![jdtls]));
+        assert_eq!(
+            offered[0].text,
+            "jdtls would run the Gradle or Maven build in slatedb/slatedb."
+        );
+        assert_eq!(
+            offered[0].trust.as_ref().map(|t| t.kinds.clone()),
+            Some(vec![jdtls])
+        );
         assert_eq!(app.trust_everywhere.get_untracked(), [jdtls]);
 
         app.apply_with_review(status(jdtls, perch_lsp::Status::Starting), review);
@@ -4530,7 +4714,10 @@ mod tests {
         let _root = floem::headless::TestRoot::new();
         let app = AppState::new();
         let rust = perch_lsp::ServerKind::RustAnalyzer;
-        app.apply(Event::TrustedServers(vec![("SlateDB/slatedb".into(), rust)]));
+        app.apply(Event::TrustedServers(vec![(
+            "SlateDB/slatedb".into(),
+            rust,
+        )]));
         assert!(app.trusts_everywhere("slatedb/SLATEDB", rust));
         assert!(!app.trusts_everywhere("slatedb/slatedb", perch_lsp::ServerKind::Jdtls));
         assert!(!app.trusts_everywhere("slatedb/other", rust));
@@ -4669,7 +4856,10 @@ mod tests {
             },
             review,
         );
-        assert!(review.pending_server_starts.get().is_empty(), "another toolchain's install");
+        assert!(
+            review.pending_server_starts.get().is_empty(),
+            "another toolchain's install"
+        );
         assert!(offers(&app).is_empty());
 
         app.apply_with_review(
@@ -4681,7 +4871,10 @@ mod tests {
         );
         assert!(!app.installing_servers.get().contains(&kind));
         assert_eq!(review.pending_server_starts.get(), [kind]);
-        assert_eq!(review.lsp_status.get().get(kind), Some(&perch_lsp::Status::Starting));
+        assert_eq!(
+            review.lsp_status.get().get(kind),
+            Some(&perch_lsp::Status::Starting)
+        );
 
         app.apply_with_review(
             Event::LspInstallFailed {
@@ -4690,7 +4883,10 @@ mod tests {
             },
             review,
         );
-        assert_eq!(app.notice().as_deref(), Some("Couldn't install rust-analyzer: no network"));
+        assert_eq!(
+            app.notice().as_deref(),
+            Some("Couldn't install rust-analyzer: no network")
+        );
     }
 
     #[test]
@@ -4712,7 +4908,10 @@ mod tests {
         app.apply_with_review(status(perch_lsp::Status::Ready), review);
         assert_eq!(app.notice(), None);
         // Ready: what came back empty is asked again by the root view.
-        assert_eq!(review.pending_ready.get(), [perch_lsp::ServerKind::RustAnalyzer]);
+        assert_eq!(
+            review.pending_ready.get(),
+            [perch_lsp::ServerKind::RustAnalyzer]
+        );
         review.pending_ready.set(Vec::new());
         app.apply_with_review(status(unhealthy.clone()), review);
         assert!(review.pending_ready.get().is_empty());
@@ -4798,7 +4997,9 @@ mod tests {
             },
             review,
         );
-        assert!(!review.files.with(|files| files.contains_key("src/loaded.rs")));
+        assert!(!review
+            .files
+            .with(|files| files.contains_key("src/loaded.rs")));
         assert!(review
             .loading
             .with(|loading| loading.contains("src/loaded.rs")));
@@ -4826,7 +5027,9 @@ mod tests {
             },
             review,
         );
-        assert!(review.files.with(|files| files.contains_key("src/loaded.rs")));
+        assert!(review
+            .files
+            .with(|files| files.contains_key("src/loaded.rs")));
         assert!(!review
             .loading
             .with(|loading| loading.contains("src/loaded.rs")));
@@ -4867,16 +5070,15 @@ mod tests {
             binary: false,
             head_blob: Some(blob.into()),
         };
-        let ready = |scope_gen, scope, files: Vec<perch_git::ChangedFile>, reread_all| {
-            Event::ScopeReady {
+        let ready =
+            |scope_gen, scope, files: Vec<perch_git::ChangedFile>, reread_all| Event::ScopeReady {
                 navigation_id: 81,
                 scope_gen,
                 item_id: "same".into(),
                 scope,
                 files: Arc::new(files),
                 reread_all,
-            }
-        };
+            };
         let file_loaded = |scope_gen, path: &str, text: &str| Event::FileLoaded {
             navigation_id: 81,
             scope_gen,
@@ -4890,23 +5092,41 @@ mod tests {
 
         // Both enter the list: both are asked for again.
         app.apply_with_review(
-            ready(811, perch_git::Scope::Branch, vec![entry("src/x.rs", "x1"), entry("src/y.rs", "y1")], false),
+            ready(
+                811,
+                perch_git::Scope::Branch,
+                vec![entry("src/x.rs", "x1"), entry("src/y.rs", "y1")],
+                false,
+            ),
             review,
         );
         let mut asked = app.reload.try_update(std::mem::take).unwrap();
         asked.sort();
         assert_eq!(asked, ["src/x.rs", "src/y.rs"]);
         assert!(review.is_loading("src/x.rs"));
-        assert!(review.file("src/x.rs").is_some(), "it shows while it reloads");
+        assert!(
+            review.file("src/x.rs").is_some(),
+            "it shows while it reloads"
+        );
         app.apply_with_review(file_loaded(811, "src/x.rs", "after\n"), review);
         app.apply_with_review(file_loaded(811, "src/y.rs", "same\n"), review);
         assert!(!review.is_loading("src/x.rs"));
-        assert!(review.file("src/x.rs").unwrap().buffer.text.contains("after"));
+        assert!(review
+            .file("src/x.rs")
+            .unwrap()
+            .buffer
+            .text
+            .contains("after"));
 
         // Only x's blob moved: y is kept, the very file it was.
         let y = review.file("src/y.rs").unwrap();
         app.apply_with_review(
-            ready(812, perch_git::Scope::Branch, vec![entry("src/x.rs", "x2"), entry("src/y.rs", "y1")], false),
+            ready(
+                812,
+                perch_git::Scope::Branch,
+                vec![entry("src/x.rs", "x2"), entry("src/y.rs", "y1")],
+                false,
+            ),
             review,
         );
         assert_eq!(app.reload.try_update(std::mem::take).unwrap(), ["src/x.rs"]);
@@ -4916,7 +5136,12 @@ mod tests {
         // x's answer for 812 never came; the next list asks again though
         // its entry is the same, since that answer would be dropped.
         app.apply_with_review(
-            ready(813, perch_git::Scope::Branch, vec![entry("src/x.rs", "x2"), entry("src/y.rs", "y1")], false),
+            ready(
+                813,
+                perch_git::Scope::Branch,
+                vec![entry("src/x.rs", "x2"), entry("src/y.rs", "y1")],
+                false,
+            ),
             review,
         );
         assert_eq!(app.reload.try_update(std::mem::take).unwrap(), ["src/x.rs"]);
@@ -4924,14 +5149,22 @@ mod tests {
 
         // The head moved: everything is read again.
         app.apply_with_review(
-            ready(814, perch_git::Scope::Branch, vec![entry("src/x.rs", "x2"), entry("src/y.rs", "y1")], true),
+            ready(
+                814,
+                perch_git::Scope::Branch,
+                vec![entry("src/x.rs", "x2"), entry("src/y.rs", "y1")],
+                true,
+            ),
             review,
         );
         let mut asked = app.reload.try_update(std::mem::take).unwrap();
         asked.sort();
         assert_eq!(asked, ["src/x.rs", "src/y.rs"]);
 
-        app.apply_with_review(ready(815, perch_git::Scope::Uncommitted, Vec::new(), true), review);
+        app.apply_with_review(
+            ready(815, perch_git::Scope::Uncommitted, Vec::new(), true),
+            review,
+        );
         assert!(review.file("src/x.rs").is_none());
     }
 
@@ -5026,18 +5259,10 @@ mod tests {
         let app = AppState::new();
         let review = review_of("wt");
 
-        let first = app.begin_agent_review_navigation(
-            review,
-            "wt".into(),
-            "attempt-old".into(),
-            41,
-        );
-        let latest = app.begin_agent_review_navigation(
-            review,
-            "wt".into(),
-            "attempt-new".into(),
-            42,
-        );
+        let first =
+            app.begin_agent_review_navigation(review, "wt".into(), "attempt-old".into(), 41);
+        let latest =
+            app.begin_agent_review_navigation(review, "wt".into(), "attempt-new".into(), 42);
         assert!(latest > first);
 
         app.apply_with_review(
@@ -5427,15 +5652,27 @@ mod tests {
         assert!(review.reactions_of("PR_7").is_empty());
 
         // The pill toggles before GitHub is asked, and asks to add.
-        assert_eq!(review.toggle_reaction("IC_1", ReactionKind::Heart), Some(true));
+        assert_eq!(
+            review.toggle_reaction("IC_1", ReactionKind::Heart),
+            Some(true)
+        );
         assert_eq!(review.reactions_of("IC_1").count(ReactionKind::Heart), 2);
-        assert!(review.reactions_of("IC_1").viewer_reacted(ReactionKind::Heart));
+        assert!(review
+            .reactions_of("IC_1")
+            .viewer_reacted(ReactionKind::Heart));
         assert!(review.is_reacting("IC_1", ReactionKind::Heart));
         // A second click on the same pill waits for the answer; another
         // pill does not.
         assert_eq!(review.toggle_reaction("IC_1", ReactionKind::Heart), None);
-        assert_eq!(review.toggle_reaction("IC_1", ReactionKind::Eyes), Some(true));
-        assert_eq!(review.toggle_reaction("", ReactionKind::Eyes), None, "no id, nothing to ask");
+        assert_eq!(
+            review.toggle_reaction("IC_1", ReactionKind::Eyes),
+            Some(true)
+        );
+        assert_eq!(
+            review.toggle_reaction("", ReactionKind::Eyes),
+            None,
+            "no id, nothing to ask"
+        );
 
         // A read that lands meanwhile, with the older counts, does not
         // put them over the toggle; the description's it may set.
@@ -5466,7 +5703,10 @@ mod tests {
             review,
         );
         assert!(!review.is_reacting("IC_1", ReactionKind::Heart));
-        assert!(review.is_reacting("IC_1", ReactionKind::Eyes), "the other ask is still out");
+        assert!(
+            review.is_reacting("IC_1", ReactionKind::Eyes),
+            "the other ask is still out"
+        );
         assert_eq!(review.reactions_of("IC_1"), settled);
 
         // A refusal puts the pill back as it was before the click.
@@ -5536,7 +5776,10 @@ mod tests {
         assert!(review.begin_resolve("gh-31", true));
         assert!(review.is_resolved("gh-31"));
         assert!(review.is_resolving("gh-31"));
-        assert!(!review.begin_resolve("gh-31", false), "the first ask is unanswered");
+        assert!(
+            !review.begin_resolve("gh-31", false),
+            "the first ask is unanswered"
+        );
         // A thread list read before the answer does not undo it.
         app.apply_with_review(threads(false), review);
         assert!(review.is_resolved("gh-31"));
@@ -5548,7 +5791,10 @@ mod tests {
             thread_id: "gh-31".into(),
         };
         app.apply_with_review(settled("other"), review);
-        assert!(review.is_resolving("gh-31"), "another item's answer is not this one's");
+        assert!(
+            review.is_resolving("gh-31"),
+            "another item's answer is not this one's"
+        );
         app.apply_with_review(settled("wt"), review);
         assert!(!review.is_resolving("gh-31"));
         assert!(review.is_resolved("gh-31"));
@@ -5678,9 +5924,7 @@ mod tests {
         let review = review_of_pull("wt", 7, "head");
         review.ready.set(true);
         review.review_open.set(true);
-        review
-            .submit_review_draft
-            .set("The summary I wrote".into());
+        review.submit_review_draft.set("The summary I wrote".into());
         review
             .submit_review_event
             .set(PullReviewEvent::RequestChanges);
@@ -5755,10 +5999,7 @@ mod tests {
         assert!(review.submit_review_pending.with(Option::is_none));
         assert!(!review.review_open.get());
         assert!(review.submit_review_draft.get().is_empty());
-        assert_eq!(
-            review.submit_review_event.get(),
-            PullReviewEvent::Comment
-        );
+        assert_eq!(review.submit_review_event.get(), PullReviewEvent::Comment);
 
         // A GET that began before the POST must not temporarily erase the
         // review GitHub already accepted.
@@ -5812,7 +6053,10 @@ mod tests {
         );
         assert!(review.submit_review_pending.with(Option::is_none));
         assert!(!review.review_open.get(), "the review is up");
-        assert!(review.submit_review_draft.get().is_empty(), "the summary posted");
+        assert!(
+            review.submit_review_draft.get().is_empty(),
+            "the summary posted"
+        );
         assert_eq!(review.submit_review_event.get(), PullReviewEvent::Comment);
         assert_eq!(review.submit_review_error.get(), None);
         assert_eq!(review.submit_review_outcome.get(), None);
@@ -5827,7 +6071,10 @@ mod tests {
         );
         assert!(app.toasts.with(|toasts| toasts.iter().any(|toast| matches!(
             &toast.kind,
-            ToastKind::Message { tone: Tone::Warning, .. }
+            ToastKind::Message {
+                tone: Tone::Warning,
+                ..
+            }
         ))));
         assert_eq!(*review.submitted_reviews.get(), vec![accepted]);
     }
@@ -5860,7 +6107,10 @@ mod tests {
             review,
         );
         assert!(review.submit_review_pending.with(Option::is_none));
-        assert!(!review.review_open.get(), "the reply posted; nothing to say");
+        assert!(
+            !review.review_open.get(),
+            "the reply posted; nothing to say"
+        );
         assert!(review.submitted_reviews.get().is_empty());
         assert!(review.discussion.get().unwrap().reviews.is_empty());
 
@@ -5884,7 +6134,10 @@ mod tests {
             review,
         );
         assert_eq!(review.submit_review_outcome.get(), None);
-        assert_eq!(app.notice().as_deref(), Some("1 comment did not post: offline."));
+        assert_eq!(
+            app.notice().as_deref(),
+            Some("1 comment did not post: offline.")
+        );
     }
 
     /// The answer to an issue comment lands on the composer that sent it:
@@ -5904,8 +6157,8 @@ mod tests {
         review.open_composer(None, None, "Looks good".into(), choice);
         review.set_destination(Destination::GitHub);
         review.start_posting(3, "Looks good".into());
-        let posted = |item_id: &str, token: u64, result: Result<(), String>| {
-            Event::IssueCommentPosted {
+        let posted =
+            |item_id: &str, token: u64, result: Result<(), String>| Event::IssueCommentPosted {
                 item_id: item_id.into(),
                 token,
                 result: result.map(|()| {
@@ -5923,8 +6176,7 @@ mod tests {
                         viewer_can_update: false,
                     })
                 }),
-            }
-        };
+            };
 
         app.apply_with_review(posted("other", 3, Err("no".into())), review);
         assert!(review.posting.get().is_some(), "another item's answer");
@@ -5935,13 +6187,19 @@ mod tests {
         assert!(review.posting.get().is_none());
         assert!(review.composer.get().is_some(), "the text stays");
         assert_eq!(review.composer_draft.get(), "Looks good");
-        assert_eq!(review.composer_error.get().as_deref(), Some("GitHub said no"));
+        assert_eq!(
+            review.composer_error.get().as_deref(),
+            Some("GitHub said no")
+        );
 
         review.start_posting(4, "Looks good".into());
         assert!(review.composer_error.get().is_none());
         app.apply_with_review(posted("wt", 4, Ok(())), review);
         assert!(review.posting.get().is_none());
-        assert!(review.composer.get().is_none(), "posted, the composer closes");
+        assert!(
+            review.composer.get().is_none(),
+            "posted, the composer closes"
+        );
     }
 
     #[test]
@@ -6037,8 +6295,8 @@ mod tests {
                     body: "Approved before navigation".into(),
                     state: "APPROVED".into(),
                     submitted_at: Some("2026-09-20T18:05:00Z".parse().unwrap()),
-                    html_url:
-                        "https://github.com/slatedb/slatedb/pull/7#pullrequestreview-101".into(),
+                    html_url: "https://github.com/slatedb/slatedb/pull/7#pullrequestreview-101"
+                        .into(),
                 })),
                 posted: 0,
                 unmatched: Vec::new(),
@@ -6498,7 +6756,11 @@ mod tests {
             Some(ToastKind::Message { text, .. }) => Some(text),
             _ => None,
         };
-        let ready = || Event::Update(UpdateStatus::Ready { version: "0.2.0".into() });
+        let ready = || {
+            Event::Update(UpdateStatus::Ready {
+                version: "0.2.0".into(),
+            })
+        };
         let _root = floem::headless::TestRoot::new();
         let app = AppState::new();
 
@@ -6511,12 +6773,20 @@ mod tests {
         // it, and nothing new is said.
         app.apply(ready());
         assert_eq!(message(&app), None);
-        assert_eq!(app.update.get(), UpdateStatus::Ready { version: "0.2.0".into() });
+        assert_eq!(
+            app.update.get(),
+            UpdateStatus::Ready {
+                version: "0.2.0".into()
+            }
+        );
 
         app.apply(Event::Update(UpdateStatus::Failed {
             version: "0.2.0".into(),
             error: "couldn't move /Applications/Perch.app aside".into(),
         }));
-        assert_eq!(message(&app).as_deref(), Some("couldn't move /Applications/Perch.app aside"));
+        assert_eq!(
+            message(&app).as_deref(),
+            Some("couldn't move /Applications/Perch.app aside")
+        );
     }
 }

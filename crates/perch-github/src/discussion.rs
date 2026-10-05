@@ -205,9 +205,21 @@ impl Discussion {
     /// key on.
     pub fn reactions_by_id(&self) -> impl Iterator<Item = (&str, &Reactions)> {
         std::iter::once((self.node_id.as_str(), &self.reactions))
-            .chain(self.comments.iter().map(|c| (c.node_id.as_str(), &c.reactions)))
-            .chain(self.reviews.iter().map(|r| (r.node_id.as_str(), &r.reactions)))
-            .chain(self.review_comments.iter().map(|c| (c.node_id.as_str(), &c.reactions)))
+            .chain(
+                self.comments
+                    .iter()
+                    .map(|c| (c.node_id.as_str(), &c.reactions)),
+            )
+            .chain(
+                self.reviews
+                    .iter()
+                    .map(|r| (r.node_id.as_str(), &r.reactions)),
+            )
+            .chain(
+                self.review_comments
+                    .iter()
+                    .map(|c| (c.node_id.as_str(), &c.reactions)),
+            )
             .filter(|(id, _)| !id.is_empty())
     }
 }
@@ -662,7 +674,11 @@ impl ReviewThreadsData {
     /// thread whose first comment has no id cannot be matched and is left
     /// out.
     pub(crate) fn into_page(self) -> Option<(Vec<ReviewThreadState>, Option<String>)> {
-        let connection = self.repository?.pull_request?.review_threads.unwrap_or_default();
+        let connection = self
+            .repository?
+            .pull_request?
+            .review_threads
+            .unwrap_or_default();
         let threads = connection
             .nodes
             .into_iter()
@@ -705,7 +721,11 @@ pub(crate) fn resolve_thread_mutation(resolve: bool) -> String {
 /// The mutation's answer: the thread as it stands after.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ResolveThreadData {
-    #[serde(default, rename = "resolveReviewThread", alias = "unresolveReviewThread")]
+    #[serde(
+        default,
+        rename = "resolveReviewThread",
+        alias = "unresolveReviewThread"
+    )]
     payload: Option<ResolveThreadPayload>,
 }
 
@@ -760,9 +780,8 @@ impl PullSummary {
     /// ever from here; the other two are here as well so a pull request
     /// whose timeline could not be read still says how it ended.
     pub(crate) fn events(&self) -> Vec<PullEvent> {
-        let login = |user: &Option<UserRef>| {
-            user.as_ref().map(|u| u.login.clone()).unwrap_or_default()
-        };
+        let login =
+            |user: &Option<UserRef>| user.as_ref().map(|u| u.login.clone()).unwrap_or_default();
         let mut events = Vec::new();
         if let Some(at) = self.created_at {
             events.push(PullEvent::new(PullEventKind::Opened, at, login(&self.user)));
@@ -807,7 +826,10 @@ mod tests {
         assert_eq!(c.side, Side::Left);
         assert_eq!(c.start_side, Some(Side::Right));
         assert_eq!((c.start_line, c.original_start_line), (Some(39), Some(38)));
-        assert_eq!((c.commit_id.as_str(), c.original_commit_id.as_str()), ("head", "orig"));
+        assert_eq!(
+            (c.commit_id.as_str(), c.original_commit_id.as_str()),
+            ("head", "orig")
+        );
         assert_eq!(c.diff_hunk, "@@ -40,3 +40,3 @@");
     }
 
@@ -874,12 +896,18 @@ mod tests {
         assert!(d.set_reactions("PRRC_3", &hooray));
         assert!(d.set_reactions("PR_1", &hooray));
         assert!(!d.set_reactions("PRRC_404", &hooray));
-        assert!(!d.set_reactions("", &hooray), "a missing id matches nothing");
+        assert!(
+            !d.set_reactions("", &hooray),
+            "a missing id matches nothing"
+        );
         assert_eq!(d.review_comments[0].reactions, hooray);
         assert_eq!(d.reactions, hooray);
         assert!(d.review_comments[1].reactions.is_empty());
         assert_eq!(
-            d.reactions_by_id().filter(|(_, r)| !r.is_empty()).map(|(id, _)| id).collect::<Vec<_>>(),
+            d.reactions_by_id()
+                .filter(|(_, r)| !r.is_empty())
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
             vec!["PR_1", "PRRC_3"]
         );
     }
@@ -891,7 +919,14 @@ mod tests {
     #[test]
     fn an_open_pull_request_has_only_been_opened() {
         let events = summary(r#"{"created_at":"2026-09-14T14:02:00Z","merged":false}"#).events();
-        assert_eq!(events, vec![PullEvent::new(PullEventKind::Opened, at("2026-09-14T14:02:00Z"), "")]);
+        assert_eq!(
+            events,
+            vec![PullEvent::new(
+                PullEventKind::Opened,
+                at("2026-09-14T14:02:00Z"),
+                ""
+            )]
+        );
     }
 
     #[test]
@@ -918,7 +953,10 @@ mod tests {
                 "closed_at":"2026-09-17T15:00:00Z","merged_by":null}"#,
         )
         .events();
-        assert_eq!(events[1], PullEvent::new(PullEventKind::Closed, at("2026-09-17T15:00:00Z"), ""));
+        assert_eq!(
+            events[1],
+            PullEvent::new(PullEventKind::Closed, at("2026-09-17T15:00:00Z"), "")
+        );
     }
 
     #[test]
@@ -995,19 +1033,20 @@ mod tests {
     #[test]
     fn resolving_and_unresolving_are_two_mutations_that_answer_with_the_thread() {
         let resolve = resolve_thread_mutation(true);
-        assert!(resolve.contains("resolveReviewThread(input: {threadId: $thread})"), "{resolve}");
+        assert!(
+            resolve.contains("resolveReviewThread(input: {threadId: $thread})"),
+            "{resolve}"
+        );
         assert!(!resolve.contains("unresolve"), "{resolve}");
         assert!(resolve_thread_mutation(false).contains("unresolveReviewThread("));
 
-        let resolved: ResolveThreadData = serde_json::from_str(
-            r#"{"resolveReviewThread":{"thread":{"isResolved":true}}}"#,
-        )
-        .unwrap();
+        let resolved: ResolveThreadData =
+            serde_json::from_str(r#"{"resolveReviewThread":{"thread":{"isResolved":true}}}"#)
+                .unwrap();
         assert_eq!(resolved.into_resolved(), Some(true));
-        let unresolved: ResolveThreadData = serde_json::from_str(
-            r#"{"unresolveReviewThread":{"thread":{"isResolved":false}}}"#,
-        )
-        .unwrap();
+        let unresolved: ResolveThreadData =
+            serde_json::from_str(r#"{"unresolveReviewThread":{"thread":{"isResolved":false}}}"#)
+                .unwrap();
         assert_eq!(unresolved.into_resolved(), Some(false));
         let empty: ResolveThreadData =
             serde_json::from_str(r#"{"resolveReviewThread":null}"#).unwrap();
@@ -1115,8 +1154,14 @@ mod tests {
         let rc = &d.review_comments[0];
         assert_eq!((rc.id, rc.line, rc.side), (3, Some(41), Side::Right));
         assert_eq!(rc.user_avatar_url, "");
-        assert_eq!((rc.start_line, rc.original_start_line, rc.start_side), (None, None, None));
-        assert_eq!((rc.commit_id.as_str(), rc.original_commit_id.as_str()), ("", ""));
+        assert_eq!(
+            (rc.start_line, rc.original_start_line, rc.start_side),
+            (None, None, None)
+        );
+        assert_eq!(
+            (rc.commit_id.as_str(), rc.original_commit_id.as_str()),
+            ("", "")
+        );
     }
 
     #[test]

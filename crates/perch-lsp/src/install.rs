@@ -62,7 +62,12 @@ pub(crate) async fn install_within(install: &Install, timeout: Duration) -> Resu
 
 /// Fetch the tarball at `url` into `staging`, check it is the one pinned,
 /// and unpack it there. macOS's own curl and tar do the work.
-async fn download(url: &str, sha256: &str, staging: &Path, timeout: Duration) -> Result<(), String> {
+async fn download(
+    url: &str,
+    sha256: &str,
+    staging: &Path,
+    timeout: Duration,
+) -> Result<(), String> {
     let tarball = staging.join("download.tar.gz");
     let tarball_arg = tarball.display().to_string();
     run(
@@ -83,7 +88,12 @@ async fn download(url: &str, sha256: &str, staging: &Path, timeout: Duration) ->
     }
     run(
         Path::new("/usr/bin/tar"),
-        &["-xzf".into(), tarball_arg, "-C".into(), staging.display().to_string()],
+        &[
+            "-xzf".into(),
+            tarball_arg,
+            "-C".into(),
+            staging.display().to_string(),
+        ],
         &[],
         timeout,
     )
@@ -110,7 +120,11 @@ fn sha256_of(path: &Path) -> Result<String, String> {
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 /// An empty directory at `dir`, whatever was there.
@@ -158,8 +172,14 @@ async fn run(
     let tail = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let mut readers = Vec::new();
     for stream in [
-        child.stdout.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
-        child.stderr.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+        child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+        child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
     ]
     .into_iter()
     .flatten()
@@ -183,7 +203,10 @@ async fn run(
         Ok(Err(e)) => return Err(format!("{name} failed: {e}")),
         Err(_) => {
             let _ = child.kill().await;
-            return Err(format!("{name} took longer than {} minutes", timeout.as_secs() / 60));
+            return Err(format!(
+                "{name} took longer than {} minutes",
+                timeout.as_secs() / 60
+            ));
         }
     };
     for reader in readers {
@@ -221,7 +244,10 @@ mod tests {
         let into = dir.path().join("gopls/0.23.0");
         let staging = partial(&into);
         let ok = sh(
-            &format!("test \"$PERCH_TEST\" = yes && touch {}/gopls", staging.display()),
+            &format!(
+                "test \"$PERCH_TEST\" = yes && touch {}/gopls",
+                staging.display()
+            ),
             Some(into.clone()),
         );
         install(&ok).await.unwrap();
@@ -269,7 +295,10 @@ mod tests {
             into: into.clone(),
         };
         let error = install(&wrong).await.unwrap_err();
-        assert!(error.contains(&sha256) && error.contains(&"0".repeat(64)), "{error}");
+        assert!(
+            error.contains(&sha256) && error.contains(&"0".repeat(64)),
+            "{error}"
+        );
         assert!(!into.exists() && !partial(&into).exists());
 
         let right = Install::Download {
@@ -278,7 +307,10 @@ mod tests {
             into: into.clone(),
         };
         install(&right).await.unwrap();
-        assert_eq!(std::fs::read_to_string(into.join("plugins/launcher.jar")).unwrap(), "jar");
+        assert_eq!(
+            std::fs::read_to_string(into.join("plugins/launcher.jar")).unwrap(),
+            "jar"
+        );
         assert!(!into.join("download.tar.gz").exists());
         assert!(!partial(&into).exists());
     }
@@ -286,7 +318,9 @@ mod tests {
     #[tokio::test]
     async fn an_install_that_hangs_is_given_up() {
         let hang = sh("sleep 30", None);
-        let error = install_within(&hang, Duration::from_millis(200)).await.unwrap_err();
+        let error = install_within(&hang, Duration::from_millis(200))
+            .await
+            .unwrap_err();
         assert!(error.contains("took longer"), "{error}");
     }
 }

@@ -81,8 +81,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let kind = ServerKind::for_path(&args[1]).unwrap_or(ServerKind::RustAnalyzer);
-    let spec = find(kind, &root, &Env::current(servers_dir()))
-        .map_err(|missing| missing.describe())?;
+    let spec =
+        find(kind, &root, &Env::current(servers_dir())).map_err(|missing| missing.describe())?;
     eprintln!("server: {}", spec.binary.display());
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -117,7 +117,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await
     .unwrap_or(false);
 
-    eprintln!("\nready: {ready} after {:.1}s", started.elapsed().as_secs_f32());
+    eprintln!(
+        "\nready: {ready} after {:.1}s",
+        started.elapsed().as_secs_f32()
+    );
     // What it says after, a warning about its build scripts say, is
     // printed as it comes.
     tokio::spawn(async move {
@@ -140,7 +143,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => eprintln!("\nno hover at {line}:{col}"),
             }
 
-            let definitions = client.definition(&file, line, col).await.unwrap_or_default();
+            let definitions = client
+                .definition(&file, line, col)
+                .await
+                .unwrap_or_default();
             eprintln!("\ndefinitions: {}", definitions.len());
             for d in definitions.iter().take(3) {
                 eprintln!(
@@ -248,8 +254,12 @@ fn servers_dir() -> PathBuf {
 /// `--symbols`: every symbol the workspace search names for `query`,
 /// asked for all kinds as Perch asks, once the server has indexed.
 async fn search(root: &Path, query: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let spec = find(ServerKind::RustAnalyzer, root, &Env::current(std::env::temp_dir()))
-        .map_err(|missing| missing.describe())?;
+    let spec = find(
+        ServerKind::RustAnalyzer,
+        root,
+        &Env::current(std::env::temp_dir()),
+    )
+    .map_err(|missing| missing.describe())?;
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let client = Client::start(spec, root, tx).await?;
     let query = format!("{query}#");
@@ -306,7 +316,12 @@ async fn answered<T>(
 }
 
 fn describe(item: &CallHierarchyItem) -> String {
-    format!("{:?} at {}:{}", item.kind, item.uri.as_str().rsplit('/').next().unwrap_or("?"), item.selection_range.start.line + 1)
+    format!(
+        "{:?} at {}:{}",
+        item.kind,
+        item.uri.as_str().rsplit('/').next().unwrap_or("?"),
+        item.selection_range.start.line + 1
+    )
 }
 
 fn print_locations(root: &Path, locations: &[Location]) {

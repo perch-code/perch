@@ -72,7 +72,8 @@ fn print(filters: &ItemFilters) -> Result<(), String> {
     let unread = |item: &Item| {
         item.subject.as_ref().is_some_and(|subject| {
             threads.iter().any(|thread| {
-                thread.unread && thread.is_about(subject.repo_full_name(), subject.kind(), subject.number())
+                thread.unread
+                    && thread.is_about(subject.repo_full_name(), subject.kind(), subject.number())
             })
         })
     };
@@ -232,18 +233,28 @@ mod tests {
             text(&worktrees("worktrees=recent")),
             "as saved while Browse showed Recent"
         );
-        assert_eq!(text(&worktrees("tab=inbox")), "", "the inbox lists no items");
+        assert_eq!(
+            text(&worktrees("tab=inbox")),
+            "",
+            "the inbox lists no items"
+        );
     }
 
     #[test]
     fn chips_go_when_pr_status_is_off_and_the_row_still_names_its_repository() {
         let got = text(&worktrees("worktrees=recent;show_pr_status=0;query=fence"));
-        assert_eq!(got, "  P  Fence the manifest  [criccomini/perch #57 · fence]\n");
+        assert_eq!(
+            got,
+            "  P  Fence the manifest  [criccomini/perch #57 · fence]\n"
+        );
     }
 
     #[test]
     fn repository_filter_limits_the_printed_list() {
-        assert_eq!(text(&worktrees("repository=criccomini/perch")), text(&worktrees("")));
+        assert_eq!(
+            text(&worktrees("repository=criccomini/perch")),
+            text(&worktrees(""))
+        );
         assert_eq!(text(&worktrees("repository=slatedb/slatedb")), "");
     }
 

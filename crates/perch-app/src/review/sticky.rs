@@ -120,7 +120,10 @@ pub(crate) fn place(
     }
     let last_row = rows - 1;
     let start = |line: usize| starts.get(line).map_or(last_row, |&r| r.min(last_row));
-    let end = |line: usize| ends.get(line).map_or(Some(last_row), |r| r.map(|r| r.min(last_row)));
+    let end = |line: usize| {
+        ends.get(line)
+            .map_or(Some(last_row), |r| r.map(|r| r.min(last_row)))
+    };
     blocks
         .iter()
         .filter_map(|&(first, last)| {
@@ -154,7 +157,9 @@ pub(crate) fn pinned(placed: &[Placed], scroll_top: f64, line_height: f64, max: 
         let slot_top = scroll_top + slot as f64 * line_height;
         // In order of first line, so every block after this one starts
         // lower still.
-        if p.start_row as f64 * line_height >= slot_top || inside.is_some_and(|end| p.start_row > end) {
+        if p.start_row as f64 * line_height >= slot_top
+            || inside.is_some_and(|end| p.start_row > end)
+        {
             break;
         }
         let bottom = (p.end_row + 1) as f64 * line_height;
@@ -523,7 +528,13 @@ mod tests {
 
     /// Placed one row per line, nothing folded.
     fn flat(blocks: &[(usize, usize)], rows: usize) -> Vec<Placed> {
-        place(blocks, rows, rows, |line| (line < rows).then_some(line), |_| false)
+        place(
+            blocks,
+            rows,
+            rows,
+            |line| (line < rows).then_some(line),
+            |_| false,
+        )
     }
 
     fn lines(pins: &[Pin]) -> Vec<usize> {
@@ -607,14 +618,23 @@ mod tests {
             20..=29 => Some(line - 14),
             _ => None,
         };
-        let blocks = [scope(0, 12), scope(2, 8), scope(9, 11), scope(14, 28), scope(15, 27)];
+        let blocks = [
+            scope(0, 12),
+            scope(2, 8),
+            scope(9, 11),
+            scope(14, 28),
+            scope(15, 27),
+        ];
         let placed = place(&blocks, 16, 30, row_of, |row| row == 5);
         let at = |line, start_row, end_row| Placed {
             line,
             start_row,
             end_row,
         };
-        assert_eq!(placed, vec![at(0, 0, 4), at(2, 2, 4), at(14, 5, 14), at(15, 5, 13)]);
+        assert_eq!(
+            placed,
+            vec![at(0, 0, 4), at(2, 2, 4), at(14, 5, 14), at(15, 5, 13)]
+        );
         // The first impl slides out alone, and the second takes the top
         // once it has gone.
         assert_eq!(lines(&pinned(&placed, 4.5 * LH, LH, 5)), vec![0]);

@@ -127,7 +127,10 @@ pub(crate) fn refusal(app: AppState, state: ReviewState, title: &str) -> Option<
             ))
         }
         Some(on) if on != readiness.branch => {
-            return Some(format!("The worktree is on {on}, not {}.", readiness.branch))
+            return Some(format!(
+                "The worktree is on {on}, not {}.",
+                readiness.branch
+            ))
         }
         Some(_) => {}
     }
@@ -159,7 +162,11 @@ pub fn surface(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
     let asked = Memo::new(move |_| {
         let item = state.item.with(|i| {
             i.as_ref().filter(|i| is_branch(i)).map(|i| {
-                let head = i.checkout.as_ref().map(|c| c.head_sha.clone()).unwrap_or_default();
+                let head = i
+                    .checkout
+                    .as_ref()
+                    .map(|c| c.head_sha.clone())
+                    .unwrap_or_default();
                 (i.id.clone(), head)
             })
         })?;
@@ -223,7 +230,12 @@ pub fn surface(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
 }
 
 /// One line: what the branch has, and the way into the form.
-fn folded(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: String) -> impl IntoView {
+fn folded(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    item_id: String,
+) -> impl IntoView {
     Stack::horizontal((
         sidebar_glyph(SidebarIcon::PullRequest, theme::fg_muted)
             .style(|s| s.size(14.0, 14.0).flex_shrink(0.0_f32)),
@@ -252,7 +264,13 @@ fn folded(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: Stri
             move || unfold(app, state, &backend, &item_id),
         ),
     ))
-    .style(|s| s.width_full().items_center().gap(8.0).padding_horiz(16.0).padding_vert(10.0))
+    .style(|s| {
+        s.width_full()
+            .items_center()
+            .gap(8.0)
+            .padding_horiz(16.0)
+            .padding_vert(10.0)
+    })
 }
 
 /// Open the form, filling it the first time from what the backend read.
@@ -410,15 +428,14 @@ fn body_editor(
 
     use crate::review::threads::cmd_enter;
 
-    let editor =
-        prose_editor(draft_of(app, &item_id).body, "Description", Some(state.next_token()));
-    let mentioner = crate::review::mention::attach(
-        app,
-        state,
-        backend,
-        editor.editor(),
-        |path| format!("`{path}` "),
+    let editor = prose_editor(
+        draft_of(app, &item_id).body,
+        "Description",
+        Some(state.next_token()),
     );
+    let mentioner = crate::review::mention::attach(app, state, backend, editor.editor(), |path| {
+        format!("`{path}` ")
+    });
     let focus_mentioner = mentioner.clone();
     let blur_mentioner = mentioner.clone();
     let key_mentioner = mentioner.clone();
@@ -487,7 +504,12 @@ fn pull_body_grip(state: ReviewState) -> Grip {
 
 /// Write with Claude or Codex, whichever was last asked here, and Stop
 /// while it writes.
-fn writer(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: String) -> impl IntoView {
+fn writer(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    item_id: String,
+) -> impl IntoView {
     let choice = move || {
         state
             .agent_last
@@ -537,13 +559,14 @@ fn writer(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: Stri
 fn offer(app: AppState, state: ReviewState, item_id: String) -> impl IntoView {
     let shown = move || state.description_offer.with(Option::is_some);
     Stack::horizontal((
-        Label::derived(|| "The description is written. Replace what you wrote?".to_string())
-            .style(|s| {
+        Label::derived(|| "The description is written. Replace what you wrote?".to_string()).style(
+            |s| {
                 s.font_size(theme::TEXT_META)
                     .color(theme::fg())
                     .min_width(0.0)
                     .flex_grow(1.0_f32)
-            }),
+            },
+        ),
         action_button(
             || "Keep mine".to_string(),
             "open-pull-request-keep",
@@ -630,7 +653,8 @@ fn base_menu(app: AppState, state: ReviewState, item_id: String) -> Menu {
                     item.checked(checked).action(move || {
                         // The branch's own base is no pick at all, so the
                         // form follows it if the branch moves.
-                        let pick = (own.as_deref() != Some(picked.as_str())).then(|| picked.clone());
+                        let pick =
+                            (own.as_deref() != Some(picked.as_str())).then(|| picked.clone());
                         update_draft(app, &item_id, |draft| draft.base = pick);
                     })
                 });
@@ -674,10 +698,14 @@ fn draft_box(app: AppState, item_id: String) -> impl IntoView {
 /// A warning that stops nothing, and the reason Open pull request is off.
 fn notes(app: AppState, state: ReviewState, title: RwSignal<String>) -> impl IntoView {
     let dirty = move || {
-        ready(state).filter(|r| r.dirty_files > 0).map(|r| match r.dirty_files {
-            1 => "1 file has uncommitted changes. It won't be in the pull request.".to_string(),
-            n => format!("{n} files have uncommitted changes. They won't be in the pull request."),
-        })
+        ready(state)
+            .filter(|r| r.dirty_files > 0)
+            .map(|r| match r.dirty_files {
+                1 => "1 file has uncommitted changes. It won't be in the pull request.".to_string(),
+                n => format!(
+                    "{n} files have uncommitted changes. They won't be in the pull request."
+                ),
+            })
     };
     let refused = move || {
         if state.pull_step.with(Option::is_some) {
@@ -706,7 +734,12 @@ fn notes(app: AppState, state: ReviewState, title: RwSignal<String>) -> impl Int
 
 fn error_line(state: ReviewState) -> impl IntoView {
     dyn_container(
-        move || state.pull_error.get().or_else(|| state.description_error.get()),
+        move || {
+            state
+                .pull_error
+                .get()
+                .or_else(|| state.description_error.get())
+        },
         |message| widgets::error_line(message, "open-pull-request-error"),
     )
     .style(|s| s.width_full())
@@ -724,7 +757,9 @@ mod tests {
         if id.debug_name().split_whitespace().any(|part| part == name) {
             return Some(id);
         }
-        id.children().into_iter().find_map(|child| named(child, name))
+        id.children()
+            .into_iter()
+            .find_map(|child| named(child, name))
     }
 
     fn find(id: floem::ViewId, text: &str) -> Option<floem::ViewId> {
@@ -836,11 +871,17 @@ mod tests {
             c,
             Command::PullRequestReadiness { item_id, base: None } if item_id == "item-7"
         )));
-        assert!(named(harness.root_id(), "open-pull-request").is_none(), "nothing read yet");
+        assert!(
+            named(harness.root_id(), "open-pull-request").is_none(),
+            "nothing read yet"
+        );
 
         state.pull_readiness.set(Some(Ok(readiness(0))));
         settle(&mut harness);
-        assert!(named(harness.root_id(), "open-pull-request").is_none(), "nothing to propose");
+        assert!(
+            named(harness.root_id(), "open-pull-request").is_none(),
+            "nothing to propose"
+        );
 
         state.pull_readiness.set(Some(Ok(readiness(3))));
         settle(&mut harness);
@@ -1021,7 +1062,10 @@ mod tests {
             state,
         );
         assert_eq!(state.pull_step.get_untracked(), None);
-        assert_eq!(state.pull_error.get_untracked().as_deref(), Some("Couldn't push"));
+        assert_eq!(
+            state.pull_error.get_untracked().as_deref(),
+            Some("Couldn't push")
+        );
         assert_eq!(draft_of(app, "item-7").title, "Kept");
 
         app.apply_with_review(
@@ -1078,7 +1122,10 @@ mod tests {
         settle(&mut harness);
         assert!(!state.describing.get_untracked());
         let draft = draft_of(app, "item-7");
-        assert_eq!((draft.title.as_str(), draft.body.as_str()), ("Agent title", "Agent body"));
+        assert_eq!(
+            (draft.title.as_str(), draft.body.as_str()),
+            ("Agent title", "Agent body")
+        );
         assert!(named(harness.root_id(), "open-pull-request-title").is_some());
 
         // Typed over: the next answer waits for the reader.
@@ -1134,8 +1181,14 @@ mod tests {
             ] {
                 let id = named(harness.root_id(), name).unwrap();
                 let rect = id.get_visual_rect_no_clip();
-                assert!(outer.x1 <= width + 0.5, "the form spills past {width}: {outer:?}");
-                assert!(rect.x1 <= outer.x1 + 0.5, "{name} spills past {width}: {rect:?}");
+                assert!(
+                    outer.x1 <= width + 0.5,
+                    "the form spills past {width}: {outer:?}"
+                );
+                assert!(
+                    rect.x1 <= outer.x1 + 0.5,
+                    "{name} spills past {width}: {rect:?}"
+                );
                 assert!(rect.width() > 20.0, "{name} squeezed at {width}: {rect:?}");
             }
         }
@@ -1168,8 +1221,15 @@ mod tests {
         harness.pointer_up(center.x, center.y + 150.0);
         settle(&mut harness);
         assert!(!state.pull_body_resizing.get());
-        assert_eq!(state.pull_body_height.get(), Some(theme::PULL_BODY_HEIGHT + 150.0));
+        assert_eq!(
+            state.pull_body_height.get(),
+            Some(theme::PULL_BODY_HEIGHT + 150.0)
+        );
         assert_eq!(height(), theme::PULL_BODY_HEIGHT + 150.0);
-        assert_eq!(state.composer_height.get(), None, "a comment's box is its own");
+        assert_eq!(
+            state.composer_height.get(),
+            None,
+            "a comment's box is its own"
+        );
     }
 }

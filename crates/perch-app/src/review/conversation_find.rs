@@ -421,7 +421,11 @@ mod tests {
     fn goes_dark_with_the_system() {
         let mut harness = harness().0;
         let left = crate::theme::dark_check::light_left(&mut harness);
-        assert!(left.is_empty(), "light colours left in dark:\n{}", left.join("\n"));
+        assert!(
+            left.is_empty(),
+            "light colours left in dark:\n{}",
+            left.join("\n")
+        );
     }
 
     fn harness() -> (HeadlessHarness, AppState, ReviewState) {

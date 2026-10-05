@@ -172,7 +172,9 @@ impl CommentThread {
 
     /// Whether anything in the thread went to GitHub, or is going.
     pub fn has_github_message(&self) -> bool {
-        self.messages.iter().any(|m| m.origin == ThreadOrigin::GitHub)
+        self.messages
+            .iter()
+            .any(|m| m.origin == ThreadOrigin::GitHub)
     }
 
     /// Whether the thread is on GitHub, so that resolving it is GitHub's.
@@ -269,7 +271,10 @@ pub fn review_threads_of(
     let comments: Vec<&ReviewComment> = discussion
         .review_comments
         .iter()
-        .filter(|c| !c.pull_request_review_id.is_some_and(|id| pending.contains(&id)))
+        .filter(|c| {
+            !c.pull_request_review_id
+                .is_some_and(|id| pending.contains(&id))
+        })
         .collect();
 
     let root_of = |c: &ReviewComment| -> u64 {
@@ -302,8 +307,16 @@ pub fn review_threads_of(
                 Some(_) => None,
             };
             let anchor = line.map(|line| {
-                let start_line = if at_head { root.start_line } else { root.original_start_line };
-                let commit = if at_head { &root.commit_id } else { &root.original_commit_id };
+                let start_line = if at_head {
+                    root.start_line
+                } else {
+                    root.original_start_line
+                };
+                let commit = if at_head {
+                    &root.commit_id
+                } else {
+                    &root.original_commit_id
+                };
                 Anchor {
                     path: root.path.clone(),
                     start_line: start_line.unwrap_or(line) as u32,
@@ -390,7 +403,10 @@ pub fn file_comment_anchor<'a>(
     let repo_url = &c.html_url[..c.html_url.find("/pull/")?];
     let body = c.body.trim_start();
     let (link, rest) = body.split_once('\n').unwrap_or((body, ""));
-    let link = link.trim_end().strip_prefix(repo_url)?.strip_prefix("/blob/")?;
+    let link = link
+        .trim_end()
+        .strip_prefix(repo_url)?
+        .strip_prefix("/blob/")?;
     let (commit, link) = link.split_once('/')?;
     let (path, lines) = link.split_once("#L")?;
     if path != url_path(&c.path) || commit.is_empty() {
@@ -1265,7 +1281,11 @@ mod tests {
         ]);
         let threads = review_threads_of(&d, "w", "fallback");
         let ids: Vec<_> = threads.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(ids, vec!["gh-7", "gh-1"], "threads sort by their root's time");
+        assert_eq!(
+            ids,
+            vec!["gh-7", "gh-1"],
+            "threads sort by their root's time"
+        );
         let first = &threads[1];
         assert_eq!(first.github_id, Some(1));
         assert_eq!(first.origin, ThreadOrigin::GitHub);
@@ -1278,7 +1298,10 @@ mod tests {
         assert_eq!(root.thread_id, "gh-1");
         assert_eq!(root.github_id, Some(1));
         assert_eq!(root.node_id.as_deref(), Some("PRRC_1"));
-        assert_eq!(root.html_url.as_deref(), Some("https://github.com/a/b/pull/1#discussion_r1"));
+        assert_eq!(
+            root.html_url.as_deref(),
+            Some("https://github.com/a/b/pull/1#discussion_r1")
+        );
         assert_eq!(root.diff_hunk.as_deref(), Some("@@ -40,3 +40,3 @@"));
         assert!(root.from_github() && !root.is_draft() && !root.is_private());
         assert_eq!(first.messages[2].thread_id, "gh-1");
@@ -1322,21 +1345,43 @@ mod tests {
         assert_eq!(thread.messages[0].body, "Unsigned types are untested.");
 
         // A link at another commit is to the base side's lines.
-        root.body = file_comment_body("https://github.com/a/b", "base", "src/my file.rs", 7, 7, "x");
+        root.body = file_comment_body(
+            "https://github.com/a/b",
+            "base",
+            "src/my file.rs",
+            7,
+            7,
+            "x",
+        );
         let (anchor, body) = file_comment_anchor(&root, "fallback").unwrap();
-        assert_eq!((anchor.side, anchor.start_line, anchor.line), (Side::Left, 7, 7));
+        assert_eq!(
+            (anchor.side, anchor.start_line, anchor.line),
+            (Side::Left, 7, 7)
+        );
         assert_eq!(anchor.commit_sha, "orig");
         assert_eq!(body, "x");
 
         // Anything else on a file has no lines.
         for other in [
             "Looks fine.".to_string(),
-            file_comment_body("https://github.com/o/other", "orig", "src/my file.rs", 7, 7, "x"),
+            file_comment_body(
+                "https://github.com/o/other",
+                "orig",
+                "src/my file.rs",
+                7,
+                7,
+                "x",
+            ),
             file_comment_body("https://github.com/a/b", "orig", "src/other.rs", 7, 7, "x"),
             "https://github.com/a/b/blob/orig/src/my%20file.rs#L9-L3".to_string(),
         ] {
             root.body = other;
-            assert_eq!(file_comment_anchor(&root, "fallback"), None, "{}", root.body);
+            assert_eq!(
+                file_comment_anchor(&root, "fallback"),
+                None,
+                "{}",
+                root.body
+            );
         }
         let threads = review_threads_of(&discussion(vec![root.clone()]), "w", "fallback");
         assert_eq!(threads[0].anchor, None);
@@ -1355,19 +1400,17 @@ mod tests {
             comment(2, None, "2026-09-16T11:39:00Z"),
         ]);
         d.review_comments[1].pull_request_review_id = Some(10);
-        d.reviews = vec![
-            crate::discussion::Review {
-                viewer_can_update: false,
-                id: 10,
-                node_id: String::new(),
-                user: "me".into(),
-                body: String::new(),
-                state: "PENDING".into(),
-                submitted_at: None,
-                html_url: String::new(),
-                reactions: Reactions::default(),
-            },
-        ];
+        d.reviews = vec![crate::discussion::Review {
+            viewer_can_update: false,
+            id: 10,
+            node_id: String::new(),
+            user: "me".into(),
+            body: String::new(),
+            state: "PENDING".into(),
+            submitted_at: None,
+            html_url: String::new(),
+            reactions: Reactions::default(),
+        }];
         let threads = review_threads_of(&d, "w", "");
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].id, "gh-1");
@@ -1410,7 +1453,10 @@ mod tests {
                 commit_sha: "orig".into(),
             })
         );
-        assert!(threads[0].outdated, "no head line means outdated without GitHub's word");
+        assert!(
+            threads[0].outdated,
+            "no head line means outdated without GitHub's word"
+        );
     }
 
     #[test]
@@ -1419,11 +1465,26 @@ mod tests {
         root.line = None;
         let mut d = discussion(vec![root, comment(2, None, "2026-09-16T11:39:00Z")]);
         d.review_threads = vec![
-            crate::discussion::ReviewThreadState { node_id: "PRRT_1".into(), root_comment_id: 1, resolved: true, outdated: false, can_resolve: true },
-            crate::discussion::ReviewThreadState { node_id: "PRRT_2".into(), root_comment_id: 2, resolved: false, outdated: true, can_resolve: false },
+            crate::discussion::ReviewThreadState {
+                node_id: "PRRT_1".into(),
+                root_comment_id: 1,
+                resolved: true,
+                outdated: false,
+                can_resolve: true,
+            },
+            crate::discussion::ReviewThreadState {
+                node_id: "PRRT_2".into(),
+                root_comment_id: 2,
+                resolved: false,
+                outdated: true,
+                can_resolve: false,
+            },
         ];
         let threads = review_threads_of(&d, "w", "");
-        assert!((threads[0].resolved, threads[0].outdated) == (true, false), "GitHub's word wins over the missing line");
+        assert!(
+            (threads[0].resolved, threads[0].outdated) == (true, false),
+            "GitHub's word wins over the missing line"
+        );
         assert!((threads[1].resolved, threads[1].outdated) == (false, true));
         // Resolving goes by the thread's own id, where GitHub allows it.
         assert_eq!(threads[0].node_id.as_deref(), Some("PRRT_1"));
@@ -1434,7 +1495,11 @@ mod tests {
 
     #[test]
     fn a_thread_github_said_nothing_about_cannot_be_resolved() {
-        let threads = review_threads_of(&discussion(vec![comment(1, None, "2026-09-16T11:38:00Z")]), "w", "");
+        let threads = review_threads_of(
+            &discussion(vec![comment(1, None, "2026-09-16T11:38:00Z")]),
+            "w",
+            "",
+        );
         assert_eq!(threads[0].node_id, None);
         assert!(!threads[0].can_resolve);
         assert!(!threads[0].resolvable());
@@ -1448,7 +1513,10 @@ mod tests {
         t.origin = ThreadOrigin::GitHub;
         assert!(t.resolvable(), "on its way with a draft, and not there yet");
         t.github_id = Some(3);
-        assert!(!t.resolvable(), "on GitHub, and GitHub has not said the reader may");
+        assert!(
+            !t.resolvable(),
+            "on GitHub, and GitHub has not said the reader may"
+        );
     }
 
     #[test]

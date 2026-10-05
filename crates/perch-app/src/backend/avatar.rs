@@ -43,7 +43,14 @@ pub(crate) fn drawn(bytes: Vec<u8>, url: &str) -> Vec<u8> {
     if let Some(cut) = CUT.lock().ok().and_then(|cut| cut.get(&key).cloned()) {
         return cut;
     }
-    match cut(&bytes, if app { crate::theme::APP_AVATAR_CORNER as f32 } else { 0.5 }) {
+    match cut(
+        &bytes,
+        if app {
+            crate::theme::APP_AVATAR_CORNER as f32
+        } else {
+            0.5
+        },
+    ) {
         Some(cut) => {
             if let Ok(mut memo) = CUT.lock() {
                 memo.insert(key, cut.clone());
@@ -134,7 +141,11 @@ pub(crate) mod tests {
             .unwrap()
             .into_rgba8();
         assert_eq!(cut.dimensions(), (SIDE, SIDE));
-        assert_eq!(cut.get_pixel(0, 0)[3], 0, "the corner is outside the circle");
+        assert_eq!(
+            cut.get_pixel(0, 0)[3],
+            0,
+            "the corner is outside the circle"
+        );
         assert_eq!(cut.get_pixel(SIDE / 2, SIDE / 2)[3], 255);
     }
 
@@ -158,12 +169,19 @@ pub(crate) mod tests {
     /// only in the rounding, solid where a circle would have cut it.
     #[test]
     fn an_apps_face_is_cut_to_a_rounded_square() {
-        let cut = image::load_from_memory(&drawn(picture(32, 32), "https://avatars.githubusercontent.com/in/15368?v=4"))
-            .unwrap()
-            .into_rgba8();
+        let cut = image::load_from_memory(&drawn(
+            picture(32, 32),
+            "https://avatars.githubusercontent.com/in/15368?v=4",
+        ))
+        .unwrap()
+        .into_rgba8();
         let alpha = |x, y| cut.get_pixel(x, y)[3];
         assert_eq!(alpha(0, 0), 0, "the very corner is rounded off");
-        assert_eq!(alpha(3, 3), 255, "a circle would cut here; the square keeps it");
+        assert_eq!(
+            alpha(3, 3),
+            255,
+            "a circle would cut here; the square keeps it"
+        );
         assert_eq!(alpha(16, 0), 255, "the edges are straight");
     }
 

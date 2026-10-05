@@ -126,7 +126,12 @@ fn search_list(state: AppState, backend: Rc<Backend>) -> impl IntoView {
                 let local = state
                     .item_filters
                     .with(|f| f.repository.as_deref().is_some_and(perch_github::is_local));
-                return if local { "Not a repository on GitHub" } else { "Pick a repository" }.to_string();
+                return if local {
+                    "Not a repository on GitHub"
+                } else {
+                    "Pick a repository"
+                }
+                .to_string();
             }
             match page() {
                 None => "Loading…".to_string(),
@@ -207,10 +212,9 @@ fn search_row(state: AppState, backend: Rc<Backend>, hit: SearchHit) -> impl Int
         _ => None,
     };
     let content = Stack::horizontal((
-        nav_row::glyph_box(state_glyph(
-            subject_state,
-            move || icons::state_color(subject_state),
-        )),
+        nav_row::glyph_box(state_glyph(subject_state, move || {
+            icons::state_color(subject_state)
+        })),
         nav_row::lines(
             nav_row::title_label(hit.title.clone(), false, unread.clone()),
             Stack::horizontal((
@@ -229,7 +233,10 @@ fn search_row(state: AppState, backend: Rc<Backend>, hit: SearchHit) -> impl Int
                         state
                             .participants
                             .with(|found| {
-                                found.get(&key).filter(|p| !p.is_empty()).map(|p| nav_row::participant_faces(p))
+                                found
+                                    .get(&key)
+                                    .filter(|p| !p.is_empty())
+                                    .map(|p| nav_row::participant_faces(p))
                             })
                             .unwrap_or_else(|| vec![author.clone()])
                     }
@@ -264,7 +271,8 @@ fn search_row(state: AppState, backend: Rc<Backend>, hit: SearchHit) -> impl Int
             let url = url.clone();
             Menu::new().item("Open on GitHub", move |m| {
                 let url = url.clone();
-                m.icon(SidebarIcon::External).action(move || open_in_browser(&url))
+                m.icon(SidebarIcon::External)
+                    .action(move || open_in_browser(&url))
             })
         })
         .style(|s| nav_row::row_style(s, false));
@@ -353,7 +361,10 @@ mod tests {
         let query = "author:@me is:open archived:false".to_string();
         assert_eq!(searches(&mut commands), [(query.clone(), 1, false)]);
         assert!(shown(&harness, "browse empty"), "loading");
-        assert!(shown(&harness, "sidebar filter"), "Browse has the menu every tab has");
+        assert!(
+            shown(&harness, "sidebar filter"),
+            "Browse has the menu every tab has"
+        );
 
         state.apply(Event::BrowseResults {
             query: query.clone(),
@@ -400,7 +411,11 @@ mod tests {
         repaint(&mut harness);
         assert_eq!(
             searches(&mut commands),
-            [("repo:a/b is:closed archived:false sort:created-desc".to_string(), 1, false)]
+            [(
+                "repo:a/b is:closed archived:false sort:created-desc".to_string(),
+                1,
+                false
+            )]
         );
 
         // A repository that is not on GitHub has nothing to search.

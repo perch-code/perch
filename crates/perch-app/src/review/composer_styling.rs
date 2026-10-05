@@ -92,7 +92,9 @@ impl Styling for ComposerStyling {
                         a = a.family(&self.code_families).color(theme::syntax_string())
                     }
                     "text.uri" | "text.reference" => a = a.color(theme::accent()),
-                    "punctuation.special" | "punctuation.delimiter" => a = a.color(theme::fg_subtle()),
+                    "punctuation.special" | "punctuation.delimiter" => {
+                        a = a.color(theme::fg_subtle())
+                    }
                     _ => continue,
                 }
                 attrs.add_span(span.start..span.end, a);

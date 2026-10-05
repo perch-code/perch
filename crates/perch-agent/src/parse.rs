@@ -120,12 +120,20 @@ fn permission_denied_event(v: &Value) -> RunEvent {
     let tool = v
         .get("tool_name")
         .and_then(Value::as_str)
-        .or_else(|| denial.and_then(|entry| entry.get("tool_name")).and_then(Value::as_str))
+        .or_else(|| {
+            denial
+                .and_then(|entry| entry.get("tool_name"))
+                .and_then(Value::as_str)
+        })
         .map(str::to_string);
     let message = v
         .get("message")
         .and_then(Value::as_str)
-        .or_else(|| denial.and_then(|entry| entry.get("message")).and_then(Value::as_str))
+        .or_else(|| {
+            denial
+                .and_then(|entry| entry.get("message"))
+                .and_then(Value::as_str)
+        })
         .filter(|message| !message.trim().is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| match tool.as_deref() {
@@ -233,8 +241,16 @@ pub fn summarize_tool_call(name: &str, input: &Value) -> String {
         // A command let out of the sandbox says so: in a Work run an
         // automatic reviewer may have let it, and the step is how the
         // reader sees that.
-        "Bash" if input.get("dangerouslyDisableSandbox").and_then(Value::as_bool) == Some(true) => {
-            format!("Ran outside the sandbox: {}", strip_cd(&field("command").unwrap_or_default()))
+        "Bash"
+            if input
+                .get("dangerouslyDisableSandbox")
+                .and_then(Value::as_bool)
+                == Some(true) =>
+        {
+            format!(
+                "Ran outside the sandbox: {}",
+                strip_cd(&field("command").unwrap_or_default())
+            )
         }
         // In auto mode a command can name the hosts it needs, which the
         // classifier reviews with it; the step says which.
@@ -296,7 +312,10 @@ pub fn summarize_tool_call(name: &str, input: &Value) -> String {
 fn edit_counts(name: &str, input: &Value) -> Option<(usize, usize)> {
     let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
     match name {
-        "Edit" => Some(changed_lines(&text(input, "old_string")?, &text(input, "new_string")?)),
+        "Edit" => Some(changed_lines(
+            &text(input, "old_string")?,
+            &text(input, "new_string")?,
+        )),
         "MultiEdit" => {
             let edits = input.get("edits")?.as_array()?;
             Some(edits.iter().fold((0, 0), |(added, removed), edit| {
@@ -389,24 +408,42 @@ mod tests {
             "old_string": "fn a() {\n    1\n}",
             "new_string": "fn a() {\n    2\n    3\n}",
         });
-        assert_eq!(summarize_tool_call("Edit", &edit), "Asked to edit wt/src/db.rs (+2 \u{2212}1)");
+        assert_eq!(
+            summarize_tool_call("Edit", &edit),
+            "Asked to edit wt/src/db.rs (+2 \u{2212}1)"
+        );
         let many = serde_json::json!({
             "file_path": "a.rs",
             "edits": [{"old_string": "x", "new_string": "y"}, {"old_string": "", "new_string": "z"}],
         });
-        assert_eq!(summarize_tool_call("MultiEdit", &many), "Asked to edit a.rs (+2 \u{2212}1)");
+        assert_eq!(
+            summarize_tool_call("MultiEdit", &many),
+            "Asked to edit a.rs (+2 \u{2212}1)"
+        );
         let write = serde_json::json!({"file_path": "a.rs", "content": "one\ntwo\n"});
-        assert_eq!(summarize_tool_call("Write", &write), "Asked to edit a.rs (+2 \u{2212}0)");
+        assert_eq!(
+            summarize_tool_call("Write", &write),
+            "Asked to edit a.rs (+2 \u{2212}0)"
+        );
         let notebook = serde_json::json!({"file_path": "n.ipynb"});
-        assert_eq!(summarize_tool_call("NotebookEdit", &notebook), "Asked to edit n.ipynb");
+        assert_eq!(
+            summarize_tool_call("NotebookEdit", &notebook),
+            "Asked to edit n.ipynb"
+        );
     }
 
     #[test]
     fn a_command_let_out_or_given_hosts_says_so() {
         let out = serde_json::json!({"command": "echo x > ~/f", "dangerouslyDisableSandbox": true});
-        assert_eq!(summarize_tool_call("Bash", &out), "Ran outside the sandbox: echo x > ~/f");
+        assert_eq!(
+            summarize_tool_call("Bash", &out),
+            "Ran outside the sandbox: echo x > ~/f"
+        );
         let hosts = serde_json::json!({"command": "curl https://example.com", "allowed_domains": ["example.com"]});
-        assert_eq!(summarize_tool_call("Bash", &hosts), "Ran curl https://example.com (network: example.com)");
+        assert_eq!(
+            summarize_tool_call("Bash", &hosts),
+            "Ran curl https://example.com (network: example.com)"
+        );
     }
     use serde_json::json;
 

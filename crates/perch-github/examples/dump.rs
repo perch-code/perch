@@ -7,9 +7,8 @@ use perch_github::{resolve_token, Config, GitHub};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = Config::load();
-    let token = resolve_token(&config).ok_or_else(|| {
-        anyhow::anyhow!("no token: set GITHUB_TOKEN or run `gh auth login`")
-    })?;
+    let token = resolve_token(&config)
+        .ok_or_else(|| anyhow::anyhow!("no token: set GITHUB_TOKEN or run `gh auth login`"))?;
     eprintln!("token source: {}", token.source.describe());
 
     let gh = GitHub::new(&token.value)?;

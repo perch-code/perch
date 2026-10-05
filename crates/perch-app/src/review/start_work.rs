@@ -12,7 +12,9 @@ use floem::reactive::{Memo, SignalGet, SignalUpdate, SignalWith};
 use floem::style::Position;
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 
-use perch_github::{Issue, Item, ItemKind, ItemSubject, PullRequest, SubjectKind, SubjectState, Thread};
+use perch_github::{
+    Issue, Item, ItemKind, ItemSubject, PullRequest, SubjectKind, SubjectState, Thread,
+};
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
@@ -30,7 +32,9 @@ pub fn can_start_work(item: &Item) -> bool {
     }
     match &item.subject {
         Some(ItemSubject::Issue(_)) => !perch_github::is_local(&item.repo_full_name),
-        Some(ItemSubject::PullRequest(pr)) => !pr.merged && !perch_github::is_local(&item.repo_full_name),
+        Some(ItemSubject::PullRequest(pr)) => {
+            !pr.merged && !perch_github::is_local(&item.repo_full_name)
+        }
         None => item.checkout.is_some(),
     }
 }
@@ -134,7 +138,10 @@ pub fn key(app: AppState, backend: &Backend, key: &KeyboardEvent) -> EventPropag
 /// The name of what the confirmation would cut from.
 fn pending_title(app: AppState, pending: &Pending) -> String {
     match pending {
-        Pending::Item(id) => app.item(id).map(|item| item.title().to_string()).unwrap_or_default(),
+        Pending::Item(id) => app
+            .item(id)
+            .map(|item| item.title().to_string())
+            .unwrap_or_default(),
         Pending::Thread(thread) => thread.subject.title.clone(),
     }
 }
@@ -211,8 +218,12 @@ fn panel(app: AppState, backend: Rc<Backend>) -> impl IntoView {
                 .margin_top(4.0)
                 .apply_if(!has_title, |s| s.hide())
         }),
-        Stack::horizontal((Empty::new().style(|s| s.flex_grow(1.0_f32)), cancel_button, create_button))
-            .style(|s| s.width_full().items_center().gap(8.0).margin_top(14.0)),
+        Stack::horizontal((
+            Empty::new().style(|s| s.flex_grow(1.0_f32)),
+            cancel_button,
+            create_button,
+        ))
+        .style(|s| s.width_full().items_center().gap(8.0).margin_top(14.0)),
     ))
     .on_event_stop(el::PointerDown, |_, _| {})
     .debug_name("start-work-confirm-panel")
@@ -289,7 +300,6 @@ pub fn pull_prompt(pr: &PullRequest) -> String {
     )
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,7 +368,10 @@ mod tests {
         assert!(can_start_work(&item), "an open pull request");
         pr.merged = true;
         item.subject = Some(ItemSubject::PullRequest(pr));
-        assert!(!can_start_work(&item), "a merged one has nothing left to do");
+        assert!(
+            !can_start_work(&item),
+            "a merged one has nothing left to do"
+        );
 
         item.subject = Some(ItemSubject::Issue(issue("")));
         assert!(can_start_work(&item), "an issue");

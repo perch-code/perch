@@ -72,7 +72,10 @@ impl Issue {
     pub fn subject_state(&self) -> SubjectState {
         if self.is_open() {
             SubjectState::IssueOpen
-        } else if matches!(self.state_reason.as_deref(), Some("not_planned" | "duplicate")) {
+        } else if matches!(
+            self.state_reason.as_deref(),
+            Some("not_planned" | "duplicate")
+        ) {
             SubjectState::IssueNotPlanned
         } else {
             SubjectState::IssueClosed
@@ -173,7 +176,10 @@ impl IssuePayload {
             labels: self
                 .labels
                 .into_iter()
-                .map(|l| Label { name: l.name, color: l.color.unwrap_or_default() })
+                .map(|l| Label {
+                    name: l.name,
+                    color: l.color.unwrap_or_default(),
+                })
                 .collect(),
             assignees: self.assignees.into_iter().map(|u| u.login).collect(),
             comments: self.comments,
@@ -385,7 +391,10 @@ impl Item {
         if let Some(subject) = &self.subject {
             return subject.title();
         }
-        self.checkout.as_ref().map(|c| c.branch.as_str()).unwrap_or("")
+        self.checkout
+            .as_ref()
+            .map(|c| c.branch.as_str())
+            .unwrap_or("")
     }
 
     /// The title before any Rename.
@@ -450,8 +459,13 @@ impl Item {
     /// checkout or no open pull request.
     pub fn divergence(&self) -> Option<Diverged> {
         let checkout = self.checkout.as_ref()?;
-        let pr = self.pull_request().filter(|pr| pr.is_open() && !pr.merged)?;
-        if checkout.head_sha.is_empty() || pr.head_sha.is_empty() || checkout.head_sha == pr.head_sha {
+        let pr = self
+            .pull_request()
+            .filter(|pr| pr.is_open() && !pr.merged)?;
+        if checkout.head_sha.is_empty()
+            || pr.head_sha.is_empty()
+            || checkout.head_sha == pr.head_sha
+        {
             return None;
         }
         let counted = checkout
@@ -555,10 +569,20 @@ mod tests {
     fn divergence_is_counted_only_for_the_heads_the_row_has_now() {
         assert_eq!(pr_with_checkout("h", "h").divergence(), None);
         let mut i = pr_with_checkout("h2", "h1");
-        assert_eq!(i.divergence(), Some(Diverged { ahead: None, behind: None }));
+        assert_eq!(
+            i.divergence(),
+            Some(Diverged {
+                ahead: None,
+                behind: None
+            })
+        );
         assert_eq!(i.divergence().unwrap().label(), "PR head not fetched");
-        i.checkout.as_mut().unwrap().divergence =
-            Some(Divergence { head: "h2".into(), pr_head: "h1".into(), ahead: 3, behind: 0 });
+        i.checkout.as_mut().unwrap().divergence = Some(Divergence {
+            head: "h2".into(),
+            pr_head: "h1".into(),
+            ahead: 3,
+            behind: 0,
+        });
         assert_eq!(i.divergence().unwrap().label(), "3 unpushed");
         // A count for heads the row no longer has is not used.
         i.checkout.as_mut().unwrap().head_sha = "h3".into();
@@ -574,7 +598,13 @@ mod tests {
 
     #[test]
     fn the_divergence_label_names_each_side() {
-        let label = |ahead, behind| Diverged { ahead: Some(ahead), behind: Some(behind) }.label();
+        let label = |ahead, behind| {
+            Diverged {
+                ahead: Some(ahead),
+                behind: Some(behind),
+            }
+            .label()
+        };
         assert_eq!(label(3, 0), "3 unpushed");
         assert_eq!(label(0, 2), "2 behind PR");
         assert_eq!(label(3, 2), "3 unpushed \u{b7} 2 behind PR");
@@ -604,7 +634,18 @@ mod tests {
         assert!(i.is_closed());
         assert!(!i.is_active());
         let mut j = item();
-        j.checkout = Some(Checkout { branch: "b".into(), base_ref: "main".into(), head_sha: "h".into(), path: "/x".into(), owned: false, on_disk: true, churn: None, last_seen_head: None, source: None, divergence: None });
+        j.checkout = Some(Checkout {
+            branch: "b".into(),
+            base_ref: "main".into(),
+            head_sha: "h".into(),
+            path: "/x".into(),
+            owned: false,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            source: None,
+            divergence: None,
+        });
         assert!(j.is_active());
         j.archived_at = Some(at("2026-09-18T12:00:00Z"));
         assert!(j.is_archived());
@@ -642,8 +683,14 @@ mod tests {
         assert_eq!(
             issue.labels,
             vec![
-                Label { name: "bug".into(), color: "d73a4a".into() },
-                Label { name: "storage".into(), color: String::new() },
+                Label {
+                    name: "bug".into(),
+                    color: "d73a4a".into()
+                },
+                Label {
+                    name: "storage".into(),
+                    color: String::new()
+                },
             ]
         );
         assert_eq!(issue.assignees, vec!["chris", "rohan"]);
@@ -675,7 +722,10 @@ mod tests {
             state_reason: None,
             author_login: "a".into(),
             author_avatar_url: String::new(),
-            labels: vec![Label { name: "bug".into(), color: "d73a4a".into() }],
+            labels: vec![Label {
+                name: "bug".into(),
+                color: "d73a4a".into(),
+            }],
             assignees: vec!["chris".into()],
             comments: 2,
             created_at: None,

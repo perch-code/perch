@@ -189,7 +189,9 @@ impl SubjectLook {
     /// The look at pull requests and issues named by repository and
     /// number, for rows that are not notifications: items and search
     /// hits. `None` when there is nothing to ask after.
-    pub(crate) fn of_subjects<'a>(subjects: impl IntoIterator<Item = (&'a str, u64)>) -> Option<Self> {
+    pub(crate) fn of_subjects<'a>(
+        subjects: impl IntoIterator<Item = (&'a str, u64)>,
+    ) -> Option<Self> {
         let mut look = Self::empty();
         for (repo, number) in subjects {
             look.add(repo, number);
@@ -341,7 +343,10 @@ impl SubjectLook {
 
     /// Who acted on each subject the answer holds last, by repository
     /// and number.
-    pub(crate) fn participants(&self, data: SubjectLookData) -> Vec<((String, u64), Vec<Participant>)> {
+    pub(crate) fn participants(
+        &self,
+        data: SubjectLookData,
+    ) -> Vec<((String, u64), Vec<Participant>)> {
         self.nodes(data)
             .into_iter()
             .map(|(repo, number, node)| ((self.repos[repo].clone(), number), participants(&node)))
@@ -487,7 +492,10 @@ mod tests {
         let look =
             SubjectLook::of_subjects([("a/b", 7), ("a/b", 8), ("c/d", 9), ("c/d", 10)]).unwrap();
         let query = look.state_query();
-        assert!(query.contains("n7: issueOrPullRequest(number: 7) { ...subject }"), "{query}");
+        assert!(
+            query.contains("n7: issueOrPullRequest(number: 7) { ...subject }"),
+            "{query}"
+        );
         assert!(query.contains("pull_state: state"), "{query}");
         assert!(!query.contains("comments("), "{query}");
         assert!(!query.contains("author"), "{query}");
@@ -669,9 +677,13 @@ mod tests {
     /// and answered the same way.
     #[test]
     fn subjects_are_asked_after_by_repository_and_number() {
-        let look = SubjectLook::of_subjects([("slatedb/slatedb", 2084), ("not-a-repository", 1)]).unwrap();
+        let look =
+            SubjectLook::of_subjects([("slatedb/slatedb", 2084), ("not-a-repository", 1)]).unwrap();
         let query = look.query();
-        assert!(query.contains("n2084: issueOrPullRequest(number: 2084)"), "{query}");
+        assert!(
+            query.contains("n2084: issueOrPullRequest(number: 2084)"),
+            "{query}"
+        );
         assert!(!query.contains("number: 1)"), "{query}");
         let data: SubjectLookData = serde_json::from_str(
             r#"{ "r0": { "n2084": {
@@ -686,7 +698,10 @@ mod tests {
             look.participants(data),
             vec![(
                 ("slatedb/slatedb".to_string(), 2084),
-                vec![Participant { login: "someone".into(), avatar_url: "https://avatars/2".into() }]
+                vec![Participant {
+                    login: "someone".into(),
+                    avatar_url: "https://avatars/2".into()
+                }]
             )]
         );
         assert!(SubjectLook::of_subjects([("local", 3)]).is_none());

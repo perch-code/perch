@@ -18,7 +18,9 @@ use floem::event::EventPropagation;
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::Position;
-use floem::views::{dyn_container, Container, Decorators, Empty, Label, ScrollExt, Stack, TextInput};
+use floem::views::{
+    dyn_container, Container, Decorators, Empty, Label, ScrollExt, Stack, TextInput,
+};
 use floem::AnyView;
 use jiff::Timestamp;
 
@@ -100,12 +102,11 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
             review.feedback_anchor.set(Some(anchor));
         }
     });
-    stack
-        .style(|s| {
-            s.position(Position::Relative)
-                .flex_shrink(0.0_f32)
-                .pointer_events_auto()
-        })
+    stack.style(|s| {
+        s.position(Position::Relative)
+            .flex_shrink(0.0_f32)
+            .pointer_events_auto()
+    })
 }
 
 /// Open the dropdown, or shut it when it is open.
@@ -420,8 +421,10 @@ fn frame(
             .scroll()
             .style(move |s| {
                 s.width_full().max_height(
-                    crate::ui::sidebar::footer_popover_room(app, theme::FEEDBACK_DROPDOWN_MAX_HEIGHT)
-                        - FOOTER_HEIGHT,
+                    crate::ui::sidebar::footer_popover_room(
+                        app,
+                        theme::FEEDBACK_DROPDOWN_MAX_HEIGHT,
+                    ) - FOOTER_HEIGHT,
                 )
             }),
         Container::new(footer).style(|s| {
@@ -801,14 +804,17 @@ fn form(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoVi
         body.into_any(),
         diagnose.into_any(),
     ]);
-    frame(app, parts, footer, "feedback-form").on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if key.code == Code::Enter && key.modifiers.meta() && can_preview() {
-            prepare(app, review, &enter_backend);
-            EventPropagation::Stop
-        } else {
-            EventPropagation::Continue
-        }
-    })
+    frame(app, parts, footer, "feedback-form").on_event(
+        el::KeyDown,
+        move |_, key: &KeyboardEvent| {
+            if key.code == Code::Enter && key.modifiers.meta() && can_preview() {
+                prepare(app, review, &enter_backend);
+                EventPropagation::Stop
+            } else {
+                EventPropagation::Continue
+            }
+        },
+    )
 }
 
 /// Preview… on its way: each step, done, under way or to come.
@@ -1457,7 +1463,10 @@ mod tests {
     fn the_bug_icon_sits_just_before_usage_in_the_drawers_footer() {
         let (harness, _app, _review, _commands) = empty_window();
         let footer = rect(&harness, "drawer footer");
-        assert!((footer.height() - theme::TITLEBAR_HEIGHT).abs() < 1.0, "{footer:?}");
+        assert!(
+            (footer.height() - theme::TITLEBAR_HEIGHT).abs() < 1.0,
+            "{footer:?}"
+        );
         let bug = rect(&harness, "feedback-button");
         let gauge = rect(&harness, "usage-button");
         assert!(bug.width() > 0.0, "with nothing open");
@@ -1466,14 +1475,26 @@ mod tests {
             "{bug:?} {gauge:?}"
         );
         assert!(footer.contains(bug.center()) && footer.contains(gauge.center()));
-        assert!((footer.x1 - theme::NAV_GUTTER - gauge.x1).abs() < 1.0, "on the gutter: {footer:?} {gauge:?}");
+        assert!(
+            (footer.x1 - theme::NAV_GUTTER - gauge.x1).abs() < 1.0,
+            "on the gutter: {footer:?} {gauge:?}"
+        );
 
         let (harness, _app, _review) = pull_request_harness();
         let footer = rect(&harness, "drawer footer");
-        assert!(footer.contains(rect(&harness, "feedback-button").center()), "with an item open");
+        assert!(
+            footer.contains(rect(&harness, "feedback-button").center()),
+            "with an item open"
+        );
         let bar = named(harness.root_id(), "item bar").expect("an item's bar");
-        assert!(named(bar, "feedback-button").is_none(), "gone from the item's bar");
-        assert!(named(bar, "usage-button").is_none(), "gone from the item's bar");
+        assert!(
+            named(bar, "feedback-button").is_none(),
+            "gone from the item's bar"
+        );
+        assert!(
+            named(bar, "usage-button").is_none(),
+            "gone from the item's bar"
+        );
     }
 
     #[test]
@@ -1485,7 +1506,10 @@ mod tests {
         let button = rect(&harness, "feedback-button");
         let dropdown = rect(&harness, "feedback-dropdown");
         assert!(dropdown.y1 <= button.y0, "{dropdown:?} {button:?}");
-        assert!((dropdown.x0 - button.x0).abs() < 1.0, "left edges aligned: {dropdown:?} {button:?}");
+        assert!(
+            (dropdown.x0 - button.x0).abs() < 1.0,
+            "left edges aligned: {dropdown:?} {button:?}"
+        );
         assert!((dropdown.width() - theme::FOOTER_POPOVER_WIDTH).abs() < 1.0);
         assert!(dropdown.height() <= theme::FEEDBACK_DROPDOWN_MAX_HEIGHT + 1.0);
         assert!(shown(&harness, "feedback-form"));
@@ -1523,7 +1547,11 @@ mod tests {
         let fg = Brush::Solid(theme::fg());
         let found = ["feedback-title", "feedback-body"].map(|name| {
             let mut found = Vec::new();
-            carets(&harness, named(harness.root_id(), name).unwrap(), &mut found);
+            carets(
+                &harness,
+                named(harness.root_id(), name).unwrap(),
+                &mut found,
+            );
             (name, found)
         });
         crate::theme::set_appearance(crate::theme::Appearance::Light);

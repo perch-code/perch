@@ -151,7 +151,9 @@ async fn a_description_and_a_review_summary_are_edited_by_their_own_mutations() 
     let (base, requests) = spawn(vec![
         Response::ok(r#"{"data":{"updatePullRequest":{"pullRequest":{"body":"pr"}}}}"#),
         Response::ok(r#"{"data":{"updateIssue":{"issue":{"body":"issue"}}}}"#),
-        Response::ok(r#"{"data":{"updatePullRequestReview":{"pullRequestReview":{"body":"lgtm"}}}}"#),
+        Response::ok(
+            r#"{"data":{"updatePullRequestReview":{"pullRequestReview":{"body":"lgtm"}}}}"#,
+        ),
     ]);
     let github = GitHub::with_base_uri("token", &base).unwrap();
 
@@ -163,14 +165,18 @@ async fn a_description_and_a_review_summary_are_edited_by_their_own_mutations() 
     for (id, place, body) in places {
         let kept = github.update_comment(id, place, body).await.unwrap();
         assert_eq!(kept.body, body);
-        assert_eq!(kept.updated_at, None, "an answer without its time still reads");
+        assert_eq!(
+            kept.updated_at, None,
+            "an answer without its time still reads"
+        );
     }
 
     let requests = requests.lock().unwrap();
     let query = |i: usize| requests[i].body["query"].as_str().unwrap().to_string();
     assert!(query(0).contains("updatePullRequest(input: {pullRequestId: $id, body: $body})"));
     assert!(query(1).contains("updateIssue(input: {id: $id, body: $body})"));
-    assert!(query(2).contains("updatePullRequestReview(input: {pullRequestReviewId: $id, body: $body})"));
+    assert!(query(2)
+        .contains("updatePullRequestReview(input: {pullRequestReviewId: $id, body: $body})"));
     assert_eq!(requests[2].body["variables"]["id"], "PRR_1");
 }
 
@@ -178,7 +184,11 @@ async fn a_description_and_a_review_summary_are_edited_by_their_own_mutations() 
 async fn a_description_or_a_review_is_never_deleted() {
     let (base, requests) = spawn(Vec::new());
     let github = GitHub::with_base_uri("token", &base).unwrap();
-    for place in [CommentPlace::PullRequestBody, CommentPlace::IssueBody, CommentPlace::Review] {
+    for place in [
+        CommentPlace::PullRequestBody,
+        CommentPlace::IssueBody,
+        CommentPlace::Review,
+    ] {
         let refused = github.delete_comment("X_1", place).await.unwrap_err();
         assert!(matches!(refused, Error::Decode(_)), "{refused:?}");
     }

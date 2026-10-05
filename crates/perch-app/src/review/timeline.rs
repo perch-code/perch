@@ -23,11 +23,18 @@ pub enum Card {
     /// is the summary's Author row. `node_id` is what reactions on it are
     /// left by; empty when the pull request's discussion has not landed, or
     /// an older build kept it.
-    Description { at: Option<Timestamp>, body: String, node_id: String, editable: bool },
+    Description {
+        at: Option<Timestamp>,
+        body: String,
+        node_id: String,
+        editable: bool,
+    },
     Comment(IssueComment),
     /// A review with its verdict and summary. Its line comments are threads
     /// of their own.
-    Review { review: Review },
+    Review {
+        review: Review,
+    },
     Event(PullEvent),
     /// One of Perch's threads or one of GitHub's; `origin` tells them apart.
     Thread(CommentThread),
@@ -46,7 +53,12 @@ impl Card {
             Card::Comment(c) => Some(c.created_at),
             Card::Review { review } => review.submitted_at,
             Card::Event(e) => Some(e.at),
-            Card::Thread(t) => Some(t.messages.first().map(|m| m.created_at).unwrap_or(t.created_at)),
+            Card::Thread(t) => Some(
+                t.messages
+                    .first()
+                    .map(|m| m.created_at)
+                    .unwrap_or(t.created_at),
+            ),
         }
     }
 
@@ -76,7 +88,11 @@ impl Card {
                 }
             }
             Card::Event(e) => cut(&event_name(e)),
-            Card::Thread(t) => t.messages.first().map(|m| first_line(&m.body)).unwrap_or_default(),
+            Card::Thread(t) => t
+                .messages
+                .first()
+                .map(|m| first_line(&m.body))
+                .unwrap_or_default(),
         }
     }
 
@@ -134,9 +150,9 @@ impl Piece {
             Piece::Text(text) | Piece::Subject(text) => text.clone(),
             Piece::Label(label) => label.name.clone(),
             Piece::Sha(sha) | Piece::Commit(sha) => short_sha(sha),
-            Piece::Reference(reference) => {
-                format!("{} {}", reference.slug(), reference.title).trim_end().into()
-            }
+            Piece::Reference(reference) => format!("{} {}", reference.slug(), reference.title)
+                .trim_end()
+                .into(),
         }
     }
 }
@@ -192,7 +208,9 @@ pub fn event_pieces(event: &PullEvent) -> Vec<Piece> {
             vec![Piece::words(format!("requested a review from {who}"))]
         }
         PullEventKind::ReviewRequestRemoved { who } => {
-            vec![Piece::words(format!("removed the review request for {who}"))]
+            vec![Piece::words(format!(
+                "removed the review request for {who}"
+            ))]
         }
         PullEventKind::ReviewDismissed { who } if who.is_empty() => {
             vec![Piece::words("dismissed a review")]
@@ -201,13 +219,17 @@ pub fn event_pieces(event: &PullEvent) -> Vec<Piece> {
             vec![Piece::words(format!("dismissed {who}'s review"))]
         }
         PullEventKind::Renamed { from, to } => {
-            vec![Piece::words(format!("changed the title from \u{201c}{from}\u{201d} to \u{201c}{to}\u{201d}"))]
+            vec![Piece::words(format!(
+                "changed the title from \u{201c}{from}\u{201d} to \u{201c}{to}\u{201d}"
+            ))]
         }
         PullEventKind::Milestoned { title } => {
             vec![Piece::words(format!("added this to the {title} milestone"))]
         }
         PullEventKind::Demilestoned { title } => {
-            vec![Piece::words(format!("removed this from the {title} milestone"))]
+            vec![Piece::words(format!(
+                "removed this from the {title} milestone"
+            ))]
         }
         PullEventKind::Referenced { sha } => {
             vec![Piece::words("referenced this in"), Piece::Sha(sha.clone())]
@@ -242,7 +264,10 @@ pub fn event_pieces(event: &PullEvent) -> Vec<Piece> {
 /// and `file` knows it; a word that is only a word, `Update`, is never
 /// asked about, so a file called `build` does not turn every "build"
 /// into a link. The runs put together are the subject.
-pub fn subject_runs<T>(subject: &str, file: impl Fn(&str) -> Option<T>) -> Vec<(String, Option<T>)> {
+pub fn subject_runs<T>(
+    subject: &str,
+    file: impl Fn(&str) -> Option<T>,
+) -> Vec<(String, Option<T>)> {
     let mut runs: Vec<(String, Option<T>)> = Vec::new();
     let plain = |runs: &mut Vec<(String, Option<T>)>, text: &str| match runs.last_mut() {
         Some((last, None)) => last.push_str(text),
@@ -251,13 +276,16 @@ pub fn subject_runs<T>(subject: &str, file: impl Fn(&str) -> Option<T>) -> Vec<(
     };
     let mut rest = subject;
     while !rest.is_empty() {
-        let start = rest.find(|c: char| !c.is_whitespace()).unwrap_or(rest.len());
+        let start = rest
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(rest.len());
         plain(&mut runs, &rest[..start]);
         rest = &rest[start..];
         let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
         let word = &rest[..end];
         rest = &rest[end..];
-        let head = word.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}', '"', '\'', '`']);
+        let head =
+            word.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}', '"', '\'', '`']);
         let core = head.trim_start_matches(['(', '[', '{', '"', '\'', '`']);
         let found = core.contains(['.', '/']).then(|| file(core)).flatten();
         match found {
@@ -285,7 +313,11 @@ pub fn event_name(event: &PullEvent) -> String {
 
 /// The first non-empty line, trimmed and cut to the harness's width.
 pub fn first_line(text: &str) -> String {
-    text.lines().map(str::trim).find(|l| !l.is_empty()).map(cut).unwrap_or_default()
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(cut)
+        .unwrap_or_default()
 }
 
 fn cut(line: &str) -> String {
@@ -362,7 +394,9 @@ fn review_cards(reviews: &[Review]) -> Vec<Card> {
         .iter()
         .filter(|review| review.state != "PENDING")
         .filter(|review| !(review.state == "COMMENTED" && review.body.trim().is_empty()))
-        .map(|review| Card::Review { review: review.clone() })
+        .map(|review| Card::Review {
+            review: review.clone(),
+        })
         .collect()
 }
 
@@ -475,7 +509,13 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn line(id: u64, review: Option<u64>, reply_to: Option<u64>, when: &str, body: &str) -> ReviewComment {
+    pub(crate) fn line(
+        id: u64,
+        review: Option<u64>,
+        reply_to: Option<u64>,
+        when: &str,
+        body: &str,
+    ) -> ReviewComment {
         ReviewComment {
             node_id: String::new(),
             reactions: Default::default(),
@@ -514,7 +554,13 @@ pub(crate) mod tests {
             worktree_id: "w".into(),
             origin: ThreadOrigin::Local,
             github_id: None,
-            anchor: Some(Anchor { path: "src/x.rs".into(), start_line: 41, line: 58, side: Side::Right, commit_sha: "h".into() }),
+            anchor: Some(Anchor {
+                path: "src/x.rs".into(),
+                start_line: 41,
+                line: 58,
+                side: Side::Right,
+                commit_sha: "h".into(),
+            }),
             outdated: false,
             resolved: false,
             node_id: None,
@@ -548,34 +594,62 @@ pub(crate) mod tests {
     #[test]
     fn a_review_sorts_by_its_own_time_and_its_line_comments_are_not_in_it() {
         let mut d = discussion(
-            vec![review(9, "APPROVED", "Looks right.", Some("2026-09-16T11:40:00Z"))],
+            vec![review(
+                9,
+                "APPROVED",
+                "Looks right.",
+                Some("2026-09-16T11:40:00Z"),
+            )],
             vec![
                 line(31, Some(9), None, "2026-09-16T11:38:00Z", "epoch"),
                 line(32, Some(9), None, "2026-09-16T12:10:00Z", "fence"),
             ],
         );
-        d.comments.push(comment(1, "2026-09-16T12:00:00Z", "Thanks"));
+        d.comments
+            .push(comment(1, "2026-09-16T12:00:00Z", "Thanks"));
         let cards = timeline(Some(&pull()), Some(&d), None, &[], &[]);
         assert_eq!(kinds(&cards), ["description", "review", "comment"]);
-        assert_eq!(lines(&cards), ["The description.", "approved  Looks right.", "Thanks"]);
-        let Card::Review { review } = &cards[1] else { panic!("{cards:?}") };
+        assert_eq!(
+            lines(&cards),
+            ["The description.", "approved  Looks right.", "Thanks"]
+        );
+        let Card::Review { review } = &cards[1] else {
+            panic!("{cards:?}")
+        };
         assert_eq!(review.id, 9);
-        assert_eq!(cards[1].at(), Some(at("2026-09-16T11:40:00Z")), "the review's own time");
+        assert_eq!(
+            cards[1].at(),
+            Some(at("2026-09-16T11:40:00Z")),
+            "the review's own time"
+        );
     }
 
     #[test]
     fn a_github_thread_is_a_thread_card_at_its_first_comments_time() {
-        let mut d = discussion(vec![review(9, "COMMENTED", "", Some("2026-09-16T11:40:00Z"))], vec![]);
+        let mut d = discussion(
+            vec![review(9, "COMMENTED", "", Some("2026-09-16T11:40:00Z"))],
+            vec![],
+        );
         d.comments.push(comment(1, "2026-09-16T10:00:00Z", "first"));
-        d.comments.push(comment(2, "2026-09-16T12:00:00Z", "second"));
-        let mut t = thread("gh-31", "2026-09-16T11:38:00Z", "2026-09-16T11:38:00Z", "epoch");
+        d.comments
+            .push(comment(2, "2026-09-16T12:00:00Z", "second"));
+        let mut t = thread(
+            "gh-31",
+            "2026-09-16T11:38:00Z",
+            "2026-09-16T11:38:00Z",
+            "epoch",
+        );
         t.origin = ThreadOrigin::GitHub;
         t.github_id = Some(31);
         t.messages[0].origin = ThreadOrigin::GitHub;
         t.messages[0].author = Author::GitHubUser("rohan".into());
         t.messages[0].github_id = Some(31);
         let cards = timeline(Some(&pull()), Some(&d), None, &[], &[t]);
-        assert_eq!(kinds(&cards), ["description", "comment", "thread", "comment"], "the empty review is noise");
+        assert_eq!(
+            kinds(&cards),
+            ["description", "comment", "thread", "comment"],
+            "the empty review is noise"
+        );
         assert_eq!(cards[2].first_line(), "epoch");
     }
 
@@ -583,25 +657,45 @@ pub(crate) mod tests {
     fn a_thread_sorts_by_its_question_between_two_comments() {
         let mut d = discussion(vec![], vec![]);
         d.comments.push(comment(1, "2026-09-16T10:00:00Z", "first"));
-        d.comments.push(comment(2, "2026-09-16T12:00:00Z", "second"));
-        let t = thread("t1", "2026-09-16T09:30:00Z", "2026-09-16T11:00:00Z", "why the fence?");
+        d.comments
+            .push(comment(2, "2026-09-16T12:00:00Z", "second"));
+        let t = thread(
+            "t1",
+            "2026-09-16T09:30:00Z",
+            "2026-09-16T11:00:00Z",
+            "why the fence?",
+        );
         let cards = timeline(Some(&pull()), Some(&d), None, &[], &[t]);
-        assert_eq!(kinds(&cards), ["description", "comment", "thread", "comment"]);
+        assert_eq!(
+            kinds(&cards),
+            ["description", "comment", "thread", "comment"]
+        );
         assert_eq!(cards[2].first_line(), "why the fence?");
-        assert_eq!(cards[2].at(), Some(at("2026-09-16T11:00:00Z")), "the question, not the row");
+        assert_eq!(
+            cards[2].at(),
+            Some(at("2026-09-16T11:00:00Z")),
+            "the question, not the row"
+        );
     }
 
     #[test]
     fn events_land_between_comments_in_time_order() {
         let mut d = discussion(vec![], vec![]);
         d.comments.push(comment(1, "2026-09-15T10:00:00Z", "first"));
-        d.comments.push(comment(2, "2026-09-17T15:00:00Z", "at the same moment as the merge"));
+        d.comments.push(comment(
+            2,
+            "2026-09-17T15:00:00Z",
+            "at the same moment as the merge",
+        ));
         d.events = vec![
             event(PullEventKind::Opened, "2026-09-14T14:02:00Z"),
             event(PullEventKind::Merged, "2026-09-17T15:00:00Z"),
         ];
         let cards = timeline(Some(&pull()), Some(&d), None, &[], &[]);
-        assert_eq!(kinds(&cards), ["description", "event", "comment", "event", "comment"]);
+        assert_eq!(
+            kinds(&cards),
+            ["description", "event", "comment", "event", "comment"]
+        );
         assert_eq!(lines(&cards)[1], "opened");
         assert_eq!(lines(&cards)[3], "merged", "an event wins a tie");
     }
@@ -610,9 +704,19 @@ pub(crate) mod tests {
     fn an_issue_has_a_description_comments_threads_and_its_own_events() {
         let issue = issue();
         let comments = vec![comment(1, "2026-09-15T10:00:00Z", "Seen it too.")];
-        let t = thread("t1", "2026-09-16T09:00:00Z", "2026-09-16T09:00:00Z", "where?");
+        let t = thread(
+            "t1",
+            "2026-09-16T09:00:00Z",
+            "2026-09-16T09:00:00Z",
+            "where?",
+        );
         let labelled = event(
-            PullEventKind::Labeled { label: Label { name: "bug".into(), color: "d73a4a".into() } },
+            PullEventKind::Labeled {
+                label: Label {
+                    name: "bug".into(),
+                    color: "d73a4a".into(),
+                },
+            },
             "2026-09-15T09:00:00Z",
         );
         let cards = timeline(
@@ -627,7 +731,12 @@ pub(crate) mod tests {
 
         let cards = timeline(None, None, Some((&issue, &comments, &[])), &[], &[t]);
         assert_eq!(kinds(&cards), ["description", "comment", "thread"]);
-        let Card::Description { at: opened, body, .. } = &cards[0] else { panic!("{cards:?}") };
+        let Card::Description {
+            at: opened, body, ..
+        } = &cards[0]
+        else {
+            panic!("{cards:?}")
+        };
         assert_eq!(*opened, Some(at("2026-09-14T14:02:00Z")));
         assert_eq!(body, "The manifest can be written twice.");
     }
@@ -635,7 +744,12 @@ pub(crate) mod tests {
     #[test]
     fn the_description_is_first_even_when_a_thread_predates_it() {
         let d = discussion(vec![], vec![]);
-        let t = [thread("t1", "2026-09-01T09:00:00Z", "2026-09-01T09:00:00Z", "early")];
+        let t = [thread(
+            "t1",
+            "2026-09-01T09:00:00Z",
+            "2026-09-01T09:00:00Z",
+            "early",
+        )];
         let cards = timeline(Some(&pull()), Some(&d), None, &[], &t);
         assert_eq!(kinds(&cards), ["description", "thread"]);
 
@@ -664,12 +778,21 @@ pub(crate) mod tests {
             commit("bbbbbbbbbb", "2026-09-16T12:00:00Z", "Mirror the manifest"),
             commit("aaaaaaaaaa", "2026-09-16T10:00:00Z", "Fence the manifest"),
         ];
-        let t = [thread("t1", "2026-09-16T11:00:00Z", "2026-09-16T11:00:00Z", "why fence?")];
+        let t = [thread(
+            "t1",
+            "2026-09-16T11:00:00Z",
+            "2026-09-16T11:00:00Z",
+            "why fence?",
+        )];
         let cards = timeline(None, None, None, &commits, &t);
         assert_eq!(kinds(&cards), ["event", "thread", "event"]);
         assert_eq!(
             lines(&cards),
-            ["committed aaaaaaa Fence the manifest", "why fence?", "committed bbbbbbb Mirror the manifest"]
+            [
+                "committed aaaaaaa Fence the manifest",
+                "why fence?",
+                "committed bbbbbbb Mirror the manifest"
+            ]
         );
 
         // A pull request's commits come from GitHub's timeline instead.
@@ -689,19 +812,34 @@ pub(crate) mod tests {
             vec![
                 // The pending review's draft comment goes with it.
                 line(31, Some(1), None, "2026-09-16T10:00:00Z", "not yet said"),
-                line(32, Some(3), None, "2026-09-16T11:09:00Z", "one line comment keeps the review"),
+                line(
+                    32,
+                    Some(3),
+                    None,
+                    "2026-09-16T11:09:00Z",
+                    "one line comment keeps the review",
+                ),
             ],
         );
         let cards = timeline(Some(&pull()), Some(&d), None, &[], &[]);
-        assert_eq!(kinds(&cards), ["description", "review"], "a line comment no longer keeps its empty review");
+        assert_eq!(
+            kinds(&cards),
+            ["description", "review"],
+            "a line comment no longer keeps its empty review"
+        );
         assert_eq!(lines(&cards)[1..], ["dismissed"]);
-        let Card::Review { review } = &cards[1] else { panic!("{cards:?}") };
+        let Card::Review { review } = &cards[1] else {
+            panic!("{cards:?}")
+        };
         assert_eq!(review.id, 4);
     }
 
     #[test]
     fn a_line_comment_with_no_review_in_the_list_is_not_a_card() {
-        let d = discussion(vec![], vec![line(31, Some(77), None, "2026-09-16T11:38:00Z", "epoch")]);
+        let d = discussion(
+            vec![],
+            vec![line(31, Some(77), None, "2026-09-16T11:38:00Z", "epoch")],
+        );
         let cards = timeline(Some(&pull()), Some(&d), None, &[], &[]);
         assert_eq!(kinds(&cards), ["description"]);
     }
@@ -709,10 +847,14 @@ pub(crate) mod tests {
     #[test]
     fn a_review_without_a_time_sorts_first() {
         let mut d = discussion(vec![review(9, "APPROVED", "", None)], vec![]);
-        d.comments.push(comment(1, "2026-09-16T11:00:00Z", "before"));
+        d.comments
+            .push(comment(1, "2026-09-16T11:00:00Z", "before"));
         d.comments.push(comment(2, "2026-09-16T12:00:00Z", "after"));
         let cards = timeline(Some(&pull()), Some(&d), None, &[], &[]);
-        assert_eq!(lines(&cards), ["The description.", "approved", "before", "after"]);
+        assert_eq!(
+            lines(&cards),
+            ["The description.", "approved", "before", "after"]
+        );
     }
 
     #[test]
@@ -722,7 +864,10 @@ pub(crate) mod tests {
         assert_eq!(name(PullEventKind::Merged), "merged");
         assert_eq!(
             name(PullEventKind::Labeled {
-                label: Label { name: "needs work".into(), color: String::new() }
+                label: Label {
+                    name: "needs work".into(),
+                    color: String::new()
+                }
             }),
             "added needs work"
         );
@@ -737,19 +882,27 @@ pub(crate) mod tests {
             "seven characters of the sha"
         );
         assert_eq!(
-            name(PullEventKind::ReviewRequested { who: "chris".into() }),
+            name(PullEventKind::ReviewRequested {
+                who: "chris".into()
+            }),
             "requested a review from chris"
         );
         assert_eq!(
-            name(PullEventKind::ReviewRequested { who: "rohan".into() }),
+            name(PullEventKind::ReviewRequested {
+                who: "rohan".into()
+            }),
             "self-requested a review"
         );
         assert_eq!(
-            name(PullEventKind::Assigned { who: "rohan".into() }),
+            name(PullEventKind::Assigned {
+                who: "rohan".into()
+            }),
             "self-assigned this"
         );
         assert_eq!(
-            name(PullEventKind::Assigned { who: "chris".into() }),
+            name(PullEventKind::Assigned {
+                who: "chris".into()
+            }),
             "assigned this to chris"
         );
         assert_eq!(
@@ -757,20 +910,28 @@ pub(crate) mod tests {
             "dismissed a review"
         );
         assert_eq!(
-            name(PullEventKind::CommentDeleted { author: "chris".into() }),
+            name(PullEventKind::CommentDeleted {
+                author: "chris".into()
+            }),
             "deleted a comment from chris"
         );
         assert_eq!(
-            name(PullEventKind::CommentDeleted { author: "rohan".into() }),
+            name(PullEventKind::CommentDeleted {
+                author: "rohan".into()
+            }),
             "deleted their comment"
         );
         assert_eq!(
-            name(PullEventKind::CommentDeleted { author: String::new() }),
+            name(PullEventKind::CommentDeleted {
+                author: String::new()
+            }),
             "deleted a comment",
             "GitHub could not say whose"
         );
         assert_eq!(
-            name(PullEventKind::ForcePushed { sha: "abc1234def".into() }),
+            name(PullEventKind::ForcePushed {
+                sha: "abc1234def".into()
+            }),
             "force-pushed to abc1234"
         );
         assert_eq!(
@@ -796,7 +957,10 @@ pub(crate) mod tests {
             runs("Update bindings/uniffi/src/config.rs"),
             vec![
                 ("Update ".into(), None),
-                ("bindings/uniffi/src/config.rs".into(), Some("bindings/uniffi/src/config.rs".into())),
+                (
+                    "bindings/uniffi/src/config.rs".into(),
+                    Some("bindings/uniffi/src/config.rs".into())
+                ),
             ]
         );
         assert_eq!(
@@ -805,19 +969,36 @@ pub(crate) mod tests {
                 ("Fix (".into(), None),
                 ("README.md".into(), Some("README.md".into())),
                 ("), and `".into(), None),
-                ("bindings/uniffi/src/config.rs".into(), Some("bindings/uniffi/src/config.rs".into())),
+                (
+                    "bindings/uniffi/src/config.rs".into(),
+                    Some("bindings/uniffi/src/config.rs".into())
+                ),
                 ("`.".into(), None),
             ]
         );
-        assert_eq!(runs("Fence the manifest"), vec![("Fence the manifest".into(), None)]);
-        assert_eq!(runs("Bump to v1.2"), vec![("Bump to v1.2".into(), None)], "not a file");
-        assert_eq!(runs("  two  spaces "), vec![("  two  spaces ".into(), None)]);
+        assert_eq!(
+            runs("Fence the manifest"),
+            vec![("Fence the manifest".into(), None)]
+        );
+        assert_eq!(
+            runs("Bump to v1.2"),
+            vec![("Bump to v1.2".into(), None)],
+            "not a file"
+        );
+        assert_eq!(
+            runs("  two  spaces "),
+            vec![("  two  spaces ".into(), None)]
+        );
         let asked = std::cell::RefCell::new(Vec::new());
         subject_runs("Update build and src/x.rs", |word| {
             asked.borrow_mut().push(word.to_string());
             None::<()>
         });
-        assert_eq!(*asked.borrow(), ["src/x.rs"], "a bare word is never looked up");
+        assert_eq!(
+            *asked.borrow(),
+            ["src/x.rs"],
+            "a bare word is never looked up"
+        );
     }
 
     #[test]
@@ -839,10 +1020,15 @@ pub(crate) mod tests {
                 Piece::Subject("Fence the manifest".into()),
             ]
         );
-        let label = Label { name: "bug".into(), color: "d73a4a".into() };
+        let label = Label {
+            name: "bug".into(),
+            color: "d73a4a".into(),
+        };
         assert_eq!(
             event_pieces(&event(
-                PullEventKind::Unlabeled { label: label.clone() },
+                PullEventKind::Unlabeled {
+                    label: label.clone()
+                },
                 "2026-09-16T11:00:00Z"
             )),
             vec![Piece::Text("removed".into()), Piece::Label(label)]
@@ -852,14 +1038,24 @@ pub(crate) mod tests {
     #[test]
     fn first_lines_skip_blanks_and_are_cut_to_width() {
         let long = "x".repeat(100);
-        let c = Card::Comment(comment(1, "2026-09-16T11:00:00Z", &format!("\n   \n  first  \nsecond\n{long}")));
+        let c = Card::Comment(comment(
+            1,
+            "2026-09-16T11:00:00Z",
+            &format!("\n   \n  first  \nsecond\n{long}"),
+        ));
         assert_eq!(c.first_line(), "first");
         let c = Card::Comment(comment(1, "2026-09-16T11:00:00Z", &long));
         assert_eq!(c.first_line().chars().count(), 80);
         let c = Card::Comment(comment(1, "2026-09-16T11:00:00Z", " \n\t"));
         assert_eq!(c.first_line(), "");
-        assert_eq!(Card::Event(event(PullEventKind::Draft, "2026-09-16T11:00:00Z")).first_line(), "converted this to draft");
-        assert_eq!(verdict(&review(1, "CHANGES_REQUESTED", "", None)), "requested changes");
+        assert_eq!(
+            Card::Event(event(PullEventKind::Draft, "2026-09-16T11:00:00Z")).first_line(),
+            "converted this to draft"
+        );
+        assert_eq!(
+            verdict(&review(1, "CHANGES_REQUESTED", "", None)),
+            "requested changes"
+        );
         assert_eq!(verdict(&review(1, "SOMETHING_NEW", "", None)), "commented");
     }
 }

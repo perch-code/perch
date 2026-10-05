@@ -680,8 +680,17 @@ mod tests {
                 body.request_focus();
                 settle(&mut harness);
             }
-            assert!(harness.is_focused(text_box), "{} is not focused", text_box.debug_name());
-            for (ch, code) in [("b", Code::KeyB), ("a", Code::KeyA), ("c", Code::KeyC), ("k", Code::KeyK)] {
+            assert!(
+                harness.is_focused(text_box),
+                "{} is not focused",
+                text_box.debug_name()
+            );
+            for (ch, code) in [
+                ("b", Code::KeyB),
+                ("a", Code::KeyA),
+                ("c", Code::KeyC),
+                ("k", Code::KeyK),
+            ] {
                 harness.dispatch_event(floem::event::Event::Key(KeyboardEvent {
                     state: KeyState::Down,
                     key: Key::Character(ch.into()),
@@ -693,10 +702,20 @@ mod tests {
                 }));
                 settle(&mut harness);
             }
-            assert!(state.composer.with(Option::is_none), "`a` opened a composer");
-            assert!(harness.is_focused(text_box), "{} lost the keyboard", text_box.debug_name());
+            assert!(
+                state.composer.with(Option::is_none),
+                "`a` opened a composer"
+            );
+            assert!(
+                harness.is_focused(text_box),
+                "{} lost the keyboard",
+                text_box.debug_name()
+            );
         }
-        assert_eq!(draft_of(app, "item-7").title, "Fix the crash on empty manifestsback");
+        assert_eq!(
+            draft_of(app, "item-7").title,
+            "Fix the crash on empty manifestsback"
+        );
         assert!(draft_of(app, "item-7").body.contains("back"));
     }
 

@@ -398,7 +398,11 @@ fn reviewer_row(
             }
             // Taking it back mends what it would run with, so the box
             // never ticks without a reviewer behind it.
-            if !choice.model.as_ref().is_some_and(|model| models.contains(model)) {
+            if !choice
+                .model
+                .as_ref()
+                .is_some_and(|model| models.contains(model))
+            {
                 choice.model = models.first().cloned();
             }
             choice.effort = choice
@@ -450,7 +454,11 @@ fn reviewer_row(
                 .on_event_stop(el::Click, move |_, _| name_toggle())
                 .style(move |s| {
                     s.font_size(theme::TEXT_BODY)
-                        .color(if chosen() { theme::fg() } else { theme::fg_muted() })
+                        .color(if chosen() {
+                            theme::fg()
+                        } else {
+                            theme::fg_muted()
+                        })
                         .min_width(0.0)
                         .apply_if(usable, clickable)
                         .selectable(false)
@@ -608,9 +616,9 @@ fn base_picker(app: AppState, state: ReviewState) -> impl IntoView {
             let Some(item_id) = current_item_id(state) else {
                 return Menu::new();
             };
-            let selected = state.review_launcher_draft.with_untracked(|draft| {
-                draft.as_ref().and_then(|draft| draft.base_ref.clone())
-            });
+            let selected = state
+                .review_launcher_draft
+                .with_untracked(|draft| draft.as_ref().and_then(|draft| draft.base_ref.clone()));
             let mut menu = Menu::new();
             for base_ref in app.review_base_refs_for(&item_id).iter() {
                 let pick = base_ref.clone();
@@ -863,21 +871,46 @@ pub(crate) fn count_chips(summary: &ReviewGroupSummary) -> impl IntoView {
     type Ink = fn() -> floem::peniko::Color;
     let group = &summary.group;
     let kinds: [(u64, &str, Ink, Ink); 4] = [
-        (group.new_findings, "new", theme::notice_fg, theme::notice_bg),
-        (group.still_present, "still present", theme::fg_muted, theme::badge_bg),
-        (group.verified_fixed, "verified fixed", theme::open, theme::diff_added_bg),
-        (group.not_verified, "not verified", theme::fg_subtle, theme::badge_bg),
+        (
+            group.new_findings,
+            "new",
+            theme::notice_fg,
+            theme::notice_bg,
+        ),
+        (
+            group.still_present,
+            "still present",
+            theme::fg_muted,
+            theme::badge_bg,
+        ),
+        (
+            group.verified_fixed,
+            "verified fixed",
+            theme::open,
+            theme::diff_added_bg,
+        ),
+        (
+            group.not_verified,
+            "not verified",
+            theme::fg_subtle,
+            theme::badge_bg,
+        ),
     ];
     let chips = kinds
         .into_iter()
         .filter(|(count, ..)| *count > 0)
         .map(|(count, words, ink, fill)| {
-            crate::ui::widgets::badge(move || format!("{count} {words}"), ink, fill, None).into_any()
+            crate::ui::widgets::badge(move || format!("{count} {words}"), ink, fill, None)
+                .into_any()
         })
         .collect::<Vec<_>>();
     Stack::horizontal_from_iter(chips)
         .debug_name("review-group-counts")
-        .style(|s| s.items_center().flex_wrap(floem::style::FlexWrap::Wrap).gap(6.0))
+        .style(|s| {
+            s.items_center()
+                .flex_wrap(floem::style::FlexWrap::Wrap)
+                .gap(6.0)
+        })
 }
 
 fn build_draft(app: AppState, state: ReviewState, item_id: &str) -> Option<ReviewLaunchDraft> {
@@ -1163,7 +1196,6 @@ fn show_in_agents(app: AppState, state: ReviewState, summary: &ReviewGroupSummar
     });
 }
 
-
 pub(crate) fn attempt_summary(summary: &ReviewGroupSummary) -> String {
     if summary.attempts.is_empty() {
         return "No reviewer attempts were admitted".into();
@@ -1232,7 +1264,6 @@ pub(crate) fn newer_changes(state: ReviewState, summary: &ReviewGroupSummary) ->
             .is_some_and(|checkout| checkout.head_sha != reviewed)
     })
 }
-
 
 fn backend_label(backend: perch_agent::Backend) -> &'static str {
     match backend {
@@ -1342,9 +1373,17 @@ pub(crate) fn action_button(
             .padding_horiz(10.0)
             .items_center()
             .justify_center()
-            .background(if prominent { theme::fg() } else { theme::canvas() })
+            .background(if prominent {
+                theme::fg()
+            } else {
+                theme::canvas()
+            })
             .border(1.0)
-            .border_color(if prominent { theme::fg() } else { theme::border() })
+            .border_color(if prominent {
+                theme::fg()
+            } else {
+                theme::border()
+            })
             .border_radius(theme::RADIUS)
             .keyboard_navigable()
             .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
@@ -1663,8 +1702,7 @@ mod tests {
     fn a_reviewer_is_one_line_and_its_box_takes_it_or_leaves_it() {
         let (app, state) = item_state();
         let root = TestRoot::new();
-        let view =
-            crate::review::review_menu::control(app, state, Rc::new(Backend::detached()));
+        let view = crate::review::review_menu::control(app, state, Rc::new(Backend::detached()));
         let mut harness = HeadlessHarness::new_with_size(root, view, 700.0, 800.0);
         let settle = |harness: &mut HeadlessHarness| {
             harness.rebuild();
@@ -1696,7 +1734,8 @@ mod tests {
         crate::review::review_menu::open(state, None);
         settle(&mut harness);
         // Opening asks the backend again, and nothing answers here.
-        app.review_dashboard_loading.update(|loading| loading.clear());
+        app.review_dashboard_loading
+            .update(|loading| loading.clear());
         settle(&mut harness);
 
         let model = rect(&harness, "review-model:claude-code");
@@ -1708,7 +1747,10 @@ mod tests {
         assert!(model.x1 < effort.x0, "{model:?} {effort:?}");
         let head = rect(&harness, "review-head");
         let base = rect(&harness, "review-base");
-        assert!((head.center().y - base.center().y).abs() < 1.0, "{head:?} {base:?}");
+        assert!(
+            (head.center().y - base.center().y).abs() < 1.0,
+            "{head:?} {base:?}"
+        );
         assert!(head.x1 < base.x0, "{head:?} {base:?}");
         assert_eq!(reviewers(), vec![perch_agent::Backend::ClaudeCode]);
 
@@ -1719,14 +1761,18 @@ mod tests {
         click(&mut harness, "review-take:codex");
         assert_eq!(reviewers(), vec![perch_agent::Backend::ClaudeCode]);
 
-        app.agent.update(|agent| agent.codex.models = vec!["gpt-5.5".into()]);
+        app.agent
+            .update(|agent| agent.codex.models = vec!["gpt-5.5".into()]);
         settle(&mut harness);
         let codex = named(harness.root_id(), "reviewer-row:codex").unwrap();
         assert!(named(codex, "reviewer-unavailable").is_none());
         click(&mut harness, "review-take:codex");
         assert_eq!(
             reviewers(),
-            vec![perch_agent::Backend::ClaudeCode, perch_agent::Backend::Codex]
+            vec![
+                perch_agent::Backend::ClaudeCode,
+                perch_agent::Backend::Codex
+            ]
         );
         click(&mut harness, "review-take:claude-code");
         assert_eq!(reviewers(), vec![perch_agent::Backend::Codex]);
@@ -1740,10 +1786,16 @@ mod tests {
         state
             .review_launcher_draft
             .set(build_draft(app, state, "worktree"));
-        assert_eq!(launch_validation(app, state).request.unwrap().instructions, None);
+        assert_eq!(
+            launch_validation(app, state).request.unwrap().instructions,
+            None
+        );
 
         state.review_launcher_instructions.set("  \n ".into());
-        assert_eq!(launch_validation(app, state).request.unwrap().instructions, None);
+        assert_eq!(
+            launch_validation(app, state).request.unwrap().instructions,
+            None
+        );
 
         state
             .review_launcher_instructions
@@ -1761,7 +1813,11 @@ mod tests {
         state
             .review_launcher_draft
             .set(build_draft(app, state, "worktree"));
-        assert!(launch_validation(app, state).request.unwrap().instructions.is_some());
+        assert!(launch_validation(app, state)
+            .request
+            .unwrap()
+            .instructions
+            .is_some());
     }
 
     #[test]
@@ -1770,7 +1826,12 @@ mod tests {
         state
             .review_launcher_draft
             .set(build_draft(app, state, "worktree"));
-        let included = || launch_validation(app, state).request.unwrap().include_uncommitted;
+        let included = || {
+            launch_validation(app, state)
+                .request
+                .unwrap()
+                .include_uncommitted
+        };
         let commit = perch_git::Commit {
             sha: "abcdef0123456789".into(),
             subject: "Start".into(),
@@ -1786,7 +1847,10 @@ mod tests {
         state.review_launcher_uncommitted.set(None);
 
         // With nothing committed, the work is all there is.
-        state.dirty.set(perch_git::Dirt { unstaged: true, staged: false });
+        state.dirty.set(perch_git::Dirt {
+            unstaged: true,
+            staged: false,
+        });
         assert!(included());
 
         // Over commits it follows the Files view, until the reader picks.
@@ -1810,8 +1874,7 @@ mod tests {
     fn launcher_moves_focus_in_and_escape_returns_it_to_the_control() {
         let (app, state) = item_state();
         let root = TestRoot::new();
-        let view =
-            crate::review::review_menu::control(app, state, Rc::new(Backend::detached()));
+        let view = crate::review::review_menu::control(app, state, Rc::new(Backend::detached()));
         let mut harness = HeadlessHarness::new_with_size(root, view, 700.0, 800.0);
         harness.rebuild();
         harness.paint();

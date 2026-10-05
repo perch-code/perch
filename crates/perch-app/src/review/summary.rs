@@ -52,7 +52,9 @@ pub fn summary(
     // The repository's grants, on an item that takes Work runs: asked for
     // as the item opens, and kept as the backend sends them.
     let work_repo = Memo::new(move |_| {
-        let viewer = app.viewer.with(|v| v.as_ref().map(|(login, _)| login.clone()));
+        let viewer = app
+            .viewer
+            .with(|v| v.as_ref().map(|(login, _)| login.clone()));
         state.item.with(|item| {
             item.as_ref()
                 .filter(|item| crate::items::work_allowed(item, viewer.as_deref()))
@@ -70,7 +72,11 @@ pub fn summary(
     let grants = Memo::new(move |_| {
         work_repo
             .get()
-            .map(|repo| state.grants.with(|all| all.get(&repo.to_lowercase()).cloned().unwrap_or_default()))
+            .map(|repo| {
+                state
+                    .grants
+                    .with(|all| all.get(&repo.to_lowercase()).cloned().unwrap_or_default())
+            })
             .unwrap_or_default()
             .into_iter()
             .map(|grant| (grant.id, grant.label))
@@ -124,7 +130,7 @@ pub fn summary(
                 divergence(state),
                 push_button(app, state, backend.clone()),
             ))
-                .style(|s| s.items_center().min_width(0.0).col_gap(theme::SUMMARY_GAP)),
+            .style(|s| s.items_center().min_width(0.0).col_gap(theme::SUMMARY_GAP)),
         ),
         dyn_row(
             SidebarIcon::Person,
@@ -153,7 +159,9 @@ pub fn summary(
             |g| !g.is_empty(),
             move |grants| {
                 let backend = grants_backend.clone();
-                chips(grants, move |(id, label)| grant_chip(backend.clone(), id, label))
+                chips(grants, move |(id, label)| {
+                    grant_chip(backend.clone(), id, label)
+                })
             },
         ),
         dyn_row(
@@ -168,7 +176,12 @@ pub fn summary(
         dyn_row(
             SidebarIcon::Person,
             "Assignees",
-            move || (data.with(|d| d.assignees.clone()), assignable.with(Option::is_some)),
+            move || {
+                (
+                    data.with(|d| d.assignees.clone()),
+                    assignable.with(Option::is_some),
+                )
+            },
             |(logins, may_assign)| !logins.is_empty() || *may_assign,
             move |(logins, may_assign)| {
                 let nobody = logins.is_empty();
@@ -430,7 +443,9 @@ pub(crate) fn may_set_draft(app: AppState, state: ReviewState) -> bool {
     if state.offline.get() || state.historical_review.with(Option::is_some) {
         return false;
     }
-    let viewer = app.viewer.with(|v| v.as_ref().map(|(login, _)| login.clone()));
+    let viewer = app
+        .viewer
+        .with(|v| v.as_ref().map(|(login, _)| login.clone()));
     let writes = state.pull_request_overview.with(|overview| {
         overview.as_ref().is_some_and(|overview| {
             matches!(
@@ -456,7 +471,10 @@ pub(crate) fn may_set_draft(app: AppState, state: ReviewState) -> bool {
 /// Convert the pull request to a draft, or mark it ready for review, as
 /// the state pill's menu and the merge box do.
 pub(crate) fn set_draft(state: ReviewState, backend: &Backend, draft: bool) {
-    let Some(item_id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone())) else {
+    let Some(item_id) = state
+        .item
+        .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+    else {
         return;
     };
     state.draft_pending.set(Some(draft));
@@ -613,10 +631,8 @@ fn checks_pill(state: ReviewState) -> impl IntoView {
                         .justify_center()
                         .margin_right(6.0)
                 }),
-                Label::derived(move || text.to_string()).style(|s| {
-                    s.font_size(theme::TEXT_BADGE)
-                        .color(theme::fg_muted())
-                }),
+                Label::derived(move || text.to_string())
+                    .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::fg_muted())),
             ))
             .on_event_stop(el::Click, move |_, _| {
                 if let Some(url) = &url {
@@ -729,10 +745,19 @@ fn trust_rows(
 ) -> Vec<crate::ui::widgets::TrustRow> {
     let mut rows = Vec::new();
     if !held.is_empty() {
-        let names = held.iter().map(|kind| kind.name()).collect::<Vec<_>>().join(" and ");
+        let names = held
+            .iter()
+            .map(|kind| kind.name())
+            .collect::<Vec<_>>()
+            .join(" and ");
         let (backend, id) = (backend.clone(), item.id.clone());
-        let start = Rc::new(move || crate::ui::toast::trust_and_start(app, &backend, &id, Vec::new()));
-        rows.push((format!("Trust and Start {names}"), SidebarIcon::Check, start as Rc<dyn Fn()>));
+        let start =
+            Rc::new(move || crate::ui::toast::trust_and_start(app, &backend, &id, Vec::new()));
+        rows.push((
+            format!("Trust and Start {names}"),
+            SidebarIcon::Check,
+            start as Rc<dyn Fn()>,
+        ));
     }
     let repo = &item.repo_full_name;
     for kind in perch_lsp::ServerKind::ALL {
@@ -741,8 +766,14 @@ fn trust_rows(
             continue;
         }
         let (label, icon) = match trusted {
-            true => (format!("Stop Trusting {} in {repo}", kind.name()), SidebarIcon::Stop),
-            false => (format!("Always Trust {} in {repo}", kind.name()), SidebarIcon::Repository),
+            true => (
+                format!("Stop Trusting {} in {repo}", kind.name()),
+                SidebarIcon::Stop,
+            ),
+            false => (
+                format!("Always Trust {} in {repo}", kind.name()),
+                SidebarIcon::Repository,
+            ),
         };
         let (backend, repo) = (backend.clone(), repo.clone());
         let flip = Rc::new(move || backend.trust_server_in_repo(&repo, kind, !trusted));
@@ -794,7 +825,12 @@ fn directory(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl In
             // Read as the menu opens, for the item open then.
             let menu_backend = backend.clone();
             let trust = move || match state.item.get_untracked() {
-                Some(item) => trust_rows(app, &menu_backend, &item, &state.lsp_status.with_untracked(|s| s.held())),
+                Some(item) => trust_rows(
+                    app,
+                    &menu_backend,
+                    &item,
+                    &state.lsp_status.with_untracked(|s| s.held()),
+                ),
                 None => Vec::new(),
             };
             // The notice's caution colour, as the pill over the rows has it.
@@ -920,7 +956,9 @@ fn divergence(state: ReviewState) -> impl IntoView {
 /// and nothing the pull request has that the worktree doesn't: a push
 /// that needs no force.
 pub(crate) fn can_push(app: AppState, state: ReviewState) -> bool {
-    let viewer = app.viewer.with(|v| v.as_ref().map(|(login, _)| login.clone()));
+    let viewer = app
+        .viewer
+        .with(|v| v.as_ref().map(|(login, _)| login.clone()));
     state.item.with(|item| {
         item.as_ref().is_some_and(|item| {
             item.pull_request().is_some()
@@ -935,7 +973,10 @@ pub(crate) fn can_push(app: AppState, state: ReviewState) -> bool {
 /// Push the item's branch to its pull request, as Push does here and in
 /// the merge box.
 pub(crate) fn push(state: ReviewState, backend: &Backend) {
-    let Some(item_id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone())) else {
+    let Some(item_id) = state
+        .item
+        .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+    else {
         return;
     };
     state.push_pending.set(true);
@@ -1190,9 +1231,15 @@ impl GitHubData {
 fn github_data(app: AppState, state: ReviewState) -> GitHubData {
     let mut data = GitHubData::default();
     if let Some(pr) = state.pull_request.get() {
-        let opened = state.discussion.with(|d| d.as_ref().and_then(|d| d.opened_at));
-        data.author = Some((pr.author_login.clone(), pr.author_avatar_url.clone(), opened))
-            .filter(|(login, ..)| !login.is_empty());
+        let opened = state
+            .discussion
+            .with(|d| d.as_ref().and_then(|d| d.opened_at));
+        data.author = Some((
+            pr.author_login.clone(),
+            pr.author_avatar_url.clone(),
+            opened,
+        ))
+        .filter(|(login, ..)| !login.is_empty());
         for r in &pr.requested_reviewers {
             data.reviewers
                 .push((r.login.clone(), r.avatar_url.clone(), None));
@@ -1388,7 +1435,11 @@ fn assignees_of(state: ReviewState) -> Vec<String> {
     state
         .pull_request
         .with_untracked(|p| p.as_ref().map(|p| p.assignees.clone()))
-        .or_else(|| state.issue.with_untracked(|i| i.as_ref().map(|i| i.assignees.clone())))
+        .or_else(|| {
+            state
+                .issue
+                .with_untracked(|i| i.as_ref().map(|i| i.assignees.clone()))
+        })
         .unwrap_or_default()
 }
 
@@ -1546,8 +1597,11 @@ fn chip(
 /// A grant: what it allows, and a × that takes it back.
 fn grant_chip(backend: Rc<Backend>, id: String, label: String) -> impl IntoView {
     Stack::horizontal((
-        Label::derived(move || label.clone())
-            .style(|s| badge_text(s, theme::fg_muted()).text_ellipsis().max_width(220.0)),
+        Label::derived(move || label.clone()).style(|s| {
+            badge_text(s, theme::fg_muted())
+                .text_ellipsis()
+                .max_width(220.0)
+        }),
         sidebar_glyph(SidebarIcon::Close, theme::fg_subtle)
             .on_event_stop(el::Click, move |_, _| backend.revoke_grant(&id))
             .debug_name("revoke-grant")
@@ -1567,7 +1621,12 @@ fn grant_chip(backend: Rc<Backend>, id: String, label: String) -> impl IntoView 
 /// Shared with the timeline's label lines, which draw the same pill.
 pub(crate) fn label_chip(name: String, color: String) -> impl IntoView {
     let rgb = label_rgb(&color);
-    chip(name, move || label_colors(rgb).0, move || label_colors(rgb).1, None)
+    chip(
+        name,
+        move || label_colors(rgb).0,
+        move || label_colors(rgb).1,
+        None,
+    )
 }
 
 /// A label's colour from GitHub's hex for it, or None when it is not one.
@@ -2000,14 +2059,20 @@ mod tests {
         assert!(!rows_shown(&harness).contains(&"Assignees".to_string()));
 
         state.assignable.update(|all| {
-            all.insert("slatedb/slatedb".into(), Some(Arc::new(vec![user("criccomini", None)])));
+            all.insert(
+                "slatedb/slatedb".into(),
+                Some(Arc::new(vec![user("criccomini", None)])),
+            );
         });
         harness.rebuild();
         harness.paint();
         assert!(rows_shown(&harness).contains(&"Assignees".to_string()));
         let row = rect(&harness, "summary row Assignees");
         let button = rect(&harness, "assign menu");
-        assert!(within(button, row), "Assign at {button:?} is outside {row:?}");
+        assert!(
+            within(button, row),
+            "Assign at {button:?} is outside {row:?}"
+        );
         assert_eq!(
             button.x0,
             row.x0 + theme::SUMMARY_NAME_WIDTH,
@@ -2046,7 +2111,8 @@ mod tests {
         let (backend, mut commands) = Backend::recording();
         let root = floem::headless::TestRoot::new();
         let view = crate::ui::app_view(app, state, Rc::new(backend));
-        let mut harness = floem::headless::HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        let mut harness =
+            floem::headless::HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
         harness.rebuild();
         harness.paint();
         let mut asked = false;
@@ -2167,15 +2233,22 @@ mod tests {
             created_at: "2026-09-22T10:00:00Z".parse().unwrap(),
         };
         state.grants.update(|all| {
-            all.insert("slatedb/slatedb".into(), vec![grant("g1", "example.com"), grant("g2", "commit")]);
+            all.insert(
+                "slatedb/slatedb".into(),
+                vec![grant("g1", "example.com"), grant("g2", "commit")],
+            );
         });
         let (backend, mut commands) = Backend::recording();
         let root = floem::headless::TestRoot::new();
         let view = crate::ui::app_view(app, state, Rc::new(backend));
-        let mut harness = floem::headless::HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        let mut harness =
+            floem::headless::HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
         harness.rebuild();
         harness.paint();
-        assert_eq!(rows_shown(&harness), ["Branch", "Repository", "Worktree", "Work may"]);
+        assert_eq!(
+            rows_shown(&harness),
+            ["Branch", "Repository", "Worktree", "Work may"]
+        );
         let mut asked = false;
         while let Ok(command) = commands.try_recv() {
             asked |= matches!(command, crate::backend::Command::ListGrants { ref repo } if repo == "slatedb/slatedb");
@@ -2208,19 +2281,31 @@ mod tests {
         item.id = "branch".into();
         let rust = perch_lsp::ServerKind::RustAnalyzer;
         let menu = |held: &[perch_lsp::ServerKind]| {
-            crate::ui::widgets::worktree_menu("/w".into(), None, trust_rows(app, &backend, &item, held))
+            crate::ui::widgets::worktree_menu(
+                "/w".into(),
+                None,
+                trust_rows(app, &backend, &item, held),
+            )
         };
         let mut sent = || {
             std::iter::from_fn(|| commands.try_recv().ok())
                 .filter_map(|command| match command {
-                    Command::TrustServerInRepo { repo, kind, trusted } => Some((repo, kind, trusted)),
+                    Command::TrustServerInRepo {
+                        repo,
+                        kind,
+                        trusted,
+                    } => Some((repo, kind, trusted)),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
         };
 
         // A line first is dropped as the menu is drawn.
-        assert_eq!(menu(&[]).outline()[..2], ["—", "Reveal in Finder"], "nothing held or trusted");
+        assert_eq!(
+            menu(&[]).outline()[..2],
+            ["—", "Reveal in Finder"],
+            "nothing held or trusted"
+        );
         let held = menu(&[rust]);
         assert_eq!(
             held.outline()[..3],
@@ -2233,9 +2318,15 @@ mod tests {
         held.choose("Always Trust rust-analyzer in slatedb/slatedb");
         assert_eq!(sent(), [("slatedb/slatedb".to_string(), rust, true)]);
 
-        app.apply(crate::backend::Event::TrustedServers(vec![("SlateDB/SlateDB".into(), rust)]));
+        app.apply(crate::backend::Event::TrustedServers(vec![(
+            "SlateDB/SlateDB".into(),
+            rust,
+        )]));
         let trusted = menu(&[]);
-        assert_eq!(trusted.outline()[0], "Stop Trusting rust-analyzer in slatedb/slatedb");
+        assert_eq!(
+            trusted.outline()[0],
+            "Stop Trusting rust-analyzer in slatedb/slatedb"
+        );
         trusted.choose("Stop Trusting rust-analyzer in slatedb/slatedb");
         assert_eq!(sent(), [("slatedb/slatedb".to_string(), rust, false)]);
     }
@@ -2428,35 +2519,43 @@ mod tests {
             state.pull_request.set(Some(Arc::new(pr)));
         };
         let permission = |permission: Option<perch_github::RepositoryPermission>| {
-            state.pull_request_overview.set(permission.map(|permission| {
-                Arc::new(perch_github::PullRequestOverview {
-                    head_sha: "h".into(),
-                    mergeable: perch_github::MergeableState::Mergeable,
-                    merge_state: perch_github::MergeState::Clean,
-                    review_decision: None,
-                    viewer_can_merge_as_admin: false,
-                    viewer_permission: Some(permission),
-                    allowed_merge_methods: Default::default(),
-                    checks: perch_github::Checks {
-                        state: CheckState::Passing,
-                        url: None,
-                        runs: Vec::new(),
-                    },
-                    squash_message: Default::default(),
-                    merge_message: Default::default(),
-                })
-            }));
+            state
+                .pull_request_overview
+                .set(permission.map(|permission| {
+                    Arc::new(perch_github::PullRequestOverview {
+                        head_sha: "h".into(),
+                        mergeable: perch_github::MergeableState::Mergeable,
+                        merge_state: perch_github::MergeState::Clean,
+                        review_decision: None,
+                        viewer_can_merge_as_admin: false,
+                        viewer_permission: Some(permission),
+                        allowed_merge_methods: Default::default(),
+                        checks: perch_github::Checks {
+                            state: CheckState::Passing,
+                            url: None,
+                            runs: Vec::new(),
+                        },
+                        squash_message: Default::default(),
+                        merge_message: Default::default(),
+                    })
+                }));
         };
         with("u", &|_| {});
         assert!(may_set_draft(app, state), "its author, in any case");
         with("u", &|pr| pr.draft = true);
         assert!(may_set_draft(app, state));
         with("someone", &|_| {});
-        assert!(!may_set_draft(app, state), "someone else's, with no word on access");
+        assert!(
+            !may_set_draft(app, state),
+            "someone else's, with no word on access"
+        );
         permission(Some(perch_github::RepositoryPermission::Triage));
         assert!(!may_set_draft(app, state));
         permission(Some(perch_github::RepositoryPermission::Write));
-        assert!(may_set_draft(app, state), "someone who may write to the repository");
+        assert!(
+            may_set_draft(app, state),
+            "someone who may write to the repository"
+        );
         with("u", &|pr| pr.merged = true);
         assert!(!may_set_draft(app, state));
         with("u", &|pr| pr.state = "closed".into());

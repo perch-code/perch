@@ -182,7 +182,13 @@ fn filter_button(state: ReviewState) -> impl IntoView {
         move |on| {
             let button = icon_button(
                 || SidebarIcon::Filter,
-                move || if on { theme::accent() } else { theme::fg_muted() },
+                move || {
+                    if on {
+                        theme::accent()
+                    } else {
+                        theme::fg_muted()
+                    }
+                },
                 move || state.changed_only.set(!on),
             );
             let text = if on {
@@ -563,7 +569,11 @@ mod tests {
     fn goes_dark_with_the_system() {
         let mut harness = app_harness().0;
         let left = crate::theme::dark_check::light_left(&mut harness);
-        assert!(left.is_empty(), "light colours left in dark:\n{}", left.join("\n"));
+        assert!(
+            left.is_empty(),
+            "light colours left in dark:\n{}",
+            left.join("\n")
+        );
     }
 
     /// The whole window on Code with a worktree of `src` and a README,

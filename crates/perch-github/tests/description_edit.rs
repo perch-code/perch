@@ -197,11 +197,18 @@ async fn a_discussion_read_right_after_a_description_edit_asks_github_for_the_ne
         .await
         .unwrap();
     assert_eq!(kept.body, "After.");
-    assert_eq!(kept.updated_at, Some("2026-10-04T12:00:00Z".parse().unwrap()));
+    assert_eq!(
+        kept.updated_at,
+        Some("2026-10-04T12:00:00Z".parse().unwrap())
+    );
     let discussion = github.fetch_discussion("octo/perch", 7).await.unwrap();
 
     assert_eq!(discussion.body, "After.");
-    assert_eq!(pull_reads(&requests), 2, "the discussion asked GitHub again");
+    assert_eq!(
+        pull_reads(&requests),
+        2,
+        "the discussion asked GitHub again"
+    );
     let requests = requests.lock().unwrap();
     let edit = requests.iter().find(|r| r.path == "/graphql").unwrap();
     assert!(edit
@@ -236,7 +243,11 @@ async fn a_pull_request_read_asked_before_a_description_edit_is_not_kept_as_curr
     let discussion = github.fetch_discussion("octo/perch", 7).await.unwrap();
 
     assert_eq!(discussion.body, "After.");
-    assert_eq!(pull_reads(&requests), 2, "the discussion asked GitHub again");
+    assert_eq!(
+        pull_reads(&requests),
+        2,
+        "the discussion asked GitHub again"
+    );
 }
 
 /// A pull request whose description becomes "Done." once it is closed

@@ -11,12 +11,12 @@ use std::path::{Path, PathBuf};
 use jiff::Timestamp;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
+use crate::activity::{ActivityEvent, ItemActivity};
 use crate::comments::{
     self, Anchor, Author, CommentMessage, CommentThread, NewRunEvent, RevisionContext, RunEvent,
-    RunEventRecord, RunHistoryCursor, RunHistoryFilter, RunHistoryPage, RunLabels, RunOwner,
-    RunMode, RunPurpose, RunRecord, RunStatus, RunStep, RunSummary, TerminalReason, ThreadOrigin,
+    RunEventRecord, RunHistoryCursor, RunHistoryFilter, RunHistoryPage, RunLabels, RunMode,
+    RunOwner, RunPurpose, RunRecord, RunStatus, RunStep, RunSummary, TerminalReason, ThreadOrigin,
 };
-use crate::activity::{ActivityEvent, ItemActivity};
 use crate::discussion::Discussion;
 use crate::items::{Checkout as ItemCheckout, Item, Subject, SubjectKind};
 use crate::model::Thread;
@@ -205,9 +205,7 @@ impl NotificationMark {
     fn hides(&self, thread: &Thread, now: Timestamp) -> bool {
         match self.snoozed_until {
             None => thread.updated_at <= self.updated_at,
-            Some(until) => {
-                now < until && (thread.updated_at <= self.updated_at || !thread.unread)
-            }
+            Some(until) => now < until && (thread.updated_at <= self.updated_at || !thread.unread),
         }
     }
 }
@@ -564,7 +562,10 @@ fn add_dismissed_thread_column(tx: &Transaction<'_>) -> Result<(), CacheError> {
         |row| row.get(0),
     )?;
     if !present {
-        tx.execute("ALTER TABLE notification_dismissals ADD COLUMN json TEXT", [])?;
+        tx.execute(
+            "ALTER TABLE notification_dismissals ADD COLUMN json TEXT",
+            [],
+        )?;
     }
     tx.execute(
         "DELETE FROM meta WHERE key = ?1",
@@ -582,7 +583,10 @@ fn add_snoozed_until_column(tx: &Transaction<'_>) -> Result<(), CacheError> {
         |row| row.get(0),
     )?;
     if !present {
-        tx.execute("ALTER TABLE notification_dismissals ADD COLUMN snoozed_until TEXT", [])?;
+        tx.execute(
+            "ALTER TABLE notification_dismissals ADD COLUMN snoozed_until TEXT",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -793,7 +797,10 @@ fn add_work_columns(tx: &Transaction<'_>) -> Result<(), CacheError> {
             |row| row.get(0),
         )?;
         if !present {
-            tx.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"), [])?;
+            tx.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"),
+                [],
+            )?;
         }
     }
     Ok(())
@@ -2004,7 +2011,12 @@ fn load_steps_on(conn: &Connection, run_id: &str) -> Result<Vec<RunStep>, CacheE
             }
             // A call is pending until its result comes. A run that ended
             // without one leaves it pending, and the view shows it as done.
-            RunEvent::ToolCall { id, summary, parent_id, .. } => {
+            RunEvent::ToolCall {
+                id,
+                summary,
+                parent_id,
+                ..
+            } => {
                 tools.insert(id, steps.len());
                 steps.push(RunStep {
                     summary: match parent_id {
@@ -2290,9 +2302,9 @@ fn truncate_event_strings(event: &mut RunEvent, max: usize) {
                 truncate_string(model, max);
             }
         }
-        RunEvent::Text { text }
-        | RunEvent::Steer { text }
-        | RunEvent::SteerLanded { text } => truncate_string(text, max),
+        RunEvent::Text { text } | RunEvent::Steer { text } | RunEvent::SteerLanded { text } => {
+            truncate_string(text, max)
+        }
         RunEvent::ToolCall {
             id,
             name,
@@ -2421,8 +2433,14 @@ fn remove_draft_on(conn: &Connection, message_id: &str) -> Result<(), CacheError
             "DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE owner_thread_id=?1)",
             params![thread_id],
         )?;
-        conn.execute("DELETE FROM runs WHERE owner_thread_id = ?1", params![thread_id])?;
-        conn.execute("DELETE FROM comment_threads WHERE id = ?1", params![thread_id])?;
+        conn.execute(
+            "DELETE FROM runs WHERE owner_thread_id = ?1",
+            params![thread_id],
+        )?;
+        conn.execute(
+            "DELETE FROM comment_threads WHERE id = ?1",
+            params![thread_id],
+        )?;
     } else if github_left == 0 {
         conn.execute(
             "UPDATE comment_threads SET origin = 'local' WHERE id = ?1",
@@ -2869,7 +2887,11 @@ impl Cache {
         for row in rows {
             threads.push(serde_json::from_str(&row?)?);
         }
-        threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| b.id.cmp(&a.id)));
+        threads.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
         Ok(threads)
     }
 
@@ -2960,7 +2982,11 @@ impl Cache {
             }
         }
         tx.commit()?;
-        threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| b.id.cmp(&a.id)));
+        threads.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| b.id.cmp(&a.id))
+        });
         Ok(threads)
     }
 
@@ -3932,7 +3958,10 @@ impl Cache {
             "DELETE FROM run_events WHERE run_id IN (SELECT id FROM runs WHERE owner_thread_id=?1)",
             params![thread_id],
         )?;
-        tx.execute("DELETE FROM runs WHERE owner_thread_id = ?1", params![thread_id])?;
+        tx.execute(
+            "DELETE FROM runs WHERE owner_thread_id = ?1",
+            params![thread_id],
+        )?;
         tx.execute(
             "DELETE FROM comment_messages WHERE thread_id = ?1 AND origin = 'local'",
             params![thread_id],
@@ -4444,7 +4473,12 @@ impl Cache {
 
     /// Trust the language server named `server` on everything in `repo`
     /// from now on, or stop.
-    pub fn set_repo_server_trust(&self, repo: &str, server: &str, trusted: bool) -> Result<(), CacheError> {
+    pub fn set_repo_server_trust(
+        &self,
+        repo: &str,
+        server: &str,
+        trusted: bool,
+    ) -> Result<(), CacheError> {
         if trusted {
             self.conn.execute(
                 "INSERT OR IGNORE INTO repo_lsp_trust (repo, server) VALUES (?1, ?2)",
@@ -4555,7 +4589,13 @@ impl Cache {
         self.conn.execute(
             "INSERT OR IGNORE INTO work_grants (id, repo, key, label, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![grant.id, grant.repo, grant.key, grant.label, grant.created_at.to_string()],
+            params![
+                grant.id,
+                grant.repo,
+                grant.key,
+                grant.label,
+                grant.created_at.to_string()
+            ],
         )?;
         Ok(())
     }
@@ -4564,9 +4604,14 @@ impl Cache {
     pub fn delete_grant(&self, id: &str) -> Result<Option<String>, CacheError> {
         let repo: Option<String> = self
             .conn
-            .query_row("SELECT repo FROM work_grants WHERE id = ?1", params![id], |row| row.get(0))
+            .query_row(
+                "SELECT repo FROM work_grants WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
             .optional()?;
-        self.conn.execute("DELETE FROM work_grants WHERE id = ?1", params![id])?;
+        self.conn
+            .execute("DELETE FROM work_grants WHERE id = ?1", params![id])?;
         Ok(repo)
     }
 
@@ -5226,10 +5271,18 @@ mod tests {
                 .collect()
         };
         let step = |summary: &str, user: bool, pending: bool| (summary.to_string(), user, pending);
-        let events = [call("a"), steer("Skip the tests"), steer("And the docs"), call("b")];
+        let events = [
+            call("a"),
+            steer("Skip the tests"),
+            steer("And the docs"),
+            call("b"),
+        ];
         for (i, e) in events.into_iter().enumerate() {
-            c.append_run_event("steered", &event(&format!("e{i}"), "2026-09-18T10:00:01Z", e))
-                .unwrap();
+            c.append_run_event(
+                "steered",
+                &event(&format!("e{i}"), "2026-09-18T10:00:01Z", e),
+            )
+            .unwrap();
         }
         assert_eq!(
             steps(&c),
@@ -5240,9 +5293,13 @@ mod tests {
                 step("And the docs", true, true),
             ]
         );
-        c.append_run_event("steered", &event("e4", "2026-09-18T10:00:02Z", landed("Skip the tests")))
+        c.append_run_event(
+            "steered",
+            &event("e4", "2026-09-18T10:00:02Z", landed("Skip the tests")),
+        )
+        .unwrap();
+        c.append_run_event("steered", &event("e5", "2026-09-18T10:00:02Z", call("c")))
             .unwrap();
-        c.append_run_event("steered", &event("e5", "2026-09-18T10:00:02Z", call("c"))).unwrap();
         assert_eq!(
             steps(&c),
             [
@@ -5253,7 +5310,14 @@ mod tests {
                 step("And the docs", true, true),
             ]
         );
-        assert_eq!(c.load_run("steered").unwrap().unwrap().latest_activity.as_deref(), Some("Ran c"));
+        assert_eq!(
+            c.load_run("steered")
+                .unwrap()
+                .unwrap()
+                .latest_activity
+                .as_deref(),
+            Some("Ran c")
+        );
     }
 
     #[test]
@@ -6609,13 +6673,29 @@ mod tests {
             label: key.into(),
             created_at: "2026-09-22T10:00:00Z".parse().unwrap(),
         };
-        c.insert_grant(&grant("g1", "local/notes", "network:example.com")).unwrap();
-        c.insert_grant(&grant("g2", "LOCAL/notes", "network:example.com")).unwrap();
-        c.insert_grant(&grant("g3", "local/notes", "commit")).unwrap();
-        c.insert_grant(&grant("g4", "acme/widgets", "commit")).unwrap();
-        let keys: Vec<String> = c.grants_for("Local/Notes").unwrap().into_iter().map(|g| g.key).collect();
-        assert_eq!(keys, ["network:example.com", "commit"], "one per key, whatever the case");
-        assert_eq!(c.delete_grant("g1").unwrap().as_deref(), Some("local/notes"));
+        c.insert_grant(&grant("g1", "local/notes", "network:example.com"))
+            .unwrap();
+        c.insert_grant(&grant("g2", "LOCAL/notes", "network:example.com"))
+            .unwrap();
+        c.insert_grant(&grant("g3", "local/notes", "commit"))
+            .unwrap();
+        c.insert_grant(&grant("g4", "acme/widgets", "commit"))
+            .unwrap();
+        let keys: Vec<String> = c
+            .grants_for("Local/Notes")
+            .unwrap()
+            .into_iter()
+            .map(|g| g.key)
+            .collect();
+        assert_eq!(
+            keys,
+            ["network:example.com", "commit"],
+            "one per key, whatever the case"
+        );
+        assert_eq!(
+            c.delete_grant("g1").unwrap().as_deref(),
+            Some("local/notes")
+        );
         assert_eq!(c.grants_for("local/notes").unwrap().len(), 1);
         assert_eq!(c.delete_grant("gone").unwrap(), None);
     }
@@ -6630,7 +6710,13 @@ mod tests {
             cache.set_meta("schema_version", "26").unwrap();
         }
         let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
-        assert_eq!(outcome, CacheOpen::Migrated { from: 26, to: SCHEMA_VERSION });
+        assert_eq!(
+            outcome,
+            CacheOpen::Migrated {
+                from: 26,
+                to: SCHEMA_VERSION
+            }
+        );
         assert!(cache.grants_for("a/b").unwrap().is_empty());
     }
 
@@ -6639,7 +6725,15 @@ mod tests {
         let c = Cache::open_in_memory().unwrap();
         let mut i = branch_item("feature");
         c.insert_item(&i).unwrap();
-        assert_eq!(c.load_item(&i.id).unwrap().unwrap().checkout.unwrap().divergence, None);
+        assert_eq!(
+            c.load_item(&i.id)
+                .unwrap()
+                .unwrap()
+                .checkout
+                .unwrap()
+                .divergence,
+            None
+        );
 
         let counted = crate::items::Divergence {
             head: "abc".into(),
@@ -6650,7 +6744,12 @@ mod tests {
         i.checkout.as_mut().unwrap().divergence = Some(counted.clone());
         c.update_item(&i).unwrap();
         assert_eq!(
-            c.load_item(&i.id).unwrap().unwrap().checkout.unwrap().divergence,
+            c.load_item(&i.id)
+                .unwrap()
+                .unwrap()
+                .checkout
+                .unwrap()
+                .divergence,
             Some(counted)
         );
     }
@@ -6662,13 +6761,31 @@ mod tests {
         let item = branch_item("feature");
         {
             let cache = Cache::open(&path, None).unwrap();
-            cache.conn.execute_batch("ALTER TABLE items DROP COLUMN divergence").unwrap();
+            cache
+                .conn
+                .execute_batch("ALTER TABLE items DROP COLUMN divergence")
+                .unwrap();
             cache.set_meta("schema_version", "27").unwrap();
         }
         let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
-        assert_eq!(outcome, CacheOpen::Migrated { from: 27, to: SCHEMA_VERSION });
+        assert_eq!(
+            outcome,
+            CacheOpen::Migrated {
+                from: 27,
+                to: SCHEMA_VERSION
+            }
+        );
         cache.insert_item(&item).unwrap();
-        assert_eq!(cache.load_item(&item.id).unwrap().unwrap().checkout.unwrap().divergence, None);
+        assert_eq!(
+            cache
+                .load_item(&item.id)
+                .unwrap()
+                .unwrap()
+                .checkout
+                .unwrap()
+                .divergence,
+            None
+        );
     }
 
     #[test]
@@ -6716,12 +6833,24 @@ mod tests {
         {
             let cache = Cache::open(&path, None).unwrap();
             cache.insert_item(&item).unwrap();
-            cache.conn.execute_batch("DROP TABLE item_activity").unwrap();
+            cache
+                .conn
+                .execute_batch("DROP TABLE item_activity")
+                .unwrap();
             cache.set_meta("schema_version", "28").unwrap();
         }
         let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
-        assert_eq!(outcome, CacheOpen::Migrated { from: 28, to: SCHEMA_VERSION });
-        assert!(cache.load_item_activity().unwrap().is_empty(), "nothing is backfilled");
+        assert_eq!(
+            outcome,
+            CacheOpen::Migrated {
+                from: 28,
+                to: SCHEMA_VERSION
+            }
+        );
+        assert!(
+            cache.load_item_activity().unwrap().is_empty(),
+            "nothing is backfilled"
+        );
     }
 
     #[test]
@@ -6744,7 +6873,10 @@ mod tests {
 
         c.delete_item(&item.id).unwrap();
         assert_eq!(c.item_code_trust(&item.id).unwrap(), None);
-        assert!(c.trust_item_code("no-such-item").is_err(), "no row for no item");
+        assert!(
+            c.trust_item_code("no-such-item").is_err(),
+            "no row for no item"
+        );
     }
 
     #[test]
@@ -6779,19 +6911,26 @@ mod tests {
         let rust = |repo: &str| c.repo_server_trusted(repo, "rust-analyzer").unwrap();
         assert!(!rust("slatedb/slatedb"));
 
-        c.set_repo_server_trust("slatedb/slatedb", "rust-analyzer", true).unwrap();
-        c.set_repo_server_trust("SlateDB/SlateDB", "rust-analyzer", true).unwrap();
+        c.set_repo_server_trust("slatedb/slatedb", "rust-analyzer", true)
+            .unwrap();
+        c.set_repo_server_trust("SlateDB/SlateDB", "rust-analyzer", true)
+            .unwrap();
         assert!(rust("SLATEDB/slatedb"), "in any case");
         assert!(!rust("slatedb/other"));
-        assert!(!c.repo_server_trusted("slatedb/slatedb", "jdtls").unwrap(), "one server");
+        assert!(
+            !c.repo_server_trusted("slatedb/slatedb", "jdtls").unwrap(),
+            "one server"
+        );
         assert_eq!(
             c.repo_server_trust().unwrap(),
             [("slatedb/slatedb".to_string(), "rust-analyzer".to_string())],
             "once, as first written"
         );
 
-        c.set_repo_server_trust("slatedb/slatedb", "jdtls", true).unwrap();
-        c.set_repo_server_trust("SlateDB/slatedb", "rust-analyzer", false).unwrap();
+        c.set_repo_server_trust("slatedb/slatedb", "jdtls", true)
+            .unwrap();
+        c.set_repo_server_trust("SlateDB/slatedb", "rust-analyzer", false)
+            .unwrap();
         assert!(!rust("slatedb/slatedb"));
         assert_eq!(
             c.repo_server_trust().unwrap(),
@@ -6805,11 +6944,20 @@ mod tests {
         let path = dir.path().join("perch.db");
         {
             let cache = Cache::open(&path, None).unwrap();
-            cache.conn.execute_batch("DROP TABLE repo_lsp_trust").unwrap();
+            cache
+                .conn
+                .execute_batch("DROP TABLE repo_lsp_trust")
+                .unwrap();
             cache.set_meta("schema_version", "34").unwrap();
         }
         let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
-        assert_eq!(outcome, CacheOpen::Migrated { from: 34, to: SCHEMA_VERSION });
+        assert_eq!(
+            outcome,
+            CacheOpen::Migrated {
+                from: 34,
+                to: SCHEMA_VERSION
+            }
+        );
         assert!(cache.repo_server_trust().unwrap().is_empty());
         cache.set_repo_server_trust("a/b", "jdtls", true).unwrap();
         assert!(cache.repo_server_trusted("a/b", "jdtls").unwrap());
@@ -6852,16 +7000,35 @@ mod tests {
             ] {
                 cache.insert_item(item).unwrap();
             }
-            cache.conn.execute_batch("DROP TABLE item_lsp_trust").unwrap();
+            cache
+                .conn
+                .execute_batch("DROP TABLE item_lsp_trust")
+                .unwrap();
             cache.set_meta("schema_version", "33").unwrap();
         }
         let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
-        assert_eq!(outcome, CacheOpen::Migrated { from: 33, to: SCHEMA_VERSION });
+        assert_eq!(
+            outcome,
+            CacheOpen::Migrated {
+                from: 33,
+                to: SCHEMA_VERSION
+            }
+        );
         for cut in [&work, &onward, &orphan, &forked, &forked_and_opened] {
-            assert_eq!(cache.item_code_trust(&cut.id).unwrap(), Some(false), "{}", cut.id);
+            assert_eq!(
+                cache.item_code_trust(&cut.id).unwrap(),
+                Some(false),
+                "{}",
+                cut.id
+            );
         }
         for other in [&pr, &checked_out, &feature, &from_feature] {
-            assert_eq!(cache.item_code_trust(&other.id).unwrap(), None, "{}", other.id);
+            assert_eq!(
+                cache.item_code_trust(&other.id).unwrap(),
+                None,
+                "{}",
+                other.id
+            );
         }
     }
 
@@ -6890,14 +7057,22 @@ mod tests {
             cache.set_meta("schema_version", "30").unwrap();
         }
         let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
-        assert_eq!(outcome, CacheOpen::Migrated { from: 30, to: SCHEMA_VERSION });
+        assert_eq!(
+            outcome,
+            CacheOpen::Migrated {
+                from: 30,
+                to: SCHEMA_VERSION
+            }
+        );
         let pinned = |id: &str| cache.load_item(id).unwrap().unwrap().pinned_at;
         assert_eq!(pinned(&saved.id), Some(saved.last_opened_at));
         assert_eq!(pinned(&both.id), both.pinned_at, "an existing pin stays");
         assert_eq!(pinned(&plain.id), None);
         let still_saved: i64 = cache
             .conn
-            .query_row("SELECT COUNT(*) FROM items WHERE saved != 0", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM items WHERE saved != 0", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(still_saved, 0);
     }
@@ -6923,7 +7098,13 @@ mod tests {
             cache.set_meta("schema_version", "31").unwrap();
         }
         let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
-        assert_eq!(outcome, CacheOpen::Migrated { from: 31, to: SCHEMA_VERSION });
+        assert_eq!(
+            outcome,
+            CacheOpen::Migrated {
+                from: 31,
+                to: SCHEMA_VERSION
+            }
+        );
         assert_eq!(cache.notifications_last_modified().unwrap(), None);
         assert!(cache.load_done_threads().unwrap().is_empty());
 
@@ -6943,12 +7124,21 @@ mod tests {
             let cache = Cache::open(&path, None).unwrap();
             cache
                 .conn
-                .execute("ALTER TABLE review_snapshots DROP COLUMN worktree_parent_sha", [])
+                .execute(
+                    "ALTER TABLE review_snapshots DROP COLUMN worktree_parent_sha",
+                    [],
+                )
                 .unwrap();
             cache.set_meta("schema_version", "29").unwrap();
         }
         let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
-        assert_eq!(outcome, CacheOpen::Migrated { from: 29, to: SCHEMA_VERSION });
+        assert_eq!(
+            outcome,
+            CacheOpen::Migrated {
+                from: 29,
+                to: SCHEMA_VERSION
+            }
+        );
         let has_column: bool = cache
             .conn
             .query_row(
@@ -6968,12 +7158,25 @@ mod tests {
         let c = Cache::open_in_memory().unwrap();
         let mut i = branch_item("feature");
         c.insert_item(&i).unwrap();
-        assert_eq!(c.load_item(&i.id).unwrap().unwrap().checkout.unwrap().source, None);
+        assert_eq!(
+            c.load_item(&i.id)
+                .unwrap()
+                .unwrap()
+                .checkout
+                .unwrap()
+                .source,
+            None
+        );
 
         i.checkout.as_mut().unwrap().source = Some("/Users/me/Code/notes".into());
         c.update_item(&i).unwrap();
         assert_eq!(
-            c.load_item(&i.id).unwrap().unwrap().checkout.unwrap().source,
+            c.load_item(&i.id)
+                .unwrap()
+                .unwrap()
+                .checkout
+                .unwrap()
+                .source,
             Some(PathBuf::from("/Users/me/Code/notes"))
         );
     }
@@ -6986,7 +7189,9 @@ mod tests {
         {
             let cache = Cache::open(&path, None).unwrap();
             cache.insert_item(&item).unwrap();
-            cache.insert_run(&run("run-25", "thread-25", RunStatus::Completed)).unwrap();
+            cache
+                .insert_run(&run("run-25", "thread-25", RunStatus::Completed))
+                .unwrap();
             for (table, column) in [
                 ("items", "source_path"),
                 ("runs", "mode"),
@@ -7002,11 +7207,28 @@ mod tests {
         }
 
         let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
-        assert_eq!(outcome, CacheOpen::Migrated { from: 25, to: SCHEMA_VERSION });
-        assert_eq!(cache.load_item(&item.id).unwrap().unwrap().checkout.unwrap().source, None);
+        assert_eq!(
+            outcome,
+            CacheOpen::Migrated {
+                from: 25,
+                to: SCHEMA_VERSION
+            }
+        );
+        assert_eq!(
+            cache
+                .load_item(&item.id)
+                .unwrap()
+                .unwrap()
+                .checkout
+                .unwrap()
+                .source,
+            None
+        );
         let mode: String = cache
             .conn
-            .query_row("SELECT mode FROM runs WHERE id='run-25'", [], |row| row.get(0))
+            .query_row("SELECT mode FROM runs WHERE id='run-25'", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(mode, "ask", "a run from before was a question");
     }
@@ -7046,14 +7268,26 @@ mod tests {
             }],
             review_comments: vec![review_comment(3, None, "2026-09-16T11:38:00Z")],
             events: vec![
-                PullEvent::new(PullEventKind::Opened, stamp_of("2026-09-14T14:02:00Z"), "chris"),
-                PullEvent::new(PullEventKind::Merged, stamp_of("2026-09-17T15:00:00Z"), "rohan"),
+                PullEvent::new(
+                    PullEventKind::Opened,
+                    stamp_of("2026-09-14T14:02:00Z"),
+                    "chris",
+                ),
+                PullEvent::new(
+                    PullEventKind::Merged,
+                    stamp_of("2026-09-17T15:00:00Z"),
+                    "rohan",
+                ),
             ],
             review_threads: Vec::new(),
         }
     }
 
-    fn review_comment(id: u64, reply_to: Option<u64>, at: &str) -> crate::discussion::ReviewComment {
+    fn review_comment(
+        id: u64,
+        reply_to: Option<u64>,
+        at: &str,
+    ) -> crate::discussion::ReviewComment {
         let mut thumbs = Reactions::default();
         thumbs.toggle(crate::reactions::ReactionKind::ThumbsUp, true);
         crate::discussion::ReviewComment {
@@ -7111,13 +7345,17 @@ mod tests {
         let c = Cache::open_in_memory().unwrap();
         c.insert_item(&pr_item(7)).unwrap();
         let mut d = discussion();
-        d.review_comments.push(review_comment(4, Some(3), "2026-09-16T11:39:00Z"));
+        d.review_comments
+            .push(review_comment(4, Some(3), "2026-09-16T11:39:00Z"));
         c.store_discussion("item-pr-7", &d).unwrap();
 
         let threads = c.load_comment_threads("item-pr-7").unwrap();
         assert_eq!(threads.len(), 1);
         let t = &threads[0];
-        assert_eq!((t.id.as_str(), t.origin, t.github_id), ("gh-3", ThreadOrigin::GitHub, Some(3)));
+        assert_eq!(
+            (t.id.as_str(), t.origin, t.github_id),
+            ("gh-3", ThreadOrigin::GitHub, Some(3))
+        );
         assert_eq!(
             t.anchor.as_ref().map(|a| a.commit_sha.as_str()),
             Some("abc123"),
@@ -7130,7 +7368,10 @@ mod tests {
         assert_eq!(root.author, Author::GitHubUser("rohan".into()));
         assert_eq!(root.github_id, Some(3));
         assert_eq!(root.node_id.as_deref(), Some("PRRC_3"));
-        assert_eq!(root.html_url.as_deref(), Some("https://github.com/acme/widgets/pull/7#discussion_r3"));
+        assert_eq!(
+            root.html_url.as_deref(),
+            Some("https://github.com/acme/widgets/pull/7#discussion_r3")
+        );
         assert_eq!(root.diff_hunk.as_deref(), Some("@@ -40,3 +40,3 @@"));
         assert_eq!(root.reactions, d.review_comments[0].reactions);
 
@@ -7251,7 +7492,10 @@ mod tests {
         gone.review_threads.clear();
         c.store_discussion("item-pr-7", &gone).unwrap();
         let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
-        assert_eq!((t.id.as_str(), t.github_id, t.node_id.as_deref()), ("gh-3", None, None));
+        assert_eq!(
+            (t.id.as_str(), t.github_id, t.node_id.as_deref()),
+            ("gh-3", None, None)
+        );
         assert!(!t.can_resolve);
         assert!(t.resolved, "as GitHub last had it");
         assert!(t.resolvable(), "Perch's now, and resolved in Perch");
@@ -7284,7 +7528,10 @@ mod tests {
         };
         let answer = CommentMessage {
             id: "a1".into(),
-            author: Author::Agent { backend: "claude-code".into(), model: "sonnet".into() },
+            author: Author::Agent {
+                backend: "claude-code".into(),
+                model: "sonnet".into(),
+            },
             body: "it means this".into(),
             created_at: stamp_of("2026-09-16T12:01:00Z"),
             run: Some(answer_run.clone()),
@@ -7305,13 +7552,25 @@ mod tests {
         // Of all that, only the draft is for the review.
         let drafts = c.load_drafts("item-pr-7").unwrap();
         let ids: Vec<_> = drafts.iter().map(|d| d.message_id.as_str()).collect();
-        assert_eq!(ids, vec!["d1"], "nothing an agent wrote, nothing asked of one");
+        assert_eq!(
+            ids,
+            vec!["d1"],
+            "nothing an agent wrote, nothing asked of one"
+        );
 
         c.delete_private_messages("gh-3").unwrap();
         let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
         let ids: Vec<_> = t.messages.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, vec!["gh-3", "d1"], "GitHub's comment and the draft stay");
-        assert_eq!(c.load_run("gh-3-r1").unwrap(), None, "the answer's run goes with it");
+        assert_eq!(
+            ids,
+            vec!["gh-3", "d1"],
+            "GitHub's comment and the draft stay"
+        );
+        assert_eq!(
+            c.load_run("gh-3-r1").unwrap(),
+            None,
+            "the answer's run goes with it"
+        );
 
         // Nothing of Perch's under it is nothing to do.
         c.delete_private_messages("gh-3").unwrap();
@@ -7343,7 +7602,11 @@ mod tests {
         c.store_discussion("item-pr-7", &gone).unwrap();
         let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
         assert_eq!((t.id.as_str(), t.github_id), ("gh-3", None));
-        assert_eq!(t.origin, ThreadOrigin::Local, "nothing under it is bound for GitHub");
+        assert_eq!(
+            t.origin,
+            ThreadOrigin::Local,
+            "nothing under it is bound for GitHub"
+        );
 
         c.delete_private_messages("gh-3").unwrap();
         assert!(
@@ -7375,13 +7638,18 @@ mod tests {
         let c = Cache::open_in_memory().unwrap();
         let t = comment_thread("t1", "w");
         c.insert_comment_thread(&t).unwrap();
-        c.insert_draft(&draft("d1", "t1", "2026-09-18T10:01:00Z")).unwrap();
+        c.insert_draft(&draft("d1", "t1", "2026-09-18T10:01:00Z"))
+            .unwrap();
 
         c.update_comment_message_body("d1", "I fixed it").unwrap();
         let t = c.load_comment_threads("w").unwrap().pop().unwrap();
         let d = t.messages.iter().find(|m| m.id == "d1").unwrap();
         assert_eq!(d.body, "I fixed it");
-        assert_eq!(d.created_at, stamp_of("2026-09-18T10:01:00Z"), "its time stays");
+        assert_eq!(
+            d.created_at,
+            stamp_of("2026-09-18T10:01:00Z"),
+            "its time stays"
+        );
 
         assert!(matches!(
             c.update_comment_message_body("t1-m2", "no"),
@@ -7402,7 +7670,8 @@ mod tests {
         c.insert_comment_thread(&t).unwrap();
         c.insert_comment_thread(&comment_thread("t2", "w")).unwrap();
 
-        c.update_reviewer_message_body("finding", "trimmed").unwrap();
+        c.update_reviewer_message_body("finding", "trimmed")
+            .unwrap();
         let threads = c.load_comment_threads("w").unwrap();
         let m = threads
             .iter()
@@ -7410,11 +7679,18 @@ mod tests {
             .find(|m| m.id == "finding")
             .unwrap();
         assert_eq!(m.body, "trimmed");
-        assert_eq!(m.created_at, stamp("2026-09-18T10:00:14Z"), "its time stays");
+        assert_eq!(
+            m.created_at,
+            stamp("2026-09-18T10:00:14Z"),
+            "its time stays"
+        );
 
         for id in ["t2-m2", "t1-m1", "nowhere"] {
             assert!(
-                matches!(c.update_reviewer_message_body(id, "no"), Err(CacheError::Corrupt(_))),
+                matches!(
+                    c.update_reviewer_message_body(id, "no"),
+                    Err(CacheError::Corrupt(_))
+                ),
                 "{id}"
             );
         }
@@ -7429,7 +7705,10 @@ mod tests {
         assert_eq!(t.origin, ThreadOrigin::GitHub);
         assert_eq!(t.github_id, None, "not on GitHub yet");
         c.set_thread_origin("t1", ThreadOrigin::Local).unwrap();
-        assert_eq!(c.load_comment_threads("w").unwrap()[0].origin, ThreadOrigin::Local);
+        assert_eq!(
+            c.load_comment_threads("w").unwrap()[0].origin,
+            ThreadOrigin::Local
+        );
         assert!(matches!(
             c.set_thread_origin("nowhere", ThreadOrigin::Local),
             Err(CacheError::Corrupt(_))
@@ -7440,7 +7719,8 @@ mod tests {
     fn a_draft_under_perchs_thread_turns_it_towards_github() {
         let c = Cache::open_in_memory().unwrap();
         c.insert_comment_thread(&comment_thread("t1", "w")).unwrap();
-        c.insert_draft(&draft("d1", "t1", "2026-09-18T10:01:00Z")).unwrap();
+        c.insert_draft(&draft("d1", "t1", "2026-09-18T10:01:00Z"))
+            .unwrap();
         let t = c.load_comment_threads("w").unwrap().pop().unwrap();
         assert_eq!(t.origin, ThreadOrigin::GitHub);
         assert_eq!(t.github_id, None);
@@ -7450,7 +7730,10 @@ mod tests {
         // A message that is not a draft is not what this is for.
         let mut answer = draft("d2", "t1", "2026-09-18T10:02:00Z");
         answer.origin = ThreadOrigin::Local;
-        assert!(matches!(c.insert_draft(&answer), Err(CacheError::Corrupt(_))));
+        assert!(matches!(
+            c.insert_draft(&answer),
+            Err(CacheError::Corrupt(_))
+        ));
         assert_eq!(c.load_comment_threads("w").unwrap()[0].messages.len(), 3);
     }
 
@@ -7458,10 +7741,15 @@ mod tests {
     fn deleting_a_draft_turns_its_thread_back_or_takes_it() {
         let c = Cache::open_in_memory().unwrap();
         c.insert_comment_thread(&comment_thread("t1", "w")).unwrap();
-        c.insert_draft(&draft("d1", "t1", "2026-09-18T10:01:00Z")).unwrap();
+        c.insert_draft(&draft("d1", "t1", "2026-09-18T10:01:00Z"))
+            .unwrap();
         c.delete_draft("d1").unwrap();
         let t = c.load_comment_threads("w").unwrap().pop().unwrap();
-        assert_eq!(t.origin, ThreadOrigin::Local, "only Perch's messages are left");
+        assert_eq!(
+            t.origin,
+            ThreadOrigin::Local,
+            "only Perch's messages are left"
+        );
         assert_eq!(t.messages.len(), 2);
 
         // A thread that was only made for its draft goes with it.
@@ -7476,7 +7764,10 @@ mod tests {
         assert_eq!(threads[0].id, "t1");
 
         // Not a draft: nothing happens.
-        assert!(matches!(c.delete_draft("t1-m1"), Err(CacheError::Corrupt(_))));
+        assert!(matches!(
+            c.delete_draft("t1-m1"),
+            Err(CacheError::Corrupt(_))
+        ));
         assert_eq!(c.load_comment_threads("w").unwrap()[0].messages.len(), 2);
     }
 
@@ -7485,7 +7776,8 @@ mod tests {
         let c = Cache::open_in_memory().unwrap();
         c.insert_item(&pr_item(7)).unwrap();
         c.store_discussion("item-pr-7", &discussion()).unwrap();
-        c.insert_draft(&draft("d1", "gh-3", "2026-09-16T12:02:00Z")).unwrap();
+        c.insert_draft(&draft("d1", "gh-3", "2026-09-16T12:02:00Z"))
+            .unwrap();
         c.delete_draft("d1").unwrap();
         let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
         assert_eq!(t.origin, ThreadOrigin::GitHub);
@@ -7502,7 +7794,8 @@ mod tests {
         let c = Cache::open_in_memory().unwrap();
         c.insert_item(&pr_item(7)).unwrap();
         let mut d = discussion();
-        d.review_comments.push(review_comment(4, Some(3), "2026-09-16T11:39:00Z"));
+        d.review_comments
+            .push(review_comment(4, Some(3), "2026-09-16T11:39:00Z"));
         c.store_discussion("item-pr-7", &d).unwrap();
         c.insert_comment_message(&CommentMessage {
             id: "q1".into(),
@@ -7524,18 +7817,34 @@ mod tests {
         d.review_comments.remove(0);
         c.store_discussion("item-pr-7", &d).unwrap();
         let threads = c.load_comment_threads("item-pr-7").unwrap();
-        assert_eq!(threads.len(), 1, "one thread, not the reply's beside the old one");
+        assert_eq!(
+            threads.len(),
+            1,
+            "one thread, not the reply's beside the old one"
+        );
         let t = &threads[0];
-        assert_eq!((t.id.as_str(), t.origin, t.github_id), ("gh-3", ThreadOrigin::GitHub, Some(4)));
+        assert_eq!(
+            (t.id.as_str(), t.origin, t.github_id),
+            ("gh-3", ThreadOrigin::GitHub, Some(4))
+        );
         let ids: Vec<_> = t.messages.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, vec!["gh-4", "q1"], "comment 3 is gone; the question stays with the reply");
-        assert_eq!(t.created_at, stamp_of("2026-09-16T11:38:00Z"), "the thread's time stays");
+        assert_eq!(
+            ids,
+            vec!["gh-4", "q1"],
+            "comment 3 is gone; the question stays with the reply"
+        );
+        assert_eq!(
+            t.created_at,
+            stamp_of("2026-09-16T11:38:00Z"),
+            "the thread's time stays"
+        );
 
         // A comment on GitHub whose row is a posted draft of the reader's
         // takes over the same way, and stays the reader's: one row for
         // comment 5, not the reader's under one thread and GitHub's copy
         // under another.
-        c.insert_draft(&draft("d1", "gh-3", "2026-09-16T12:02:00Z")).unwrap();
+        c.insert_draft(&draft("d1", "gh-3", "2026-09-16T12:02:00Z"))
+            .unwrap();
         let reply = crate::discussion::ReviewComment {
             in_reply_to_id: Some(4),
             user: "chris".into(),
@@ -7566,7 +7875,8 @@ mod tests {
         let c = Cache::open_in_memory().unwrap();
         c.insert_item(&pr_item(7)).unwrap();
         c.store_discussion("item-pr-7", &discussion()).unwrap();
-        c.insert_draft(&draft("d1", "gh-3", "2026-09-16T12:02:00Z")).unwrap();
+        c.insert_draft(&draft("d1", "gh-3", "2026-09-16T12:02:00Z"))
+            .unwrap();
         let reply = crate::discussion::ReviewComment {
             in_reply_to_id: Some(3),
             user: "chris".into(),
@@ -7576,12 +7886,22 @@ mod tests {
         c.mark_draft_posted("d1", &reply, false).unwrap();
 
         let mut kept = c.load_discussion("item-pr-7").unwrap().unwrap().1;
-        kept.comments[0].reactions.toggle(crate::reactions::ReactionKind::Rocket, true);
+        kept.comments[0]
+            .reactions
+            .toggle(crate::reactions::ReactionKind::Rocket, true);
         c.rewrite_discussion("item-pr-7", &kept).unwrap();
-        assert_eq!(c.load_discussion("item-pr-7").unwrap().unwrap().1, kept, "the copy is kept");
+        assert_eq!(
+            c.load_discussion("item-pr-7").unwrap().unwrap().1,
+            kept,
+            "the copy is kept"
+        );
         let t = c.load_comment_threads("item-pr-7").unwrap().pop().unwrap();
         let ids: Vec<_> = t.messages.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, vec!["gh-3", "d1"], "the posted reply is not taken for gone");
+        assert_eq!(
+            ids,
+            vec!["gh-3", "d1"],
+            "the posted reply is not taken for gone"
+        );
         assert_eq!(t.messages[1].github_id, Some(5));
 
         // The same copy as a refresh from GitHub would take it, as the
@@ -7667,7 +7987,11 @@ mod tests {
 
     /// A comment GitHub made of a draft at `comment_thread`'s anchor, in
     /// review `review`.
-    fn posted_comment(id: u64, review: Option<u64>, body: &str) -> crate::discussion::ReviewComment {
+    fn posted_comment(
+        id: u64,
+        review: Option<u64>,
+        body: &str,
+    ) -> crate::discussion::ReviewComment {
         crate::discussion::ReviewComment {
             pull_request_review_id: review,
             user: "chris".into(),
@@ -7686,7 +8010,8 @@ mod tests {
     fn a_posted_draft_keeps_its_ids_and_author_when_github_lists_it() {
         let c = Cache::open_in_memory().unwrap();
         c.insert_item(&pr_item(7)).unwrap();
-        c.insert_comment_thread(&draft_thread("t1", "2026-09-19T08:00:00Z")).unwrap();
+        c.insert_comment_thread(&draft_thread("t1", "2026-09-19T08:00:00Z"))
+            .unwrap();
         c.insert_comment_message(&CommentMessage {
             id: "q1".into(),
             origin: ThreadOrigin::Local,
@@ -7706,9 +8031,17 @@ mod tests {
         let t = &threads[0];
         assert_eq!((t.id.as_str(), t.github_id), ("t1", Some(500)));
         let ids: Vec<_> = t.messages.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, vec!["t1-d1", "q1"], "the question asked here stays under it");
+        assert_eq!(
+            ids,
+            vec!["t1-d1", "q1"],
+            "the question asked here stays under it"
+        );
         let posted = &t.messages[0];
-        assert_eq!(posted.author, Author::User, "the reader's, not a GitHub user's");
+        assert_eq!(
+            posted.author,
+            Author::User,
+            "the reader's, not a GitHub user's"
+        );
         assert_eq!(posted.github_id, Some(500));
         assert!(!posted.is_draft());
         assert_eq!(posted.reactions, comment.reactions);
@@ -7743,7 +8076,8 @@ mod tests {
         let c = Cache::open_in_memory().unwrap();
         c.insert_item(&pr_item(7)).unwrap();
         c.store_discussion("item-pr-7", &discussion()).unwrap();
-        c.insert_draft(&draft("d1", "gh-3", "2026-09-16T12:02:00Z")).unwrap();
+        c.insert_draft(&draft("d1", "gh-3", "2026-09-16T12:02:00Z"))
+            .unwrap();
         let reply = crate::discussion::ReviewComment {
             in_reply_to_id: Some(3),
             user: "chris".into(),
@@ -7778,25 +8112,42 @@ mod tests {
         let c = Cache::open_in_memory().unwrap();
         c.insert_item(&pr_item(7)).unwrap();
         c.store_discussion("item-pr-7", &discussion()).unwrap();
-        c.insert_comment_thread(&draft_thread("t2", "2026-09-19T08:00:00Z")).unwrap();
-        c.insert_draft(&draft("d-reply", "gh-3", "2026-09-19T09:00:00Z")).unwrap();
-        c.insert_draft(&draft("t2-d2", "t2", "2026-09-19T08:30:00Z")).unwrap();
+        c.insert_comment_thread(&draft_thread("t2", "2026-09-19T08:00:00Z"))
+            .unwrap();
+        c.insert_draft(&draft("d-reply", "gh-3", "2026-09-19T09:00:00Z"))
+            .unwrap();
+        c.insert_draft(&draft("t2-d2", "t2", "2026-09-19T08:30:00Z"))
+            .unwrap();
 
         let drafts = c.load_drafts("item-pr-7").unwrap();
         let ids: Vec<_> = drafts.iter().map(|d| d.message_id.as_str()).collect();
-        assert_eq!(ids, vec!["d-reply", "t2-d1", "t2-d2"], "GitHub's thread came first");
+        assert_eq!(
+            ids,
+            vec!["d-reply", "t2-d1", "t2-d2"],
+            "GitHub's thread came first"
+        );
         assert_eq!(drafts[0].thread_github_id, Some(3));
         assert_eq!(drafts[0].thread_id, "gh-3");
         assert_eq!(drafts[1].thread_github_id, None);
-        assert_eq!(drafts[1].anchor.as_ref().map(|a| (a.start_line, a.line)), Some((41, 58)));
-        assert_eq!(drafts[1].thread_created_at, stamp_of("2026-09-19T08:00:00Z"));
+        assert_eq!(
+            drafts[1].anchor.as_ref().map(|a| (a.start_line, a.line)),
+            Some((41, 58))
+        );
+        assert_eq!(
+            drafts[1].thread_created_at,
+            stamp_of("2026-09-19T08:00:00Z")
+        );
         assert_eq!(drafts[2].created_at, stamp_of("2026-09-19T08:30:00Z"));
         assert!(c.load_drafts("item-pr-8").unwrap().is_empty());
 
         assert_eq!(c.delete_all_drafts("item-pr-7").unwrap(), (3, vec![]));
         assert!(c.load_drafts("item-pr-7").unwrap().is_empty());
         let threads = c.load_comment_threads("item-pr-7").unwrap();
-        assert_eq!(threads.len(), 1, "the thread made for its drafts went with them");
+        assert_eq!(
+            threads.len(),
+            1,
+            "the thread made for its drafts went with them"
+        );
         assert_eq!(threads[0].id, "gh-3");
         assert_eq!(c.delete_all_drafts("item-pr-7").unwrap(), (0, vec![]));
     }
@@ -7806,7 +8157,8 @@ mod tests {
         let c = Cache::open_in_memory().unwrap();
         c.insert_item(&pr_item(7)).unwrap();
         // Two threads at one anchor, one at another, one nowhere in the review.
-        c.insert_comment_thread(&draft_thread("t1", "2026-09-19T08:00:00Z")).unwrap();
+        c.insert_comment_thread(&draft_thread("t1", "2026-09-19T08:00:00Z"))
+            .unwrap();
         let mut twin = draft_thread("t1b", "2026-09-19T08:05:00Z");
         twin.messages[0].body = "and also this".into();
         c.insert_comment_thread(&twin).unwrap();
@@ -7839,8 +8191,13 @@ mod tests {
             },
         ];
         let ids = ["t1-d1", "t1b-d1", "t2-d1", "t3-d1"].map(String::from);
-        let reconciled = c.reconcile_review_drafts("item-pr-7", 77, &d, &ids).unwrap();
-        assert_eq!(reconciled.matched, ["t1-d1", "t1b-d1", "t2-d1"].map(String::from));
+        let reconciled = c
+            .reconcile_review_drafts("item-pr-7", 77, &d, &ids)
+            .unwrap();
+        assert_eq!(
+            reconciled.matched,
+            ["t1-d1", "t1b-d1", "t2-d1"].map(String::from)
+        );
         assert_eq!(reconciled.unmatched, vec!["t3-d1".to_string()]);
 
         let threads = c.load_comment_threads("item-pr-7").unwrap();
@@ -7885,14 +8242,20 @@ mod tests {
             for column in GITHUB_MESSAGE_COLUMNS {
                 cache
                     .conn
-                    .execute(&format!("ALTER TABLE comment_messages DROP COLUMN {column}"), [])
+                    .execute(
+                        &format!("ALTER TABLE comment_messages DROP COLUMN {column}"),
+                        [],
+                    )
                     .unwrap();
             }
             // Schema 23's, which the ingestion here writes.
             for (column, _) in GITHUB_THREAD_COLUMNS {
                 cache
                     .conn
-                    .execute(&format!("ALTER TABLE comment_threads DROP COLUMN {column}"), [])
+                    .execute(
+                        &format!("ALTER TABLE comment_threads DROP COLUMN {column}"),
+                        [],
+                    )
                     .unwrap();
             }
             cache
@@ -7965,7 +8328,13 @@ mod tests {
         }
 
         let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
-        assert_eq!(outcome, CacheOpen::Migrated { from: 21, to: SCHEMA_VERSION });
+        assert_eq!(
+            outcome,
+            CacheOpen::Migrated {
+                from: 21,
+                to: SCHEMA_VERSION
+            }
+        );
         let (_, d) = cache.load_discussion(&item.id).unwrap().unwrap();
         assert_eq!(
             d.events,
@@ -7998,18 +8367,34 @@ mod tests {
             for (column, _) in GITHUB_THREAD_COLUMNS {
                 cache
                     .conn
-                    .execute(&format!("ALTER TABLE comment_threads DROP COLUMN {column}"), [])
+                    .execute(
+                        &format!("ALTER TABLE comment_threads DROP COLUMN {column}"),
+                        [],
+                    )
                     .unwrap();
             }
             cache.set_meta("schema_version", "22").unwrap();
         }
 
         let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
-        assert_eq!(outcome, CacheOpen::Migrated { from: 22, to: SCHEMA_VERSION });
+        assert_eq!(
+            outcome,
+            CacheOpen::Migrated {
+                from: 22,
+                to: SCHEMA_VERSION
+            }
+        );
         let threads = cache.load_comment_threads(&item.id).unwrap();
         assert_eq!(threads.len(), 1);
-        assert_eq!((threads[0].node_id.as_deref(), threads[0].can_resolve), (None, false));
-        assert_eq!(threads[0].messages.len(), local.messages.len(), "nothing under it lost");
+        assert_eq!(
+            (threads[0].node_id.as_deref(), threads[0].can_resolve),
+            (None, false)
+        );
+        assert_eq!(
+            threads[0].messages.len(),
+            local.messages.len(),
+            "nothing under it lost"
+        );
         cache.set_thread_resolved("local-22", true).unwrap();
         assert!(cache.load_comment_threads(&item.id).unwrap()[0].resolved);
     }
@@ -8028,7 +8413,13 @@ mod tests {
         }
 
         let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
-        assert_eq!(outcome, CacheOpen::Migrated { from: 23, to: SCHEMA_VERSION });
+        assert_eq!(
+            outcome,
+            CacheOpen::Migrated {
+                from: 23,
+                to: SCHEMA_VERSION
+            }
+        );
         let has_column: bool = cache
             .conn
             .query_row(
@@ -8048,7 +8439,9 @@ mod tests {
         let path = dir.path().join("perch.db");
         {
             let cache = Cache::open(&path, None).unwrap();
-            cache.insert_run(&run("run-24", "thread-24", RunStatus::Completed)).unwrap();
+            cache
+                .insert_run(&run("run-24", "thread-24", RunStatus::Completed))
+                .unwrap();
             for column in RUN_CONTEXT_COLUMNS {
                 cache
                     .conn
@@ -8059,8 +8452,17 @@ mod tests {
         }
 
         let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
-        assert_eq!(outcome, CacheOpen::Migrated { from: 24, to: SCHEMA_VERSION });
-        assert_eq!(cache.run_context("run-24").unwrap(), Some(RunContext::default()));
+        assert_eq!(
+            outcome,
+            CacheOpen::Migrated {
+                from: 24,
+                to: SCHEMA_VERSION
+            }
+        );
+        assert_eq!(
+            cache.run_context("run-24").unwrap(),
+            Some(RunContext::default())
+        );
         cache
             .set_run_context("run-24", Some("/perch/context/run-24"), Some("{}"))
             .unwrap();
@@ -8320,8 +8722,7 @@ mod tests {
                 Some("Sat, 19 Sep 2026 12:00:00 GMT"),
             )
             .unwrap();
-            c.dismiss_notification(&dismissed)
-                .unwrap();
+            c.dismiss_notification(&dismissed).unwrap();
             assert_eq!(c.load_threads().unwrap(), vec![other.clone()]);
         }
 
@@ -8366,13 +8767,15 @@ mod tests {
         let stale = notification_thread("1", "2026-09-19T11:00:00Z");
         c.dismiss_notification(&stale).unwrap();
         assert_eq!(
-            c.notification_dismissals().unwrap().get(&dismissed.id).map(|mark| mark.updated_at),
+            c.notification_dismissals()
+                .unwrap()
+                .get(&dismissed.id)
+                .map(|mark| mark.updated_at),
             Some(dismissed.updated_at)
         );
 
         let newer = notification_thread("1", "2026-09-20T09:00:00Z");
-        c.store_threads(std::slice::from_ref(&newer), None)
-            .unwrap();
+        c.store_threads(std::slice::from_ref(&newer), None).unwrap();
         c.dismiss_notification(&stale).unwrap();
         assert_eq!(c.load_threads().unwrap(), vec![newer]);
     }
@@ -8387,10 +8790,16 @@ mod tests {
             .unwrap();
         c.dismiss_notification(&older).unwrap();
         c.dismiss_notification(&newer).unwrap();
-        assert_eq!(c.load_done_threads().unwrap(), vec![newer.clone(), older.clone()]);
+        assert_eq!(
+            c.load_done_threads().unwrap(),
+            vec![newer.clone(), older.clone()]
+        );
         assert_eq!(c.load_threads().unwrap(), vec![other.clone()]);
 
-        assert_eq!(c.restore_notification(&older.id).unwrap(), Some(older.clone()));
+        assert_eq!(
+            c.restore_notification(&older.id).unwrap(),
+            Some(older.clone())
+        );
         assert_eq!(c.load_done_threads().unwrap(), vec![newer.clone()]);
         assert_eq!(c.restore_notification(&older.id).unwrap(), None);
 
@@ -8407,12 +8816,16 @@ mod tests {
         let mut read = notification_thread("1", "2026-09-19T12:00:00Z");
         read.unread = false;
         let other = notification_thread("2", "2026-09-19T11:00:00Z");
-        c.store_threads(&[read.clone(), other.clone()], None).unwrap();
+        c.store_threads(&[read.clone(), other.clone()], None)
+            .unwrap();
         let until = Timestamp::now() + jiff::SignedDuration::from_hours(3);
         c.snooze_notification(&read, until).unwrap();
 
         assert_eq!(c.load_threads().unwrap(), vec![other.clone()]);
-        assert!(c.load_done_threads().unwrap().is_empty(), "a snooze is not Done");
+        assert!(
+            c.load_done_threads().unwrap().is_empty(),
+            "a snooze is not Done"
+        );
         let snoozed = c.load_snoozed_threads().unwrap();
         assert_eq!(snoozed.len(), 1);
         assert_eq!(snoozed[0].id, read.id);
@@ -8420,13 +8833,23 @@ mod tests {
         let visible = c
             .store_notification_snapshot(&[read.clone(), other.clone()], None)
             .unwrap();
-        assert_eq!(visible, vec![other.clone()], "the same revision stays snoozed");
+        assert_eq!(
+            visible,
+            vec![other.clone()],
+            "the same revision stays snoozed"
+        );
 
         // Nothing is due yet.
-        assert!(c.wake_snoozed_notifications(Timestamp::now()).unwrap().is_empty());
+        assert!(c
+            .wake_snoozed_notifications(Timestamp::now())
+            .unwrap()
+            .is_empty());
         let woken = c.wake_snoozed_notifications(until).unwrap();
         assert_eq!(woken.len(), 1);
-        assert!(!woken[0].unread && !woken[0].local_unread, "back read, as it went");
+        assert!(
+            !woken[0].unread && !woken[0].local_unread,
+            "back read, as it went"
+        );
         assert_eq!(woken[0].snoozed_until, None);
         assert!(c.load_snoozed_threads().unwrap().is_empty());
         assert!(c.notification_dismissals().unwrap().is_empty());
@@ -8436,8 +8859,11 @@ mod tests {
     fn new_unread_activity_lifts_a_snooze_early_and_read_activity_does_not() {
         let c = Cache::open_in_memory().unwrap();
         let snoozed = notification_thread("1", "2026-09-19T12:00:00Z");
-        c.snooze_notification(&snoozed, Timestamp::now() + jiff::SignedDuration::from_hours(3))
-            .unwrap();
+        c.snooze_notification(
+            &snoozed,
+            Timestamp::now() + jiff::SignedDuration::from_hours(3),
+        )
+        .unwrap();
 
         let mut read_newer = notification_thread("1", "2026-09-19T13:00:00Z");
         read_newer.unread = false;
@@ -8459,8 +8885,11 @@ mod tests {
         let c = Cache::open_in_memory().unwrap();
         let mut thread = notification_thread("1", "2026-09-19T12:00:00Z");
         thread.unread = false;
-        c.snooze_notification(&thread, Timestamp::now() - jiff::SignedDuration::from_secs(1))
-            .unwrap();
+        c.snooze_notification(
+            &thread,
+            Timestamp::now() - jiff::SignedDuration::from_secs(1),
+        )
+        .unwrap();
         let visible = c
             .store_notification_snapshot(std::slice::from_ref(&thread), None)
             .unwrap();
@@ -8471,14 +8900,20 @@ mod tests {
     fn done_replaces_a_snooze_and_restore_takes_either_back() {
         let c = Cache::open_in_memory().unwrap();
         let thread = notification_thread("1", "2026-09-19T12:00:00Z");
-        c.snooze_notification(&thread, Timestamp::now() + jiff::SignedDuration::from_hours(3))
-            .unwrap();
+        c.snooze_notification(
+            &thread,
+            Timestamp::now() + jiff::SignedDuration::from_hours(3),
+        )
+        .unwrap();
         c.dismiss_notification(&thread).unwrap();
         assert!(c.load_snoozed_threads().unwrap().is_empty());
         assert_eq!(c.load_done_threads().unwrap(), vec![thread.clone()]);
 
-        c.snooze_notification(&thread, Timestamp::now() + jiff::SignedDuration::from_hours(3))
-            .unwrap();
+        c.snooze_notification(
+            &thread,
+            Timestamp::now() + jiff::SignedDuration::from_hours(3),
+        )
+        .unwrap();
         assert_eq!(c.restore_notification(&thread.id).unwrap(), Some(thread));
         assert!(c.load_snoozed_threads().unwrap().is_empty());
     }

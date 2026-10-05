@@ -15,7 +15,10 @@ use crate::diff::{FileDiff, LineStatus};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Row {
     /// A line of the head file, at `head_line` (zero based).
-    Head { head_line: usize, status: LineStatus },
+    Head {
+        head_line: usize,
+        status: LineStatus,
+    },
     /// A line the pull request removed, at `base_line` in the base file.
     Deleted { base_line: usize },
 }
@@ -55,9 +58,16 @@ impl DisplayBuffer {
     /// A file with no diff: every line is itself.
     pub fn plain(text: &str) -> Self {
         let rows = (0..line_count(text))
-            .map(|head_line| Row::Head { head_line, status: LineStatus::Unchanged })
+            .map(|head_line| Row::Head {
+                head_line,
+                status: LineStatus::Unchanged,
+            })
             .collect();
-        Self { text: text.to_string(), rows, change_starts: Vec::new() }
+        Self {
+            text: text.to_string(),
+            rows,
+            change_starts: Vec::new(),
+        }
     }
 
     /// Splice the removed lines of `diff` into `head`.
@@ -110,7 +120,14 @@ impl DisplayBuffer {
                     change_starts.push(rows.len());
                 }
                 previous_changed = changed;
-                push(&mut text, &mut rows, ghost, Row::Deleted { base_line: *base_line });
+                push(
+                    &mut text,
+                    &mut rows,
+                    ghost,
+                    Row::Deleted {
+                        base_line: *base_line,
+                    },
+                );
             }
 
             let status = diff.status_at(head_line);
@@ -128,14 +145,25 @@ impl DisplayBuffer {
                 change_starts.push(rows.len());
             }
             previous_changed = true;
-            push(&mut text, &mut rows, ghost, Row::Deleted { base_line: *base_line });
+            push(
+                &mut text,
+                &mut rows,
+                ghost,
+                Row::Deleted {
+                    base_line: *base_line,
+                },
+            );
         }
 
         if !rows.is_empty() {
             text.push('\n');
         }
 
-        Self { text, rows, change_starts }
+        Self {
+            text,
+            rows,
+            change_starts,
+        }
     }
 
     pub fn row(&self, display_line: usize) -> Option<Row> {
@@ -214,10 +242,20 @@ mod tests {
 
         // a, ghost(b), B, c
         assert_eq!(b.len(), 4);
-        assert_eq!(b.row(0), Some(Row::Head { head_line: 0, status: LineStatus::Unchanged }));
+        assert_eq!(
+            b.row(0),
+            Some(Row::Head {
+                head_line: 0,
+                status: LineStatus::Unchanged
+            })
+        );
         assert!(b.row(1).unwrap().is_deleted());
         assert_eq!(b.row(2).unwrap().head_line(), Some(1));
-        assert_eq!(b.text.lines().nth(1), Some("b"), "the ghost carries the old text");
+        assert_eq!(
+            b.text.lines().nth(1),
+            Some("b"),
+            "the ghost carries the old text"
+        );
         assert_eq!(b.text.lines().nth(2), Some("B"));
     }
 
@@ -257,7 +295,9 @@ mod tests {
         let b = DisplayBuffer::unified(head, base, &d);
 
         for head_line in 0..head.lines().count() {
-            let display = b.display_line(head_line).expect("every head line is displayed");
+            let display = b
+                .display_line(head_line)
+                .expect("every head line is displayed");
             assert_eq!(b.head_line(display), Some(head_line));
         }
     }
@@ -271,7 +311,10 @@ mod tests {
 
         let rendered: Vec<&str> = b.text.lines().collect();
         for line in head.lines() {
-            assert!(rendered.contains(&line), "{line:?} vanished from the buffer");
+            assert!(
+                rendered.contains(&line),
+                "{line:?} vanished from the buffer"
+            );
         }
     }
 
@@ -313,7 +356,10 @@ mod tests {
         assert_eq!(b.change_starts.len(), 2, "two separate changed regions");
         let first = b.change_starts[0];
         let second = b.change_starts[1];
-        assert_eq!(b.next_change(0), Some(first).filter(|f| *f > 0).or(Some(second)));
+        assert_eq!(
+            b.next_change(0),
+            Some(first).filter(|f| *f > 0).or(Some(second))
+        );
         assert_eq!(b.next_change(first), Some(second));
         assert_eq!(b.next_change(second), None);
         assert_eq!(b.previous_change(second), Some(first));

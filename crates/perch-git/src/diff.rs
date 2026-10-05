@@ -130,7 +130,10 @@ impl FileDiff {
     }
 
     pub fn status_at(&self, line: usize) -> LineStatus {
-        self.line_status.get(line).copied().unwrap_or(LineStatus::Unchanged)
+        self.line_status
+            .get(line)
+            .copied()
+            .unwrap_or(LineStatus::Unchanged)
     }
 }
 
@@ -145,45 +148,60 @@ pub fn file_diff(base: &str, head: &str) -> FileDiff {
     let mut deleted = Vec::new();
     let mut hunks: Vec<Hunk> = Vec::new();
 
-    diff(Algorithm::Histogram, &input, |before: std::ops::Range<u32>, after: std::ops::Range<u32>| {
-        let removed = before.len();
-        let added = after.len();
-        let start = after.start as usize;
-        let end = after.end as usize;
+    diff(
+        Algorithm::Histogram,
+        &input,
+        |before: std::ops::Range<u32>, after: std::ops::Range<u32>| {
+            let removed = before.len();
+            let added = after.len();
+            let start = after.start as usize;
+            let end = after.end as usize;
 
-        // A run that both removes and adds is a modification; one that only
-        // adds is an addition. Colouring them differently is what lets a
-        // reviewer tell rewritten code from new code at a glance.
-        let status = if removed > 0 && added > 0 {
-            LineStatus::Modified
-        } else {
-            LineStatus::Added
-        };
-        for entry in line_status.iter_mut().take(end.min(head_line_count)).skip(start) {
-            *entry = status;
-        }
+            // A run that both removes and adds is a modification; one that only
+            // adds is an addition. Colouring them differently is what lets a
+            // reviewer tell rewritten code from new code at a glance.
+            let status = if removed > 0 && added > 0 {
+                LineStatus::Modified
+            } else {
+                LineStatus::Added
+            };
+            for entry in line_status
+                .iter_mut()
+                .take(end.min(head_line_count))
+                .skip(start)
+            {
+                *entry = status;
+            }
 
-        if removed > 0 {
-            deleted.push(DeletedRun {
-                before_line: start.min(head_line_count),
-                lines: base_lines
-                    [(before.start as usize).min(base_lines.len())..(before.end as usize).min(base_lines.len())]
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-            });
-        }
+            if removed > 0 {
+                deleted.push(DeletedRun {
+                    before_line: start.min(head_line_count),
+                    lines: base_lines[(before.start as usize).min(base_lines.len())
+                        ..(before.end as usize).min(base_lines.len())]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect(),
+                });
+            }
 
-        if added > 0 {
-            hunks.push(Hunk { start, end: end.min(head_line_count) });
-        } else {
-            // A pure deletion has no head lines of its own, but the reviewer
-            // still needs to be able to jump to it.
-            hunks.push(Hunk { start, end: start });
-        }
-    });
+            if added > 0 {
+                hunks.push(Hunk {
+                    start,
+                    end: end.min(head_line_count),
+                });
+            } else {
+                // A pure deletion has no head lines of its own, but the reviewer
+                // still needs to be able to jump to it.
+                hunks.push(Hunk { start, end: start });
+            }
+        },
+    );
 
-    FileDiff { line_status, deleted, hunks }
+    FileDiff {
+        line_status,
+        deleted,
+        hunks,
+    }
 }
 
 /// How many bytes of a line git keeps after a hunk header's `@@`: the
@@ -291,7 +309,15 @@ pub fn merge_file_lists(
         .map(|(status, path, old_path)| {
             let (additions, deletions, binary) =
                 counts.get(&path).copied().unwrap_or((0, 0, false));
-            ChangedFile { path, old_path, status, additions, deletions, binary, head_blob: None }
+            ChangedFile {
+                path,
+                old_path,
+                status,
+                additions,
+                deletions,
+                binary,
+                head_blob: None,
+            }
         })
         .collect();
 
@@ -323,7 +349,11 @@ mod tests {
         let parsed = parse_name_status(raw);
         assert_eq!(
             parsed[0],
-            (ChangeStatus::Renamed, "src/new.rs".into(), Some("src/old.rs".into()))
+            (
+                ChangeStatus::Renamed,
+                "src/new.rs".into(),
+                Some("src/old.rs".into())
+            )
         );
         // The record after a rename must still line up.
         assert_eq!(parsed[1], (ChangeStatus::Modified, "src/a.rs".into(), None));
@@ -334,7 +364,10 @@ mod tests {
         let raw = "12\t3\tsrc/a.rs\u{0}100\t0\tsrc/b.rs\u{0}";
         assert_eq!(
             parse_numstat(raw),
-            vec![(12, 3, false, "src/a.rs".into()), (100, 0, false, "src/b.rs".into())]
+            vec![
+                (12, 3, false, "src/a.rs".into()),
+                (100, 0, false, "src/b.rs".into())
+            ]
         );
     }
 
@@ -393,7 +426,10 @@ mod tests {
         assert_eq!(f.directory(), "crates/perch-app/src/");
         assert_eq!(f.file_name(), "main.rs");
 
-        let top = ChangedFile { path: "README.md".into(), ..f };
+        let top = ChangedFile {
+            path: "README.md".into(),
+            ..f
+        };
         assert_eq!(top.directory(), "");
         assert_eq!(top.file_name(), "README.md");
     }
@@ -429,7 +465,10 @@ mod tests {
         let d = file_diff("a\nb\nc\nd\n", "a\nd\n");
         assert_eq!(d.deleted.len(), 1);
         assert_eq!(d.deleted[0].lines, vec!["b".to_string(), "c".to_string()]);
-        assert_eq!(d.deleted[0].before_line, 1, "ghost lines sit above head line 1");
+        assert_eq!(
+            d.deleted[0].before_line, 1,
+            "ghost lines sit above head line 1"
+        );
     }
 
     #[test]
@@ -470,15 +509,30 @@ mod tests {
 
     #[test]
     fn a_hunks_context_is_the_nearest_line_above_it_that_starts_an_identifier() {
-        let base: Vec<&str> = "use std::fmt;\n\nimpl Manifest {\n    fn load() {\n        let a = 1;\n    }\n}\n".lines().collect();
+        let base: Vec<&str> =
+            "use std::fmt;\n\nimpl Manifest {\n    fn load() {\n        let a = 1;\n    }\n}\n"
+                .lines()
+                .collect();
         // A hunk from line five, `let a`: the indented `fn` does not count,
         // the `impl` does, as git's default rule has it.
         assert_eq!(hunk_context(&base, 4), Some("impl Manifest {"));
         // The hunk's own first line is not above it.
         assert_eq!(hunk_context(&base, 2), Some("use std::fmt;"));
-        assert_eq!(hunk_context(&base, 0), None, "nothing is above the first line");
-        assert_eq!(hunk_context(&base, 100), Some("impl Manifest {"), "past the end is below every line");
-        assert_eq!(hunk_context(&["  a", "{"], 2), None, "no line starts an identifier");
+        assert_eq!(
+            hunk_context(&base, 0),
+            None,
+            "nothing is above the first line"
+        );
+        assert_eq!(
+            hunk_context(&base, 100),
+            Some("impl Manifest {"),
+            "past the end is below every line"
+        );
+        assert_eq!(
+            hunk_context(&["  a", "{"], 2),
+            None,
+            "no line starts an identifier"
+        );
         assert_eq!(hunk_context(&["_private", "$var", "x"], 2), Some("$var"));
     }
 
@@ -488,7 +542,10 @@ mod tests {
         let context = hunk_context(&[&long, "body"], 1).unwrap();
         assert_eq!(context.len(), 80);
         assert!(context.starts_with("fn aaa"));
-        assert_eq!(hunk_context(&["struct S {   \t", "x"], 1), Some("struct S {"));
+        assert_eq!(
+            hunk_context(&["struct S {   \t", "x"], 1),
+            Some("struct S {")
+        );
         // A cut never splits a character.
         let wide = format!("s{}", "é".repeat(60));
         assert_eq!(hunk_context(&[&wide, "x"], 1).unwrap().len(), 79);

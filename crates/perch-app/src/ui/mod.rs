@@ -12,8 +12,8 @@ pub mod new_work;
 pub mod notifications;
 pub mod open_box;
 pub mod sidebar;
-pub mod toast;
 pub mod titlebar;
+pub mod toast;
 pub mod update;
 pub mod usage;
 pub mod widgets;
@@ -123,7 +123,9 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 return;
             };
             review.pending_scope.set(None);
-            let item_id = review.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone()));
+            let item_id = review
+                .item
+                .with_untracked(|i| i.as_ref().map(|i| i.id.clone()));
             if let Some(item_id) = item_id {
                 backend.set_scope(&item_id, scope);
             }
@@ -270,7 +272,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     widgets::centered_message(
                         SidebarIcon::Branch,
                         || "Nothing open".to_string(),
-                        || "Pick a pull request, an issue, or a worktree from the sidebar.".to_string(),
+                        || {
+                            "Pick a pull request, an issue, or a worktree from the sidebar."
+                                .to_string()
+                        },
                     ),
                 )
                 .into_any()
@@ -549,9 +554,11 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     None
                 } else {
                     match review.tab.get() {
-                        crate::review::model::ItemTab::Code => (review.active.with(Option::is_some)
-                            && review.drawn_picture().is_none())
-                        .then_some(crate::review::find::Pane::Code),
+                        crate::review::model::ItemTab::Code => {
+                            (review.active.with(Option::is_some)
+                                && review.drawn_picture().is_none())
+                            .then_some(crate::review::find::Pane::Code)
+                        }
                         crate::review::model::ItemTab::Conversation => {
                             Some(crate::review::find::Pane::Conversation)
                         }
@@ -597,8 +604,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 }
                 // Any box that takes typing keeps the keys below: `a` typed
                 // in the close-as-issue title is an `a`, not a composer.
-                let typing =
-                    typing || review.find_focused.get() || text_box_focused(cx, root_id);
+                let typing = typing || review.find_focused.get() || text_box_focused(cx, root_id);
                 if typing || !review.is_open() {
                     if key.code == Code::KeyW && key.modifiers == OS_MOD {
                         close_item_or_window(state, review, key_backend, root_id);
@@ -648,7 +654,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     return EventPropagation::Stop;
                 }
                 if key.code == Code::F12 && key.modifiers == OS_MOD {
-                    crate::review::navigation::implementations_at_cursor(review, &references_backend);
+                    crate::review::navigation::implementations_at_cursor(
+                        review,
+                        &references_backend,
+                    );
                     return EventPropagation::Stop;
                 }
                 if key.code == Code::F12 && key.modifiers == Modifiers::SHIFT {
@@ -663,7 +672,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     review.go_back();
                     return EventPropagation::Stop;
                 }
-                if key.code == Code::Minus && key.modifiers == Modifiers::CONTROL | Modifiers::SHIFT {
+                if key.code == Code::Minus && key.modifiers == Modifiers::CONTROL | Modifiers::SHIFT
+                {
                     review.go_forward();
                     return EventPropagation::Stop;
                 }
@@ -691,7 +701,11 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     || state.renaming.with(Option::is_some)
                     || state.confirm_delete.with(Option::is_some)
                     || state.confirm_loss.with(Option::is_some);
-                if key.code == Code::Escape && key.modifiers.is_empty() && !claimed && review.panel_open() {
+                if key.code == Code::Escape
+                    && key.modifiers.is_empty()
+                    && !claimed
+                    && review.panel_open()
+                {
                     review.close_panel();
                     return EventPropagation::Stop;
                 }
@@ -750,10 +764,11 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         // stays, so an Escape meant for the selection cannot throw
                         // the question away; the composer's own close button does that.
                         Code::Escape
-                            if review.composer.with(|c| {
-                                c.as_ref().is_some_and(|c| c.editing.is_some())
-                            }) || (review.composer.with(Option::is_some)
-                                && review.composer_draft.with(|d| d.trim().is_empty())) =>
+                            if review
+                                .composer
+                                .with(|c| c.as_ref().is_some_and(|c| c.editing.is_some()))
+                                || (review.composer.with(Option::is_some)
+                                    && review.composer_draft.with(|d| d.trim().is_empty())) =>
                         {
                             review.close_composer();
                             return EventPropagation::Stop;
@@ -993,9 +1008,9 @@ fn pane_with_bar(
             .debug_name("empty bar"),
         )
         .style(|s| crate::review::header::bar_style(s).z_index(2)),
-        Container::new(message).debug_name("pane-body").style(|s| {
-            s.width_full().flex_grow(1.0_f32).min_height(0.0)
-        }),
+        Container::new(message)
+            .debug_name("pane-body")
+            .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0)),
     ))
     .style(|s| s.size_full().flex_col().min_height(0.0))
 }
@@ -1025,8 +1040,7 @@ fn dismiss_popovers(review: ReviewState, hit_path: Option<&[floem::ElementId]>) 
         let (Some(anchor), Some(leaf)) = (anchor, hit_path.and_then(|path| path.last())) else {
             return false;
         };
-        std::iter::successors(Some(leaf.owning_id()), floem::ViewId::parent)
-            .any(|id| id == anchor)
+        std::iter::successors(Some(leaf.owning_id()), floem::ViewId::parent).any(|id| id == anchor)
     };
     if review.agents_dropdown_open.get_untracked()
         && !inside(review.agents_dropdown_anchor.get_untracked())
@@ -1180,7 +1194,11 @@ mod tests {
         let agents = named(harness.root_id(), "agents-button")
             .unwrap()
             .get_visual_rect_no_clip();
-        assert_eq!(agents.x1, 1400.0 - theme::REVIEW_HEADER_PADDING, "at the bar's end");
+        assert_eq!(
+            agents.x1,
+            1400.0 - theme::REVIEW_HEADER_PADDING,
+            "at the bar's end"
+        );
 
         // Beside the lights is the bar's own surface: the window drags
         // from it.
@@ -1212,7 +1230,10 @@ mod tests {
             "the bar starts at the drawer's edge"
         );
         assert_eq!(
-            named(bar, "drawer toggle").unwrap().get_visual_rect_no_clip().width(),
+            named(bar, "drawer toggle")
+                .unwrap()
+                .get_visual_rect_no_clip()
+                .width(),
             0.0,
             "the drawer's strip has the lights now"
         );
@@ -1236,7 +1257,9 @@ mod tests {
         let close = named(bar, "new-work-close")
             .expect("no X in the bar")
             .get_visual_rect_no_clip();
-        let agents = named(bar, "agents-button").unwrap().get_visual_rect_no_clip();
+        let agents = named(bar, "agents-button")
+            .unwrap()
+            .get_visual_rect_no_clip();
         assert!(title.get_visual_rect_no_clip().x1 <= agents.x0);
         assert!(agents.x1 <= close.x0, "the X is last");
         assert_eq!(close.x1, 1400.0 - theme::REVIEW_HEADER_PADDING);
@@ -1407,13 +1430,21 @@ mod tests {
         assert!(harness.is_focused(text), "the box has the keyboard");
 
         state.open_box.text.set("fence".into());
-        harness.dispatch_event(key(Code::Enter, Key::Named(NamedKey::Enter), Modifiers::empty()));
+        harness.dispatch_event(key(
+            Code::Enter,
+            Key::Named(NamedKey::Enter),
+            Modifiers::empty(),
+        ));
         harness.rebuild();
         harness.paint();
         assert!(state.open_box.error.get().is_some());
         assert!(state.open_box.open.get());
 
-        harness.dispatch_event(key(Code::Escape, Key::Named(NamedKey::Escape), Modifiers::empty()));
+        harness.dispatch_event(key(
+            Code::Escape,
+            Key::Named(NamedKey::Escape),
+            Modifiers::empty(),
+        ));
         harness.rebuild();
         harness.paint();
         assert!(!state.open_box.open.get());
@@ -1446,9 +1477,16 @@ mod tests {
         assert!(panel.get_visual_rect_no_clip().width() > 0.0);
         let create = named(harness.root_id(), "start-work-create").unwrap();
         assert!(harness.is_focused(create), "Create has the keyboard");
-        assert!(commands.try_recv().is_err(), "nothing cut before the answer");
+        assert!(
+            commands.try_recv().is_err(),
+            "nothing cut before the answer"
+        );
 
-        harness.dispatch_event(key(Code::Escape, Key::Named(NamedKey::Escape), Modifiers::empty()));
+        harness.dispatch_event(key(
+            Code::Escape,
+            Key::Named(NamedKey::Escape),
+            Modifiers::empty(),
+        ));
         settle(&mut harness);
         assert!(state.start_work_confirm.with(Option::is_none));
         assert!(named(harness.root_id(), "start-work-confirm-panel").is_none());
@@ -1456,13 +1494,17 @@ mod tests {
 
         ask(state, Pending::Item("slatedb/slatedb#7".into()));
         settle(&mut harness);
-        harness.dispatch_event(key(Code::Enter, Key::Named(NamedKey::Enter), Modifiers::empty()));
+        harness.dispatch_event(key(
+            Code::Enter,
+            Key::Named(NamedKey::Enter),
+            Modifiers::empty(),
+        ));
         settle(&mut harness);
         assert!(state.start_work_confirm.with(Option::is_none));
         let sent: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
-        let cut = sent
-            .iter()
-            .any(|c| matches!(c, Command::StartWork { item_id, .. } if item_id == "slatedb/slatedb#7"));
+        let cut = sent.iter().any(
+            |c| matches!(c, Command::StartWork { item_id, .. } if item_id == "slatedb/slatedb#7"),
+        );
         assert!(cut, "Enter cuts the branch: {sent:?}");
     }
 
@@ -1489,10 +1531,22 @@ mod tests {
             .owning_id();
         assert!(harness.is_focused(editor));
         let drawer = named(harness.root_id(), "right-drawer").expect("no drawer in the window");
-        assert_eq!(drawer.get_visual_rect_no_clip().width(), 0.0, "shut, it takes no room");
+        assert_eq!(
+            drawer.get_visual_rect_no_clip().width(),
+            0.0,
+            "shut, it takes no room"
+        );
 
-        let files = key(Code::KeyE, Key::Character("e".into()), OS_MOD | Modifiers::SHIFT);
-        let agents = key(Code::KeyA, Key::Character("a".into()), OS_MOD | Modifiers::SHIFT);
+        let files = key(
+            Code::KeyE,
+            Key::Character("e".into()),
+            OS_MOD | Modifiers::SHIFT,
+        );
+        let agents = key(
+            Code::KeyA,
+            Key::Character("a".into()),
+            OS_MOD | Modifiers::SHIFT,
+        );
         harness.dispatch_event(files.clone());
         harness.rebuild();
         harness.paint();
@@ -1508,19 +1562,35 @@ mod tests {
         // The same editor, moved over rather than built again.
         let code_now = named(harness.root_id(), "tinted editor").unwrap();
         assert_eq!(code_now, code, "the editor was rebuilt");
-        assert!(code.get_visual_rect_no_clip().x1 <= drawer.x0, "the editor is under the drawer");
+        assert!(
+            code.get_visual_rect_no_clip().x1 <= drawer.x0,
+            "the editor is under the drawer"
+        );
         assert_eq!(review.active.get().as_deref(), Some("src/x.rs"));
 
         harness.dispatch_event(files);
         harness.rebuild();
         harness.paint();
-        assert!(named(harness.root_id(), "files-panel").is_none(), "Cmd-Shift-E did not shut it");
+        assert!(
+            named(harness.root_id(), "files-panel").is_none(),
+            "Cmd-Shift-E did not shut it"
+        );
         assert_eq!(
-            named(harness.root_id(), "right-drawer").unwrap().get_visual_rect_no_clip().width(),
+            named(harness.root_id(), "right-drawer")
+                .unwrap()
+                .get_visual_rect_no_clip()
+                .width(),
             0.0
         );
-        assert_eq!(code.get_visual_rect_no_clip().x1, 1400.0, "the editor has the window again");
-        assert!(harness.is_focused(editor), "the editor did not get the keyboard back");
+        assert_eq!(
+            code.get_visual_rect_no_clip().x1,
+            1400.0,
+            "the editor has the window again"
+        );
+        assert!(
+            harness.is_focused(editor),
+            "the editor did not get the keyboard back"
+        );
         assert_eq!(review.active.get().as_deref(), Some("src/x.rs"));
 
         // Cmd-Shift-A opens the dropdown and Escape shuts it, giving the
@@ -1528,14 +1598,24 @@ mod tests {
         harness.dispatch_event(agents.clone());
         harness.rebuild();
         harness.paint();
-        assert!(review.agents_dropdown_open.get(), "Cmd-Shift-A did not open the dropdown");
+        assert!(
+            review.agents_dropdown_open.get(),
+            "Cmd-Shift-A did not open the dropdown"
+        );
         assert!(named(harness.root_id(), "agents-dropdown").is_some());
-        harness.dispatch_event(key(Code::Escape, Key::Named(NamedKey::Escape), Modifiers::empty()));
+        harness.dispatch_event(key(
+            Code::Escape,
+            Key::Named(NamedKey::Escape),
+            Modifiers::empty(),
+        ));
         harness.rebuild();
         harness.paint();
         assert!(!review.agents_dropdown_open.get());
         assert!(named(harness.root_id(), "agents-dropdown").is_none());
-        assert!(harness.is_focused(editor), "Escape did not give the editor the keyboard back");
+        assert!(
+            harness.is_focused(editor),
+            "Escape did not give the editor the keyboard back"
+        );
         harness.dispatch_event(agents.clone());
         harness.rebuild();
         harness.dispatch_event(agents);
@@ -1555,11 +1635,18 @@ mod tests {
         harness.paint();
         assert!(named(harness.root_id(), "files-panel").is_none());
 
-        harness.dispatch_event(key(Code::KeyE, Key::Character("e".into()), OS_MOD | Modifiers::SHIFT));
+        harness.dispatch_event(key(
+            Code::KeyE,
+            Key::Character("e".into()),
+            OS_MOD | Modifiers::SHIFT,
+        ));
         harness.rebuild();
         harness.paint();
         assert_eq!(review.tab.get(), ItemTab::Code);
-        assert!(named(harness.root_id(), "files-panel").is_some(), "the tree did not open");
+        assert!(
+            named(harness.root_id(), "files-panel").is_some(),
+            "the tree did not open"
+        );
         assert!(named(harness.root_id(), "tinted editor").is_some());
     }
 
@@ -1576,7 +1663,9 @@ mod tests {
         harness.click(x, y);
         harness.rebuild();
         harness.paint();
-        let code = harness.element_id_at(x, y).expect("nothing under the click");
+        let code = harness
+            .element_id_at(x, y)
+            .expect("nothing under the click");
         assert!(
             harness.is_focused(code.owning_id()),
             "the press did not give the editor the keyboard"
@@ -1626,8 +1715,20 @@ mod tests {
         review.open_tab("src/x.rs");
         harness.rebuild();
         harness.paint();
-        let next = || key(Code::BracketRight, Key::Character("}".into()), OS_MOD | Modifiers::SHIFT);
-        let previous = || key(Code::BracketLeft, Key::Character("{".into()), OS_MOD | Modifiers::SHIFT);
+        let next = || {
+            key(
+                Code::BracketRight,
+                Key::Character("}".into()),
+                OS_MOD | Modifiers::SHIFT,
+            )
+        };
+        let previous = || {
+            key(
+                Code::BracketLeft,
+                Key::Character("{".into()),
+                OS_MOD | Modifiers::SHIFT,
+            )
+        };
         let showing = |review: &ReviewState| match review.tab.get() {
             ItemTab::Conversation => "conversation".to_string(),
             ItemTab::Code => review.active.get().unwrap_or_default(),
@@ -1676,20 +1777,26 @@ mod tests {
         use std::sync::Arc;
         let (mut harness, review) = window_with_a_file_open();
         let mode = |n: u8| {
-            let (code, c) = if n == 1 { (Code::Digit1, "!") } else { (Code::Digit2, "@") };
+            let (code, c) = if n == 1 {
+                (Code::Digit1, "!")
+            } else {
+                (Code::Digit2, "@")
+            };
             key(code, Key::Character(c.into()), OS_MOD | Modifiers::SHIFT)
         };
         harness.dispatch_event(mode(1));
         review.close_tab("src/x.rs");
-        review.changed_files.set(Arc::new(vec![perch_git::ChangedFile {
-            path: "src/x.rs".into(),
-            old_path: None,
-            status: perch_git::ChangeStatus::Modified,
-            additions: 1,
-            deletions: 1,
-            binary: false,
-            head_blob: None,
-        }]));
+        review
+            .changed_files
+            .set(Arc::new(vec![perch_git::ChangedFile {
+                path: "src/x.rs".into(),
+                old_path: None,
+                status: perch_git::ChangeStatus::Modified,
+                additions: 1,
+                deletions: 1,
+                binary: false,
+                head_blob: None,
+            }]));
         harness.rebuild();
         harness.paint();
         assert_eq!(review.tab.get(), ItemTab::Conversation);
@@ -1700,7 +1807,10 @@ mod tests {
         harness.paint();
         assert_eq!(review.tab.get(), ItemTab::Code);
         assert_eq!(review.active.get(), None, "a change opened by itself");
-        assert!(named(harness.root_id(), "files-panel").is_some(), "the first visit had no tree");
+        assert!(
+            named(harness.root_id(), "files-panel").is_some(),
+            "the first visit had no tree"
+        );
         assert!(
             named(harness.root_id(), "\"No file open\"").is_some(),
             "the pane does not say no file is open"
@@ -1785,12 +1895,19 @@ mod tests {
             ("s", Code::KeyS),
             ("e", Code::KeyE),
         ] {
-            let modifiers = if ch == "P" { Modifiers::SHIFT } else { Modifiers::empty() };
+            let modifiers = if ch == "P" {
+                Modifiers::SHIFT
+            } else {
+                Modifiers::empty()
+            };
             harness.dispatch_event(key(code, Key::Character(ch.into()), modifiers));
             harness.rebuild();
             harness.paint();
         }
-        assert!(review.composer.with(Option::is_none), "`a` opened a composer");
+        assert!(
+            review.composer.with(Option::is_none),
+            "`a` opened a composer"
+        );
         assert!(harness.is_focused(editor), "the box lost the keyboard");
         assert_eq!(review.review_launcher_instructions.get(), "Please");
     }

@@ -77,7 +77,9 @@ impl Responses {
     /// longer than `within` ago.
     pub fn fresh(&mut self, path: &str, within: Duration) -> Option<Known> {
         let checked = self.entries.get(path)?.checked;
-        (checked.elapsed() <= within).then(|| self.get(path)).flatten()
+        (checked.elapsed() <= within)
+            .then(|| self.get(path))
+            .flatten()
     }
 
     /// GitHub said what is kept at `path` is still current.

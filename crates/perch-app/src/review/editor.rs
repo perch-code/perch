@@ -90,7 +90,10 @@ pub fn editor_pane(
         Effect::new(move |_| {
             if let Some((path, line, column)) = state.pending_jump.get() {
                 state.pending_jump.set(None);
-                if state.active.with_untracked(|a| a.as_deref() != Some(path.as_str())) {
+                if state
+                    .active
+                    .with_untracked(|a| a.as_deref() != Some(path.as_str()))
+                {
                     state.open_for_jump(|| open_file(&path));
                 }
                 state.jump_caret.set(Some((line, column)));
@@ -105,7 +108,10 @@ pub fn editor_pane(
         Effect::new(move |_| {
             if let Some(path) = state.pending_open.get() {
                 state.pending_open.set(None);
-                if state.active.with_untracked(|a| a.as_deref() != Some(path.as_str())) {
+                if state
+                    .active
+                    .with_untracked(|a| a.as_deref() != Some(path.as_str()))
+                {
                     state.open_for_jump(|| open_file(&path));
                 } else {
                     state.show_in_tree(&path);
@@ -146,9 +152,7 @@ pub fn editor_pane(
                 // of the file the same way.
                 move || {
                     let path = state.active.get();
-                    let source = path
-                        .as_deref()
-                        .is_some_and(|path| state.shows_source(path));
+                    let source = path.as_deref().is_some_and(|path| state.shows_source(path));
                     (path, state.editor_epoch.get(), state.layout.get(), source)
                 },
                 move |(path, epoch, layout, source)| {
@@ -160,14 +164,20 @@ pub fn editor_pane(
                             centered_message(
                                 SidebarIcon::Search,
                                 || "No changes".to_string(),
-                                || "Pick a file from the tree, or press ⌘P to go to one by name.".to_string(),
+                                || {
+                                    "Pick a file from the tree, or press ⌘P to go to one by name."
+                                        .to_string()
+                                },
                             )
                             .into_any()
                         }
                         None => centered_message(
                             SidebarIcon::Search,
                             || "No file open".to_string(),
-                            || "Pick a file from the tree, or press ⌘P to go to one by name.".to_string(),
+                            || {
+                                "Pick a file from the tree, or press ⌘P to go to one by name."
+                                    .to_string()
+                            },
                         )
                         .into_any(),
                         Some(path) => match state.file(&path) {
@@ -288,9 +298,7 @@ fn code_view(
 ) -> impl IntoView {
     let memos = Memos::new(state, &file);
     let split = Effect::untrack(|| match layout {
-        Layout::Split => {
-            memos.inputs(state, &file).split(&file)
-        }
+        Layout::Split => memos.inputs(state, &file).split(&file),
         Layout::Stacked => None,
     });
     // New sides of the file that fit this editor are set in here, and
@@ -382,7 +390,15 @@ fn stacked_view(
     wire_highlights(state, &live, live_file);
     wire_folds(state, live_file, memos, epoch, {
         move |file: &LoadedFile, inputs: &Inputs, reloaded: bool| {
-            apply(&live, inputs.stacked(file), viewport, scroll_to, cursor, shifted, reloaded)
+            apply(
+                &live,
+                inputs.stacked(file),
+                viewport,
+                scroll_to,
+                cursor,
+                shifted,
+                reloaded,
+            )
         }
     });
     wire_cursor(state, backend.clone(), file.clone(), doc, cursor, shifted);
@@ -824,9 +840,7 @@ fn divider_layer(
     let stack = dyn_stack(
         visible,
         |(span, run)| (span.clone(), *run),
-        move |(span, _)| {
-            divider_bar(state, file, doc, labels, span, viewport, scroll_delta, bars)
-        },
+        move |(span, _)| divider_bar(state, file, doc, labels, span, viewport, scroll_delta, bars),
     )
     .style(|s| s.size_full());
 
@@ -868,10 +882,12 @@ fn divider_bar(
     let header = divider_header(state, file, doc, labels, start);
 
     let bar = match bars {
-        Bars::Editor => {
-            records_hover(state, start, passes_wheel(header, viewport, scroll_delta, None))
-                .into_any()
-        }
+        Bars::Editor => records_hover(
+            state,
+            start,
+            passes_wheel(header, viewport, scroll_delta, None),
+        )
+        .into_any(),
         // The outer stack's shape: two halves about a one-pixel rule,
         // each beginning with its gutter.
         Bars::Split { base_delta } => {
@@ -883,12 +899,22 @@ fn divider_bar(
                     passes_wheel(header, viewport, scroll_delta, Some(base_delta)),
                 ),
             ))
-            .style(|s| s.flex_basis(0.0).flex_grow(1.0_f32).min_width(0.0).height_full());
+            .style(|s| {
+                s.flex_basis(0.0)
+                    .flex_grow(1.0_f32)
+                    .min_width(0.0)
+                    .height_full()
+            });
             let rest = Stack::horizontal((
                 Empty::new().style(|s| s.width(1.0).height_full().flex_shrink(0.0_f32)),
                 Empty::new().style(|s| s.flex_basis(0.0).flex_grow(1.0_f32).height_full()),
             ))
-            .style(|s| s.flex_basis(0.0).flex_grow(1.0_f32).min_width(0.0).height_full());
+            .style(|s| {
+                s.flex_basis(0.0)
+                    .flex_grow(1.0_f32)
+                    .min_width(0.0)
+                    .height_full()
+            });
             let rest = passes_wheel(rest, viewport, scroll_delta, None);
             Stack::horizontal((base, records_hover(state, start, rest))).into_any()
         }
@@ -990,11 +1016,7 @@ fn divider_header(
 /// Fold again: a 16px slot holding a 12px Undo glyph, muted until the
 /// pointer is on it, that folds `ranges`, the head ranges of runs as the
 /// folds have them by default, back.
-fn fold_again(
-    state: ReviewState,
-    file: LiveFile,
-    ranges: Vec<(usize, usize)>,
-) -> impl IntoView {
+fn fold_again(state: ReviewState, file: LiveFile, ranges: Vec<(usize, usize)>) -> impl IntoView {
     let hovered = RwSignal::new(false);
     let color = move || {
         if hovered.get() {
@@ -1005,8 +1027,11 @@ fn fold_again(
     };
     cards::tip(
         Container::new(
-            icon_in(move || icons::sidebar_icon(SidebarIcon::Undo, color()), color)
-                .style(|s| s.size(theme::CHEVRON_GLYPH, theme::CHEVRON_GLYPH)),
+            icon_in(
+                move || icons::sidebar_icon(SidebarIcon::Undo, color()),
+                color,
+            )
+            .style(|s| s.size(theme::CHEVRON_GLYPH, theme::CHEVRON_GLYPH)),
         )
         .debug_name("fold again")
         .on_event_stop(el::Click, move |_, _| {
@@ -1069,7 +1094,12 @@ impl CardItem {
     fn key(&self) -> String {
         match self {
             CardItem::Thread(t) => {
-                format!("thread:{}:{}:{}", t.id, t.outdated, cards::thread_key_tail(t))
+                format!(
+                    "thread:{}:{}:{}",
+                    t.id,
+                    t.outdated,
+                    cards::thread_key_tail(t)
+                )
             }
             CardItem::Composer(c) => format!("composer:{}", c.opening),
         }
@@ -1405,7 +1435,14 @@ fn split_view(
             );
         }
     });
-    wire_cursor(state, backend.clone(), file.clone(), right_doc, right_cursor, right_shifted);
+    wire_cursor(
+        state,
+        backend.clone(),
+        file.clone(),
+        right_doc,
+        right_cursor,
+        right_shifted,
+    );
     wire_place(
         state,
         file.path.clone(),
@@ -1415,8 +1452,22 @@ fn split_view(
         right_cursor,
         epoch,
     );
-    wire_jump(state, live_file, right_doc, right_scroll_to, right_cursor, epoch);
-    wire_page(state, right_doc, right_viewport, right_delta, right_cursor, epoch);
+    wire_jump(
+        state,
+        live_file,
+        right_doc,
+        right_scroll_to,
+        right_cursor,
+        epoch,
+    );
+    wire_page(
+        state,
+        right_doc,
+        right_viewport,
+        right_delta,
+        right_cursor,
+        epoch,
+    );
     let right = navigation::navigable(right, state, backend.clone(), file.clone(), right_doc);
 
     // The left follows the right down the file. Sideways it keeps its own
@@ -1440,11 +1491,17 @@ fn split_view(
         backend.clone(),
         live_file,
         if pins_base { left_doc } else { right_doc },
-        if pins_base { left_viewport } else { right_viewport },
+        if pins_base {
+            left_viewport
+        } else {
+            right_viewport
+        },
         gutter::width_of(&file),
         right_delta,
         pins_base.then_some(left_delta),
-        Rc::new(move |y| right_scroll_to.set(Some(Vec2::new(right_viewport.get_untracked().x0, y)))),
+        Rc::new(move |y| {
+            right_scroll_to.set(Some(Vec2::new(right_viewport.get_untracked().x0, y)))
+        }),
     );
 
     let left_pane = Stack::horizontal((
@@ -2157,7 +2214,11 @@ mod window {
     fn goes_dark_with_the_system() {
         let mut harness = harness().0;
         let left = crate::theme::dark_check::light_left(&mut harness);
-        assert!(left.is_empty(), "light colours left in dark:\n{}", left.join("\n"));
+        assert!(
+            left.is_empty(),
+            "light colours left in dark:\n{}",
+            left.join("\n")
+        );
     }
 
     /// The whole window on Code with one changed file open, so the split
@@ -2379,7 +2440,12 @@ mod window {
         // function's closing brace is line 122 and the impl's 123.
         let file = |changed: &str| {
             let body: String = (0..120)
-                .map(|i| format!("        let x{i} = {};\n", if i % 3 == 0 { changed } else { "0" }))
+                .map(|i| {
+                    format!(
+                        "        let x{i} = {};\n",
+                        if i % 3 == 0 { changed } else { "0" }
+                    )
+                })
                 .collect();
             format!("impl Default for Options {{\n    fn default() -> Self {{\n{body}    }}\n}}\n")
         };
@@ -2395,39 +2461,66 @@ mod window {
                 .count()
         };
         assert_eq!(asked(), 0, "nothing is asked of a server that is not there");
-        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
+        state.set_server_status(
+            perch_lsp::ServerKind::RustAnalyzer,
+            perch_lsp::Status::Ready,
+        );
         harness.rebuild();
-        assert_eq!(asked(), 1, "the outline is asked for when the server comes up");
+        assert_eq!(
+            asked(),
+            1,
+            "the outline is asked for when the server comes up"
+        );
 
         let outline = |lines| {
             let mut symbols = std::collections::HashMap::new();
             symbols.insert(
                 "src/x.rs".to_string(),
-                Arc::new(Outline { lines, blocks: vec![(0, 123), (1, 122)] }),
+                Arc::new(Outline {
+                    lines,
+                    blocks: vec![(0, 123), (1, 122)],
+                }),
             );
             symbols
         };
         state.symbols.set(outline(lines_hash(head.lines())));
-        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).expect("a stacked editor");
+        let viewport = super::STACKED_VIEWPORT
+            .with(|v| v.get())
+            .expect("a stacked editor");
         harness.rebuild();
         harness.paint();
-        assert_eq!(count(harness.root_id(), "sticky:"), 0, "nothing is pinned at the top");
+        assert_eq!(
+            count(harness.root_id(), "sticky:"),
+            0,
+            "nothing is pinned at the top"
+        );
 
         harness.scroll_down(800.0, 500.0, 20.0 * line_height);
         harness.rebuild();
         harness.paint();
-        assert!(viewport.get().y0 > 10.0 * line_height, "the code did not scroll");
+        assert!(
+            viewport.get().y0 > 10.0 * line_height,
+            "the code did not scroll"
+        );
         let root = harness.root_id();
         let (outer, inner) = (rect_of(root, "sticky:0"), rect_of(root, "sticky:1"));
-        assert_eq!((outer.x0, outer.y0, outer.height()), (left, top, line_height));
+        assert_eq!(
+            (outer.x0, outer.y0, outer.height()),
+            (left, top, line_height)
+        );
         assert_eq!((inner.x0, inner.y0), (left, top + line_height));
         assert_eq!(count(root, "sticky:"), 2);
         let text = rect_of(root, "impl Default for Options {");
-        assert_eq!(text.x0, left + gutter_width() + crate::theme::CODE_GUTTER_GAP);
+        assert_eq!(
+            text.x0,
+            left + gutter_width() + crate::theme::CODE_GUTTER_GAP
+        );
         assert!(find(root, "fn default() -> Self {").is_some());
 
         // An outline of other text: a commit's head, say.
-        state.symbols.set(outline(lines_hash("fn other() {}".lines())));
+        state
+            .symbols
+            .set(outline(lines_hash("fn other() {}".lines())));
         harness.rebuild();
         harness.paint();
         assert_eq!(count(harness.root_id(), "sticky:"), 0);
@@ -2454,7 +2547,11 @@ mod window {
         harness.rebuild();
         harness.paint();
         assert_eq!(state.editor_epoch.get(), epoch, "edited in place");
-        assert_eq!(count(harness.root_id(), "sticky:"), 0, "the old outline is of other text");
+        assert_eq!(
+            count(harness.root_id(), "sticky:"),
+            0,
+            "the old outline is of other text"
+        );
         state.symbols.set(outline(lines_hash(edited.lines())));
         harness.rebuild();
         harness.paint();
@@ -2498,8 +2595,11 @@ mod window {
         use crate::review::model::Outline;
         use crate::review::sticky::lines_hash;
 
-        let body: String = (0..120).map(|i| format!("        let x{i} = 0;\n")).collect();
-        let base = format!("impl Default for Options {{\n    fn default() -> Self {{\n{body}    }}\n}}\n");
+        let body: String = (0..120)
+            .map(|i| format!("        let x{i} = 0;\n"))
+            .collect();
+        let base =
+            format!("impl Default for Options {{\n    fn default() -> Self {{\n{body}    }}\n}}\n");
         let (backend, mut commands) = crate::backend::Backend::recording();
         let (mut harness, state) = harness_as(
             String::new(),
@@ -2513,34 +2613,56 @@ mod window {
         let mut asked = || {
             std::iter::from_fn(|| commands.try_recv().ok())
                 .filter_map(|c| match c {
-                    crate::backend::Command::RemovedSymbols { path, text } if path == "src/x.rs" => {
+                    crate::backend::Command::RemovedSymbols { path, text }
+                        if path == "src/x.rs" =>
+                    {
                         Some(text)
                     }
                     _ => None,
                 })
                 .collect::<Vec<_>>()
         };
-        assert!(asked().is_empty(), "nothing is asked of a server that is not there");
-        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
+        assert!(
+            asked().is_empty(),
+            "nothing is asked of a server that is not there"
+        );
+        state.set_server_status(
+            perch_lsp::ServerKind::RustAnalyzer,
+            perch_lsp::Status::Ready,
+        );
         harness.rebuild();
-        assert_eq!(asked(), vec![base.clone()], "the removed lines are handed over");
+        assert_eq!(
+            asked(),
+            vec![base.clone()],
+            "the removed lines are handed over"
+        );
 
         let mut symbols = std::collections::HashMap::new();
         symbols.insert(
             "src/x.rs".to_string(),
-            Arc::new(Outline { lines: lines_hash(base.lines()), blocks: vec![(0, 123), (1, 122)] }),
+            Arc::new(Outline {
+                lines: lines_hash(base.lines()),
+                blocks: vec![(0, 123), (1, 122)],
+            }),
         );
         state.symbols.set(symbols);
         harness.rebuild();
         harness.paint();
-        assert_eq!(count(harness.root_id(), "sticky:"), 0, "nothing is pinned at the top");
+        assert_eq!(
+            count(harness.root_id(), "sticky:"),
+            0,
+            "nothing is pinned at the top"
+        );
 
         harness.scroll_down(800.0, 500.0, 20.0 * line_height);
         harness.rebuild();
         harness.paint();
         let root = harness.root_id();
         let (outer, inner) = (rect_of(root, "sticky:0"), rect_of(root, "sticky:1"));
-        assert_eq!((outer.x0, outer.y0, outer.height()), (left, top, line_height));
+        assert_eq!(
+            (outer.x0, outer.y0, outer.height()),
+            (left, top, line_height)
+        );
         assert_eq!((inner.x0, inner.y0), (left, top + line_height));
         assert!(find(root, "impl Default for Options {").is_some());
         assert!(find(root, "fn default() -> Self {").is_some());
@@ -2772,10 +2894,16 @@ mod window {
         assert!(left_box.x1 < right_box.x0, "the sides are side by side");
         assert_eq!(right_box.x1, 1400.0);
         let (_, rect, bg) = tint(&harness, left, 1);
-        assert_eq!((rect.x0, rect.x1, rect.y0), (left_box.x0, left_box.x1, top + line_height));
+        assert_eq!(
+            (rect.x0, rect.x1, rect.y0),
+            (left_box.x0, left_box.x1, top + line_height)
+        );
         assert_eq!(bg, Some(Brush::Solid(diff_deleted_bg())));
         let (_, rect, bg) = tint(&harness, right, 1);
-        assert_eq!((rect.x0, rect.x1, rect.y0), (right_box.x0, right_box.x1, top + line_height));
+        assert_eq!(
+            (rect.x0, rect.x1, rect.y0),
+            (right_box.x0, right_box.x1, top + line_height)
+        );
         assert_eq!(bg, Some(Brush::Solid(diff_modified_bg())));
     }
 
@@ -2852,7 +2980,12 @@ mod window {
         let editor = find(harness.root_id(), "tinted editor").unwrap();
         let editor_box = editor.get_visual_rect_no_clip();
         let scroll = find(editor, "Scroll").unwrap();
-        assert!(!bar_at(&harness, scroll, editor_box.x1 - 1.0, editor_box.y0 + 5.0));
+        assert!(!bar_at(
+            &harness,
+            scroll,
+            editor_box.x1 - 1.0,
+            editor_box.y0 + 5.0
+        ));
         drop(harness);
 
         // Lines wider than the view, in a file that fits it: a bar along
@@ -2871,7 +3004,12 @@ mod window {
             !bar_at(&harness, scroll, x, editor_box.y1 - bar - 1.0),
             "the code is above the bar"
         );
-        assert!(!bar_at(&harness, scroll, editor_box.x1 - 1.0, editor_box.y0 + 5.0));
+        assert!(!bar_at(
+            &harness,
+            scroll,
+            editor_box.x1 - 1.0,
+            editor_box.y0 + 5.0
+        ));
     }
 
     /// A split scrolls by the head side's bar alone: its scroll ends at
@@ -2913,10 +3051,8 @@ mod window {
     /// 2 between, in a strip `TAB_HEIGHT` tall under the header's bar.
     fn tile_center(layout: Layout) -> (f64, f64) {
         let tile = crate::theme::LAYOUT_TILE;
-        let split_right = 1400.0
-            - 8.0
-            - tile
-            - (crate::theme::TILE_RULE_GAP + 1.0 + crate::theme::TILE_RULE_GAP);
+        let split_right =
+            1400.0 - 8.0 - tile - (crate::theme::TILE_RULE_GAP + 1.0 + crate::theme::TILE_RULE_GAP);
         let x = match layout {
             Layout::Split => split_right - tile / 2.0,
             Layout::Stacked => split_right - tile - 2.0 - tile / 2.0,
@@ -3028,11 +3164,7 @@ mod window {
         let doc = live.doc.get();
         assert_eq!(doc.len(), 64 + 72, "every line, no divider");
         assert!(doc.folds.is_empty());
-        assert_eq!(
-            state.hidden_lines(),
-            0,
-            "nothing hidden"
-        );
+        assert_eq!(state.hidden_lines(), 0, "nothing hidden");
         assert_eq!(laid_out_text(&live), doc.text);
 
         harness.click(x, y);
@@ -3109,8 +3241,20 @@ mod window {
         assert_eq!(doc.len(), 64 + 72 - 54 + 2);
         let run = doc.run_of(5).expect("row 5 is the divider");
         assert_eq!(run.len(), 54);
-        assert_eq!(doc.rows[5], DocRow::Divider { run: 0, expand: Expand::Down });
-        assert_eq!(doc.rows[6], DocRow::Divider { run: 0, expand: Expand::Up });
+        assert_eq!(
+            doc.rows[5],
+            DocRow::Divider {
+                run: 0,
+                expand: Expand::Down
+            }
+        );
+        assert_eq!(
+            doc.rows[6],
+            DocRow::Divider {
+                run: 0,
+                expand: Expand::Up
+            }
+        );
         assert_eq!(laid_out_text(&live), doc.text);
         let viewport = super::STACKED_VIEWPORT
             .with(|v| v.get())
@@ -3122,7 +3266,10 @@ mod window {
         // is the second, and opens the run's last lines, which follow
         // the divider. The pointer on it is on the divider's first row.
         let (left, top) = pane_origin();
-        let (x, y) = (left + gutter_width() / 2.0, top + 6.0 * line_height + line_height / 2.0);
+        let (x, y) = (
+            left + gutter_width() / 2.0,
+            top + 6.0 * line_height + line_height / 2.0,
+        );
         harness.pointer_move(x, y);
         harness.rebuild();
         harness.paint();
@@ -3177,13 +3324,18 @@ mod window {
     /// rows. The gutter is as wide as three digits need, narrower than the
     /// seventy it was when the controls sat in a row inside it.
     #[test]
-    fn a_divider_is_githubs_hunk_row_with_its_expanders_in_the_gutter_and_its_header_over_the_code() {
+    fn a_divider_is_githubs_hunk_row_with_its_expanders_in_the_gutter_and_its_header_over_the_code()
+    {
         use crate::theme::{diff_expander_bg, diff_expander_hover_bg, CODE_GUTTER_GAP};
         let (mut harness, state) = one_long_run();
         let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
         let root = harness.root_id();
         let (left, top) = pane_origin();
-        assert!(gutter_width() < 60.0, "the gutter is {} wide", gutter_width());
+        assert!(
+            gutter_width() < 60.0,
+            "the gutter is {} wide",
+            gutter_width()
+        );
         // The named box is inside the clip that carries the width and the
         // rule.
         let gutter = find(root, "gutter")
@@ -3197,7 +3349,12 @@ mod window {
         let up = rect_of(root, "expander:Up");
         assert_eq!(
             (down.x0, down.width(), down.y0, down.height()),
-            (left, gutter_width() - 1.0, top + 5.0 * line_height, line_height)
+            (
+                left,
+                gutter_width() - 1.0,
+                top + 5.0 * line_height,
+                line_height
+            )
         );
         assert_eq!((up.x0, up.y0), (left, top + 6.0 * line_height));
         assert_eq!(count(root, "expander:"), 2, "one divider, two expanders");
@@ -3205,12 +3362,21 @@ mod window {
             let id = find(harness.root_id(), name).unwrap();
             harness.get_computed_style(id).get(floem::style::Background)
         };
-        assert_eq!(background(&harness, "expander:Down"), Some(Brush::Solid(diff_expander_bg())));
+        assert_eq!(
+            background(&harness, "expander:Down"),
+            Some(Brush::Solid(diff_expander_bg()))
+        );
         harness.pointer_move(up.center().x, up.center().y);
         harness.rebuild();
         harness.paint();
-        assert_eq!(background(&harness, "expander:Up"), Some(Brush::Solid(diff_expander_hover_bg())));
-        assert_eq!(background(&harness, "expander:Down"), Some(Brush::Solid(diff_expander_bg())));
+        assert_eq!(
+            background(&harness, "expander:Up"),
+            Some(Brush::Solid(diff_expander_hover_bg()))
+        );
+        assert_eq!(
+            background(&harness, "expander:Down"),
+            Some(Brush::Solid(diff_expander_bg()))
+        );
 
         // The header counts the hunk below the run, which runs to the end
         // of the file, and takes its context from the base: the nearest
@@ -3219,7 +3385,11 @@ mod window {
         let header = "@@ -59,64 +59,64 @@ line 56";
         let editor = rect_of(root, "tinted editor");
         let label = rect_of(root, header);
-        assert_eq!(label.x0, editor.x0 + CODE_GUTTER_GAP, "from the first code column");
+        assert_eq!(
+            label.x0,
+            editor.x0 + CODE_GUTTER_GAP,
+            "from the first code column"
+        );
         assert!(
             (label.center().y - (top + 6.0 * line_height)).abs() < 1.0,
             "down the middle of the two rows: {label:?}"
@@ -3259,7 +3429,13 @@ mod window {
             format!("{}{}", context(0, 100), blocks("old")),
         );
         let doc = stacked(state).doc.get();
-        assert_eq!(doc.rows[0], DocRow::Divider { run: 0, expand: Expand::Up });
+        assert_eq!(
+            doc.rows[0],
+            DocRow::Divider {
+                run: 0,
+                expand: Expand::Up
+            }
+        );
         assert!(doc.display_line(1).is_some(), "the divider is one row");
         let root = harness.root_id();
         assert_eq!(count(root, "expander:"), 1);
@@ -3306,7 +3482,10 @@ mod window {
         // when the jump scrolls the row away and leave `[` with nowhere
         // to go.
         let (left, top) = pane_origin();
-        harness.click(left + gutter_width() - 14.0, top + 3.0 * line_height + line_height / 2.0);
+        harness.click(
+            left + gutter_width() - 14.0,
+            top + 3.0 * line_height + line_height / 2.0,
+        );
         harness.rebuild();
 
         // The next change after the top starts at the ghost of old bottom,
@@ -3354,7 +3533,11 @@ mod window {
         harness.dispatch_event(bracket(false));
         harness.rebuild();
         harness.paint();
-        assert_eq!(state.cursor_line.get(), 0, "the keyboard went with the header");
+        assert_eq!(
+            state.cursor_line.get(),
+            0,
+            "the keyboard went with the header"
+        );
     }
 
     #[test]
@@ -3500,10 +3683,17 @@ mod window {
         let edited = head.replacen("fn c() {}\n", "fn c() {}\nfn added() {}\n", 29);
         reload(state, edited.clone());
         rebuilt(&mut harness);
-        assert_eq!(state.editor_epoch.get(), epoch, "the editor was built again");
+        assert_eq!(
+            state.editor_epoch.get(),
+            epoch,
+            "the editor was built again"
+        );
         let live = stacked(state);
         assert!(live.doc.get().text.contains("fn added()"));
-        assert_eq!(laid_out_text(&live), state.active_file().unwrap().buffer.text);
+        assert_eq!(
+            laid_out_text(&live),
+            state.active_file().unwrap().buffer.text
+        );
         assert_eq!(stacked_y(), scrolled);
 
         // Above it: the scroll follows the code down by the line added.
@@ -3742,9 +3932,13 @@ mod window {
         harness.pointer_move(editor.get_visual_rect_no_clip().x0 + 40.0, y);
         harness.rebuild();
         harness.paint();
-        assert_eq!(state.hovered_line.get(), Some(5), "the header records the pointer");
-        let reset = find(harness.root_id(), "fold again")
-            .expect("Fold again shows on the hovered divider");
+        assert_eq!(
+            state.hovered_line.get(),
+            Some(5),
+            "the header records the pointer"
+        );
+        let reset =
+            find(harness.root_id(), "fold again").expect("Fold again shows on the hovered divider");
         let (x, y) = (
             reset.get_visual_rect_no_clip().center().x,
             reset.get_visual_rect_no_clip().center().y,
@@ -4622,10 +4816,7 @@ mod window {
         // code column, past its gutter.
         let rect = card_rect(&harness, "t1");
         assert_eq!(rect.y0, 7.0 * line_height + crate::theme::CARD_INSET);
-        assert_eq!(
-            rect.x0,
-            gutter_width() + crate::theme::CODE_GUTTER_GAP
-        );
+        assert_eq!(rect.x0, gutter_width() + crate::theme::CODE_GUTTER_GAP);
         let (pane_left, _) = pane_origin();
         assert_eq!(
             rect.x1,
@@ -4955,7 +5146,10 @@ mod window {
         // Up on the divider shows the run's last twenty lines, as the
         // divider's own test has it: display line 46, `line 44`, is row 14.
         let (left, top) = pane_origin();
-        let (x, y) = (left + gutter_width() / 2.0, top + 6.0 * line_height + line_height / 2.0);
+        let (x, y) = (
+            left + gutter_width() / 2.0,
+            top + 6.0 * line_height + line_height / 2.0,
+        );
         harness.pointer_move(x, y);
         harness.rebuild();
         harness.paint();
@@ -5003,7 +5197,11 @@ mod window {
             Some((5, 42)),
             "the run above, to the context before the line"
         );
-        assert_eq!(doc.row_of_display(46), Some(10), "after the two rows of the divider above");
+        assert_eq!(
+            doc.row_of_display(46),
+            Some(10),
+            "after the two rows of the divider above"
+        );
         assert_eq!(doc.card_span(&CardId::Composer), Some(11..11 + rows));
         assert_eq!(
             doc.run_of(11 + rows + 3).map(|r| (r.first, r.last)),
@@ -5068,7 +5266,10 @@ mod window {
                     run: None,
                     github_id: Some(id + i as u64),
                     node_id: Some(format!("PRRC_{}", id + i as u64)),
-                    html_url: Some(format!("https://github.com/o/r/pull/1#discussion_r{}", id + i as u64)),
+                    html_url: Some(format!(
+                        "https://github.com/o/r/pull/1#discussion_r{}",
+                        id + i as u64
+                    )),
                     diff_hunk: (i == 0).then(|| "@@ -5,3 +5,3 @@\n a\n b\n c".to_string()),
                     reactions: Default::default(),
                 })
@@ -5099,7 +5300,10 @@ mod window {
             Some(9..9 + estimate),
             "the estimate, until the card is laid out"
         );
-        assert!(!state.is_collapsed(&card), "not resolved, so it starts open");
+        assert!(
+            !state.is_collapsed(&card),
+            "not resolved, so it starts open"
+        );
         harness.rebuild();
         harness.paint();
         let rows = laid_out_rows(&harness, "gh-100");
@@ -5188,7 +5392,10 @@ mod window {
         // goes before it.
         let mut mine = thread_with("t1", 5, 7, &["why?"]);
         mine.created_at = "2026-09-18T09:00:00Z".parse().unwrap();
-        state.set_comment_threads(Arc::new(vec![mine, github_thread(100, 7, &["nit: name this", "done"])]));
+        state.set_comment_threads(Arc::new(vec![
+            mine,
+            github_thread(100, 7, &["nit: name this", "done"]),
+        ]));
         harness.rebuild();
         harness.paint();
         let doc = live.doc.get();
@@ -5217,7 +5424,10 @@ mod window {
         // The Ask is drawn while the card is under the pointer.
         let rect = card_rect(&harness, "gh-100");
         let (left, top) = pane_origin();
-        let inside = (left + gutter_width() + rect.center().x, top + rect.center().y);
+        let inside = (
+            left + gutter_width() + rect.center().x,
+            top + rect.center().y,
+        );
         harness.pointer_move(inside.0, inside.1);
         harness.rebuild();
         harness.paint();
@@ -5233,7 +5443,11 @@ mod window {
             Some((7, 7)),
             "on the thread's own lines"
         );
-        assert_eq!(state.composer_draft.get(), "", "nothing is quoted; the thread carries the comment");
+        assert_eq!(
+            state.composer_draft.get(),
+            "",
+            "nothing is quoted; the thread carries the comment"
+        );
         assert!(state.follow_up_is_inline("gh-100"));
     }
 
@@ -5246,14 +5460,23 @@ mod window {
         let (mut harness, state) = harness();
         state.set_comment_threads(Arc::new(vec![github_thread(100, 7, &["nit: name this"])]));
         let hearts = Reactions {
-            groups: vec![ReactionGroup { kind: ReactionKind::Heart, count: 1, viewer_reacted: false, reactors: vec![] }],
+            groups: vec![ReactionGroup {
+                kind: ReactionKind::Heart,
+                count: 1,
+                viewer_reacted: false,
+                reactors: vec![],
+            }],
         };
         state.install_reactions([("PRRC_100", &hearts)]);
         harness.rebuild();
         harness.paint();
 
         let card = find(harness.root_id(), "inline-card:gh-100").unwrap();
-        let face = find(find(card, "reactions").expect("the comment's pills"), "react-button").unwrap();
+        let face = find(
+            find(card, "reactions").expect("the comment's pills"),
+            "react-button",
+        )
+        .unwrap();
         let c = face.get_visual_rect_no_clip().center();
         harness.click(c.x, c.y);
         harness.rebuild();
@@ -5262,7 +5485,11 @@ mod window {
         let picker = find(harness.root_id(), "react-picker").expect("the click opened it");
         let at = face.get_visual_rect_no_clip();
         let rect = picker.get_visual_rect_no_clip();
-        assert_eq!((rect.y1, rect.x0), (at.y0 - 8.0, at.x0), "not over the face");
+        assert_eq!(
+            (rect.y1, rect.x0),
+            (at.y0 - 8.0, at.x0),
+            "not over the face"
+        );
         for kind in ReactionKind::ALL {
             let pick = find(picker, &format!("react-pick:{}", kind.graphql())).unwrap();
             let c = pick.get_visual_rect_no_clip().center();
@@ -5283,7 +5510,10 @@ mod window {
         thread.resolved = true;
         state.set_comment_threads(Arc::new(vec![thread]));
         let card = CardId::Thread("gh-100".into());
-        assert!(state.is_collapsed(&card), "resolved on GitHub, so folded away");
+        assert!(
+            state.is_collapsed(&card),
+            "resolved on GitHub, so folded away"
+        );
         harness.rebuild();
         harness.paint();
         let folded = crate::review::doc::COLLAPSED_ROWS;
@@ -5384,8 +5614,7 @@ mod window {
         assert_eq!(rect.y0, 9.0 * line_height + crate::theme::CARD_INSET);
         assert_eq!(rect.x0, crate::theme::CODE_GUTTER_GAP);
         let (pane_left, _) = pane_origin();
-        let right_edge =
-            1400.0 - pane_left - gutter_width() - crate::theme::CODE_GUTTER_GAP;
+        let right_edge = 1400.0 - pane_left - gutter_width() - crate::theme::CODE_GUTTER_GAP;
         assert!(
             right_edge > rect.x0 + crate::theme::INLINE_THREAD_MAX_WIDTH,
             "the pane is wider than a card may be"

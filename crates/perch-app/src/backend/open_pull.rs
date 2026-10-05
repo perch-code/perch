@@ -14,8 +14,8 @@ use perch_git::{PushError, RepoId};
 use perch_github::{Item, ItemCheckout, PullLookup, PullRequest};
 
 use super::{
-    count_divergence, head_repo_of, install_pull_request_snapshot, refresh_open_item, root_of,
-    configured_base, take_pull_request, Ctx, Event,
+    configured_base, count_divergence, head_repo_of, install_pull_request_snapshot,
+    refresh_open_item, root_of, take_pull_request, Ctx, Event,
 };
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -138,7 +138,9 @@ async fn create_inner(
     base: &str,
     draft: bool,
 ) -> Result<(u64, Option<String>), String> {
-    let github = ctx.github().ok_or("A GitHub token is required to open a pull request")?;
+    let github = ctx
+        .github()
+        .ok_or("A GitHub token is required to open a pull request")?;
     let title = title.trim();
     if title.is_empty() {
         return Err("The pull request needs a title".into());
@@ -160,7 +162,10 @@ async fn create_inner(
         .unwrap_or_default();
     if on != checkout.branch {
         return Err(if on.is_empty() {
-            format!("The worktree's HEAD is detached, not on {}.", checkout.branch)
+            format!(
+                "The worktree's HEAD is detached, not on {}.",
+                checkout.branch
+            )
         } else {
             format!("The worktree is on {on}, not {}.", checkout.branch)
         });
@@ -178,7 +183,10 @@ async fn create_inner(
     if let Some(pr) = open_pull(ctx, &item, &head_owner, &head_repo, &checkout.branch).await? {
         let number = pr.number;
         attach(ctx, item_id, pr)?;
-        return Ok((number, Some(format!("#{number} was already open on this branch."))));
+        return Ok((
+            number,
+            Some(format!("#{number} was already open on this branch.")),
+        ));
     }
 
     step(ctx, item_id, OpenStep::Pushing);
@@ -247,7 +255,10 @@ async fn push_to_pull_inner(ctx: &Ctx, item_id: &str) -> Result<(), String> {
     if ctx.is_open(item_id) {
         refresh_open_item(ctx, item_id).await;
     } else {
-        match github.fetch_pull_request(&pr.repo_full_name, pr.number).await {
+        match github
+            .fetch_pull_request(&pr.repo_full_name, pr.number)
+            .await
+        {
             Ok(fresh) => {
                 install_pull_request_snapshot(ctx, item_id, fresh, None);
             }
@@ -268,7 +279,10 @@ async fn push_to_pull_inner(ctx: &Ctx, item_id: &str) -> Result<(), String> {
 /// What a description run came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DescriptionOutcome {
-    Written { title: String, body: String },
+    Written {
+        title: String,
+        body: String,
+    },
     Failed(String),
     /// The reader stopped it.
     Stopped,
@@ -301,7 +315,10 @@ pub(super) async fn describe(
 ) {
     let mut outcome = describe_inner(ctx, item_id, base, backend, model, effort).await;
     if let DescriptionOutcome::Written { body, .. } = &mut outcome {
-        if let Some(number) = ctx.item(item_id).and_then(|item| closes_subject(ctx, &item)) {
+        if let Some(number) = ctx
+            .item(item_id)
+            .and_then(|item| closes_subject(ctx, &item))
+        {
             *body = with_closes(body, number);
         }
     }
@@ -400,7 +417,11 @@ pub(super) async fn write_title_and_body(
 }
 
 /// The branch's commits and the files it changes, against `base`.
-async fn description_prompt(ctx: &Ctx, item_id: &str, base: &str) -> Result<crate::ask::Prompt, String> {
+async fn description_prompt(
+    ctx: &Ctx,
+    item_id: &str,
+    base: &str,
+) -> Result<crate::ask::Prompt, String> {
     let item = ctx.item(item_id).ok_or("The item is gone")?;
     let checkout = branch_checkout(&item)?;
     let base_ref = resolve_base(ctx, &item, checkout, base)
@@ -530,11 +551,18 @@ fn is_sha(s: &str) -> bool {
 /// A ref in the worktree's repository for `base` on GitHub: the
 /// remote-tracking branch of the remote that is the item's repository,
 /// then any remote's, then Perch's home ref, then a local branch.
-async fn resolve_base(ctx: &Ctx, item: &Item, checkout: &ItemCheckout, base: &str) -> Option<String> {
+async fn resolve_base(
+    ctx: &Ctx,
+    item: &Item,
+    checkout: &ItemCheckout,
+    base: &str,
+) -> Option<String> {
     let git = ctx.preparer.git();
     let hosts = ctx.config().github_hosts();
     let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
-    let mut remotes = perch_git::remotes(git, &checkout.path).await.unwrap_or_default();
+    let mut remotes = perch_git::remotes(git, &checkout.path)
+        .await
+        .unwrap_or_default();
     remotes.sort_by_key(|(name, url)| {
         let this_repo = perch_git::repo_from_remote(url, &hosts)
             .is_some_and(|r| r.eq_ignore_ascii_case(&item.repo_full_name));
@@ -550,7 +578,12 @@ async fn resolve_base(ctx: &Ctx, item: &Item, checkout: &ItemCheckout, base: &st
         let found = git
             .run(
                 Some(&checkout.path),
-                ["rev-parse", "--verify", "--quiet", &format!("{candidate}^{{commit}}")],
+                [
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("{candidate}^{{commit}}"),
+                ],
                 QUERY_TIMEOUT,
             )
             .await
@@ -591,7 +624,10 @@ fn closes_subject(ctx: &Ctx, item: &Item) -> Option<u64> {
         return None;
     }
     let source = ctx.item(item.from_item_id.as_deref()?)?;
-    if !source.repo_full_name.eq_ignore_ascii_case(&item.repo_full_name) {
+    if !source
+        .repo_full_name
+        .eq_ignore_ascii_case(&item.repo_full_name)
+    {
         return None;
     }
     match source.subject.as_ref()? {
@@ -616,13 +652,20 @@ fn with_closes(body: &str, number: u64) -> String {
 /// The pull request template, looked for where GitHub looks: `.github/`,
 /// the root, then `docs/`, whatever the file name's case.
 fn template(worktree: &Path) -> Option<String> {
-    for dir in [worktree.join(".github"), worktree.to_path_buf(), worktree.join("docs")] {
+    for dir in [
+        worktree.join(".github"),
+        worktree.to_path_buf(),
+        worktree.join("docs"),
+    ] {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
         for entry in entries.flatten() {
             let name = entry.file_name();
-            if name.to_string_lossy().eq_ignore_ascii_case("pull_request_template.md") {
+            if name
+                .to_string_lossy()
+                .eq_ignore_ascii_case("pull_request_template.md")
+            {
                 if let Ok(text) = std::fs::read_to_string(entry.path()) {
                     return Some(text.trim_end().to_string());
                 }
@@ -641,7 +684,9 @@ async fn open_pull(
     head_repo: &str,
     branch: &str,
 ) -> Result<Option<PullRequest>, String> {
-    let github = ctx.github().ok_or("A GitHub token is required to open a pull request")?;
+    let github = ctx
+        .github()
+        .ok_or("A GitHub token is required to open a pull request")?;
     let lookup = github
         .find_pull_for_branch(&item.repo_full_name, head_owner, branch, None)
         .await
@@ -711,12 +756,15 @@ async fn remote_for(ctx: &Ctx, checkout: &ItemCheckout, head_repo: &str) -> Stri
     let git = ctx.preparer.git();
     let hosts = ctx.config().github_hosts();
     let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
-    let remotes = perch_git::remotes(git, &checkout.path).await.unwrap_or_default();
+    let remotes = perch_git::remotes(git, &checkout.path)
+        .await
+        .unwrap_or_default();
     let named = |name: &str| remotes.iter().any(|(n, _)| n == name);
     if let Some(origin) = remotes
         .iter()
         .filter(|(_, url)| {
-            perch_git::repo_from_remote(url, &hosts).is_some_and(|r| r.eq_ignore_ascii_case(head_repo))
+            perch_git::repo_from_remote(url, &hosts)
+                .is_some_and(|r| r.eq_ignore_ascii_case(head_repo))
         })
         .min_by_key(|(name, _)| name != "origin")
     {
@@ -725,7 +773,11 @@ async fn remote_for(ctx: &Ctx, checkout: &ItemCheckout, head_repo: &str) -> Stri
     let tracked = git
         .run(
             Some(&checkout.path),
-            ["config", "--get", &format!("branch.{}.remote", checkout.branch)],
+            [
+                "config",
+                "--get",
+                &format!("branch.{}.remote", checkout.branch),
+            ],
             QUERY_TIMEOUT,
         )
         .await
@@ -742,7 +794,9 @@ fn attach(ctx: &Ctx, item_id: &str, pr: PullRequest) -> Result<(), String> {
     match ctx.with_cache(|c| take_pull_request(c, &mut item, pr)) {
         Some(Ok(true)) => {}
         Some(Ok(false)) => {
-            return Err(format!("#{number} is open, and another row with a worktree has it."));
+            return Err(format!(
+                "#{number} is open, and another row with a worktree has it."
+            ));
         }
         Some(Err(e)) => return Err(e.to_string()),
         None => return Err("The local database is unavailable".into()),
@@ -827,9 +881,20 @@ mod tests {
     #[test]
     fn a_description_ends_by_closing_what_the_branch_replaces_once() {
         assert_eq!(with_closes("", 7), "Closes #7");
-        assert_eq!(with_closes("Fence the manifest.\n\n", 7), "Fence the manifest.\n\nCloses #7");
-        assert_eq!(with_closes("Fixes #7 at last.", 7), "Fixes #7 at last.", "said already");
-        assert_eq!(with_closes("See #7.", 7), "See #7.\n\nCloses #7", "a mention closes nothing");
+        assert_eq!(
+            with_closes("Fence the manifest.\n\n", 7),
+            "Fence the manifest.\n\nCloses #7"
+        );
+        assert_eq!(
+            with_closes("Fixes #7 at last.", 7),
+            "Fixes #7 at last.",
+            "said already"
+        );
+        assert_eq!(
+            with_closes("See #7.", 7),
+            "See #7.\n\nCloses #7",
+            "a mention closes nothing"
+        );
     }
 
     #[test]
@@ -847,13 +912,22 @@ mod tests {
             body: r#"{"message":"Validation Failed","errors":[{"resource":"PullRequest","code":"custom","message":"A pull request already exists for me:fence."}]}"#.into(),
         };
         assert!(already_exists(&error));
-        assert_eq!(github_says(&error), "A pull request already exists for me:fence.");
+        assert_eq!(
+            github_says(&error),
+            "A pull request already exists for me:fence."
+        );
         let plain = perch_github::Error::Status {
             status: 403,
             body: r#"{"message":"Resource not accessible by integration"}"#.into(),
         };
-        assert_eq!(github_says(&plain), "Resource not accessible by integration");
-        assert_eq!(github_says(&perch_github::Error::Network("x".into())), "Offline.");
+        assert_eq!(
+            github_says(&plain),
+            "Resource not accessible by integration"
+        );
+        assert_eq!(
+            github_says(&perch_github::Error::Network("x".into())),
+            "Offline."
+        );
     }
 
     #[test]

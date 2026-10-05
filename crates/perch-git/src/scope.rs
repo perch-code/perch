@@ -100,14 +100,21 @@ impl Scope {
                     return None;
                 }
                 match kind {
-                    "since" => Scope::SinceLastLooked { from: sha.to_string() },
-                    "commit" => Scope::Commit { sha: sha.to_string() },
+                    "since" => Scope::SinceLastLooked {
+                        from: sha.to_string(),
+                    },
+                    "commit" => Scope::Commit {
+                        sha: sha.to_string(),
+                    },
                     "run" => {
                         let (before, after) = sha.split_once("..")?;
                         if before.is_empty() || after.is_empty() {
                             return None;
                         }
-                        Scope::Run { before: before.to_string(), after: after.to_string() }
+                        Scope::Run {
+                            before: before.to_string(),
+                            after: after.to_string(),
+                        }
                     }
                     _ => return None,
                 }
@@ -132,7 +139,11 @@ impl fmt::Display for Scope {
 
 /// The seven characters the menu shows.
 fn short_sha(sha: &str) -> &str {
-    let end = sha.char_indices().nth(7).map(|(i, _)| i).unwrap_or(sha.len());
+    let end = sha
+        .char_indices()
+        .nth(7)
+        .map(|(i, _)| i)
+        .unwrap_or(sha.len());
     &sha[..end]
 }
 
@@ -161,7 +172,11 @@ const LOG_FORMAT: &str = "--format=%H%x00%s%x00%b%x00%an%x00%aI";
 /// The commits in `base..head`, newest first.
 pub async fn log(git: &Git, cwd: &Path, base: &str, head: &str) -> Result<Vec<Commit>, Error> {
     let out = git
-        .run(Some(cwd), ["log", "-z", LOG_FORMAT, &format!("{base}..{head}")], QUERY_TIMEOUT)
+        .run(
+            Some(cwd),
+            ["log", "-z", LOG_FORMAT, &format!("{base}..{head}")],
+            QUERY_TIMEOUT,
+        )
         .await?;
     parse_log(&out)
 }
@@ -234,7 +249,9 @@ pub fn parse_status(porcelain: &str) -> Dirt {
     let mut dirt = Dirt::default();
     for line in porcelain.lines() {
         let mut chars = line.chars();
-        let (Some(x), Some(y)) = (chars.next(), chars.next()) else { continue };
+        let (Some(x), Some(y)) = (chars.next(), chars.next()) else {
+            continue;
+        };
         match x {
             '?' => dirt.unstaged = true,
             '!' => {}
@@ -292,8 +309,11 @@ pub async fn changed_files(
     let raw = diff(git, worktree, &["--raw", "--no-abbrev"], &revs).await?;
     let numstat = diff(git, worktree, &["--numstat"], &revs).await?;
     let raw = parse_raw(&raw);
-    let irregular: std::collections::HashSet<String> =
-        raw.iter().filter(|c| !c.regular).map(|c| c.path.clone()).collect();
+    let irregular: std::collections::HashSet<String> = raw
+        .iter()
+        .filter(|c| !c.regular)
+        .map(|c| c.path.clone())
+        .collect();
     let mut files = assemble(raw, parse_numstat(&numstat));
 
     if head == Rev::Worktree {
@@ -308,7 +328,12 @@ pub async fn changed_files(
 }
 
 /// `git diff -M -z <flags> <revs>` in the worktree.
-async fn diff(git: &Git, worktree: &Path, flags: &[&str], revs: &[String]) -> Result<String, Error> {
+async fn diff(
+    git: &Git,
+    worktree: &Path,
+    flags: &[&str],
+    revs: &[String],
+) -> Result<String, Error> {
     let args = ["diff", "-M", "-z"]
         .iter()
         .chain(flags)
@@ -322,7 +347,11 @@ async fn diff(git: &Git, worktree: &Path, flags: &[&str], revs: &[String]) -> Re
 /// A path the diff already lists is left to it: a file removed from the
 /// index but still on disk shows as deleted against `HEAD` and untracked
 /// at once, and one row is enough.
-async fn add_untracked(git: &Git, worktree: &Path, files: &mut Vec<ChangedFile>) -> Result<(), Error> {
+async fn add_untracked(
+    git: &Git,
+    worktree: &Path,
+    files: &mut Vec<ChangedFile>,
+) -> Result<(), Error> {
     let out = git
         .run(
             Some(worktree),
@@ -376,13 +405,21 @@ async fn hash_on_disk(
     // Only a regular file has a blob to hash: a submodule is a commit and
     // a symlink's blob is its target text, which hash-object would not
     // give. Those keep no blob and are never Viewed.
-    let on_disk = |f: &ChangedFile| f.status != ChangeStatus::Deleted && !irregular.contains(&f.path);
-    let paths: Vec<String> = files.iter().filter(|f| on_disk(f)).map(|f| f.path.clone()).collect();
+    let on_disk =
+        |f: &ChangedFile| f.status != ChangeStatus::Deleted && !irregular.contains(&f.path);
+    let paths: Vec<String> = files
+        .iter()
+        .filter(|f| on_disk(f))
+        .map(|f| f.path.clone())
+        .collect();
     if paths.is_empty() {
         return Ok(());
     }
 
-    let args = ["hash-object", "--"].iter().map(|s| s.to_string()).chain(paths.clone());
+    let args = ["hash-object", "--"]
+        .iter()
+        .map(|s| s.to_string())
+        .chain(paths.clone());
     match git.run(Some(worktree), args, DIFF_TIMEOUT).await {
         Ok(out) => {
             let mut shas = out.lines();
@@ -395,7 +432,11 @@ async fn hash_on_disk(
         Err(_) => {
             for file in files.iter_mut().filter(|f| on_disk(f)) {
                 let args = ["hash-object", "--", file.path.as_str()];
-                file.head_blob = git.run(Some(worktree), args, DIFF_TIMEOUT).await.ok().map(|s| s.trim().to_string());
+                file.head_blob = git
+                    .run(Some(worktree), args, DIFF_TIMEOUT)
+                    .await
+                    .ok()
+                    .map(|s| s.trim().to_string());
             }
         }
     }
@@ -427,9 +468,13 @@ pub fn parse_raw(raw: &str) -> Vec<RawChange> {
 
     while let Some(record) = fields.next() {
         let mut parts = record.strip_prefix(':').unwrap_or(record).split(' ');
-        let (_, Some(new_mode), _, Some(new_sha), Some(code)) =
-            (parts.next(), parts.next(), parts.next(), parts.next(), parts.next())
-        else {
+        let (_, Some(new_mode), _, Some(new_sha), Some(code)) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) else {
             continue;
         };
         // 100644 and 100755 are files; 120000 is a symlink, 160000 a
@@ -452,7 +497,13 @@ pub fn parse_raw(raw: &str) -> Vec<RawChange> {
                     regular,
                 });
             }
-            _ => out.push(RawChange { status, path: first.to_string(), old_path: None, head_blob, regular }),
+            _ => out.push(RawChange {
+                status,
+                path: first.to_string(),
+                old_path: None,
+                head_blob,
+                regular,
+            }),
         }
     }
 
@@ -493,7 +544,12 @@ fn assemble(raw: Vec<RawChange>, numstat: Vec<(u32, u32, bool, String)>) -> Vec<
 /// Text comes back as git's or the disk's bytes read as UTF-8, lossily.
 /// Neither size nor binary-ness is checked here: the caller has the
 /// changed row's `binary` and its own size limit, as it does today.
-pub async fn read_side(git: &Git, worktree: &Path, rev: &Rev, path: &str) -> Result<Option<String>, Error> {
+pub async fn read_side(
+    git: &Git,
+    worktree: &Path,
+    rev: &Rev,
+    path: &str,
+) -> Result<Option<String>, Error> {
     let spec = match rev {
         Rev::Sha(sha) => format!("{sha}:{path}"),
         Rev::Index => format!(":{path}"),
@@ -506,14 +562,18 @@ pub async fn read_side(git: &Git, worktree: &Path, rev: &Rev, path: &str) -> Res
         }
     };
 
-    match git.run(Some(worktree), ["show", &spec], QUERY_TIMEOUT).await {
+    match git
+        .run(Some(worktree), ["show", &spec], QUERY_TIMEOUT)
+        .await
+    {
         Ok(text) => Ok(Some(text)),
         // `git show` has no exit code for a missing path apart from the
         // one for a bad revision; the message is the only tell. It says
         // "does not exist in", "does not exist (neither on disk nor in the
         // index)" or "exists on disk, but not in".
         Err(Error::Git { stderr, .. })
-            if stderr.contains("does not exist") || stderr.contains("exists on disk, but not in") =>
+            if stderr.contains("does not exist")
+                || stderr.contains("exists on disk, but not in") =>
         {
             Ok(None)
         }
@@ -595,9 +655,18 @@ mod tests {
             Scope::SinceLastLooked { from: "old".into() }.sides("mb", "hd"),
             (sha("old"), sha("hd"))
         );
-        assert_eq!(Scope::Commit { sha: "c1".into() }.sides("mb", "hd"), (sha("c1^"), sha("c1")));
-        assert_eq!(Scope::Uncommitted.sides("mb", "hd"), (sha("HEAD"), Rev::Worktree));
-        assert_eq!(Scope::Unstaged.sides("mb", "hd"), (Rev::Index, Rev::Worktree));
+        assert_eq!(
+            Scope::Commit { sha: "c1".into() }.sides("mb", "hd"),
+            (sha("c1^"), sha("c1"))
+        );
+        assert_eq!(
+            Scope::Uncommitted.sides("mb", "hd"),
+            (sha("HEAD"), Rev::Worktree)
+        );
+        assert_eq!(
+            Scope::Unstaged.sides("mb", "hd"),
+            (Rev::Index, Rev::Worktree)
+        );
         assert_eq!(Scope::Staged.sides("mb", "hd"), (sha("HEAD"), Rev::Index));
     }
 
@@ -605,24 +674,41 @@ mod tests {
     fn scopes_print_and_parse_the_same() {
         let scopes = [
             Scope::Branch,
-            Scope::SinceLastLooked { from: "abc123".into() },
-            Scope::Commit { sha: "def456".into() },
+            Scope::SinceLastLooked {
+                from: "abc123".into(),
+            },
+            Scope::Commit {
+                sha: "def456".into(),
+            },
             Scope::Uncommitted,
             Scope::Unstaged,
             Scope::Staged,
-            Scope::Run { before: "aaa111".into(), after: "bbb222".into() },
+            Scope::Run {
+                before: "aaa111".into(),
+                after: "bbb222".into(),
+            },
         ];
         for scope in scopes {
-            assert_eq!(Scope::parse(&scope.to_string()), Some(scope.clone()), "{scope}");
+            assert_eq!(
+                Scope::parse(&scope.to_string()),
+                Some(scope.clone()),
+                "{scope}"
+            );
         }
-        assert_eq!(Scope::parse("commit:def456").unwrap().to_string(), "commit:def456");
+        assert_eq!(
+            Scope::parse("commit:def456").unwrap().to_string(),
+            "commit:def456"
+        );
         assert_eq!(Scope::parse("since:abc").unwrap().to_string(), "since:abc");
         assert_eq!(Scope::parse(" staged\n"), Some(Scope::Staged));
     }
 
     #[test]
     fn a_scope_that_is_not_one_does_not_parse() {
-        for s in ["", "Branch", "commit", "commit:", "since:", "tag:v1", "head", "run:a", "run:..b", "run:a.."] {
+        for s in [
+            "", "Branch", "commit", "commit:", "since:", "tag:v1", "head", "run:a", "run:..b",
+            "run:a..",
+        ] {
             assert_eq!(Scope::parse(s), None, "{s:?}");
         }
     }
@@ -630,12 +716,18 @@ mod tests {
     #[test]
     fn labels_name_the_entry_and_a_commit_by_its_short_sha() {
         assert_eq!(Scope::Branch.label(), "Branch");
-        assert_eq!(Scope::SinceLastLooked { from: "x".into() }.label(), "Since you last looked");
+        assert_eq!(
+            Scope::SinceLastLooked { from: "x".into() }.label(),
+            "Since you last looked"
+        );
         assert_eq!(Scope::Uncommitted.label(), "Uncommitted");
         assert_eq!(Scope::Unstaged.label(), "Unstaged");
         assert_eq!(Scope::Staged.label(), "Staged");
         assert_eq!(
-            Scope::Commit { sha: "fa19d134cbfb5378935afdcec1326ae15620e461".into() }.label(),
+            Scope::Commit {
+                sha: "fa19d134cbfb5378935afdcec1326ae15620e461".into()
+            }
+            .label(),
             "fa19d13"
         );
         assert_eq!(Scope::Commit { sha: "abc".into() }.label(), "abc");
@@ -684,16 +776,52 @@ c9e2a71baf7e8791602f0b113820970ff4b49134\0first\0A body line.\n\nSecond paragrap
         assert_eq!(parse_status(""), Dirt::default());
         assert!(!parse_status("").any());
 
-        assert_eq!(parse_status(" M a.txt\n"), Dirt { unstaged: true, staged: false });
-        assert_eq!(parse_status("M  a.txt\n"), Dirt { unstaged: false, staged: true });
-        assert_eq!(parse_status("MM a.txt\n"), Dirt { unstaged: true, staged: true });
-        assert_eq!(parse_status("A  new.txt\n D gone.txt\n"), Dirt { unstaged: true, staged: true });
-        assert_eq!(parse_status("R  old.txt -> new.txt\n"), Dirt { unstaged: false, staged: true });
+        assert_eq!(
+            parse_status(" M a.txt\n"),
+            Dirt {
+                unstaged: true,
+                staged: false
+            }
+        );
+        assert_eq!(
+            parse_status("M  a.txt\n"),
+            Dirt {
+                unstaged: false,
+                staged: true
+            }
+        );
+        assert_eq!(
+            parse_status("MM a.txt\n"),
+            Dirt {
+                unstaged: true,
+                staged: true
+            }
+        );
+        assert_eq!(
+            parse_status("A  new.txt\n D gone.txt\n"),
+            Dirt {
+                unstaged: true,
+                staged: true
+            }
+        );
+        assert_eq!(
+            parse_status("R  old.txt -> new.txt\n"),
+            Dirt {
+                unstaged: false,
+                staged: true
+            }
+        );
     }
 
     #[test]
     fn untracked_files_are_unstaged_and_ignored_ones_are_nothing() {
-        assert_eq!(parse_status("?? scratch.txt\n"), Dirt { unstaged: true, staged: false });
+        assert_eq!(
+            parse_status("?? scratch.txt\n"),
+            Dirt {
+                unstaged: true,
+                staged: false
+            }
+        );
         assert_eq!(parse_status("!! target/\n"), Dirt::default());
     }
 
@@ -752,10 +880,25 @@ c9e2a71baf7e8791602f0b113820970ff4b49134\0first\0A body line.\n\nSecond paragrap
     #[test]
     fn assembling_pairs_records_with_counts_and_sorts_by_path() {
         let raw = vec![
-            RawChange { status: ChangeStatus::Modified, path: "b.rs".into(), old_path: None, head_blob: Some("bb".into()), regular: true },
-            RawChange { status: ChangeStatus::Added, path: "a.rs".into(), old_path: None, head_blob: Some("aa".into()), regular: true },
+            RawChange {
+                status: ChangeStatus::Modified,
+                path: "b.rs".into(),
+                old_path: None,
+                head_blob: Some("bb".into()),
+                regular: true,
+            },
+            RawChange {
+                status: ChangeStatus::Added,
+                path: "a.rs".into(),
+                old_path: None,
+                head_blob: Some("aa".into()),
+                regular: true,
+            },
         ];
-        let numstat = vec![(5, 2, false, "b.rs".to_string()), (40, 0, false, "a.rs".to_string())];
+        let numstat = vec![
+            (5, 2, false, "b.rs".to_string()),
+            (40, 0, false, "a.rs".to_string()),
+        ];
         let files = assemble(raw, numstat);
         assert_eq!(files[0].path, "a.rs");
         assert_eq!(files[0].additions, 40);
@@ -769,7 +912,11 @@ c9e2a71baf7e8791602f0b113820970ff4b49134\0first\0A body line.\n\nSecond paragrap
     fn line_counts_match_numstat() {
         assert_eq!(count_lines(b""), (0, false));
         assert_eq!(count_lines(b"a\nb\n"), (2, false));
-        assert_eq!(count_lines(b"a\nb"), (2, false), "an unterminated last line counts");
+        assert_eq!(
+            count_lines(b"a\nb"),
+            (2, false),
+            "an unterminated last line counts"
+        );
         assert_eq!(count_lines(b"\x89PNG\0\0"), (0, true));
     }
 
@@ -777,11 +924,26 @@ c9e2a71baf7e8791602f0b113820970ff4b49134\0first\0A body line.\n\nSecond paragrap
     fn diff_revs_spell_each_pair_the_way_git_takes_it() {
         let sha = |s: &str| Rev::Sha(s.to_string());
         let strs = |v: Option<Vec<String>>| v.map(|v| v.join(" "));
-        assert_eq!(strs(diff_revs(&sha("a"), &sha("b"))).as_deref(), Some("a b"));
-        assert_eq!(strs(diff_revs(&sha("HEAD"), &Rev::Index)).as_deref(), Some("--cached HEAD"));
-        assert_eq!(strs(diff_revs(&sha("HEAD"), &Rev::Worktree)).as_deref(), Some("HEAD"));
-        assert_eq!(strs(diff_revs(&Rev::Index, &Rev::Worktree)).as_deref(), Some(""));
-        assert_eq!(strs(diff_revs(&Rev::Worktree, &Rev::Index)).as_deref(), Some("-R"));
+        assert_eq!(
+            strs(diff_revs(&sha("a"), &sha("b"))).as_deref(),
+            Some("a b")
+        );
+        assert_eq!(
+            strs(diff_revs(&sha("HEAD"), &Rev::Index)).as_deref(),
+            Some("--cached HEAD")
+        );
+        assert_eq!(
+            strs(diff_revs(&sha("HEAD"), &Rev::Worktree)).as_deref(),
+            Some("HEAD")
+        );
+        assert_eq!(
+            strs(diff_revs(&Rev::Index, &Rev::Worktree)).as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            strs(diff_revs(&Rev::Worktree, &Rev::Index)).as_deref(),
+            Some("-R")
+        );
         assert_eq!(diff_revs(&Rev::Index, &Rev::Index), None);
     }
 
@@ -791,7 +953,10 @@ c9e2a71baf7e8791602f0b113820970ff4b49134\0first\0A body line.\n\nSecond paragrap
 
     #[test]
     fn unchanged_lines_are_paired() {
-        assert_eq!(rows("a\nb\n", "a\nb\n"), vec![(Some(1), Some(1)), (Some(2), Some(2))]);
+        assert_eq!(
+            rows("a\nb\n", "a\nb\n"),
+            vec![(Some(1), Some(1)), (Some(2), Some(2))]
+        );
     }
 
     #[test]
@@ -818,11 +983,21 @@ c9e2a71baf7e8791602f0b113820970ff4b49134\0first\0A body line.\n\nSecond paragrap
         );
         assert_eq!(
             rows("a\nb\nc\n", "a\nB\nB2\nc\n"),
-            vec![(Some(1), Some(1)), (Some(2), Some(2)), (None, Some(3)), (Some(3), Some(4))]
+            vec![
+                (Some(1), Some(1)),
+                (Some(2), Some(2)),
+                (None, Some(3)),
+                (Some(3), Some(4))
+            ]
         );
         assert_eq!(
             rows("a\nb\nc\nd\n", "a\nX\nd\n"),
-            vec![(Some(1), Some(1)), (Some(2), Some(2)), (Some(3), None), (Some(4), Some(3))]
+            vec![
+                (Some(1), Some(1)),
+                (Some(2), Some(2)),
+                (Some(3), None),
+                (Some(4), Some(3))
+            ]
         );
     }
 
@@ -845,7 +1020,10 @@ c9e2a71baf7e8791602f0b113820970ff4b49134\0first\0A body line.\n\nSecond paragrap
     fn a_plain_file_with_no_diff_pairs_every_line() {
         let text = "a\nb\nc\n";
         let rows = alignment(&FileDiff::default(), text, text);
-        assert_eq!(rows, vec![(Some(1), Some(1)), (Some(2), Some(2)), (Some(3), Some(3))]);
+        assert_eq!(
+            rows,
+            vec![(Some(1), Some(1)), (Some(2), Some(2)), (Some(3), Some(3))]
+        );
     }
 
     #[test]
@@ -861,8 +1039,16 @@ c9e2a71baf7e8791602f0b113820970ff4b49134\0first\0A body line.\n\nSecond paragrap
             let rows = rows(base, head);
             let bases: Vec<usize> = rows.iter().filter_map(|r| r.0).collect();
             let heads: Vec<usize> = rows.iter().filter_map(|r| r.1).collect();
-            assert_eq!(bases, (1..=base.lines().count()).collect::<Vec<_>>(), "{base:?} -> {head:?}");
-            assert_eq!(heads, (1..=head.lines().count()).collect::<Vec<_>>(), "{base:?} -> {head:?}");
+            assert_eq!(
+                bases,
+                (1..=base.lines().count()).collect::<Vec<_>>(),
+                "{base:?} -> {head:?}"
+            );
+            assert_eq!(
+                heads,
+                (1..=head.lines().count()).collect::<Vec<_>>(),
+                "{base:?} -> {head:?}"
+            );
             assert!(rows.iter().all(|r| r.0.is_some() || r.1.is_some()));
         }
     }

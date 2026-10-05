@@ -64,7 +64,9 @@ fn comment(id: usize) -> String {
 
 /// One reaction group as GraphQL writes it.
 fn group(content: &str, count: u32, mine: bool) -> String {
-    format!(r#"{{"content":"{content}","viewerHasReacted":{mine},"reactors":{{"totalCount":{count}}}}}"#)
+    format!(
+        r#"{{"content":"{content}","viewerHasReacted":{mine},"reactors":{{"totalCount":{count}}}}}"#
+    )
 }
 
 /// The reactions answer for the ids a query named: the description has a
@@ -108,7 +110,13 @@ fn page(items: Vec<String>) -> String {
 /// and the reactions on all of it. The ids each reactions query named are
 /// kept, a query at a time.
 #[allow(clippy::type_complexity)]
-fn spawn(comments: usize) -> (String, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<Vec<String>>>>) {
+fn spawn(
+    comments: usize,
+) -> (
+    String,
+    Arc<AtomicUsize>,
+    Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let requests = Arc::new(AtomicUsize::new(0));
@@ -118,7 +126,9 @@ fn spawn(comments: usize) -> (String, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            let Some((path, request_body)) = read_request(&mut stream) else { continue };
+            let Some((path, request_body)) = read_request(&mut stream) else {
+                continue;
+            };
             counter.fetch_add(1, Ordering::SeqCst);
             if path.starts_with("/graphql") && request_body.contains("reviewThreads") {
                 respond(&mut stream, &review_threads());
@@ -148,7 +158,9 @@ fn spawn(comments: usize) -> (String, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec
             } else if path.contains("/pulls/1/reviews") {
                 page(vec![r#"{"id":9,"node_id":"PRR_9","user":{"login":"r"},"body":"lgtm","state":"APPROVED","submitted_at":"2026-09-16T11:40:00Z","html_url":"https://github.com/a/b/pull/1#pullrequestreview-9"}"#.into()])
             } else if path.contains("/pulls/1/commits") {
-                page(vec![r#"{"sha":"abc1234def","author":{"login":"criccomini"}}"#.into()])
+                page(vec![
+                    r#"{"sha":"abc1234def","author":{"login":"criccomini"}}"#.into(),
+                ])
             } else if path.contains("/pulls/1/comments") {
                 page(vec![
                     r#"{"id":3,"node_id":"PRRC_3","pull_request_review_id":9,"user":{"login":"r"},"body":"here","path":"src/x.rs","line":41,"side":"LEFT","diff_hunk":"@@ -40,3 +40,3 @@","created_at":"2026-09-16T11:38:00Z","html_url":"https://github.com/a/b/pull/1#discussion_r3"}"#.into(),
@@ -185,7 +197,11 @@ async fn every_page_of_the_conversation_is_read() {
     assert_eq!(d.review_comments[0].location(), "src/x.rs:41");
     assert_eq!(d.review_comments[0].side, Side::Left);
     assert_eq!(d.review_comments[0].diff_hunk, "@@ -40,3 +40,3 @@");
-    assert_eq!(d.review_comments[1].side, Side::Right, "no side is the head side");
+    assert_eq!(
+        d.review_comments[1].side,
+        Side::Right,
+        "no side is the head side"
+    );
     // The opening out of the pull request's own payload, since the
     // timeline has no line for it, and the rest out of the timeline. The
     // merge is said once: the payload's and the close beside it are both
@@ -197,7 +213,10 @@ async fn every_page_of_the_conversation_is_read() {
             PullEvent::new(PullEventKind::Opened, at("2026-09-14T14:02:00Z"), ""),
             PullEvent::new(
                 PullEventKind::Labeled {
-                    label: Label { name: "bug".into(), color: "d73a4a".into() }
+                    label: Label {
+                        name: "bug".into(),
+                        color: "d73a4a".into()
+                    }
                 },
                 at("2026-09-15T08:00:00Z"),
                 "r",
@@ -229,12 +248,19 @@ async fn every_page_of_the_conversation_is_read() {
     assert!(d.reactions.viewer_reacted(ReactionKind::ThumbsUp));
     assert_eq!(d.comments[0].reactions.count(ReactionKind::Heart), 2);
     assert!(!d.comments[0].reactions.viewer_reacted(ReactionKind::Heart));
-    assert_eq!(d.comments[0].reactions.count(ReactionKind::ThumbsUp), 0, "nobody's is not shown");
+    assert_eq!(
+        d.comments[0].reactions.count(ReactionKind::ThumbsUp),
+        0,
+        "nobody's is not shown"
+    );
     assert!(d.comments[1].reactions.is_empty());
     assert!(d.reviews[0].reactions.is_empty());
     assert_eq!(d.review_comments[0].node_id, "PRRC_3");
     let asked = asked.lock().unwrap();
-    assert_eq!(asked.iter().map(Vec::len).collect::<Vec<_>>(), vec![100, 54]);
+    assert_eq!(
+        asked.iter().map(Vec::len).collect::<Vec<_>>(),
+        vec![100, 54]
+    );
     assert_eq!(asked[0][0], "PR_1");
     assert_eq!(asked[1][53], "PRRC_4");
     // The state of the one review thread, by its first comment.

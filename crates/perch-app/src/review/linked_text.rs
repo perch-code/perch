@@ -498,7 +498,11 @@ impl Leaf {
     fn copied(&self, range: Range<usize>) -> String {
         let mut out = String::new();
         let mut at = range.start;
-        for inline in self.formulas.iter().filter(|inline| self.takes(&range, inline.index)) {
+        for inline in self
+            .formulas
+            .iter()
+            .filter(|inline| self.takes(&range, inline.index))
+        {
             out.push_str(&self.text[at..inline.index]);
             out.push('$');
             out.push_str(&inline.formula.source);
@@ -524,8 +528,12 @@ impl Leaf {
                     let i = placed.id as usize;
                     let inline = self.formulas.get(i)?;
                     let (width, height, depth) = inline.formula.size_at(inline.em);
-                    let (x, top) = (f64::from(placed.x), f64::from(placed.y + placed.height) - height);
-                    let rect = Rect::new(x, top, x + width, top + height + depth) + origin.to_vec2();
+                    let (x, top) = (
+                        f64::from(placed.x),
+                        f64::from(placed.y + placed.height) - height,
+                    );
+                    let rect =
+                        Rect::new(x, top, x + width, top + height + depth) + origin.to_vec2();
                     Some((i, rect))
                 })
                 .collect()
@@ -714,7 +722,10 @@ impl LinkedText {
         let text = self.selected_text();
         SELECTED.with_borrow_mut(|selected| match text {
             Some(text) => *selected = Some((self.id, text)),
-            None if selected.as_ref().is_some_and(|(owner, _)| *owner == self.id) => {
+            None if selected
+                .as_ref()
+                .is_some_and(|(owner, _)| *owner == self.id) =>
+            {
                 *selected = None
             }
             None => {}
@@ -1116,7 +1127,12 @@ impl View for LinkedText {
             .get_untracked()
             .and_then(|i| self.links.get(i))
             .map(|link| {
-                let ink = self.leaf.attrs.borrow().get_span(link.range.start).get_color();
+                let ink = self
+                    .leaf
+                    .attrs
+                    .borrow()
+                    .get_span(link.range.start)
+                    .get_color();
                 vec![(link.range.clone(), ink.unwrap_or(theme::link()))]
             })
             .unwrap_or_default();
@@ -1427,7 +1443,12 @@ mod tests {
         width: f32,
         strikes: &[Strike],
     ) -> Vec<(Rect, Color)> {
-        rules(&layout_at(text, attrs.clone(), width), text.len(), strikes, Rule::Strike)
+        rules(
+            &layout_at(text, attrs.clone(), width),
+            text.len(),
+            strikes,
+            Rule::Strike,
+        )
     }
 
     fn natural_width(text: &str) -> f32 {
@@ -1465,7 +1486,10 @@ mod tests {
         assert_eq!((under.x0, under.x1), (strike.x0, strike.x1));
         assert!(under.y0 > strike.y1, "{under:?} under {strike:?}");
         let height = layout.size().height;
-        assert!(under.y1 < height && under.height() >= 1.0, "{under:?} in {height}");
+        assert!(
+            under.y1 < height && under.height() >= 1.0,
+            "{under:?} in {height}"
+        );
     }
 
     #[test]
@@ -1560,8 +1584,10 @@ mod tests {
             selectable: bool,
         ) -> (HeadlessHarness, ViewId) {
             let root = TestRoot::new();
-            let view = Container::new(linked_text(TEXT.into(), links, || (prose(15.0), Vec::new())))
-                .style(move |s| s.width(WIDTH).padding(0.0).selectable(selectable));
+            let view = Container::new(linked_text(TEXT.into(), links, || {
+                (prose(15.0), Vec::new())
+            }))
+            .style(move |s| s.width(WIDTH).padding(0.0).selectable(selectable));
             let mut harness = HeadlessHarness::new_with_size(root, view, WIDTH, 400.0);
             harness.rebuild();
             harness.paint();
@@ -1741,7 +1767,10 @@ mod tests {
         #[test]
         fn a_press_on_a_link_is_the_links_and_selects_nothing() {
             let start = TEXT.find("fox").unwrap();
-            let link = (start..start + 3, Target::Url("https://example.com/fox".into()));
+            let link = (
+                start..start + 3,
+                Target::Url("https://example.com/fox".into()),
+            );
             let (mut h, id) = harness(vec![link], true);
             let (fox, lazy) = (glyphs("fox"), glyphs("lazy"));
             let y = fox.center().y;
@@ -1859,9 +1888,12 @@ mod tests {
 
         fn harness() -> (HeadlessHarness, ViewId) {
             let root = TestRoot::new();
-            let view = Container::new(linked_text_with(TEXT.into(), Vec::new(), vec![inline()], || {
-                (attrs(), Vec::new())
-            }))
+            let view = Container::new(linked_text_with(
+                TEXT.into(),
+                Vec::new(),
+                vec![inline()],
+                || (attrs(), Vec::new()),
+            ))
             .style(|s| s.width(WIDTH).padding(0.0));
             let mut harness = HeadlessHarness::new_with_size(root, view, WIDTH, 400.0);
             harness.rebuild();
@@ -1895,7 +1927,10 @@ mod tests {
         fn glyphs(needle: &str) -> Rect {
             let start = TEXT.find(needle).unwrap();
             let layout = layout_at(TEXT, attrs(), WIDTH as f32);
-            let link = Link { range: start..start + needle.len(), target: Target::Url(String::new()) };
+            let link = Link {
+                range: start..start + needle.len(),
+                target: Target::Url(String::new()),
+            };
             line_rects(&layout, &link)[0]
         }
 
@@ -1916,8 +1951,19 @@ mod tests {
             assert!(glyphs("in").x0 >= rect.x1, "{rect:?} {:?}", glyphs("in"));
             // Its baseline is the line's: the depth hangs below it.
             let shadow = layout_at(TEXT, attrs(), WIDTH as f32);
-            let baseline = f64::from(shadow.parley_layout().lines().next().unwrap().metrics().baseline);
-            assert!((rect.y0 + height - baseline).abs() < 0.01, "{rect:?} {baseline}");
+            let baseline = f64::from(
+                shadow
+                    .parley_layout()
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .metrics()
+                    .baseline,
+            );
+            assert!(
+                (rect.y0 + height - baseline).abs() < 0.01,
+                "{rect:?} {baseline}"
+            );
         }
 
         #[test]
@@ -1950,7 +1996,10 @@ mod tests {
                 taken: RefCell::new(None),
                 selectable: Cell::new(true),
                 found: RefCell::new((Vec::new(), None)),
-                formulas: vec![Inline { index: 5, ..inline() }],
+                formulas: vec![Inline {
+                    index: 5,
+                    ..inline()
+                }],
             };
             assert_eq!(leaf.copied(0..5), "x is $O(n)$");
             assert_eq!(leaf.copied(0..4), "x is");

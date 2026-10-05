@@ -269,7 +269,11 @@ fn split(blocks: Vec<Block>) -> (Vec<String>, Vec<Block>) {
             _ => None,
         })
         .collect();
-    let doc = doc.iter().skip_while(|b| matches!(b, Block::Rule)).cloned().collect();
+    let doc = doc
+        .iter()
+        .skip_while(|b| matches!(b, Block::Rule))
+        .cloned()
+        .collect();
     (signature, doc)
 }
 
@@ -385,7 +389,10 @@ mod tests {
         let on_space = doc.offset_of_row(0) + 2;
         assert_eq!(symbol_at(&doc, "src/x.rs", on_space), None);
         let on_f = doc.offset_of_row(0);
-        assert_eq!(symbol_at(&doc, "src/x.rs", on_f).map(|s| s.text), Some("fn".into()));
+        assert_eq!(
+            symbol_at(&doc, "src/x.rs", on_f).map(|s| s.text),
+            Some("fn".into())
+        );
         let past_the_end = doc.offset_of_row(0) + 13;
         assert_eq!(symbol_at(&doc, "src/x.rs", past_the_end), None);
     }
@@ -414,7 +421,10 @@ mod tests {
         let short = cut(HOVER, 1);
         assert!(short.starts_with("```rust\nslatedb::db::Db\n```\n\n```rust\npub async fn flush"));
         assert!(short.contains("---"));
-        assert!(short.ends_with("Flush in-memory writes.\n\u{2026}"), "{short}");
+        assert!(
+            short.ends_with("Flush in-memory writes.\n\u{2026}"),
+            "{short}"
+        );
 
         // Room for it all, or exactly enough: nothing is cut, and there is
         // no ellipsis.
@@ -424,12 +434,17 @@ mod tests {
 
     #[test]
     fn a_cut_inside_a_fence_closes_the_fence_first() {
-        let text = "```rust\nfn x()\n```\n\nDocs.\n\n```rust\nlet a = 1;\nlet b = 2;\nlet c = 3;\n```\n";
+        let text =
+            "```rust\nfn x()\n```\n\nDocs.\n\n```rust\nlet a = 1;\nlet b = 2;\nlet c = 3;\n```\n";
         let short = cut(text, 4);
         assert!(short.ends_with("let a = 1;\n```\n\u{2026}"), "{short}");
         // A cut on the fence's opening line drops the fence rather than
         // closing an empty one.
-        assert!(cut(text, 3).ends_with("Docs.\n\u{2026}"), "{}", cut(text, 3));
+        assert!(
+            cut(text, 3).ends_with("Docs.\n\u{2026}"),
+            "{}",
+            cut(text, 3)
+        );
         let blocks = markdown::parse(&short);
         assert!(
             matches!(blocks.last(), Some(Block::Paragraph(_))),
@@ -441,7 +456,11 @@ mod tests {
     fn blank_runs_in_the_doc_comment_are_collapsed_and_count_once() {
         let text = "```rust\nfn x()\n```\n\na\n\n\n\nb\n";
         assert_eq!(cut(text, 20), "```rust\nfn x()\n```\n\na\n\nb");
-        assert_eq!(cut(text, 3), "```rust\nfn x()\n```\n\na\n\nb", "a, the blank, and b fit");
+        assert_eq!(
+            cut(text, 3),
+            "```rust\nfn x()\n```\n\na\n\nb",
+            "a, the blank, and b fit"
+        );
         // Cut after the blank: the ellipsis follows `a`, not the blank.
         assert_eq!(cut(text, 2), "```rust\nfn x()\n```\n\na\n\u{2026}");
         assert_eq!(cut(text, 1), "```rust\nfn x()\n```\n\na\n\u{2026}");
@@ -449,11 +468,17 @@ mod tests {
 
     #[test]
     fn the_doc_comment_is_at_most_the_cap_tall_whatever_its_blanks() {
-        let paragraphs = (1..=20).map(|i| format!("Paragraph {i}.")).collect::<Vec<_>>().join("\n\n");
+        let paragraphs = (1..=20)
+            .map(|i| format!("Paragraph {i}."))
+            .collect::<Vec<_>>()
+            .join("\n\n");
         let text = format!("```rust\nfn x()\n```\n\n{paragraphs}\n");
         let short = cut(&text, DOC_LINES);
         let doc_lines = short.lines().skip(4).count();
-        assert!(doc_lines <= DOC_LINES + 1, "{doc_lines} lines, the ellipsis among them");
+        assert!(
+            doc_lines <= DOC_LINES + 1,
+            "{doc_lines} lines, the ellipsis among them"
+        );
         assert!(short.ends_with('\u{2026}'));
     }
 
@@ -469,10 +494,34 @@ mod tests {
 
     #[test]
     fn the_tip_narrows_to_the_room_beside_the_pointer_and_then_moves_left() {
-        assert_eq!(Fit::in_room(900.0), Fit { width: TOOLTIP_WIDTH, shift: 0.0 });
-        assert_eq!(Fit::in_room(400.0), Fit { width: 400.0, shift: 0.0 });
-        assert_eq!(Fit::in_room(120.0), Fit { width: TOOLTIP_MIN_WIDTH, shift: TOOLTIP_MIN_WIDTH - 120.0 });
-        assert_eq!(Fit::in_room(-5.0), Fit { width: TOOLTIP_MIN_WIDTH, shift: TOOLTIP_MIN_WIDTH });
+        assert_eq!(
+            Fit::in_room(900.0),
+            Fit {
+                width: TOOLTIP_WIDTH,
+                shift: 0.0
+            }
+        );
+        assert_eq!(
+            Fit::in_room(400.0),
+            Fit {
+                width: 400.0,
+                shift: 0.0
+            }
+        );
+        assert_eq!(
+            Fit::in_room(120.0),
+            Fit {
+                width: TOOLTIP_MIN_WIDTH,
+                shift: TOOLTIP_MIN_WIDTH - 120.0
+            }
+        );
+        assert_eq!(
+            Fit::in_room(-5.0),
+            Fit {
+                width: TOOLTIP_MIN_WIDTH,
+                shift: TOOLTIP_MIN_WIDTH
+            }
+        );
     }
 
     /// The card laid out in a window, so its size can be measured: wider
@@ -484,8 +533,14 @@ mod tests {
         assert_eq!(
             doc,
             vec![
-                Block::Paragraph(vec![markdown::Span { text: "Flush in-memory writes.".into(), ..Default::default() }]),
-                Block::Paragraph(vec![markdown::Span { text: "More.".into(), ..Default::default() }]),
+                Block::Paragraph(vec![markdown::Span {
+                    text: "Flush in-memory writes.".into(),
+                    ..Default::default()
+                }]),
+                Block::Paragraph(vec![markdown::Span {
+                    text: "More.".into(),
+                    ..Default::default()
+                }]),
             ]
         );
         // A signature with nothing after its rule stands alone.
@@ -513,10 +568,18 @@ mod tests {
         harness.paint();
         let rect = harness.get_layout_rect(id);
         assert!(rect.width() <= TOOLTIP_WIDTH + 0.5, "{} wide", rect.width());
-        assert!(rect.width() > 400.0, "{} wide: the card takes its width", rect.width());
+        assert!(
+            rect.width() > 400.0,
+            "{} wide: the card takes its width",
+            rect.width()
+        );
         // Two signature lines, a rule, and a wrapped paragraph: taller than
         // one line of each.
-        assert!(rect.height() > 4.0 * theme::CODE_LINE_HEIGHT as f64, "{} tall", rect.height());
+        assert!(
+            rect.height() > 4.0 * theme::CODE_LINE_HEIGHT as f64,
+            "{} tall",
+            rect.height()
+        );
 
         // A short one is only as wide as its text.
         let root = TestRoot::new();
@@ -529,6 +592,10 @@ mod tests {
         harness.paint();
         let rect = harness.get_layout_rect(id);
         assert!(rect.width() < 200.0, "{} wide", rect.width());
-        assert!(rect.height() < 3.0 * theme::CODE_LINE_HEIGHT as f64, "{} tall", rect.height());
+        assert!(
+            rect.height() < 3.0 * theme::CODE_LINE_HEIGHT as f64,
+            "{} tall",
+            rect.height()
+        );
     }
 }

@@ -87,7 +87,10 @@ impl PerchStyling {
         find_current: RwSignal<Option<usize>>,
         id: u64,
     ) -> Self {
-        Self { side: Some(side), ..Self::new(file, doc, highlights, find, find_current, id) }
+        Self {
+            side: Some(side),
+            ..Self::new(file, doc, highlights, find, find_current, id)
+        }
     }
 
     /// The columns of the caret's symbol's uses on a row: those on the
@@ -165,7 +168,14 @@ impl PerchStyling {
     /// in among the head's. A split's left is the old file whole, and reads
     /// in full colour.
     fn is_ghost(&self, row: usize) -> bool {
-        self.side.is_none() && matches!(self.row(row), Some(DocRow::Line { tint: Tint::Deleted, .. }))
+        self.side.is_none()
+            && matches!(
+                self.row(row),
+                Some(DocRow::Line {
+                    tint: Tint::Deleted,
+                    ..
+                })
+            )
     }
 
     fn line_len(&self, row: usize) -> usize {
@@ -242,10 +252,17 @@ impl Styling for PerchStyling {
             .highlights_for(line)
             .into_iter()
             .map(|(start, end)| (start, end, theme::symbol_highlight_bg()));
-        let matches = self.matches_for(line).into_iter().map(|(start, end, current)| {
-            let color = if current { theme::find_current_bg() } else { theme::find_match_bg() };
-            (start, end, color)
-        });
+        let matches = self
+            .matches_for(line)
+            .into_iter()
+            .map(|(start, end, current)| {
+                let color = if current {
+                    theme::find_current_bg()
+                } else {
+                    theme::find_match_bg()
+                };
+                (start, end, color)
+            });
         for (start, end, color) in uses.chain(matches) {
             let x0 = layout_line.text.cursor_point(start, Affinity::Downstream).x;
             let x1 = layout_line.text.cursor_point(end, Affinity::Upstream).x;
@@ -286,7 +303,11 @@ mod tests {
             perch_git::Scope::Branch,
             String::new(),
         ));
-        let doc = RwSignal::new(Arc::new(doc::build(&DisplayBuffer::plain(text), &folds, &[])));
+        let doc = RwSignal::new(Arc::new(doc::build(
+            &DisplayBuffer::plain(text),
+            &folds,
+            &[],
+        )));
         PerchStyling::new(
             RwSignal::new(file),
             doc,
@@ -303,15 +324,31 @@ mod tests {
         // Display lines 2 to 4 folded away: rows are lines 0, 1, a
         // divider, then 5 and 6.
         let styling = styling(text, vec![Run::new(2, 4, 2)]);
-        styling.highlights.set(Arc::new(vec![(0, 4, 8), (1, 8, 12), (3, 8, 12), (5, 8, 12), (5, 40, 44)]));
+        styling.highlights.set(Arc::new(vec![
+            (0, 4, 8),
+            (1, 8, 12),
+            (3, 8, 12),
+            (5, 8, 12),
+            (5, 40, 44),
+        ]));
 
         assert_eq!(styling.highlights_for(0), vec![(4, 8)]);
         assert_eq!(styling.highlights_for(1), vec![(8, 12)]);
-        assert!(styling.highlights_for(2).is_empty(), "the divider is no head line");
-        assert_eq!(styling.highlights_for(3), vec![(8, 12)], "row 3 is head line 5, past the fold");
+        assert!(
+            styling.highlights_for(2).is_empty(),
+            "the divider is no head line"
+        );
+        assert_eq!(
+            styling.highlights_for(3),
+            vec![(8, 12)],
+            "row 3 is head line 5, past the fold"
+        );
         assert!(styling.highlights_for(4).is_empty());
         // Head line 3's use is inside the fold: on no row, so not drawn.
-        assert!(!(0..5).any(|row| styling.highlights_for(row).contains(&(8, 12)) && styling.doc.with_untracked(|d| d.head_line(row)) == Some(3)));
+        assert!(
+            !(0..5).any(|row| styling.highlights_for(row).contains(&(8, 12))
+                && styling.doc.with_untracked(|d| d.head_line(row)) == Some(3))
+        );
 
         // Revealed, the fold's lines have rows, and the use is drawn.
         let whole = doc::build(&DisplayBuffer::plain(text), &[], &[]);
@@ -326,11 +363,21 @@ mod tests {
 
     #[test]
     fn the_matches_on_a_row_are_its_display_lines_and_the_current_one_is_marked() {
-        let m = |display, start, end| Match { display, start, end };
+        let m = |display, start, end| Match {
+            display,
+            start,
+            end,
+        };
         let text = "let path = 1;\nlet a = path;\nlet b = path;\nlet c = path;\nlet d = path;\nlet e = path;\nlet f = 2;\n";
         // Display lines 2 to 4 folded away, as above.
         let styling = styling(text, vec![Run::new(2, 4, 2)]);
-        styling.find.set(Arc::new(vec![m(0, 4, 8), m(1, 8, 12), m(3, 8, 12), m(5, 8, 12), m(5, 40, 44)]));
+        styling.find.set(Arc::new(vec![
+            m(0, 4, 8),
+            m(1, 8, 12),
+            m(3, 8, 12),
+            m(5, 8, 12),
+            m(5, 40, 44),
+        ]));
         styling.find_current.set(Some(3));
 
         assert_eq!(styling.matches_for(0), vec![(4, 8, false)]);
@@ -342,7 +389,10 @@ mod tests {
             "row 3 is line 5, the current match; the range past the line is dropped"
         );
         assert!(styling.matches_for(4).is_empty(), "line 6 has none");
-        assert!(styling.matches_for(9).is_empty(), "a row the document does not have");
+        assert!(
+            styling.matches_for(9).is_empty(),
+            "a row the document does not have"
+        );
 
         // Revealed, line 3's match has a row, and is not the current one.
         let whole = doc::build(&DisplayBuffer::plain(text), &[], &[]);
@@ -354,9 +404,15 @@ mod tests {
 
         // A split's base side is over the base file, whose lines are not
         // the unified buffer's: nothing is drawn there.
-        let base = PerchStyling { side: Some(Side::Base), ..styling };
+        let base = PerchStyling {
+            side: Some(Side::Base),
+            ..styling
+        };
         assert!(base.matches_for(0).is_empty());
-        let head = PerchStyling { side: Some(Side::Head), ..base };
+        let head = PerchStyling {
+            side: Some(Side::Head),
+            ..base
+        };
         assert_eq!(head.matches_for(0), vec![(4, 8, false)]);
     }
 }

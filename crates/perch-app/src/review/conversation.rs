@@ -18,11 +18,11 @@ use floem::views::{
 
 use crate::backend::Backend;
 use crate::review::cards;
-use crate::review::{conversation_find, find};
 use crate::review::model::{Paging, ReviewFindingFilter, ReviewState};
 use crate::review::threads::{self, ThreadFace};
 use crate::review::timeline::{timeline, Card};
 use crate::review::OpenFile;
+use crate::review::{conversation_find, find};
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::clickable;
@@ -54,12 +54,17 @@ pub fn view(
         let bare = state
             .item
             .with(|item| item.as_ref().is_some_and(|item| item.subject.is_none()));
-        let commits = if bare { state.commits.get() } else { Default::default() };
+        let commits = if bare {
+            state.commits.get()
+        } else {
+            Default::default()
+        };
         let cards = state.comment_threads.with(|threads| {
             timeline(
                 pull.as_deref(),
                 discussion.as_deref(),
-                issue.as_deref()
+                issue
+                    .as_deref()
                     .map(|i| (i, comments.as_slice(), issue_events.as_slice())),
                 &commits,
                 threads.iter().filter(|thread| state.thread_visible(thread)),
@@ -363,15 +368,21 @@ fn card_view(
     let view: floem::AnyView = match card {
         // What Perch started from an issue is the summary's In Perch row,
         // not repeated under the description.
-        Card::Description { body, node_id, editable, .. } => {
-            cards::description_card(app, state, backend, body, node_id, editable).into_any()
-        }
+        Card::Description {
+            body,
+            node_id,
+            editable,
+            ..
+        } => cards::description_card(app, state, backend, body, node_id, editable).into_any(),
         Card::Comment(comment) => cards::comment_card(app, state, backend, comment).into_any(),
         Card::Review { review } => cards::review_card(app, state, backend, review).into_any(),
         Card::Event(event) => {
             let link = state.item.with_untracked(|i| {
                 let item = i.as_deref()?;
-                Some((item.subject.as_ref()?.number(), crate::ui::items::github_url(item)?))
+                Some((
+                    item.subject.as_ref()?.number(),
+                    crate::ui::items::github_url(item)?,
+                ))
             });
             cards::event_row(
                 app,
@@ -663,7 +674,11 @@ mod tests {
     fn goes_dark_with_the_system() {
         let mut harness = app_harness().0;
         let left = crate::theme::dark_check::light_left(&mut harness);
-        assert!(left.is_empty(), "light colours left in dark:\n{}", left.join("\n"));
+        assert!(
+            left.is_empty(),
+            "light colours left in dark:\n{}",
+            left.join("\n")
+        );
     }
 
     fn app_harness() -> (HeadlessHarness, AppState, ReviewState) {
@@ -736,8 +751,18 @@ mod tests {
         discussion.comments[0].node_id = "IC_1".into();
         discussion.comments[0].reactions = Reactions {
             groups: vec![
-                ReactionGroup { kind: ReactionKind::ThumbsUp, count: 2, viewer_reacted: false, reactors: vec![] },
-                ReactionGroup { kind: ReactionKind::Rocket, count: 1, viewer_reacted: true, reactors: vec![] },
+                ReactionGroup {
+                    kind: ReactionKind::ThumbsUp,
+                    count: 2,
+                    viewer_reacted: false,
+                    reactors: vec![],
+                },
+                ReactionGroup {
+                    kind: ReactionKind::Rocket,
+                    count: 1,
+                    viewer_reacted: true,
+                    reactors: vec![],
+                },
             ],
         };
         let (mut harness, app, state) = app_harness_on(backend, discussion);
@@ -750,7 +775,8 @@ mod tests {
         // nothing on it, has the row hidden; the review, kept without a
         // node id, has no picker at all.
         let pill = |harness: &HeadlessHarness, kind: &str| {
-            let id = find(comment, &format!("reaction:{kind}")).unwrap_or_else(|| panic!("no {kind} pill"));
+            let id = find(comment, &format!("reaction:{kind}"))
+                .unwrap_or_else(|| panic!("no {kind} pill"));
             let mut all = Vec::new();
             names(id, &mut all);
             (id, all.join(" "), harness.get_layout_rect(id).height())
@@ -762,8 +788,15 @@ mod tests {
         assert!(find(comment, "reaction:EYES").is_none(), "nobody left one");
         assert!(find(comment, "react-button").is_some());
         let row = find(description, "reactions").unwrap();
-        assert_eq!(harness.get_layout_rect(row).height(), 0.0, "nothing to show");
-        assert!(find(description, "react-button").is_some(), "the picker is the way in");
+        assert_eq!(
+            harness.get_layout_rect(row).height(),
+            0.0,
+            "nothing to show"
+        );
+        assert!(
+            find(description, "react-button").is_some(),
+            "the picker is the way in"
+        );
         assert!(find(review, "react-button").is_none());
         assert!(find(review, "reactions").is_none());
 
@@ -782,7 +815,9 @@ mod tests {
             Ok(crate::backend::Command::SetReaction { item_id, node_id, kind: ReactionKind::ThumbsUp, add: true })
                 if item_id == "wt" && node_id == "IC_1"
         ));
-        assert!(state.reactions_of("IC_1").viewer_reacted(ReactionKind::ThumbsUp));
+        assert!(state
+            .reactions_of("IC_1")
+            .viewer_reacted(ReactionKind::ThumbsUp));
         harness.rebuild();
         harness.paint();
         let (thumbs, text, _) = pill(&harness, "THUMBS_UP");
@@ -802,7 +837,12 @@ mod tests {
                 node_id: "IC_1".into(),
                 kind: ReactionKind::ThumbsUp,
                 reactions: Reactions {
-                    groups: vec![ReactionGroup { kind: ReactionKind::ThumbsUp, count: 4, viewer_reacted: true, reactors: vec![] }],
+                    groups: vec![ReactionGroup {
+                        kind: ReactionKind::ThumbsUp,
+                        count: 4,
+                        viewer_reacted: true,
+                        reactors: vec![],
+                    }],
                 },
             },
             state,
@@ -811,12 +851,19 @@ mod tests {
         harness.paint();
         let (thumbs, text, _) = pill(&harness, "THUMBS_UP");
         assert!(text.contains("\"4\""), "{text}");
-        assert!(find(comment, "reaction:ROCKET").is_none(), "GitHub says nobody's");
+        assert!(
+            find(comment, "reaction:ROCKET").is_none(),
+            "GitHub says nobody's"
+        );
         let c = thumbs.get_visual_rect_no_clip().center();
         harness.click(c.x, c.y);
         assert!(matches!(
             commands.try_recv(),
-            Ok(crate::backend::Command::SetReaction { kind: ReactionKind::ThumbsUp, add: false, .. })
+            Ok(crate::backend::Command::SetReaction {
+                kind: ReactionKind::ThumbsUp,
+                add: false,
+                ..
+            })
         ));
         assert_eq!(state.reactions_of("IC_1").count(ReactionKind::ThumbsUp), 3);
     }
@@ -834,8 +881,18 @@ mod tests {
         discussion.comments[0].node_id = "IC_1".into();
         discussion.comments[0].reactions = Reactions {
             groups: vec![
-                ReactionGroup { kind: ReactionKind::ThumbsUp, count: 2, viewer_reacted: false, reactors: vec![] },
-                ReactionGroup { kind: ReactionKind::Rocket, count: 1, viewer_reacted: true, reactors: vec![] },
+                ReactionGroup {
+                    kind: ReactionKind::ThumbsUp,
+                    count: 2,
+                    viewer_reacted: false,
+                    reactors: vec![],
+                },
+                ReactionGroup {
+                    kind: ReactionKind::Rocket,
+                    count: 1,
+                    viewer_reacted: true,
+                    reactors: vec![],
+                },
             ],
         };
         let (harness, _, state) = app_harness_on(backend, discussion);
@@ -904,7 +961,11 @@ mod tests {
                 .unwrap_or_else(|| panic!("no {kind:?}"));
             let rect = pick.get_visual_rect_no_clip();
             assert_eq!((rect.width(), rect.height()), (32.0, 32.0));
-            assert_eq!(rect.x0, card.x0 + 5.0 + 36.0 * i as f64, "{kind:?} out of line");
+            assert_eq!(
+                rect.x0,
+                card.x0 + 5.0 + 36.0 * i as f64,
+                "{kind:?} out of line"
+            );
             let c = rect.center();
             assert_eq!(
                 harness.element_id_at(c.x, c.y).map(|e| e.owning_id()),
@@ -928,10 +989,19 @@ mod tests {
         click_on(&mut harness, rocket);
         assert!(matches!(
             commands.try_recv(),
-            Ok(crate::backend::Command::SetReaction { kind: ReactionKind::Rocket, add: false, .. })
+            Ok(crate::backend::Command::SetReaction {
+                kind: ReactionKind::Rocket,
+                add: false,
+                ..
+            })
         ));
-        assert!(!state.reactions_of("IC_1").viewer_reacted(ReactionKind::Rocket));
-        assert!(find(harness.root_id(), "react-picker").is_none(), "the pick left it open");
+        assert!(!state
+            .reactions_of("IC_1")
+            .viewer_reacted(ReactionKind::Rocket));
+        assert!(
+            find(harness.root_id(), "react-picker").is_none(),
+            "the pick left it open"
+        );
 
         // An Eyes is left, and a pill is drawn for it.
         click_on(&mut harness, face);
@@ -939,7 +1009,11 @@ mod tests {
         click_on(&mut harness, eyes);
         assert!(matches!(
             commands.try_recv(),
-            Ok(crate::backend::Command::SetReaction { kind: ReactionKind::Eyes, add: true, .. })
+            Ok(crate::backend::Command::SetReaction {
+                kind: ReactionKind::Eyes,
+                add: true,
+                ..
+            })
         ));
         assert!(find(comment, "reaction:EYES").is_some());
     }
@@ -952,7 +1026,11 @@ mod tests {
         let (mut harness, _, _commands) = reacted_harness();
         let comment = find(harness.root_id(), "card:comment").unwrap();
         let face = find(comment, "react-button").unwrap();
-        assert_eq!(harness.get_layout_rect(face).height(), 0.0, "drawn without the pointer");
+        assert_eq!(
+            harness.get_layout_rect(face).height(),
+            0.0,
+            "drawn without the pointer"
+        );
         let over = comment.get_visual_rect_no_clip().center();
         harness.pointer_move(over.x, over.y);
         harness.rebuild();
@@ -972,7 +1050,11 @@ mod tests {
         harness.pointer_move(5.0, 5.0);
         harness.rebuild();
         harness.paint();
-        assert_eq!(harness.get_layout_rect(face).height(), 24.0, "the anchor went");
+        assert_eq!(
+            harness.get_layout_rect(face).height(),
+            24.0,
+            "the anchor went"
+        );
         let picker = find(harness.root_id(), "react-picker").expect("the picker went");
         assert_eq!(picker.get_visual_rect_no_clip(), card);
     }
@@ -994,11 +1076,18 @@ mod tests {
         harness.paint();
 
         let at = face.get_visual_rect_no_clip();
-        assert!(at.y0 > before.y0 + 50.0, "the face did not move: {before:?} to {at:?}");
+        assert!(
+            at.y0 > before.y0 + 50.0,
+            "the face did not move: {before:?} to {at:?}"
+        );
         let card = find(harness.root_id(), "react-picker")
             .expect("the picker closed")
             .get_visual_rect_no_clip();
-        assert_eq!((card.y1, card.x0), (at.y0 - 8.0, at.x0), "the picker stayed behind");
+        assert_eq!(
+            (card.y1, card.x0),
+            (at.y0 - 8.0, at.x0),
+            "the picker stayed behind"
+        );
     }
 
     /// A click anywhere but the picker closes it and does nothing else:
@@ -1016,7 +1105,10 @@ mod tests {
         click_on(&mut harness, face);
         assert!(find(harness.root_id(), "react-picker").is_some());
         click_on(&mut harness, thumbs);
-        assert!(find(harness.root_id(), "react-picker").is_none(), "the click left it open");
+        assert!(
+            find(harness.root_id(), "react-picker").is_none(),
+            "the click left it open"
+        );
         assert!(commands.try_recv().is_err(), "the click reached the pill");
         assert_eq!(state.reactions_of("IC_1").count(ReactionKind::ThumbsUp), 2);
         assert!(harness.is_focused(face), "the click left the focus nowhere");
@@ -1024,7 +1116,10 @@ mod tests {
         // The face again, which a click while it is open closes.
         click_on(&mut harness, face);
         click_on(&mut harness, face);
-        assert!(find(harness.root_id(), "react-picker").is_none(), "the face left it open");
+        assert!(
+            find(harness.root_id(), "react-picker").is_none(),
+            "the face left it open"
+        );
 
         // Escape reaches the picker, which took the focus as it opened.
         click_on(&mut harness, face);
@@ -1032,8 +1127,14 @@ mod tests {
         harness.dispatch_event(escape());
         harness.rebuild();
         harness.paint();
-        assert!(find(harness.root_id(), "react-picker").is_none(), "Escape left it open");
-        assert!(harness.is_focused(face), "the face did not take the focus back");
+        assert!(
+            find(harness.root_id(), "react-picker").is_none(),
+            "Escape left it open"
+        );
+        assert!(
+            harness.is_focused(face),
+            "the face did not take the focus back"
+        );
         assert!(commands.try_recv().is_err());
     }
 
@@ -1065,7 +1166,10 @@ mod tests {
             harness.dispatch_event(key(code, named, modifiers, false));
             harness.rebuild();
             harness.paint();
-            assert!(harness.is_focused(pick(then)), "{code:?} did not reach {then}");
+            assert!(
+                harness.is_focused(pick(then)),
+                "{code:?} did not reach {then}"
+            );
         }
 
         harness.dispatch_event(key(Code::Enter, NamedKey::Enter, none, false));
@@ -1074,9 +1178,16 @@ mod tests {
         harness.paint();
         assert!(matches!(
             commands.try_recv(),
-            Ok(crate::backend::Command::SetReaction { kind: ReactionKind::Laugh, add: true, .. })
+            Ok(crate::backend::Command::SetReaction {
+                kind: ReactionKind::Laugh,
+                add: true,
+                ..
+            })
         ));
-        assert!(find(harness.root_id(), "react-picker").is_none(), "Return left it open");
+        assert!(
+            find(harness.root_id(), "react-picker").is_none(),
+            "Return left it open"
+        );
         assert!(harness.is_focused(face));
     }
 
@@ -1142,7 +1253,10 @@ mod tests {
         let page = find(harness.root_id(), "conversation")
             .unwrap()
             .get_visual_rect_no_clip();
-        assert!(rect.x1 <= page.x1, "the title at {rect:?} runs past {page:?}");
+        assert!(
+            rect.x1 <= page.x1,
+            "the title at {rect:?} runs past {page:?}"
+        );
         let line = (crate::theme::TEXT_PAGE_TITLE * crate::theme::PAGE_TITLE_LINE_HEIGHT) as f64;
         assert!(
             rect.height() - crate::theme::CONVERSATION_TITLE_GAP > 1.5 * line,
@@ -1283,7 +1397,10 @@ mod tests {
         discussion.events.extend([
             event(
                 PullEventKind::Labeled {
-                    label: perch_github::Label { name: "needs work".into(), color: "d73a4a".into() },
+                    label: perch_github::Label {
+                        name: "needs work".into(),
+                        color: "d73a4a".into(),
+                    },
                 },
                 "2026-09-15T08:00:00Z",
             ),
@@ -1298,7 +1415,9 @@ mod tests {
                 "",
             ),
             event(
-                PullEventKind::ReviewRequested { who: "chris".into() },
+                PullEventKind::ReviewRequested {
+                    who: "chris".into(),
+                },
                 "2026-09-15T10:00:00Z",
             ),
             event(
@@ -1314,8 +1433,7 @@ mod tests {
                 "2026-09-15T10:30:00Z",
             ),
         ]);
-        let (mut harness, _, _) =
-            app_harness_on(crate::backend::Backend::detached(), discussion);
+        let (mut harness, _, _) = app_harness_on(crate::backend::Backend::detached(), discussion);
 
         let mut all = Vec::new();
         names(harness.root_id(), &mut all);
@@ -1342,7 +1460,6 @@ mod tests {
             opened(),
             vec!["https://github.com/slatedb/slatedb/pull/2098".to_string()]
         );
-
 
         // Every line's pieces are inside the line: a subject too long
         // for the column is cut, and the time at the end stays on it.
@@ -1399,7 +1516,12 @@ mod tests {
             )
         };
         discussion.events.extend([
-            commit(&here, "criccomini", "Fence the manifest", "2026-09-15T09:00:00Z"),
+            commit(
+                &here,
+                "criccomini",
+                "Fence the manifest",
+                "2026-09-15T09:00:00Z",
+            ),
             commit(&away, "", "Update src/manifest.rs", "2026-09-15T10:00:00Z"),
         ]);
         let (backend, mut commands) = crate::backend::Backend::recording();
@@ -1412,7 +1534,10 @@ mod tests {
                 author: "Chris".into(),
                 authored_at: at("2026-09-15T09:00:00Z"),
             }]));
-            state.tree.set(Arc::new(vec![perch_git::TreeEntry::new("src/manifest.rs", false)]));
+            state.tree.set(Arc::new(vec![perch_git::TreeEntry::new(
+                "src/manifest.rs",
+                false,
+            )]));
         });
         let root = harness.root_id();
         let click = |harness: &mut HeadlessHarness, id: floem::ViewId| {
@@ -1430,7 +1555,10 @@ mod tests {
 
         // The account's login, not git's name, as every other line names
         // someone; a commit with no account is signed by git's name.
-        click(&mut harness, find(root, "name label - Label: \"criccomini\"").unwrap());
+        click(
+            &mut harness,
+            find(root, "name label - Label: \"criccomini\"").unwrap(),
+        );
         assert_eq!(opened(), vec!["https://github.com/criccomini".to_string()]);
         assert!(find(root, "name label - Label: \"Chris\"").is_some());
 
@@ -1441,7 +1569,9 @@ mod tests {
         click(&mut harness, sha("bbbbbbb"));
         assert_eq!(
             opened(),
-            vec![format!("https://github.com/criccomini/perch/pull/57/commits/{away}")]
+            vec![format!(
+                "https://github.com/criccomini/perch/pull/57/commits/{away}"
+            )]
         );
 
         while commands.try_recv().is_ok() {}
@@ -1458,21 +1588,39 @@ mod tests {
         harness.rebuild();
         harness.paint();
         let root = harness.root_id();
-        let file = find(root, "event file - Label: \"src/manifest.rs\"").expect("the file is a link");
+        let file =
+            find(root, "event file - Label: \"src/manifest.rs\"").expect("the file is a link");
         // The space before the file is kept, though it ends a label.
         let words = find(root, "Label: \"Update \"").unwrap();
-        let (words, path) = (words.get_visual_rect_no_clip(), file.get_visual_rect_no_clip());
+        let (words, path) = (
+            words.get_visual_rect_no_clip(),
+            file.get_visual_rect_no_clip(),
+        );
         let bare = {
             use floem::text::{Attrs, AttrsList, FamilyOwned, TextLayout};
-            let family: Vec<FamilyOwned> = FamilyOwned::parse_list(crate::theme::FONT_STACK).collect();
-            let attrs = AttrsList::new(Attrs::new().font_size(crate::theme::TEXT_META).family(&family));
-            TextLayout::new_with_text("Update", attrs, None).size().width
+            let family: Vec<FamilyOwned> =
+                FamilyOwned::parse_list(crate::theme::FONT_STACK).collect();
+            let attrs = AttrsList::new(
+                Attrs::new()
+                    .font_size(crate::theme::TEXT_META)
+                    .family(&family),
+            );
+            TextLayout::new_with_text("Update", attrs, None)
+                .size()
+                .width
         };
-        assert!(path.x0 >= words.x0 + bare + 2.0, "no space: {words:?} then {path:?}, the word {bare} wide");
+        assert!(
+            path.x0 >= words.x0 + bare + 2.0,
+            "no space: {words:?} then {path:?}, the word {bare} wide"
+        );
         click(&mut harness, file);
         assert_eq!(state.tab.get_untracked(), crate::review::ItemTab::Code);
         harness.rebuild();
-        assert_eq!(state.active.get_untracked().as_deref(), Some("src/manifest.rs"), "Files took it");
+        assert_eq!(
+            state.active.get_untracked().as_deref(),
+            Some("src/manifest.rs"),
+            "Files took it"
+        );
         assert!(opened().is_empty());
     }
 
@@ -1541,7 +1689,10 @@ mod tests {
         harness.pointer_move(c.x, c.y);
         harness.recompute_styles();
         let linked = harness.get_computed_style(me);
-        assert_eq!(linked.get(BorderBottomColor), Some(theme::fg_muted().into()));
+        assert_eq!(
+            linked.get(BorderBottomColor),
+            Some(theme::fg_muted().into())
+        );
         assert_eq!(linked.get(Cursor), Some(CursorStyle::Pointer));
         click(&mut harness, me);
         assert_eq!(opened(), vec!["https://github.com/me".to_string()]);
@@ -1580,7 +1731,10 @@ mod tests {
                 perch_git::TreeEntry::new("src", true),
                 perch_git::TreeEntry::new("src/manifest.rs", false),
             ]));
-            state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
+            state.set_server_status(
+                perch_lsp::ServerKind::RustAnalyzer,
+                perch_lsp::Status::Ready,
+            );
         });
         let mut asked = Vec::new();
         while let Ok(command) = commands.try_recv() {
@@ -1593,7 +1747,11 @@ mod tests {
         let comment = find(harness.root_id(), "card:comment").unwrap();
         let text = find(comment, "LinkedText").unwrap();
         let links = crate::review::linked_text::links_on_first_line(&mut harness, text);
-        assert_eq!(links.len(), 1, "the path, and not the name no one has answered: {links:?}");
+        assert_eq!(
+            links.len(),
+            1,
+            "the path, and not the name no one has answered: {links:?}"
+        );
         harness.click(links[0].x, links[0].y);
         harness.rebuild();
         harness.paint();
@@ -1615,7 +1773,11 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert_eq!(state.jump_to_line.get(), None, "the editor took the jump");
-        assert_eq!(state.last_position.get(), Some((1, 0)), "the caret is on line 2");
+        assert_eq!(
+            state.last_position.get(),
+            Some((1, 0)),
+            "the caret is on line 2"
+        );
     }
 
     /// One of GitHub's review threads is a thread card at its first
@@ -1652,19 +1814,37 @@ mod tests {
         let mut all = Vec::new();
         names(card, &mut all);
         let text = all.join("\n");
-        assert!(text.contains("thread-path - Label: \"src/manifest.rs\""), "the header names the file: {text}");
-        assert_eq!(text.matches("name label - Label: \"chris\"").count(), 2, "a byline a comment");
-        assert!(!text.contains("Label: \"Local\""), "GitHub's thread is not marked Local");
+        assert!(
+            text.contains("thread-path - Label: \"src/manifest.rs\""),
+            "the header names the file: {text}"
+        );
+        assert_eq!(
+            text.matches("name label - Label: \"chris\"").count(),
+            2,
+            "a byline a comment"
+        );
+        assert!(
+            !text.contains("Label: \"Local\""),
+            "GitHub's thread is not marked Local"
+        );
         assert!(!text.contains("Label: \"You\""), "nobody here asked");
-        assert!(text.contains("[\"epoch\"]") && text.contains("[\"the reply\"]"), "{text}");
+        assert!(
+            text.contains("[\"epoch\"]") && text.contains("[\"the reply\"]"),
+            "{text}"
+        );
         let bylines: Vec<_> = all
             .iter()
             .enumerate()
             .filter(|(_, n)| n.contains("name label - Label: \"chris\""))
             .map(|(i, _)| i)
             .collect();
-        let reply_after_root = all[bylines[0]..bylines[1]].iter().any(|n| n.contains("[\"epoch\"]"));
-        assert!(reply_after_root, "the reply's byline comes after the comment");
+        let reply_after_root = all[bylines[0]..bylines[1]]
+            .iter()
+            .any(|n| n.contains("[\"epoch\"]"));
+        assert!(
+            reply_after_root,
+            "the reply's byline comes after the comment"
+        );
 
         // The card is under the fold; bring it up and hover it for the Ask.
         card.scroll_to(None);
@@ -1681,8 +1861,15 @@ mod tests {
         harness.paint();
         let composer = state.composer.get().expect("the composer opened");
         assert_eq!(composer.thread_id.as_deref(), Some("gh-31"));
-        assert_eq!(composer.anchor.as_ref().map(|a| a.label()), Some("src/manifest.rs:41".to_string()));
-        assert_eq!(state.composer_draft.get(), "", "the thread carries the comment; nothing is quoted");
+        assert_eq!(
+            composer.anchor.as_ref().map(|a| a.label()),
+            Some("src/manifest.rs:41".to_string())
+        );
+        assert_eq!(
+            state.composer_draft.get(),
+            "",
+            "the thread carries the comment; nothing is quoted"
+        );
         assert!(
             find(card, "composer-box").is_some(),
             "the follow-up composer is inside the GitHub thread's card"
@@ -1711,13 +1898,22 @@ mod tests {
 
         quote(&mut harness, "card:comment");
         let composer = state.composer.get().expect("the composer opened");
-        assert_eq!((composer.thread_id, composer.anchor), (None, None), "at the foot");
+        assert_eq!(
+            (composer.thread_id, composer.anchor),
+            (None, None),
+            "at the foot"
+        );
         assert!(composer.destination.is_github());
         assert_eq!(state.composer_draft.get(), "> Thanks\n\n");
         let foot = find(harness.root_id(), "composer").unwrap();
-        assert!(find(foot, "composer-box").is_some(), "the box is open at the foot");
+        assert!(
+            find(foot, "composer-box").is_some(),
+            "the box is open at the foot"
+        );
 
-        state.composer_draft.set("> Thanks\n\nYou're welcome.".into());
+        state
+            .composer_draft
+            .set("> Thanks\n\nYou're welcome.".into());
         quote(&mut harness, "card:review");
         assert_eq!(
             state.composer_draft.get(),
@@ -1767,7 +1963,8 @@ mod tests {
         let mut all = Vec::new();
         names(root, &mut all);
         assert!(
-            all.iter().any(|n| n.contains("deleted a comment from kvnloo")),
+            all.iter()
+                .any(|n| n.contains("deleted a comment from kvnloo")),
             "the timeline says who deleted whose"
         );
 
@@ -1776,7 +1973,10 @@ mod tests {
         harness.pointer_move(c.x, c.y);
         harness.rebuild();
         harness.paint();
-        assert!(find(review, "delete-comment").is_none(), "a review is not deleted from here");
+        assert!(
+            find(review, "delete-comment").is_none(),
+            "a review is not deleted from here"
+        );
     }
 
     /// Edit on a comment the reader may edit opens the composer in the
@@ -1805,15 +2005,27 @@ mod tests {
         let editor = find(comment, "comment-editor").expect("the card holds the editor");
         assert!(harness.get_layout_rect(editor).height() > 0.0);
         assert!(find(editor, "Label: \"Update comment\"").is_some());
-        assert!(find(editor, "composer-destination").is_none(), "it goes nowhere else");
+        assert!(
+            find(editor, "composer-destination").is_none(),
+            "it goes nowhere else"
+        );
         let mut all = Vec::new();
         names(harness.root_id(), &mut all);
         let boxes = all.iter().filter(|n| n.contains("composer-box")).count();
-        assert_eq!(boxes, 1, "the card's alone; the foot keeps the box that asks");
+        assert_eq!(
+            boxes, 1,
+            "the card's alone; the foot keeps the box that asks"
+        );
 
         // Opened again with other words, as the reader would type them.
         while commands.try_recv().is_ok() {}
-        state.open_composer_with(None, None, "Thanks a lot".into(), Destination::GitHub, Some("IC_1".into()));
+        state.open_composer_with(
+            None,
+            None,
+            "Thanks a lot".into(),
+            Destination::GitHub,
+            Some("IC_1".into()),
+        );
         harness.rebuild();
         harness.paint();
         let comment = find(harness.root_id(), "card:comment").unwrap();
@@ -1826,19 +2038,28 @@ mod tests {
         ));
         assert!(state.composer.get().is_none(), "the edit closed");
         let kept = state.discussion.get().unwrap();
-        assert_eq!(kept.comments[0].body, "Thanks a lot", "shown before GitHub answers");
+        assert_eq!(
+            kept.comments[0].body, "Thanks a lot",
+            "shown before GitHub answers"
+        );
         let comment = find(harness.root_id(), "card:comment").unwrap();
         assert!(!shown(&harness, "comment-editor"));
         let mut all = Vec::new();
         names(comment, &mut all);
-        assert!(all.iter().any(|n| n.contains("Thanks a lot")), "the card shows the new words");
+        assert!(
+            all.iter().any(|n| n.contains("Thanks a lot")),
+            "the card shows the new words"
+        );
 
         let review = find(harness.root_id(), "card:review").unwrap();
         let c = review.get_visual_rect_no_clip().center();
         harness.pointer_move(c.x, c.y);
         harness.rebuild();
         harness.paint();
-        assert!(find(review, "edit-comment").is_none(), "not without GitHub's say so");
+        assert!(
+            find(review, "edit-comment").is_none(),
+            "not without GitHub's say so"
+        );
     }
 
     /// The description and a review's summary, which GitHub says the
@@ -1857,7 +2078,12 @@ mod tests {
         let (mut harness, _, state) = app_harness_on(backend, discussion);
 
         let cases = [
-            ("card:description", "PR_57", "The description.", CommentPlace::PullRequestBody),
+            (
+                "card:description",
+                "PR_57",
+                "The description.",
+                CommentPlace::PullRequestBody,
+            ),
             ("card:review", "PRR_9", "Looks right.", CommentPlace::Review),
         ];
         for (name, id, was, place) in cases {
@@ -1866,24 +2092,48 @@ mod tests {
             harness.rebuild();
             harness.paint();
             hover_and_click(&mut harness, card, "edit-comment");
-            let composer = state.composer.get().unwrap_or_else(|| panic!("{name}: no composer"));
+            let composer = state
+                .composer
+                .get()
+                .unwrap_or_else(|| panic!("{name}: no composer"));
             assert_eq!(composer.editing.as_deref(), Some(id), "{name}");
             assert_eq!(state.composer_draft.get(), was, "{name}");
             let card = find(harness.root_id(), name).unwrap();
             let editor = find(card, "comment-editor").expect("the card holds the editor");
             assert!(harness.get_layout_rect(editor).height() > 0.0, "{name}");
-            assert!(find(editor, "Label: \"Update comment\"").is_some(), "{name}");
+            assert!(
+                find(editor, "Label: \"Update comment\"").is_some(),
+                "{name}"
+            );
 
             while commands.try_recv().is_ok() {}
             let words = format!("{was} Edited.");
-            state.open_composer_with(None, None, words.clone(), Destination::GitHub, Some(id.into()));
+            state.open_composer_with(
+                None,
+                None,
+                words.clone(),
+                Destination::GitHub,
+                Some(id.into()),
+            );
             harness.rebuild();
             harness.paint();
             let card = find(harness.root_id(), name).unwrap();
-            click_on(&mut harness, find(card, "composer-send").expect("Update comment"));
+            click_on(
+                &mut harness,
+                find(card, "composer-send").expect("Update comment"),
+            );
             match commands.try_recv() {
-                Ok(crate::backend::Command::UpdateGithubComment { item_id, node_id, place: asked, body }) => {
-                    assert_eq!((item_id.as_str(), node_id.as_str(), asked), ("wt", id, place), "{name}");
+                Ok(crate::backend::Command::UpdateGithubComment {
+                    item_id,
+                    node_id,
+                    place: asked,
+                    body,
+                }) => {
+                    assert_eq!(
+                        (item_id.as_str(), node_id.as_str(), asked),
+                        ("wt", id, place),
+                        "{name}"
+                    );
                     assert_eq!(body, words, "{name}");
                 }
                 other => panic!("{name}: the edit was not asked for: {other:?}"),
@@ -1892,7 +2142,10 @@ mod tests {
             let card = find(harness.root_id(), name).unwrap();
             let mut all = Vec::new();
             names(card, &mut all);
-            assert!(all.iter().any(|n| n.contains("Edited.")), "{name}: shows the new words");
+            assert!(
+                all.iter().any(|n| n.contains("Edited.")),
+                "{name}: shows the new words"
+            );
         }
         let kept = state.discussion.get().unwrap();
         assert_eq!(kept.body, "The description. Edited.");
@@ -1937,16 +2190,30 @@ mod tests {
         let (mut harness, _, state) = app_harness_on(backend, discussion);
         let mut update = |harness: &mut HeadlessHarness, name: &str, id: &str, words: &str| {
             while commands.try_recv().is_ok() {}
-            state.open_composer_with(None, None, words.into(), Destination::GitHub, Some(id.into()));
+            state.open_composer_with(
+                None,
+                None,
+                words.into(),
+                Destination::GitHub,
+                Some(id.into()),
+            );
             harness.rebuild();
             harness.paint();
             let card = find(harness.root_id(), name).unwrap();
             card.scroll_to(None);
             harness.rebuild();
             harness.paint();
-            click_on(harness, find(card, "composer-send").expect("Update comment"));
+            click_on(
+                harness,
+                find(card, "composer-send").expect("Update comment"),
+            );
             match commands.try_recv() {
-                Ok(crate::backend::Command::UpdateGithubComment { node_id, place, body, .. }) => {
+                Ok(crate::backend::Command::UpdateGithubComment {
+                    node_id,
+                    place,
+                    body,
+                    ..
+                }) => {
                     assert_eq!(node_id, id);
                     Some((place, body))
                 }
@@ -1957,28 +2224,49 @@ mod tests {
         let cases = [
             ("", ""),
             (" \n\n", ""),
-            ("    let x = 1;\n\nThe description.\n\n", "    let x = 1;\n\nThe description."),
+            (
+                "    let x = 1;\n\nThe description.\n\n",
+                "    let x = 1;\n\nThe description.",
+            ),
         ];
         for (words, sent) in cases {
             let asked = update(&mut harness, "card:description", "PR_57", words);
-            assert_eq!(asked, Some((CommentPlace::PullRequestBody, sent.to_string())), "{words:?}");
+            assert_eq!(
+                asked,
+                Some((CommentPlace::PullRequestBody, sent.to_string())),
+                "{words:?}"
+            );
             assert!(state.composer.get().is_none(), "{words:?}: the edit closed");
-            assert_eq!(state.discussion.get().unwrap().body, sent, "{words:?}: shown at once");
+            assert_eq!(
+                state.discussion.get().unwrap().body,
+                sent,
+                "{words:?}: shown at once"
+            );
         }
         update(&mut harness, "card:description", "PR_57", "");
         let card = find(harness.root_id(), "card:description").unwrap();
-        assert!(find(card, "No description.").is_some(), "an emptied description says so");
+        assert!(
+            find(card, "No description.").is_some(),
+            "an emptied description says so"
+        );
 
         let words = "    let y = 2;\n\nThis panics.\n";
         let asked = update(&mut harness, "card:comment", "IC_1", words);
         let sent = "    let y = 2;\n\nThis panics.";
-        assert_eq!(asked, Some((CommentPlace::Conversation, sent.to_string())), "a comment too");
+        assert_eq!(
+            asked,
+            Some((CommentPlace::Conversation, sent.to_string())),
+            "a comment too"
+        );
         assert_eq!(state.discussion.get().unwrap().comments[0].body, sent);
 
         let asked = update(&mut harness, "card:review", "PRR_9", "  ");
         assert_eq!(asked, None, "a summary needs words");
         assert!(state.composer.get().is_some(), "the edit stays open");
-        assert_eq!(state.discussion.get().unwrap().reviews[0].body, "Looks right.");
+        assert_eq!(
+            state.discussion.get().unwrap().reviews[0].body,
+            "Looks right."
+        );
     }
 
     /// An emptied edit of the description asks for a description, not
@@ -2002,16 +2290,28 @@ mod tests {
             ("card:review", "PRR_9", "leave-a-review…"),
         ];
         for (name, id, placeholder) in cases {
-            state.open_composer_with(None, None, String::new(), Destination::GitHub, Some(id.into()));
+            state.open_composer_with(
+                None,
+                None,
+                String::new(),
+                Destination::GitHub,
+                Some(id.into()),
+            );
             harness.rebuild();
             harness.paint();
             let card = find(harness.root_id(), name).unwrap();
             let editor = find(card, "comment-editor").expect("the card holds the editor");
             let mut all = Vec::new();
             names(editor, &mut all);
-            let shown: Vec<_> = all.iter().filter(|n| n.contains("composer-placeholder:")).collect();
+            let shown: Vec<_> = all
+                .iter()
+                .filter(|n| n.contains("composer-placeholder:"))
+                .collect();
             let wanted = format!("composer-placeholder:{placeholder}");
-            assert!(shown.len() == 1 && shown[0].contains(&wanted), "{name}: {shown:?}");
+            assert!(
+                shown.len() == 1 && shown[0].contains(&wanted),
+                "{name}: {shown:?}"
+            );
         }
     }
 
@@ -2117,7 +2417,11 @@ mod tests {
         harness.paint();
         hover_and_click(&mut harness, comment, "quote-reply");
         let composer = state.composer.get().expect("the composer opened");
-        assert_eq!((composer.thread_id, composer.anchor), (None, None), "at the foot");
+        assert_eq!(
+            (composer.thread_id, composer.anchor),
+            (None, None),
+            "at the foot"
+        );
         assert!(composer.destination.is_github());
         assert_eq!(state.composer_draft.get(), "> Thanks\n\n");
     }
@@ -2138,14 +2442,21 @@ mod tests {
         hover_and_click(&mut harness, card, "quote-reply-agent");
         let composer = state.composer.get().expect("the Follow up box opened");
         assert_eq!(composer.thread_id.as_deref(), Some("t1"));
-        assert!(!composer.destination.is_github(), "{:?}", composer.destination);
+        assert!(
+            !composer.destination.is_github(),
+            "{:?}",
+            composer.destination
+        );
         assert_eq!(state.composer_draft.get(), "> because\n\n");
 
         // Nothing selected now: the whole answer, under what was typed.
         state.composer_draft.set("> because\n\nWhy?".into());
         let card = find(harness.root_id(), "card:thread").unwrap();
         hover_and_click(&mut harness, card, "quote-reply-agent");
-        assert_eq!(state.composer_draft.get(), "> because\n\nWhy?\n\n> because the lock\n\n");
+        assert_eq!(
+            state.composer_draft.get(),
+            "> because\n\nWhy?\n\n> because the lock\n\n"
+        );
         let composer = state.composer.get().unwrap();
         assert!(!composer.destination.is_github());
     }
@@ -2248,7 +2559,12 @@ mod tests {
         }]));
         harness.rebuild();
         harness.paint();
-        assert_eq!(cards_in_order(&harness).len(), 1, "{:?}", cards_in_order(&harness));
+        assert_eq!(
+            cards_in_order(&harness).len(),
+            1,
+            "{:?}",
+            cards_in_order(&harness)
+        );
         assert!(!shown(&harness, "Nothing here yet"));
     }
 
@@ -2341,7 +2657,10 @@ mod tests {
         click_on(&mut harness, preview);
         assert!(shown(&harness, "composer-preview"));
         assert!(!shown(&harness, "composer editor box"));
-        assert!(!shown(&harness, "composer-format:bold"), "no styles to put on in Preview");
+        assert!(
+            !shown(&harness, "composer-format:bold"),
+            "no styles to put on in Preview"
+        );
 
         let write = find(harness.root_id(), "composer-tab:Write").unwrap();
         click_on(&mut harness, write);

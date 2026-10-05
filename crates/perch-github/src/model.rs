@@ -67,7 +67,10 @@ impl Thread {
             ItemKind::Issue => self.subject.kind == SubjectKind::Issue,
         };
         same_kind
-            && self.repository.full_name.eq_ignore_ascii_case(repo_full_name)
+            && self
+                .repository
+                .full_name
+                .eq_ignore_ascii_case(repo_full_name)
             && self.number_hint() == Some(number)
     }
 
@@ -213,7 +216,6 @@ impl Reason {
             Reason::Other(s) => s,
         }
     }
-
 }
 
 impl Serialize for Reason {
@@ -432,7 +434,9 @@ mod tests {
 
     #[test]
     fn number_is_parsed_from_subject_url() {
-        let t = thread_with_url(Some("https://api.github.com/repos/slatedb/slatedb/issues/2097"));
+        let t = thread_with_url(Some(
+            "https://api.github.com/repos/slatedb/slatedb/issues/2097",
+        ));
         assert_eq!(t.number_hint(), Some(2097));
     }
 
@@ -552,7 +556,10 @@ mod tests {
 
         // GitHub's payload has no such field, and is not refused for it.
         let mut from_wire: serde_json::Value = serde_json::from_str(&json).unwrap();
-        from_wire.as_object_mut().unwrap().remove("subject_snapshot");
+        from_wire
+            .as_object_mut()
+            .unwrap()
+            .remove("subject_snapshot");
         let bare: Thread = serde_json::from_value(from_wire).unwrap();
         assert_eq!(bare.subject_snapshot, None);
     }
@@ -611,7 +618,10 @@ mod tests {
     fn a_thread_is_about_its_subject_by_repository_kind_and_number() {
         let issue = thread_with_url(Some("https://api.github.com/repos/a/b/issues/42"));
         assert!(issue.is_about("a/b", ItemKind::Issue, 42));
-        assert!(issue.is_about("A/B", ItemKind::Issue, 42), "as GitHub spells it, or not");
+        assert!(
+            issue.is_about("A/B", ItemKind::Issue, 42),
+            "as GitHub spells it, or not"
+        );
         assert!(
             !issue.is_about("a/b", ItemKind::PullRequest, 42),
             "a pull request is not the issue"
@@ -674,7 +684,10 @@ mod tests {
         assert_eq!(t.reason, Reason::Mention);
         assert_eq!(t.subject.kind, SubjectKind::PullRequest);
         assert_eq!(t.number_hint(), Some(2091));
-        assert_eq!(t.repository.owner_avatar_url, "https://avatars.githubusercontent.com/u/1");
+        assert_eq!(
+            t.repository.owner_avatar_url,
+            "https://avatars.githubusercontent.com/u/1"
+        );
 
         let mut cached = t;
         cached.local_unread = true;

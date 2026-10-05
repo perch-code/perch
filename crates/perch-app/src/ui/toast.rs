@@ -53,8 +53,12 @@ pub fn toast(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
                 },
                 ToastKind::Message { text, tone, open } => {
                     let reportable = tone != Tone::Success && open.is_none();
-                    let go = open.map(|open| destination(state, review, backend.clone(), token, open));
-                    (message(state, review, token, text, tone, reportable).into_any(), go)
+                    let go =
+                        open.map(|open| destination(state, review, backend.clone(), token, open));
+                    (
+                        message(state, review, token, text, tone, reportable).into_any(),
+                        go,
+                    )
                 }
                 ToastKind::Server(offer) => (
                     server_offer(state, review, backend.clone(), token, offer).into_any(),
@@ -124,12 +128,9 @@ fn destination(
                     navigation_id,
                 );
             }
-            ToastOpen::FeedbackPreview => crate::ui::feedback::open(
-                state,
-                review,
-                crate::feedback::FeedbackKind::Bug,
-                None,
-            ),
+            ToastOpen::FeedbackPreview => {
+                crate::ui::feedback::open(state, review, crate::feedback::FeedbackKind::Bug, None)
+            }
         }
     })
 }
@@ -147,9 +148,12 @@ fn message(
         Tone::Warning => theme::draft,
         Tone::Success => theme::open,
     };
-    let dismiss = widgets::icon_action(SidebarIcon::Close, "Dismiss message", || true, move || {
-        state.dismiss_toast(token)
-    });
+    let dismiss = widgets::icon_action(
+        SidebarIcon::Close,
+        "Dismiss message",
+        || true,
+        move || state.dismiss_toast(token),
+    );
     let reported = text.clone();
     let report = Label::derived(|| "Report".to_string())
         .on_event_stop(el::Click, move |_, _| {
@@ -246,9 +250,12 @@ fn server_offer(
         (None, None) => Empty::new().into_any(),
     };
     let key = offer.key.clone();
-    let close = widgets::icon_action(SidebarIcon::Close, "Dismiss message", || true, move || {
-        state.decline_offer(token, &key)
-    })
+    let close = widgets::icon_action(
+        SidebarIcon::Close,
+        "Dismiss message",
+        || true,
+        move || state.decline_offer(token, &key),
+    )
     .style(move |s| s.apply_if(installing(), |s| s.hide()));
     match offer.trust {
         // The line is long, so it has the card's width, the close at its
@@ -261,8 +268,12 @@ fn server_offer(
                 close,
             ))
             .style(|s| s.items_start().width_full().gap(9.0));
-            let actions = Container::new(button)
-                .style(|s| s.width_full().justify_end().padding_right(6.0).margin_top(6.0));
+            let actions = Container::new(button).style(|s| {
+                s.width_full()
+                    .justify_end()
+                    .padding_right(6.0)
+                    .margin_top(6.0)
+            });
             Stack::vertical((top, always_trust(state, ask), actions))
                 .style(|s| s.width_full().padding_bottom(4.0))
                 .into_any()
@@ -285,10 +296,12 @@ const FIRST_LINE: f64 = 16.8;
 fn always_trust(state: AppState, ask: TrustAsk) -> impl IntoView {
     let rows = ask.kinds.into_iter().map(move |kind| {
         let toggle = move || {
-            state.trust_everywhere.update(|ticked| match ticked.iter().position(|k| *k == kind) {
-                Some(at) => _ = ticked.remove(at),
-                None => ticked.push(kind),
-            })
+            state
+                .trust_everywhere
+                .update(|ticked| match ticked.iter().position(|k| *k == kind) {
+                    Some(at) => _ = ticked.remove(at),
+                    None => ticked.push(kind),
+                })
         };
         let ticked = move || match state.trust_everywhere.with(|ticked| ticked.contains(&kind)) {
             true => Checked::Full,
@@ -593,8 +606,12 @@ mod tests {
         // The line has the card's width but the close's; the close centres
         // on its first line; Trust and start sits
         // under the boxes, 13px in from the card's right and bottom.
-        let close = named(toast, "Dismiss message").expect("no close").get_visual_rect_no_clip();
-        let button = named(toast, "Trust and start").expect("no Trust and start").get_visual_rect_no_clip();
+        let close = named(toast, "Dismiss message")
+            .expect("no close")
+            .get_visual_rect_no_clip();
+        let button = named(toast, "Trust and start")
+            .expect("no Trust and start")
+            .get_visual_rect_no_clip();
         let jdtls_row = named(toast, "Always trust jdtls in slatedb/slatedb")
             .unwrap()
             .get_visual_rect_no_clip();
@@ -602,8 +619,14 @@ mod tests {
         let first = line.y0 + (28.0 - super::FIRST_LINE) / 2.0;
         assert!((close.center().y - (first + super::FIRST_LINE / 2.0)).abs() < 0.5);
         assert!(button.y0 >= jdtls_row.y1, "{button:?} {jdtls_row:?}");
-        assert!((card.x1 - button.x1 - 14.0).abs() < 1.0, "{button:?} {card:?}");
-        assert!((card.y1 - button.y1 - 14.0).abs() < 1.0, "{button:?} {card:?}");
+        assert!(
+            (card.x1 - button.x1 - 14.0).abs() < 1.0,
+            "{button:?} {card:?}"
+        );
+        assert!(
+            (card.y1 - button.y1 - 14.0).abs() < 1.0,
+            "{button:?} {card:?}"
+        );
 
         harness.click(row.x1 - 20.0, row.center().y);
         settle(&mut harness);
@@ -622,6 +645,9 @@ mod tests {
         assert_eq!(sent, [vec![rust]]);
 
         state.offer_server(ServerOffer::held(&item, &[rust]), false);
-        assert!(state.trust_everywhere.get_untracked().is_empty(), "a new ask starts empty");
+        assert!(
+            state.trust_everywhere.get_untracked().is_empty(),
+            "a new ask starts empty"
+        );
     }
 }

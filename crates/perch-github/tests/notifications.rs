@@ -70,7 +70,11 @@ struct Response {
 
 impl Response {
     fn new(status: &'static str, body: impl Into<String>) -> Self {
-        Self { status, headers: Vec::new(), body: body.into() }
+        Self {
+            status,
+            headers: Vec::new(),
+            body: body.into(),
+        }
     }
 
     fn header(mut self, name: &str, value: &str) -> Self {
@@ -217,7 +221,10 @@ async fn a_304_probe_keeps_the_cached_list_and_validator() {
 
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].header("if-modified-since"), Some(OLD_LAST_MODIFIED));
+    assert_eq!(
+        requests[0].header("if-modified-since"),
+        Some(OLD_LAST_MODIFIED)
+    );
 }
 
 #[tokio::test]
@@ -242,7 +249,11 @@ async fn a_changed_conditional_response_refetches_the_whole_inbox() {
 
     assert!(!result.unchanged);
     assert_eq!(
-        result.threads.iter().map(|thread| thread.id.as_str()).collect::<Vec<_>>(),
+        result
+            .threads
+            .iter()
+            .map(|thread| thread.id.as_str())
+            .collect::<Vec<_>>(),
         vec!["1", "2", "3"],
         "the whole inbox replaces the cached one, not the changed rows"
     );
@@ -255,7 +266,10 @@ async fn a_changed_conditional_response_refetches_the_whole_inbox() {
 
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].header("if-modified-since"), Some(OLD_LAST_MODIFIED));
+    assert_eq!(
+        requests[0].header("if-modified-since"),
+        Some(OLD_LAST_MODIFIED)
+    );
     assert_eq!(requests[1].header("if-modified-since"), None);
     assert_eq!(
         requests[1].path,
@@ -347,7 +361,9 @@ async fn a_successful_last_request_gates_the_next_call_without_sending_it() {
     let (base, requests) = spawn(vec![response]);
     let gh = GitHub::with_base_uri("token", &base).expect("client");
 
-    gh.mark_thread_read("41").await.expect("the final allowed request succeeds");
+    gh.mark_thread_read("41")
+        .await
+        .expect("the final allowed request succeeds");
     assert!(matches!(
         gh.mark_thread_done("42").await,
         Err(Error::RateLimited {
@@ -355,7 +371,11 @@ async fn a_successful_last_request_gates_the_next_call_without_sending_it() {
             retry_after_secs: None
         }) if deadline == reset as i64
     ));
-    assert_eq!(requests.lock().unwrap().len(), 1, "the gated call never reached the server");
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "the gated call never reached the server"
+    );
 }
 
 #[tokio::test]
@@ -392,7 +412,10 @@ async fn a_look_at_the_subjects_is_one_graphql_query_read_past_what_github_could
     let gh = GitHub::with_base_uri("token", &base).expect("client");
     let threads: Vec<perch_github::Thread> = serde_json::from_str(&list_json(1..=2)).unwrap();
 
-    let found = gh.look_at_subjects(&threads).await.expect("look at subjects");
+    let found = gh
+        .look_at_subjects(&threads)
+        .await
+        .expect("look at subjects");
 
     assert_eq!(found.len(), 1);
     let (id, snapshot) = &found[0];
@@ -410,9 +433,18 @@ async fn a_look_at_the_subjects_is_one_graphql_query_read_past_what_github_could
     assert_eq!(requests[0].path, "/graphql");
     let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
     let query = body["query"].as_str().unwrap();
-    assert!(query.contains(r#"r0: repository(owner: "a", name: "b")"#), "{query}");
-    assert!(query.contains("n1: issueOrPullRequest(number: 1)"), "{query}");
-    assert!(query.contains("n2: issueOrPullRequest(number: 2)"), "{query}");
+    assert!(
+        query.contains(r#"r0: repository(owner: "a", name: "b")"#),
+        "{query}"
+    );
+    assert!(
+        query.contains("n1: issueOrPullRequest(number: 1)"),
+        "{query}"
+    );
+    assert!(
+        query.contains("n2: issueOrPullRequest(number: 2)"),
+        "{query}"
+    );
 }
 
 #[tokio::test]
@@ -423,7 +455,10 @@ async fn a_look_with_nothing_to_ask_after_sends_nothing() {
     threads[0].subject.kind = perch_github::SubjectKind::CheckSuite;
     threads[0].subject.url = None;
 
-    let found = gh.look_at_subjects(&threads).await.expect("look at subjects");
+    let found = gh
+        .look_at_subjects(&threads)
+        .await
+        .expect("look at subjects");
 
     assert!(found.is_empty());
     assert!(requests.lock().unwrap().is_empty());

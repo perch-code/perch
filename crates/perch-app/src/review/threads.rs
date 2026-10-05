@@ -29,9 +29,9 @@ use crate::review::cards;
 use crate::review::doc::CardId;
 use crate::review::model::{AgentChoice, Composer, Destination, ReviewState};
 use crate::review::timeline::count_of;
-use crate::ui::menu::MenuExt;
 use crate::state::AppState;
 use crate::theme;
+use crate::ui::menu::MenuExt;
 use crate::ui::widgets::{
     badge, clickable, confirmation, editor_box, icon_button, name_label, prose_editor,
     sidebar_glyph, text_button, Name,
@@ -59,7 +59,12 @@ pub fn model_label(model: &str) -> String {
         } else if part.chars().all(|c| c.is_ascii_alphabetic()) {
             let mut chars = part.chars();
             let first = chars.next().map(|c| c.to_ascii_uppercase());
-            words.push(first.into_iter().chain(chars.map(|c| c.to_ascii_lowercase())).collect());
+            words.push(
+                first
+                    .into_iter()
+                    .chain(chars.map(|c| c.to_ascii_lowercase()))
+                    .collect(),
+            );
         } else {
             words.push(part.to_string());
         }
@@ -116,7 +121,12 @@ pub fn agent_name(backend: &str, model: &str, effort: &str) -> String {
 /// the CLI says, the ones it asked for.
 pub fn run_agent_name(run: &RunRecord) -> String {
     let or_requested = |used: &str, requested: &str| {
-        if used.trim().is_empty() { requested } else { used }.to_string()
+        if used.trim().is_empty() {
+            requested
+        } else {
+            used
+        }
+        .to_string()
     };
     agent_name(
         &run.backend,
@@ -322,14 +332,18 @@ pub fn composer_view(
     let edit_kind = edit_kind(state, &composer);
     let save_label = edit_kind.clone().and_then(EditKind::save_label);
     let editing = composer.editing.is_some();
-    let steering_run = composer.thread_id.as_ref().filter(|_| !editing).and_then(|id| {
-        state.comment_threads.with_untracked(|threads| {
-            threads
-                .iter()
-                .find(|t| &t.id == id)
-                .and_then(|t| t.running_run().map(|run| run.id.clone()))
-        })
-    });
+    let steering_run = composer
+        .thread_id
+        .as_ref()
+        .filter(|_| !editing)
+        .and_then(|id| {
+            state.comment_threads.with_untracked(|threads| {
+                threads
+                    .iter()
+                    .find(|t| &t.id == id)
+                    .and_then(|t| t.running_run().map(|run| run.id.clone()))
+            })
+        });
     let steering = steering_run.is_some();
     let editing_placeholder = edit_kind.as_ref().and_then(EditKind::placeholder);
     let placeholder = if let Some(placeholder) = editing_placeholder {
@@ -356,12 +370,8 @@ pub fn composer_view(
     // `@` offers people and files. A file goes to an agent as `@path`, as
     // Claude Code and Codex take one, and to GitHub as a code span, where
     // `@` would mention someone.
-    let mentioner = crate::review::mention::attach(
-        app,
-        state,
-        backend.clone(),
-        editor.editor(),
-        move |path| {
+    let mentioner =
+        crate::review::mention::attach(app, state, backend.clone(), editor.editor(), move |path| {
             let github = state
                 .composer
                 .with_untracked(|c| c.as_ref().is_some_and(|c| c.destination.is_github()));
@@ -370,8 +380,7 @@ pub fn composer_view(
             } else {
                 format!("@{path} ")
             }
-        },
-    );
+        });
     let focus_mentioner = mentioner.clone();
     let blur_mentioner = mentioner.clone();
     let key_mentioner = mentioner.clone();
@@ -404,8 +413,8 @@ pub fn composer_view(
             let question = read_text();
             // A close needs nothing said, nor does a description, which
             // may be emptied; everything else does.
-            let closing = state.composer_confirming.get_untracked()
-                && state.composer_closing.get_untracked();
+            let closing =
+                state.composer_confirming.get_untracked() && state.composer_closing.get_untracked();
             let description = edit_kind.as_ref().is_some_and(EditKind::edits_description);
             if question.trim().is_empty() && !closing && !description {
                 return;
@@ -516,9 +525,7 @@ pub fn composer_view(
                         *effort,
                         sending_mode(app, state, composer.mode),
                     );
-                    state
-                        .agent_last
-                        .set(Some((*agent, model.clone(), *effort)));
+                    state.agent_last.set(Some((*agent, model.clone(), *effort)));
                 }
                 // A draft: written and shown, and nothing asked. The
                 // review form posts it.
@@ -552,8 +559,7 @@ pub fn composer_view(
             if posting_here_now() {
                 return CommandExecuted::No;
             }
-            if cmd_enter(&cmd) || (plain_enter(&cmd) && state.composer_confirming.get_untracked())
-            {
+            if cmd_enter(&cmd) || (plain_enter(&cmd) && state.composer_confirming.get_untracked()) {
                 key_send();
                 return CommandExecuted::Yes;
             }
@@ -839,19 +845,17 @@ fn resize_handle(grip: Grip, box_id: floem::ViewId) -> impl IntoView {
     // events of its own: capture goes to whatever the pointer went down
     // on, and a drag from the middle of the band must be the band's like
     // one from either end.
-    Container::new(
-        Empty::new().style(move |s| {
-            s.width(theme::COMPOSER_GRIP_WIDTH)
-                .height(theme::COMPOSER_GRIP_MARK)
-                .border_radius(theme::COMPOSER_GRIP_MARK / 2.0)
-                .pointer_events_none()
-                .background(match (grip.resizing.get(), hovered.get()) {
-                    (true, _) => theme::accent(),
-                    (false, true) => theme::fg_subtle(),
-                    (false, false) => theme::border(),
-                })
-        }),
-    )
+    Container::new(Empty::new().style(move |s| {
+        s.width(theme::COMPOSER_GRIP_WIDTH)
+            .height(theme::COMPOSER_GRIP_MARK)
+            .border_radius(theme::COMPOSER_GRIP_MARK / 2.0)
+            .pointer_events_none()
+            .background(match (grip.resizing.get(), hovered.get()) {
+                (true, _) => theme::accent(),
+                (false, true) => theme::fg_subtle(),
+                (false, false) => theme::border(),
+            })
+    }))
     .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
     .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
     .on_event_stop(el::PointerDown, move |cx, e: &PointerButtonEvent| {
@@ -893,9 +897,12 @@ fn resize_handle(grip: Grip, box_id: floem::ViewId) -> impl IntoView {
     .on_event_stop(el::DragEnd, move |_, _: &floem::event::DragEndEvent| {
         grip.resizing.set(false);
     })
-    .on_event_stop(el::DragCancel, move |_, _: &floem::event::DragCancelEvent| {
-        grip.resizing.set(false);
-    })
+    .on_event_stop(
+        el::DragCancel,
+        move |_, _: &floem::event::DragCancelEvent| {
+            grip.resizing.set(false);
+        },
+    )
     .debug_name("composer resize handle")
     .style(|s| {
         s.position(Position::Absolute)
@@ -1072,7 +1079,10 @@ fn composer_footer(
                 let issue = move || {
                     state.issue.with(|issue| {
                         issue.as_ref().map(|issue| {
-                            format!("github.com/{}/issues/{}", issue.repo_full_name, issue.number)
+                            format!(
+                                "github.com/{}/issues/{}",
+                                issue.repo_full_name, issue.number
+                            )
                         })
                     })
                 };
@@ -1106,9 +1116,11 @@ fn composer_footer(
             })
             .debug_name("composer-confirm"),
             Empty::new().style(|s| s.flex_grow(1.0_f32)),
-            text_button(|| "Cancel".to_string(), SidebarIcon::Close, move || {
-                state.composer_confirming.set(false)
-            })
+            text_button(
+                || "Cancel".to_string(),
+                SidebarIcon::Close,
+                move || state.composer_confirming.set(false),
+            )
             .debug_name("composer-cancel-post"),
             send_button(
                 move || {
@@ -1127,7 +1139,8 @@ fn composer_footer(
         FooterMode::Posting => Stack::horizontal((
             Label::derived(move || {
                 let (closing, applying) = state.posting.with(|p| {
-                    p.as_ref().map_or((false, false), |p| (p.closing, p.applying))
+                    p.as_ref()
+                        .map_or((false, false), |p| (p.closing, p.applying))
                 });
                 if closing {
                     "Closing\u{2026}".to_string()
@@ -1137,12 +1150,12 @@ fn composer_footer(
                     "Posting\u{2026}".to_string()
                 }
             })
-                .style(|s| {
-                    s.font_size(theme::TEXT_META)
-                        .color(theme::fg_muted())
-                        .selectable(false)
-                })
-                .debug_name("composer-posting"),
+            .style(|s| {
+                s.font_size(theme::TEXT_META)
+                    .color(theme::fg_muted())
+                    .selectable(false)
+            })
+            .debug_name("composer-posting"),
             Empty::new().style(|s| s.flex_grow(1.0_f32)),
         ))
         .style(|s| s.items_center().width_full().height(30.0).margin_top(8.0))
@@ -1174,7 +1187,9 @@ fn issue_close_offered(app: AppState, state: ReviewState) -> bool {
     if !closes_from_composer(state) {
         return false;
     }
-    let viewer = app.viewer.with(|v| v.as_ref().map(|(login, _)| login.clone()));
+    let viewer = app
+        .viewer
+        .with(|v| v.as_ref().map(|(login, _)| login.clone()));
     let closable = state.issue_closable.get();
     state.issue.with(|issue| {
         issue.as_ref().is_some_and(|issue| {
@@ -1193,7 +1208,9 @@ pub(crate) fn pull_request_close_offered(app: AppState, state: ReviewState) -> b
     if !closes_from_composer(state) {
         return false;
     }
-    let viewer = app.viewer.with(|v| v.as_ref().map(|(login, _)| login.clone()));
+    let viewer = app
+        .viewer
+        .with(|v| v.as_ref().map(|(login, _)| login.clone()));
     let (open, author) = state.pull_request.with(|pull| match pull {
         Some(pull) => (
             pull.is_open() && !pull.merged,
@@ -1223,7 +1240,9 @@ pub(crate) fn pull_request_close_offered(app: AppState, state: ReviewState) -> b
 /// Whether the open item takes Work runs: a worktree of the reader's own,
 /// or a pull request they opened, on disk.
 fn work_offered(app: AppState, state: ReviewState) -> bool {
-    let viewer = app.viewer.with(|v| v.as_ref().map(|(login, _)| login.clone()));
+    let viewer = app
+        .viewer
+        .with(|v| v.as_ref().map(|(login, _)| login.clone()));
     state.item.with(|item| {
         item.as_ref()
             .is_some_and(|item| crate::items::work_allowed(item, viewer.as_deref()))
@@ -1380,7 +1399,10 @@ fn edit_kind(state: ReviewState, composer: &Composer) -> Option<EditKind> {
         Some(_) => Some(EditKind::Draft),
         None => state
             .github_comment_place(id)
-            .map(|place| EditKind::Posted { node_id: id.to_string(), place }),
+            .map(|place| EditKind::Posted {
+                node_id: id.to_string(),
+                place,
+            }),
     }
 }
 
@@ -1482,22 +1504,26 @@ fn destination_picker(app: AppState, state: ReviewState) -> impl IntoView {
                 let checked = selected.as_deref() == Some(model.as_str());
                 menu = menu.item(label, move |item| {
                     let pick = pick.clone();
-                    item.checked(checked).enabled(models_offered).action(move || {
-                        let agent = app.agent.get_untracked();
-                        // The effort stays where it was, or where it was
-                        // last for an agent when coming back from GitHub.
-                        let effort = state
-                            .composer
-                            .with_untracked(|c| c.as_ref().and_then(|c| c.destination.agent_choice()))
-                            .map(|(_, _, e)| e)
-                            .or_else(|| state.agent_last.get_untracked().map(|(_, _, e)| e))
-                            .unwrap_or_else(|| defaults(app).2);
-                        state.set_destination(Destination::Agent {
-                            backend,
-                            model: pick.clone(),
-                            effort: nearest_effort(&agent, &pick, effort),
+                    item.checked(checked)
+                        .enabled(models_offered)
+                        .action(move || {
+                            let agent = app.agent.get_untracked();
+                            // The effort stays where it was, or where it was
+                            // last for an agent when coming back from GitHub.
+                            let effort = state
+                                .composer
+                                .with_untracked(|c| {
+                                    c.as_ref().and_then(|c| c.destination.agent_choice())
+                                })
+                                .map(|(_, _, e)| e)
+                                .or_else(|| state.agent_last.get_untracked().map(|(_, _, e)| e))
+                                .unwrap_or_else(|| defaults(app).2);
+                            state.set_destination(Destination::Agent {
+                                backend,
+                                model: pick.clone(),
+                                effort: nearest_effort(&agent, &pick, effort),
+                            })
                         })
-                    })
                 });
             }
         }
@@ -1548,7 +1574,9 @@ pub fn destination_label(destination: &Destination) -> String {
 /// first. Each entry names the backend the model runs on, which is
 /// config's call, not the section's, so a model listed under both stays
 /// with Claude Code wherever it appears.
-pub(crate) fn model_groups(agent: &perch_github::AgentConfig) -> Vec<Vec<(perch_agent::Backend, String)>> {
+pub(crate) fn model_groups(
+    agent: &perch_github::AgentConfig,
+) -> Vec<Vec<(perch_agent::Backend, String)>> {
     let entry = |m: &String| (crate::ask::backend_for(agent, m), m.clone());
     let claude: Vec<_> = agent.models.iter().map(entry).collect();
     let codex: Vec<_> = agent.codex_models().iter().map(entry).collect();
@@ -1732,8 +1760,11 @@ pub fn thread_card(
             ThreadOrigin::Local => (theme::perch_bg(), theme::border_muted()),
             ThreadOrigin::GitHub => (theme::canvas(), theme::border()),
         };
-        base.background(background)
-            .border_color(if flashing.get() { theme::accent() } else { border })
+        base.background(background).border_color(if flashing.get() {
+            theme::accent()
+        } else {
+            border
+        })
     });
 
     // The editor layer scrolls to inline cards before asking them to flash.
@@ -1894,8 +1925,13 @@ pub(crate) fn local_chip(shown: bool) -> floem::AnyView {
         return Empty::new().into_any();
     }
     cards::tip(
-        badge(|| "Perch only".to_string(), theme::fg_muted, theme::canvas, None)
-            .style(|s| s.margin_left(8.0)),
+        badge(
+            || "Perch only".to_string(),
+            theme::fg_muted,
+            theme::canvas,
+            None,
+        )
+        .style(|s| s.margin_left(8.0)),
         "This thread is on this machine and is not on GitHub.".to_string(),
     )
     .into_any()
@@ -2014,16 +2050,24 @@ fn collapsed_row(app: AppState, state: ReviewState, thread: CommentThread) -> im
     let trailing = Stack::horizontal((
         match private {
             0 => Empty::new().into_any(),
-            n => badge(move || format!("{n} Perch only"), theme::fg_muted, theme::perch_bg, None)
-                .debug_name("perch-only-count")
-                .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP))
-                .into_any(),
+            n => badge(
+                move || format!("{n} Perch only"),
+                theme::fg_muted,
+                theme::perch_bg,
+                None,
+            )
+            .debug_name("perch-only-count")
+            .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP))
+            .into_any(),
         },
         crate::review::run_view::running_mark(state, thread.id.clone()),
         thread_menu(state, &thread, theme::COLLAPSED_CARD_MENU, move || {
             state.expand_card(&open_id)
         })
-        .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP).flex_shrink(0.0_f32)),
+        .style(|s| {
+            s.margin_left(theme::COLLAPSED_CARD_PILL_GAP)
+                .flex_shrink(0.0_f32)
+        }),
     ))
     .style(|s| s.items_center().flex_shrink(0.0_f32))
     .into_any();
@@ -2175,9 +2219,14 @@ fn more_pill(more: usize) -> impl IntoView {
     if more == 0 {
         return Empty::new().into_any();
     }
-    badge(move || format!("{more} more"), theme::fg_subtle, theme::badge_bg, None)
-        .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP))
-        .into_any()
+    badge(
+        move || format!("{more} more"),
+        theme::fg_subtle,
+        theme::badge_bg,
+        None,
+    )
+    .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP))
+    .into_any()
 }
 
 /// The chevron at a card's left: pointing right while the card is
@@ -2233,7 +2282,11 @@ pub(crate) fn chevron_button(
             .size(slot, slot)
             .items_center()
             .justify_center()
-            .border_radius(if slot > theme::CHEVRON_SLOT { theme::RADIUS } else { 3.0 })
+            .border_radius(if slot > theme::CHEVRON_SLOT {
+                theme::RADIUS
+            } else {
+                3.0
+            })
             .flex_shrink(0.0_f32)
             .hover(|s| s.background(theme::badge_bg()))
     })
@@ -2417,9 +2470,7 @@ pub fn messages_view(
                 m.origin.name(),
                 m.github_id,
                 cards::body_hash(&m.body),
-                m.run
-                    .as_ref()
-                    .map(|r| (r.status.name(), r.error.clone())),
+                m.run.as_ref().map(|r| (r.status.name(), r.error.clone())),
                 *editing,
                 *lane,
                 *place,
@@ -2454,10 +2505,20 @@ pub fn messages_view(
                 // A message only Perch has, in a thread on GitHub, is on
                 // a grey band from one side of the box to the other, so
                 // what a colleague can see is the white.
-                (Some(thread), None) => Container::new(
-                    message_view(app, state, backend.clone(), thread, m, face, lane),
-                )
-                .debug_name(if lane == Lane::Flush { "message-row" } else { "private-band" })
+                (Some(thread), None) => Container::new(message_view(
+                    app,
+                    state,
+                    backend.clone(),
+                    thread,
+                    m,
+                    face,
+                    lane,
+                ))
+                .debug_name(if lane == Lane::Flush {
+                    "message-row"
+                } else {
+                    "private-band"
+                })
                 .style(move |s| {
                     s.width_full()
                         .padding_horiz(face.inset())
@@ -2634,7 +2695,9 @@ pub fn follow_up(
                     s.width_full()
                         .padding_horiz(theme::INLINE_THREAD_INSET)
                         .padding_bottom(theme::INLINE_THREAD_INSET)
-                        .apply_if(after_band.get(), |s| s.padding_top(theme::INLINE_THREAD_INSET))
+                        .apply_if(after_band.get(), |s| {
+                            s.padding_top(theme::INLINE_THREAD_INSET)
+                        })
                         .apply_if(empty.get(), |s| s.hide())
                 })
                 .into_any()
@@ -2698,7 +2761,9 @@ fn resolve_foot(
             let id = thread_id.clone();
             let busy_id = thread_id.clone();
             foot_button(label, face, move || {
-                let Some(item_id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+                let Some(item_id) = state
+                    .item
+                    .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
                 else {
                     return;
                 };
@@ -2781,7 +2846,16 @@ pub fn message_view(
     if message.from_github() {
         return posted_message_view(app, state, backend, &thread, &message, face, place);
     }
-    local_message_view(app, state, backend, thread, message, face, place, lane != Lane::Flush)
+    local_message_view(
+        app,
+        state,
+        backend,
+        thread,
+        message,
+        face,
+        place,
+        lane != Lane::Flush,
+    )
 }
 
 /// The height of a comment's byline: the buttons at its end, which the
@@ -2859,7 +2933,12 @@ fn byline_row(
     children.push(trailing);
     Stack::horizontal_from_iter(children)
         .debug_name("comment-byline")
-        .style(|s| s.items_center().width_full().min_width(0.0).height(BYLINE_ROW))
+        .style(|s| {
+            s.items_center()
+                .width_full()
+                .min_width(0.0)
+                .height(BYLINE_ROW)
+        })
         .into_any()
 }
 
@@ -2916,10 +2995,7 @@ fn byline_label(text: &'static str, name: &'static str) -> Container {
 
 /// Author, beside a comment by whoever opened the pull request or the
 /// issue, as GitHub marks them. `login` is read as it is drawn.
-fn author_label(
-    state: ReviewState,
-    login: impl Fn() -> Option<String> + 'static,
-) -> impl IntoView {
+fn author_label(state: ReviewState, login: impl Fn() -> Option<String> + 'static) -> impl IntoView {
     let is_author = Memo::new(move |_| {
         let Some(login) = login() else {
             return false;
@@ -2959,13 +3035,21 @@ fn after_review_label(state: ReviewState, at: jiff::Timestamp) -> impl IntoView 
     });
     cards::tip(
         badge(
-            move || number.get().map(|n| format!("After Review #{n}")).unwrap_or_default(),
+            move || {
+                number
+                    .get()
+                    .map(|n| format!("After Review #{n}"))
+                    .unwrap_or_default()
+            },
             theme::fg_muted,
             || floem::peniko::Color::TRANSPARENT,
             Some(theme::border),
         )
         .debug_name("after-review")
-        .style(move |s| s.margin_left(6.0).apply_if(number.get().is_none(), |s| s.hide())),
+        .style(move |s| {
+            s.margin_left(6.0)
+                .apply_if(number.get().is_none(), |s| s.hide())
+        }),
         "Said after this review ended; the code shown is what the review read.".to_string(),
     )
 }
@@ -2995,15 +3079,21 @@ fn local_message_view(
         .run
         .as_ref()
         .is_some_and(|r| r.status == RunStatus::Completed);
-    let settled = is_agent
-        && !body.trim().is_empty()
-        && (finished || message.run.is_none());
+    let settled = is_agent && !body.trim().is_empty() && (finished || message.run.is_none());
     let text = message_body(state, &thread, &body, None);
     let actions = if settled {
         // Only what a reviewer said is the reader's to edit; an answer
         // stays as its run left it.
         let editable = message.run.is_none().then(|| message.id.clone());
-        agent_actions(app, state, thread.clone(), body.clone(), editable, text.id(), hovered)
+        agent_actions(
+            app,
+            state,
+            thread.clone(),
+            body.clone(),
+            editable,
+            text.id(),
+            hovered,
+        )
     } else {
         Empty::new().into_any()
     };
@@ -3012,7 +3102,11 @@ fn local_message_view(
     let (content, pending) = match message.run.clone() {
         Some(run) if is_agent && finished => (
             Stack::vertical((
-                crate::review::run_view::run_fold(state, &run, without_answer(run.clone(), &body).steps),
+                crate::review::run_view::run_fold(
+                    state,
+                    &run,
+                    without_answer(run.clone(), &body).steps,
+                ),
                 text,
                 run_footer(backend.clone(), run),
             ))
@@ -3162,7 +3256,13 @@ fn agent_actions(
                 if !offered {
                     return Empty::new().into_any();
                 }
-                cards::hover_action(hovered, SidebarIcon::PullRequest, "Post to GitHub", "post-to-github", post.clone())
+                cards::hover_action(
+                    hovered,
+                    SidebarIcon::PullRequest,
+                    "Post to GitHub",
+                    "post-to-github",
+                    post.clone(),
+                )
                 .into_any()
             },
         ),
@@ -3200,9 +3300,20 @@ fn quote_to_agent(
         None => quote,
     };
     let destination = open.filter(|d| !d.is_github()).unwrap_or_else(|| {
-        Destination::agent(state.agent_last.get_untracked().unwrap_or_else(|| defaults(app)))
+        Destination::agent(
+            state
+                .agent_last
+                .get_untracked()
+                .unwrap_or_else(|| defaults(app)),
+        )
     });
-    state.open_composer_with(Some(thread_id.to_string()), anchor, draft, destination, None);
+    state.open_composer_with(
+        Some(thread_id.to_string()),
+        anchor,
+        draft,
+        destination,
+        None,
+    );
 }
 
 /// Reply and Ask about this on a comment in a thread that is on GitHub,
@@ -3225,7 +3336,12 @@ fn reply_and_ask(
             Some(thread_id.clone()),
             anchor.clone(),
             String::new(),
-            Destination::agent(state.agent_last.get_untracked().unwrap_or_else(|| defaults(app))),
+            Destination::agent(
+                state
+                    .agent_last
+                    .get_untracked()
+                    .unwrap_or_else(|| defaults(app)),
+            ),
             None,
         );
     });
@@ -3250,8 +3366,14 @@ fn reply_and_ask(
             if !offered {
                 return Empty::new().into_any();
             }
-            cards::hover_action(hovered, SidebarIcon::Reply, "Reply", "reply-github", reply_to.clone())
-                .into_any()
+            cards::hover_action(
+                hovered,
+                SidebarIcon::Reply,
+                "Reply",
+                "reply-github",
+                reply_to.clone(),
+            )
+            .into_any()
         },
     )
     .into_any();
@@ -3293,13 +3415,24 @@ fn github_message_view(
     let name = login.clone();
     let author = login.clone();
     let byline = byline_row(
-        name_label(move || Name::Login(name.clone()), move |s| name_style(s, face)),
+        name_label(
+            move || Name::Login(name.clone()),
+            move |s| name_style(s, face),
+        ),
         vec![
             when_label(app, message.created_at, face, "comment-when").into_any(),
             author_label(state, move || Some(author.clone())).into_any(),
             after_review_label(state, message.created_at).into_any(),
         ],
-        cards::actions(state, backend.clone(), hovered, Some(leading), Some(ask), react, url),
+        cards::actions(
+            state,
+            backend.clone(),
+            hovered,
+            Some(leading),
+            Some(ask),
+            react,
+            url,
+        ),
     );
     let avatar = crate::ui::widgets::avatar(
         app,
@@ -3336,19 +3469,31 @@ fn draft_message_view(
     let edit = edit_in_row(state, thread, message);
     let delete_id = message.id.clone();
     let delete: Rc<dyn Fn()> = Rc::new(move || {
-        let Some(item_id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone())) else {
+        let Some(item_id) = state
+            .item
+            .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+        else {
             return;
         };
         backend.delete_draft(&item_id, &delete_id);
     });
     let actions = Stack::horizontal((
         cards::hover_action(hovered, SidebarIcon::Pencil, "Edit", "edit-draft", edit),
-        cards::hover_action(hovered, SidebarIcon::Trash, "Delete", "delete-draft", delete),
+        cards::hover_action(
+            hovered,
+            SidebarIcon::Trash,
+            "Delete",
+            "delete-draft",
+            delete,
+        ),
     ))
     .style(|s| s.items_center().gap(4.0).flex_shrink(0.0_f32))
     .into_any();
     let byline = byline_row(
-        name_label(move || author_name(app, &Author::User, None), move |s| name_style(s, face)),
+        name_label(
+            move || author_name(app, &Author::User, None),
+            move |s| name_style(s, face),
+        ),
         vec![
             draft_pill().into_any(),
             author_label(state, move || viewer_login(app)).into_any(),
@@ -3381,20 +3526,35 @@ fn posted_message_view(
     let node_id = message.node_id.clone().unwrap_or_default();
     let deletable = !node_id.is_empty();
     let delete = cards::delete_action(state, hovered, node_id.clone(), move || deletable);
-    let edit = cards::edit_action(hovered, move || deletable, edit_in_row(state, thread, message));
+    let edit = cards::edit_action(
+        hovered,
+        move || deletable,
+        edit_in_row(state, thread, message),
+    );
     let leading = cards::leading_actions(Some(reply_button), edit, Some(delete));
     let confirm = cards::delete_comment_confirmation(app, state, backend.clone(), node_id);
     let react = message.node_id.as_deref().and_then(cards::reactable);
     let url = message.html_url.clone().unwrap_or_default();
     let reactions = cards::reactions_under(app, state, backend.clone(), &react);
     let byline = byline_row(
-        name_label(move || author_name(app, &Author::User, None), move |s| name_style(s, face)),
+        name_label(
+            move || author_name(app, &Author::User, None),
+            move |s| name_style(s, face),
+        ),
         vec![
             when_label(app, message.created_at, face, "posted-when").into_any(),
             author_label(state, move || viewer_login(app)).into_any(),
             after_review_label(state, message.created_at).into_any(),
         ],
-        cards::actions(state, backend.clone(), hovered, Some(leading), Some(ask), react, url),
+        cards::actions(
+            state,
+            backend.clone(),
+            hovered,
+            Some(leading),
+            Some(ask),
+            react,
+            url,
+        ),
     );
     let body = Stack::vertical((
         message_body(state, thread, &message.body, Some(backend)),
@@ -3409,7 +3569,11 @@ fn posted_message_view(
 
 /// Open the composer in `message`'s row with its text, to edit it: a
 /// draft, a reviewer's words, or a comment on GitHub.
-fn edit_in_row(state: ReviewState, thread: &CommentThread, message: &CommentMessage) -> Rc<dyn Fn()> {
+fn edit_in_row(
+    state: ReviewState,
+    thread: &CommentThread,
+    message: &CommentMessage,
+) -> Rc<dyn Fn()> {
     let (thread_id, anchor) = (thread.id.clone(), thread.anchor.clone());
     let (id, body) = (message.id.clone(), message.body.clone());
     Rc::new(move || {
@@ -3457,9 +3621,14 @@ fn message_body(
 /// going there, and is not there yet.
 pub fn draft_pill() -> impl IntoView {
     cards::tip(
-        badge(|| "Draft".to_string(), theme::github, theme::github_bg, None)
-            .debug_name("draft-pill")
-            .style(|s| s.margin_left(8.0)),
+        badge(
+            || "Draft".to_string(),
+            theme::github,
+            theme::github_bg,
+            None,
+        )
+        .debug_name("draft-pill")
+        .style(|s| s.margin_left(8.0)),
         "Not on GitHub until the review is submitted.".to_string(),
     )
 }
@@ -3641,13 +3810,33 @@ fn approval_card(
             None => Empty::new().into_any(),
         },
         Stack::horizontal((
-            action_button("Allow once", "approval-once", true, || true, move || once(ApprovalAnswer::Once)),
-            action_button(&view.always, "approval-always", false, || true, move || {
-                always(ApprovalAnswer::Always)
-            }),
-            action_button("Deny", "approval-deny", false, || true, move || deny(ApprovalAnswer::Deny)),
+            action_button(
+                "Allow once",
+                "approval-once",
+                true,
+                || true,
+                move || once(ApprovalAnswer::Once),
+            ),
+            action_button(
+                &view.always,
+                "approval-always",
+                false,
+                || true,
+                move || always(ApprovalAnswer::Always),
+            ),
+            action_button(
+                "Deny",
+                "approval-deny",
+                false,
+                || true,
+                move || deny(ApprovalAnswer::Deny),
+            ),
         ))
-        .style(|s| s.items_center().gap(6.0).flex_wrap(floem::style::FlexWrap::Wrap)),
+        .style(|s| {
+            s.items_center()
+                .gap(6.0)
+                .flex_wrap(floem::style::FlexWrap::Wrap)
+        }),
     ))
     .debug_name("approval-card")
     .style(|s| {
@@ -3676,7 +3865,8 @@ fn work_changes(state: ReviewState, backend: Rc<Backend>, run: &RunRecord) -> fl
     if !state.run_changes.with_untracked(|m| m.contains_key(&id)) {
         backend.run_changes(&id);
     }
-    let counts = floem::reactive::Memo::new(move |_| state.run_changes.with(|m| m.get(&id).copied()));
+    let counts =
+        floem::reactive::Memo::new(move |_| state.run_changes.with(|m| m.get(&id).copied()));
     dyn_container(
         move || counts.get(),
         move |counts| {
@@ -3688,7 +3878,9 @@ fn work_changes(state: ReviewState, backend: Rc<Backend>, run: &RunRecord) -> fl
             let files = count_of(files as usize, "file", "files");
             Label::derived(move || format!("{files} changed, +{added} \u{2212}{removed}"))
                 .on_event_stop(el::Click, move |_, _| {
-                    let Some(item_id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+                    let Some(item_id) = state
+                        .item
+                        .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
                     else {
                         return;
                     };
@@ -3820,7 +4012,9 @@ pub fn steps_summary(steps: &[perch_github::RunStep]) -> String {
     let searches = count("Searched ") + count("Listed ");
     let edits = steps
         .iter()
-        .filter(|s| s.ok && (s.summary.starts_with("Asked to edit ") || s.summary.starts_with("Edited ")))
+        .filter(|s| {
+            s.ok && (s.summary.starts_with("Asked to edit ") || s.summary.starts_with("Edited "))
+        })
         .count();
     let denied = steps.iter().filter(|s| !s.ok).count();
     if reads > 0 {
@@ -3940,28 +4134,45 @@ mod tests {
                 if id.debug_name().split_whitespace().any(|part| part == name) {
                     return Some(id);
                 }
-                id.children().into_iter().find_map(|child| walk(child, name))
+                id.children()
+                    .into_iter()
+                    .find_map(|child| walk(child, name))
             }
             walk(harness.root_id(), name)
         };
         assert!(find(&harness, "approval-card").is_some());
         assert!(find(&harness, "approval-command").is_some());
-        let always = find(&harness, "approval-always").unwrap().get_visual_rect_no_clip().center();
+        let always = find(&harness, "approval-always")
+            .unwrap()
+            .get_visual_rect_no_clip()
+            .center();
         harness.click(always.x, always.y);
         harness.rebuild();
         harness.paint();
         let mut answered = Vec::new();
         while let Ok(command) = commands.try_recv() {
-            if let crate::backend::Command::AnswerApproval { run_id, approval_id, answer } = command {
+            if let crate::backend::Command::AnswerApproval {
+                run_id,
+                approval_id,
+                answer,
+            } = command
+            {
                 answered.push((run_id, approval_id, answer));
             }
         }
         assert_eq!(
             answered,
-            [("run-1".to_string(), "a1".to_string(), crate::backend::ApprovalAnswer::Always)]
+            [(
+                "run-1".to_string(),
+                "a1".to_string(),
+                crate::backend::ApprovalAnswer::Always
+            )]
         );
         assert!(state.approvals.with(Vec::is_empty));
-        assert!(find(&harness, "approval-card").is_none(), "answered, the card goes");
+        assert!(
+            find(&harness, "approval-card").is_none(),
+            "answered, the card goes"
+        );
     }
     use crate::backend::Command;
     use floem::headless::{HeadlessHarness, TestRoot};
@@ -4066,11 +4277,23 @@ mod tests {
 
     #[test]
     fn agents_are_named_by_maker_model_version_and_effort() {
-        assert_eq!(agent_name("claude-code", "claude-opus-5-5", "low"), "Claude Opus 5.5 (low)");
-        assert_eq!(agent_name("codex", "gpt-6.1-sol", "xhigh"), "Codex Sol 6.1 (xhigh)");
-        assert_eq!(agent_name("claude-code", "opus", "High"), "Claude Opus (high)");
+        assert_eq!(
+            agent_name("claude-code", "claude-opus-5-5", "low"),
+            "Claude Opus 5.5 (low)"
+        );
+        assert_eq!(
+            agent_name("codex", "gpt-6.1-sol", "xhigh"),
+            "Codex Sol 6.1 (xhigh)"
+        );
+        assert_eq!(
+            agent_name("claude-code", "opus", "High"),
+            "Claude Opus (high)"
+        );
         assert_eq!(agent_name("", "claude-sonnet-5", ""), "Claude Sonnet 5");
-        assert_eq!(agent_name("", "gpt-5.5", "medium"), "Codex GPT 5.5 (medium)");
+        assert_eq!(
+            agent_name("", "gpt-5.5", "medium"),
+            "Codex GPT 5.5 (medium)"
+        );
         assert_eq!(agent_name("codex", "", "low"), "Codex (low)");
         let run = RunRecord {
             backend: "claude-code".into(),
@@ -4078,13 +4301,21 @@ mod tests {
             requested_effort: "high".into(),
             ..RunRecord::default()
         };
-        assert_eq!(run_agent_name(&run), "Claude Opus (high)", "what it asked for");
+        assert_eq!(
+            run_agent_name(&run),
+            "Claude Opus (high)",
+            "what it asked for"
+        );
         let run = RunRecord {
             model: "claude-opus-5-5".into(),
             effort: "medium".into(),
             ..run
         };
-        assert_eq!(run_agent_name(&run), "Claude Opus 5.5 (medium)", "what it ran with");
+        assert_eq!(
+            run_agent_name(&run),
+            "Claude Opus 5.5 (medium)",
+            "what it ran with"
+        );
     }
 
     fn enter(modifiers: Modifiers) -> floem::event::Event {
@@ -4142,7 +4373,10 @@ mod tests {
             Ok(Command::Ask { question, .. }) => assert_eq!(question, "why?"),
             other => panic!("Cmd-Enter did not send: {other:?}"),
         }
-        assert!(state.composer.get().is_none(), "sending closes the composer");
+        assert!(
+            state.composer.get().is_none(),
+            "sending closes the composer"
+        );
     }
 
     /// Picking a model from the chip under the box gives the keyboard back
@@ -4192,10 +4426,17 @@ mod tests {
         harness.paint();
         assert!(!crate::ui::menu::is_open());
         assert_eq!(
-            state.composer.get().and_then(|c| c.destination.agent_choice()).map(|(_, _, e)| e),
+            state
+                .composer
+                .get()
+                .and_then(|c| c.destination.agent_choice())
+                .map(|(_, _, e)| e),
             Some(perch_agent::Effort::High)
         );
-        assert!(harness.is_focused(text_box), "the box has the keyboard back");
+        assert!(
+            harness.is_focused(text_box),
+            "the box has the keyboard back"
+        );
     }
 
     /// The first view whose debug name contains `text`.
@@ -4255,12 +4496,20 @@ mod tests {
             can_resolve: false,
             created_at: at,
             messages: vec![
-                message("gh-31", ThreadOrigin::GitHub, Author::GitHubUser("rohan".into()), "epoch"),
+                message(
+                    "gh-31",
+                    ThreadOrigin::GitHub,
+                    Author::GitHubUser("rohan".into()),
+                    "epoch",
+                ),
                 message("q1", ThreadOrigin::Local, Author::User, "why?"),
                 message(
                     "a1",
                     ThreadOrigin::Local,
-                    Author::Agent { backend: "claude-code".into(), model: "sonnet".into() },
+                    Author::Agent {
+                        backend: "claude-code".into(),
+                        model: "sonnet".into(),
+                    },
                     "because",
                 ),
             ],
@@ -4285,8 +4534,14 @@ mod tests {
         });
         state.comment_threads.set(Arc::new(vec![thread.clone()]));
         let (backend, _commands) = crate::backend::Backend::recording();
-        let view = messages_view(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
-            .style(|s| s.width(600.0));
+        let view = messages_view(
+            app,
+            state,
+            Rc::new(backend),
+            thread.id.clone(),
+            ThreadFace::Card,
+        )
+        .style(|s| s.width(600.0));
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
         let settle = |harness: &mut HeadlessHarness| {
             harness.rebuild();
@@ -4309,22 +4564,35 @@ mod tests {
             },
         );
         settle(&mut harness);
-        assert!(find(harness.root_id(), "Label: \"Running\"").is_some(), "the step goes");
+        assert!(
+            find(harness.root_id(), "Label: \"Running\"").is_some(),
+            "the step goes"
+        );
         assert!(find(harness.root_id(), "Label: \"cargo test\"").is_some());
         assert!(find(harness.root_id(), "spinner").is_some());
 
         state.apply_run_event(
             "run-1",
-            &perch_agent::RunEvent::ToolResult { id: "c1".into(), ok: false, summary: "exit 101".into() },
+            &perch_agent::RunEvent::ToolResult {
+                id: "c1".into(),
+                ok: false,
+                summary: "exit 101".into(),
+            },
         );
-        state.apply_run_event("run-1", &perch_agent::RunEvent::Text("It failed to build.".into()));
+        state.apply_run_event(
+            "run-1",
+            &perch_agent::RunEvent::Text("It failed to build.".into()),
+        );
         settle(&mut harness);
         assert!(
             find(harness.root_id(), "Label: \"cargo test: exit 101\"").is_some(),
             "the result reached the line"
         );
         assert!(find(harness.root_id(), "Label: \"Ran\"").is_some());
-        assert!(find(harness.root_id(), "It failed to build.").is_some(), "the words show");
+        assert!(
+            find(harness.root_id(), "It failed to build.").is_some(),
+            "the words show"
+        );
         assert_eq!(header(&harness), before, "the message was built again");
     }
 
@@ -4347,8 +4615,14 @@ mod tests {
         });
         state.comment_threads.set(Arc::new(vec![thread.clone()]));
         let (backend, _commands) = crate::backend::Backend::recording();
-        let view = messages_view(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
-            .style(|s| s.width(600.0));
+        let view = messages_view(
+            app,
+            state,
+            Rc::new(backend),
+            thread.id.clone(),
+            ThreadFace::Card,
+        )
+        .style(|s| s.width(600.0));
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
         harness.rebuild();
         harness.paint();
@@ -4362,7 +4636,11 @@ mod tests {
             2,
             "the question and the answer on its way are both Perch's"
         );
-        assert_eq!(find_all(harness.root_id(), "comment-rail").len(), 3, "rohan, the reader and the agent");
+        assert_eq!(
+            find_all(harness.root_id(), "comment-rail").len(),
+            3,
+            "rohan, the reader and the agent"
+        );
 
         state.comment_threads.update(|threads| {
             let run = Arc::make_mut(threads)[0].messages[1].run.as_mut().unwrap();
@@ -4396,7 +4674,13 @@ mod tests {
         let (backend, mut commands) = crate::backend::Backend::recording();
         let backend = Rc::new(backend);
         let view = Stack::vertical((
-            messages_view(app, state, backend.clone(), thread.id.clone(), ThreadFace::Card),
+            messages_view(
+                app,
+                state,
+                backend.clone(),
+                thread.id.clone(),
+                ThreadFace::Card,
+            ),
             follow_up(app, state, backend, thread.id.clone(), ThreadFace::Card),
         ))
         .style(|s| s.flex_col().width(600.0));
@@ -4409,17 +4693,31 @@ mod tests {
         assert!(shown(&harness, "Steer"));
         assert!(!shown(&harness, "Follow up"));
 
-        state.open_composer(Some(thread.id.clone()), thread.anchor.clone(), "Skip the tests".into(), sonnet_medium());
+        state.open_composer(
+            Some(thread.id.clone()),
+            thread.anchor.clone(),
+            "Skip the tests".into(),
+            sonnet_medium(),
+        );
         settle(&mut harness);
-        assert!(shown(&harness, "composer-steer-footer"), "no pickers: it goes to the run");
+        assert!(
+            shown(&harness, "composer-steer-footer"),
+            "no pickers: it goes to the run"
+        );
         click(&mut harness, "composer-send");
         match commands.try_recv() {
             Ok(Command::SteerRun { run_id, text }) => {
-                assert_eq!((run_id.as_str(), text.as_str()), ("run-1", "Skip the tests"));
+                assert_eq!(
+                    (run_id.as_str(), text.as_str()),
+                    ("run-1", "Skip the tests")
+                );
             }
             other => panic!("Send did not steer: {other:?}"),
         }
-        assert!(state.composer.get_untracked().is_none(), "sent, the box goes");
+        assert!(
+            state.composer.get_untracked().is_none(),
+            "sent, the box goes"
+        );
 
         state.apply_steer("run-1", "Skip the tests");
         state.apply_run_event(
@@ -4432,7 +4730,8 @@ mod tests {
             },
         );
         settle(&mut harness);
-        let steer = find(harness.root_id(), "run-steer").expect("the reader's words are among the steps");
+        let steer =
+            find(harness.root_id(), "run-steer").expect("the reader's words are among the steps");
         let step = find(harness.root_id(), "Label: \"cargo build\"").unwrap();
         assert!(
             steer.get_visual_rect_no_clip().y0 > step.get_visual_rect_no_clip().y1,
@@ -4440,13 +4739,29 @@ mod tests {
         );
         assert!(shown(&harness, "run-steer-unread"));
 
-        state.apply_run_event("run-1", &perch_agent::RunEvent::Steered("Skip the tests".into()));
-        state.apply_run_event("run-1", &perch_agent::RunEvent::Text("Skipping them.".into()));
+        state.apply_run_event(
+            "run-1",
+            &perch_agent::RunEvent::Steered("Skip the tests".into()),
+        );
+        state.apply_run_event(
+            "run-1",
+            &perch_agent::RunEvent::Text("Skipping them.".into()),
+        );
         settle(&mut harness);
-        assert!(find(harness.root_id(), "run-steer-unread").is_none(), "read");
-        let steer = find(harness.root_id(), "run-steer").unwrap().get_visual_rect_no_clip();
-        let words = find(harness.root_id(), "Skipping them.").unwrap().get_visual_rect_no_clip();
-        assert!(words.y0 > steer.y1, "what it says after reading comes after: {steer:?} {words:?}");
+        assert!(
+            find(harness.root_id(), "run-steer-unread").is_none(),
+            "read"
+        );
+        let steer = find(harness.root_id(), "run-steer")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        let words = find(harness.root_id(), "Skipping them.")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        assert!(
+            words.y0 > steer.y1,
+            "what it says after reading comes after: {steer:?} {words:?}"
+        );
 
         let set_status = |status: RunStatus| {
             state.comment_threads.update(|threads| {
@@ -4473,20 +4788,30 @@ mod tests {
         let thread = github_thread_with_private_messages();
         state.comment_threads.set(Arc::new(vec![thread.clone()]));
         let (backend, mut commands) = crate::backend::Backend::recording();
-        let view = delete_confirmation(state, Rc::new(backend), thread.id.clone(), thread.is_github_bound());
+        let view = delete_confirmation(
+            state,
+            Rc::new(backend),
+            thread.id.clone(),
+            thread.is_github_bound(),
+        );
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
         harness.rebuild();
         harness.paint();
-        assert!(find(harness.root_id(), "Delete Perch's messages?").is_none(), "nothing asked yet");
+        assert!(
+            find(harness.root_id(), "Delete Perch's messages?").is_none(),
+            "nothing asked yet"
+        );
 
         state.confirm_thread.set(Some("gh-31".into()));
         harness.rebuild();
         harness.paint();
         let root_id = harness.root_id();
         assert!(find(root_id, "Delete Perch's messages?").is_some());
-        assert!(
-            find(root_id, "The questions and answers asked here go. Nothing on GitHub is touched.").is_some()
-        );
+        assert!(find(
+            root_id,
+            "The questions and answers asked here go. Nothing on GitHub is touched."
+        )
+        .is_some());
         let delete = find(root_id, "Label: \"Delete\"").expect("a Delete button");
         let c = delete.get_visual_rect_no_clip().center();
         harness.click(c.x, c.y);
@@ -4707,11 +5032,8 @@ mod tests {
         let (backend, mut commands) = crate::backend::Backend::recording();
         let backend = Rc::new(backend);
         let composer = composer_view(app, state, backend.clone(), composer, ThreadFace::Card);
-        let view = Stack::vertical((
-            composer,
-            crate::review::mention::popup(app, state),
-        ))
-        .style(|s| s.size_full());
+        let view = Stack::vertical((composer, crate::review::mention::popup(app, state)))
+            .style(|s| s.size_full());
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
         harness.rebuild();
         harness.paint();
@@ -4764,16 +5086,25 @@ mod tests {
         // Under the @, inside the window.
         let list = find_mention_row(&harness, "mentions").get_visual_rect_no_clip();
         let text = text_box.get_visual_rect_no_clip();
-        assert!(list.y0 > text.y0 && list.x0 > text.x0 + 10.0, "{list:?} {text:?}");
+        assert!(
+            list.y0 > text.y0 && list.x0 > text.x0 + 10.0,
+            "{list:?} {text:?}"
+        );
         assert!(list.x1 <= 800.0 && list.y1 <= 400.0, "{list:?}");
-        assert!(commands.try_recv().is_err(), "nothing typed is not asked of GitHub");
+        assert!(
+            commands.try_recv().is_err(),
+            "nothing typed is not asked of GitHub"
+        );
 
         // Letters ask GitHub once typing rests, about the last of them;
         // meanwhile the list has who matches here, then the files.
         harness.dispatch_event(typed("c"));
         harness.dispatch_event(typed("a"));
         harness.rebuild();
-        assert!(commands.try_recv().is_err(), "nothing is asked while typing");
+        assert!(
+            commands.try_recv().is_err(),
+            "nothing is asked while typing"
+        );
         let ask = |query: &str| crate::review::mention::Ask {
             item_id: "item-1".into(),
             repo: "acme/repo".into(),
@@ -4782,7 +5113,10 @@ mod tests {
         };
         // The timer for `c` finds typing moved on, and asks nothing.
         state.mentions.ask_if_waiting(&backend, &ask("c"));
-        assert!(commands.try_recv().is_err(), "a query typed through is not asked");
+        assert!(
+            commands.try_recv().is_err(),
+            "a query typed through is not asked"
+        );
         harness.dispatch_event(named(NamedKey::Backspace, Code::Backspace));
         harness.rebuild();
         state.mentions.ask_if_waiting(&backend, &ask("c"));
@@ -4791,7 +5125,10 @@ mod tests {
             Ok(Command::MentionableUsers { item_id, repo_full_name, query })
                 if item_id == "item-1" && repo_full_name == "acme/repo" && query == "c"
         ));
-        assert_eq!(shown().unwrap(), ["@cadonna", "src/client.rs", "src/lib.rs"]);
+        assert_eq!(
+            shown().unwrap(),
+            ["@cadonna", "src/client.rs", "src/lib.rs"]
+        );
 
         // GitHub's answer joins the list after the item's own.
         state.mentions.install(
@@ -4839,7 +5176,10 @@ mod tests {
         harness.rebuild();
         assert_eq!(state.composer_draft.get(), "hi @calavera @src/lib.rs ");
         assert_eq!(shown(), None);
-        assert!(harness.is_focused(text_box), "the box has the keyboard back");
+        assert!(
+            harness.is_focused(text_box),
+            "the box has the keyboard back"
+        );
 
         // Escape puts the list away, not the composer, and it stays away
         // for this @ as more is typed.
@@ -4890,7 +5230,10 @@ mod tests {
         harness.paint();
         assert_eq!(shown().unwrap(), ["#634", "#1794", "#1380"]);
         let row = find_mention_row(&harness, "mention-row:#634");
-        assert!(harness.get_layout_rect(row).width() > 0.0, "the row is drawn");
+        assert!(
+            harness.get_layout_rect(row).width() > 0.0,
+            "the row is drawn"
+        );
         harness.dispatch_event(typed("6"));
         harness.rebuild();
         assert_eq!(shown().unwrap(), ["#634"]);
@@ -4914,7 +5257,10 @@ mod tests {
         harness.paint();
         assert_eq!(shown().unwrap()[0], ":fire:");
         let row = find_mention_row(&harness, "mention-row::fire:");
-        assert!(harness.get_layout_rect(row).width() > 0.0, "the row is drawn");
+        assert!(
+            harness.get_layout_rect(row).width() > 0.0,
+            "the row is drawn"
+        );
         harness.dispatch_event(named(NamedKey::Enter, Code::Enter));
         harness.rebuild();
         assert_eq!(
@@ -5100,7 +5446,10 @@ mod tests {
         harness.paint();
         let root_id = harness.root_id();
         assert!(find(root_id, "Label: \"Send\"").is_some());
-        assert!(find(root_id, "Label: \"Medium\"").is_some(), "the effort picker");
+        assert!(
+            find(root_id, "Label: \"Medium\"").is_some(),
+            "the effort picker"
+        );
 
         // As the picker's GitHub entry does.
         state.composer.update(|c| {
@@ -5113,7 +5462,10 @@ mod tests {
         let root_id = harness.root_id();
         assert!(find(root_id, "Label: \"Add to review\"").is_some());
         assert!(find(root_id, "Label: \"GitHub\"").is_some());
-        assert!(find(root_id, "Label: \"Medium\"").is_none(), "no effort for GitHub");
+        assert!(
+            find(root_id, "Label: \"Medium\"").is_none(),
+            "no effort for GitHub"
+        );
         let text_box = state.composer_box.get().expect("the box registered itself");
         assert!(harness.is_focused(text_box), "the flip kept the keyboard");
 
@@ -5135,7 +5487,10 @@ mod tests {
             }
             other => panic!("Cmd-Enter did not keep a draft: {other:?}"),
         }
-        assert!(state.composer.get().is_none(), "sending closes the composer");
+        assert!(
+            state.composer.get().is_none(),
+            "sending closes the composer"
+        );
         assert_eq!(
             state.last_destination[ThreadFace::Card.index()].get(),
             Some(Destination::GitHub)
@@ -5143,7 +5498,10 @@ mod tests {
         assert_eq!(state.agent_last.get(), None, "no agent was sent to");
 
         state.open_composer(None, Some(anchor.clone()), String::new(), sonnet_medium());
-        assert_eq!(state.composer.get().unwrap().destination, Destination::GitHub);
+        assert_eq!(
+            state.composer.get().unwrap().destination,
+            Destination::GitHub
+        );
         state.open_composer(None, None, String::new(), sonnet_medium());
         assert_eq!(
             state.composer.get().unwrap().destination,
@@ -5165,7 +5523,10 @@ mod tests {
         state.pull_request.set(Some(Arc::new(closed)));
         state.open_composer(None, Some(anchor), String::new(), sonnet_medium());
         let composer = state.composer.get().unwrap();
-        assert!(!state.github_offered(&composer), "a closed pull request takes no draft");
+        assert!(
+            !state.github_offered(&composer),
+            "a closed pull request takes no draft"
+        );
         assert_eq!(composer.destination, Destination::agent(sonnet_medium()));
         state.open_composer(Some("gh-31".into()), None, String::new(), sonnet_medium());
         assert!(
@@ -5203,7 +5564,12 @@ mod tests {
             commit_sha: "h".into(),
         };
         let suggestion = "```suggestion\nB\n```";
-        state.open_composer(None, Some(anchor.clone()), suggestion.into(), sonnet_medium());
+        state.open_composer(
+            None,
+            Some(anchor.clone()),
+            suggestion.into(),
+            sonnet_medium(),
+        );
         let composer = state.composer.get().unwrap();
         let (backend, mut commands) = crate::backend::Backend::recording();
         let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Card);
@@ -5242,7 +5608,12 @@ mod tests {
         assert!(state.composer.get().is_none(), "applied, the composer goes");
 
         let root = TestRoot::new();
-        state.open_composer(None, Some(anchor), format!("why not?\n{suggestion}"), sonnet_medium());
+        state.open_composer(
+            None,
+            Some(anchor),
+            format!("why not?\n{suggestion}"),
+            sonnet_medium(),
+        );
         let composer = state.composer.get().unwrap();
         let (backend, mut commands) = crate::backend::Backend::recording();
         let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Card);
@@ -5273,44 +5644,52 @@ mod tests {
         thread.messages.push(draft);
         state.comment_threads.set(Arc::new(vec![thread.clone()]));
         let ended = said + jiff::SignedDuration::from_mins(1);
-        state.historical_review.set(Some(crate::review::model::ReviewGroupSummary {
-            group: perch_github::ReviewGroup {
-                id: "group-1".into(),
-                item_id: "item-1".into(),
-                snapshot_id: "snapshot-1".into(),
-                number: 1,
-                status: perch_github::ReviewGroupStatus::Completed,
-                new_findings: 0,
-                still_present: 0,
-                verified_fixed: 0,
-                not_verified: 0,
-                created_at: said,
-                started_at: Some(said),
-                ended_at: Some(ended),
-                instructions: None,
-            },
-            snapshot: perch_github::ReviewSnapshot {
-                id: "snapshot-1".into(),
-                item_id: "item-1".into(),
-                repository: "slatedb/slatedb".into(),
-                branch_label: None,
-                requested_base_ref: "main".into(),
-                base_tip_sha: "base".into(),
-                merge_base_sha: "base".into(),
-                head_sha: "head".into(),
-                dirty_edits_excluded: false,
-                retention_key: "snapshot-1".into(),
-                retained_ref: None,
-                manifest_path: None,
-                diff_path: None,
-                created_at: said,
-                worktree_parent_sha: None,
-            },
-            attempts: Vec::new(),
-        }));
+        state
+            .historical_review
+            .set(Some(crate::review::model::ReviewGroupSummary {
+                group: perch_github::ReviewGroup {
+                    id: "group-1".into(),
+                    item_id: "item-1".into(),
+                    snapshot_id: "snapshot-1".into(),
+                    number: 1,
+                    status: perch_github::ReviewGroupStatus::Completed,
+                    new_findings: 0,
+                    still_present: 0,
+                    verified_fixed: 0,
+                    not_verified: 0,
+                    created_at: said,
+                    started_at: Some(said),
+                    ended_at: Some(ended),
+                    instructions: None,
+                },
+                snapshot: perch_github::ReviewSnapshot {
+                    id: "snapshot-1".into(),
+                    item_id: "item-1".into(),
+                    repository: "slatedb/slatedb".into(),
+                    branch_label: None,
+                    requested_base_ref: "main".into(),
+                    base_tip_sha: "base".into(),
+                    merge_base_sha: "base".into(),
+                    head_sha: "head".into(),
+                    dirty_edits_excluded: false,
+                    retention_key: "snapshot-1".into(),
+                    retained_ref: None,
+                    manifest_path: None,
+                    diff_path: None,
+                    created_at: said,
+                    worktree_parent_sha: None,
+                },
+                attempts: Vec::new(),
+            }));
         let (backend, _commands) = crate::backend::Backend::recording();
-        let view = messages_view(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
-            .style(|s| s.width(600.0));
+        let view = messages_view(
+            app,
+            state,
+            Rc::new(backend),
+            thread.id.clone(),
+            ThreadFace::Card,
+        )
+        .style(|s| s.width(600.0));
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
         harness.rebuild();
         harness.paint();
@@ -5322,7 +5701,10 @@ mod tests {
         assert_eq!(shown, 1, "only the draft came after the review");
         assert!(find(root_id, "Label: \"After Review #1\"").is_some());
 
-        let pill = find(root_id, "draft-pill").unwrap().get_visual_rect_no_clip().center();
+        let pill = find(root_id, "draft-pill")
+            .unwrap()
+            .get_visual_rect_no_clip()
+            .center();
         harness.pointer_move(pill.x, pill.y);
         harness.rebuild();
         harness.paint();
@@ -5361,8 +5743,14 @@ mod tests {
         thread.messages.push(draft);
         state.comment_threads.set(Arc::new(vec![thread.clone()]));
         let (backend, mut commands) = crate::backend::Backend::recording();
-        let view = messages_view(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
-            .style(|s| s.width(600.0));
+        let view = messages_view(
+            app,
+            state,
+            Rc::new(backend),
+            thread.id.clone(),
+            ThreadFace::Card,
+        )
+        .style(|s| s.width(600.0));
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
         harness.rebuild();
         harness.paint();
@@ -5371,10 +5759,16 @@ mod tests {
         assert!(harness.get_layout_rect(pill).width() > 0.0);
         let edit = find(root_id, "edit-draft").expect("edit");
         let delete = find(root_id, "delete-draft").expect("delete");
-        assert_eq!(harness.get_layout_rect(edit).width(), 0.0, "hidden until hovered");
+        assert_eq!(
+            harness.get_layout_rect(edit).width(),
+            0.0,
+            "hidden until hovered"
+        );
 
         // Under the pointer, the actions show.
-        let body = find(root_id, "draft-pill").unwrap().get_visual_rect_no_clip();
+        let body = find(root_id, "draft-pill")
+            .unwrap()
+            .get_visual_rect_no_clip();
         harness.pointer_move(body.center().x, body.center().y);
         harness.rebuild();
         harness.paint();
@@ -5384,7 +5778,10 @@ mod tests {
         let c = delete.get_visual_rect_no_clip().center();
         harness.click(c.x, c.y);
         match commands.try_recv() {
-            Ok(Command::DeleteDraft { item_id, message_id }) => {
+            Ok(Command::DeleteDraft {
+                item_id,
+                message_id,
+            }) => {
                 assert_eq!(item_id, "item-1");
                 assert_eq!(message_id, "d1");
             }
@@ -5402,7 +5799,10 @@ mod tests {
         harness.rebuild();
         harness.paint();
         let root_id = harness.root_id();
-        assert!(find(root_id, "draft-pill").is_none(), "the composer took the draft's row");
+        assert!(
+            find(root_id, "draft-pill").is_none(),
+            "the composer took the draft's row"
+        );
         assert!(find(root_id, "Label: \"Add to review\"").is_some());
         // The box keeps its own padding, and the room under the last row
         // is outside its border, so it does not sit on the card's edge.
@@ -5418,17 +5818,27 @@ mod tests {
         // words are safe in the cache.
         let text_box = state.composer_box.get().expect("the box registered itself");
         assert!(harness.is_focused(text_box));
-        harness.dispatch_event(key(Key::Named(NamedKey::Escape), Code::Escape, Modifiers::empty()));
+        harness.dispatch_event(key(
+            Key::Named(NamedKey::Escape),
+            Code::Escape,
+            Modifiers::empty(),
+        ));
         harness.rebuild();
         harness.paint();
         assert!(state.composer.get().is_none(), "Escape closed the edit");
-        assert!(find(harness.root_id(), "draft-pill").is_some(), "the draft is back");
+        assert!(
+            find(harness.root_id(), "draft-pill").is_some(),
+            "the draft is back"
+        );
 
         // Edited and sent: the backend is asked to rewrite that draft, in
         // its thread, and the composer closes. Nothing is remembered for
         // the face; an edit is GitHub's by nature, not by choice.
         let root_id = harness.root_id();
-        let pill = find(root_id, "draft-pill").unwrap().get_visual_rect_no_clip().center();
+        let pill = find(root_id, "draft-pill")
+            .unwrap()
+            .get_visual_rect_no_clip()
+            .center();
         harness.pointer_move(pill.x, pill.y);
         harness.rebuild();
         harness.paint();
@@ -5440,14 +5850,28 @@ mod tests {
         let text_box = state.composer_box.get().expect("the box registered itself");
         assert!(harness.is_focused(text_box));
         harness.dispatch_event(key(Key::Character("a".into()), Code::KeyA, Modifiers::META));
-        harness.dispatch_event(key(Key::Named(NamedKey::Backspace), Code::Backspace, Modifiers::empty()));
+        harness.dispatch_event(key(
+            Key::Named(NamedKey::Backspace),
+            Code::Backspace,
+            Modifiers::empty(),
+        ));
         for ch in "I fixed it".chars() {
-            harness.dispatch_event(key(Key::Character(ch.to_string()), Code::KeyA, Modifiers::empty()));
+            harness.dispatch_event(key(
+                Key::Character(ch.to_string()),
+                Code::KeyA,
+                Modifiers::empty(),
+            ));
         }
         harness.dispatch_event(enter(Modifiers::META));
         harness.rebuild();
         match commands.try_recv() {
-            Ok(Command::SaveDraft { item_id, thread_id, anchor, body, editing }) => {
+            Ok(Command::SaveDraft {
+                item_id,
+                thread_id,
+                anchor,
+                body,
+                editing,
+            }) => {
                 assert_eq!(item_id, "item-1");
                 assert_eq!(thread_id.as_deref(), Some("gh-31"));
                 assert_eq!(anchor, thread.anchor);
@@ -5507,19 +5931,31 @@ mod tests {
         };
         state.discussion.set(Some(Arc::new(discussion(false))));
         let (backend, mut commands) = crate::backend::Backend::recording();
-        let view = messages_view(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
-            .style(|s| s.width(600.0));
+        let view = messages_view(
+            app,
+            state,
+            Rc::new(backend),
+            thread.id.clone(),
+            ThreadFace::Card,
+        )
+        .style(|s| s.width(600.0));
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
         harness.rebuild();
         harness.paint();
-        assert!(find(harness.root_id(), "edit-comment").is_none(), "not without GitHub's say so");
+        assert!(
+            find(harness.root_id(), "edit-comment").is_none(),
+            "not without GitHub's say so"
+        );
 
         state.discussion.set(Some(Arc::new(discussion(true))));
         harness.rebuild();
         harness.paint();
         let root_id = harness.root_id();
         let edit = find(root_id, "edit-comment").expect("GitHub says the reader may");
-        let at = find(root_id, "RichText").expect("the text").get_visual_rect_no_clip().center();
+        let at = find(root_id, "RichText")
+            .expect("the text")
+            .get_visual_rect_no_clip()
+            .center();
         harness.pointer_move(at.x, at.y);
         harness.rebuild();
         harness.paint();
@@ -5538,14 +5974,27 @@ mod tests {
         let text_box = state.composer_box.get().expect("the box registered itself");
         assert!(harness.is_focused(text_box));
         harness.dispatch_event(key(Key::Character("a".into()), Code::KeyA, Modifiers::META));
-        harness.dispatch_event(key(Key::Named(NamedKey::Backspace), Code::Backspace, Modifiers::empty()));
+        harness.dispatch_event(key(
+            Key::Named(NamedKey::Backspace),
+            Code::Backspace,
+            Modifiers::empty(),
+        ));
         for ch in "epochs".chars() {
-            harness.dispatch_event(key(Key::Character(ch.to_string()), Code::KeyA, Modifiers::empty()));
+            harness.dispatch_event(key(
+                Key::Character(ch.to_string()),
+                Code::KeyA,
+                Modifiers::empty(),
+            ));
         }
         harness.dispatch_event(enter(Modifiers::META));
         harness.rebuild();
         match commands.try_recv() {
-            Ok(Command::UpdateGithubComment { item_id, node_id, place, body }) => {
+            Ok(Command::UpdateGithubComment {
+                item_id,
+                node_id,
+                place,
+                body,
+            }) => {
                 assert_eq!(item_id, "item-1");
                 assert_eq!(node_id, "PRRC_31");
                 assert_eq!(place, perch_github::CommentPlace::Line);
@@ -5587,14 +6036,21 @@ mod tests {
             thread_id: "t1".into(),
             ..posted
         }];
-        state.comment_threads.set(Arc::new(vec![theirs.clone(), ours.clone()]));
+        state
+            .comment_threads
+            .set(Arc::new(vec![theirs.clone(), ours.clone()]));
         let (backend, _commands) = crate::backend::Backend::recording();
         let backend = Rc::new(backend);
         let view = floem::views::Stack::vertical((
-            messages_view(app, state, backend.clone(), theirs.id.clone(), ThreadFace::Card)
-                .debug_name("theirs"),
-            cards::thread_card(app, state, backend, Rc::new(|_| {}), ours)
-                .debug_name("ours"),
+            messages_view(
+                app,
+                state,
+                backend.clone(),
+                theirs.id.clone(),
+                ThreadFace::Card,
+            )
+            .debug_name("theirs"),
+            cards::thread_card(app, state, backend, Rc::new(|_| {}), ours).debug_name("ours"),
         ))
         .style(|s| s.width(600.0));
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 900.0);
@@ -5602,13 +6058,28 @@ mod tests {
         harness.paint();
         for name in ["theirs", "ours"] {
             let card = find(harness.root_id(), name).unwrap();
-            assert!(find(card, "posted-when").is_some(), "{name}: the comment's time");
+            assert!(
+                find(card, "posted-when").is_some(),
+                "{name}: the comment's time"
+            );
             assert!(find(card, "github-link").is_some(), "{name}: its link");
             assert!(find(card, "reactions").is_some(), "{name}: its reactions");
-            assert!(find(card, "draft-pill").is_none(), "{name}: not a draft any more");
-            assert!(find(card, "edit-draft").is_none(), "{name}: not edited here");
-            assert!(find(card, "delete-draft").is_none(), "{name}: not deleted here");
-            assert!(find(card, "Label: \"You\"").is_some(), "{name}: the reader's");
+            assert!(
+                find(card, "draft-pill").is_none(),
+                "{name}: not a draft any more"
+            );
+            assert!(
+                find(card, "edit-draft").is_none(),
+                "{name}: not edited here"
+            );
+            assert!(
+                find(card, "delete-draft").is_none(),
+                "{name}: not deleted here"
+            );
+            assert!(
+                find(card, "Label: \"You\"").is_some(),
+                "{name}: the reader's"
+            );
         }
         assert!(
             find(find(harness.root_id(), "theirs").unwrap(), "reply-github").is_some(),
@@ -5630,8 +6101,15 @@ mod tests {
                 })
                 .collect()
         };
-        assert_eq!(drawn(&harness), [false; 4], "nothing until the pointer is on it");
-        let at = find(ours, "posted-when").unwrap().get_visual_rect_no_clip().center();
+        assert_eq!(
+            drawn(&harness),
+            [false; 4],
+            "nothing until the pointer is on it"
+        );
+        let at = find(ours, "posted-when")
+            .unwrap()
+            .get_visual_rect_no_clip()
+            .center();
         harness.pointer_move(at.x, at.y);
         harness.rebuild();
         harness.paint();
@@ -5650,14 +6128,27 @@ mod tests {
         let thread = github_thread_with_private_messages();
         state.comment_threads.set(Arc::new(vec![thread.clone()]));
         let (backend, _commands) = crate::backend::Backend::recording();
-        let view = messages_view(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
-            .style(|s| s.width(600.0));
+        let view = messages_view(
+            app,
+            state,
+            Rc::new(backend),
+            thread.id.clone(),
+            ThreadFace::Card,
+        )
+        .style(|s| s.width(600.0));
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
         harness.rebuild();
         harness.paint();
         let reply = find(harness.root_id(), "reply-github").expect("Reply on rohan's comment");
-        assert_eq!(harness.get_layout_rect(reply).width(), 0.0, "hidden until hovered");
-        let at = find(harness.root_id(), "Label: \"rohan\"").unwrap().get_visual_rect_no_clip().center();
+        assert_eq!(
+            harness.get_layout_rect(reply).width(),
+            0.0,
+            "hidden until hovered"
+        );
+        let at = find(harness.root_id(), "Label: \"rohan\"")
+            .unwrap()
+            .get_visual_rect_no_clip()
+            .center();
         harness.pointer_move(at.x, at.y);
         harness.rebuild();
         harness.paint();
@@ -5673,7 +6164,12 @@ mod tests {
         state.close_composer();
 
         // Follow up under the same thread is the agent's, as before.
-        state.open_composer(Some("gh-31".into()), thread.anchor.clone(), String::new(), sonnet_medium());
+        state.open_composer(
+            Some("gh-31".into()),
+            thread.anchor.clone(),
+            String::new(),
+            sonnet_medium(),
+        );
         assert!(!state.composer.get().unwrap().destination.is_github());
         state.close_composer();
 
@@ -5682,7 +6178,10 @@ mod tests {
         state.pull_request.set(Some(Arc::new(closed)));
         harness.rebuild();
         harness.paint();
-        assert!(find(harness.root_id(), "reply-github").is_none(), "nowhere for a draft to go");
+        assert!(
+            find(harness.root_id(), "reply-github").is_none(),
+            "nowhere for a draft to go"
+        );
     }
 
     /// A follow-up follows the thread's last message: under rohan's
@@ -5701,7 +6200,10 @@ mod tests {
         // run's high, neither of which the defaults would give.
         let mut answered = thread.clone();
         let answer = answered.messages.last_mut().unwrap();
-        answer.author = Author::Agent { backend: "claude-code".into(), model: "opus".into() };
+        answer.author = Author::Agent {
+            backend: "claude-code".into(),
+            model: "opus".into(),
+        };
         answer.run = Some(perch_github::RunRecord {
             id: "r1".into(),
             backend: "claude-code".into(),
@@ -5711,7 +6213,12 @@ mod tests {
             ..Default::default()
         });
         state.comment_threads.set(Arc::new(vec![answered.clone()]));
-        state.open_composer(Some(answered.id.clone()), answered.anchor.clone(), String::new(), sonnet_medium());
+        state.open_composer(
+            Some(answered.id.clone()),
+            answered.anchor.clone(),
+            String::new(),
+            sonnet_medium(),
+        );
         assert_eq!(
             state.composer.get().unwrap().destination,
             Destination::Agent {
@@ -5726,8 +6233,16 @@ mod tests {
         let mut theirs = thread.clone();
         theirs.messages.truncate(1);
         state.comment_threads.set(Arc::new(vec![theirs.clone()]));
-        state.open_composer(Some(theirs.id.clone()), theirs.anchor.clone(), String::new(), sonnet_medium());
-        assert_eq!(state.composer.get().unwrap().destination, Destination::GitHub);
+        state.open_composer(
+            Some(theirs.id.clone()),
+            theirs.anchor.clone(),
+            String::new(),
+            sonnet_medium(),
+        );
+        assert_eq!(
+            state.composer.get().unwrap().destination,
+            Destination::GitHub
+        );
         state.close_composer();
 
         // Ask about this on rohan's comment.
@@ -5752,9 +6267,19 @@ mod tests {
         harness.paint();
         let c = ask.get_visual_rect_no_clip().center();
         harness.click(c.x, c.y);
-        let composer = state.composer.get().expect("Ask about this opened the composer");
+        let composer = state
+            .composer
+            .get()
+            .expect("Ask about this opened the composer");
         assert_eq!(composer.thread_id.as_deref(), Some("gh-31"));
-        assert_eq!(composer.destination, Destination::agent((perch_agent::Backend::ClaudeCode, "opus".into(), perch_agent::Effort::High)));
+        assert_eq!(
+            composer.destination,
+            Destination::agent((
+                perch_agent::Backend::ClaudeCode,
+                "opus".into(),
+                perch_agent::Effort::High
+            ))
+        );
         assert_eq!(composer.editing, None);
     }
 
@@ -5796,8 +6321,16 @@ mod tests {
         let root_id = harness.root_id();
         let post = find(root_id, "post-to-github").expect("Post to GitHub");
         let copy = find(root_id, "copy-message").expect("Copy");
-        assert_eq!(harness.get_layout_rect(post).width(), 0.0, "hidden until hovered");
-        assert_eq!(harness.get_layout_rect(copy).width(), 0.0, "hidden until hovered");
+        assert_eq!(
+            harness.get_layout_rect(post).width(),
+            0.0,
+            "hidden until hovered"
+        );
+        assert_eq!(
+            harness.get_layout_rect(copy).width(),
+            0.0,
+            "hidden until hovered"
+        );
 
         let at = harness.get_layout_rect(root_id).center();
         harness.pointer_move(at.x, at.y);
@@ -5817,13 +6350,19 @@ mod tests {
 
         let c = post.get_visual_rect_no_clip().center();
         harness.click(c.x, c.y);
-        let composer = state.composer.get().expect("Post to GitHub opened the composer");
+        let composer = state
+            .composer
+            .get()
+            .expect("Post to GitHub opened the composer");
         assert_eq!(composer.thread_id.as_deref(), Some("gh-31"));
         assert_eq!(composer.destination, Destination::GitHub);
         assert_eq!(composer.anchor, thread.anchor);
         assert_eq!(composer.editing, None, "a new draft, not an edit");
         assert_eq!(state.composer_draft.get(), "because");
-        assert!(find(root_id, "edit-finding").is_none(), "an answer is not edited");
+        assert!(
+            find(root_id, "edit-finding").is_none(),
+            "an answer is not edited"
+        );
     }
 
     /// A finding's message has Edit under the pointer, so the reader can
@@ -5838,14 +6377,23 @@ mod tests {
         let thread = finding_thread("**High · Lock**\n\nTaken twice.\n\n_Reported by Claude._");
         state.comment_threads.set(Arc::new(vec![thread.clone()]));
         let (backend, mut commands) = crate::backend::Backend::recording();
-        let view = messages_view(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
-            .style(|s| s.width(600.0));
+        let view = messages_view(
+            app,
+            state,
+            Rc::new(backend),
+            thread.id.clone(),
+            ThreadFace::Card,
+        )
+        .style(|s| s.width(600.0));
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
         harness.rebuild();
         harness.paint();
         let root_id = harness.root_id();
         let edit = find(root_id, "edit-finding").expect("a finding offers Edit");
-        let at = find(root_id, "RichText").expect("the text").get_visual_rect_no_clip().center();
+        let at = find(root_id, "RichText")
+            .expect("the text")
+            .get_visual_rect_no_clip()
+            .center();
         harness.pointer_move(at.x, at.y);
         harness.rebuild();
         harness.paint();
@@ -5860,22 +6408,40 @@ mod tests {
         harness.rebuild();
         harness.paint();
         let root_id = harness.root_id();
-        assert!(find(root_id, "edit-finding").is_none(), "the composer took the row");
+        assert!(
+            find(root_id, "edit-finding").is_none(),
+            "the composer took the row"
+        );
         assert!(find(root_id, "Label: \"Save\"").is_some());
         assert!(find(root_id, "Label: \"Add to review\"").is_none());
-        assert!(find(root_id, "composer-destination").is_none(), "it goes nowhere");
+        assert!(
+            find(root_id, "composer-destination").is_none(),
+            "it goes nowhere"
+        );
 
         let text_box = state.composer_box.get().expect("the box registered itself");
         assert!(harness.is_focused(text_box));
         harness.dispatch_event(key(Key::Character("a".into()), Code::KeyA, Modifiers::META));
-        harness.dispatch_event(key(Key::Named(NamedKey::Backspace), Code::Backspace, Modifiers::empty()));
+        harness.dispatch_event(key(
+            Key::Named(NamedKey::Backspace),
+            Code::Backspace,
+            Modifiers::empty(),
+        ));
         for ch in "Taken twice.".chars() {
-            harness.dispatch_event(key(Key::Character(ch.to_string()), Code::KeyA, Modifiers::empty()));
+            harness.dispatch_event(key(
+                Key::Character(ch.to_string()),
+                Code::KeyA,
+                Modifiers::empty(),
+            ));
         }
         harness.dispatch_event(enter(Modifiers::META));
         harness.rebuild();
         match commands.try_recv() {
-            Ok(Command::EditReviewerMessage { item_id, message_id, body }) => {
+            Ok(Command::EditReviewerMessage {
+                item_id,
+                message_id,
+                body,
+            }) => {
                 assert_eq!(item_id, "item-1");
                 assert_eq!(message_id, "f1");
                 assert_eq!(body, "Taken twice.");
@@ -5921,8 +6487,12 @@ mod tests {
         harness.pointer_move(at.x, at.y);
         harness.rebuild();
         harness.paint();
-        let actions = find(root_id, "agent-actions").unwrap().get_visual_rect_no_clip();
-        let prose = find(root_id, "RichText").expect("the finding's text").get_visual_rect_no_clip();
+        let actions = find(root_id, "agent-actions")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        let prose = find(root_id, "RichText")
+            .expect("the finding's text")
+            .get_visual_rect_no_clip();
         assert!(prose.height() > 40.0, "the text wraps: {prose:?}");
         assert!(
             actions.intersect(prose).is_zero_area(),
@@ -5954,19 +6524,34 @@ mod tests {
         assert!(state.github_offered_on(&place), "a place on GitHub alone");
         let mut neither = lines.clone();
         neither.anchor = None;
-        assert!(state.github_offered_on(&neither), "neither, so an issue comment");
+        assert!(
+            state.github_offered_on(&neither),
+            "neither, so an issue comment"
+        );
 
         let mut closed = pull();
         closed.state = "closed".into();
         state.pull_request.set(Some(Arc::new(closed)));
-        assert!(!state.github_offered_on(&lines), "no review to take the draft");
+        assert!(
+            !state.github_offered_on(&lines),
+            "no review to take the draft"
+        );
         assert!(!state.github_offered_on(&place), "nor a reply for one");
-        assert!(state.github_offered_on(&neither), "a closed pull request still takes a comment");
+        assert!(
+            state.github_offered_on(&neither),
+            "a closed pull request still takes a comment"
+        );
 
         state.pull_request.set(None);
-        assert!(!state.github_offered_on(&neither), "a branch has nowhere to post");
+        assert!(
+            !state.github_offered_on(&neither),
+            "a branch has nowhere to post"
+        );
         state.issue.set(Some(Arc::new(issue())));
-        assert!(state.github_offered_on(&neither), "an issue takes the comment");
+        assert!(
+            state.github_offered_on(&neither),
+            "an issue takes the comment"
+        );
         assert!(!state.github_offered_on(&lines), "but no draft");
     }
 
@@ -5997,7 +6582,10 @@ mod tests {
                 id: "f1".into(),
                 thread_id: "finding-1".into(),
                 origin: ThreadOrigin::Local,
-                author: Author::Agent { backend: "claude-code".into(), model: "sonnet".into() },
+                author: Author::Agent {
+                    backend: "claude-code".into(),
+                    model: "sonnet".into(),
+                },
                 body: text.into(),
                 created_at: at,
                 run: None,
@@ -6054,18 +6642,27 @@ mod tests {
         harness.paint();
         let c = post.get_visual_rect_no_clip().center();
         harness.click(c.x, c.y);
-        let composer = state.composer.get().expect("Post to GitHub opened the composer");
+        let composer = state
+            .composer
+            .get()
+            .expect("Post to GitHub opened the composer");
         assert_eq!(composer.thread_id.as_deref(), Some("ours"));
         assert_eq!(composer.destination, Destination::GitHub);
         assert_eq!(composer.anchor, None);
         assert_eq!(state.composer_draft.get(), "because");
-        assert!(state.posts_issue_comment(&composer), "an issue comment, not a draft");
+        assert!(
+            state.posts_issue_comment(&composer),
+            "an issue comment, not a draft"
+        );
 
         // An issue has no pull request to comment on.
         state.pull_request.set(None);
         harness.rebuild();
         harness.paint();
-        assert!(find(harness.root_id(), "post-to-github").is_none(), "nowhere at all");
+        assert!(
+            find(harness.root_id(), "post-to-github").is_none(),
+            "nowhere at all"
+        );
     }
 
     /// Post to GitHub is offered only on an open pull request, and the
@@ -6091,19 +6688,28 @@ mod tests {
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
         harness.rebuild();
         harness.paint();
-        assert!(find(harness.root_id(), "post-to-github").is_none(), "no pull request yet");
+        assert!(
+            find(harness.root_id(), "post-to-github").is_none(),
+            "no pull request yet"
+        );
 
         state.pull_request.set(Some(Arc::new(pull())));
         harness.rebuild();
         harness.paint();
-        assert!(find(harness.root_id(), "post-to-github").is_some(), "the pull request landed");
+        assert!(
+            find(harness.root_id(), "post-to-github").is_some(),
+            "the pull request landed"
+        );
 
         let mut closed = pull();
         closed.state = "closed".into();
         state.pull_request.set(Some(Arc::new(closed)));
         harness.rebuild();
         harness.paint();
-        assert!(find(harness.root_id(), "post-to-github").is_none(), "closed takes no review");
+        assert!(
+            find(harness.root_id(), "post-to-github").is_none(),
+            "closed takes no review"
+        );
     }
 
     /// The draft the reader leaves in `thread`, bound for GitHub.
@@ -6127,14 +6733,24 @@ mod tests {
         thread.messages.push(draft_under(&thread));
         assert_eq!(
             Lane::of(&thread),
-            [Lane::Flush, Lane::PrivateStart, Lane::PrivateContinue, Lane::Flush]
+            [
+                Lane::Flush,
+                Lane::PrivateStart,
+                Lane::PrivateContinue,
+                Lane::Flush
+            ]
         );
 
         let mut split = thread.clone();
         split.messages.swap(2, 3);
         assert_eq!(
             Lane::of(&split),
-            [Lane::Flush, Lane::PrivateStart, Lane::Flush, Lane::PrivateStart]
+            [
+                Lane::Flush,
+                Lane::PrivateStart,
+                Lane::Flush,
+                Lane::PrivateStart
+            ]
         );
 
         let mut private = thread.clone();
@@ -6167,25 +6783,51 @@ mod tests {
             harness.paint();
             let root_id = harness.root_id();
 
-            assert_eq!(find_all(root_id, "comment-byline").len(), 4, "{face:?}: a byline per message");
+            assert_eq!(
+                find_all(root_id, "comment-byline").len(),
+                4,
+                "{face:?}: a byline per message"
+            );
             let stack = find(root_id, "thread-messages").expect("the messages");
             let rows = stack.children();
             assert_eq!(rows.len(), 4, "{face:?}: a row per message");
-            let labelled: Vec<bool> = rows.iter().map(|r| find(*r, "perch-only").is_some()).collect();
-            assert_eq!(labelled, [false, true, true, false], "{face:?}: the question and the answer");
+            let labelled: Vec<bool> = rows
+                .iter()
+                .map(|r| find(*r, "perch-only").is_some())
+                .collect();
+            assert_eq!(
+                labelled,
+                [false, true, true, false],
+                "{face:?}: the question and the answer"
+            );
             // And on a grey band from one side of the box to the other,
             // so what a colleague can see is the white.
-            let banded: Vec<bool> =
-                rows.iter().map(|r| r.debug_name().contains("private-band")).collect();
+            let banded: Vec<bool> = rows
+                .iter()
+                .map(|r| r.debug_name().contains("private-band"))
+                .collect();
             assert_eq!(banded, [false, true, true, false], "{face:?}: banded");
             let band = rows[1].get_visual_rect_no_clip();
             let messages = stack.get_visual_rect_no_clip();
-            assert_eq!((band.x0, band.x1), (messages.x0, messages.x1), "{face:?}: edge to edge");
+            assert_eq!(
+                (band.x0, band.x1),
+                (messages.x0, messages.x1),
+                "{face:?}: edge to edge"
+            );
             for label in find_all(root_id, "perch-only") {
-                assert!(harness.get_layout_rect(label).width() > 0.0, "{face:?}: the label is drawn");
+                assert!(
+                    harness.get_layout_rect(label).width() > 0.0,
+                    "{face:?}: the label is drawn"
+                );
             }
-            assert!(find(rows[3], "draft-pill").is_some(), "{face:?}: the draft is last");
-            assert!(find(rows[0], "ask-about").is_some(), "{face:?}: rohan's comment");
+            assert!(
+                find(rows[3], "draft-pill").is_some(),
+                "{face:?}: the draft is last"
+            );
+            assert!(
+                find(rows[0], "ask-about").is_some(),
+                "{face:?}: rohan's comment"
+            );
 
             // Every byline starts at one place, past the avatar, and the
             // text under it starts there too, the first message's in the
@@ -6201,7 +6843,9 @@ mod tests {
             };
             let past_avatar = inset + avatar + theme::THREAD_AVATAR_GAP;
             for (i, row) in rows.iter().enumerate() {
-                let byline = find(*row, "comment-byline").unwrap().get_visual_rect_no_clip();
+                let byline = find(*row, "comment-byline")
+                    .unwrap()
+                    .get_visual_rect_no_clip();
                 assert_eq!(byline.x0 - left, past_avatar, "{face:?}: row {i}'s byline");
                 let text = find(*row, "LinkedText")
                     .or_else(|| find(*row, "RichText"))
@@ -6209,7 +6853,10 @@ mod tests {
                     .get_visual_rect_no_clip();
                 assert_eq!(text.x0 - left, past_avatar, "{face:?}: row {i}'s text");
                 // The line down the avatars runs beside every message.
-                assert!(find(*row, "comment-rail").is_some(), "{face:?}: row {i}'s rail");
+                assert!(
+                    find(*row, "comment-rail").is_some(),
+                    "{face:?}: row {i}'s rail"
+                );
             }
         }
     }
@@ -6230,16 +6877,30 @@ mod tests {
             }
             state.comment_threads.set(Arc::new(vec![thread.clone()]));
             let (backend, _commands) = crate::backend::Backend::recording();
-            let view = follow_up(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Inline)
-                .style(|s| s.width(600.0));
+            let view = follow_up(
+                app,
+                state,
+                Rc::new(backend),
+                thread.id.clone(),
+                ThreadFace::Inline,
+            )
+            .style(|s| s.width(600.0));
             let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
             harness.rebuild();
             harness.paint();
-            let bar = find(harness.root_id(), "reply-bar").unwrap().get_visual_rect_no_clip();
-            let line = find(harness.root_id(), "Follow up").unwrap().get_visual_rect_no_clip();
+            let bar = find(harness.root_id(), "reply-bar")
+                .unwrap()
+                .get_visual_rect_no_clip();
+            let line = find(harness.root_id(), "Follow up")
+                .unwrap()
+                .get_visual_rect_no_clip();
             offsets.push(line.y0 - bar.y0);
         }
-        assert_eq!(offsets[0] - offsets[1], theme::INLINE_THREAD_INSET, "{offsets:?}");
+        assert_eq!(
+            offsets[0] - offsets[1],
+            theme::INLINE_THREAD_INSET,
+            "{offsets:?}"
+        );
     }
 
     /// Folded, a GitHub thread that holds the reader's asks says how many,
@@ -6259,7 +6920,9 @@ mod tests {
         for thread in [&theirs, &ours] {
             state.toggle_card(&CardId::Thread(thread.id.clone()));
         }
-        state.comment_threads.set(Arc::new(vec![theirs.clone(), ours.clone()]));
+        state
+            .comment_threads
+            .set(Arc::new(vec![theirs.clone(), ours.clone()]));
         let (backend, _commands) = crate::backend::Backend::recording();
         let backend = Rc::new(backend);
         let view = floem::views::Stack::vertical((
@@ -6295,15 +6958,28 @@ mod tests {
         }
         state.comment_threads.set(Arc::new(vec![thread.clone()]));
         let (backend, _commands) = crate::backend::Backend::recording();
-        let view = messages_view(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
-            .style(|s| s.width(600.0));
+        let view = messages_view(
+            app,
+            state,
+            Rc::new(backend),
+            thread.id.clone(),
+            ThreadFace::Card,
+        )
+        .style(|s| s.width(600.0));
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
         harness.rebuild();
         harness.paint();
         let root_id = harness.root_id();
         assert!(find(root_id, "perch-only").is_none());
-        assert_eq!(find_all(root_id, "comment-byline").len(), 2, "the question and the answer have bylines");
-        assert!(find(root_id, "agent-avatar").is_some(), "the answer is under the agent's mark");
+        assert_eq!(
+            find_all(root_id, "comment-byline").len(),
+            2,
+            "the question and the answer have bylines"
+        );
+        assert!(
+            find(root_id, "agent-avatar").is_some(),
+            "the answer is under the agent's mark"
+        );
 
         // A draft added under it labels what was there.
         let mut with_draft = thread.clone();
@@ -6314,7 +6990,11 @@ mod tests {
         harness.rebuild();
         harness.paint();
         let root_id = harness.root_id();
-        assert_eq!(find_all(root_id, "perch-only").len(), 2, "the question and the answer are labelled");
+        assert_eq!(
+            find_all(root_id, "perch-only").len(),
+            2,
+            "the question and the answer are labelled"
+        );
         assert!(find(root_id, "draft-pill").is_some());
     }
 
@@ -6380,7 +7060,11 @@ mod tests {
     }
 
     fn escape() -> floem::event::Event {
-        key(Key::Named(NamedKey::Escape), Code::Escape, Modifiers::empty())
+        key(
+            Key::Named(NamedKey::Escape),
+            Code::Escape,
+            Modifiers::empty(),
+        )
     }
 
     /// Whether a view is laid out at all: a hidden one has no size.
@@ -6427,14 +7111,24 @@ mod tests {
 
         click(&mut harness, "thread-resolve");
         match commands.try_recv() {
-            Ok(Command::ResolveThread { item_id, thread_id, resolve }) => {
-                assert_eq!((item_id.as_str(), thread_id.as_str(), resolve), ("item-1", "gh-31", true));
+            Ok(Command::ResolveThread {
+                item_id,
+                thread_id,
+                resolve,
+            }) => {
+                assert_eq!(
+                    (item_id.as_str(), thread_id.as_str(), resolve),
+                    ("item-1", "gh-31", true)
+                );
             }
             other => panic!("Resolve asked nothing: {other:?}"),
         }
         assert!(state.is_resolved("gh-31"));
         assert!(state.is_collapsed(&CardId::Thread("gh-31".into())));
-        assert!(!shown(&harness, "thread-resolve"), "folded away with the card");
+        assert!(
+            !shown(&harness, "thread-resolve"),
+            "folded away with the card"
+        );
     }
 
     /// A resolved thread offers Unresolve. The thread shows the click at
@@ -6448,8 +7142,14 @@ mod tests {
         let thread = resolvable_thread(true);
         state.comment_threads.set(Arc::new(vec![thread.clone()]));
         let (backend, mut commands) = crate::backend::Backend::recording();
-        let view = follow_up(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
-            .style(|s| s.width(600.0));
+        let view = follow_up(
+            app,
+            state,
+            Rc::new(backend),
+            thread.id.clone(),
+            ThreadFace::Card,
+        )
+        .style(|s| s.width(600.0));
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
         harness.rebuild();
         harness.paint();
@@ -6457,10 +7157,16 @@ mod tests {
 
         click(&mut harness, "thread-unresolve");
         assert!(
-            matches!(commands.try_recv(), Ok(Command::ResolveThread { resolve: false, .. })),
+            matches!(
+                commands.try_recv(),
+                Ok(Command::ResolveThread { resolve: false, .. })
+            ),
             "Unresolve asks to unresolve"
         );
-        assert!(shown(&harness, "thread-resolve"), "shown unresolved before GitHub answers");
+        assert!(
+            shown(&harness, "thread-resolve"),
+            "shown unresolved before GitHub answers"
+        );
         assert!(!shown(&harness, "thread-unresolve"));
         click(&mut harness, "thread-resolve");
         assert!(commands.try_recv().is_err(), "the first ask is unanswered");
@@ -6468,7 +7174,10 @@ mod tests {
         state.settle_resolution("gh-31");
         harness.rebuild();
         harness.paint();
-        assert!(shown(&harness, "thread-unresolve"), "refused, it is as GitHub has it");
+        assert!(
+            shown(&harness, "thread-unresolve"),
+            "refused, it is as GitHub has it"
+        );
         assert!(!shown(&harness, "thread-resolve"));
     }
 
@@ -6485,39 +7194,74 @@ mod tests {
         thread.can_resolve = false;
         state.comment_threads.set(Arc::new(vec![thread.clone()]));
         let (backend, _commands) = crate::backend::Backend::recording();
-        let view = follow_up(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
-            .style(|s| s.width(600.0));
+        let view = follow_up(
+            app,
+            state,
+            Rc::new(backend),
+            thread.id.clone(),
+            ThreadFace::Card,
+        )
+        .style(|s| s.width(600.0));
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
         harness.rebuild();
         harness.paint();
         assert!(!shown(&harness, "thread-resolve"));
-        assert!(shown(&harness, "Follow up"), "the line is there all the same");
+        assert!(
+            shown(&harness, "Follow up"),
+            "the line is there all the same"
+        );
 
         thread.can_resolve = true;
         state.comment_threads.set(Arc::new(vec![thread.clone()]));
         harness.rebuild();
         harness.paint();
         assert!(shown(&harness, "thread-resolve"));
-        assert!(find(harness.root_id(), "Label: \"Resolve conversation\"").is_some(), "GitHub's words");
-        let line = find(harness.root_id(), "Follow up").unwrap().get_visual_rect_no_clip();
-        let button = find(harness.root_id(), "thread-resolve").unwrap().get_visual_rect_no_clip();
-        assert!(button.y0 > line.y1, "under the Follow up box: {line:?} {button:?}");
-        assert_eq!(button.x0, theme::THREAD_INSET, "at the thread's left, in its inset: {button:?}");
+        assert!(
+            find(harness.root_id(), "Label: \"Resolve conversation\"").is_some(),
+            "GitHub's words"
+        );
+        let line = find(harness.root_id(), "Follow up")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        let button = find(harness.root_id(), "thread-resolve")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        assert!(
+            button.y0 > line.y1,
+            "under the Follow up box: {line:?} {button:?}"
+        );
+        assert_eq!(
+            button.x0,
+            theme::THREAD_INSET,
+            "at the thread's left, in its inset: {button:?}"
+        );
         // The box sits past the reader's face, in the bar's inset.
-        let bar = find(harness.root_id(), "reply-bar").unwrap().get_visual_rect_no_clip();
+        let bar = find(harness.root_id(), "reply-bar")
+            .unwrap()
+            .get_visual_rect_no_clip();
         assert_eq!(bar.width(), 600.0, "the bar is the thread's width");
         assert_eq!(
             line.x0,
             theme::THREAD_INSET + theme::THREAD_AVATAR + theme::THREAD_AVATAR_GAP,
             "the box is past the face"
         );
-        assert_eq!(line.x1, 600.0 - theme::THREAD_INSET, "and reaches the bar's inset");
+        assert_eq!(
+            line.x1,
+            600.0 - theme::THREAD_INSET,
+            "and reaches the bar's inset"
+        );
 
-        state.open_composer(Some(thread.id.clone()), thread.anchor.clone(), String::new(), sonnet_medium());
+        state.open_composer(
+            Some(thread.id.clone()),
+            thread.anchor.clone(),
+            String::new(),
+            sonnet_medium(),
+        );
         harness.rebuild();
         harness.paint();
         assert!(!shown(&harness, "thread-resolve"));
-        let composer = find(harness.root_id(), "composer-box").expect("the composer is under the thread");
+        let composer =
+            find(harness.root_id(), "composer-box").expect("the composer is under the thread");
         assert_eq!(
             harness.get_layout_rect(composer).width(),
             600.0 - 2.0 * theme::THREAD_INSET,
@@ -6541,12 +7285,21 @@ mod tests {
         let thread = finding_thread("because");
         state.comment_threads.set(Arc::new(vec![thread.clone()]));
         let (backend, mut commands) = crate::backend::Backend::recording();
-        let view = follow_up(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
-            .style(|s| s.width(600.0));
+        let view = follow_up(
+            app,
+            state,
+            Rc::new(backend),
+            thread.id.clone(),
+            ThreadFace::Card,
+        )
+        .style(|s| s.width(600.0));
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
         harness.rebuild();
         harness.paint();
-        assert!(shown(&harness, "thread-resolve"), "the reader's own, whatever GitHub allows");
+        assert!(
+            shown(&harness, "thread-resolve"),
+            "the reader's own, whatever GitHub allows"
+        );
 
         click(&mut harness, "thread-resolve");
         assert!(
@@ -6639,20 +7392,32 @@ mod tests {
         let thread = resolvable_thread(false);
         state.comment_threads.set(Arc::new(vec![thread.clone()]));
         let (backend, mut commands) = crate::backend::Backend::recording();
-        let view = cards::thread_card(app, state, Rc::new(backend), Rc::new(|_| {}), thread.clone())
-            .style(|s| s.width(700.0));
+        let view = cards::thread_card(
+            app,
+            state,
+            Rc::new(backend),
+            Rc::new(|_| {}),
+            thread.clone(),
+        )
+        .style(|s| s.width(700.0));
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 800.0);
         harness.rebuild();
         harness.paint();
         let comment = "name label - Label: \"rohan\"";
         assert!(shown(&harness, comment), "open, the comment shows");
         assert!(shown(&harness, "thread-path"), "the header names the file");
-        assert!(!shown(&harness, "resolved-toggle"), "nothing to show or hide on a thread not resolved");
+        assert!(
+            !shown(&harness, "resolved-toggle"),
+            "nothing to show or hide on a thread not resolved"
+        );
 
         // The chevron folds it to its header, and opens it again.
         click(&mut harness, "thread-chevron");
         assert!(state.is_folded("gh-31"));
-        assert!(find(harness.root_id(), comment).is_none(), "folded to its header");
+        assert!(
+            find(harness.root_id(), comment).is_none(),
+            "folded to its header"
+        );
         assert!(shown(&harness, "thread-path"));
         click(&mut harness, "thread-chevron");
         assert!(shown(&harness, comment));
@@ -6665,10 +7430,17 @@ mod tests {
         let resolve = std::iter::from_fn(|| commands.try_recv().ok())
             .find(|c| matches!(c, Command::ResolveThread { .. }));
         match resolve {
-            Some(Command::ResolveThread { thread_id, resolve: true, .. }) => assert_eq!(thread_id, "gh-31"),
+            Some(Command::ResolveThread {
+                thread_id,
+                resolve: true,
+                ..
+            }) => assert_eq!(thread_id, "gh-31"),
             other => panic!("Resolve asked nothing: {other:?}"),
         }
-        assert!(find(harness.root_id(), comment).is_none(), "resolved, folded to its header");
+        assert!(
+            find(harness.root_id(), comment).is_none(),
+            "resolved, folded to its header"
+        );
         assert!(shown(&harness, "Label: \"Show resolved\""));
 
         // GitHub answers, and the thread stays folded.
@@ -6727,7 +7499,9 @@ mod tests {
             body: "why?".into(),
             ..theirs.messages[0].clone()
         }];
-        state.comment_threads.set(Arc::new(vec![theirs.clone(), ours.clone()]));
+        state
+            .comment_threads
+            .set(Arc::new(vec![theirs.clone(), ours.clone()]));
         let (backend, _commands) = crate::backend::Backend::recording();
         let backend = Rc::new(backend);
         let view = floem::views::Stack::vertical((
@@ -6742,7 +7516,10 @@ mod tests {
         let ours = find(harness.root_id(), "ours").unwrap();
         let heading = find(ours, "lines-heading").expect("the reader's thread is open");
         assert_eq!(texts(heading).join(" "), "Question on lines R5 to R7");
-        assert!(find(ours, "Label: \"Perch only\"").is_some(), "marked as the reader's own");
+        assert!(
+            find(ours, "Label: \"Perch only\"").is_some(),
+            "marked as the reader's own"
+        );
 
         let theirs = find(harness.root_id(), "theirs").unwrap();
         let row = find(theirs, "resolved-row").expect("resolved, so collapsed to its row");
@@ -6751,7 +7528,10 @@ mod tests {
             "Comment on line R7",
             "the row says where the thread is, as GitHub's does"
         );
-        assert!(find(row, "name label").is_none(), "and not who spoke or what they said");
+        assert!(
+            find(row, "name label").is_none(),
+            "and not who spoke or what they said"
+        );
         let toggle = find(theirs, "resolved-toggle").expect("Show resolved on the row");
         assert!(harness.get_layout_rect(toggle).width() > 0.0);
         assert_eq!(texts(toggle), ["Show resolved"]);
@@ -6763,9 +7543,15 @@ mod tests {
         let theirs = find(harness.root_id(), "theirs").unwrap();
         let heading = find(theirs, "lines-heading").expect("open, with its header");
         assert_eq!(texts(heading).join(" "), "Comment on line R7");
-        assert_eq!(texts(find(theirs, "resolved-toggle").unwrap()), ["Hide resolved"]);
+        assert_eq!(
+            texts(find(theirs, "resolved-toggle").unwrap()),
+            ["Hide resolved"]
+        );
         assert!(find(theirs, "Label: \"Unresolve comment\"").is_some());
-        assert!(state.is_folded("gh-31"), "opening it in the code leaves Conversation folded");
+        assert!(
+            state.is_folded("gh-31"),
+            "opening it in the code leaves Conversation folded"
+        );
     }
 
     /// A comment by whoever opened the pull request says Author in its
@@ -6784,19 +7570,31 @@ mod tests {
         thread.messages.push(reply);
         state.comment_threads.set(Arc::new(vec![thread.clone()]));
         let (backend, _commands) = crate::backend::Backend::recording();
-        let view = messages_view(app, state, Rc::new(backend), thread.id.clone(), ThreadFace::Card)
-            .style(|s| s.width(600.0));
+        let view = messages_view(
+            app,
+            state,
+            Rc::new(backend),
+            thread.id.clone(),
+            ThreadFace::Card,
+        )
+        .style(|s| s.width(600.0));
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
         harness.rebuild();
         harness.paint();
-        let rows = find(harness.root_id(), "thread-messages").unwrap().children();
+        let rows = find(harness.root_id(), "thread-messages")
+            .unwrap()
+            .children();
         let marked: Vec<bool> = rows
             .iter()
             .map(|row| {
                 find(*row, "author-label").is_some_and(|l| harness.get_layout_rect(l).width() > 0.0)
             })
             .collect();
-        assert_eq!(marked, [false, true], "octocat opened the pull request; rohan did not");
+        assert_eq!(
+            marked,
+            [false, true],
+            "octocat opened the pull request; rohan did not"
+        );
     }
 
     /// At the foot of a pull request's conversation GitHub is offered
@@ -6817,21 +7615,34 @@ mod tests {
 
         state.open_composer(None, None, String::new(), sonnet_medium());
         let foot = state.composer.get().unwrap();
-        assert_eq!(foot.destination, Destination::agent(sonnet_medium()), "an agent first");
+        assert_eq!(
+            foot.destination,
+            Destination::agent(sonnet_medium()),
+            "an agent first"
+        );
         assert!(state.github_offered(&foot));
         assert!(state.posts_issue_comment(&foot));
 
         state.open_composer(Some("theirs".into()), None, String::new(), sonnet_medium());
         let reply = state.composer.get().unwrap();
         assert!(state.github_offered(&reply));
-        assert!(!state.posts_issue_comment(&reply), "a reply, not an issue comment");
-        assert!(state.posts_reply(&reply), "a reply on GitHub's thread posts at once");
+        assert!(
+            !state.posts_issue_comment(&reply),
+            "a reply, not an issue comment"
+        );
+        assert!(
+            state.posts_reply(&reply),
+            "a reply on GitHub's thread posts at once"
+        );
         assert!(!state.posts_reply(&foot));
 
         state.open_composer(Some("ours".into()), None, String::new(), sonnet_medium());
         let follow_up = state.composer.get().unwrap();
         assert!(state.github_offered(&follow_up));
-        assert!(state.posts_issue_comment(&follow_up), "nowhere on GitHub to reply");
+        assert!(
+            state.posts_issue_comment(&follow_up),
+            "nowhere on GitHub to reply"
+        );
 
         state.pull_request.set(None);
         state.open_composer(None, None, String::new(), sonnet_medium());
@@ -6866,7 +7677,10 @@ mod tests {
         harness.paint();
         let root_id = harness.root_id();
         assert!(find(root_id, "Label: \"Comment\"").is_some());
-        assert!(find(root_id, "Label: \"Medium\"").is_none(), "no effort for GitHub");
+        assert!(
+            find(root_id, "Label: \"Medium\"").is_none(),
+            "no effort for GitHub"
+        );
         let text_box = state.composer_box.get().expect("the box registered itself");
         assert!(harness.is_focused(text_box));
 
@@ -6874,12 +7688,18 @@ mod tests {
         harness.dispatch_event(enter(Modifiers::META));
         harness.rebuild();
         harness.paint();
-        assert!(commands.try_recv().is_err(), "nothing posted before the yes");
+        assert!(
+            commands.try_recv().is_err(),
+            "nothing posted before the yes"
+        );
         assert!(state.composer_confirming.get());
         let root_id = harness.root_id();
         assert!(find(root_id, "Post to github.com/acme/repo/pull/42?").is_some());
         assert!(find(root_id, "composer-post").is_some());
-        assert!(find(root_id, "Label: \"Comment\"").is_none(), "the send gave way to the ask");
+        assert!(
+            find(root_id, "Label: \"Comment\"").is_none(),
+            "the send gave way to the ask"
+        );
 
         // Escape takes it back, text and all.
         harness.dispatch_event(escape());
@@ -6909,15 +7729,25 @@ mod tests {
             }
             other => panic!("Enter did not post: {other:?}"),
         };
-        assert_eq!(state.composer_draft.get(), "Looks good", "Enter did not break the line");
+        assert_eq!(
+            state.composer_draft.get(),
+            "Looks good",
+            "Enter did not break the line"
+        );
         assert!(!state.composer_confirming.get());
         let posting = state.posting.get().expect("the comment is in flight");
         assert_eq!(posting.token, token);
         assert_eq!(posting.body, "Looks good");
-        assert!(state.composer.get().is_some(), "the composer stays open while posting");
+        assert!(
+            state.composer.get().is_some(),
+            "the composer stays open while posting"
+        );
         let root_id = harness.root_id();
         assert!(find(root_id, "composer-posting").is_some());
-        assert!(find(root_id, "Label: \"Comment\"").is_none(), "nothing to click while posting");
+        assert!(
+            find(root_id, "Label: \"Comment\"").is_none(),
+            "nothing to click while posting"
+        );
         assert_eq!(
             state.last_destination[ThreadFace::Card.index()].get(),
             Some(Destination::GitHub)
@@ -6930,7 +7760,10 @@ mod tests {
         assert!(commands.try_recv().is_err());
         assert_eq!(state.composer_draft.get(), "Looks good");
         // Nor can the box be put away from under the comment.
-        assert!(!shown(&harness, "composer-close"), "no closing while posting");
+        assert!(
+            !shown(&harness, "composer-close"),
+            "no closing while posting"
+        );
 
         // An answer to some other send is not this one's.
         state.settle_issue_comment(token + 100, Err("stale".into()));
@@ -6942,12 +7775,18 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert!(state.posting.get().is_none());
-        assert!(state.composer.get().is_some(), "the composer stays with its text");
+        assert!(
+            state.composer.get().is_some(),
+            "the composer stays with its text"
+        );
         assert_eq!(state.composer_draft.get(), "Looks good");
         let root_id = harness.root_id();
         assert!(find(root_id, "composer-error").is_some());
         assert!(find(root_id, "GitHub could not post the comment: 403").is_some());
-        assert!(find(root_id, "Label: \"Comment\"").is_some(), "the send is back");
+        assert!(
+            find(root_id, "Label: \"Comment\"").is_some(),
+            "the send is back"
+        );
         assert!(shown(&harness, "composer-close"), "and so is the close");
 
         // Clicking Comment asks, clicking Post posts, and this time it lands.
@@ -6962,10 +7801,16 @@ mod tests {
             }
             other => panic!("Post did not post: {other:?}"),
         };
-        assert!(state.composer_error.get().is_none(), "a new try clears the old reason");
+        assert!(
+            state.composer_error.get().is_none(),
+            "a new try clears the old reason"
+        );
         state.settle_issue_comment(token, Ok(()));
         assert!(state.posting.get().is_none());
-        assert!(state.composer.get().is_none(), "posted, the composer closes");
+        assert!(
+            state.composer.get().is_none(),
+            "posted, the composer closes"
+        );
         assert_eq!(state.composer_draft.get(), "");
 
         // The foot still opens on an agent; GitHub is a click away.
@@ -6988,7 +7833,12 @@ mod tests {
         let state = state_with_pull_request();
         let thread = github_thread_with_private_messages();
         state.comment_threads.set(Arc::new(vec![thread.clone()]));
-        state.open_composer(Some(thread.id.clone()), None, "Fixed in abc".into(), sonnet_medium());
+        state.open_composer(
+            Some(thread.id.clone()),
+            None,
+            "Fixed in abc".into(),
+            sonnet_medium(),
+        );
         state.set_destination(Destination::GitHub);
         let composer = state.composer.get().unwrap();
         let (backend, mut commands) = crate::backend::Backend::recording();
@@ -7003,7 +7853,10 @@ mod tests {
         harness.dispatch_event(enter(Modifiers::META));
         harness.rebuild();
         harness.paint();
-        assert!(!state.composer_confirming.get(), "a reply is not asked about");
+        assert!(
+            !state.composer_confirming.get(),
+            "a reply is not asked about"
+        );
         let token = match commands.try_recv() {
             Ok(Command::ReplyToThread {
                 item_id,
@@ -7034,10 +7887,20 @@ mod tests {
             other => panic!("Reply did not reply: {other:?}"),
         };
         state.settle_issue_comment(token, Ok(()));
-        assert!(state.composer.get().is_none(), "posted, the composer closes");
+        assert!(
+            state.composer.get().is_none(),
+            "posted, the composer closes"
+        );
 
-        state.open_composer(Some(thread.id.clone()), None, "draft".into(), sonnet_medium());
-        state.composer.update(|c| c.as_mut().unwrap().editing = Some("draft-1".into()));
+        state.open_composer(
+            Some(thread.id.clone()),
+            None,
+            "draft".into(),
+            sonnet_medium(),
+        );
+        state
+            .composer
+            .update(|c| c.as_mut().unwrap().editing = Some("draft-1".into()));
         let editing = state.composer.get().unwrap();
         assert!(!state.posts_reply(&editing), "an edited draft stays one");
     }
@@ -7065,13 +7928,24 @@ mod tests {
         assert!(find(harness.root_id(), "Label: \"Close with comment\"").is_some());
 
         click(&mut harness, "subject-close");
-        assert!(commands.try_recv().is_err(), "nothing closed before the yes");
+        assert!(
+            commands.try_recv().is_err(),
+            "nothing closed before the yes"
+        );
         assert!(state.composer_confirming.get());
-        assert!(find(harness.root_id(), "Comment on and close github.com/acme/repo/pull/42?").is_some());
+        assert!(find(
+            harness.root_id(),
+            "Comment on and close github.com/acme/repo/pull/42?"
+        )
+        .is_some());
 
         click(&mut harness, "composer-post");
         let token = match commands.try_recv() {
-            Ok(Command::ClosePullRequest { item_id, token, body }) => {
+            Ok(Command::ClosePullRequest {
+                item_id,
+                token,
+                body,
+            }) => {
                 assert_eq!(item_id, "item-1");
                 assert_eq!(body, "Superseded by #43");
                 token
@@ -7157,18 +8031,32 @@ mod tests {
         click(&mut harness, "subject-close-menu");
         assert!(shown(&harness, "close-ways"));
         assert!(shown(&harness, "close-as-completed"));
-        assert!(!shown(&harness, "close-as-issue-unfold"), "an issue is not closed as one");
+        assert!(
+            !shown(&harness, "close-as-issue-unfold"),
+            "an issue is not closed as one"
+        );
         // Under the button, its right edge on the button's.
-        let button = find(harness.root_id(), "subject-close-menu").unwrap().get_visual_rect_no_clip();
-        let menu = find(harness.root_id(), "close-ways").unwrap().get_visual_rect_no_clip();
-        assert!(menu.y0 >= button.y1 && (menu.x1 - button.x1).abs() < 2.0, "{menu:?} {button:?}");
+        let button = find(harness.root_id(), "subject-close-menu")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        let menu = find(harness.root_id(), "close-ways")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        assert!(
+            menu.y0 >= button.y1 && (menu.x1 - button.x1).abs() < 2.0,
+            "{menu:?} {button:?}"
+        );
 
         click(&mut harness, "close-as-not-planned");
         assert!(!shown(&harness, "close-ways"));
         assert!(commands.try_recv().is_err(), "a pick closes nothing");
         assert!(find(harness.root_id(), "Label: \"Close as not planned\"").is_some());
         click(&mut harness, "subject-close");
-        assert!(find(harness.root_id(), "Close github.com/acme/repo/issues/43 as not planned?").is_some());
+        assert!(find(
+            harness.root_id(),
+            "Close github.com/acme/repo/issues/43 as not planned?"
+        )
+        .is_some());
         click(&mut harness, "composer-post");
         let token = match commands.try_recv() {
             Ok(Command::CloseIssue {
@@ -7210,7 +8098,11 @@ mod tests {
         assert!(!shown(&harness, "close-duplicate-row:50"));
         click(&mut harness, "close-duplicate-row:12");
         assert!(!shown(&harness, "close-ways"));
-        assert!(find(harness.root_id(), "Close github.com/acme/repo/issues/43 as a duplicate of #12?").is_some());
+        assert!(find(
+            harness.root_id(),
+            "Close github.com/acme/repo/issues/43 as a duplicate of #12?"
+        )
+        .is_some());
         click(&mut harness, "composer-post");
         match commands.try_recv() {
             Ok(Command::CloseIssue { reason, .. }) => {
@@ -7265,7 +8157,10 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert!(!shown(&harness, "close-ways"));
-        assert_eq!(state.composer_close_reason.get(), IssueCloseReason::Completed);
+        assert_eq!(
+            state.composer_close_reason.get(),
+            IssueCloseReason::Completed
+        );
     }
 
     /// A pull request's menu has Close pull request and Close as issue…,
@@ -7327,13 +8222,19 @@ mod tests {
             harness.paint();
             let rects: Vec<_> = ["subject-close", "subject-close-menu", "composer-send"]
                 .into_iter()
-                .map(|name| find(harness.root_id(), name).unwrap().get_visual_rect_no_clip())
+                .map(|name| {
+                    find(harness.root_id(), name)
+                        .unwrap()
+                        .get_visual_rect_no_clip()
+                })
                 .collect();
             for rect in &rects {
                 assert!(rect.x1 <= width, "past the card at {width}: {rect:?}");
             }
             if width == 800.0 {
-                assert!(rects.iter().all(|r| (r.center().y - rects[0].center().y).abs() < 2.0));
+                assert!(rects
+                    .iter()
+                    .all(|r| (r.center().y - rects[0].center().y).abs() < 2.0));
             }
         }
     }
@@ -7410,7 +8311,9 @@ mod tests {
         state.open_composer(None, None, "Looks good".into(), sonnet_medium());
         state.set_destination(Destination::GitHub);
         state.composer_confirming.set(true);
-        state.composer_error.set(Some("GitHub could not post the comment: 403".into()));
+        state
+            .composer_error
+            .set(Some("GitHub could not post the comment: 403".into()));
 
         state.open_composer_with(
             None,
@@ -7452,19 +8355,28 @@ mod tests {
 
         state.open_composer(None, None, "Another".into(), sonnet_medium());
         let next = state.composer.get().unwrap().opening;
-        assert!(!state.posting_from(next), "nothing of this composer's is in flight");
+        assert!(
+            !state.posting_from(next),
+            "nothing of this composer's is in flight"
+        );
         assert!(state.posting.get().is_some());
 
         state.settle_issue_comment(3, Err("GitHub could not post the comment: 403".into()));
         assert!(state.posting.get().is_none());
-        assert!(state.composer_error.get().is_none(), "the refusal was not this composer's");
+        assert!(
+            state.composer_error.get().is_none(),
+            "the refusal was not this composer's"
+        );
         assert_eq!(state.composer_draft.get(), "Another");
 
         state.start_posting(4, "Another".into());
         state.open_composer(None, None, "A third".into(), sonnet_medium());
         state.settle_issue_comment(4, Ok(()));
         assert!(state.posting.get().is_none());
-        assert!(state.composer.get().is_some(), "the third composer is not the one that posted");
+        assert!(
+            state.composer.get().is_some(),
+            "the third composer is not the one that posted"
+        );
         assert_eq!(state.composer_draft.get(), "A third");
     }
 
@@ -7596,7 +8508,10 @@ mod tests {
         harness.pointer_down(x, y);
         harness.pointer_move(x, y + 60.0);
         assert!(state.composer_resizing.get());
-        assert_eq!(state.composer_height.get(), Some(theme::COMPOSER_HEIGHT + 60.0));
+        assert_eq!(
+            state.composer_height.get(),
+            Some(theme::COMPOSER_HEIGHT + 60.0)
+        );
         harness.rebuild();
         harness.paint();
         assert_eq!(height(), theme::COMPOSER_HEIGHT + 60.0);
@@ -7610,9 +8525,15 @@ mod tests {
 
         // Neither limit is passed.
         harness.pointer_move(x, y - 400.0);
-        assert_eq!(state.composer_height.get(), Some(theme::COMPOSER_MIN_HEIGHT));
+        assert_eq!(
+            state.composer_height.get(),
+            Some(theme::COMPOSER_MIN_HEIGHT)
+        );
         harness.pointer_move(x, y + 900.0);
-        assert_eq!(state.composer_height.get(), Some(theme::COMPOSER_MAX_HEIGHT));
+        assert_eq!(
+            state.composer_height.get(),
+            Some(theme::COMPOSER_MAX_HEIGHT)
+        );
 
         harness.pointer_move(x, y + 100.0);
         harness.pointer_up(x, y + 100.0);

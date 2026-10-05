@@ -67,13 +67,28 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let mut args: Vec<std::ffi::OsString> = args.into_iter().map(|a| a.as_ref().to_owned()).collect();
+    let mut args: Vec<std::ffi::OsString> =
+        args.into_iter().map(|a| a.as_ref().to_owned()).collect();
     // Past git's own options, some of which take the next argument.
     let mut i = 0;
-    while let Some(arg) = args.get(i).and_then(|a| a.to_str()).filter(|a| a.starts_with('-')) {
-        i += if matches!(arg, "-c" | "-C" | "--git-dir" | "--work-tree" | "--namespace") { 2 } else { 1 };
+    while let Some(arg) = args
+        .get(i)
+        .and_then(|a| a.to_str())
+        .filter(|a| a.starts_with('-'))
+    {
+        i += if matches!(
+            arg,
+            "-c" | "-C" | "--git-dir" | "--work-tree" | "--namespace"
+        ) {
+            2
+        } else {
+            1
+        };
     }
-    if args.get(i).is_some_and(|sub| sub == "status" || sub == "diff") {
+    if args
+        .get(i)
+        .is_some_and(|sub| sub == "status" || sub == "diff")
+    {
         args.insert(i + 1, "--ignore-submodules=dirty".into());
     }
     args
@@ -391,17 +406,33 @@ mod tests {
     #[test]
     fn status_and_diff_leave_the_inside_of_submodules_alone() {
         let guarded = |args: &[&str]| -> Vec<String> {
-            guard_submodules(args).into_iter().map(|a| a.into_string().unwrap()).collect()
+            guard_submodules(args)
+                .into_iter()
+                .map(|a| a.into_string().unwrap())
+                .collect()
         };
-        assert_eq!(guarded(&["status", "--porcelain"]), ["status", "--ignore-submodules=dirty", "--porcelain"]);
-        assert_eq!(guarded(&["diff", "HEAD"]), ["diff", "--ignore-submodules=dirty", "HEAD"]);
+        assert_eq!(
+            guarded(&["status", "--porcelain"]),
+            ["status", "--ignore-submodules=dirty", "--porcelain"]
+        );
+        assert_eq!(
+            guarded(&["diff", "HEAD"]),
+            ["diff", "--ignore-submodules=dirty", "HEAD"]
+        );
         assert_eq!(
             guarded(&["--no-optional-locks", "status"]),
             ["--no-optional-locks", "status", "--ignore-submodules=dirty"]
         );
         assert_eq!(
             guarded(&["-c", "diff.foo=status", "-C", "diff", "diff"]),
-            ["-c", "diff.foo=status", "-C", "diff", "diff", "--ignore-submodules=dirty"]
+            [
+                "-c",
+                "diff.foo=status",
+                "-C",
+                "diff",
+                "diff",
+                "--ignore-submodules=dirty"
+            ]
         );
         assert_eq!(guarded(&["log", "--", "status"]), ["log", "--", "status"]);
         assert_eq!(guarded(&["show", "diff"]), ["show", "diff"]);
@@ -465,9 +496,14 @@ mod tests {
         std::fs::write(&askpass, format!("#!/bin/sh\necho {ASKED}\n")).unwrap();
         std::fs::set_permissions(&askpass, std::fs::Permissions::from_mode(0o755)).unwrap();
         let global = home.path().join("gitconfig");
-        std::fs::write(&global, format!("[core]\n\taskPass = \"{}\"\n{config}", askpass.display())).unwrap();
+        std::fs::write(
+            &global,
+            format!("[core]\n\taskPass = \"{}\"\n{config}", askpass.display()),
+        )
+        .unwrap();
 
-        let mut command = Git::new(Some(TOKEN.into())).command(Some(home.path()), ["credential", "fill"]);
+        let mut command =
+            Git::new(Some(TOKEN.into())).command(Some(home.path()), ["credential", "fill"]);
         // Whatever GIT_ASKPASS Perch was started with, git gets an empty one.
         assert!(command
             .as_std()

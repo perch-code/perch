@@ -317,7 +317,9 @@ mod tests {
         let nested = "`````\n````\ninner\n`````\n\nAfter.";
         let cleaned = clean(nested);
         assert!(
-            cleaned.trim_start().starts_with("`````\n````\ninner\n`````"),
+            cleaned
+                .trim_start()
+                .starts_with("`````\n````\ninner\n`````"),
             "{cleaned}"
         );
         assert!(cleaned.ends_with("After."), "{cleaned}");

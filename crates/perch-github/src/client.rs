@@ -25,23 +25,23 @@ use crate::commits::{
     FILE_TEXT_QUERY,
 };
 use crate::discussion::{
-    resolve_thread_mutation, CommentPlace, Discussion, IssueComment, IssueCommentPayload, PullReviewEvent,
-    PullSummary, ResolveThreadData, Review, ReviewComment, ReviewCommentDraft,
+    resolve_thread_mutation, CommentPlace, Discussion, IssueComment, IssueCommentPayload,
+    PullReviewEvent, PullSummary, ResolveThreadData, Review, ReviewComment, ReviewCommentDraft,
     ReviewCommentPayload, ReviewPayload, ReviewThreadState, ReviewThreadsData,
     REVIEW_THREADS_MAX_PAGES, REVIEW_THREADS_QUERY,
 };
 use crate::items::{Issue, IssueCloseReason, IssuePayload};
 use crate::model::{SubjectSnapshot, SubjectState, Thread};
 use crate::pulls::{
-    check_sighting, rest_check_sighting, CheckSighting, CommitMessage, MergeMethod, MergeRequest, MergeResult,
-    PullPayload, PullRequest, PullRequestOverview, PullRequestOverviewAccumulator,
+    check_sighting, rest_check_sighting, CheckSighting, CommitMessage, MergeMethod, MergeRequest,
+    MergeResult, PullPayload, PullRequest, PullRequestOverview, PullRequestOverviewAccumulator,
     PullRequestOverviewQuery, PULL_REQUEST_OVERVIEW_QUERY,
 };
-use crate::releases::{Release, ReleaseAsset};
 use crate::reactions::{
     reaction_mutation, reactions_query, NodeReading, ReactionKind, ReactionMutationData, Reactions,
     ReactionsData, NODES_PER_QUERY,
 };
+use crate::releases::{Release, ReleaseAsset};
 use crate::responses::{Known, Responses, BUDGET_BYTES};
 use crate::subjects::{SubjectLook, SubjectLookData};
 use crate::timeline::{
@@ -344,8 +344,12 @@ impl GitHub {
             ._delete(&path, None::<&()>)
             .await
             .map_err(map_octocrab_error)?;
-        self.finish_mutation(response, &[StatusCode::NO_CONTENT], &format!("DELETE {path}"))
-            .await
+        self.finish_mutation(
+            response,
+            &[StatusCode::NO_CONTENT],
+            &format!("DELETE {path}"),
+        )
+        .await
     }
 
     /// Ignore future activity on a notification thread, including when the
@@ -365,7 +369,7 @@ impl GitHub {
             &[StatusCode::OK, StatusCode::NOT_MODIFIED],
             &format!("PUT {path}"),
         )
-            .await
+        .await
     }
 
     /// One page of `/notifications`, including the headers that pace and
@@ -435,9 +439,8 @@ impl GitHub {
                     "contextsCursor": cursor.as_deref(),
                 }
             });
-            let data: PullRequestOverviewQuery = self
-                .graphql(&payload, "pull request overview")
-                .await?;
+            let data: PullRequestOverviewQuery =
+                self.graphql(&payload, "pull request overview").await?;
             let page = data.into_page().ok_or_else(|| {
                 Error::Decode(format!(
                     "GitHub returned no pull request for {repo_full_name}#{number}"
@@ -446,9 +449,8 @@ impl GitHub {
             match overview.as_mut() {
                 Some(overview) => overview.push(page).map_err(Error::Decode)?,
                 None => {
-                    overview = Some(
-                        PullRequestOverviewAccumulator::new(page).map_err(Error::Decode)?,
-                    );
+                    overview =
+                        Some(PullRequestOverviewAccumulator::new(page).map_err(Error::Decode)?);
                 }
             }
 
@@ -501,7 +503,9 @@ impl GitHub {
             ._put(&path, Some(&body))
             .await
             .map_err(map_octocrab_error)?;
-        let body = self.finish_response(response, &[StatusCode::OK], &format!("PUT {path}")).await?;
+        let body = self
+            .finish_response(response, &[StatusCode::OK], &format!("PUT {path}"))
+            .await?;
         self.forget_pull_request(repo_full_name, number);
         serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))
     }
@@ -601,7 +605,9 @@ impl GitHub {
             .repository
             .and_then(|repository| repository.pull_request)
             .ok_or_else(|| {
-                Error::Decode(format!("GitHub has no pull request {repo_full_name}#{number}"))
+                Error::Decode(format!(
+                    "GitHub has no pull request {repo_full_name}#{number}"
+                ))
             })?;
         if pull.is_draft == draft {
             return Ok(draft);
@@ -724,15 +730,8 @@ impl GitHub {
             comment: &'a ReviewCommentDraft,
         }
 
-        self.post_review_comment(
-            repo_full_name,
-            number,
-            &Request {
-                commit_id,
-                comment,
-            },
-        )
-        .await
+        self.post_review_comment(repo_full_name, number, &Request { commit_id, comment })
+            .await
     }
 
     /// Open a review thread on the file at `path` rather than on its
@@ -914,7 +913,14 @@ impl GitHub {
         self.check_rate_limit()?;
         let response = self
             .octo
-            ._post(&path, Some(&Request { title, body, labels }))
+            ._post(
+                &path,
+                Some(&Request {
+                    title,
+                    body,
+                    labels,
+                }),
+            )
             .await
             .map_err(map_octocrab_error)?;
         let body = self
@@ -937,7 +943,9 @@ impl GitHub {
         repo_full_name: &str,
     ) -> Result<Vec<WorkflowRunPayload>, Error> {
         let body = self
-            .get_text(&format!("/repos/{repo_full_name}/actions/runs?per_page=100"))
+            .get_text(&format!(
+                "/repos/{repo_full_name}/actions/runs?per_page=100"
+            ))
             .await?;
         let payload: WorkflowRunsPayload =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
@@ -1016,7 +1024,10 @@ impl GitHub {
             if discussion.review_comments.is_empty() {
                 return None;
             }
-            Some(self.fetch_review_thread_states(repo_full_name, number).await)
+            Some(
+                self.fetch_review_thread_states(repo_full_name, number)
+                    .await,
+            )
         };
         let (timeline, thread_states) = tokio::join!(
             self.fetch_timeline(repo_full_name, number, &discussion.reviews),
@@ -1029,7 +1040,9 @@ impl GitHub {
             // where it did not.
             Ok(events) => {
                 discussion.events.retain(|own| {
-                    !events.iter().any(|e| e.kind == own.kind && same_moment(e.at, own.at))
+                    !events
+                        .iter()
+                        .any(|e| e.kind == own.kind && same_moment(e.at, own.at))
                 });
                 discussion.events.extend(events);
                 discussion.events = tidy(std::mem::take(&mut discussion.events));
@@ -1143,7 +1156,8 @@ impl GitHub {
                 "query": DELETED_AUTHORS_QUERY,
                 "variables": { "ids": ids },
             });
-            let data: DeletedAuthorsData = self.graphql(&payload, "deleted comment authors").await?;
+            let data: DeletedAuthorsData =
+                self.graphql(&payload, "deleted comment authors").await?;
             for ((at, _), login) in chunk.iter().zip(data.authors()) {
                 if let Some(PullEventKind::CommentDeleted { author }) =
                     events.get_mut(*at).map(|e| &mut e.kind)
@@ -1367,7 +1381,9 @@ impl GitHub {
             CommentPlace::Conversation => "deleteIssueComment",
             CommentPlace::Line => "deletePullRequestReviewComment",
             CommentPlace::PullRequestBody | CommentPlace::IssueBody | CommentPlace::Review => {
-                return Err(Error::Decode("a description or a review is not deleted".into()));
+                return Err(Error::Decode(
+                    "a description or a review is not deleted".into(),
+                ));
             }
         };
         let payload = serde_json::json!({
@@ -1410,9 +1426,12 @@ impl GitHub {
                 "pullRequestReviewComment",
                 None,
             ),
-            CommentPlace::PullRequestBody => {
-                ("updatePullRequest", "pullRequestId", "pullRequest", Some("pulls"))
-            }
+            CommentPlace::PullRequestBody => (
+                "updatePullRequest",
+                "pullRequestId",
+                "pullRequest",
+                Some("pulls"),
+            ),
             CommentPlace::IssueBody => ("updateIssue", "id", "issue", Some("issues")),
             CommentPlace::Review => (
                 "updatePullRequestReview",
@@ -1496,8 +1515,9 @@ impl GitHub {
         });
         let data: crate::subscription::SubscriptionData =
             self.graphql(&payload, "subscribe").await?;
-        data.state()
-            .ok_or_else(|| Error::Decode("GitHub answered the subscription without its state".into()))
+        data.state().ok_or_else(|| {
+            Error::Decode("GitHub answered the subscription without its state".into())
+        })
     }
 
     /// When the rate limit GitHub last named lifts, as seconds since the
@@ -1526,9 +1546,8 @@ impl GitHub {
                 "first": first.clamp(1, 100),
             },
         });
-        let data: crate::mentions::MentionableUsersData = self
-            .graphql(&payload, "mentionable users")
-            .await?;
+        let data: crate::mentions::MentionableUsersData =
+            self.graphql(&payload, "mentionable users").await?;
         Ok(data.into_users())
     }
 
@@ -1561,9 +1580,9 @@ impl GitHub {
             .await?;
         match data {
             Some(data) => Ok(data.into_references()),
-            None if problems.is_empty() => {
-                Err(Error::Decode("GitHub's GraphQL response had no data".into()))
-            }
+            None if problems.is_empty() => Err(Error::Decode(
+                "GitHub's GraphQL response had no data".into(),
+            )),
             None => Err(Error::Graphql(problems.join("; "))),
         }
     }
@@ -1733,7 +1752,11 @@ impl GitHub {
         };
         let response = response.map_err(map_octocrab_error)?;
         let body = self
-            .finish_response(response, &[expected, StatusCode::OK], &format!("{method} {path}"))
+            .finish_response(
+                response,
+                &[expected, StatusCode::OK],
+                &format!("{method} {path}"),
+            )
             .await?;
         let payload: IssuePayload =
             serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
@@ -1780,7 +1803,9 @@ impl GitHub {
     ) -> Result<crate::search::SearchPage, Error> {
         let (query, sort, order) = search_sort(query);
         let q = percent_encoding::utf8_percent_encode(&query, percent_encoding::NON_ALPHANUMERIC);
-        let path = format!("/search/issues?q={q}&sort={sort}&order={order}&per_page={per_page}&page={page}");
+        let path = format!(
+            "/search/issues?q={q}&sort={sort}&order={order}&per_page={per_page}&page={page}"
+        );
         let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let until = self.search_limit_until.load(Ordering::SeqCst);
@@ -1890,9 +1915,11 @@ impl GitHub {
         &self,
         subjects: &[(String, u64)],
     ) -> Result<Vec<((String, u64), Vec<crate::model::Participant>)>, Error> {
-        let Some(look) =
-            SubjectLook::of_subjects(subjects.iter().map(|(repo, number)| (repo.as_str(), *number)))
-        else {
+        let Some(look) = SubjectLook::of_subjects(
+            subjects
+                .iter()
+                .map(|(repo, number)| (repo.as_str(), *number)),
+        ) else {
             return Ok(Vec::new());
         };
         let payload = serde_json::json!({ "query": look.query() });
@@ -1919,9 +1946,11 @@ impl GitHub {
         &self,
         subjects: &[(String, u64)],
     ) -> Result<Vec<((String, u64), SubjectState)>, Error> {
-        let Some(look) =
-            SubjectLook::of_subjects(subjects.iter().map(|(repo, number)| (repo.as_str(), *number)))
-        else {
+        let Some(look) = SubjectLook::of_subjects(
+            subjects
+                .iter()
+                .map(|(repo, number)| (repo.as_str(), *number)),
+        ) else {
             return Ok(Vec::new());
         };
         let payload = serde_json::json!({ "query": look.state_query() });
@@ -2016,8 +2045,7 @@ impl GitHub {
         let runs = format!("/repos/{repo_full_name}/commits/{sha}/check-runs?per_page=100");
         let statuses = format!("/repos/{repo_full_name}/commits/{sha}/status?per_page=100");
         let (runs_tag, runs_body) = self.probe(&runs, tags.runs.as_deref()).await?;
-        let (statuses_tag, statuses_body) =
-            self.probe(&statuses, tags.statuses.as_deref()).await?;
+        let (statuses_tag, statuses_body) = self.probe(&statuses, tags.statuses.as_deref()).await?;
         Ok(CheckProbe {
             tags: CheckTags {
                 runs: runs_tag,
@@ -2340,7 +2368,9 @@ impl GitHub {
     where
         B: http_body::Body<Data = Bytes>,
     {
-        self.finish_response(response, accepted, what).await.map(drop)
+        self.finish_response(response, accepted, what)
+            .await
+            .map(drop)
     }
 
     /// Consume a response, preserving its body for a JSON-returning mutation.
@@ -2515,7 +2545,11 @@ impl GitHub {
             });
         }
         let mut bytes = Vec::with_capacity(asset.size as usize);
-        while let Some(chunk) = response.chunk().await.map_err(|e| Error::Network(e.to_string()))? {
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| Error::Network(e.to_string()))?
+        {
             bytes.extend_from_slice(&chunk);
             if bytes.len() as u64 > asset.size {
                 break;
@@ -2578,11 +2612,18 @@ impl GitHub {
                 body: "picture fetch failed".into(),
             });
         }
-        if response.content_length().is_some_and(|length| length > PICTURE_BYTES) {
+        if response
+            .content_length()
+            .is_some_and(|length| length > PICTURE_BYTES)
+        {
             return Err(Error::Decode(format!("picture over {PICTURE_BYTES} bytes")));
         }
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|e| Error::Network(e.to_string()))? {
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| Error::Network(e.to_string()))?
+        {
             bytes.extend_from_slice(&chunk);
             if bytes.len() as u64 > PICTURE_BYTES {
                 return Err(Error::Decode(format!("picture over {PICTURE_BYTES} bytes")));
@@ -2844,14 +2885,24 @@ mod tests {
     fn a_sort_qualifier_becomes_the_search_s_parameters() {
         assert_eq!(
             search_sort("author:@me is:open archived:false"),
-            ("author:@me is:open archived:false".to_string(), "updated", "desc")
+            (
+                "author:@me is:open archived:false".to_string(),
+                "updated",
+                "desc"
+            )
         );
         assert_eq!(
             search_sort("author:@me sort:created-asc is:open"),
             ("author:@me is:open".to_string(), "created", "asc")
         );
-        assert_eq!(search_sort("repo:a/b sort:updated"), ("repo:a/b".to_string(), "updated", "desc"));
-        assert_eq!(search_sort("repo:a/b sort:bogus-asc"), ("repo:a/b".to_string(), "updated", "desc"));
+        assert_eq!(
+            search_sort("repo:a/b sort:updated"),
+            ("repo:a/b".to_string(), "updated", "desc")
+        );
+        assert_eq!(
+            search_sort("repo:a/b sort:bogus-asc"),
+            ("repo:a/b".to_string(), "updated", "desc")
+        );
     }
 
     #[test]
@@ -2889,11 +2940,17 @@ mod tests {
 
     #[test]
     fn only_a_picture_on_github_com_is_asked_for_with_the_token() {
-        assert!(sends_token("https://github.com/user-attachments/assets/0a1b"));
+        assert!(sends_token(
+            "https://github.com/user-attachments/assets/0a1b"
+        ));
         assert!(sends_token("https://github.com/o/r/assets/1/0a1b"));
-        assert!(!sends_token("http://github.com/user-attachments/assets/0a1b"));
+        assert!(!sends_token(
+            "http://github.com/user-attachments/assets/0a1b"
+        ));
         assert!(!sends_token("https://github.com.evil.example/x.png"));
-        assert!(!sends_token("https://user-images.githubusercontent.com/1/x.png"));
+        assert!(!sends_token(
+            "https://user-images.githubusercontent.com/1/x.png"
+        ));
         assert!(!sends_token("https://example.com/https://github.com/x.png"));
     }
 

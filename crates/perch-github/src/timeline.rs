@@ -63,24 +63,51 @@ pub enum PullEventKind {
         login: String,
         subject: String,
     },
-    ForcePushed { sha: String },
+    ForcePushed {
+        sha: String,
+    },
     HeadDeleted,
     HeadRestored,
-    Labeled { label: Label },
-    Unlabeled { label: Label },
-    Assigned { who: String },
-    Unassigned { who: String },
-    ReviewRequested { who: String },
-    ReviewRequestRemoved { who: String },
+    Labeled {
+        label: Label,
+    },
+    Unlabeled {
+        label: Label,
+    },
+    Assigned {
+        who: String,
+    },
+    Unassigned {
+        who: String,
+    },
+    ReviewRequested {
+        who: String,
+    },
+    ReviewRequestRemoved {
+        who: String,
+    },
     /// A review someone threw out. `who` wrote it.
-    ReviewDismissed { who: String },
-    Renamed { from: String, to: String },
-    Milestoned { title: String },
-    Demilestoned { title: String },
+    ReviewDismissed {
+        who: String,
+    },
+    Renamed {
+        from: String,
+        to: String,
+    },
+    Milestoned {
+        title: String,
+    },
+    Demilestoned {
+        title: String,
+    },
     /// A commit elsewhere that named this one.
-    Referenced { sha: String },
+    Referenced {
+        sha: String,
+    },
     /// Another issue or pull request that named this one.
-    CrossReferenced { reference: Reference },
+    CrossReferenced {
+        reference: Reference,
+    },
     Pinned,
     Unpinned,
     Locked,
@@ -362,7 +389,11 @@ impl DeletedAuthorsData {
     pub(crate) fn authors(self) -> Vec<String> {
         self.nodes
             .into_iter()
-            .map(|node| node.and_then(|n| n.author).map(|a| a.login).unwrap_or_default())
+            .map(|node| {
+                node.and_then(|n| n.author)
+                    .map(|a| a.login)
+                    .unwrap_or_default()
+            })
             .collect()
     }
 }
@@ -574,8 +605,15 @@ mod tests {
             }
         };
         assert_eq!(login("criccomini@users.noreply.github.com"), "criccomini");
-        assert_eq!(login("12345+CRiccomini@users.noreply.github.com"), "CRiccomini");
-        assert_eq!(login("c@example.com"), "", "any other email names no account");
+        assert_eq!(
+            login("12345+CRiccomini@users.noreply.github.com"),
+            "CRiccomini"
+        );
+        assert_eq!(
+            login("c@example.com"),
+            "",
+            "any other email names no account"
+        );
         assert_eq!(login("@users.noreply.github.com"), "");
     }
 

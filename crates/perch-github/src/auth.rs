@@ -39,17 +39,29 @@ pub struct Token {
 /// First hit wins: `GITHUB_TOKEN`, `GH_TOKEN`, `gh auth token`, config file.
 pub fn resolve_token(config: &Config) -> Option<Token> {
     if let Some(value) = non_empty_env("GITHUB_TOKEN") {
-        return Some(Token { value, source: TokenSource::GithubTokenEnv });
+        return Some(Token {
+            value,
+            source: TokenSource::GithubTokenEnv,
+        });
     }
     if let Some(value) = non_empty_env("GH_TOKEN") {
-        return Some(Token { value, source: TokenSource::GhTokenEnv });
+        return Some(Token {
+            value,
+            source: TokenSource::GhTokenEnv,
+        });
     }
     if let Some(value) = gh_cli_token() {
-        return Some(Token { value, source: TokenSource::GhCli });
+        return Some(Token {
+            value,
+            source: TokenSource::GhCli,
+        });
     }
     if let Some(value) = config.token.as_ref().map(|t| t.trim().to_string()) {
         if !value.is_empty() {
-            return Some(Token { value, source: TokenSource::ConfigFile });
+            return Some(Token {
+                value,
+                source: TokenSource::ConfigFile,
+            });
         }
     }
     None
@@ -73,7 +85,9 @@ fn gh_cli_token() -> Option<String> {
 /// Where Homebrew, MacPorts and Nix put `gh`. A Finder launch gets only
 /// `/usr/bin:/bin:/usr/sbin:/sbin` on `PATH`, which holds none of them.
 fn gh_install_dirs() -> Vec<PathBuf> {
-    let mut dirs = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"].map(PathBuf::from).to_vec();
+    let mut dirs = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"]
+        .map(PathBuf::from)
+        .to_vec();
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         dirs.push(home.join(".nix-profile/bin"));
         dirs.push(home.join(".local/bin"));
@@ -83,7 +97,10 @@ fn gh_install_dirs() -> Vec<PathBuf> {
 
 /// `gh` on `PATH`, else in the first of `extra` that has it.
 fn find_gh(path: Option<&OsStr>, extra: &[PathBuf]) -> Option<PathBuf> {
-    let on_path = path.into_iter().flat_map(std::env::split_paths).collect::<Vec<_>>();
+    let on_path = path
+        .into_iter()
+        .flat_map(std::env::split_paths)
+        .collect::<Vec<_>>();
     on_path
         .iter()
         .chain(extra)
@@ -113,7 +130,10 @@ mod tests {
         let install = tempfile::tempdir().unwrap();
         std::fs::write(on_path.path().join("gh"), "").unwrap();
         std::fs::write(install.path().join("gh"), "").unwrap();
-        let found = find_gh(Some(on_path.path().as_os_str()), &[install.path().to_path_buf()]);
+        let found = find_gh(
+            Some(on_path.path().as_os_str()),
+            &[install.path().to_path_buf()],
+        );
         assert_eq!(found, Some(on_path.path().join("gh")));
     }
 }

@@ -11,14 +11,15 @@ use lsp_types::{
     CallHierarchyClientCapabilities, CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams,
     CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams,
     CallHierarchyPrepareParams, ClientCapabilities, DidCloseTextDocumentParams, DocumentHighlight,
-    DocumentSymbol, DocumentSymbolClientCapabilities, DocumentSymbolParams, DocumentSymbolResponse,
-    DocumentHighlightClientCapabilities, DocumentHighlightParams, GeneralClientCapabilities,
-    GotoCapability, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverClientCapabilities,
-    HoverParams, InitializeParams, InitializeResult, InitializedParams, Location, MarkupKind,
-    OneOf, Position, PositionEncodingKind, PublishDiagnosticsParams, ReferenceContext,
-    ReferenceParams, SymbolKind, TextDocumentClientCapabilities, TextDocumentIdentifier,
-    TextDocumentItem, TextDocumentPositionParams, Uri, WindowClientCapabilities,
-    WorkDoneProgressParams, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    DocumentHighlightClientCapabilities, DocumentHighlightParams, DocumentSymbol,
+    DocumentSymbolClientCapabilities, DocumentSymbolParams, DocumentSymbolResponse,
+    GeneralClientCapabilities, GotoCapability, GotoDefinitionParams, GotoDefinitionResponse, Hover,
+    HoverClientCapabilities, HoverParams, InitializeParams, InitializeResult, InitializedParams,
+    Location, MarkupKind, OneOf, Position, PositionEncodingKind, PublishDiagnosticsParams,
+    ReferenceContext, ReferenceParams, SymbolKind, TextDocumentClientCapabilities,
+    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, Uri,
+    WindowClientCapabilities, WorkDoneProgressParams, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -61,8 +62,13 @@ pub enum ServerEvent {
     /// The server says something is wrong that leaves it usable: some
     /// build scripts failed, say. Sent once per message, not on each
     /// repeat.
-    Warning { message: String },
-    Diagnostics { uri: String, diagnostics: Vec<lsp_types::Diagnostic> },
+    Warning {
+        message: String,
+    },
+    Diagnostics {
+        uri: String,
+        diagnostics: Vec<lsp_types::Diagnostic>,
+    },
 }
 
 /// A request the caller can make.
@@ -400,7 +406,11 @@ impl Client {
             .and_then(|files| files.get(uri).cloned())
             .unwrap_or_else(|| uri.to_string());
         let value = self
-            .request("java/classFileContents", json!({ "uri": full }), PANEL_TIMEOUT)
+            .request(
+                "java/classFileContents",
+                json!({ "uri": full }),
+                PANEL_TIMEOUT,
+            )
             .await
             .ok()?;
         decode_result::<String>(value).filter(|text| !text.is_empty())
@@ -433,7 +443,9 @@ impl Client {
 
     /// Send `event` on, keeping it if it is a status.
     fn tell(&self, event: ServerEvent) {
-        let Ok(mut told) = self.told.lock() else { return };
+        let Ok(mut told) = self.told.lock() else {
+            return;
+        };
         if let ServerEvent::Status(status) = &event {
             told.1 = status.clone();
         }
@@ -443,7 +455,10 @@ impl Client {
     /// Tell `status` unless the server has already said something since
     /// it started.
     fn tell_if_starting(&self, status: Status) {
-        let starting = self.told.lock().is_ok_and(|told| told.1 == Status::Starting);
+        let starting = self
+            .told
+            .lock()
+            .is_ok_and(|told| told.1 == Status::Starting);
         if starting {
             self.tell(ServerEvent::Status(status));
         }
@@ -461,9 +476,13 @@ impl Client {
     /// change: the server keeps the text it was given over the file on
     /// disk until the file is closed. The same text is not sent twice.
     pub async fn did_open(&self, path: &Path, text: &str) {
-        let Some(uri) = self.uri_for(path) else { return };
+        let Some(uri) = self.uri_for(path) else {
+            return;
+        };
         let changed = {
-            let Ok(mut documents) = self.documents.lock() else { return };
+            let Ok(mut documents) = self.documents.lock() else {
+                return;
+            };
             match documents.get_mut(&uri.to_string()) {
                 Some((_, given)) if **given == *text => return,
                 Some((version, given)) => {
@@ -517,13 +536,17 @@ impl Client {
     pub fn given(&self, path: &Path) -> Option<Arc<str>> {
         let uri = self.uri_for(path)?;
         let documents = self.documents.lock().ok()?;
-        documents.get(&uri.to_string()).map(|(_, text)| text.clone())
+        documents
+            .get(&uri.to_string())
+            .map(|(_, text)| text.clone())
     }
 
     /// Tell the server a file it was given is gone: the text of a deleted
     /// file, handed over only to be outlined.
     pub async fn did_close(&self, path: &Path) {
-        let Some(uri) = self.uri_for(path) else { return };
+        let Some(uri) = self.uri_for(path) else {
+            return;
+        };
         let given = self
             .documents
             .lock()
@@ -565,7 +588,11 @@ impl Client {
             work_done_progress_params: WorkDoneProgressParams::default(),
         };
         let value = self
-            .request("textDocument/hover", serde_json::to_value(params).ok()?, QUICK_TIMEOUT)
+            .request(
+                "textDocument/hover",
+                serde_json::to_value(params).ok()?,
+                QUICK_TIMEOUT,
+            )
             .await
             .ok()?;
         decode_result(value)
@@ -577,8 +604,14 @@ impl Client {
         line: u32,
         character: u32,
     ) -> Result<Vec<Location>, Error> {
-        self.goto("textDocument/definition", path, line, character, QUICK_TIMEOUT)
-            .await
+        self.goto(
+            "textDocument/definition",
+            path,
+            line,
+            character,
+            QUICK_TIMEOUT,
+        )
+        .await
     }
 
     /// The type of the thing at a position: a binding's type, the struct
@@ -589,8 +622,14 @@ impl Client {
         line: u32,
         character: u32,
     ) -> Result<Vec<Location>, Error> {
-        self.goto("textDocument/typeDefinition", path, line, character, QUICK_TIMEOUT)
-            .await
+        self.goto(
+            "textDocument/typeDefinition",
+            path,
+            line,
+            character,
+            QUICK_TIMEOUT,
+        )
+        .await
     }
 
     /// The impls of the trait, or of the trait method, at a position. A
@@ -601,8 +640,14 @@ impl Client {
         line: u32,
         character: u32,
     ) -> Result<Vec<Location>, Error> {
-        self.goto("textDocument/implementation", path, line, character, PANEL_TIMEOUT)
-            .await
+        self.goto(
+            "textDocument/implementation",
+            path,
+            line,
+            character,
+            PANEL_TIMEOUT,
+        )
+        .await
     }
 
     /// The three gotos are one request with three names: a position in,
@@ -626,7 +671,8 @@ impl Client {
             partial_result_params: Default::default(),
         };
         let params = serde_json::to_value(params).unwrap_or(Value::Null);
-        self.ask_for_list(method, params, timeout, goto_locations).await
+        self.ask_for_list(method, params, timeout, goto_locations)
+            .await
     }
 
     /// Ask for a list, read from the reply by `read`. A reply that is an
@@ -645,7 +691,10 @@ impl Client {
         read: fn(Value) -> Vec<T>,
     ) -> Result<Vec<T>, Error> {
         let loading = self.status().is_loading();
-        let answer = self.request(method, params.clone(), timeout).await.map(read);
+        let answer = self
+            .request(method, params.clone(), timeout)
+            .await
+            .map(read);
         if !loading || answer.as_ref().is_ok_and(|found| !found.is_empty()) {
             return answer;
         }
@@ -681,11 +730,18 @@ impl Client {
             text_document_position: position,
             work_done_progress_params: WorkDoneProgressParams::default(),
             partial_result_params: Default::default(),
-            context: ReferenceContext { include_declaration: true },
+            context: ReferenceContext {
+                include_declaration: true,
+            },
         };
         let params = serde_json::to_value(params).unwrap_or(Value::Null);
-        self.ask_for_list("textDocument/references", params, PANEL_TIMEOUT, reference_locations)
-            .await
+        self.ask_for_list(
+            "textDocument/references",
+            params,
+            PANEL_TIMEOUT,
+            reference_locations,
+        )
+        .await
     }
 
     /// Every use of the symbol at a position in its own file, as ranges,
@@ -759,8 +815,13 @@ impl Client {
             work_done_progress_params: WorkDoneProgressParams::default(),
         };
         let params = serde_json::to_value(params).unwrap_or(Value::Null);
-        self.ask_for_list("textDocument/prepareCallHierarchy", params, PANEL_TIMEOUT, list)
-            .await
+        self.ask_for_list(
+            "textDocument/prepareCallHierarchy",
+            params,
+            PANEL_TIMEOUT,
+            list,
+        )
+        .await
     }
 
     /// The callers of an item, each with where in the caller the call is.
@@ -806,15 +867,25 @@ impl Client {
         let Ok(params) = serde_json::to_value(params) else {
             return Vec::new();
         };
-        let Ok(value) = self.request("workspace/symbol", params, QUICK_TIMEOUT).await else {
+        let Ok(value) = self
+            .request("workspace/symbol", params, QUICK_TIMEOUT)
+            .await
+        else {
             return Vec::new();
         };
         workspace_symbols(value)
     }
 
-    fn position(&self, path: &Path, line: u32, character: u32) -> Option<TextDocumentPositionParams> {
+    fn position(
+        &self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Option<TextDocumentPositionParams> {
         Some(TextDocumentPositionParams {
-            text_document: TextDocumentIdentifier { uri: self.uri_for(path)? },
+            text_document: TextDocumentIdentifier {
+                uri: self.uri_for(path)?,
+            },
             position: Position { line, character },
         })
     }
@@ -828,7 +899,12 @@ impl Client {
     }
 
     /// Send a request and wait `timeout` for its answer.
-    async fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, Error> {
+    async fn request(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, Error> {
         if self.exited.get().is_some() {
             return Err(self.exited_error());
         }
@@ -879,7 +955,8 @@ impl Client {
         self.stopping.store(true, Ordering::Relaxed);
         let asked = async {
             let hung = matches!(
-                self.request("shutdown", Value::Null, LIFECYCLE_TIMEOUT).await,
+                self.request("shutdown", Value::Null, LIFECYCLE_TIMEOUT)
+                    .await,
                 Err(Error::Timeout)
             );
             self.notify("exit", Value::Null).await;
@@ -930,12 +1007,18 @@ const STDERR_TAIL: usize = 20;
 /// that says it is an error, else the last line. rustup's proxy for a
 /// toolchain without rust-analyzer writes
 /// `error: unknown binary 'rust-analyzer' in toolchain '1.98.1-…'`.
-pub(crate) fn exit_reason<'a>(lines: impl DoubleEndedIterator<Item = &'a str> + Clone) -> Option<String> {
+pub(crate) fn exit_reason<'a>(
+    lines: impl DoubleEndedIterator<Item = &'a str> + Clone,
+) -> Option<String> {
     let lines = lines.map(str::trim).filter(|line| !line.is_empty());
     let error = lines.clone().find_map(|line| {
-        line.strip_prefix("error:").or_else(|| line.strip_prefix("Error:")).map(str::trim)
+        line.strip_prefix("error:")
+            .or_else(|| line.strip_prefix("Error:"))
+            .map(str::trim)
     });
-    error.or_else(|| lines.clone().next_back()).map(str::to_string)
+    error
+        .or_else(|| lines.clone().next_back())
+        .map(str::to_string)
 }
 
 /// Read what the server sends until its output closes. What comes back is
@@ -1104,10 +1187,14 @@ fn server_health(params: &Value) -> Option<Health> {
     match params.get("health").and_then(Value::as_str)? {
         "ok" => Some(Health::Ok),
         "warning" => Some(Health::Warning(
-            message.unwrap_or("the language server reported a problem").to_string(),
+            message
+                .unwrap_or("the language server reported a problem")
+                .to_string(),
         )),
         "error" => Some(Health::Error(
-            message.unwrap_or("the language server reported an error").to_string(),
+            message
+                .unwrap_or("the language server reported an error")
+                .to_string(),
         )),
         _ => None,
     }
@@ -1309,10 +1396,16 @@ fn progress_status(params: &Value) -> Option<Status> {
     let value = params.get("value")?;
     match value.get("kind").and_then(Value::as_str)? {
         "begin" => Some(Status::Indexing {
-            percent: value.get("percentage").and_then(Value::as_u64).map(|p| p as u8),
+            percent: value
+                .get("percentage")
+                .and_then(Value::as_u64)
+                .map(|p| p as u8),
         }),
         "report" => Some(Status::Indexing {
-            percent: value.get("percentage").and_then(Value::as_u64).map(|p| p as u8),
+            percent: value
+                .get("percentage")
+                .and_then(Value::as_u64)
+                .map(|p| p as u8),
         }),
         "end" => Some(Status::Ready),
         _ => None,
@@ -1364,7 +1457,9 @@ pub fn uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
         out.push(bytes[i]);
         i += 1;
     }
-    Some(std::path::PathBuf::from(String::from_utf8_lossy(&out).into_owned()))
+    Some(std::path::PathBuf::from(
+        String::from_utf8_lossy(&out).into_owned(),
+    ))
 }
 
 /// A document's symbols as blocks, `(first, last)` lines, in order of
@@ -1390,7 +1485,12 @@ pub fn blocks(response: DocumentSymbolResponse) -> Vec<(usize, usize)> {
         DocumentSymbolResponse::Flat(symbols) => out.extend(
             symbols
                 .iter()
-                .map(|s| (s.location.range.start.line as usize, s.location.range.end.line as usize))
+                .map(|s| {
+                    (
+                        s.location.range.start.line as usize,
+                        s.location.range.end.line as usize,
+                    )
+                })
                 .filter(|(first, last)| last > first),
         ),
     }
@@ -1443,7 +1543,11 @@ mod tests {
             .await
             .err()
             .expect("the start fails");
-        assert!(started.elapsed() < LIFECYCLE_TIMEOUT, "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < LIFECYCLE_TIMEOUT,
+            "{:?}",
+            started.elapsed()
+        );
         assert_eq!(
             error.to_string(),
             "the language server exited: unknown binary 'rust-analyzer'"
@@ -1454,7 +1558,9 @@ mod tests {
         }
         assert_eq!(
             statuses.last(),
-            Some(&Status::Failed { reason: error.to_string() })
+            Some(&Status::Failed {
+                reason: error.to_string()
+            })
         );
     }
 
@@ -1481,7 +1587,11 @@ mod tests {
             .await
             .err()
             .expect("the start fails");
-        assert!(started.elapsed() < LIFECYCLE_TIMEOUT, "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < LIFECYCLE_TIMEOUT,
+            "{:?}",
+            started.elapsed()
+        );
         assert_eq!(
             error.to_string(),
             "the language server exited: unknown binary 'rust-analyzer'"
@@ -1492,7 +1602,9 @@ mod tests {
         }
         assert_eq!(
             statuses.last(),
-            Some(&Status::Failed { reason: error.to_string() })
+            Some(&Status::Failed {
+                reason: error.to_string()
+            })
         );
     }
 
@@ -1550,9 +1662,17 @@ while True:
         client.did_open(&file, "one").await;
         client.did_open(&file, "one").await;
         client.did_open(&file, "two").await;
-        assert_eq!(client.given(&file).as_deref(), Some("two"), "the text it was last given");
+        assert_eq!(
+            client.given(&file).as_deref(),
+            Some("two"),
+            "the text it was last given"
+        );
         client.close_documents().await;
-        assert_eq!(client.given(&file), None, "read from disk again once closed");
+        assert_eq!(
+            client.given(&file),
+            None,
+            "read from disk again once closed"
+        );
         client.did_close(&file).await;
         client.did_open(&file, "two").await;
         assert_eq!(client.given(&file).as_deref(), Some("two"));
@@ -1601,7 +1721,10 @@ while True:
         std::fs::write(&script, RECORDING_SERVER).unwrap();
         let spec = ServerSpec {
             binary: PathBuf::from("python3"),
-            args: vec![script.display().to_string(), dir.join("methods").display().to_string()],
+            args: vec![
+                script.display().to_string(),
+                dir.join("methods").display().to_string(),
+            ],
             kind: ServerKind::RustAnalyzer,
             options: Value::Null,
         };
@@ -1697,7 +1820,10 @@ while True:
     async fn a_server_that_ignores_the_exit_is_killed() {
         let took = stop_a_server_ignoring("exit").await;
         assert!(took >= EXIT_GRACE, "given its moment: {took:?}");
-        assert!(took < EXIT_GRACE + KILL_WAIT + Duration::from_secs(1), "{took:?}");
+        assert!(
+            took < EXIT_GRACE + KILL_WAIT + Duration::from_secs(1),
+            "{took:?}"
+        );
     }
 
     /// A server that never answers the shutdown is killed once the ask
@@ -1706,7 +1832,10 @@ while True:
     async fn a_server_that_does_not_answer_the_shutdown_is_killed() {
         let took = stop_a_server_ignoring("shutdown").await;
         assert!(took >= LIFECYCLE_TIMEOUT, "{took:?}");
-        assert!(took < LIFECYCLE_TIMEOUT + KILL_WAIT + Duration::from_secs(1), "{took:?}");
+        assert!(
+            took < LIFECYCLE_TIMEOUT + KILL_WAIT + Duration::from_secs(1),
+            "{took:?}"
+        );
     }
 
     /// A server that writes its process id to the file named by its
@@ -1744,7 +1873,10 @@ time.sleep(600)
         assert!(matches!(error, Error::Timeout), "{error}");
         let timeout = ServerKind::RustAnalyzer.initialize_timeout();
         assert!(took >= timeout, "{took:?}");
-        assert!(took < timeout + KILL_WAIT + Duration::from_secs(1), "{took:?}");
+        assert!(
+            took < timeout + KILL_WAIT + Duration::from_secs(1),
+            "{took:?}"
+        );
         let pid: u32 = std::fs::read_to_string(&pid_file).unwrap().parse().unwrap();
         assert!(!alive(pid), "gone once the start failed");
         // Once nothing holds the client its events end, so this also says
@@ -1813,7 +1945,10 @@ time.sleep(600)
         assert_eq!(failed.await.ok().flatten().as_deref(), Some(reason));
         assert!(client.ended(LIFECYCLE_TIMEOUT).await, "killed");
         assert!(!alive(client.pid().unwrap()));
-        let error = client.definition(&dir.path().join("lib.rs"), 0, 0).await.unwrap_err();
+        let error = client
+            .definition(&dir.path().join("lib.rs"), 0, 0)
+            .await
+            .unwrap_err();
         assert_eq!(error.to_string(), reason);
     }
 
@@ -1864,9 +1999,18 @@ while True:
         let client = Client::start(spec, dir.path(), tx).await.unwrap();
         let uri = "jdt://contents/guava-33.3.1-jre.jar/com.google.common.collect/ImmutableList.class?=demo/%5C/Users%5C/me%5C/.m2";
         let key = client.remember_class_file(uri);
-        assert_eq!(key, "jdt://contents/guava-33.3.1-jre.jar/com.google.common.collect/ImmutableList.class");
-        assert_eq!(client.class_file_contents(&key).await, Some(format!("// {uri}")));
-        assert_eq!(client.uri_for(Path::new(&key)).map(|u| u.to_string()), Some(uri.to_string()));
+        assert_eq!(
+            key,
+            "jdt://contents/guava-33.3.1-jre.jar/com.google.common.collect/ImmutableList.class"
+        );
+        assert_eq!(
+            client.class_file_contents(&key).await,
+            Some(format!("// {uri}"))
+        );
+        assert_eq!(
+            client.uri_for(Path::new(&key)).map(|u| u.to_string()),
+            Some(uri.to_string())
+        );
         client.shutdown().await;
     }
 
@@ -1881,7 +2025,10 @@ while True:
         let spec = ServerSpec {
             kind: ServerKind::Gopls,
             binary: PathBuf::from("python3"),
-            args: vec![script.display().to_string(), dir.join("methods").display().to_string()],
+            args: vec![
+                script.display().to_string(),
+                dir.join("methods").display().to_string(),
+            ],
             options: Value::Null,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1949,10 +2096,16 @@ while True:
     #[test]
     fn progress_begin_and_report_read_as_indexing() {
         let begin = json!({"value":{"kind":"begin","percentage":0}});
-        assert_eq!(progress_status(&begin), Some(Status::Indexing { percent: Some(0) }));
+        assert_eq!(
+            progress_status(&begin),
+            Some(Status::Indexing { percent: Some(0) })
+        );
 
         let report = json!({"value":{"kind":"report","percentage":42}});
-        assert_eq!(progress_status(&report), Some(Status::Indexing { percent: Some(42) }));
+        assert_eq!(
+            progress_status(&report),
+            Some(Status::Indexing { percent: Some(42) })
+        );
     }
 
     #[test]
@@ -1964,7 +2117,10 @@ while True:
     #[test]
     fn progress_without_a_percentage_still_reports_indexing() {
         let begin = json!({"value":{"kind":"begin"}});
-        assert_eq!(progress_status(&begin), Some(Status::Indexing { percent: None }));
+        assert_eq!(
+            progress_status(&begin),
+            Some(Status::Indexing { percent: None })
+        );
     }
 
     #[test]
@@ -1993,7 +2149,9 @@ while True:
         );
         assert_eq!(
             server_health(&json!({"health":"warning","quiescent":true})),
-            Some(Health::Warning("the language server reported a problem".into()))
+            Some(Health::Warning(
+                "the language server reported a problem".into()
+            ))
         );
         assert_eq!(
             server_health(&json!({"health":"ok","quiescent":false})),
@@ -2027,7 +2185,10 @@ while True:
             &mut reported,
             &[
                 ("$/progress", json!({"value":{"kind":"begin"}})),
-                ("experimental/serverStatus", json!({"health":"ok","quiescent":false})),
+                (
+                    "experimental/serverStatus",
+                    json!({"health":"ok","quiescent":false}),
+                ),
                 ("$/progress", json!({"value":{"kind":"end"}})),
                 ("experimental/serverStatus", error.clone()),
                 // Told again whenever it goes quiet or busy, and a progress
@@ -2040,13 +2201,19 @@ while True:
         // Never ready on the way: the fetch's end came while it was busy.
         assert_eq!(
             events,
-            vec!["rust-analyzer indexing", "rust-analyzer: Failed to read Cargo metadata"]
+            vec![
+                "rust-analyzer indexing",
+                "rust-analyzer: Failed to read Cargo metadata"
+            ]
         );
 
         // Loaded after all.
         let events = told(
             &mut reported,
-            &[("experimental/serverStatus", json!({"health":"ok","quiescent":true}))],
+            &[(
+                "experimental/serverStatus",
+                json!({"health":"ok","quiescent":true}),
+            )],
         );
         assert_eq!(events, vec!["rust-analyzer ready"]);
     }
@@ -2064,7 +2231,10 @@ while True:
             ("$/progress", json!({"token": token, "value": value}))
         };
         let status = |quiescent: bool| {
-            ("experimental/serverStatus", json!({"health":"ok","quiescent":quiescent}))
+            (
+                "experimental/serverStatus",
+                json!({"health":"ok","quiescent":quiescent}),
+            )
         };
         let mut reported = Reported::default();
         let events = told(
@@ -2112,7 +2282,10 @@ while True:
                 status(true),
             ],
         );
-        assert_eq!(events, vec!["rust-analyzer indexing", "rust-analyzer ready"]);
+        assert_eq!(
+            events,
+            vec!["rust-analyzer indexing", "rust-analyzer ready"]
+        );
     }
 
     /// A server that says it is loading as it starts and answers a
@@ -2187,7 +2360,10 @@ while True:
             }
             None
         });
-        assert_eq!(loading.await.ok().flatten(), Some(Status::Indexing { percent: None }));
+        assert_eq!(
+            loading.await.ok().flatten(),
+            Some(Status::Indexing { percent: None })
+        );
 
         let file = dir.path().join("lib.rs");
         let error = client.definition(&file, 0, 0).await.unwrap_err();
@@ -2195,7 +2371,10 @@ while True:
         // The lists the panels show are asked the same way.
         let loading = |e: Error| e.to_string() == "rust-analyzer is still loading";
         assert!(client.references(&file, 0, 0).await.is_err_and(loading));
-        assert!(client.prepare_call_hierarchy(&file, 0, 0).await.is_err_and(loading));
+        assert!(client
+            .prepare_call_hierarchy(&file, 0, 0)
+            .await
+            .is_err_and(loading));
 
         let found = client.definition(&file, 0, 0).await.unwrap();
         assert_eq!(client.status(), Status::Ready);
@@ -2212,9 +2391,8 @@ while True:
     /// messages leave its status alone.
     #[test]
     fn a_message_says_how_a_server_without_a_status_is() {
-        let message = |kind: u64, text: &str| {
-            ("window/showMessage", json!({"type": kind, "message": text}))
-        };
+        let message =
+            |kind: u64, text: &str| ("window/showMessage", json!({"type": kind, "message": text}));
         let mut reported = Reported {
             hears_messages: true,
             ..Default::default()
@@ -2238,7 +2416,10 @@ while True:
             ]
         );
         let mut deaf = Reported::default();
-        assert_eq!(told(&mut deaf, &[message(1, "anything")]), Vec::<String>::new());
+        assert_eq!(
+            told(&mut deaf, &[message(1, "anything")]),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -2284,14 +2465,20 @@ while True:
         );
         assert_eq!(
             events,
-            vec!["rust-analyzer ready", "warning: Failed to run build scripts"]
+            vec![
+                "rust-analyzer ready",
+                "warning: Failed to run build scripts"
+            ]
         );
 
         // Well, then the same warning again: news again.
         let events = told(
             &mut reported,
             &[
-                ("experimental/serverStatus", json!({"health":"ok","quiescent":true})),
+                (
+                    "experimental/serverStatus",
+                    json!({"health":"ok","quiescent":true}),
+                ),
                 ("experimental/serverStatus", warning),
             ],
         );
@@ -2328,7 +2515,11 @@ while True:
         let range = json!({"start":{"line":3,"character":4},"end":{"line":3,"character":9}});
         let one = json!({"uri":"file:///a/src/lib.rs","range":range});
         assert_eq!(goto_locations(one.clone()).len(), 1, "one location");
-        assert_eq!(goto_locations(json!([one.clone(), one.clone()])).len(), 2, "a list");
+        assert_eq!(
+            goto_locations(json!([one.clone(), one.clone()])).len(),
+            2,
+            "a list"
+        );
 
         // A link, which the capabilities say not to send, still lands where
         // it points if a server sends one anyway.
@@ -2384,7 +2575,11 @@ while True:
             {"name":"lazy","kind":12,"location":{"uri":"file:///a/src/lazy.rs"}}
         ]);
         let found = workspace_symbols(nested);
-        assert_eq!(found.len(), 2, "the one with no range is left out: {found:?}");
+        assert_eq!(
+            found.len(),
+            2,
+            "the one with no range is left out: {found:?}"
+        );
         assert_eq!(found[0].name, "SlateDbWalGc");
         assert_eq!(found[0].kind, SymbolKind::STRUCT);
         assert_eq!(found[0].container, None);

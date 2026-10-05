@@ -85,10 +85,7 @@ impl WorkflowRunQuery {
         &self,
         runs: impl IntoIterator<Item = &'a WorkflowRunPayload>,
     ) -> Option<&'a WorkflowRunPayload> {
-        let earliest_end = self
-            .at
-            .checked_sub(ANNOUNCEMENT_DELAY)
-            .unwrap_or(self.at);
+        let earliest_end = self.at.checked_sub(ANNOUNCEMENT_DELAY).unwrap_or(self.at);
         runs.into_iter()
             .filter(|run| {
                 run.name == self.workflow
@@ -130,7 +127,11 @@ fn parse_title(title: &str) -> Option<(String, String, String)> {
     if workflow.is_empty() || branch.is_empty() {
         return None;
     }
-    Some((workflow.to_string(), verdict.to_string(), branch.to_string()))
+    Some((
+        workflow.to_string(),
+        verdict.to_string(),
+        branch.to_string(),
+    ))
 }
 
 /// The checks pill: the head's status-check rollup.
@@ -297,7 +298,11 @@ mod tests {
         );
         assert_eq!(
             parse_title("PR Checks workflow run succeeded for feature/foo-bar branch"),
-            Some(("PR Checks".into(), "succeeded".into(), "feature/foo-bar".into()))
+            Some((
+                "PR Checks".into(),
+                "succeeded".into(),
+                "feature/foo-bar".into()
+            ))
         );
         assert_eq!(
             parse_title("CI workflow run, Attempt #2 failed for main branch"),
@@ -337,7 +342,10 @@ mod tests {
             announced_verdict("CI workflow run timed out for main branch"),
             None
         );
-        assert_eq!(announced_verdict("Non-repeatable reads within DbSnapshot"), None);
+        assert_eq!(
+            announced_verdict("Non-repeatable reads within DbSnapshot"),
+            None
+        );
     }
 
     #[test]

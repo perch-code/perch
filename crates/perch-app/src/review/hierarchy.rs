@@ -35,7 +35,10 @@ use crate::ui::widgets::{clickable, sidebar_glyph};
 /// local the server names nothing and nothing opens. Nothing while the
 /// server is not there.
 pub fn show(state: ReviewState, backend: &Backend, symbol: &Symbol) {
-    if !state.lsp_status.with_untracked(|s| s.usable_for(&symbol.path)) {
+    if !state
+        .lsp_status
+        .with_untracked(|s| s.usable_for(&symbol.path))
+    {
         return;
     }
     let token = state.next_token();
@@ -340,7 +343,11 @@ fn item_row(
                 } else {
                     theme::weight_emphasis()
                 })
-                .color(if repeats { theme::fg_muted() } else { theme::fg() })
+                .color(if repeats {
+                    theme::fg_muted()
+                } else {
+                    theme::fg()
+                })
                 .flex_shrink(0.0_f32)
                 .selectable(false)
         }),
@@ -391,7 +398,11 @@ fn chevron(state: ReviewState, at: usize, expanded: bool, pending: bool) -> impl
     } else {
         SidebarIcon::ChevronRight
     };
-    let color = if pending { theme::fg_subtle } else { theme::fg_muted };
+    let color = if pending {
+        theme::fg_subtle
+    } else {
+        theme::fg_muted
+    };
     Container::new(
         sidebar_glyph(glyph, color).style(|s| s.size(theme::CHEVRON_GLYPH, theme::CHEVRON_GLYPH)),
     )
@@ -571,7 +582,10 @@ mod tests {
     #[test]
     fn the_panel_opens_when_the_server_names_a_function_and_not_otherwise() {
         let state = ReviewState::new();
-        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
+        state.set_server_status(
+            perch_lsp::ServerKind::RustAnalyzer,
+            perch_lsp::Status::Ready,
+        );
         let (backend, mut commands) = crate::backend::Backend::recording();
         let symbol = Symbol {
             path: "src/x.rs".into(),
@@ -686,11 +700,17 @@ mod tests {
         state.ask_again(&backend, perch_lsp::ServerKind::Gopls);
         assert_eq!(state.pending_calls.get().len(), 1, "not its server");
 
-        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
+        state.set_server_status(
+            perch_lsp::ServerKind::RustAnalyzer,
+            perch_lsp::Status::Ready,
+        );
         state.ask_again(&backend, perch_lsp::ServerKind::RustAnalyzer);
         let queued = state.pending_calls.get();
         assert_eq!(queued.len(), 2);
-        assert_eq!((queued[1].1.name.as_str(), queued[1].2), ("run", Direction::Callers));
+        assert_eq!(
+            (queued[1].1.name.as_str(), queued[1].2),
+            ("run", Direction::Callers)
+        );
         let open = state.hierarchy.get().unwrap();
         assert_eq!(open.rows[0].pending, Some(queued[1].0));
         assert!(matches!(&rows(&open)[1], Row::Notice { text, .. } if text == "Looking\u{2026}"));
@@ -700,6 +720,10 @@ mod tests {
         assert_eq!(open.rows.len(), 2);
         assert_eq!(open.rows[0].failed, None);
         state.ask_again(&backend, perch_lsp::ServerKind::RustAnalyzer);
-        assert_eq!(state.pending_calls.get().len(), 2, "answered: nothing to ask again");
+        assert_eq!(
+            state.pending_calls.get().len(),
+            2,
+            "answered: nothing to ask again"
+        );
     }
 }

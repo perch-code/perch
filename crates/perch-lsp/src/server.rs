@@ -147,12 +147,18 @@ pub enum Status {
     /// the editor works without it.
     Missing(Missing),
     Starting,
-    Indexing { percent: Option<u8> },
+    Indexing {
+        percent: Option<u8>,
+    },
     Ready,
     /// Running, but it says it cannot do its work: rust-analyzer whose
     /// workspace failed to load answers every ask with nothing.
-    Unhealthy { message: String },
-    Failed { reason: String },
+    Unhealthy {
+        message: String,
+    },
+    Failed {
+        reason: String,
+    },
     /// Not started: it would run the checkout's own code (see
     /// `ServerKind::project_code`), which the reader hasn't trusted.
     Held,
@@ -264,9 +270,14 @@ impl Missing {
             (Some(Need::Node), _) => {
                 format!("{name} needs Node and npm, which aren't on your PATH.")
             }
-            (Some(Need::Jdk), _) => format!("{name} needs a JDK 21 or later, which isn't installed."),
+            (Some(Need::Jdk), _) => {
+                format!("{name} needs a JDK 21 or later, which isn't installed.")
+            }
             (None, Some(toolchain)) => {
-                format!("{name} isn't installed for Rust {}.", short_toolchain(toolchain))
+                format!(
+                    "{name} isn't installed for Rust {}.",
+                    short_toolchain(toolchain)
+                )
             }
             (None, None) => format!("{name} isn't installed."),
         }
@@ -320,10 +331,13 @@ impl Install {
     /// The command as the toast's tooltip shows it.
     pub fn shown(&self) -> String {
         match self {
-            Install::Command { program, args, env, .. } => {
-                let program = program
-                    .file_name()
-                    .map_or_else(|| program.display().to_string(), |n| n.to_string_lossy().into_owned());
+            Install::Command {
+                program, args, env, ..
+            } => {
+                let program = program.file_name().map_or_else(
+                    || program.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
                 env.iter()
                     .map(|(name, value)| format!("{name}={value}"))
                     .chain(std::iter::once(program))
@@ -340,7 +354,10 @@ impl Install {
 
 /// The `.partial` sibling an install into `into` writes to first.
 pub fn partial(into: &Path) -> PathBuf {
-    let name = into.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = into
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     into.with_file_name(format!("{name}.partial"))
 }
 
@@ -397,7 +414,11 @@ fn find_jdtls(root: &Path, env: &Env) -> Result<ServerSpec, Missing> {
         return Ok(ServerSpec {
             kind,
             binary: wrapper,
-            args: vec![format!("--jvm-arg={NO_METADATA_AT_ROOT}"), "-data".into(), data()],
+            args: vec![
+                format!("--jvm-arg={NO_METADATA_AT_ROOT}"),
+                "-data".into(),
+                data(),
+            ],
             options,
         });
     }
@@ -415,9 +436,9 @@ fn find_jdtls(root: &Path, env: &Env) -> Result<ServerSpec, Missing> {
             .flatten()
             .map(|entry| entry.path())
             .find(|path| {
-                path.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("org.eclipse.equinox.launcher_") && n.ends_with(".jar"))
+                path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                    n.starts_with("org.eclipse.equinox.launcher_") && n.ends_with(".jar")
+                })
             })?;
         Some((dir, launcher))
     });
@@ -733,7 +754,9 @@ fn tsserver(lib: &Path) -> Option<PathBuf> {
     let tsserver = std::fs::canonicalize(lib.join("tsserver.js")).ok()?;
     let package = package_json(&tsserver.parent()?.parent()?.join("package.json"))?;
     let versioned = package["version"].as_str().is_some_and(|v| !v.is_empty());
-    let named = tsserver.file_name().is_some_and(|name| name == "tsserver.js");
+    let named = tsserver
+        .file_name()
+        .is_some_and(|name| name == "tsserver.js");
     (versioned && named && tsserver.is_file()).then_some(tsserver)
 }
 
@@ -746,7 +769,10 @@ fn package_json(path: &Path) -> Option<serde_json::Value> {
 /// Perch's directory, without their install scripts.
 fn typescript_install(npm: &Path, env: &Env) -> Install {
     let kind = ServerKind::TypescriptLanguageServer;
-    let into = env.servers.join(kind.name()).join(TYPESCRIPT_LANGUAGE_SERVER_PIN);
+    let into = env
+        .servers
+        .join(kind.name())
+        .join(TYPESCRIPT_LANGUAGE_SERVER_PIN);
     Install::Command {
         program: npm.to_path_buf(),
         args: vec![
@@ -794,8 +820,14 @@ fn go_version(go: &Path) -> Option<(u64, u64)> {
 
 /// `go version go1.25.0 darwin/arm64` as `(1, 25)`.
 fn parse_go_version(text: &str) -> Option<(u64, u64)> {
-    let word = text.split_whitespace().find_map(|w| w.strip_prefix("go1."))?;
-    let minor = word.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()?;
+    let word = text
+        .split_whitespace()
+        .find_map(|w| w.strip_prefix("go1."))?;
+    let minor = word
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()?;
     Some((1, minor))
 }
 
@@ -811,7 +843,9 @@ fn find_gopls(env: &Env) -> Result<ServerSpec, Missing> {
             .filter(|p| p.is_file())
     });
     let perchs = || {
-        newest_install(env, kind).map(|(_, dir)| dir.join("gopls")).filter(|p| p.is_file())
+        newest_install(env, kind)
+            .map(|(_, dir)| dir.join("gopls"))
+            .filter(|p| p.is_file())
     };
     if let Some(binary) = users.or_else(perchs) {
         return Ok(ServerSpec {
@@ -856,7 +890,9 @@ pub(crate) fn gopls_install(go: &Path, env: &Env) -> Install {
 /// The newest version of `kind` under Perch's servers directory, and its
 /// directory. An install still under way, `.partial`, isn't one.
 pub fn newest_install(env: &Env, kind: ServerKind) -> Option<(String, PathBuf)> {
-    installs(&env.servers.join(kind.name())).into_iter().next_back()
+    installs(&env.servers.join(kind.name()))
+        .into_iter()
+        .next_back()
 }
 
 /// The finished installs in a server's directory, oldest first.
@@ -1052,7 +1088,11 @@ fn is_rustup_proxy(candidate: &Path, rustup: Option<&Path>) -> bool {
 pub fn kinds_at_root(root: &Path) -> Vec<ServerKind> {
     ServerKind::ALL
         .into_iter()
-        .filter(|kind| kind.markers().iter().any(|marker| root.join(marker).is_file()))
+        .filter(|kind| {
+            kind.markers()
+                .iter()
+                .any(|marker| root.join(marker).is_file())
+        })
         .collect()
 }
 
@@ -1114,7 +1154,11 @@ mod tests {
         }
 
         fn rust(&self) -> Result<ServerSpec, Missing> {
-            find(ServerKind::RustAnalyzer, &self.path("checkout"), &self.env())
+            find(
+                ServerKind::RustAnalyzer,
+                &self.path("checkout"),
+                &self.env(),
+            )
         }
 
         /// A TypeScript package at `sub` with a tsserver, and
@@ -1151,7 +1195,10 @@ mod tests {
             let bin = self.path(&into).join("node_modules/.bin");
             std::fs::create_dir_all(&bin).unwrap();
             std::fs::write(bin.join("typescript-language-server"), "").unwrap();
-            self.typescript(&format!("{into}/node_modules/typescript"), TYPESCRIPT_PACKAGE);
+            self.typescript(
+                &format!("{into}/node_modules/typescript"),
+                TYPESCRIPT_PACKAGE,
+            );
             bin.join("typescript-language-server")
         }
     }
@@ -1177,14 +1224,23 @@ mod tests {
         // A rust-analyzer from another release on PATH isn't used.
         fake.tool("rust-analyzer", "exit 0");
         let missing = fake.rust().unwrap_err();
-        assert_eq!(missing.describe(), "rust-analyzer isn't installed for Rust 1.98.1.");
+        assert_eq!(
+            missing.describe(),
+            "rust-analyzer isn't installed for Rust 1.98.1."
+        );
         assert_eq!(
             missing.install.as_deref(),
             Some(&Install::Command {
                 program: rustup,
-                args: ["component", "add", "rust-analyzer", "--toolchain", "1.98.1-aarch64-apple-darwin"]
-                    .map(String::from)
-                    .to_vec(),
+                args: [
+                    "component",
+                    "add",
+                    "rust-analyzer",
+                    "--toolchain",
+                    "1.98.1-aarch64-apple-darwin"
+                ]
+                .map(String::from)
+                .to_vec(),
                 env: Vec::new(),
                 into: None,
             })
@@ -1204,7 +1260,10 @@ mod tests {
              echo 'help: run `rustup toolchain install` to install it' >&2; exit 1",
         );
         let missing = fake.rust().unwrap_err();
-        assert_eq!(missing.toolchain.as_deref(), Some("1.80.0-aarch64-apple-darwin"));
+        assert_eq!(
+            missing.toolchain.as_deref(),
+            Some("1.80.0-aarch64-apple-darwin")
+        );
         assert_eq!(
             missing.install.unwrap().shown(),
             "rustup toolchain install 1.80.0-aarch64-apple-darwin --profile minimal --component rust-analyzer"
@@ -1219,8 +1278,14 @@ mod tests {
             ),
             RustupWhich::NoComponent("stable-aarch64-apple-darwin".into())
         );
-        assert_eq!(rustup_which_failure("error: something else"), RustupWhich::Other);
-        assert_eq!(rustup_which_failure("note: toolchain 'x' is not installed"), RustupWhich::Other);
+        assert_eq!(
+            rustup_which_failure("error: something else"),
+            RustupWhich::Other
+        );
+        assert_eq!(
+            rustup_which_failure("note: toolchain 'x' is not installed"),
+            RustupWhich::Other
+        );
     }
 
     /// Any other rustup failure is as good as no rustup: PATH, but never
@@ -1255,7 +1320,10 @@ mod tests {
         let gopls = |fake: &Fake| find(ServerKind::Gopls, &fake.path("checkout"), &fake.env());
         let missing = gopls(&fake).unwrap_err();
         assert_eq!(missing.needs, Some(Need::Go));
-        assert_eq!(missing.describe(), "gopls needs Go, which isn't on your PATH.");
+        assert_eq!(
+            missing.describe(),
+            "gopls needs Go, which isn't on your PATH."
+        );
 
         fake.tool("go", "echo go version go1.25.0 darwin/arm64");
         let missing = gopls(&fake).unwrap_err();
@@ -1305,7 +1373,11 @@ mod tests {
         fake.typescript("checkout/node_modules/typescript", TYPESCRIPT_PACKAGE);
         assert_eq!(ts(&fake).unwrap_err().needs, Some(Need::Node));
         let npm = fake.tool("npm", "exit 0");
-        assert_eq!(ts(&fake).unwrap_err().needs, Some(Need::Node), "npm without node");
+        assert_eq!(
+            ts(&fake).unwrap_err().needs,
+            Some(Need::Node),
+            "npm without node"
+        );
         fake.tool("node", "exit 0");
         let missing = ts(&fake).unwrap_err();
         let into = fake.path("servers/typescript-language-server/6.0.1");
@@ -1330,30 +1402,48 @@ mod tests {
         let spec = ts(&fake).unwrap();
         assert_eq!(spec.binary, bin.join("typescript-language-server"));
         assert_eq!(spec.args, ["--stdio"]);
-        assert_eq!(spec.options["tsserver"]["path"], beside.display().to_string());
+        assert_eq!(
+            spec.options["tsserver"]["path"],
+            beside.display().to_string()
+        );
 
         // The user's, linked from PATH. With no TypeScript of its own, as
         // a version manager's shim, Perch's runs instead. One beside the
         // link isn't the server's: node follows the link first.
         let (users, package) = fake.global_typescript_server("6.0.1");
         fake.typescript("bin/node_modules/typescript", TYPESCRIPT_PACKAGE);
-        assert_eq!(ts(&fake).unwrap().binary, bin.join("typescript-language-server"));
+        assert_eq!(
+            ts(&fake).unwrap().binary,
+            bin.join("typescript-language-server")
+        );
         // A global install's TypeScript beside the server's package.
         let globals = "global/lib/node_modules/typescript";
         fake.typescript(globals, r#"{ "version": "" }"#);
-        assert_eq!(ts(&fake).unwrap().binary, bin.join("typescript-language-server"));
+        assert_eq!(
+            ts(&fake).unwrap().binary,
+            bin.join("typescript-language-server")
+        );
         let global = fake.typescript(globals, TYPESCRIPT_PACKAGE);
         let spec = ts(&fake).unwrap();
         assert_eq!(spec.binary, users);
-        assert_eq!(spec.options["tsserver"]["path"], global.display().to_string());
+        assert_eq!(
+            spec.options["tsserver"]["path"],
+            global.display().to_string()
+        );
         // The package's own, nearer, as node would find it first. Node
         // stops there, so one with no tsserver, as 7, isn't passed over
         // for the global one.
         let owns = "global/lib/node_modules/typescript-language-server/node_modules/typescript";
         let own = fake.typescript(owns, TYPESCRIPT_PACKAGE);
-        assert_eq!(ts(&fake).unwrap().options["tsserver"]["path"], own.display().to_string());
+        assert_eq!(
+            ts(&fake).unwrap().options["tsserver"]["path"],
+            own.display().to_string()
+        );
         std::fs::remove_file(&own).unwrap();
-        assert_eq!(ts(&fake).unwrap().binary, bin.join("typescript-language-server"));
+        assert_eq!(
+            ts(&fake).unwrap().binary,
+            bin.join("typescript-language-server")
+        );
 
         // With no TypeScript of its own and no Perch's, it's missing.
         std::fs::remove_dir_all(fake.path(globals)).unwrap();
@@ -1361,7 +1451,10 @@ mod tests {
         std::fs::remove_dir_all(fake.path("servers/typescript-language-server")).unwrap();
         let missing = ts(&fake).unwrap_err();
         assert_eq!(missing.needs, None);
-        assert_eq!(missing.install.as_deref(), Some(&typescript_install(&npm, &fake.env())));
+        assert_eq!(
+            missing.install.as_deref(),
+            Some(&typescript_install(&npm, &fake.env()))
+        );
     }
 
     /// typescript-language-server takes a tsserver only when the package
@@ -1373,7 +1466,14 @@ mod tests {
         let file = fake.typescript("typescript", TYPESCRIPT_PACKAGE);
         let lib = file.parent().unwrap().to_path_buf();
         assert_eq!(tsserver(&lib), Some(file.clone()));
-        for package in ["", "nonsense", "[]", "{}", r#"{ "version": "" }"#, r#"{ "version": 6 }"#] {
+        for package in [
+            "",
+            "nonsense",
+            "[]",
+            "{}",
+            r#"{ "version": "" }"#,
+            r#"{ "version": 6 }"#,
+        ] {
             fake.typescript("typescript", package);
             assert_eq!(tsserver(&lib), None, "{package}");
         }
@@ -1402,14 +1502,20 @@ mod tests {
         let (users, _) = fake.global_typescript_server("2.0.1");
         fake.typescript("global/lib/node_modules/typescript", TYPESCRIPT_PACKAGE);
         let missing = ts(&fake).unwrap_err();
-        assert_eq!(missing.install.as_deref(), Some(&typescript_install(&npm, &fake.env())));
+        assert_eq!(
+            missing.install.as_deref(),
+            Some(&typescript_install(&npm, &fake.env()))
+        );
         let perchs = fake.perchs_typescript_server("6.0.1");
         assert_eq!(ts(&fake).unwrap().binary, perchs);
         fake.global_typescript_server("2.1.0");
         assert_eq!(ts(&fake).unwrap().binary, users);
 
         std::fs::remove_file(&users).unwrap();
-        fake.tool("typescript-language-server", "exec node /elsewhere/lib/cli.mjs \"$@\"");
+        fake.tool(
+            "typescript-language-server",
+            "exec node /elsewhere/lib/cli.mjs \"$@\"",
+        );
         fake.typescript("node_modules/typescript", TYPESCRIPT_PACKAGE);
         assert_eq!(ts(&fake).unwrap().binary, perchs);
     }
@@ -1463,12 +1569,18 @@ mod tests {
         assert_eq!(spec.args[0], NO_METADATA_AT_ROOT);
         let data = jdtls_data(&fake.env(), &root);
         assert!(data.starts_with(fake.path("servers/jdtls-data")));
-        assert_eq!(std::fs::read_to_string(data.join("worktree")).unwrap(), root.display().to_string());
+        assert_eq!(
+            std::fs::read_to_string(data.join("worktree")).unwrap(),
+            root.display().to_string()
+        );
         let at = |flag: &str| spec.args.iter().position(|a| a == flag).unwrap();
         assert_eq!(spec.args[at("-jar") + 1], launcher.display().to_string());
         assert_eq!(spec.args[at("-data") + 1], data.display().to_string());
         assert!(spec.args[at("-configuration") + 1].starts_with(&into.display().to_string()));
-        assert_eq!(spec.options["extendedClientCapabilities"]["classFileContentsSupport"], true);
+        assert_eq!(
+            spec.options["extendedClientCapabilities"]["classFileContentsSupport"],
+            true
+        );
         assert_eq!(
             spec.options["settings"]["java"]["import"]["generatesMetadataFilesAtProjectRoot"],
             false
@@ -1490,7 +1602,10 @@ mod tests {
 
     #[test]
     fn java_says_its_major_version() {
-        assert_eq!(java_major("openjdk version \"21.0.2\" 2024-01-16"), Some(21));
+        assert_eq!(
+            java_major("openjdk version \"21.0.2\" 2024-01-16"),
+            Some(21)
+        );
         assert_eq!(java_major("java version \"1.8.0_402\""), Some(8));
         assert_eq!(java_major("openjdk version \"25\" 2025-09-16"), Some(25));
         assert_eq!(java_major("nothing"), None);
@@ -1514,7 +1629,10 @@ mod tests {
         let old_one = outdated(&spec, &fake.env()).unwrap();
         assert_eq!(old_one.installed, "5.1.0");
         assert_eq!(old_one.pin, "6.0.1");
-        assert_eq!(old_one.describe(), "typescript-language-server 6.0.1 is available.");
+        assert_eq!(
+            old_one.describe(),
+            "typescript-language-server 6.0.1 is available."
+        );
         assert_eq!(old_one.install, typescript_install(&npm, &fake.env()));
 
         // Up to date: nothing.
@@ -1567,8 +1685,14 @@ mod tests {
 
     #[test]
     fn go_says_its_version() {
-        assert_eq!(parse_go_version("go version go1.25.0 darwin/arm64\n"), Some((1, 25)));
-        assert_eq!(parse_go_version("go version go1.26rc1 linux/amd64"), Some((1, 26)));
+        assert_eq!(
+            parse_go_version("go version go1.25.0 darwin/arm64\n"),
+            Some((1, 25))
+        );
+        assert_eq!(
+            parse_go_version("go version go1.26rc1 linux/amd64"),
+            Some((1, 26))
+        );
         assert_eq!(parse_go_version("nonsense"), None);
     }
 
@@ -1586,18 +1710,30 @@ mod tests {
         let missing = fake.rust().unwrap_err();
         assert_eq!(missing.needs, Some(Need::Rustup));
         assert_eq!(missing.install, None);
-        assert_eq!(missing.describe(), "rust-analyzer needs rustup, which isn't on your PATH.");
+        assert_eq!(
+            missing.describe(),
+            "rust-analyzer needs rustup, which isn't on your PATH."
+        );
         fake.tool("rust-analyzer", "exit 0");
         assert!(fake.rust().is_ok());
     }
 
     #[test]
     fn a_file_picks_its_server_by_extension() {
-        assert_eq!(language_id("src/lib.rs"), Some((ServerKind::RustAnalyzer, "rust")));
-        assert_eq!(language_id("/abs/MAIN.RS"), Some((ServerKind::RustAnalyzer, "rust")));
+        assert_eq!(
+            language_id("src/lib.rs"),
+            Some((ServerKind::RustAnalyzer, "rust"))
+        );
+        assert_eq!(
+            language_id("/abs/MAIN.RS"),
+            Some((ServerKind::RustAnalyzer, "rust"))
+        );
         assert_eq!(ServerKind::for_path("README.md"), None);
         assert_eq!(ServerKind::for_path("Makefile"), None);
-        assert_eq!(ServerKind::for_fence("Rust"), Some(ServerKind::RustAnalyzer));
+        assert_eq!(
+            ServerKind::for_fence("Rust"),
+            Some(ServerKind::RustAnalyzer)
+        );
         assert_eq!(ServerKind::for_fence("diff"), None);
         assert_eq!(language_id("cmd/main.go"), Some((ServerKind::Gopls, "go")));
         assert_eq!(ServerKind::for_fence("golang"), Some(ServerKind::Gopls));
@@ -1617,7 +1753,10 @@ mod tests {
         std::fs::write(dir.join("Cargo.toml"), "").unwrap();
         assert_eq!(kinds_at_root(&dir), [ServerKind::RustAnalyzer]);
         std::fs::write(dir.join("go.work"), "").unwrap();
-        assert_eq!(kinds_at_root(&dir), [ServerKind::RustAnalyzer, ServerKind::Gopls]);
+        assert_eq!(
+            kinds_at_root(&dir),
+            [ServerKind::RustAnalyzer, ServerKind::Gopls]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1627,7 +1766,10 @@ mod tests {
             ServerKind::RustAnalyzer.project_code(),
             Some("build scripts and proc macros")
         );
-        assert_eq!(ServerKind::Jdtls.project_code(), Some("Gradle or Maven build"));
+        assert_eq!(
+            ServerKind::Jdtls.project_code(),
+            Some("Gradle or Maven build")
+        );
         assert_eq!(ServerKind::Gopls.project_code(), None);
         assert_eq!(ServerKind::TypescriptLanguageServer.project_code(), None);
     }
@@ -1640,7 +1782,11 @@ mod tests {
             Status::Indexing { percent: Some(42) }.describe(rust),
             "rust-analyzer indexing 42%"
         );
-        assert!(Status::Failed { reason: "boom".into() }.describe(rust).contains("boom"));
+        assert!(Status::Failed {
+            reason: "boom".into()
+        }
+        .describe(rust)
+        .contains("boom"));
         assert_eq!(
             Status::Unhealthy {
                 message: "Failed to load workspaces\n\nUsage: cargo metadata".into()
@@ -1648,7 +1794,10 @@ mod tests {
             .describe(rust),
             "rust-analyzer: Failed to load workspaces"
         );
-        assert_eq!(Status::Held.describe(rust), "rust-analyzer waits for you to trust this code");
+        assert_eq!(
+            Status::Held.describe(rust),
+            "rust-analyzer waits for you to trust this code"
+        );
     }
 
     #[test]
@@ -1664,7 +1813,10 @@ mod tests {
             toolchain: None,
         })
         .is_usable());
-        assert!(!Status::Unhealthy { message: "no workspace".into() }.is_usable());
+        assert!(!Status::Unhealthy {
+            message: "no workspace".into()
+        }
+        .is_usable());
         assert!(!Status::Held.is_usable());
     }
 
@@ -1673,8 +1825,14 @@ mod tests {
         assert!(Status::Starting.is_loading());
         assert!(Status::Indexing { percent: None }.is_loading());
         assert!(!Status::Ready.is_loading());
-        assert!(!Status::Unhealthy { message: "no workspace".into() }.is_loading());
-        assert!(!Status::Failed { reason: "exited".into() }.is_loading());
+        assert!(!Status::Unhealthy {
+            message: "no workspace".into()
+        }
+        .is_loading());
+        assert!(!Status::Failed {
+            reason: "exited".into()
+        }
+        .is_loading());
         // Held never loads: it waits on the reader, not the server.
         assert!(!Status::Held.is_loading());
     }

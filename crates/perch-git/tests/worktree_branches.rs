@@ -54,11 +54,23 @@ impl Fixture {
         std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
         git(
             tmp.path(),
-            &["clone", "-q", "--bare", remote.to_str().unwrap(), bare.to_str().unwrap()],
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                remote.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
         );
 
         let preparer = Preparer::new(store.clone(), None);
-        Self { _tmp: tmp, remote, store, id, preparer }
+        Self {
+            _tmp: tmp,
+            remote,
+            store,
+            id,
+            preparer,
+        }
     }
 
     /// A new commit on the remote's main, published as pull request 7's head.
@@ -164,7 +176,10 @@ async fn a_retargeted_pull_request_fetches_its_new_base() {
     assert_eq!(on_old.merge_base, first);
 
     let (back, fetched) = f.prepare_on(&head, "main").await;
-    assert!(fetched, "the old base's ref is not what refs/perch/base holds now");
+    assert!(
+        fetched,
+        "the old base's ref is not what refs/perch/base holds now"
+    );
     assert_eq!(back.merge_base, head);
 }
 
@@ -247,7 +262,10 @@ async fn archiving_keeps_the_branch_and_restoring_needs_no_clone() {
     let restored = f.prepare(&head).await;
     assert_eq!(restored.worktree, checkout.worktree);
     assert!(restored.worktree.join("a.txt").is_file());
-    assert_eq!(git(&restored.worktree, &["rev-parse", "--abbrev-ref", "HEAD"]), "perch/pr-7");
+    assert_eq!(
+        git(&restored.worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "perch/pr-7"
+    );
 }
 
 #[tokio::test]
@@ -255,9 +273,15 @@ async fn forgetting_deletes_the_branch() {
     let f = Fixture::new();
     let head = f.push_commit("pr");
     let checkout = f.prepare(&head).await;
-    f.preparer.remove_worktree(&f.bare(), &checkout.worktree).await.unwrap();
+    f.preparer
+        .remove_worktree(&f.bare(), &checkout.worktree)
+        .await
+        .unwrap();
 
-    f.preparer.delete_branch(&f.bare(), "perch/pr-7").await.unwrap();
+    f.preparer
+        .delete_branch(&f.bare(), "perch/pr-7")
+        .await
+        .unwrap();
     assert!(!f.branches().contains("perch/pr-7"));
 }
 
@@ -266,7 +290,10 @@ async fn every_directory_is_listed_whether_or_not_it_is_known() {
     let f = Fixture::new();
     let head = f.push_commit("pr");
     let checkout = f.prepare(&head).await;
-    let stray = f.store.worktrees_dir().join("acme__widgets__old-commit-layout");
+    let stray = f
+        .store
+        .worktrees_dir()
+        .join("acme__widgets__old-commit-layout");
     std::fs::create_dir_all(&stray).unwrap();
 
     let mut dirs = f.preparer.worktree_dirs();
@@ -293,7 +320,10 @@ async fn a_clean_worktree_with_a_commit_of_its_own_is_not_reset() {
 
     let two = f.push_commit("more");
     let kept = f.prepare(&two).await;
-    assert_eq!(kept.head_sha, mine, "the unpushed commit is still checked out");
+    assert_eq!(
+        kept.head_sha, mine,
+        "the unpushed commit is still checked out"
+    );
     assert_eq!(kept.stale.as_deref(), Some(two.as_str()));
     assert_eq!(git(&kept.worktree, &["rev-parse", "HEAD"]), mine);
 }
@@ -324,7 +354,13 @@ async fn commits_only_on_counts_what_deleting_the_branch_loses() {
         .cut_branch(&f.bare(), &f.id, "chris/work", &main, &[])
         .await
         .unwrap();
-    assert_eq!(f.preparer.commits_only_on(&f.bare(), &cut.branch).await.unwrap(), 0);
+    assert_eq!(
+        f.preparer
+            .commits_only_on(&f.bare(), &cut.branch)
+            .await
+            .unwrap(),
+        0
+    );
 
     for name in ["one", "two"] {
         std::fs::write(cut.worktree.join(name), name).unwrap();
@@ -332,16 +368,31 @@ async fn commits_only_on_counts_what_deleting_the_branch_loses() {
         git(&cut.worktree, &["commit", "-q", "-m", name]);
     }
     assert_eq!(
-        f.preparer.commits_only_on(&f.bare(), &cut.branch).await.unwrap(),
+        f.preparer
+            .commits_only_on(&f.bare(), &cut.branch)
+            .await
+            .unwrap(),
         2,
         "the worktree's own HEAD does not count as holding them"
     );
 
     // Another branch at the first commit keeps it.
     git(&cut.worktree, &["branch", "keep", "HEAD~1"]);
-    assert_eq!(f.preparer.commits_only_on(&f.bare(), &cut.branch).await.unwrap(), 1);
+    assert_eq!(
+        f.preparer
+            .commits_only_on(&f.bare(), &cut.branch)
+            .await
+            .unwrap(),
+        1
+    );
     // So does a ref of Perch's own, such as a pull request's head.
     let head = git(&cut.worktree, &["rev-parse", "HEAD"]);
     git(&f.bare(), &["update-ref", "refs/perch/pull/9/head", &head]);
-    assert_eq!(f.preparer.commits_only_on(&f.bare(), &cut.branch).await.unwrap(), 0);
+    assert_eq!(
+        f.preparer
+            .commits_only_on(&f.bare(), &cut.branch)
+            .await
+            .unwrap(),
+        0
+    );
 }

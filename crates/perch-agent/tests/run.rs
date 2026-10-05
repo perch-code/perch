@@ -238,7 +238,10 @@ async fn the_agent_does_not_inherit_secrets() {
         .collect();
     for (name, value) in scrubbed {
         assert!(!names.contains(&name), "{name} reached the agent:\n{seen}");
-        assert!(!values.contains(&value), "{value} reached the agent:\n{seen}");
+        assert!(
+            !values.contains(&value),
+            "{value} reached the agent:\n{seen}"
+        );
     }
     for (name, value) in kept {
         assert!(
@@ -550,12 +553,18 @@ read eof || true
 
     assert_eq!(request.kind, perch_agent::ApprovalKind::Host);
     assert_eq!(request.subject, "example.com");
-    assert!(matches!(rest.last(), Some(RunEvent::Finished { .. })), "{rest:?}");
+    assert!(
+        matches!(rest.last(), Some(RunEvent::Finished { .. })),
+        "{rest:?}"
+    );
     assert!(matches!(run.wait().await, RunOutcome::Finished { .. }));
     let wrote = std::fs::read_to_string(&record).unwrap();
     let lines: Vec<&str> = wrote.lines().collect();
     assert!(lines[0].contains("\"subtype\":\"initialize\""), "{wrote}");
-    assert!(lines[1].contains("\"content\":\"hi\""), "the prompt went on stdin: {wrote}");
+    assert!(
+        lines[1].contains("\"content\":\"hi\""),
+        "the prompt went on stdin: {wrote}"
+    );
     assert!(lines[2].contains("\"behavior\":\"deny\""), "{wrote}");
     assert!(lines[2].contains("The reader said no"), "{wrote}");
 }
@@ -592,9 +601,16 @@ read eof || true
     let (request, rest) = answer_first_approval(&run, &mut rx, perch_agent::Decision::Allow).await;
 
     assert_eq!(request.kind, perch_agent::ApprovalKind::Host);
-    assert!(matches!(&rest[0], RunEvent::Started { session_id, .. } if session_id == "th-1"), "{rest:?}");
-    assert!(rest.iter().any(|e| matches!(e, RunEvent::Text(t) if t == "Fetched.")));
-    assert!(matches!(rest.last(), Some(RunEvent::Finished { session_id, .. }) if session_id == "th-1"));
+    assert!(
+        matches!(&rest[0], RunEvent::Started { session_id, .. } if session_id == "th-1"),
+        "{rest:?}"
+    );
+    assert!(rest
+        .iter()
+        .any(|e| matches!(e, RunEvent::Text(t) if t == "Fetched.")));
+    assert!(
+        matches!(rest.last(), Some(RunEvent::Finished { session_id, .. }) if session_id == "th-1")
+    );
     assert!(matches!(run.wait().await, RunOutcome::Finished { .. }));
     let wrote = std::fs::read_to_string(&record).unwrap();
     let lines: Vec<&str> = wrote.lines().collect();
@@ -633,7 +649,10 @@ sleep 30
         .await
         .expect("the stop went through");
     assert!(matches!(outcome, RunOutcome::Stopped { .. }), "{outcome:?}");
-    assert!(!run.answer("r1", perch_agent::Decision::Allow), "nothing to answer now");
+    assert!(
+        !run.answer("r1", perch_agent::Decision::Allow),
+        "nothing to answer now"
+    );
 }
 
 /// Collect events until one matches `at`, steer with `text`, and collect
@@ -691,13 +710,33 @@ read eof || true
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let run = Run::spawn(spec(binary, dir.path().to_path_buf()), tx).unwrap();
 
-    let events = steer_at(&run, &mut rx, |e| matches!(e, RunEvent::ToolCall { .. }), "Skip the tests").await;
+    let events = steer_at(
+        &run,
+        &mut rx,
+        |e| matches!(e, RunEvent::ToolCall { .. }),
+        "Skip the tests",
+    )
+    .await;
     let at = steered_at(&events);
-    assert!(matches!(events[at - 1], RunEvent::ToolResult { .. }), "it lands after the step: {events:?}");
-    assert!(matches!(events[at + 1], RunEvent::Text(ref t) if t == "Skipped."), "{events:?}");
-    assert_eq!(events.iter().filter(|e| matches!(e, RunEvent::Steered(_))).count(), 1, "not the prompt");
+    assert!(
+        matches!(events[at - 1], RunEvent::ToolResult { .. }),
+        "it lands after the step: {events:?}"
+    );
+    assert!(
+        matches!(events[at + 1], RunEvent::Text(ref t) if t == "Skipped."),
+        "{events:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, RunEvent::Steered(_)))
+            .count(),
+        1,
+        "not the prompt"
+    );
     assert!(matches!(events.last(), Some(RunEvent::Finished { .. })));
-    let wrote: serde_json::Value = serde_json::from_str(std::fs::read_to_string(&record).unwrap().trim()).unwrap();
+    let wrote: serde_json::Value =
+        serde_json::from_str(std::fs::read_to_string(&record).unwrap().trim()).unwrap();
     assert_eq!(wrote["type"], "user");
     assert_eq!(wrote["message"]["content"], "Skip the tests");
     assert!(!run.steer("more"), "a finished run takes nothing");
@@ -724,13 +763,32 @@ read eof || true
     let binary = fake_agent(dir.path(), body);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let run = Run::spawn(spec(binary, dir.path().to_path_buf()), tx).unwrap();
-    let events = steer_at(&run, &mut rx, |e| matches!(e, RunEvent::Text(_)), "Skip the tests").await;
+    let events = steer_at(
+        &run,
+        &mut rx,
+        |e| matches!(e, RunEvent::Text(_)),
+        "Skip the tests",
+    )
+    .await;
 
     let at = steered_at(&events);
-    assert!(matches!(events[at + 1], RunEvent::Text(ref t) if t == "Skipped."), "{events:?}");
-    assert_eq!(events.iter().filter(|e| matches!(e, RunEvent::Started { .. })).count(), 1, "the run starts once: {events:?}");
+    assert!(
+        matches!(events[at + 1], RunEvent::Text(ref t) if t == "Skipped."),
+        "{events:?}"
+    );
     assert_eq!(
-        events.iter().filter(|e| matches!(e, RunEvent::Finished { .. })).count(),
+        events
+            .iter()
+            .filter(|e| matches!(e, RunEvent::Started { .. }))
+            .count(),
+        1,
+        "the run starts once: {events:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, RunEvent::Finished { .. }))
+            .count(),
         1,
         "the first turn's result is not the run's: {events:?}"
     );
@@ -767,16 +825,38 @@ read eof || true
     spec.backend = Backend::Codex;
     let run = Run::spawn(spec, tx).unwrap();
 
-    let events = steer_at(&run, &mut rx, |e| matches!(e, RunEvent::ToolCall { .. }), "Skip the tests").await;
+    let events = steer_at(
+        &run,
+        &mut rx,
+        |e| matches!(e, RunEvent::ToolCall { .. }),
+        "Skip the tests",
+    )
+    .await;
     let at = steered_at(&events);
-    assert!(matches!(events[at + 1], RunEvent::Text(ref t) if t == "Skipped."), "{events:?}");
-    assert_eq!(events.iter().filter(|e| matches!(e, RunEvent::Finished { .. })).count(), 1, "{events:?}");
+    assert!(
+        matches!(events[at + 1], RunEvent::Text(ref t) if t == "Skipped."),
+        "{events:?}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, RunEvent::Finished { .. }))
+            .count(),
+        1,
+        "{events:?}"
+    );
     assert!(matches!(events.last(), Some(RunEvent::Finished { .. })));
     let wrote = std::fs::read_to_string(&record).unwrap();
-    let lines: Vec<serde_json::Value> = wrote.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let lines: Vec<serde_json::Value> = wrote
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
     assert_eq!(lines[0]["method"], "turn/steer");
     assert_eq!(lines[0]["params"]["expectedTurnId"], "tu-1");
     assert_eq!(lines[0]["params"]["input"][0]["text"], "Skip the tests");
-    assert_eq!(lines[1]["method"], "turn/start", "the steer missed its turn: {wrote}");
+    assert_eq!(
+        lines[1]["method"], "turn/start",
+        "the steer missed its turn: {wrote}"
+    );
     assert_eq!(lines[1]["params"]["input"][0]["text"], "Skip the tests");
 }
