@@ -34,6 +34,12 @@ pub fn toast(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
                 return Empty::new().into_any();
             };
             let token = toast.token;
+            // An offer to trust says more, and its Always trust boxes name
+            // the repository, so its card is wider.
+            let width = match &toast.kind {
+                ToastKind::Server(offer) if offer.trust.is_some() => 360.0,
+                _ => 328.0,
+            };
             // What clicking anywhere on the card does, for a toast that
             // goes somewhere. Its own close button stops the click.
             let (body, open) = match toast.kind {
@@ -62,7 +68,7 @@ pub fn toast(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
             }
             card.style(move |s| {
                 let s = s
-                    .width(328.0)
+                    .width(width)
                     .max_width_full()
                     .padding_left(13.0)
                     .padding_right(7.0)
@@ -229,15 +235,32 @@ fn server_offer(state: AppState, backend: Rc<Backend>, token: u64, offer: Server
         state.decline_offer(token, &key)
     })
     .style(move |s| s.apply_if(installing(), |s| s.hide()));
-    let top = Stack::horizontal((dot(theme::draft), line, button, close))
-        .style(|s| s.items_center().width_full().gap(9.0));
     match offer.trust {
-        Some(ask) => Stack::vertical((top, always_trust(state, ask)))
-            .style(|s| s.width_full().gap(2.0))
+        // The line is long, so it has the card's width, the close at its
+        // first line, and the button goes under the boxes at the right.
+        Some(ask) => {
+            let lift = (28.0 - FIRST_LINE) / 2.0;
+            let top = Stack::horizontal((
+                dot(theme::draft).style(move |s| s.margin_top(lift + (FIRST_LINE - 9.0) / 2.0)),
+                line.style(move |s| s.padding_top(lift)),
+                close,
+            ))
+            .style(|s| s.items_start().width_full().gap(9.0));
+            let actions = Container::new(button)
+                .style(|s| s.width_full().justify_end().padding_right(6.0).margin_top(6.0));
+            Stack::vertical((top, always_trust(state, ask), actions))
+                .style(|s| s.width_full().padding_bottom(4.0))
+                .into_any()
+        }
+        None => Stack::horizontal((dot(theme::draft), line, button, close))
+            .style(|s| s.items_center().width_full().gap(9.0))
             .into_any(),
-        None => top.into_any(),
     }
 }
+
+/// The height of a line of body text, which a close at the top of a
+/// wrapped line centres on.
+const FIRST_LINE: f64 = 16.8;
 
 /// The Always trust boxes under a trust offer's line, one for each server
 /// held back. A box ticked when Trust and start is pressed trusts that
@@ -275,9 +298,8 @@ fn always_trust(state: AppState, ask: TrustAsk) -> impl IntoView {
         .style(|s| widgets::clickable(s).items_center().width_full())
     });
     // The box under the line's first letter: the dot and the gap after it
-    // are 18px, and the box sits 5px into its 26px target. The target's
-    // own 5px under it stands in for the card's padding.
-    Stack::vertical_from_iter(rows).style(|s| s.width_full().padding_left(13.0).margin_bottom(-5.0))
+    // are 18px, and the box sits 5px into its 26px target.
+    Stack::vertical_from_iter(rows).style(|s| s.width_full().padding_left(13.0).margin_top(2.0))
 }
 
 /// Trust and start, from the toast or the worktree menu: trust `item_id`'s
@@ -507,6 +529,20 @@ mod tests {
         assert!(row.y1 <= card.y1, "inside the card");
         // The drawn box is 16px, 5px into the row's 26px target.
         assert!((row.x0 + 5.0 - line.x0).abs() < 1.0, "{row:?} {line:?}");
+        // The line has the card's width but the close's; the close centres
+        // on its first line; Trust and start sits
+        // under the boxes, 13px in from the card's right and bottom.
+        let close = named(toast, "Dismiss message").expect("no close").get_visual_rect_no_clip();
+        let button = named(toast, "Trust and start").expect("no Trust and start").get_visual_rect_no_clip();
+        let jdtls_row = named(toast, "Always trust jdtls in slatedb/slatedb")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        assert!(line.x1 >= close.x0 - 10.0, "{line:?} {close:?}");
+        let first = line.y0 + (28.0 - super::FIRST_LINE) / 2.0;
+        assert!((close.center().y - (first + super::FIRST_LINE / 2.0)).abs() < 0.5);
+        assert!(button.y0 >= jdtls_row.y1, "{button:?} {jdtls_row:?}");
+        assert!((card.x1 - button.x1 - 14.0).abs() < 1.0, "{button:?} {card:?}");
+        assert!((card.y1 - button.y1 - 14.0).abs() < 1.0, "{button:?} {card:?}");
 
         harness.click(row.x1 - 20.0, row.center().y);
         settle(&mut harness);
