@@ -994,11 +994,14 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 .class(floem::views::editor::view::EditorViewClass, |s| {
                     s.cursor_color(theme::fg())
                 })
-                // Every scroll's bars as macOS's own: when it overlays
-                // them, there while the view scrolls and while the pointer
-                // is on one, and fading out once it stops.
+                // Every scroll's bars as macOS's own: a pill of a slider,
+                // which floem draws only on macOS and squares off
+                // elsewhere, and when macOS overlays them, there while the
+                // view scrolls and while the pointer is on one, and fading
+                // out once it stops.
                 .custom_style_class(|s: floem::views::scroll::ScrollCustomStyle| {
-                    s.show_bars_when_idle(!crate::scrollers::overlaid())
+                    s.handle_rounded(true)
+                        .show_bars_when_idle(!crate::scrollers::overlaid())
                 })
                 .class(crate::scrollers::ToEdge, crate::scrollers::to_edge)
         })
