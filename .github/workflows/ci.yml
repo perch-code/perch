@@ -1,0 +1,16 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # rustup installs the toolchain rust-toolchain.toml pins, rustfmt included.
+      - name: Check formatting
+        run: cargo fmt --all --check
