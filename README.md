@@ -217,7 +217,8 @@ files a bug report or an idea as an issue on `perch-code/perch`. An error
 or warning toast has **Report**, which starts one about it.
 
 A report carries what Perch knows about itself: its version and commit,
-macOS and your screens, the agent CLIs it found, its language servers (which
+the operating system (on macOS its version and your screens, on Linux the
+distribution, kernel and session), the agent CLIs it found, its language servers (which
 binary, from where, how much memory), where the token came from, your config
 with the token and repository names left out, the session's recent errors,
 and the end of its log. For a bug, Claude or Codex can look into it first,
