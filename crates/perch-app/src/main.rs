@@ -49,7 +49,8 @@ fn main() {
     }
     // A Finder launch gets a bare PATH. Everything Perch starts inherits it:
     // gh, the agents, an npm-installed agent's `node`. Adding the install
-    // dirs here, at the end, fixes them all at once.
+    // dirs here, at the end, fixes them all at once. Its relative entries
+    // go here too, since most of what Perch starts runs in a checkout.
     if let Some(path) = perch_agent::path_with_install_dirs(
         std::env::var_os("PATH").as_deref(),
         &perch_agent::install_dirs(),

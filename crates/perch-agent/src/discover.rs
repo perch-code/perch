@@ -27,16 +27,21 @@ pub fn install_dirs() -> Vec<PathBuf> {
 /// `path` with each of `extra` that exists and is not already on it added
 /// at the end, so what the user put first still wins. An npm-installed
 /// CLI is a `#!/usr/bin/env node` script, and without this a Finder launch
-/// finds the script but not `node`. `None` when there is nothing to add.
+/// finds the script but not `node`. `None` when there is nothing to change.
+///
+/// Its relative entries go, an empty one included, which means the
+/// current directory. What Perch starts runs in a checkout, a pull
+/// request's among them, where `.` or `node_modules/.bin` would find
+/// whatever program the pull request put there.
 pub fn path_with_install_dirs(path: Option<&OsStr>, extra: &[PathBuf]) -> Option<OsString> {
-    let mut dirs = path.into_iter().flat_map(std::env::split_paths).collect::<Vec<_>>();
-    let before = dirs.len();
+    let given = path.into_iter().flat_map(std::env::split_paths).collect::<Vec<_>>();
+    let mut dirs = given.iter().filter(|dir| dir.is_absolute()).cloned().collect::<Vec<_>>();
     for dir in extra {
         if dir.is_dir() && !dirs.contains(dir) {
             dirs.push(dir.clone());
         }
     }
-    (dirs.len() > before).then(|| std::env::join_paths(dirs).ok()).flatten()
+    (dirs != given).then(|| std::env::join_paths(dirs).ok()).flatten()
 }
 
 /// Where a binary is. A name is looked up on `PATH`, then in the
@@ -215,6 +220,18 @@ mod tests {
         assert_eq!(std::env::split_paths(&joined).collect::<Vec<_>>(), [on_path.clone(), brew.clone()]);
         assert_eq!(path_with_install_dirs(Some(&joined), &extra), None, "nothing new to add");
         assert_eq!(path_with_install_dirs(None, &[brew.clone()]), Some(brew.into_os_string()));
+    }
+
+    #[test]
+    fn relative_path_entries_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let on_path = dir.path().join("bin");
+        std::fs::create_dir_all(&on_path).unwrap();
+        // `::` is an empty entry, the current directory.
+        let path = format!(".:node_modules/.bin:{}::", on_path.display());
+        let kept = path_with_install_dirs(Some(OsStr::new(&path)), &[]).unwrap();
+        assert_eq!(std::env::split_paths(&kept).collect::<Vec<_>>(), [on_path]);
+        assert_eq!(path_with_install_dirs(Some(&kept), &[]), None, "nothing left to drop");
     }
 
     #[test]
