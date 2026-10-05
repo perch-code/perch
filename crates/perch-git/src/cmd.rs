@@ -21,18 +21,33 @@ use crate::Error;
 /// `ps`) and never written to a config file.
 const TOKEN_ENV: &str = "PERCH_GIT_TOKEN";
 
-/// A credential helper that answers with the token from the environment.
+/// A credential helper that answers with the token from the environment,
+/// for https://github.com and no other host.
 ///
 /// The leading empty `credential.helper=` clears helpers inherited from the
-/// user's global config, so the macOS keychain never gets a look in and
-/// cannot pop a dialog during a headless fetch.
-fn credential_args() -> [String; 4] {
+/// user's global config, scoped ones included, so the macOS keychain never
+/// gets a look in and cannot pop a dialog during a headless fetch. The
+/// empty scoped one clears github.com's again, such as `gh auth
+/// setup-git`'s, for good measure.
+///
+/// The token's helper is scoped because git hands `-c` config down to the
+/// programs it runs, git-lfs among them, and a pull request's `.lfsconfig`
+/// can point git-lfs at any host. git asks the helpers for that host's
+/// credentials, and an unscoped helper would answer with the token. The
+/// scope has to match scheme, host and port, so `http://github.com` and
+/// `https://github.com.evil.example` get nothing, and `Git::command` turns
+/// askpass off so the reader is not asked instead. Perch's own git only
+/// talks to github.com (`RepoId::clone_url`); an enterprise remote is
+/// fetched with the reader's git.
+fn credential_args() -> [String; 6] {
     [
         "-c".into(),
         "credential.helper=".into(),
         "-c".into(),
+        "credential.https://github.com.helper=".into(),
+        "-c".into(),
         format!(
-            "credential.helper=!f() {{ echo username=x-access-token; echo password=${TOKEN_ENV}; }}; f"
+            "credential.https://github.com.helper=!f() {{ echo username=x-access-token; echo password=${TOKEN_ENV}; }}; f"
         ),
     ]
 }
@@ -296,6 +311,13 @@ impl Git {
         // helper, which the reader's own fetches need and Perch's do not.
         if !self.plain {
             command.env("GIT_CONFIG_NOSYSTEM", "1");
+            // Asked about a host the token's helper skips, such as one a
+            // pull request's `.lfsconfig` names, git and git-lfs fall back
+            // to askpass: `GIT_ASKPASS`, `core.askPass`, then
+            // `SSH_ASKPASS`. That pops a dialog whose answer goes to the
+            // host. Set but empty, `GIT_ASKPASS` wins and runs nothing, so
+            // the request fails instead.
+            command.env("GIT_ASKPASS", "");
         }
         // Some of git's messages are read back as text; a translated git
         // would say them differently.
@@ -417,10 +439,94 @@ mod tests {
     #[test]
     fn the_credential_helper_reads_the_token_from_the_environment() {
         let args = credential_args();
-        // The first helper is empty, which clears inherited ones.
+        // The first helpers are empty, which clears inherited ones.
         assert_eq!(args[1], "credential.helper=");
-        assert!(args[3].contains(TOKEN_ENV));
+        assert_eq!(args[3], "credential.https://github.com.helper=");
+        assert!(args[5].starts_with("credential.https://github.com.helper=!"));
+        assert!(args[5].contains(TOKEN_ENV));
         // The token itself must never appear in a command line.
-        assert!(!args[3].contains("ghp_"));
+        assert!(!args[5].contains("ghp_"));
+    }
+
+    const TOKEN: &str = "perch-test-token";
+
+    /// What askpass answers in the tests, so the output shows whether git
+    /// fell back to asking the reader.
+    const ASKED: &str = "askpass-ran";
+
+    /// What Perch's git says to `git credential fill` for `request`, on a
+    /// machine whose only global config is `config`. `core.askPass` and
+    /// `SSH_ASKPASS` both name a program that answers [`ASKED`].
+    async fn credential_fill(config: &str, request: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let askpass = home.path().join("askpass");
+        std::fs::write(&askpass, format!("#!/bin/sh\necho {ASKED}\n")).unwrap();
+        std::fs::set_permissions(&askpass, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let global = home.path().join("gitconfig");
+        std::fs::write(&global, format!("[core]\n\taskPass = \"{}\"\n{config}", askpass.display())).unwrap();
+
+        let mut command = Git::new(Some(TOKEN.into())).command(Some(home.path()), ["credential", "fill"]);
+        // Whatever GIT_ASKPASS Perch was started with, git gets an empty one.
+        assert!(command
+            .as_std()
+            .get_envs()
+            .any(|(name, value)| name == "GIT_ASKPASS" && value == Some(OsStr::new(""))));
+        command
+            .env("GIT_CONFIG_GLOBAL", &global)
+            .env("HOME", home.path())
+            .env("SSH_ASKPASS", &askpass)
+            .env_remove("GIT_CONFIG_PARAMETERS")
+            .env_remove("GIT_CONFIG_COUNT")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("git runs");
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(request.as_bytes()).await.unwrap();
+        drop(stdin);
+        let output = child.wait_with_output().await.unwrap();
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    }
+
+    #[tokio::test]
+    async fn the_token_goes_to_github_com_and_nowhere_else() {
+        let said = credential_fill("", "protocol=https\nhost=github.com\n\n").await;
+        assert!(said.contains(&format!("password={TOKEN}")), "{said}");
+        assert!(!said.contains(ASKED), "{said}");
+
+        for request in [
+            // A pull request's .lfsconfig naming its own server.
+            "protocol=https\nhost=attacker.example\n\n",
+            "protocol=http\nhost=github.com\n\n",
+            "protocol=https\nhost=github.com.attacker.example\n\n",
+            "protocol=https\nhost=github.com:8443\n\n",
+        ] {
+            let said = credential_fill("", request).await;
+            assert!(!said.contains(TOKEN), "{request:?} got the token: {said}");
+            // Nor does the reader get asked for that host's password.
+            assert!(!said.contains(ASKED), "{request:?} ran askpass: {said}");
+        }
+    }
+
+    #[tokio::test]
+    async fn inherited_helpers_answer_for_no_host() {
+        // A helper with a whole answer, so git would ask no later one.
+        let helper = "\"!f() { echo username=inherited; echo password=inherited; }; f\"";
+        let config = format!("[credential]\n\thelper = {helper}\n[credential \"https://github.com\"]\n\thelper = {helper}\n");
+
+        let said = credential_fill(&config, "protocol=https\nhost=github.com\n\n").await;
+        assert!(said.contains(&format!("password={TOKEN}")), "{said}");
+        assert!(!said.contains("inherited"), "{said}");
+
+        let said = credential_fill(&config, "protocol=https\nhost=attacker.example\n\n").await;
+        assert!(!said.contains(TOKEN), "{said}");
+        assert!(!said.contains("inherited"), "{said}");
+        assert!(!said.contains(ASKED), "{said}");
     }
 }
