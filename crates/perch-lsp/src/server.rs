@@ -221,6 +221,9 @@ pub struct Env {
     pub java_home_tool: PathBuf,
     /// `JAVA_HOME`.
     pub java_home: Option<PathBuf>,
+    /// Directories of JDKs, one in each entry: where Linux distributions
+    /// install them.
+    pub jvm_dirs: Vec<PathBuf>,
 }
 
 impl Env {
@@ -233,6 +236,7 @@ impl Env {
             servers,
             java_home_tool: PathBuf::from("/usr/libexec/java_home"),
             java_home: std::env::var_os("JAVA_HOME").map(PathBuf::from),
+            jvm_dirs: vec![PathBuf::from("/usr/lib/jvm")],
         }
     }
 
@@ -533,26 +537,67 @@ pub fn jdtls_data_path(servers: &Path, root: &Path) -> PathBuf {
     servers.join("jdtls-data").join(name)
 }
 
-/// A JDK new enough to run jdtls: the one macOS's `java_home` picks for
-/// 21 or later, else `JAVA_HOME` when its `java` is 21 or later.
+/// A JDK new enough to run jdtls. On macOS, the one its `java_home`
+/// picks for 21 or later, else `JAVA_HOME`. Elsewhere `JAVA_HOME`, else
+/// the `java` on `PATH`, which is the JDK the system was set to, else the
+/// newest of the installed ones. macOS's `/usr/bin/java` asks to install
+/// Java when there is none, so it is never run there.
 fn find_jdk(env: &Env) -> Option<PathBuf> {
-    let picked = std::process::Command::new(&env.java_home_tool)
-        .args(["-v", "21+"])
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
-        .filter(|home| home.join("bin/java").is_file());
-    picked.or_else(|| {
-        let home = env.java_home.clone()?;
-        let out = std::process::Command::new(home.join("bin/java"))
-            .arg("-version")
+    let new_enough = |home: &PathBuf| jdk_major(home).is_some_and(|major| major >= 21);
+    if cfg!(target_os = "macos") {
+        let picked = std::process::Command::new(&env.java_home_tool)
+            .args(["-v", "21+"])
             .output()
-            .ok()?;
-        // `java -version` writes to stderr.
-        let major = java_major(&String::from_utf8_lossy(&out.stderr))?;
-        (major >= 21).then_some(home)
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+            .filter(|home| home.join("bin/java").is_file());
+        return picked.or_else(|| env.java_home.clone().filter(new_enough));
+    }
+    if let Some(home) = env.java_home.clone().filter(new_enough) {
+        return Some(home);
+    }
+    // `/usr/bin/java` is a link, often by way of `/etc/alternatives`, into
+    // the JDK's own `bin`.
+    let on_path = env
+        .which("java")
+        .and_then(|java| std::fs::canonicalize(java).ok())
+        .and_then(|java| Some(java.parent()?.parent()?.to_path_buf()))
+        .filter(new_enough);
+    on_path.or_else(|| {
+        let mut homes: Vec<PathBuf> = env
+            .jvm_dirs
+            .iter()
+            .filter_map(|dir| std::fs::read_dir(dir).ok())
+            .flatten()
+            .flatten()
+            .filter_map(|entry| std::fs::canonicalize(entry.path()).ok())
+            .collect();
+        homes.sort();
+        homes.dedup();
+        homes
+            .into_iter()
+            .filter_map(|home| Some((jdk_major(&home)?, home)))
+            .filter(|(major, _)| *major >= 21)
+            .max_by(|a, b| a.0.cmp(&b.0))
+            .map(|(_, home)| home)
     })
+}
+
+/// The major version of the JDK at `home`: from the `release` file every
+/// JDK has, else from asking its `java`. `None` when there's no `java`.
+fn jdk_major(home: &Path) -> Option<u64> {
+    let java = home.join("bin/java");
+    if !java.is_file() {
+        return None;
+    }
+    let release = std::fs::read_to_string(home.join("release")).unwrap_or_default();
+    if let Some(line) = release.lines().find(|l| l.starts_with("JAVA_VERSION=")) {
+        return java_major(line);
+    }
+    let out = std::process::Command::new(java).arg("-version").output().ok()?;
+    // `java -version` writes to stderr.
+    java_major(&String::from_utf8_lossy(&out.stderr))
 }
 
 /// The major version in `java -version`'s `version "21.0.2"`, or 8 for
@@ -1206,7 +1251,7 @@ mod tests {
             let fake = Fake {
                 dir: tempfile::tempdir().unwrap(),
             };
-            for sub in ["bin", "home", "servers", "checkout"] {
+            for sub in ["bin", "home", "servers", "checkout", "jvm"] {
                 std::fs::create_dir_all(fake.dir.path().join(sub)).unwrap();
             }
             fake
@@ -1223,6 +1268,7 @@ mod tests {
                 servers: self.path("servers"),
                 java_home_tool: self.path("bin/java_home"),
                 java_home: None,
+                jvm_dirs: vec![self.path("jvm")],
             }
         }
 
@@ -1233,6 +1279,15 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
             path
+        }
+
+        /// A JDK of `version` at `sub`, saying so in its `release` file.
+        fn jdk(&self, sub: &str, version: &str) -> PathBuf {
+            let home = self.path(sub);
+            std::fs::create_dir_all(home.join("bin")).unwrap();
+            std::fs::write(home.join("bin/java"), "").unwrap();
+            std::fs::write(home.join("release"), format!("JAVA_VERSION=\"{version}\"\n")).unwrap();
+            home
         }
 
         fn rust(&self) -> Result<ServerSpec, Missing> {
@@ -1691,9 +1746,8 @@ mod tests {
         let jdtls = |fake: &Fake| find(ServerKind::Jdtls, &root, &fake.env());
         assert_eq!(jdtls(&fake).unwrap_err().needs, Some(Need::Jdk));
 
-        let jdk = fake.path("jdk");
-        std::fs::create_dir_all(jdk.join("bin")).unwrap();
-        std::fs::write(jdk.join("bin/java"), "").unwrap();
+        // Where macOS's `java_home` and Linux's look both find it.
+        let jdk = fake.jdk("jvm/jdk-21", "21.0.2");
         fake.tool("java_home", &format!("echo {}", jdk.display()));
         let missing = jdtls(&fake).unwrap_err();
         let into = fake.path("servers/jdtls/1.61.0");
@@ -1748,6 +1802,32 @@ mod tests {
         );
     }
 
+    /// Off macOS a JDK is `JAVA_HOME`, else the one `java` on `PATH` links
+    /// into, else the newest installed; one older than 21 is passed over.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn a_jdk_is_java_home_then_javas_on_path_then_the_newest_installed() {
+        let fake = Fake::new();
+        assert_eq!(find_jdk(&fake.env()), None);
+
+        let old = fake.jdk("jvm/java-17-openjdk", "17.0.9");
+        assert_eq!(find_jdk(&fake.env()), None, "17 is too old");
+        let newer = fake.jdk("jvm/java-26-openjdk", "26.0.1");
+        let new = fake.jdk("jvm/java-21-openjdk", "21.0.12");
+        // As Arch has it, a `default` link beside the JDKs.
+        std::os::unix::fs::symlink(&new, fake.path("jvm/default")).unwrap();
+        assert_eq!(find_jdk(&fake.env()), Some(newer.clone()), "the newest installed");
+
+        // `java` on PATH is the system's choice, through a link.
+        std::os::unix::fs::symlink(new.join("bin/java"), fake.path("bin/java")).unwrap();
+        assert_eq!(find_jdk(&fake.env()), Some(new.clone()));
+
+        let env = Env { java_home: Some(newer.clone()), ..fake.env() };
+        assert_eq!(find_jdk(&env), Some(newer.clone()), "JAVA_HOME first");
+        let env = Env { java_home: Some(old.clone()), ..fake.env() };
+        assert_eq!(find_jdk(&env), Some(new), "an old JAVA_HOME is passed over");
+    }
+
     #[test]
     fn java_says_its_major_version() {
         assert_eq!(
@@ -1757,6 +1837,7 @@ mod tests {
         assert_eq!(java_major("java version \"1.8.0_402\""), Some(8));
         assert_eq!(java_major("openjdk version \"25\" 2025-09-16"), Some(25));
         assert_eq!(java_major("nothing"), None);
+        assert_eq!(java_major("JAVA_VERSION=\"21.0.12\""), Some(21));
         assert!(is_class_file("jdt://contents/rt.jar/java.util/List.class"));
         assert_eq!(
             language_id("jdt://contents/rt.jar/java.util/List.class"),
