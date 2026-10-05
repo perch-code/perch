@@ -3699,6 +3699,7 @@ dependencies = [
  "perch-syntax",
  "pulldown-cmark",
  "regex",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",

@@ -837,7 +837,7 @@ impl Config {
 ///
 /// One directory, so it can be named in a sentence, backed up, or deleted
 /// as a whole. Under it: `config.toml`, `perch.db`, `avatars/`, `repos/`,
-/// `worktrees/`, and `homes/`.
+/// `worktrees/`, `homes/`, and `updates/`.
 pub fn perch_home() -> PathBuf {
     match std::env::var_os("PERCH_HOME").filter(|v| !v.is_empty()) {
         Some(dir) => expand_home(&dir.to_string_lossy()),

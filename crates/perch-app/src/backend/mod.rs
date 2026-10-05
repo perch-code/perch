@@ -40,6 +40,7 @@ mod kept_servers;
 pub(crate) mod open_pull;
 pub(crate) mod reviews;
 pub(crate) mod runs;
+mod update;
 mod windows;
 
 /// How many avatar downloads may be in flight at once.
@@ -758,6 +759,9 @@ pub enum Command {
         login: String,
         note: String,
     },
+    /// Swap the downloaded `version` in for the running app and reopen it.
+    /// `UpdateInstalled` or `Update(Failed)` answers.
+    InstallUpdate { version: String },
 }
 
 /// How the reader answered a request.
@@ -1456,6 +1460,10 @@ pub enum Event {
         existing: bool,
     },
     InviteFailed(crate::feedback::SendError),
+    /// Where updating Perch stands, for every window.
+    Update(crate::update::UpdateStatus),
+    /// The new app is in place and opens once this one is gone: quit.
+    UpdateInstalled,
     /// The commits over the base and whether the checkout has work in it,
     /// for the scope menu, and the head as it was at the previous open,
     /// which "Since you last looked" ranges from.
@@ -2834,6 +2842,12 @@ impl Backend {
         });
     }
 
+    pub fn install_update(&self, version: &str) {
+        let _ = self.commands.send(Command::InstallUpdate {
+            version: version.to_string(),
+        });
+    }
+
     pub fn plus_one_feedback(&self, number: u64, node_id: &str, react: bool) {
         let _ = self.commands.send(Command::PlusOneFeedback {
             number,
@@ -3990,6 +4004,7 @@ async fn run(
     };
     send_agent_runs(&ctx, 50);
     reviews::recover(&ctx).await;
+    update::spawn(ctx.clone());
     // A language server grows as it loads, so whether the kept ones fit
     // beside the ones on show is looked at again every little while, not
     // only when one is set aside.
@@ -4997,6 +5012,10 @@ async fn run(
             Command::Invite { login, note } => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move { invite::send(&ctx, &login, &note).await });
+            }
+            Command::InstallUpdate { version } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { update::install(&ctx, version).await });
             }
             Command::OpenFile {
                 path,

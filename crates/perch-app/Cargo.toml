@@ -16,6 +16,7 @@ perch-lsp = { path = "../perch-lsp" }
 perch-agent = { path = "../perch-agent" }
 perch-knowledge = { path = "../perch-knowledge" }
 pulldown-cmark = { version = "0.13", default-features = false }
+semver = "1"
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

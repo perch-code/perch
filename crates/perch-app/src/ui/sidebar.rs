@@ -23,6 +23,7 @@ use crate::ui::items::{item_row, OpenItem};
 use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::titlebar::title_bar;
 use crate::ui::widgets::sidebar_glyph;
+use crate::update::UpdateStatus;
 use perch_github::Item;
 
 /// The drawer, open.
@@ -121,8 +122,9 @@ fn toggle_button(state: AppState) -> impl IntoView {
 }
 
 /// The strip along the drawer's foot, as tall as the bar over the main
-/// pane: who is signed in, then what belongs to the app rather than to an
-/// item, invites, bug reports and plan usage.
+/// pane: who is signed in, or the restart for an update that's waiting,
+/// then what belongs to the app rather than to an item, invites, bug
+/// reports and plan usage.
 fn footer(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     let login = move || state.viewer.with(|v| v.as_ref().map(|(l, _)| l.clone()).unwrap_or_default());
     let url = move || state.viewer.with(|v| v.as_ref().map(|(_, a)| a.clone()).unwrap_or_default());
@@ -136,22 +138,43 @@ fn footer(state: AppState, backend: Rc<Backend>) -> impl IntoView {
         Some(review) => Stack::horizontal((
             crate::ui::invite::button(state, review, backend.clone()),
             crate::ui::feedback::button(state, review, backend.clone()),
-            crate::ui::usage::button(state, review, backend),
+            crate::ui::usage::button(state, review, backend.clone()),
         ))
         .into_any(),
         None => Empty::new().into_any(),
     };
-    Stack::horizontal((
-        face,
-        Label::derived(login).style(|s| {
-            s.font_size(theme::TEXT_BODY)
-                .color(theme::nav_fg())
-                .text_ellipsis()
+    // An update waiting for a restart takes the login's place.
+    let updating = floem::reactive::Memo::new(move |_| state.update.with(|u| *u != UpdateStatus::Current));
+    let middle = {
+        let backend = backend.clone();
+        dyn_container(
+            move || updating.get(),
+            move |updating| {
+                if updating {
+                    crate::ui::update::button(state, backend.clone()).into_any()
+                } else {
+                    Label::derived(login)
+                        .style(|s| {
+                            s.font_size(theme::TEXT_BODY)
+                                .color(theme::nav_fg())
+                                .text_ellipsis()
+                                .min_width(0.0)
+                        })
+                        .into_any()
+                }
+            },
+        )
+        .style(|s| {
+            s.items_center()
                 .min_width(0.0)
                 .flex_grow(1.0_f32)
                 .margin_left(8.0)
                 .margin_right(8.0)
-        }),
+        })
+    };
+    Stack::horizontal((
+        face,
+        middle,
         controls.style(|s| s.items_center().gap(4.0).flex_shrink(0.0_f32)),
     ))
     .debug_name("drawer footer")
@@ -1756,6 +1779,42 @@ mod tests {
         let mut harness = window().0;
         let left = crate::theme::dark_check::light_left(&mut harness);
         assert!(left.is_empty(), "light colours left in dark:\n{}", left.join("\n"));
+    }
+
+    /// A downloaded update puts its restart in the login's place, inside
+    /// the drawer at its narrowest and beside the footer's buttons, and a
+    /// press asks the backend to install it.
+    #[test]
+    fn a_waiting_update_is_restarted_from_the_footer() {
+        let root = TestRoot::new();
+        let state = AppState::new();
+        state.sidebar_width.set(theme::SIDEBAR_MIN_WIDTH);
+        state.viewer.set(Some(("me".into(), String::new())));
+        let review = crate::review::model::ReviewState::new();
+        let (backend, mut commands) = Backend::recording();
+        let view = crate::ui::app_view(state, review, Rc::new(backend));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1200.0, 760.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "update-button").is_none());
+
+        state.update.set(UpdateStatus::Ready { version: "0.2.0".into() });
+        harness.rebuild();
+        harness.paint();
+        let button = find(harness.root_id(), "update-button").unwrap().get_visual_rect_no_clip();
+        let footer = find(harness.root_id(), "drawer footer").unwrap().get_visual_rect_no_clip();
+        let invite = find(harness.root_id(), "invite-button").unwrap().get_visual_rect_no_clip();
+        assert!(button.width() > 60.0, "{button:?}");
+        assert!(button.y0 >= footer.y0 && button.y1 <= footer.y1, "{button:?} in {footer:?}");
+        assert!(button.x1 <= invite.x0, "{button:?} runs into {invite:?}");
+        assert!(invite.x1 <= theme::SIDEBAR_MIN_WIDTH, "{invite:?}");
+
+        harness.click(button.center().x, button.center().y);
+        assert_eq!(state.update.get(), UpdateStatus::Installing { version: "0.2.0".into() });
+        match commands.try_recv() {
+            Ok(crate::backend::Command::InstallUpdate { version }) => assert_eq!(version, "0.2.0"),
+            other => panic!("expected InstallUpdate, got {other:?}"),
+        }
     }
 
     /// The whole window, so the drawer sits where it does in the app: at

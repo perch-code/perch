@@ -269,6 +269,9 @@ pub struct AppState {
     pub agent: RwSignal<AgentConfig>,
     /// How much of each agent CLI's plan limits is used, as last heard.
     pub usage: RwSignal<perch_agent::usage::Board>,
+    /// Where updating Perch stands: a newer release waiting for a
+    /// restart, or the restart under way.
+    pub update: RwSignal<crate::update::UpdateStatus>,
     /// The review view's state, once the window has made it, so a menu
     /// that ends in something being opened can put the progress card up.
     pub review: RwSignal<Option<crate::review::model::ReviewState>>,
@@ -496,6 +499,7 @@ impl AppState {
             review_launching: RwSignal::new(HashMap::new()),
             agent: RwSignal::new(AgentConfig::default()),
             usage: RwSignal::new(Default::default()),
+            update: RwSignal::new(crate::update::UpdateStatus::Current),
             hovered_item: RwSignal::new(None),
             item_filters: RwSignal::new(crate::items::ItemFilters::default()),
             renaming: RwSignal::new(None),
@@ -535,6 +539,7 @@ impl AppState {
         copy(self.notifications_polled, data.notifications_polled);
         copy(self.agent, data.agent);
         copy(self.usage, data.usage);
+        copy(self.update, data.update);
         copy(self.viewer, data.viewer);
         copy(self.agent_runs, data.agent_runs);
         copy(self.agent_run_events, data.agent_run_events);
@@ -805,6 +810,26 @@ impl AppState {
         if let Some(id) = completed_id {
             self.show_agent_completion(id);
         }
+    }
+
+    /// A new release ready says so once, and the footer keeps the restart
+    /// on offer; a failed restart says why.
+    fn apply_update(&self, status: crate::update::UpdateStatus) {
+        use crate::update::UpdateStatus;
+        let before = self.update.get_untracked();
+        match &status {
+            UpdateStatus::Ready { version, .. }
+                if !matches!(&before, UpdateStatus::Ready { version: v, .. } if v == version) =>
+            {
+                self.notify(
+                    format!("Perch {version} is ready. Restart from the drawer's footer to update."),
+                    Tone::Success,
+                );
+            }
+            UpdateStatus::Failed { error, .. } => self.notify(error.clone(), Tone::Error),
+            _ => {}
+        }
+        self.update.set(status);
     }
 
     fn show_agent_completion(&self, run_id: String) {
@@ -3053,6 +3078,8 @@ impl AppState {
             }
             Event::AgentConfig(agent) => self.agent.set(agent),
             Event::Usage(board) => self.usage.set(board),
+            Event::Update(status) => self.apply_update(status),
+            Event::UpdateInstalled => floem::quit_app(),
             Event::CommentThreads { .. }
             | Event::AgentStep { .. }
             | Event::AgentSteer { .. }
@@ -6462,5 +6489,34 @@ mod tests {
         assert_eq!(retained.response, "hydrated answer");
         assert!(retained.response_truncated);
         assert_eq!(retained.steps.len(), 1);
+    }
+
+    #[test]
+    fn an_update_says_it_is_ready_once_and_its_failure_each_time() {
+        use crate::update::UpdateStatus;
+        let message = |app: &AppState| match app.current_toast().map(|t| t.kind) {
+            Some(ToastKind::Message { text, .. }) => Some(text),
+            _ => None,
+        };
+        let ready = || Event::Update(UpdateStatus::Ready { version: "0.2.0".into() });
+        let _root = floem::headless::TestRoot::new();
+        let app = AppState::new();
+
+        app.apply(ready());
+        let said = message(&app).unwrap();
+        assert!(said.contains("Perch 0.2.0 is ready"), "{said}");
+        app.dismiss_toast(app.current_toast().unwrap().token);
+
+        // The next look finds the same release: the footer still offers
+        // it, and nothing new is said.
+        app.apply(ready());
+        assert_eq!(message(&app), None);
+        assert_eq!(app.update.get(), UpdateStatus::Ready { version: "0.2.0".into() });
+
+        app.apply(Event::Update(UpdateStatus::Failed {
+            version: "0.2.0".into(),
+            error: "couldn't move /Applications/Perch.app aside".into(),
+        }));
+        assert_eq!(message(&app).as_deref(), Some("couldn't move /Applications/Perch.app aside"));
     }
 }

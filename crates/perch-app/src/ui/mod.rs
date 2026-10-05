@@ -14,6 +14,7 @@ pub mod open_box;
 pub mod sidebar;
 pub mod toast;
 pub mod titlebar;
+pub mod update;
 pub mod usage;
 pub mod widgets;
 

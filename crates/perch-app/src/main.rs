@@ -24,6 +24,7 @@ mod state;
 mod theme;
 mod timefmt;
 mod ui;
+mod update;
 mod windows;
 
 use floem::reactive::SignalWith;

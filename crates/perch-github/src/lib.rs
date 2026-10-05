@@ -18,6 +18,7 @@ pub mod model;
 pub mod pulls;
 pub mod reactions;
 pub mod references;
+pub mod releases;
 pub mod reviews;
 mod responses;
 pub mod search;
@@ -63,6 +64,7 @@ pub use pulls::{
 pub use reactions::{ReactionGroup, ReactionKind, Reactions};
 pub use subscription::IssueViewerState;
 pub use references::IssueReference;
+pub use releases::{Release, ReleaseAsset};
 pub use search::{SearchHit, SearchPage};
 pub use reviews::{
     AnchorMapping, AnchorMappingMethod, AnchorMappingStatus, DeletedReviewHistory, Finding,

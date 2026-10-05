@@ -18,14 +18,21 @@ worktree behind every item.
 ## Install
 
 Perch runs on Apple Silicon Macs. With `gh` signed in to an account that can
-read this repository, install or update to the latest release with:
+read this repository, install the latest release with:
 
 ```bash
 gh release download --repo perch-code/perch --pattern Perch-macos-arm64.tar.gz -O - | tar -xz -C /Applications
 ```
 
-Quit Perch before updating. Downloading through `gh` rather than a browser
-keeps macOS from quarantining the app, which isn't notarized.
+Downloading through `gh` rather than a browser keeps macOS from quarantining
+the app, which isn't notarized.
+
+After that, Perch updates itself. Every six hours it asks GitHub, with the
+same token it reads notifications with, whether there's a newer release.
+When there is, it downloads and unpacks it under `~/.perch/updates`, and
+**Restart to update** takes the login's place in the drawer's footer. A
+restart swaps the new app in where the old one was and reopens it. A Perch
+run from source (`cargo run`) never updates itself.
 
 To build from source instead:
 
@@ -207,7 +214,8 @@ Everything lives under `~/.perch` (or `$PERCH_HOME`): the config, a SQLite
 database, worktrees, clones, agent state, and in `servers/` the language
 servers Perch installed and jdtls's data for each checkout. Delete
 `servers/` to uninstall them. Perch's log is in `logs/`, one file a day,
-the last seven kept. The database holds your local conversations, drafts
+the last seven kept. A downloaded update waits in `updates/` until the
+restart that installs it. The database holds your local conversations, drafts
 and review history, so don't treat it as a cache.
 
 Perch removes the worktrees it made under `~/.perch` once they're done
@@ -228,6 +236,6 @@ git tag v0.2.0 && git push origin v0.2.0
 ```
 
 The release workflow builds `Perch.app` on an Apple Silicon runner and
-publishes `Perch-macos-arm64.tar.gz` to a GitHub release. A tag with a hyphen,
-like `v0.2.0-beta.1`, becomes a prerelease, which `gh release download` skips
-by default.
+publishes `Perch-macos-arm64.tar.gz` to a GitHub release. A running Perch
+finds it within six hours. A tag with a hyphen, like `v0.2.0-beta.1`, becomes
+a prerelease, which neither the updater nor `gh release download` picks up.

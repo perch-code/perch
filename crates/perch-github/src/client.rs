@@ -37,6 +37,7 @@ use crate::pulls::{
     PullPayload, PullRequest, PullRequestOverview, PullRequestOverviewAccumulator,
     PullRequestOverviewQuery, PULL_REQUEST_OVERVIEW_QUERY,
 };
+use crate::releases::{Release, ReleaseAsset};
 use crate::reactions::{
     reaction_mutation, reactions_query, NodeReading, ReactionKind, ReactionMutationData, Reactions,
     ReactionsData, NODES_PER_QUERY,
@@ -2471,6 +2472,66 @@ impl GitHub {
         );
     }
 
+    /// The repository's latest release: its newest that is neither a
+    /// draft nor a prerelease. `None` when it has none, or when the token
+    /// can't see the repository, since GitHub answers both with a 404.
+    pub async fn latest_release(&self, repo_full_name: &str) -> Result<Option<Release>, Error> {
+        let body = match self
+            .get_text(&format!("/repos/{repo_full_name}/releases/latest"))
+            .await
+        {
+            Ok(body) => body,
+            Err(Error::Status { status: 404, .. }) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        serde_json::from_str(&body)
+            .map(Some)
+            .map_err(|e| Error::Decode(e.to_string()))
+    }
+
+    /// Download a release's file, whole, into memory.
+    ///
+    /// It's asked of the API, with the token when that's api.github.com,
+    /// which redirects to storage elsewhere; the client drops the token on
+    /// the way. Anything short of the size the release lists is an error,
+    /// so a dropped connection never passes for the file.
+    pub async fn download_release_asset(&self, asset: &ReleaseAsset) -> Result<Vec<u8>, Error> {
+        let mut request = self
+            .http
+            .get(&asset.url)
+            .header(http::header::ACCEPT, "application/octet-stream")
+            .timeout(RELEASE_ASSET_TIMEOUT);
+        if asset.url.starts_with("https://api.github.com/") {
+            request = request.bearer_auth(&*self.token);
+        }
+        let mut response = request
+            .send()
+            .await
+            .map_err(|e| Error::Network(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(Error::Status {
+                status: response.status().as_u16(),
+                body: format!("download of {} failed", asset.name),
+            });
+        }
+        let mut bytes = Vec::with_capacity(asset.size as usize);
+        while let Some(chunk) = response.chunk().await.map_err(|e| Error::Network(e.to_string()))? {
+            bytes.extend_from_slice(&chunk);
+            if bytes.len() as u64 > asset.size {
+                break;
+            }
+        }
+        if bytes.len() as u64 != asset.size {
+            return Err(Error::Network(format!(
+                "{} came to {} bytes, not the {} its release lists",
+                asset.name,
+                bytes.len(),
+                asset.size
+            )));
+        }
+        Ok(bytes)
+    }
+
     /// Download an avatar at display size. Returns raw encoded bytes.
     pub async fn fetch_avatar(&self, url: &str) -> Result<Vec<u8>, Error> {
         let sized = with_size_param(url, 64);
@@ -2530,6 +2591,10 @@ impl GitHub {
         Ok(bytes)
     }
 }
+
+/// How long a release's file may take to download. The client's own 20
+/// seconds is for API calls; Perch's tarball is tens of megabytes.
+const RELEASE_ASSET_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// The most a picture may weigh: GitHub takes uploads of up to 10 MB, and
 /// a picture from elsewhere bigger than this is not one to draw in a
