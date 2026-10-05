@@ -644,6 +644,8 @@ mod tests {
         ReviewState,
         UnboundedReceiver<Command>,
     ) {
+        // A click is turned into a caret by the code's widths.
+        crate::theme::install_fonts_for_tests();
         let root = TestRoot::new();
         let app = AppState::new();
         let state = ReviewState::new();
