@@ -326,9 +326,12 @@ pub fn wire(state: ReviewState) {
         // The same editor with new text edited in: the matches are made
         // again, the one the bar was on kept where it still is, and the
         // view stays where the reader has it.
-        let reloaded = before
-            .as_ref()
-            .is_some_and(|b| Made { loaded: made.loaded, ..b.made.clone() } == made);
+        let reloaded = before.as_ref().is_some_and(|b| {
+            Made {
+                loaded: made.loaded,
+                ..b.made.clone()
+            } == made
+        });
         // The anchor stands while the caret is where the bar put it, on
         // the match it is on; anywhere else, the reader moved it there.
         let caret = caret(state, false);
@@ -1174,7 +1177,11 @@ mod window {
         let mut harness = harness().0;
         harness.dispatch_event(cmd(Code::KeyF, "f"));
         let left = crate::theme::dark_check::light_left(&mut harness);
-        assert!(left.is_empty(), "light colours left in dark:\n{}", left.join("\n"));
+        assert!(
+            left.is_empty(),
+            "light colours left in dark:\n{}",
+            left.join("\n")
+        );
     }
 
     fn harness() -> (HeadlessHarness, ReviewState) {

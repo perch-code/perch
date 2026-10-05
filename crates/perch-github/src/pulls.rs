@@ -863,7 +863,10 @@ fn current_suites(parsed: &[ParsedCheck]) -> std::collections::HashMap<(&str, &s
             *entry = (rank, suite);
         }
     }
-    latest.into_iter().map(|(key, (_, suite))| (key, suite)).collect()
+    latest
+        .into_iter()
+        .map(|(key, (_, suite))| (key, suite))
+        .collect()
 }
 
 impl CheckContextPayload {
@@ -888,7 +891,10 @@ impl CheckContextPayload {
                 };
                 let suite = suite_id
                     .filter(|_| workflow_run.is_some())
-                    .map(|id| SuiteRef { id, done: suite_done });
+                    .map(|id| SuiteRef {
+                        id,
+                        done: suite_done,
+                    });
                 let workflow = workflow_run
                     .as_ref()
                     .and_then(|run| run.workflow.as_ref())
@@ -1231,7 +1237,11 @@ mod tests {
     /// passes must not stand in for jobs the re-run has not reached.
     fn rerun_rollup(rerun_status: &str) -> Checks {
         let run = |name: &str, status: &str, conclusion: &str, started: &str, suite: u64| {
-            let suite_status = if suite == 2 { rerun_status } else { "COMPLETED" };
+            let suite_status = if suite == 2 {
+                rerun_status
+            } else {
+                "COMPLETED"
+            };
             serde_json::json!({
                 "__typename": "CheckRun",
                 "name": name,
@@ -1257,7 +1267,10 @@ mod tests {
             run("bindings-go", "COMPLETED", "SUCCESS", "2026-10-01T18:37:43Z", 1),
             {"__typename": "StatusContext", "context": "license/cla", "state": "SUCCESS"},
         ]);
-        checks_from_contexts(Some("PENDING".into()), serde_json::from_value(contexts).unwrap())
+        checks_from_contexts(
+            Some("PENDING".into()),
+            serde_json::from_value(contexts).unwrap(),
+        )
     }
 
     #[test]
@@ -1267,7 +1280,10 @@ mod tests {
 
         assert_eq!(checks.runs.len(), 4);
         assert_eq!(row("tests").state, CheckRunState::Pending);
-        assert_eq!(row("style").started_at, Some("2026-10-01T18:54:57Z".parse().unwrap()));
+        assert_eq!(
+            row("style").started_at,
+            Some("2026-10-01T18:54:57Z".parse().unwrap())
+        );
         let waiting = row("bindings-go");
         assert_eq!(waiting.state, CheckRunState::Waiting);
         assert_eq!((waiting.url.as_deref(), waiting.completed_at), (None, None));
@@ -1281,7 +1297,11 @@ mod tests {
     #[test]
     fn a_finished_rerun_keeps_what_the_older_run_alone_ran() {
         let checks = rerun_rollup("COMPLETED");
-        let go = checks.runs.iter().find(|c| c.name == "bindings-go").unwrap();
+        let go = checks
+            .runs
+            .iter()
+            .find(|c| c.name == "bindings-go")
+            .unwrap();
         assert_eq!(go.state, CheckRunState::Success);
     }
 
@@ -1289,7 +1309,11 @@ mod tests {
     /// last job as it began. GitHub's aggregate still says FAILURE.
     fn cancelled_by_next_run(second_windows: Option<&str>) -> Checks {
         let run = |name: &str, conclusion: Option<&str>, started: &str, suite: u64| {
-            let status = if conclusion.is_some() { "COMPLETED" } else { "IN_PROGRESS" };
+            let status = if conclusion.is_some() {
+                "COMPLETED"
+            } else {
+                "IN_PROGRESS"
+            };
             let running = suite == 2 && second_windows.is_none();
             serde_json::json!({
                 "__typename": "CheckRun",
@@ -1314,7 +1338,10 @@ mod tests {
             run("windows", second_windows, "2026-10-04T08:55:42Z", 2),
             {"__typename": "StatusContext", "context": "license/cla", "state": "SUCCESS"},
         ]);
-        checks_from_contexts(Some("FAILURE".into()), serde_json::from_value(contexts).unwrap())
+        checks_from_contexts(
+            Some("FAILURE".into()),
+            serde_json::from_value(contexts).unwrap(),
+        )
     }
 
     #[test]
@@ -1337,8 +1364,10 @@ mod tests {
             "status": "COMPLETED",
             "conclusion": "SUCCESS",
         }]);
-        let checks =
-            checks_from_contexts(Some("FAILURE".into()), serde_json::from_value(contexts).unwrap());
+        let checks = checks_from_contexts(
+            Some("FAILURE".into()),
+            serde_json::from_value(contexts).unwrap(),
+        );
         assert!(matches!(checks.state, CheckState::Failing { .. }));
     }
 
@@ -1365,10 +1394,16 @@ mod tests {
             )
         };
 
-        let same = rest_check_sighting(&runs(r#""status":"in_progress","conclusion":null"#), statuses);
+        let same = rest_check_sighting(
+            &runs(r#""status":"in_progress","conclusion":null"#),
+            statuses,
+        );
         assert_eq!(same, Some(check_sighting(&rollup)));
 
-        let moved = rest_check_sighting(&runs(r#""status":"completed","conclusion":"failure""#), statuses);
+        let moved = rest_check_sighting(
+            &runs(r#""status":"completed","conclusion":"failure""#),
+            statuses,
+        );
         assert_ne!(moved, Some(check_sighting(&rollup)));
 
         // A listing cut at its page says nothing.

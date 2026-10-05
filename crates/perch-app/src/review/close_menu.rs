@@ -75,9 +75,10 @@ fn face(state: ReviewState) -> (SubjectState, String) {
             };
             (SubjectState::IssueClosed, label.to_string())
         }
-        IssueCloseReason::NotPlanned => {
-            (SubjectState::IssueNotPlanned, "Close as not planned".to_string())
-        }
+        IssueCloseReason::NotPlanned => (
+            SubjectState::IssueNotPlanned,
+            "Close as not planned".to_string(),
+        ),
         IssueCloseReason::Duplicate(n) => (
             SubjectState::IssueNotPlanned,
             format!("Close as duplicate of #{n}"),
@@ -255,11 +256,7 @@ pub fn popup(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl In
     let sheet = Empty::new()
         .on_event_stop(el::PointerDown, move |_, _| close(state))
         .on_event_stop(el::PointerWheel, move |_, _| close(state))
-        .style(|s| {
-            s.position(Position::Absolute)
-                .inset(0.0)
-                .z_index(94)
-        })
+        .style(|s| s.position(Position::Absolute).inset(0.0).z_index(94))
         .debug_name("close-sheet");
     let menu = dyn_container(
         move || pane.get(),
@@ -369,22 +366,19 @@ fn reasons(app: AppState, state: ReviewState) -> impl IntoView {
                 true,
                 move || {
                     state.close_duplicate_query.set(String::new());
-                    state
-                        .close_menu
-                        .update(|m| {
-                            if let Some(m) = m {
-                                m.duplicate = true;
-                            }
-                        })
+                    state.close_menu.update(|m| {
+                        if let Some(m) = m {
+                            m.duplicate = true;
+                        }
+                    })
                 },
             )
             .debug_name("close-as-duplicate"),
         ))
         .into_any()
     } else {
-        let as_issue = Memo::new(move |_| {
-            crate::review::threads::pull_request_close_offered(app, state)
-        });
+        let as_issue =
+            Memo::new(move |_| crate::review::threads::pull_request_close_offered(app, state));
         Stack::vertical((
             row(
                 || true,

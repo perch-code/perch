@@ -6,7 +6,9 @@ use jiff::{Timestamp, Unit, Zoned};
 fn days_between(when: &Zoned, now: &Zoned) -> i64 {
     let a = when.date();
     let b = now.date();
-    b.since((Unit::Day, a)).map(|s| s.get_days() as i64).unwrap_or(0)
+    b.since((Unit::Day, a))
+        .map(|s| s.get_days() as i64)
+        .unwrap_or(0)
 }
 
 /// "42 minutes ago", "yesterday", "3 weeks ago", "Jan 3".
@@ -49,7 +51,12 @@ pub fn relative(when: Timestamp, now: Timestamp) -> String {
             if date.year() == now_local.date().year() {
                 format!("{} {}", month_name(date.month()), date.day())
             } else {
-                format!("{} {}, {}", month_name(date.month()), date.day(), date.year())
+                format!(
+                    "{} {}, {}",
+                    month_name(date.month()),
+                    date.day(),
+                    date.year()
+                )
             }
         }
     }
@@ -118,12 +125,18 @@ pub(crate) mod tests {
     fn ahead_says_the_time_the_day_or_the_date() {
         let utc = jiff::tz::TimeZone::UTC;
         let now = ts("2026-09-27T17:00:00Z");
-        assert_eq!(ahead_in(ts("2026-09-27T22:00:00Z"), now, utc.clone()), "10:00 PM");
+        assert_eq!(
+            ahead_in(ts("2026-09-27T22:00:00Z"), now, utc.clone()),
+            "10:00 PM"
+        );
         assert_eq!(
             ahead_in(ts("2026-09-28T09:05:00Z"), now, utc.clone()),
             "tomorrow 9:05 AM"
         );
-        assert_eq!(ahead_in(ts("2026-10-03T16:58:29Z"), now, utc.clone()), "Sat 4:58 PM");
+        assert_eq!(
+            ahead_in(ts("2026-10-03T16:58:29Z"), now, utc.clone()),
+            "Sat 4:58 PM"
+        );
         assert_eq!(ahead_in(ts("2026-10-12T00:00:00Z"), now, utc), "Oct 12");
     }
 
@@ -177,7 +190,11 @@ pub(crate) mod tests {
     fn the_short_form_is_one_unit_with_no_ago() {
         let now = ts("2026-09-20T12:00:00Z");
         assert_eq!(short(ts("2026-09-20T11:59:40Z"), now), "now");
-        assert_eq!(short(ts("2026-09-20T12:00:05Z"), now), "now", "a clock ahead of ours");
+        assert_eq!(
+            short(ts("2026-09-20T12:00:05Z"), now),
+            "now",
+            "a clock ahead of ours"
+        );
         assert_eq!(short(ts("2026-09-20T11:55:00Z"), now), "5m");
         assert_eq!(short(ts("2026-09-20T09:00:00Z"), now), "3h");
         assert_eq!(short(ts("2026-09-19T11:00:00Z"), now), "1d");

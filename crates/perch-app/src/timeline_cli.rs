@@ -39,7 +39,10 @@ fn print(id: &str) -> Result<bool, String> {
     let Some(item) = cache.load_item(id).map_err(|e| e.to_string())? else {
         return Ok(false);
     };
-    let discussion = cache.load_discussion(id).map_err(|e| e.to_string())?.map(|(_, d)| d);
+    let discussion = cache
+        .load_discussion(id)
+        .map_err(|e| e.to_string())?
+        .map(|(_, d)| d);
     let threads = cache.load_comment_threads(id).map_err(|e| e.to_string())?;
 
     // A note on what the list below is missing, on stderr so stdout stays
@@ -48,16 +51,28 @@ fn print(id: &str) -> Result<bool, String> {
     if discussion.is_none() && item.subject.is_some() {
         eprintln!("note: nothing is cached for this item yet; open it in the app once");
     }
-    let (comments, events): (Vec<perch_github::IssueComment>, Vec<perch_github::PullEvent>) =
-        match (&item.issue(), &discussion) {
-            (Some(_), Some(d)) => (d.comments.clone(), d.events.clone()),
-            _ => Default::default(),
-        };
+    let (comments, events): (
+        Vec<perch_github::IssueComment>,
+        Vec<perch_github::PullEvent>,
+    ) = match (&item.issue(), &discussion) {
+        (Some(_), Some(d)) => (d.comments.clone(), d.events.clone()),
+        _ => Default::default(),
+    };
     let issue = item
         .issue()
         .map(|i| (i, comments.as_slice(), events.as_slice()));
     let pull = item.pull_request();
-    let cards = timeline(pull, if pull.is_some() { discussion.as_ref() } else { None }, issue, &[], &threads);
+    let cards = timeline(
+        pull,
+        if pull.is_some() {
+            discussion.as_ref()
+        } else {
+            None
+        },
+        issue,
+        &[],
+        &threads,
+    );
     let mut out = String::new();
     render(&mut out, &cards);
     print!("{out}");
@@ -69,8 +84,15 @@ fn print(id: &str) -> Result<bool, String> {
 /// `    reply <first line>`.
 fn render(out: &mut String, cards: &[Card]) {
     for card in cards {
-        let at = card.at().map(|t| t.to_string()).unwrap_or_else(|| "--".into());
-        out.push_str(&format!("{:<11}  {at}  {}\n", card.kind(), card.first_line()));
+        let at = card
+            .at()
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "--".into());
+        out.push_str(&format!(
+            "{:<11}  {at}  {}\n",
+            card.kind(),
+            card.first_line()
+        ));
         if let Card::Thread(thread) = card {
             if let Some(anchor) = &thread.anchor {
                 out.push_str(&format!("  {}\n", anchor.label()));
@@ -86,7 +108,9 @@ fn render(out: &mut String, cards: &[Card]) {
 mod tests {
     use super::*;
     use crate::review::timeline::tests::{at, event, review};
-    use perch_github::{Anchor, Author, CommentMessage, CommentThread, PullEventKind, Side, ThreadOrigin};
+    use perch_github::{
+        Anchor, Author, CommentMessage, CommentThread, PullEventKind, Side, ThreadOrigin,
+    };
 
     fn message(id: u64, when: &str, body: &str) -> CommentMessage {
         CommentMessage {
@@ -109,13 +133,26 @@ mod tests {
     fn a_thread_prints_its_anchor_and_the_replies_under_it() {
         let cards = vec![
             Card::Event(event(PullEventKind::Opened, "2026-09-14T14:02:00Z")),
-            Card::Review { review: review(9, "APPROVED", "Looks right.\n\nMore below.", Some("2026-09-16T11:40:00Z")) },
+            Card::Review {
+                review: review(
+                    9,
+                    "APPROVED",
+                    "Looks right.\n\nMore below.",
+                    Some("2026-09-16T11:40:00Z"),
+                ),
+            },
             Card::Thread(CommentThread {
                 id: "gh-31".into(),
                 worktree_id: "w".into(),
                 origin: ThreadOrigin::GitHub,
                 github_id: Some(31),
-                anchor: Some(Anchor { path: "src/manifest.rs".into(), start_line: 41, line: 41, side: Side::Right, commit_sha: "h".into() }),
+                anchor: Some(Anchor {
+                    path: "src/manifest.rs".into(),
+                    start_line: 41,
+                    line: 41,
+                    side: Side::Right,
+                    commit_sha: "h".into(),
+                }),
                 outdated: false,
                 resolved: false,
                 node_id: None,
@@ -126,7 +163,12 @@ mod tests {
                     message(32, "2026-09-16T12:00:00Z", "  the reply "),
                 ],
             }),
-            Card::Description { at: None, body: String::new(), node_id: String::new(), editable: false },
+            Card::Description {
+                at: None,
+                body: String::new(),
+                node_id: String::new(),
+                editable: false,
+            },
         ];
         let mut out = String::new();
         render(&mut out, &cards);

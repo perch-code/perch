@@ -84,7 +84,9 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
     let click_backend = backend.clone();
     let key_backend = backend.clone();
     let button = button
-        .on_event_stop(el::Click, move |_, _| toggle(review, &click_backend, Some(button_id)))
+        .on_event_stop(el::Click, move |_, _| {
+            toggle(review, &click_backend, Some(button_id))
+        })
         .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
             if matches!(key.code, Code::Enter | Code::Space) {
                 toggle(review, &key_backend, Some(button_id));
@@ -102,7 +104,9 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
                 .keyboard_navigable()
                 .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
                 .hover(|s| s.background(theme::badge_bg()))
-                .apply_if(review.agents_dropdown_open.get(), |s| s.background(theme::badge_bg()))
+                .apply_if(review.agents_dropdown_open.get(), |s| {
+                    s.background(theme::badge_bg())
+                })
         })
         .debug_name("agents-button");
 
@@ -239,9 +243,9 @@ fn listing(app: AppState) -> Listing {
     });
     app.agent_runs.with(|runs| {
         let active = active_groups_with_reviews(runs, None, &review_groups)
-        .into_iter()
-        .map(|group| (item_title(app, &group.runs[0]), group.runs))
-        .collect();
+            .into_iter()
+            .map(|group| (item_title(app, &group.runs[0]), group.runs))
+            .collect();
         let mut recent = history_runs_with_reviews(runs, &review_groups);
         recent.truncate(RECENT_RUNS);
         Listing { active, recent }

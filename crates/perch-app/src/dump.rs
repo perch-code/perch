@@ -42,7 +42,9 @@ pub fn run(args: &[String]) {
             _ => positional.push(arg.clone()),
         }
     }
-    let [target, path] = positional.as_slice() else { usage() };
+    let [target, path] = positional.as_slice() else {
+        usage()
+    };
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -78,7 +80,14 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
     let root = perch_github::config::data_dir().ok_or_else(|| "no data dir".to_string())?;
     let preparer = Preparer::new(Store::new(root), Some(token.value.clone()));
     let checkout = preparer
-        .prepare(&id, number, &pr.head_sha, &pr.base_ref, &format!("perch/pr-{number}"), |_| {})
+        .prepare(
+            &id,
+            number,
+            &pr.head_sha,
+            &pr.base_ref,
+            &format!("perch/pr-{number}"),
+            |_| {},
+        )
         .await
         .map_err(|e| e.to_string())?;
 
@@ -86,9 +95,15 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
     // blob, and the two sides read the way the window reads them.
     let scope = Scope::Branch;
     let git = preparer.git();
-    let files = perch_git::changed_files(git, &checkout.worktree, &scope, &checkout.merge_base, &checkout.head_sha)
-        .await
-        .map_err(|e| e.to_string())?;
+    let files = perch_git::changed_files(
+        git,
+        &checkout.worktree,
+        &scope,
+        &checkout.merge_base,
+        &checkout.head_sha,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     let entry = files.iter().find(|f| f.path == path).cloned();
     let (base_rev, head_rev) = scope.sides(&checkout.merge_base, &checkout.head_sha);
 
@@ -113,7 +128,10 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
         }
         _ => String::new(),
     };
-    let blob = entry.as_ref().and_then(|f| f.head_blob.clone()).unwrap_or_default();
+    let blob = entry
+        .as_ref()
+        .and_then(|f| f.head_blob.clone())
+        .unwrap_or_default();
 
     let file = Arc::new(crate::backend::build_loaded_file(
         path.to_string(),
@@ -128,12 +146,23 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
     // The documents as the window would build them, from what the cache
     // holds for the item. A file with no base side is stacked in the
     // window whatever the layout, and here too.
-    let Kept { anchors, reveals, cards, threads } = if whole { Kept::none() } else { kept_for(full_name, number, &file) };
+    let Kept {
+        anchors,
+        reveals,
+        cards,
+        threads,
+    } = if whole {
+        Kept::none()
+    } else {
+        kept_for(full_name, number, &file)
+    };
     let folded = !whole;
     let sides = if split {
         let sides = editor::split_doc(&file, folded, &anchors, &reveals, &cards);
         if sides.is_none() {
-            eprintln!("note: {path} has no base side; the window shows it stacked, and so does this");
+            eprintln!(
+                "note: {path} has no base side; the window shows it stacked, and so does this"
+            );
         }
         sides
     } else {
@@ -141,7 +170,9 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
     };
     let rendered = match sides {
         Some((left, right)) => Rendered::Split(left, right),
-        None => Rendered::Stacked(editor::stacked_doc(&file, folded, &anchors, &reveals, &cards)),
+        None => Rendered::Stacked(editor::stacked_doc(
+            &file, folded, &anchors, &reveals, &cards,
+        )),
     };
 
     println!("file:     {}", file.path);
@@ -149,7 +180,14 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
     println!("status:   {:?}", file.status);
     println!("lines:    {}", file.buffer.len());
     println!("changes:  {}", file.buffer.change_starts.len());
-    println!("blob:     {}", if file.blob.is_empty() { "none" } else { &file.blob });
+    println!(
+        "blob:     {}",
+        if file.blob.is_empty() {
+            "none"
+        } else {
+            &file.blob
+        }
+    );
     if !whole {
         println!("anchors:  {}", anchors.len());
         println!("reveals:  {}", reveals_line(&reveals));
@@ -222,8 +260,16 @@ fn print_rows(file: &LoadedFile, doc: &Doc, side: Option<Side>, threads: &[Comme
                 continue;
             }
             DocRow::Spacer { card, row } => {
-                let total = doc.rows.iter().filter(|r| matches!(r, DocRow::Spacer { card: c, .. } if c == card));
-                println!("  [{}, row {} of {}]", card_name(card), row + 1, total.count());
+                let total = doc
+                    .rows
+                    .iter()
+                    .filter(|r| matches!(r, DocRow::Spacer { card: c, .. } if c == card));
+                println!(
+                    "  [{}, row {} of {}]",
+                    card_name(card),
+                    row + 1,
+                    total.count()
+                );
                 if let (doc::CardId::Thread(id), 0) = (card, row) {
                     if let Some(thread) = threads.iter().find(|t| &t.id == id) {
                         let mixed = thread.has_github_message();
@@ -242,8 +288,12 @@ fn print_rows(file: &LoadedFile, doc: &Doc, side: Option<Side>, threads: &[Comme
         let (number, spans) = match side {
             Some(Side::Base) => (display + 1, file.base_spans.line(display)),
             Some(Side::Head) | None => match file.buffer.row(display) {
-                Some(Row::Head { head_line, .. }) => (head_line + 1, file.head_spans.line(head_line)),
-                Some(Row::Deleted { base_line }) => (base_line + 1, file.base_spans.line(base_line)),
+                Some(Row::Head { head_line, .. }) => {
+                    (head_line + 1, file.head_spans.line(head_line))
+                }
+                Some(Row::Deleted { base_line }) => {
+                    (base_line + 1, file.base_spans.line(base_line))
+                }
                 None => continue,
             },
         };
@@ -303,7 +353,11 @@ fn reveals_line(reveals: &Reveals) -> String {
     if reveals.is_empty() {
         return "none".to_string();
     }
-    reveals.iter().map(|(first, last)| format!("{}-{}", first + 1, last + 1)).collect::<Vec<_>>().join(", ")
+    reveals
+        .iter()
+        .map(|(first, last)| format!("{}-{}", first + 1, last + 1))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// What the cache holds for an item that shapes a file's document: the
@@ -324,7 +378,12 @@ struct Kept {
 impl Kept {
     /// Nothing kept: folded around the changes alone, as a new item is.
     fn none() -> Self {
-        Self { anchors: Vec::new(), reveals: Reveals::default(), cards: Vec::new(), threads: Vec::new() }
+        Self {
+            anchors: Vec::new(),
+            reveals: Reveals::default(),
+            cards: Vec::new(),
+            threads: Vec::new(),
+        }
     }
 }
 
@@ -336,13 +395,18 @@ fn kept_for(full_name: &str, number: u64, file: &LoadedFile) -> Kept {
         return Kept::none();
     };
     if !db.exists() {
-        eprintln!("note: no cache at {}; folding around the changes alone", db.display());
+        eprintln!(
+            "note: no cache at {}; folding around the changes alone",
+            db.display()
+        );
         return Kept::none();
     }
     match kept_in(&db, full_name, number, file) {
         Ok(Some(kept)) => kept,
         Ok(None) => {
-            eprintln!("note: {full_name}#{number} is not in the cache; folding around the changes alone");
+            eprintln!(
+                "note: {full_name}#{number} is not in the cache; folding around the changes alone"
+            );
             Kept::none()
         }
         Err(e) => {
@@ -353,7 +417,12 @@ fn kept_for(full_name: &str, number: u64, file: &LoadedFile) -> Kept {
 }
 
 /// `None` when the item is not in the cache.
-fn kept_in(db: &std::path::Path, full_name: &str, number: u64, file: &LoadedFile) -> Result<Option<Kept>, String> {
+fn kept_in(
+    db: &std::path::Path,
+    full_name: &str,
+    number: u64,
+    file: &LoadedFile,
+) -> Result<Option<Kept>, String> {
     let cache = Cache::open(db, None).map_err(|e| e.to_string())?;
     let Some(item) = cache
         .find_item_by_subject(full_name, ItemKind::PullRequest, number)
@@ -361,7 +430,9 @@ fn kept_in(db: &std::path::Path, full_name: &str, number: u64, file: &LoadedFile
     else {
         return Ok(None);
     };
-    let threads = cache.load_comment_threads(&item.id).map_err(|e| e.to_string())?;
+    let threads = cache
+        .load_comment_threads(&item.id)
+        .map_err(|e| e.to_string())?;
     let anchors = crate::review::model::anchors_of(&threads, &file.path);
     // A file with no blob has no rows, as in the window.
     let reveals = if file.blob.is_empty() {
@@ -376,8 +447,19 @@ fn kept_in(db: &std::path::Path, full_name: &str, number: u64, file: &LoadedFile
             .map(|(a, b)| (a as usize, b as usize))
             .collect()
     };
-    let cards = crate::review::model::cards_of(&threads, None, file, &Default::default(), &Default::default());
-    Ok(Some(Kept { anchors, reveals, cards, threads }))
+    let cards = crate::review::model::cards_of(
+        &threads,
+        None,
+        file,
+        &Default::default(),
+        &Default::default(),
+    );
+    Ok(Some(Kept {
+        anchors,
+        reveals,
+        cards,
+        threads,
+    }))
 }
 
 #[cfg(test)]
@@ -406,10 +488,17 @@ mod tests {
     fn a_draft_is_marked_after_its_author_and_a_posted_comment_is_not() {
         let draft = message(Author::User, ThreadOrigin::GitHub, None);
         assert_eq!(message_line(&draft, true), "    you [draft]: I will fix it");
-        let posted = message(Author::GitHubUser("rohan".into()), ThreadOrigin::GitHub, Some(31));
+        let posted = message(
+            Author::GitHubUser("rohan".into()),
+            ThreadOrigin::GitHub,
+            Some(31),
+        );
         assert_eq!(message_line(&posted, true), "    rohan: I will fix it");
         let answer = message(
-            Author::Agent { backend: "claude-code".into(), model: "sonnet".into() },
+            Author::Agent {
+                backend: "claude-code".into(),
+                model: "sonnet".into(),
+            },
             ThreadOrigin::Local,
             None,
         );
@@ -423,12 +512,21 @@ mod tests {
     fn a_private_message_is_marked_only_in_a_thread_with_a_github_message() {
         let question = message(Author::User, ThreadOrigin::Local, None);
         let answer = message(
-            Author::Agent { backend: "claude-code".into(), model: "sonnet".into() },
+            Author::Agent {
+                backend: "claude-code".into(),
+                model: "sonnet".into(),
+            },
             ThreadOrigin::Local,
             None,
         );
-        assert_eq!(message_line(&question, true), "    you [perch]: I will fix it");
-        assert_eq!(message_line(&answer, true), "    sonnet [perch]: I will fix it");
+        assert_eq!(
+            message_line(&question, true),
+            "    you [perch]: I will fix it"
+        );
+        assert_eq!(
+            message_line(&answer, true),
+            "    sonnet [perch]: I will fix it"
+        );
         assert_eq!(message_line(&question, false), "    you: I will fix it");
         assert_eq!(message_line(&answer, false), "    sonnet: I will fix it");
     }

@@ -39,7 +39,10 @@ async fn print(id: &str, scope: &Scope) -> Result<(), String> {
         return Err(format!("no cache at {}; run the app once", path.display()));
     }
     let (cache, _) = Cache::open_with_outcome(&path, None).map_err(|e| e.to_string())?;
-    let item = cache.load_item(id).map_err(|e| e.to_string())?.ok_or_else(|| format!("no item {id}"))?;
+    let item = cache
+        .load_item(id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no item {id}"))?;
     let checkout = item.checkout.as_ref().ok_or("that item has no checkout")?;
     if !checkout.path.join(".git").exists() {
         return Err(format!("{} is not on disk", checkout.path.display()));
@@ -48,26 +51,49 @@ async fn print(id: &str, scope: &Scope) -> Result<(), String> {
 
     let git = Git::new(None);
     let head = git
-        .run(Some(&checkout.path), ["rev-parse", "HEAD"], Duration::from_secs(30))
+        .run(
+            Some(&checkout.path),
+            ["rev-parse", "HEAD"],
+            Duration::from_secs(30),
+        )
         .await
         .map_err(|e| e.to_string())?
         .trim()
         .to_string();
     let merge_base = merge_base(&git, &checkout.path, &item, &head).await?;
-    eprintln!("scope: {scope}  base: {}  head: {}", &merge_base[..7.min(merge_base.len())], &head[..7.min(head.len())]);
+    eprintln!(
+        "scope: {scope}  base: {}  head: {}",
+        &merge_base[..7.min(merge_base.len())],
+        &head[..7.min(head.len())]
+    );
 
     let files = changed_files(&git, &checkout.path, scope, &merge_base, &head)
         .await
         .map_err(|e| e.to_string())?;
-    let (adds, dels) = files.iter().fold((0, 0), |(a, d), f| (a + f.additions, d + f.deletions));
+    let (adds, dels) = files
+        .iter()
+        .fold((0, 0), |(a, d), f| (a + f.additions, d + f.deletions));
     for f in &files {
         let mark = match &f.head_blob {
             Some(blob) if viewed.contains(&(f.path.clone(), blob.clone())) => "\u{2713}",
             _ => " ",
         };
-        let blob = f.head_blob.as_deref().map(|b| &b[..7.min(b.len())]).unwrap_or("-");
-        let churn = if f.binary { "binary".to_string() } else { format!("+{} \u{2212}{}", f.additions, f.deletions) };
-        println!("{mark} {} {:<40} {:<12} {blob}", f.status.letter(), f.path, churn);
+        let blob = f
+            .head_blob
+            .as_deref()
+            .map(|b| &b[..7.min(b.len())])
+            .unwrap_or("-");
+        let churn = if f.binary {
+            "binary".to_string()
+        } else {
+            format!("+{} \u{2212}{}", f.additions, f.deletions)
+        };
+        println!(
+            "{mark} {} {:<40} {:<12} {blob}",
+            f.status.letter(),
+            f.path,
+            churn
+        );
     }
     println!("{} files  +{adds} \u{2212}{dels}", files.len());
     Ok(())
@@ -96,7 +122,14 @@ async fn merge_base(git: &Git, worktree: &Path, item: &Item, head: &str) -> Resu
     }
     candidates.push(checkout.base_ref.clone());
     for base in candidates {
-        if let Ok(out) = git.run(Some(worktree), ["merge-base", &base, head], Duration::from_secs(30)).await {
+        if let Ok(out) = git
+            .run(
+                Some(worktree),
+                ["merge-base", &base, head],
+                Duration::from_secs(30),
+            )
+            .await
+        {
             let sha = out.trim().to_string();
             if !sha.is_empty() {
                 return Ok(sha);

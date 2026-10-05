@@ -471,7 +471,10 @@ pub fn active_groups_with_reviews(
 ) -> Vec<AgentRunGroup> {
     let active_review_attempts = active_attempts(review_groups);
     let mut groups: Vec<AgentRunGroup> = Vec::new();
-    for run in runs.iter().filter(|run| working(run, &active_review_attempts)) {
+    for run in runs
+        .iter()
+        .filter(|run| working(run, &active_review_attempts))
+    {
         let index = groups
             .iter()
             .position(|group| group.item_id == run.item_id)
@@ -592,7 +595,12 @@ impl RunCounts {
             .iter()
             .filter(|run| !run.status.is_active())
             .max_by_key(|run| run.ended_at.unwrap_or(run.queued_at))
-            .is_some_and(|run| matches!(run.status, AgentRunStatus::Failed | AgentRunStatus::Interrupted));
+            .is_some_and(|run| {
+                matches!(
+                    run.status,
+                    AgentRunStatus::Failed | AgentRunStatus::Interrupted
+                )
+            });
         counts
     }
 
@@ -851,7 +859,12 @@ pub(crate) mod tests {
     #[test]
     fn an_items_runs_are_its_own_working_first_then_newest_finished() {
         let runs = vec![
-            run("a", "one", AgentRunStatus::Completed, "2026-09-19T10:00:00Z"),
+            run(
+                "a",
+                "one",
+                AgentRunStatus::Completed,
+                "2026-09-19T10:00:00Z",
+            ),
             run("b", "one", AgentRunStatus::Queued, "2026-09-19T10:01:00Z"),
             run("c", "two", AgentRunStatus::Running, "2026-09-19T10:02:00Z"),
             run("d", "one", AgentRunStatus::Running, "2026-09-19T10:03:00Z"),
@@ -872,16 +885,36 @@ pub(crate) mod tests {
         let at = "2026-09-19T10:00:00Z";
         let mut runs = vec![
             run("a", "one", AgentRunStatus::Running, at),
-            run("b", "one", AgentRunStatus::Completed, "2026-09-19T09:00:00Z"),
-            run("c", "one", AgentRunStatus::Completed, "2026-09-19T09:10:00Z"),
+            run(
+                "b",
+                "one",
+                AgentRunStatus::Completed,
+                "2026-09-19T09:00:00Z",
+            ),
+            run(
+                "c",
+                "one",
+                AgentRunStatus::Completed,
+                "2026-09-19T09:10:00Z",
+            ),
             run("d", "one", AgentRunStatus::Stopped, "2026-09-19T09:20:00Z"),
-            run("e", "one", AgentRunStatus::Completed, "2026-09-19T09:30:00Z"),
+            run(
+                "e",
+                "one",
+                AgentRunStatus::Completed,
+                "2026-09-19T09:30:00Z",
+            ),
         ];
         assert_eq!(RunCounts::of(&runs, &none).label(), "1 running · 4 done");
 
         let waiting = HashSet::from(["a".to_string()]);
         runs.push(run("q", "one", AgentRunStatus::Queued, at));
-        runs.push(run("f", "one", AgentRunStatus::Failed, "2026-09-19T08:00:00Z"));
+        runs.push(run(
+            "f",
+            "one",
+            AgentRunStatus::Failed,
+            "2026-09-19T08:00:00Z",
+        ));
         assert_eq!(
             RunCounts::of(&runs, &waiting).label(),
             "1 queued · 1 waiting · 4 done · 1 failed"
@@ -893,7 +926,12 @@ pub(crate) mod tests {
         assert_eq!(RunCounts::of(&runs, &none).label(), "1 run");
 
         // The one that finished last failed.
-        runs.push(run("g", "one", AgentRunStatus::Interrupted, "2026-09-19T11:00:00Z"));
+        runs.push(run(
+            "g",
+            "one",
+            AgentRunStatus::Interrupted,
+            "2026-09-19T11:00:00Z",
+        ));
         let counts = RunCounts::of(&runs, &none);
         assert!(counts.last_failed);
         assert_eq!(counts.label(), "Last run failed");

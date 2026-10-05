@@ -205,7 +205,9 @@ pub fn repo_from_remote(url: &str, hosts: &[&str]) -> Option<String> {
 /// The host in a URL's authority, without the `user@` before it or the
 /// `:port` after it.
 fn host_of(authority: &str) -> &str {
-    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
     host.split_once(':').map_or(host, |(host, _)| host)
 }
 
@@ -242,7 +244,12 @@ pub fn github_remote(remotes: &[(String, String)], hosts: &[&str]) -> Option<(St
 /// a branch to diff against. Nothing here touches the network: remotes
 /// come from the root's config and a remote HEAD from a ref already on
 /// disk.
-pub async fn scan_root(git: &Git, root: &Path, base: Option<&str>, hosts: &[&str]) -> Result<RootScan, Error> {
+pub async fn scan_root(
+    git: &Git,
+    root: &Path,
+    base: Option<&str>,
+    hosts: &[&str],
+) -> Result<RootScan, Error> {
     let listing = git
         .run(
             Some(root),
@@ -374,10 +381,18 @@ pub struct BranchReadiness {
 }
 
 /// Read a worktree's [`BranchReadiness`]. Reads only.
-pub async fn branch_readiness(git: &Git, worktree: &Path, base: &str) -> Result<BranchReadiness, Error> {
+pub async fn branch_readiness(
+    git: &Git,
+    worktree: &Path,
+    base: &str,
+) -> Result<BranchReadiness, Error> {
     let range = format!("{base}..HEAD");
     let ahead = git
-        .run(Some(worktree), ["rev-list", "--count", &range], QUERY_TIMEOUT)
+        .run(
+            Some(worktree),
+            ["rev-list", "--count", &range],
+            QUERY_TIMEOUT,
+        )
         .await?;
     let ahead = ahead
         .trim()
@@ -395,7 +410,11 @@ pub async fn branch_readiness(git: &Git, worktree: &Path, base: &str) -> Result<
         .filter(|line| !line.is_empty() && !line.starts_with("!!"))
         .count() as u32;
     let head_branch = git
-        .run(Some(worktree), ["symbolic-ref", "--quiet", "--short", "HEAD"], QUERY_TIMEOUT)
+        .run(
+            Some(worktree),
+            ["symbolic-ref", "--quiet", "--short", "HEAD"],
+            QUERY_TIMEOUT,
+        )
         .await
         .ok()
         .map(|s| s.trim().to_string())

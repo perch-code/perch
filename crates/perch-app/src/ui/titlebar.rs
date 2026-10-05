@@ -40,8 +40,8 @@ fn title_bar_with<V: IntoView + 'static>(
             return EventPropagation::Continue;
         }
         // A press on a control in the bar bubbles through here too. Not ours.
-        let on_bar = cx.hit_path.as_deref().and_then(|path| path.last())
-            == Some(&id.get_element_id());
+        let on_bar =
+            cx.hit_path.as_deref().and_then(|path| path.last()) == Some(&id.get_element_id());
         if !on_bar {
             return EventPropagation::Continue;
         }

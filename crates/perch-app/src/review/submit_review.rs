@@ -252,7 +252,10 @@ fn drafts_list(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
         if state.submit_review_pending.with_untracked(Option::is_some) {
             return;
         }
-        if let Some(item_id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone())) {
+        if let Some(item_id) = state
+            .item
+            .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+        {
             discard_backend.discard_drafts(&item_id);
         }
         state.submit_review_confirm_discard.set(false);
@@ -272,9 +275,11 @@ fn drafts_list(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                     Empty::new().style(|s| s.flex_grow(1.0_f32)),
                     text_button(|| "Discard".to_string(), SidebarIcon::Trash, discard_all)
                         .debug_name("discard-all-confirm"),
-                    text_button(|| "Cancel".to_string(), SidebarIcon::Close, move || {
-                        state.submit_review_confirm_discard.set(false)
-                    }),
+                    text_button(
+                        || "Cancel".to_string(),
+                        SidebarIcon::Close,
+                        move || state.submit_review_confirm_discard.set(false),
+                    ),
                 ))
                 .style(|s| {
                     s.items_center()
@@ -297,14 +302,12 @@ fn drafts_list(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                                 .selectable(false)
                         }),
                     Empty::new().style(|s| s.flex_grow(1.0_f32)),
-                    Container::new(
-                        Label::derived(|| "Discard all".to_string()).style(|s| {
-                            s.font_size(theme::TEXT_BADGE)
-                                .color(theme::fg_muted())
-                                .selectable(false)
-                                .pointer_events_none()
-                        }),
-                    )
+                    Container::new(Label::derived(|| "Discard all".to_string()).style(|s| {
+                        s.font_size(theme::TEXT_BADGE)
+                            .color(theme::fg_muted())
+                            .selectable(false)
+                            .pointer_events_none()
+                    }))
                     .on_event_stop(el::Click, move |_, _| {
                         if state.submit_review_pending.with_untracked(Option::is_none) {
                             state.submit_review_confirm_discard.set(true);
@@ -364,7 +367,10 @@ fn draft_row(
         if state.submit_review_pending.with_untracked(Option::is_some) {
             return;
         }
-        if let Some(item_id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone())) {
+        if let Some(item_id) = state
+            .item
+            .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+        {
             backend.delete_draft(&item_id, &message_id);
         }
     };
@@ -484,13 +490,9 @@ fn review_editor(
     );
     // `@` offers people and files, as in a composer; the review goes to
     // GitHub, so a file goes in as a code span.
-    let mentioner = crate::review::mention::attach(
-        app,
-        state,
-        backend,
-        editor.editor(),
-        |path| format!("`{path}` "),
-    );
+    let mentioner = crate::review::mention::attach(app, state, backend, editor.editor(), |path| {
+        format!("`{path}` ")
+    });
     let focus_mentioner = mentioner.clone();
     let blur_mentioner = mentioner.clone();
     let key_mentioner = mentioner.clone();
@@ -717,7 +719,9 @@ fn wire_outcome_row(
             .apply_if(!selected, |s| s.focusable())
             .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
             .set_disabled(!enabled)
-            .apply_if(enabled, |s| s.hover(|s| s.background(theme::canvas_subtle())))
+            .apply_if(enabled, |s| {
+                s.hover(|s| s.background(theme::canvas_subtle()))
+            })
             .apply_if(!enabled, |s| {
                 s.opacity(0.5_f32).cursor(CursorStyle::Default)
             })
@@ -978,14 +982,22 @@ mod tests {
 
     #[test]
     fn only_approval_allows_an_empty_body_without_drafts() {
-        assert!(!review_body_is_valid(PullReviewEvent::Comment, " \n", false));
+        assert!(!review_body_is_valid(
+            PullReviewEvent::Comment,
+            " \n",
+            false
+        ));
         assert!(review_body_is_valid(
             PullReviewEvent::Comment,
             "Looks good overall",
             false
         ));
         assert!(review_body_is_valid(PullReviewEvent::Approve, "", false));
-        assert!(!review_body_is_valid(PullReviewEvent::RequestChanges, "", false));
+        assert!(!review_body_is_valid(
+            PullReviewEvent::RequestChanges,
+            "",
+            false
+        ));
         assert!(review_body_is_valid(
             PullReviewEvent::RequestChanges,
             "Please cover the failure path",
@@ -994,7 +1006,11 @@ mod tests {
         // Drafts on lines are a comment review's content; a request for
         // changes still says what to change.
         assert!(review_body_is_valid(PullReviewEvent::Comment, "", true));
-        assert!(!review_body_is_valid(PullReviewEvent::RequestChanges, "", true));
+        assert!(!review_body_is_valid(
+            PullReviewEvent::RequestChanges,
+            "",
+            true
+        ));
     }
 
     #[test]
@@ -1215,7 +1231,10 @@ mod tests {
         assert!(shown(&harness, delete), "the pointer on it keeps it");
         harness.click(at.x, at.y);
         match next_command(&mut commands) {
-            Ok(Command::DeleteDraft { item_id, message_id }) => {
+            Ok(Command::DeleteDraft {
+                item_id,
+                message_id,
+            }) => {
                 assert_eq!(item_id, "item-42");
                 assert_eq!(message_id, "t2-d1");
             }
@@ -1247,10 +1266,15 @@ mod tests {
         assert!(at.y1 <= 700.0, "Submit ends at {} in a 700 window", at.y1);
         let rows = named(harness.root_id(), "submit-review-draft-list").expect("no rows");
         let height = harness.get_layout_rect(rows).height();
-        assert!(height >= 3.0 * DRAFT_ROW_HEIGHT, "the list keeps three rows");
+        assert!(
+            height >= 3.0 * DRAFT_ROW_HEIGHT,
+            "the list keeps three rows"
+        );
         assert!(height < 30.0 * DRAFT_ROW_HEIGHT, "the list scrolls");
 
-        state.comment_threads.set(Arc::new(vec![draft_thread("t1", "head-42", None, "one")]));
+        state
+            .comment_threads
+            .set(Arc::new(vec![draft_thread("t1", "head-42", None, "one")]));
         harness.rebuild();
         harness.paint();
         let rows = named(harness.root_id(), "submit-review-draft-list").expect("no rows");
@@ -1261,7 +1285,9 @@ mod tests {
     fn a_drafts_location_shuts_the_popover_and_goes_to_its_line() {
         let root = TestRoot::new();
         let state = review_state();
-        state.comment_threads.set(Arc::new(vec![draft_thread("t1", "head-42", None, "one")]));
+        state
+            .comment_threads
+            .set(Arc::new(vec![draft_thread("t1", "head-42", None, "one")]));
         open(state, None);
         let view = control(AppState::new(), state, Rc::new(Backend::detached()));
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 800.0);
@@ -1279,7 +1305,9 @@ mod tests {
         let root = TestRoot::new();
         let state = review_state();
         state.submit_review_autofocus.set(true);
-        state.comment_threads.set(Arc::new(vec![draft_thread("t1", "head-42", None, "one")]));
+        state
+            .comment_threads
+            .set(Arc::new(vec![draft_thread("t1", "head-42", None, "one")]));
         open(state, None);
         let (backend, mut commands) = Backend::recording();
         let view = control(AppState::new(), state, Rc::new(backend));
@@ -1292,7 +1320,10 @@ mod tests {
         harness.rebuild();
         match next_command(&mut commands) {
             Ok(Command::SubmitPullRequestReview { body, event, .. }) => {
-                assert_eq!(body, "", "the drafts are the content; the backend reads them");
+                assert_eq!(
+                    body, "",
+                    "the drafts are the content; the backend reads them"
+                );
                 assert_eq!(event, PullReviewEvent::Comment);
             }
             other => panic!("Cmd-Enter did not submit: {other:?}"),
@@ -1300,7 +1331,9 @@ mod tests {
 
         // A request for changes still needs its summary.
         state.submit_review_pending.set(None);
-        state.submit_review_event.set(PullReviewEvent::RequestChanges);
+        state
+            .submit_review_event
+            .set(PullReviewEvent::RequestChanges);
         assert!(!can_submit(state));
     }
 
@@ -1322,7 +1355,10 @@ mod tests {
         click(&mut harness, "discard-all");
         assert!(state.submit_review_confirm_discard.get());
         assert!(find(harness.root_id(), "Discard all drafts?").is_some());
-        assert!(next_command(&mut commands).is_err(), "asking discards nothing");
+        assert!(
+            next_command(&mut commands).is_err(),
+            "asking discards nothing"
+        );
 
         click(&mut harness, "discard-all-confirm");
         assert!(!state.submit_review_confirm_discard.get());
@@ -1410,7 +1446,9 @@ mod tests {
     fn a_draft_edited_while_the_form_is_open_shows_its_new_text() {
         let root = TestRoot::new();
         let state = review_state();
-        state.comment_threads.set(Arc::new(vec![draft_thread("t1", "head-42", None, "first")]));
+        state
+            .comment_threads
+            .set(Arc::new(vec![draft_thread("t1", "head-42", None, "first")]));
         open(state, None);
         let view = control(AppState::new(), state, Rc::new(Backend::detached()));
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 800.0);
@@ -1422,7 +1460,9 @@ mod tests {
         assert!(excerpts[0].debug_name().contains("first"));
 
         // Saved again from its card, same id, new text.
-        state.comment_threads.set(Arc::new(vec![draft_thread("t1", "head-42", None, "second")]));
+        state.comment_threads.set(Arc::new(vec![draft_thread(
+            "t1", "head-42", None, "second",
+        )]));
         harness.rebuild();
         harness.paint();
         let mut excerpts = Vec::new();
@@ -1508,7 +1548,10 @@ mod tests {
             "\nLooks good",
             "Enter is a new line at the caret, which starts at the top"
         );
-        assert!(next_command(&mut commands).is_err(), "Enter submitted the review");
+        assert!(
+            next_command(&mut commands).is_err(),
+            "Enter submitted the review"
+        );
 
         harness.dispatch_event(enter(Modifiers::META));
         harness.rebuild();
@@ -1555,14 +1598,18 @@ mod tests {
         harness.rebuild();
         harness.paint();
         let shown = |harness: &HeadlessHarness, name: &str| {
-            named(harness.root_id(), name).is_some_and(|id| harness.get_layout_rect(id).height() > 0.0)
+            named(harness.root_id(), name)
+                .is_some_and(|id| harness.get_layout_rect(id).height() > 0.0)
         };
         assert!(shown(&harness, "composer-preview"));
         harness.dispatch_event(key(Code::Escape));
         harness.rebuild();
         harness.paint();
         assert!(!shown(&harness, "composer-preview"));
-        assert!(state.review_open.get(), "Escape from Preview closed the review");
+        assert!(
+            state.review_open.get(),
+            "Escape from Preview closed the review"
+        );
     }
 
     #[test]

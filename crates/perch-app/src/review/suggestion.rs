@@ -179,17 +179,31 @@ pub fn only_suggestion(text: &str) -> Option<Vec<String>> {
 /// new lines end as the old ones did, `\r\n` or `\n`.
 pub fn apply(file: &str, original: &Original, lines: &[String]) -> Result<String, String> {
     let changed = || "The lines this suggestion replaces have changed".to_string();
-    let first = (original.first as usize).checked_sub(1).ok_or_else(changed)?;
+    let first = (original.first as usize)
+        .checked_sub(1)
+        .ok_or_else(changed)?;
     let last = first + original.lines.len();
     let mut rows: Vec<&str> = file.split_inclusive('\n').collect();
     if last > rows.len() || original.lines.is_empty() {
         return Err(changed());
     }
-    let unended = |row: &str| row.trim_end_matches('\n').trim_end_matches('\r').to_string();
-    if rows[first..last].iter().map(|r| unended(r)).ne(original.lines.iter().cloned()) {
+    let unended = |row: &str| {
+        row.trim_end_matches('\n')
+            .trim_end_matches('\r')
+            .to_string()
+    };
+    if rows[first..last]
+        .iter()
+        .map(|r| unended(r))
+        .ne(original.lines.iter().cloned())
+    {
         return Err(changed());
     }
-    let ending = if rows[first].ends_with("\r\n") { "\r\n" } else { "\n" };
+    let ending = if rows[first].ends_with("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
     // The file's last line may have no ending; the new last line has none
     // either then.
     let open_end = last == rows.len() && !rows[last - 1].ends_with('\n');
@@ -305,19 +319,43 @@ mod tests {
             only_suggestion("```suggestion\n    a,\n    b,\n```"),
             Some(lines(&["    a,", "    b,"]))
         );
-        assert_eq!(only_suggestion("```suggestion\n```"), Some(vec![]), "taken out");
-        assert_eq!(only_suggestion("```suggestion\n\n```"), Some(lines(&[""])), "one blank line");
-        assert_eq!(only_suggestion("\n```suggestion\nx\n```\n\n"), Some(lines(&["x"])));
-        assert_eq!(only_suggestion("why:\n```suggestion\nx\n```"), None, "words beside it");
+        assert_eq!(
+            only_suggestion("```suggestion\n```"),
+            Some(vec![]),
+            "taken out"
+        );
+        assert_eq!(
+            only_suggestion("```suggestion\n\n```"),
+            Some(lines(&[""])),
+            "one blank line"
+        );
+        assert_eq!(
+            only_suggestion("\n```suggestion\nx\n```\n\n"),
+            Some(lines(&["x"]))
+        );
+        assert_eq!(
+            only_suggestion("why:\n```suggestion\nx\n```"),
+            None,
+            "words beside it"
+        );
         assert_eq!(only_suggestion("```suggestion\nx\n```\nsee?"), None);
         assert_eq!(only_suggestion("```rust\nx\n```"), None);
-        assert_eq!(only_suggestion("```suggestion\nx\n```\n```suggestion\ny\n```"), None);
+        assert_eq!(
+            only_suggestion("```suggestion\nx\n```\n```suggestion\ny\n```"),
+            None
+        );
     }
 
     #[test]
     fn a_suggestion_applies_over_the_lines_it_was_written_against() {
-        let original = Original { first: 2, lines: lines(&["b", "c"]) };
-        assert_eq!(apply("a\nb\nc\nd\n", &original, &lines(&["B"])), Ok("a\nB\nd\n".into()));
+        let original = Original {
+            first: 2,
+            lines: lines(&["b", "c"]),
+        };
+        assert_eq!(
+            apply("a\nb\nc\nd\n", &original, &lines(&["B"])),
+            Ok("a\nB\nd\n".into())
+        );
         assert_eq!(apply("a\nb\nc\nd\n", &original, &[]), Ok("a\nd\n".into()));
         assert_eq!(
             apply("a\r\nb\r\nc\r\n", &original, &lines(&["x", "y", "z"])),
@@ -329,7 +367,10 @@ mod tests {
             "no ending at the end"
         );
         assert_eq!(apply("a\nb\nc", &original, &[]), Ok("a".into()));
-        assert!(apply("a\nb2\nc\n", &original, &[]).is_err(), "changed since");
+        assert!(
+            apply("a\nb2\nc\n", &original, &[]).is_err(),
+            "changed since"
+        );
         assert!(apply("a\nb\n", &original, &[]).is_err(), "shorter now");
     }
 }

@@ -1816,7 +1816,9 @@ pub(super) fn stored_process_event(event: &perch_agent::RunEvent) -> Option<Stor
             model: Some(model.clone()),
         }),
         perch_agent::RunEvent::Text(text) => Some(StoredRunEvent::Text { text: text.clone() }),
-        perch_agent::RunEvent::Steered(text) => Some(StoredRunEvent::SteerLanded { text: text.clone() }),
+        perch_agent::RunEvent::Steered(text) => {
+            Some(StoredRunEvent::SteerLanded { text: text.clone() })
+        }
         perch_agent::RunEvent::ToolCall {
             id,
             name,
@@ -3968,7 +3970,10 @@ mod tests {
                 .map(|found| found.id),
             Some("work-review".into())
         );
-        assert_eq!(WorktreeProjection::target(vec![snapshot.clone()], "moved"), None);
+        assert_eq!(
+            WorktreeProjection::target(vec![snapshot.clone()], "moved"),
+            None
+        );
 
         let file = |path: &str, blob: &str| perch_git::ChangedFile {
             path: path.into(),
@@ -3993,10 +3998,17 @@ mod tests {
         let left = perch_github::Side::Left;
 
         // Uncommitted diffs from HEAD, the review's merge base here.
-        let view = WorktreeProjection::of(&perch_git::Scope::Uncommitted, "mb", "head", &files).unwrap();
+        let view =
+            WorktreeProjection::of(&perch_git::Scope::Uncommitted, "mb", "head", &files).unwrap();
         assert!(view.shows(&snapshot, &anchor("a.rs", right, "reviewed")));
-        assert!(!view.shows(&snapshot, &anchor("b.rs", right, "reviewed")), "edited since");
-        assert!(!view.shows(&snapshot, &anchor("c.rs", right, "reviewed")), "not in the view");
+        assert!(
+            !view.shows(&snapshot, &anchor("b.rs", right, "reviewed")),
+            "edited since"
+        );
+        assert!(
+            !view.shows(&snapshot, &anchor("c.rs", right, "reviewed")),
+            "not in the view"
+        );
         assert!(view.shows(&snapshot, &anchor("b.rs", left, "old")));
 
         // Branch diffs from its merge base, which is not the review's.

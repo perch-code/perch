@@ -21,7 +21,10 @@ pub use lsp_types;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("could not start {binary}: {source}")]
-    Spawn { binary: String, source: std::io::Error },
+    Spawn {
+        binary: String,
+        source: std::io::Error,
+    },
     #[error("the language server exited")]
     Exited,
     #[error("the language server exited: {0}")]

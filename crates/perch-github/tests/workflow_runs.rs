@@ -83,9 +83,15 @@ async fn the_newest_runs_are_asked_for_with_no_filter() {
     let (base, paths) = spawn(RUNS);
     let gh = GitHub::with_base_uri("t", &base).unwrap();
 
-    let runs = gh.list_recent_workflow_runs("slatedb/slatedb").await.unwrap();
+    let runs = gh
+        .list_recent_workflow_runs("slatedb/slatedb")
+        .await
+        .unwrap();
     assert_eq!(runs.len(), 2);
 
     let paths = paths.lock().unwrap();
-    assert_eq!(paths.as_slice(), ["/repos/slatedb/slatedb/actions/runs?per_page=100"]);
+    assert_eq!(
+        paths.as_slice(),
+        ["/repos/slatedb/slatedb/actions/runs?per_page=100"]
+    );
 }

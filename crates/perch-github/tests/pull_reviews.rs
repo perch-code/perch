@@ -239,10 +239,7 @@ fn draft(path: &str, start_line: Option<u64>, line: u64, body: &str) -> ReviewCo
 
 #[tokio::test]
 async fn a_review_carries_its_comments_on_lines_and_needs_no_summary_with_them() {
-    let (base, requests) = spawn(vec![Response::new(
-        "200 OK",
-        review(4, "COMMENTED", ""),
-    )]);
+    let (base, requests) = spawn(vec![Response::new("200 OK", review(4, "COMMENTED", ""))]);
     let github = GitHub::with_base_uri("token", &base).unwrap();
 
     let comments = [
@@ -311,7 +308,10 @@ async fn a_reply_posts_under_the_threads_root_and_decodes_the_comment() {
     assert_eq!(posted.id, 77);
     assert_eq!(posted.in_reply_to_id, Some(31));
     assert_eq!(posted.node_id, "PRRC_77");
-    assert_eq!(posted.html_url, "https://github.com/a/b/pull/42#discussion_r77");
+    assert_eq!(
+        posted.html_url,
+        "https://github.com/a/b/pull/42#discussion_r77"
+    );
 
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
@@ -529,21 +529,37 @@ async fn resolving_a_thread_names_it_and_reads_back_whether_it_is_resolved() {
     ]);
     let github = GitHub::with_base_uri("token", &base).unwrap();
 
-    assert!(github.set_review_thread_resolved("PRRT_1", true).await.unwrap());
-    assert!(!github.set_review_thread_resolved("PRRT_1", false).await.unwrap());
+    assert!(github
+        .set_review_thread_resolved("PRRT_1", true)
+        .await
+        .unwrap());
+    assert!(!github
+        .set_review_thread_resolved("PRRT_1", false)
+        .await
+        .unwrap());
 
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
-    assert_eq!((requests[0].method.as_str(), requests[0].path.as_str()), ("POST", "/graphql"));
-    let asked = |i: usize| -> serde_json::Value { serde_json::from_str(&requests[i].body).unwrap() };
+    assert_eq!(
+        (requests[0].method.as_str(), requests[0].path.as_str()),
+        ("POST", "/graphql")
+    );
+    let asked =
+        |i: usize| -> serde_json::Value { serde_json::from_str(&requests[i].body).unwrap() };
     let resolve = asked(0);
     let query = resolve["query"].as_str().unwrap();
     assert!(query.starts_with("mutation("), "{query}");
-    assert!(query.contains("resolveReviewThread(input: {threadId: $thread})"), "{query}");
+    assert!(
+        query.contains("resolveReviewThread(input: {threadId: $thread})"),
+        "{query}"
+    );
     assert!(!query.contains("unresolve"), "{query}");
     assert_eq!(resolve["variables"]["thread"], "PRRT_1");
     let unresolve = asked(1);
-    assert!(unresolve["query"].as_str().unwrap().contains("unresolveReviewThread("));
+    assert!(unresolve["query"]
+        .as_str()
+        .unwrap()
+        .contains("unresolveReviewThread("));
     assert_eq!(unresolve["variables"]["thread"], "PRRT_1");
 }
 
@@ -558,16 +574,25 @@ async fn a_thread_github_will_not_resolve_is_an_error_and_no_id_asks_nothing() {
     ]);
     let github = GitHub::with_base_uri("token", &base).unwrap();
 
-    let refused = github.set_review_thread_resolved("PRRT_1", true).await.unwrap_err();
+    let refused = github
+        .set_review_thread_resolved("PRRT_1", true)
+        .await
+        .unwrap_err();
     assert!(
         matches!(&refused, Error::Graphql(message) if message.contains("not accessible")),
         "{refused:?}"
     );
-    let empty = github.set_review_thread_resolved("PRRT_1", true).await.unwrap_err();
+    let empty = github
+        .set_review_thread_resolved("PRRT_1", true)
+        .await
+        .unwrap_err();
     assert!(matches!(empty, Error::Decode(_)), "{empty:?}");
     assert_eq!(requests.lock().unwrap().len(), 2);
 
-    let none = github.set_review_thread_resolved("", false).await.unwrap_err();
+    let none = github
+        .set_review_thread_resolved("", false)
+        .await
+        .unwrap_err();
     assert!(matches!(none, Error::Decode(_)), "{none:?}");
     assert_eq!(requests.lock().unwrap().len(), 2, "no id, no request");
 }
@@ -595,7 +620,10 @@ async fn a_file_is_read_at_a_commit_and_a_change_to_it_committed_over_the_head()
     ]);
     let github = GitHub::with_base_uri("token", &base).unwrap();
 
-    assert_eq!(github.file_text("a/b", "h1", "src/x.rs").await.unwrap(), Ok("a\nb\n".into()));
+    assert_eq!(
+        github.file_text("a/b", "h1", "src/x.rs").await.unwrap(),
+        Ok("a\nb\n".into())
+    );
     assert_eq!(
         github.file_text("a/b", "h1", "logo.png").await.unwrap(),
         Err(perch_github::Unreadable::Binary)
@@ -605,35 +633,64 @@ async fn a_file_is_read_at_a_commit_and_a_change_to_it_committed_over_the_head()
         Err(perch_github::Unreadable::Missing)
     );
     let oid = github
-        .commit_file("fork/b", "feature", "h1", "src/x.rs", "a\nB\n", "Update src/x.rs", "")
+        .commit_file(
+            "fork/b",
+            "feature",
+            "h1",
+            "src/x.rs",
+            "a\nB\n",
+            "Update src/x.rs",
+            "",
+        )
         .await
         .unwrap();
     assert_eq!(oid, "c2");
     let moved = github
-        .commit_file("fork/b", "feature", "h1", "src/x.rs", "a\nB\n", "Update src/x.rs", "why")
+        .commit_file(
+            "fork/b",
+            "feature",
+            "h1",
+            "src/x.rs",
+            "a\nB\n",
+            "Update src/x.rs",
+            "why",
+        )
         .await
         .unwrap_err();
-    assert!(matches!(&moved, Error::Graphql(m) if m.contains("Expected branch")), "{moved:?}");
     assert!(
-        github.commit_file("fork/b", "feature", "h1", "src/x.rs", "", " ", "").await.is_err(),
+        matches!(&moved, Error::Graphql(m) if m.contains("Expected branch")),
+        "{moved:?}"
+    );
+    assert!(
+        github
+            .commit_file("fork/b", "feature", "h1", "src/x.rs", "", " ", "")
+            .await
+            .is_err(),
         "no message, no request"
     );
 
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 5);
-    let asked = |i: usize| -> serde_json::Value { serde_json::from_str(&requests[i].body).unwrap() };
+    let asked =
+        |i: usize| -> serde_json::Value { serde_json::from_str(&requests[i].body).unwrap() };
     let read = asked(0);
     assert_eq!(read["variables"]["owner"], "a");
     assert_eq!(read["variables"]["name"], "b");
     assert_eq!(read["variables"]["expression"], "h1:src/x.rs");
     let commit = asked(3);
-    assert!(commit["query"].as_str().unwrap().contains("createCommitOnBranch(input: $input)"));
+    assert!(commit["query"]
+        .as_str()
+        .unwrap()
+        .contains("createCommitOnBranch(input: $input)"));
     let input = &commit["variables"]["input"];
     assert_eq!(input["branch"]["repositoryNameWithOwner"], "fork/b");
     assert_eq!(input["branch"]["branchName"], "feature");
     assert_eq!(input["expectedHeadOid"], "h1");
     assert_eq!(input["message"]["headline"], "Update src/x.rs");
-    assert!(input["message"].get("body").is_none(), "no body when there is none");
+    assert!(
+        input["message"].get("body").is_none(),
+        "no body when there is none"
+    );
     assert_eq!(input["fileChanges"]["additions"][0]["path"], "src/x.rs");
     assert_eq!(input["fileChanges"]["additions"][0]["contents"], "YQpCCg==");
     assert_eq!(asked(4)["variables"]["input"]["message"]["body"], "why");

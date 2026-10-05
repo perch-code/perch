@@ -80,7 +80,9 @@ fn spawn(comments: usize) -> (String, Arc<AtomicUsize>) {
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            let Some(path) = read_path(&mut stream) else { continue };
+            let Some(path) = read_path(&mut stream) else {
+                continue;
+            };
             counter.fetch_add(1, Ordering::SeqCst);
             let page_no: usize = path
                 .split("&page=")
@@ -91,7 +93,11 @@ fn spawn(comments: usize) -> (String, Arc<AtomicUsize>) {
             if path.contains("/issues/42/comments") {
                 let start = (page_no - 1) * 100;
                 let end = (start + 100).min(comments);
-                respond(&mut stream, "200 OK", &page((start..end).map(|i| comment(i + 1)).collect()));
+                respond(
+                    &mut stream,
+                    "200 OK",
+                    &page((start..end).map(|i| comment(i + 1)).collect()),
+                );
             } else if path.contains("/issues/42") {
                 respond(&mut stream, "200 OK", ISSUE);
             } else if path.contains("/issues/7") {
@@ -119,8 +125,14 @@ async fn an_issue_arrives_with_its_repository_filled_in() {
     assert_eq!(issue.labels[0].name, "bug");
     assert_eq!(issue.assignees, vec!["chris"]);
     assert_eq!(issue.comments, 150);
-    assert_eq!(issue.created_at, Some("2026-09-14T14:02:00Z".parse().unwrap()));
-    assert_eq!(issue.repo_full_name, "a/b", "the repository comes from the caller");
+    assert_eq!(
+        issue.created_at,
+        Some("2026-09-14T14:02:00Z".parse().unwrap())
+    );
+    assert_eq!(
+        issue.repo_full_name, "a/b",
+        "the repository comes from the caller"
+    );
     assert_eq!(requests.load(Ordering::SeqCst), 1);
 }
 
@@ -165,7 +177,10 @@ async fn a_number_is_told_a_pull_request_or_an_issue() {
     let (base, _) = spawn(0);
     let gh = GitHub::with_base_uri("token", &base).unwrap();
     assert_eq!(gh.subject_kind("a/b", 42).await.unwrap(), ItemKind::Issue);
-    assert_eq!(gh.subject_kind("a/b", 7).await.unwrap(), ItemKind::PullRequest);
+    assert_eq!(
+        gh.subject_kind("a/b", 7).await.unwrap(),
+        ItemKind::PullRequest
+    );
     assert!(matches!(
         gh.subject_kind("a/b", 999).await.unwrap_err(),
         Error::Status { status: 404, .. }

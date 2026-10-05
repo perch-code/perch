@@ -43,7 +43,9 @@ use crate::icons::SidebarIcon;
 use crate::review::markdown;
 use crate::review::model::{Destination, ItemTab, LoadedFile, ReviewState};
 use crate::review::threads::{self, ThreadFace};
-use crate::review::timeline::{count_of, event_name, event_pieces, short_sha, verdict, Card, Piece};
+use crate::review::timeline::{
+    count_of, event_name, event_pieces, short_sha, verdict, Card, Piece,
+};
 use crate::review::OpenFile;
 use crate::state::AppState;
 use crate::theme;
@@ -63,7 +65,9 @@ pub fn key(card: &Card) -> String {
     match card {
         // The time lands with the discussion, after a first paint from
         // the snapshot, and an edit can keep a body's length.
-        Card::Description { body, at, editable, .. } => {
+        Card::Description {
+            body, at, editable, ..
+        } => {
             format!("description:{:?}:{:x}:{}", at, body_hash(body), editable)
         }
         // An edit made here shows before GitHub dates it, and what the
@@ -118,7 +122,10 @@ pub(crate) fn thread_key_tail(t: &CommentThread) -> String {
         anchor,
         t.messages.len(),
         t.messages.last().map(|m| m.id.as_str()).unwrap_or_default(),
-        t.messages.first().map(|m| body_hash(&m.body)).unwrap_or_default()
+        t.messages
+            .first()
+            .map(|m| body_hash(&m.body))
+            .unwrap_or_default()
     )
 }
 
@@ -191,11 +198,7 @@ pub fn card(header: impl IntoView + 'static, body: Option<floem::AnyView>) -> im
 
 /// The byline row at the top of an entry.
 fn byline_strip(content: impl IntoView + 'static) -> impl IntoView {
-    Container::new(content).style(|s| {
-        s.items_center()
-            .width_full()
-            .height(theme::BYLINE_HEIGHT)
-    })
+    Container::new(content).style(|s| s.items_center().width_full().height(theme::BYLINE_HEIGHT))
 }
 
 /// Who, with what glyph, did what, when. The avatar is read when it is
@@ -292,8 +295,14 @@ pub(crate) fn actions(
             None => Empty::new().into_any(),
         },
         match ask {
-            Some(ask) => hover_action(hovered, SidebarIcon::Thread, "Ask about this", "ask-about", ask)
-                .into_any(),
+            Some(ask) => hover_action(
+                hovered,
+                SidebarIcon::Thread,
+                "Ask about this",
+                "ask-about",
+                ask,
+            )
+            .into_any(),
             None => Empty::new().into_any(),
         },
         match react {
@@ -359,10 +368,16 @@ pub(crate) fn quote_action(
     let selected = Rc::new(RefCell::new(None));
     let read = selected.clone();
     let action: Rc<dyn Fn()> = Rc::new(move || quote(read.borrow().clone()));
-    Container::new(hover_action(hovered, SidebarIcon::Reply, "Quote reply", name, action))
-        .on_event_cont(el::PointerEnter, move |_, _| {
-            *selected.borrow_mut() = crate::review::linked_text::selected_under(scope);
-        })
+    Container::new(hover_action(
+        hovered,
+        SidebarIcon::Reply,
+        "Quote reply",
+        name,
+        action,
+    ))
+    .on_event_cont(el::PointerEnter, move |_, _| {
+        *selected.borrow_mut() = crate::review::linked_text::selected_under(scope);
+    })
 }
 
 /// Delete under the pointer, for a comment on GitHub, while `may` says
@@ -375,7 +390,14 @@ pub(crate) fn delete_action(
     may: impl Fn() -> bool + 'static,
 ) -> floem::AnyView {
     let delete = Rc::new(move || state.confirm_comment.set(Some(node_id.clone())));
-    offered_action(hovered, may, SidebarIcon::Trash, "Delete", "delete-comment", delete)
+    offered_action(
+        hovered,
+        may,
+        SidebarIcon::Trash,
+        "Delete",
+        "delete-comment",
+        delete,
+    )
 }
 
 /// Edit under the pointer, for a comment on GitHub, while `may` says
@@ -386,7 +408,14 @@ pub(crate) fn edit_action(
     may: impl Fn() -> bool + 'static,
     edit: Rc<dyn Fn()>,
 ) -> floem::AnyView {
-    offered_action(hovered, may, SidebarIcon::Pencil, "Edit", "edit-comment", edit)
+    offered_action(
+        hovered,
+        may,
+        SidebarIcon::Pencil,
+        "Edit",
+        "edit-comment",
+        edit,
+    )
 }
 
 /// A hover action that is there only while `may` says so.
@@ -459,8 +488,9 @@ pub(crate) fn delete_comment_confirmation(
                 "Delete",
                 move || {
                     state.confirm_comment.set(None);
-                    let Some(item_id) =
-                        state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+                    let Some(item_id) = state
+                        .item
+                        .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
                     else {
                         return;
                     };
@@ -493,7 +523,10 @@ pub(crate) fn delete_comment_confirmation(
 /// each of them then, the Leave last, which hid a draft's Delete as the
 /// pointer reached it. The fork's `perch` branch sends them neither event
 /// now; reading the path keeps this right whatever order events come in.
-pub(crate) fn track_hover<V: IntoView + 'static>(view: V, hovered: RwSignal<bool>) -> impl IntoView {
+pub(crate) fn track_hover<V: IntoView + 'static>(
+    view: V,
+    hovered: RwSignal<bool>,
+) -> impl IntoView {
     let view = view.into_intermediate();
     let id = view.view_id();
     let follow = move |cx: &mut floem::event::EventCx| {
@@ -532,7 +565,10 @@ pub(crate) fn reactions_under(
 /// Toggle the reader's reaction where it is shown, then ask GitHub. A
 /// pill already asked about takes no second click until GitHub answers.
 fn react(state: ReviewState, backend: &Backend, node_id: &str, kind: ReactionKind) {
-    let Some(item_id) = state.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone())) else {
+    let Some(item_id) = state
+        .item
+        .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+    else {
         return;
     };
     if let Some(add) = state.toggle_reaction(node_id, kind) {
@@ -643,10 +679,15 @@ fn react_button(
     let slot = dyn_container(
         move || shown.get(),
         move |placement| match placement {
-            Some(placement) => {
-                picker(state, backend.clone(), node_id.clone(), placement, size, close.clone())
-                    .into_any()
-            }
+            Some(placement) => picker(
+                state,
+                backend.clone(),
+                node_id.clone(),
+                placement,
+                size,
+                close.clone(),
+            )
+            .into_any(),
             None => Empty::new().into_any(),
         },
     )
@@ -677,7 +718,10 @@ fn react_button(
                 s.border(rule)
                     .border_color(theme::border())
                     .background(theme::canvas())
-                    .hover(|s| s.background(theme::badge_bg()).border_color(theme::fg_subtle()))
+                    .hover(|s| {
+                        s.background(theme::badge_bg())
+                            .border_color(theme::fg_subtle())
+                    })
             };
             s.apply_if(open, |s| s.background(theme::badge_bg()))
         })
@@ -714,8 +758,14 @@ fn picker(
         .into_iter()
         .enumerate()
         .map(|(i, kind)| {
-            let (id, view) =
-                pick(state, backend.clone(), node_id.clone(), kind, keyed, close.clone());
+            let (id, view) = pick(
+                state,
+                backend.clone(),
+                node_id.clone(),
+                kind,
+                keyed,
+                close.clone(),
+            );
             let view = view
                 .into_intermediate()
                 .on_event_cont(el::FocusGained, move |_, _| current.set(i));
@@ -810,13 +860,11 @@ fn pick(
     });
     let busy_node = node_id.clone();
     let busy = Memo::new(move |_| state.is_reacting(&busy_node, kind));
-    let button = Container::new(
-        Label::derived(move || kind.emoji().to_string()).style(|s| {
-            s.font_size(PICK_EMOJI)
-                .selectable(false)
-                .pointer_events_none()
-        }),
-    )
+    let button = Container::new(Label::derived(move || kind.emoji().to_string()).style(|s| {
+        s.font_size(PICK_EMOJI)
+            .selectable(false)
+            .pointer_events_none()
+    }))
     .on_event_stop(el::Click, move |_, _| {
         if !busy.get_untracked() {
             react(state, &backend, &node_id, kind);
@@ -838,7 +886,13 @@ fn pick(
                 s.focus(|s| s.outline(2.0).outline_color(theme::accent_ring()))
             })
             .apply_if(mine, |s| s.background(theme::reacted_bg()))
-            .hover(move |s| s.background(if mine { theme::reacted_bg() } else { theme::badge_bg() }))
+            .hover(move |s| {
+                s.background(if mine {
+                    theme::reacted_bg()
+                } else {
+                    theme::badge_bg()
+                })
+            })
             .apply_if(busy.get(), |s| s.opacity(0.4_f32))
     });
     let id = button.view_id();
@@ -873,7 +927,11 @@ fn reactions_row(
             |g| g.clone(),
             move |g| reaction_pill(app, state, pill_backend.clone(), pill_node.clone(), g),
         )
-        .style(|s| s.items_center().gap(6.0).flex_wrap(floem::taffy::FlexWrap::Wrap)),
+        .style(|s| {
+            s.items_center()
+                .gap(6.0)
+                .flex_wrap(floem::taffy::FlexWrap::Wrap)
+        }),
         react_button(state, backend, node_id, None),
     ))
     .debug_name("reactions")
@@ -914,7 +972,11 @@ fn reaction_pill(
             Label::derived(move || count.to_string()).style(move |s| {
                 s.font_size(theme::TEXT_BADGE)
                     .font_weight(theme::weight_emphasis())
-                    .color(if mine { theme::unread() } else { theme::fg_muted() })
+                    .color(if mine {
+                        theme::unread()
+                    } else {
+                        theme::fg_muted()
+                    })
                     .margin_left(5.0)
                     .selectable(false)
                     .pointer_events_none()
@@ -933,11 +995,27 @@ fn reaction_pill(
                 .padding_horiz(9.0)
                 .border(1.0)
                 .border_radius(theme::REACTION_PILL_HEIGHT / 2.0)
-                .border_color(if mine { theme::reacted_border() } else { theme::border() })
-                .background(if mine { theme::reacted_bg() } else { theme::canvas() })
+                .border_color(if mine {
+                    theme::reacted_border()
+                } else {
+                    theme::border()
+                })
+                .background(if mine {
+                    theme::reacted_bg()
+                } else {
+                    theme::canvas()
+                })
                 .hover(move |s| {
-                    s.background(if mine { theme::reacted_bg() } else { theme::badge_bg() })
-                        .border_color(if mine { theme::unread() } else { theme::fg_subtle() })
+                    s.background(if mine {
+                        theme::reacted_bg()
+                    } else {
+                        theme::badge_bg()
+                    })
+                    .border_color(if mine {
+                        theme::unread()
+                    } else {
+                        theme::fg_subtle()
+                    })
                 })
         }),
         move || {
@@ -978,7 +1056,10 @@ fn reacted_tip(group: &ReactionGroup, viewer: Option<&str>) -> String {
         [rest @ .., last] if !rest.is_empty() => format!("{}, and {last}", rest.join(", ")),
         _ => parts.concat(),
     };
-    format!("{who} reacted with {} emoji", group.kind.label().to_lowercase())
+    format!(
+        "{who} reacted with {} emoji",
+        group.kind.label().to_lowercase()
+    )
 }
 
 /// A view with a line of explanation on hover, in the window's overlay so
@@ -1232,8 +1313,8 @@ pub fn description_card(
         markdown::render_linked(&body, state).into_any()
     };
     let scope = description.id();
-    let quote = (!body.trim().is_empty())
-        .then(|| quote_reply_button(state, hovered, body.clone(), scope));
+    let quote =
+        (!body.trim().is_empty()).then(|| quote_reply_button(state, hovered, body.clone(), scope));
     let edit = edit_in_card_action(state, hovered, node_id.clone(), body.clone(), editable);
     let leading = leading_actions(quote, edit, None);
     let react = reactable(&node_id);
@@ -1252,7 +1333,15 @@ pub fn description_card(
                             .color(theme::fg())
                     }),
                     Empty::new().style(|s| s.flex_grow(1.0_f32)),
-                    actions(state, backend, hovered, Some(leading), None, react, String::new()),
+                    actions(
+                        state,
+                        backend,
+                        hovered,
+                        Some(leading),
+                        None,
+                        react,
+                        String::new(),
+                    ),
                 ))
                 .style(|s| s.items_center().width_full().min_width(0.0)),
             ),
@@ -1308,7 +1397,15 @@ pub fn comment_card(
             byline_strip(byline(
                 app,
                 who,
-                actions(state, backend, hovered, Some(leading), Some(ask), react, comment.html_url.clone()),
+                actions(
+                    state,
+                    backend,
+                    hovered,
+                    Some(leading),
+                    Some(ask),
+                    react,
+                    comment.html_url.clone(),
+                ),
             )),
             Some(body),
         ),
@@ -1358,9 +1455,7 @@ fn edited_in_card(
     let editing = Memo::new(move |_| {
         state.composer.with(|c| {
             c.as_ref()
-                .filter(|c| {
-                    c.thread_id.is_none() && c.editing.as_deref() == Some(node_id.as_str())
-                })
+                .filter(|c| c.thread_id.is_none() && c.editing.as_deref() == Some(node_id.as_str()))
                 .map(|c| c.opening)
         })
     });
@@ -1376,9 +1471,14 @@ fn edited_in_card(
         },
     )
     .debug_name("comment-editor")
-    .style(move |s| s.width_full().apply_if(editing.get().is_none(), |s| s.hide()));
-    let shown = Container::new(shown)
-        .style(move |s| s.width_full().apply_if(editing.get().is_some(), |s| s.hide()));
+    .style(move |s| {
+        s.width_full()
+            .apply_if(editing.get().is_none(), |s| s.hide())
+    });
+    let shown = Container::new(shown).style(move |s| {
+        s.width_full()
+            .apply_if(editing.get().is_some(), |s| s.hide())
+    });
     Stack::vertical((shown, editor))
         .style(|s| s.flex_col().width_full())
         .into_any()
@@ -1442,17 +1542,17 @@ pub fn review_card(
     let react = summary.as_ref().and_then(|_| reactable(&review.node_id));
 
     let body = text.map(|text| {
-        let shown = Stack::vertical((
-            text,
-            reactions_under(app, state, backend.clone(), &react),
-        ))
-        .style(|s| s.flex_col().width_full())
-        .into_any();
+        let shown = Stack::vertical((text, reactions_under(app, state, backend.clone(), &react)))
+            .style(|s| s.flex_col().width_full())
+            .into_any();
         edited_in_card(app, state, backend.clone(), review.node_id.clone(), shown)
     });
 
     let trailing = actions(state, backend, hovered, leading, ask, react, url);
-    track_hover(card(byline_strip(byline(app, who, trailing)), body), hovered)
+    track_hover(
+        card(byline_strip(byline(app, who, trailing)), body),
+        hovered,
+    )
 }
 
 /// The file a thread is on, as the header across it names it: the path
@@ -1942,7 +2042,9 @@ fn event_words(text: String) -> Label {
 
 /// Whether the checkout has a commit, so Files can show it by itself.
 fn has_commit(state: ReviewState, sha: &str) -> bool {
-    state.commits.with_untracked(|commits| commits.iter().any(|c| c.sha == sha))
+    state
+        .commits
+        .with_untracked(|commits| commits.iter().any(|c| c.sha == sha))
 }
 
 /// The pull request's page, which shows a head commit as one of its own.
@@ -1981,20 +2083,22 @@ fn event_subject(state: ReviewState, subject: String) -> floem::AnyView {
     dyn_container(
         move || runs.get(),
         move |runs| {
-            Stack::horizontal_from_iter(runs.into_iter().map(|(text, link)| match link {
-                None => event_words(text).into_any(),
-                Some(link) => Label::derived(move || text.clone())
-                    .debug_name("event file")
-                    .on_event_stop(el::Click, move |_, _| refs.go(&link))
-                    .style(|s| {
-                        underlined_link(
-                            s.font_size(theme::TEXT_META)
-                                .color(theme::fg())
-                                .text_ellipsis()
-                                .min_width(0.0),
-                        )
-                    })
-                    .into_any(),
+            Stack::horizontal_from_iter(runs.into_iter().map(|(text, link)| {
+                match link {
+                    None => event_words(text).into_any(),
+                    Some(link) => Label::derived(move || text.clone())
+                        .debug_name("event file")
+                        .on_event_stop(el::Click, move |_, _| refs.go(&link))
+                        .style(|s| {
+                            underlined_link(
+                                s.font_size(theme::TEXT_META)
+                                    .color(theme::fg())
+                                    .text_ellipsis()
+                                    .min_width(0.0),
+                            )
+                        })
+                        .into_any(),
+                }
             }))
             .style(|s| s.items_center().min_width(0.0))
             .into_any()
@@ -2043,10 +2147,14 @@ pub fn thread_card(
             let thread = thread.clone();
             Stack::vertical((
                 match thread.anchor.clone() {
-                    Some(anchor) => {
-                        anchor_block(state, backend.clone(), anchor, thread.outdated, hunk.clone())
-                            .into_any()
-                    }
+                    Some(anchor) => anchor_block(
+                        state,
+                        backend.clone(),
+                        anchor,
+                        thread.outdated,
+                        hunk.clone(),
+                    )
+                    .into_any(),
                     None => Empty::new().into_any(),
                 },
                 threads::notices(app, state, backend.clone(), &thread, ThreadFace::Card),
@@ -2057,7 +2165,13 @@ pub fn thread_card(
                     thread.id.clone(),
                     ThreadFace::Card,
                 ),
-                threads::follow_up(app, state, backend.clone(), thread.id.clone(), ThreadFace::Card),
+                threads::follow_up(
+                    app,
+                    state,
+                    backend.clone(),
+                    thread.id.clone(),
+                    ThreadFace::Card,
+                ),
             ))
             .style(|s| s.flex_col().width_full())
             .into_any()
@@ -2097,7 +2211,8 @@ fn thread_header(
             })
             .into_any(),
     };
-    let (chevron_id, toggle_id, open_id) = (thread.id.clone(), thread.id.clone(), thread.id.clone());
+    let (chevron_id, toggle_id, open_id) =
+        (thread.id.clone(), thread.id.clone(), thread.id.clone());
     Stack::horizontal((
         threads::chevron_button(
             move || !folded.get(),
@@ -2203,7 +2318,8 @@ pub(crate) fn finding_controls(
                     match (&summary.backend, &summary.model) {
                         (Some(backend), Some(model)) => threads::model_name(backend, model),
                         (Some(backend), None) => {
-                            crate::review::review_launch::backend_label_from_name(backend).to_string()
+                            crate::review::review_launch::backend_label_from_name(backend)
+                                .to_string()
                         }
                         _ => "reviewer unavailable".to_string(),
                     }
@@ -2350,9 +2466,7 @@ pub(crate) fn finding_controls(
                                 let open = sha.clone();
                                 Label::derived(move || short_sha(&sha).to_string())
                                     .debug_name("finding-checked-sha")
-                                    .on_event_stop(el::Click, move |_, _| {
-                                        open_commit(state, &open)
-                                    })
+                                    .on_event_stop(el::Click, move |_, _| open_commit(state, &open))
                                     .style(|s| {
                                         underlined_link(
                                             finding_meta(s)
@@ -2376,7 +2490,11 @@ pub(crate) fn finding_controls(
                                 .apply_if(!moved, |s| s.hide())
                         }),
                 ))
-                .style(|s| s.items_center().gap(4.0).flex_wrap(floem::style::FlexWrap::Wrap));
+                .style(|s| {
+                    s.items_center()
+                        .gap(4.0)
+                        .flex_wrap(floem::style::FlexWrap::Wrap)
+                });
                 Stack::vertical((
                     Stack::horizontal((
                         crate::ui::widgets::badge(
@@ -2392,11 +2510,21 @@ pub(crate) fn finding_controls(
                                 .flex_shrink(0.0_f32)
                                 .selectable(false)
                         }),
-                        crate::ui::widgets::badge(move || status.0.clone(), status.1, status.2, None)
-                            .debug_name("finding-status"),
+                        crate::ui::widgets::badge(
+                            move || status.0.clone(),
+                            status.1,
+                            status.2,
+                            None,
+                        )
+                        .debug_name("finding-status"),
                         match reason {
                             Some(reason) => Label::derived(move || reason.clone())
-                                .style(|s| finding_meta(s).text_ellipsis().min_width(0.0).flex_shrink(1.0_f32))
+                                .style(|s| {
+                                    finding_meta(s)
+                                        .text_ellipsis()
+                                        .min_width(0.0)
+                                        .flex_shrink(1.0_f32)
+                                })
                                 .into_any(),
                             None => absent(),
                         },
@@ -2455,7 +2583,11 @@ fn finding_status(finding: &perch_github::Finding, rechecked: bool) -> (String, 
     if finding.verification == FindingVerification::Fixed
         || finding.disposition == FindingDisposition::VerifiedFixed
     {
-        return ("\u{2713} Verified fixed".into(), theme::open, theme::diff_added_bg);
+        return (
+            "\u{2713} Verified fixed".into(),
+            theme::open,
+            theme::diff_added_bg,
+        );
     }
     match finding.verification {
         FindingVerification::Present if rechecked => {
@@ -2475,7 +2607,9 @@ fn finding_status(finding: &perch_github::Finding, rechecked: bool) -> (String, 
 pub(crate) fn severity_inks(severity: perch_github::FindingSeverity) -> (ChipInk, ChipInk) {
     use perch_github::FindingSeverity;
     match severity {
-        FindingSeverity::Critical | FindingSeverity::High => (theme::closed, theme::diff_deleted_bg),
+        FindingSeverity::Critical | FindingSeverity::High => {
+            (theme::closed, theme::diff_deleted_bg)
+        }
         FindingSeverity::Medium => (theme::notice_fg, theme::notice_bg),
         _ => (theme::fg_muted, theme::badge_bg),
     }
@@ -2568,7 +2702,9 @@ fn anchor_block(
 ) -> impl IntoView {
     let path = anchor.path.clone();
     let loaded = Memo::new(move |_| state.files.with(|m| m.contains_key(&path)));
-    let hunk = hunk.map(|h| hunk_tail(&h, theme::HUNK_LINES)).filter(|h| !h.is_empty());
+    let hunk = hunk
+        .map(|h| hunk_tail(&h, theme::HUNK_LINES))
+        .filter(|h| !h.is_empty());
     let at_head = Memo::new(move |_| {
         let checkout = state.item.with(|i| {
             i.as_ref()
@@ -2591,7 +2727,10 @@ fn anchor_block(
     // as its hunk would show them, so the line is not alone.
     let lines_anchor = if has_hunk && anchor.start_line == anchor.line {
         Anchor {
-            start_line: anchor.line.saturating_sub(theme::HUNK_LINES as u32 - 1).max(1),
+            start_line: anchor
+                .line
+                .saturating_sub(theme::HUNK_LINES as u32 - 1)
+                .max(1),
             ..anchor.clone()
         }
     } else {
@@ -2706,7 +2845,10 @@ mod tests {
         let present = finding(FindingDisposition::Open, FindingVerification::Present);
         assert_eq!(finding_status(&present, false).0, "Reported");
         assert_eq!(finding_status(&present, true).0, "Still present");
-        let fixed = finding(FindingDisposition::VerifiedFixed, FindingVerification::Fixed);
+        let fixed = finding(
+            FindingDisposition::VerifiedFixed,
+            FindingVerification::Fixed,
+        );
         assert_eq!(finding_status(&fixed, false).0, "\u{2713} Verified fixed");
         let dismissed = finding(FindingDisposition::Dismissed, FindingVerification::Present);
         assert_eq!(finding_status(&dismissed, true).0, "Dismissed");
@@ -2716,19 +2858,49 @@ mod tests {
     fn a_reactions_tip_names_who_left_it() {
         let me = Some("me");
         let tip = |g: ReactionGroup| reacted_tip(&g, me);
-        assert_eq!(tip(hearts(1, false, &["octocat"])), "octocat reacted with heart emoji");
-        assert_eq!(tip(hearts(2, false, &["a", "b"])), "a and b reacted with heart emoji");
-        assert_eq!(tip(hearts(3, false, &["a", "b", "c"])), "a, b, and c reacted with heart emoji");
-        assert_eq!(tip(hearts(12, false, &["a", "b"])), "a, b, and 10 more reacted with heart emoji");
-        assert_eq!(tip(hearts(5, false, &["a"])), "a and 4 more reacted with heart emoji");
-        assert_eq!(tip(hearts(2, true, &["a", "me"])), "You and a reacted with heart emoji");
+        assert_eq!(
+            tip(hearts(1, false, &["octocat"])),
+            "octocat reacted with heart emoji"
+        );
+        assert_eq!(
+            tip(hearts(2, false, &["a", "b"])),
+            "a and b reacted with heart emoji"
+        );
+        assert_eq!(
+            tip(hearts(3, false, &["a", "b", "c"])),
+            "a, b, and c reacted with heart emoji"
+        );
+        assert_eq!(
+            tip(hearts(12, false, &["a", "b"])),
+            "a, b, and 10 more reacted with heart emoji"
+        );
+        assert_eq!(
+            tip(hearts(5, false, &["a"])),
+            "a and 4 more reacted with heart emoji"
+        );
+        assert_eq!(
+            tip(hearts(2, true, &["a", "me"])),
+            "You and a reacted with heart emoji"
+        );
         // Just added, and GitHub not yet asked: You, counted in.
-        assert_eq!(tip(hearts(2, true, &["a"])), "You and a reacted with heart emoji");
+        assert_eq!(
+            tip(hearts(2, true, &["a"])),
+            "You and a reacted with heart emoji"
+        );
         // Just taken back: the reader's name goes before GitHub's answer.
-        assert_eq!(tip(hearts(1, false, &["me", "a"])), "a reacted with heart emoji");
+        assert_eq!(
+            tip(hearts(1, false, &["me", "a"])),
+            "a reacted with heart emoji"
+        );
         // Nobody named, as an older build kept it.
-        assert_eq!(tip(hearts(1, false, &[])), "1 person reacted with heart emoji");
-        assert_eq!(tip(hearts(3, false, &[])), "3 people reacted with heart emoji");
+        assert_eq!(
+            tip(hearts(1, false, &[])),
+            "1 person reacted with heart emoji"
+        );
+        assert_eq!(
+            tip(hearts(3, false, &[])),
+            "3 people reacted with heart emoji"
+        );
         assert_eq!(tip(hearts(1, true, &[])), "You reacted with heart emoji");
         // The reader not known yet: GitHub's names as they are.
         assert_eq!(
@@ -2736,7 +2908,13 @@ mod tests {
             "me and a reacted with heart emoji"
         );
         assert_eq!(
-            reacted_tip(&ReactionGroup { kind: ReactionKind::ThumbsUp, ..hearts(1, false, &["a"]) }, me),
+            reacted_tip(
+                &ReactionGroup {
+                    kind: ReactionKind::ThumbsUp,
+                    ..hearts(1, false, &["a"])
+                },
+                me
+            ),
             "a reacted with thumbs up emoji"
         );
     }
@@ -2920,9 +3098,7 @@ mod tests {
             key(&comment(None)),
             key(&comment(Some("2026-09-16T09:14:00Z")))
         );
-        let event = |kind| {
-            Card::Event(PullEvent::new(kind, at("2026-09-15T09:14:00Z"), "rohan"))
-        };
+        let event = |kind| Card::Event(PullEvent::new(kind, at("2026-09-15T09:14:00Z"), "rohan"));
         assert_ne!(
             key(&event(PullEventKind::Opened)),
             key(&event(PullEventKind::Closed))

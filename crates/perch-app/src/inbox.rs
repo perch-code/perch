@@ -53,12 +53,13 @@ pub fn involves(whose: BrowseView, thread: &Thread, viewer: Option<&str>) -> boo
         BrowseView::ReviewRequested => thread.reason == Reason::ReviewRequested,
         BrowseView::Yours => {
             thread.reason == Reason::Author
-                || viewer.filter(|login| !login.is_empty()).is_some_and(|login| {
-                    thread
-                        .subject_snapshot
-                        .as_ref()
-                        .is_some_and(|snapshot| snapshot.author_login.eq_ignore_ascii_case(login))
-                })
+                || viewer
+                    .filter(|login| !login.is_empty())
+                    .is_some_and(|login| {
+                        thread.subject_snapshot.as_ref().is_some_and(|snapshot| {
+                            snapshot.author_login.eq_ignore_ascii_case(login)
+                        })
+                    })
         }
         BrowseView::Assigned => thread.reason == Reason::Assign,
         BrowseView::Mentioned => matches!(thread.reason, Reason::Mention | Reason::TeamMention),
@@ -168,7 +169,10 @@ mod tests {
         assert!(!visible[0].unread);
 
         // Unread Only leaves the read one out, in the same order.
-        let unread_only = InboxFilters { unread_only: true, ..Default::default() };
+        let unread_only = InboxFilters {
+            unread_only: true,
+            ..Default::default()
+        };
         let unread = filter(&threads, &unread_only, None, None, "");
         assert_eq!(
             unread
@@ -207,7 +211,13 @@ mod tests {
                 true,
             ),
         ];
-        let visible = filter(&threads, &InboxFilters::default(), None, Some("ORG/ONE"), "manifest");
+        let visible = filter(
+            &threads,
+            &InboxFilters::default(),
+            None,
+            Some("ORG/ONE"),
+            "manifest",
+        );
         assert_eq!(
             visible
                 .iter()
@@ -233,13 +243,41 @@ mod tests {
             participants: None,
             at: "2026-09-19T12:00:00Z".parse().unwrap(),
         };
-        let mut merged = thread("4", "org/one", "Merged", SubjectKind::PullRequest, Reason::Author, false);
+        let mut merged = thread(
+            "4",
+            "org/one",
+            "Merged",
+            SubjectKind::PullRequest,
+            Reason::Author,
+            false,
+        );
         merged.subject_snapshot = Some(snapshot(SubjectState::PrMerged));
-        let mut not_planned = thread("3", "org/one", "Not planned", SubjectKind::Issue, Reason::Author, false);
+        let mut not_planned = thread(
+            "3",
+            "org/one",
+            "Not planned",
+            SubjectKind::Issue,
+            Reason::Author,
+            false,
+        );
         not_planned.subject_snapshot = Some(snapshot(SubjectState::IssueNotPlanned));
-        let mut open = thread("2", "org/one", "Open", SubjectKind::PullRequest, Reason::Author, false);
+        let mut open = thread(
+            "2",
+            "org/one",
+            "Open",
+            SubjectKind::PullRequest,
+            Reason::Author,
+            false,
+        );
         open.subject_snapshot = Some(snapshot(SubjectState::PrDraft));
-        let unlooked = thread("1", "org/one", "Unlooked", SubjectKind::Release, Reason::Author, false);
+        let unlooked = thread(
+            "1",
+            "org/one",
+            "Unlooked",
+            SubjectKind::Release,
+            Reason::Author,
+            false,
+        );
         let threads = vec![merged, not_planned, open, unlooked];
         let ids = |filters: &InboxFilters| {
             filter(&threads, filters, None, None, "")
@@ -247,11 +285,20 @@ mod tests {
                 .map(|thread| thread.id)
                 .collect::<Vec<_>>()
         };
-        let closed = InboxFilters { state: StateFilter::Closed, ..Default::default() };
+        let closed = InboxFilters {
+            state: StateFilter::Closed,
+            ..Default::default()
+        };
         assert_eq!(ids(&closed), ["4", "3"]);
-        let open_only = InboxFilters { state: StateFilter::Open, ..Default::default() };
+        let open_only = InboxFilters {
+            state: StateFilter::Open,
+            ..Default::default()
+        };
         assert_eq!(ids(&open_only), ["2", "1"]);
-        let oldest = InboxFilters { direction: Direction::Oldest, ..Default::default() };
+        let oldest = InboxFilters {
+            direction: Direction::Oldest,
+            ..Default::default()
+        };
         assert_eq!(ids(&oldest), ["1", "2", "3", "4"]);
     }
 
@@ -259,7 +306,14 @@ mod tests {
     /// GitHub's reason; Yours also by who a look found opened it.
     #[test]
     fn whose_narrows_on_the_reason_and_yours_on_the_author_too() {
-        let mut mentioned_on_mine = thread("6", "org/one", "Mine", SubjectKind::PullRequest, Reason::Mention, true);
+        let mut mentioned_on_mine = thread(
+            "6",
+            "org/one",
+            "Mine",
+            SubjectKind::PullRequest,
+            Reason::Mention,
+            true,
+        );
         mentioned_on_mine.subject_snapshot = Some(perch_github::SubjectSnapshot {
             author_login: "Reader".into(),
             author_avatar_url: String::new(),
@@ -271,14 +325,52 @@ mod tests {
         });
         let threads = vec![
             mentioned_on_mine,
-            thread("5", "org/one", "Team", SubjectKind::Issue, Reason::TeamMention, true),
-            thread("4", "org/one", "Assigned", SubjectKind::Issue, Reason::Assign, true),
-            thread("3", "org/one", "Authored", SubjectKind::PullRequest, Reason::Author, true),
-            thread("2", "org/one", "Review", SubjectKind::PullRequest, Reason::ReviewRequested, true),
-            thread("1", "org/one", "Watching", SubjectKind::Issue, Reason::Subscribed, true),
+            thread(
+                "5",
+                "org/one",
+                "Team",
+                SubjectKind::Issue,
+                Reason::TeamMention,
+                true,
+            ),
+            thread(
+                "4",
+                "org/one",
+                "Assigned",
+                SubjectKind::Issue,
+                Reason::Assign,
+                true,
+            ),
+            thread(
+                "3",
+                "org/one",
+                "Authored",
+                SubjectKind::PullRequest,
+                Reason::Author,
+                true,
+            ),
+            thread(
+                "2",
+                "org/one",
+                "Review",
+                SubjectKind::PullRequest,
+                Reason::ReviewRequested,
+                true,
+            ),
+            thread(
+                "1",
+                "org/one",
+                "Watching",
+                SubjectKind::Issue,
+                Reason::Subscribed,
+                true,
+            ),
         ];
         let ids = |whose, viewer| {
-            let filters = InboxFilters { whose, ..Default::default() };
+            let filters = InboxFilters {
+                whose,
+                ..Default::default()
+            };
             filter(&threads, &filters, viewer, None, "")
                 .into_iter()
                 .map(|thread| thread.id)

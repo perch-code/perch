@@ -15,7 +15,7 @@ use std::rc::Rc;
 
 use floem::prelude::*;
 use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::views::{Container, Decorators, Empty, Stack, TextInput, dyn_container};
+use floem::views::{dyn_container, Container, Decorators, Empty, Stack, TextInput};
 use perch_github::{Item, ItemSubject, SubjectState};
 
 use crate::backend::{Backend, LossPrompt};
@@ -26,8 +26,8 @@ use crate::theme;
 use crate::ui::menu::{Menu, MenuExt, Shortcut};
 use crate::ui::nav_row;
 use crate::ui::widgets::{
-    confirmation, copy_to_clipboard, icon_button, open_in_browser, open_in_terminal, reveal_in_finder,
-    sidebar_glyph, state_glyph,
+    confirmation, copy_to_clipboard, icon_button, open_in_browser, open_in_terminal,
+    reveal_in_finder, sidebar_glyph, state_glyph,
 };
 
 /// Opening an item. Shared by every row.
@@ -96,12 +96,19 @@ pub fn item_row(
             byline(state, &item),
         ),
     ))
-    .style(|s| s.items_center().width_full().min_width(0.0).pointer_events_none());
+    .style(|s| {
+        s.items_center()
+            .width_full()
+            .min_width(0.0)
+            .pointer_events_none()
+    });
 
     let row = Container::new(content)
         .debug_name(row_debug_name)
         .on_event_stop(el::Click, move |_, _| on_open(&open_target))
-        .on_event_cont(el::PointerEnter, move |_, _| state.hovered_item.set(Some(hover_id.clone())))
+        .on_event_cont(el::PointerEnter, move |_, _| {
+            state.hovered_item.set(Some(hover_id.clone()))
+        })
         .on_event_cont(el::PointerLeave, move |_, _| {
             state.hovered_item.update(|h| {
                 if h.as_deref() == Some(leave_id.as_str()) {
@@ -126,7 +133,10 @@ pub fn item_row(
                 .with(|p| p.clone().filter(|p| p.item_id == id))
             {
                 Under::Loss(prompt)
-            } else if state.confirm_delete.with(|d| d.as_deref() == Some(id.as_str())) {
+            } else if state
+                .confirm_delete
+                .with(|d| d.as_deref() == Some(id.as_str()))
+            {
                 Under::Delete
             } else {
                 Under::Nothing
@@ -141,10 +151,13 @@ pub fn item_row(
                 Under::Delete => {
                     delete_confirmation(state, under_backend.clone(), under_item.clone()).into_any()
                 }
-                Under::Loss(prompt) => {
-                    loss_confirmation(state, under_backend.clone(), under_item.title().to_string(), prompt)
-                        .into_any()
-                }
+                Under::Loss(prompt) => loss_confirmation(
+                    state,
+                    under_backend.clone(),
+                    under_item.title().to_string(),
+                    prompt,
+                )
+                .into_any(),
                 Under::Nothing => Empty::new().into_any(),
             },
         )
@@ -160,10 +173,13 @@ pub fn item_row(
 /// clears both without the row being rebuilt. A branch with no subject
 /// has nothing to be unread.
 fn unread(state: AppState, item: &Item) -> impl Fn() -> bool + Clone + 'static {
-    let about = item
-        .subject
-        .as_ref()
-        .map(|subject| (subject.repo_full_name().to_string(), subject.kind(), subject.number()));
+    let about = item.subject.as_ref().map(|subject| {
+        (
+            subject.repo_full_name().to_string(),
+            subject.kind(),
+            subject.number(),
+        )
+    });
     move || {
         about
             .as_ref()
@@ -203,7 +219,11 @@ pub(crate) fn glyph(item: &Item) -> impl IntoView {
         })
         .into_any(),
         None => {
-            let color = if muted { theme::nav_subtle } else { theme::nav_muted };
+            let color = if muted {
+                theme::nav_subtle
+            } else {
+                theme::nav_muted
+            };
             sidebar_glyph(SidebarIcon::Branch, color).into_any()
         }
     }
@@ -215,15 +235,27 @@ pub(crate) fn glyph(item: &Item) -> impl IntoView {
 fn faces(state: AppState, item: &Item) -> impl Fn() -> Vec<nav_row::Face> + 'static {
     let subject = item.subject.as_ref().map(|subject| {
         let author = match subject {
-            ItemSubject::PullRequest(pr) => nav_row::Face::new(pr.author_avatar_url.clone(), pr.author_login.clone()),
-            ItemSubject::Issue(issue) => nav_row::Face::new(issue.author_avatar_url.clone(), issue.author_login.clone()),
+            ItemSubject::PullRequest(pr) => {
+                nav_row::Face::new(pr.author_avatar_url.clone(), pr.author_login.clone())
+            }
+            ItemSubject::Issue(issue) => {
+                nav_row::Face::new(issue.author_avatar_url.clone(), issue.author_login.clone())
+            }
         };
-        ((subject.repo_full_name().to_string(), subject.number()), author)
+        (
+            (subject.repo_full_name().to_string(), subject.number()),
+            author,
+        )
     });
     move || match &subject {
         Some((key, author)) => state
             .participants
-            .with(|found| found.get(key).filter(|p| !p.is_empty()).map(|p| nav_row::participant_faces(p)))
+            .with(|found| {
+                found
+                    .get(key)
+                    .filter(|p| !p.is_empty())
+                    .map(|p| nav_row::participant_faces(p))
+            })
             .unwrap_or_else(|| vec![author.clone()]),
         // The viewer arrives after the rows do, so the face follows it.
         None => state.viewer.with(|v| {
@@ -284,40 +316,55 @@ fn row_trailing(
     // `hovered_item` for every row, and scrolling moves rows under the
     // pointer; keyed on the signal, each write would rebuild every row's
     // trailing views and lay the list out again.
-    let hovering = Memo::new(move |_| state.hovered_item.with(|h| h.as_deref() == Some(id.as_str())));
+    let hovering = Memo::new(move |_| {
+        state
+            .hovered_item
+            .with(|h| h.as_deref() == Some(id.as_str()))
+    });
     let pinned = item.is_pinned();
     let at = item.last_activity();
 
-    dyn_container(move || hovering.get(), move |hovered| {
-        if !hovered {
-            return Stack::horizontal((
-                if pinned {
-                    nav_row::mark(SidebarIcon::Pin, theme::fg_subtle).into_any()
-                } else {
-                    Empty::new().into_any()
-                },
-                nav_row::unread_dot(unread.clone()),
-                nav_row::age(state, at),
+    dyn_container(
+        move || hovering.get(),
+        move |hovered| {
+            if !hovered {
+                return Stack::horizontal((
+                    if pinned {
+                        nav_row::mark(SidebarIcon::Pin, theme::fg_subtle).into_any()
+                    } else {
+                        Empty::new().into_any()
+                    },
+                    nav_row::unread_dot(unread.clone()),
+                    nav_row::age(state, at),
+                ))
+                .style(|s| s.items_center().flex_shrink(0.0_f32))
+                .into_any();
+            }
+            let pin_id = item.id.clone();
+            let pin_backend = backend.clone();
+            let menu_item = item.clone();
+            let menu_backend = backend.clone();
+            Stack::horizontal((
+                icon_button(
+                    move || SidebarIcon::Pin,
+                    move || {
+                        if pinned {
+                            theme::accent()
+                        } else {
+                            theme::fg_subtle()
+                        }
+                    },
+                    move || pin_backend.pin_item(&pin_id, !pinned),
+                )
+                .debug_name("row pin"),
+                nav_row::more_button(move || {
+                    item_menu(state, menu_backend.clone(), menu_item.clone())
+                }),
             ))
-            .style(|s| s.items_center().flex_shrink(0.0_f32))
-            .into_any();
-        }
-        let pin_id = item.id.clone();
-        let pin_backend = backend.clone();
-        let menu_item = item.clone();
-        let menu_backend = backend.clone();
-        Stack::horizontal((
-            icon_button(
-                move || SidebarIcon::Pin,
-                move || if pinned { theme::accent() } else { theme::fg_subtle() },
-                move || pin_backend.pin_item(&pin_id, !pinned),
-            )
-            .debug_name("row pin"),
-            nav_row::more_button(move || item_menu(state, menu_backend.clone(), menu_item.clone())),
-        ))
-        .style(|s| s.items_center().flex_shrink(0.0_f32).margin_left(4.0))
-        .into_any()
-    })
+            .style(|s| s.items_center().flex_shrink(0.0_f32).margin_left(4.0))
+            .into_any()
+        },
+    )
     .style(|s| s.flex_shrink(0.0_f32))
 }
 
@@ -329,12 +376,14 @@ fn key(code: Code) -> Shortcut {
 /// reader's own has none.
 pub fn github_url(item: &Item) -> Option<String> {
     match &item.subject {
-        Some(ItemSubject::PullRequest(pr)) => {
-            Some(format!("https://github.com/{}/pull/{}", pr.repo_full_name, pr.number))
-        }
-        Some(ItemSubject::Issue(i)) => {
-            Some(format!("https://github.com/{}/issues/{}", i.repo_full_name, i.number))
-        }
+        Some(ItemSubject::PullRequest(pr)) => Some(format!(
+            "https://github.com/{}/pull/{}",
+            pr.repo_full_name, pr.number
+        )),
+        Some(ItemSubject::Issue(i)) => Some(format!(
+            "https://github.com/{}/issues/{}",
+            i.repo_full_name, i.number
+        )),
         None => None,
     }
 }
@@ -356,41 +405,48 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
         let github_url = github_url.clone();
         move |sub| {
             let (reveal, terminal, copy) = (path.clone(), path.clone(), path.clone());
-            sub.icon(SidebarIcon::ArrowUpRight).item("GitHub", {
-                let url = github_url.clone();
-                move |i| {
-                    let url = url.clone();
-                    i.icon(SidebarIcon::External).enabled(has_subject).action(move || {
-                        if let Some(url) = &url {
-                            open_in_browser(url)
+            sub.icon(SidebarIcon::ArrowUpRight)
+                .item("GitHub", {
+                    let url = github_url.clone();
+                    move |i| {
+                        let url = url.clone();
+                        i.icon(SidebarIcon::External)
+                            .enabled(has_subject)
+                            .action(move || {
+                                if let Some(url) = &url {
+                                    open_in_browser(url)
+                                }
+                            })
+                    }
+                })
+                .item("Finder", move |i| {
+                    let p = reveal.clone();
+                    i.icon(SidebarIcon::Folder)
+                        .enabled(on_disk)
+                        .action(move || {
+                            if let Some(p) = &p {
+                                reveal_in_finder(p)
+                            }
+                        })
+                })
+                .item("Terminal", move |i| {
+                    let p = terminal.clone();
+                    i.icon(SidebarIcon::Terminal)
+                        .enabled(on_disk)
+                        .action(move || {
+                            if let Some(p) = &p {
+                                open_in_terminal(p)
+                            }
+                        })
+                })
+                .item("Copy Path", move |i| {
+                    let p = copy.clone();
+                    i.icon(SidebarIcon::Copy).enabled(on_disk).action(move || {
+                        if let Some(p) = &p {
+                            copy_to_clipboard(p.to_string_lossy().into_owned())
                         }
                     })
-                }
-            })
-            .item("Finder", move |i| {
-                let p = reveal.clone();
-                i.icon(SidebarIcon::Folder).enabled(on_disk).action(move || {
-                    if let Some(p) = &p {
-                        reveal_in_finder(p)
-                    }
                 })
-            })
-            .item("Terminal", move |i| {
-                let p = terminal.clone();
-                i.icon(SidebarIcon::Terminal).enabled(on_disk).action(move || {
-                    if let Some(p) = &p {
-                        open_in_terminal(p)
-                    }
-                })
-            })
-            .item("Copy Path", move |i| {
-                let p = copy.clone();
-                i.icon(SidebarIcon::Copy).enabled(on_disk).action(move || {
-                    if let Some(p) = &p {
-                        copy_to_clipboard(p.to_string_lossy().into_owned())
-                    }
-                })
-            })
         }
     });
     {
@@ -441,10 +497,12 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
         let i = id.clone();
         menu = menu.item("Rename", move |m| {
             let i = i.clone();
-            m.icon(SidebarIcon::Pencil).accelerator(key(Code::KeyR)).action(move || {
-                state.confirm_delete.set(None);
-                state.renaming.set(Some(i.clone()));
-            })
+            m.icon(SidebarIcon::Pencil)
+                .accelerator(key(Code::KeyR))
+                .action(move || {
+                    state.confirm_delete.set(None);
+                    state.renaming.set(Some(i.clone()));
+                })
         });
     }
     menu = menu.separator();
@@ -456,38 +514,54 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
         // comes and goes with it.
         let on_disk = crate::items::in_worktrees(&item);
         let owned = item.checkout.as_ref().is_some_and(|c| c.owned);
-        menu = menu.item(if on_disk { "Remove Worktree" } else { "Restore Worktree" }, move |m| {
-            let (b, i) = (b.clone(), i.clone());
-            let icon = if on_disk { SidebarIcon::Archive } else { SidebarIcon::Undo };
-            m.icon(icon).enabled(owned).accelerator(key(Code::KeyA)).action(move || {
-                if !on_disk {
-                    let navigation_id = b.restore_item(&i);
-                    if let Some(review) = state.review.get_untracked() {
-                        state.begin_item_review(
-                            review,
-                            "Checking out the files",
-                            &i,
-                            navigation_id,
-                        );
-                    } else {
-                        state.expect_item_navigation(&i, navigation_id);
-                    }
+        menu = menu.item(
+            if on_disk {
+                "Remove Worktree"
+            } else {
+                "Restore Worktree"
+            },
+            move |m| {
+                let (b, i) = (b.clone(), i.clone());
+                let icon = if on_disk {
+                    SidebarIcon::Archive
                 } else {
-                    state.confirm_loss.set(None);
-                    b.archive_item(&i);
-                }
-            })
-        });
+                    SidebarIcon::Undo
+                };
+                m.icon(icon)
+                    .enabled(owned)
+                    .accelerator(key(Code::KeyA))
+                    .action(move || {
+                        if !on_disk {
+                            let navigation_id = b.restore_item(&i);
+                            if let Some(review) = state.review.get_untracked() {
+                                state.begin_item_review(
+                                    review,
+                                    "Checking out the files",
+                                    &i,
+                                    navigation_id,
+                                );
+                            } else {
+                                state.expect_item_navigation(&i, navigation_id);
+                            }
+                        } else {
+                            state.confirm_loss.set(None);
+                            b.archive_item(&i);
+                        }
+                    })
+            },
+        );
     }
     {
         let i = id.clone();
         menu = menu.item("Delete", move |m| {
             let i = i.clone();
-            m.icon(SidebarIcon::Trash).accelerator(key(Code::KeyD)).action(move || {
-                state.renaming.set(None);
-                state.confirm_loss.set(None);
-                state.confirm_delete.set(Some(i.clone()));
-            })
+            m.icon(SidebarIcon::Trash)
+                .accelerator(key(Code::KeyD))
+                .action(move || {
+                    state.renaming.set(None);
+                    state.confirm_loss.set(None);
+                    state.confirm_delete.set(Some(i.clone()));
+                })
         });
     }
     menu
@@ -540,10 +614,16 @@ fn delete_confirmation(state: AppState, backend: Rc<Backend>, item: Item) -> imp
     let what = match item.checkout.as_ref() {
         Some(c) if c.owned && c.on_disk => format!(
             "Removes the row and its threads, the directory {}, and the branch {}.",
-            c.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            c.path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             c.branch
         ),
-        Some(c) if c.owned => format!("Removes the row and its threads, and the branch {}.", c.branch),
+        Some(c) if c.owned => format!(
+            "Removes the row and its threads, and the branch {}.",
+            c.branch
+        ),
         Some(_) => "Removes the row and its threads. Nothing on disk is touched.".to_string(),
         None => "Removes the row and its threads.".to_string(),
     };
@@ -586,7 +666,12 @@ fn loss_text(title: &str, prompt: &LossPrompt) -> (String, String, &'static str)
 
 /// The backend's question before a delete that would lose what git
 /// cannot bring back.
-fn loss_confirmation(state: AppState, backend: Rc<Backend>, title: String, prompt: LossPrompt) -> impl IntoView {
+fn loss_confirmation(
+    state: AppState,
+    backend: Rc<Backend>,
+    title: String,
+    prompt: LossPrompt,
+) -> impl IntoView {
     let (question, what, go) = loss_text(&title, &prompt);
     let id = prompt.item_id.clone();
     confirmation(

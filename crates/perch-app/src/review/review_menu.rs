@@ -86,7 +86,11 @@ pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
         dyn_container(
             move || prominent.get(),
             |prominent| {
-                let color = if prominent { theme::canvas } else { theme::fg_subtle };
+                let color = if prominent {
+                    theme::canvas
+                } else {
+                    theme::fg_subtle
+                };
                 sidebar_glyph(SidebarIcon::ChevronDown, color)
                     .style(|s| s.size(9.0, 9.0).pointer_events_none())
             },
@@ -127,8 +131,12 @@ pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                     .hover(|s| s.background(theme::action_hover()))
             } else {
                 let open = state.review_open.get();
-                s.background(if open { theme::border() } else { theme::badge_bg() })
-                    .hover(|s| s.background(theme::border()))
+                s.background(if open {
+                    theme::border()
+                } else {
+                    theme::badge_bg()
+                })
+                .hover(|s| s.background(theme::border()))
             }
         })
         .debug_name("review-control");

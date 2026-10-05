@@ -428,7 +428,13 @@ impl ReviewSpec {
             prompt.push_str("\n\n");
             prompt.push_str(&instructions);
         }
-        claude_isolation_args(&self.cwd, &self.model, self.effort, ORCHESTRATION_TOOLS, prompt)
+        claude_isolation_args(
+            &self.cwd,
+            &self.model,
+            self.effort,
+            ORCHESTRATION_TOOLS,
+            prompt,
+        )
     }
 }
 
@@ -491,7 +497,13 @@ impl ReviewVerificationSpec {
     }
 
     fn claude_args(&self) -> Vec<String> {
-        claude_isolation_args(&self.cwd, &self.model, self.effort, &[], self.prompt.clone())
+        claude_isolation_args(
+            &self.cwd,
+            &self.model,
+            self.effort,
+            &[],
+            self.prompt.clone(),
+        )
     }
 }
 
@@ -543,7 +555,10 @@ fn codex_isolation_args(
         "--config".into(),
         "instructions=\"\"".into(),
         "--config".into(),
-        format!("developer_instructions={}", toml_string(developer_instructions)),
+        format!(
+            "developer_instructions={}",
+            toml_string(developer_instructions)
+        ),
     ]);
     args
 }
@@ -581,7 +596,12 @@ fn claude_isolation_args(
         "none".into(),
         "--allowedTools".into(),
     ];
-    args.extend(READ_ONLY_TOOLS.iter().chain(extra_tools).map(|tool| (*tool).to_string()));
+    args.extend(
+        READ_ONLY_TOOLS
+            .iter()
+            .chain(extra_tools)
+            .map(|tool| (*tool).to_string()),
+    );
     args.push("--disallowedTools".into());
     args.extend(denied_tools());
     args.push("--".into());
@@ -1946,7 +1966,11 @@ mod tests {
         assert!(prompt.ends_with(":\n\nOnly rfc.md"));
 
         spec.instructions = None;
-        assert!(spec.args().last().unwrap().ends_with("the thread file it was asked in."));
+        assert!(spec
+            .args()
+            .last()
+            .unwrap()
+            .ends_with("the thread file it was asked in."));
 
         let mut codex = review_spec(Backend::Codex, dir.path().into());
         codex.discussion_dir = Some("/perch/context/review-g1".into());
@@ -1956,7 +1980,9 @@ mod tests {
             .find(|arg| arg.starts_with("developer_instructions="))
             .unwrap();
         let boundary = developer.find("untrusted review data").unwrap();
-        let discussion = developer.find("/perch/context/review-g1/, INDEX.md first").unwrap();
+        let discussion = developer
+            .find("/perch/context/review-g1/, INDEX.md first")
+            .unwrap();
         assert!(boundary < discussion, "below the data boundary");
         assert!(!args.iter().any(|arg| arg == "--"));
     }

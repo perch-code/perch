@@ -34,14 +34,23 @@ pub fn install_dirs() -> Vec<PathBuf> {
 /// request's among them, where `.` or `node_modules/.bin` would find
 /// whatever program the pull request put there.
 pub fn path_with_install_dirs(path: Option<&OsStr>, extra: &[PathBuf]) -> Option<OsString> {
-    let given = path.into_iter().flat_map(std::env::split_paths).collect::<Vec<_>>();
-    let mut dirs = given.iter().filter(|dir| dir.is_absolute()).cloned().collect::<Vec<_>>();
+    let given = path
+        .into_iter()
+        .flat_map(std::env::split_paths)
+        .collect::<Vec<_>>();
+    let mut dirs = given
+        .iter()
+        .filter(|dir| dir.is_absolute())
+        .cloned()
+        .collect::<Vec<_>>();
     for dir in extra {
         if dir.is_dir() && !dirs.contains(dir) {
             dirs.push(dir.clone());
         }
     }
-    (dirs != given).then(|| std::env::join_paths(dirs).ok()).flatten()
+    (dirs != given)
+        .then(|| std::env::join_paths(dirs).ok())
+        .flatten()
 }
 
 /// Where a binary is. A name is looked up on `PATH`, then in the
@@ -50,11 +59,21 @@ pub fn path_with_install_dirs(path: Option<&OsStr>, extra: &[PathBuf]) -> Option
 /// with a leading `~` expanded. `None` means it is not there.
 pub fn find_binary(binary: &str) -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    find_binary_in(binary, std::env::var_os("PATH").as_deref(), &install_dirs(), home.as_deref())
+    find_binary_in(
+        binary,
+        std::env::var_os("PATH").as_deref(),
+        &install_dirs(),
+        home.as_deref(),
+    )
 }
 
 /// `find_binary` with its environment passed in, so it can be tested.
-pub fn find_binary_in(binary: &str, path: Option<&OsStr>, extra: &[PathBuf], home: Option<&Path>) -> Option<PathBuf> {
+pub fn find_binary_in(
+    binary: &str,
+    path: Option<&OsStr>,
+    extra: &[PathBuf],
+    home: Option<&Path>,
+) -> Option<PathBuf> {
     if binary.contains('/') {
         let expanded = match (binary.strip_prefix("~/"), home) {
             (Some(rest), Some(home)) => home.join(rest),
@@ -62,7 +81,10 @@ pub fn find_binary_in(binary: &str, path: Option<&OsStr>, extra: &[PathBuf], hom
         };
         return expanded.is_file().then_some(expanded);
     }
-    let on_path = path.into_iter().flat_map(std::env::split_paths).collect::<Vec<_>>();
+    let on_path = path
+        .into_iter()
+        .flat_map(std::env::split_paths)
+        .collect::<Vec<_>>();
     on_path
         .iter()
         .chain(extra.iter())
@@ -96,19 +118,35 @@ pub fn parse_codex_catalog(json: &str) -> Vec<CodexModel> {
     };
     models
         .iter()
-        .filter(|m| m.get("visibility").and_then(Value::as_str).unwrap_or("list") == "list")
+        .filter(|m| {
+            m.get("visibility")
+                .and_then(Value::as_str)
+                .unwrap_or("list")
+                == "list"
+        })
         .filter_map(|m| {
             let slug = m.get("slug").and_then(Value::as_str)?.to_string();
-            let display_name =
-                m.get("display_name").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| slug.clone());
+            let display_name = m
+                .get("display_name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| slug.clone());
             let efforts = m
                 .get("supported_reasoning_levels")
                 .and_then(Value::as_array)
                 .map(|levels| {
-                    levels.iter().filter_map(|l| l.get("effort").and_then(Value::as_str)).map(str::to_string).collect()
+                    levels
+                        .iter()
+                        .filter_map(|l| l.get("effort").and_then(Value::as_str))
+                        .map(str::to_string)
+                        .collect()
                 })
                 .unwrap_or_default();
-            Some(CodexModel { slug, display_name, efforts })
+            Some(CodexModel {
+                slug,
+                display_name,
+                efforts,
+            })
         })
         .collect()
 }
@@ -125,8 +163,15 @@ pub async fn codex_catalog(binary: &Path) -> Result<Vec<CodexModel>, String> {
         .map_err(|_| "codex debug models took more than ten seconds".to_string())?
         .map_err(|e| format!("could not run codex debug models: {e}"))?;
     if !output.status.success() {
-        let tail = String::from_utf8_lossy(&output.stderr).lines().last().unwrap_or("").to_string();
-        return Err(format!("codex debug models exited with {}: {tail}", output.status));
+        let tail = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .last()
+            .unwrap_or("")
+            .to_string();
+        return Err(format!(
+            "codex debug models exited with {}: {tail}",
+            output.status
+        ));
     }
     let models = parse_codex_catalog(&String::from_utf8_lossy(&output.stdout));
     if models.is_empty() {
@@ -153,7 +198,11 @@ pub fn codex_default_model_in(home: &Path) -> Option<String> {
     text.lines()
         .map(str::trim)
         .take_while(|l| !l.starts_with('['))
-        .find_map(|l| l.strip_prefix("model").map(str::trim_start).and_then(|r| r.strip_prefix('=')))
+        .find_map(|l| {
+            l.strip_prefix("model")
+                .map(str::trim_start)
+                .and_then(|r| r.strip_prefix('='))
+        })
         .map(|v| v.trim().trim_matches('"').to_string())
         .filter(|v| !v.is_empty())
 }
@@ -172,7 +221,10 @@ mod tests {
     #[test]
     fn the_catalog_lists_visible_models_in_order_with_their_efforts() {
         let models = parse_codex_catalog(CATALOG);
-        assert_eq!(models.iter().map(|m| m.slug.as_str()).collect::<Vec<_>>(), ["gpt-6-astra", "gpt-5.5"]);
+        assert_eq!(
+            models.iter().map(|m| m.slug.as_str()).collect::<Vec<_>>(),
+            ["gpt-6-astra", "gpt-5.5"]
+        );
         assert_eq!(models[0].display_name, "GPT-6-Astra");
         assert!(models[0].efforts.iter().any(|e| e == "ultra"));
         assert!(!models[1].efforts.iter().any(|e| e == "ultra"));
@@ -199,10 +251,20 @@ mod tests {
         let path = std::env::join_paths([&on_path]).unwrap();
         let extras = [extra.clone()];
 
-        assert_eq!(find_binary_in("claude", Some(&path), &extras, None), Some(on_path.join("claude")));
-        assert_eq!(find_binary_in("codex", Some(&path), &extras, None), Some(extra.join("codex")));
+        assert_eq!(
+            find_binary_in("claude", Some(&path), &extras, None),
+            Some(on_path.join("claude"))
+        );
+        assert_eq!(
+            find_binary_in("codex", Some(&path), &extras, None),
+            Some(extra.join("codex"))
+        );
         assert_eq!(find_binary_in("gemini", Some(&path), &extras, None), None);
-        assert_eq!(find_binary_in("claude", None, &[], None), None, "no PATH, no extras, nothing");
+        assert_eq!(
+            find_binary_in("claude", None, &[], None),
+            None,
+            "no PATH, no extras, nothing"
+        );
     }
 
     #[test]
@@ -217,9 +279,19 @@ mod tests {
         let extra = [on_path.clone(), missing, brew.clone()];
 
         let joined = path_with_install_dirs(Some(&path), &extra).unwrap();
-        assert_eq!(std::env::split_paths(&joined).collect::<Vec<_>>(), [on_path.clone(), brew.clone()]);
-        assert_eq!(path_with_install_dirs(Some(&joined), &extra), None, "nothing new to add");
-        assert_eq!(path_with_install_dirs(None, &[brew.clone()]), Some(brew.into_os_string()));
+        assert_eq!(
+            std::env::split_paths(&joined).collect::<Vec<_>>(),
+            [on_path.clone(), brew.clone()]
+        );
+        assert_eq!(
+            path_with_install_dirs(Some(&joined), &extra),
+            None,
+            "nothing new to add"
+        );
+        assert_eq!(
+            path_with_install_dirs(None, &[brew.clone()]),
+            Some(brew.into_os_string())
+        );
     }
 
     #[test]
@@ -231,7 +303,11 @@ mod tests {
         let path = format!(".:node_modules/.bin:{}::", on_path.display());
         let kept = path_with_install_dirs(Some(OsStr::new(&path)), &[]).unwrap();
         assert_eq!(std::env::split_paths(&kept).collect::<Vec<_>>(), [on_path]);
-        assert_eq!(path_with_install_dirs(Some(&kept), &[]), None, "nothing left to drop");
+        assert_eq!(
+            path_with_install_dirs(Some(&kept), &[]),
+            None,
+            "nothing left to drop"
+        );
     }
 
     #[test]
@@ -241,10 +317,23 @@ mod tests {
         std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
         std::fs::write(&bin, "").unwrap();
 
-        assert_eq!(find_binary_in(bin.to_str().unwrap(), None, &[], None), Some(bin.clone()));
-        assert_eq!(find_binary_in("~/tools/codex", None, &[], Some(dir.path())), Some(bin.clone()));
-        assert_eq!(find_binary_in("~/tools/nope", None, &[], Some(dir.path())), None);
-        assert_eq!(find_binary_in(dir.path().to_str().unwrap(), None, &[], None), None, "a directory is not a binary");
+        assert_eq!(
+            find_binary_in(bin.to_str().unwrap(), None, &[], None),
+            Some(bin.clone())
+        );
+        assert_eq!(
+            find_binary_in("~/tools/codex", None, &[], Some(dir.path())),
+            Some(bin.clone())
+        );
+        assert_eq!(
+            find_binary_in("~/tools/nope", None, &[], Some(dir.path())),
+            None
+        );
+        assert_eq!(
+            find_binary_in(dir.path().to_str().unwrap(), None, &[], None),
+            None,
+            "a directory is not a binary"
+        );
     }
 
     #[test]
@@ -252,8 +341,15 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         assert_eq!(codex_default_model_in(home.path()), None);
         std::fs::write(home.path().join("config.toml"), "model = \"gpt-6-astra\"\nmodel_reasoning_effort = \"low\"\n[projects]\nmodel = \"other\"\n").unwrap();
-        assert_eq!(codex_default_model_in(home.path()).as_deref(), Some("gpt-6-astra"));
-        std::fs::write(home.path().join("config.toml"), "[agent]\nmodel = \"only-in-a-table\"\n").unwrap();
+        assert_eq!(
+            codex_default_model_in(home.path()).as_deref(),
+            Some("gpt-6-astra")
+        );
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[agent]\nmodel = \"only-in-a-table\"\n",
+        )
+        .unwrap();
         assert_eq!(codex_default_model_in(home.path()), None);
     }
 
@@ -272,8 +368,13 @@ mod tests {
         let models = codex_catalog(&good).await.unwrap();
         assert_eq!(models.len(), 2);
         let err = codex_catalog(&bad).await.unwrap_err();
-        assert!(err.contains("exited") && err.contains("no such command"), "{err}");
-        let err = codex_catalog(&dir.path().join("missing")).await.unwrap_err();
+        assert!(
+            err.contains("exited") && err.contains("no such command"),
+            "{err}"
+        );
+        let err = codex_catalog(&dir.path().join("missing"))
+            .await
+            .unwrap_err();
         assert!(err.contains("could not run"), "{err}");
     }
 }

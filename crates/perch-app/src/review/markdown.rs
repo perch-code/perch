@@ -129,23 +129,46 @@ pub enum Block {
     Image(Image),
     /// A formula, on a line of its own, centred.
     Math(Rc<Formula>),
-    Heading { level: u8, spans: Vec<Span> },
+    Heading {
+        level: u8,
+        spans: Vec<Span>,
+    },
     /// A quote, or one of GitHub's alerts when `alert` is set.
-    Quote { alert: Option<Alert>, blocks: Vec<Block> },
+    Quote {
+        alert: Option<Alert>,
+        blocks: Vec<Block>,
+    },
     /// A list, numbered from `start` or bulleted. Tight when no item has
     /// a paragraph of its own, which is how a list of short lines reads.
-    List { start: Option<u64>, tight: bool, items: Vec<Item> },
+    List {
+        start: Option<u64>,
+        tight: bool,
+        items: Vec<Item>,
+    },
     /// Fenced or indented code, with the fence's language if it named one.
-    Code { lang: Option<String>, text: String },
+    Code {
+        lang: Option<String>,
+        text: String,
+    },
     /// A review comment's suggested change: a fence named `suggestion`,
     /// with the lines it replaces where they are known. Only
     /// [`render_suggesting`] makes one, from a fence under a line.
-    Suggestion { text: String, original: Option<Original> },
-    Table { align: Vec<Align>, head: Vec<Vec<Span>>, rows: Vec<Vec<Vec<Span>>> },
+    Suggestion {
+        text: String,
+        original: Option<Original>,
+    },
+    Table {
+        align: Vec<Align>,
+        head: Vec<Vec<Span>>,
+        rows: Vec<Vec<Vec<Span>>>,
+    },
     Rule,
     /// A `<details>` block: its summary, and what it folds away until
     /// opened.
-    Details { summary: Vec<Span>, blocks: Vec<Block> },
+    Details {
+        summary: Vec<Span>,
+        blocks: Vec<Block>,
+    },
     /// The footnotes, in the order they were first referenced, drawn after
     /// everything else as GitHub draws them.
     Footnotes(Vec<Vec<Block>>),
@@ -378,7 +401,10 @@ fn push_text(spans: &mut Vec<Span>, style: &Span, text: &str) {
         {
             last.text.push_str(text);
         }
-        _ => spans.push(Span { text: text.to_string(), ..style.clone() }),
+        _ => spans.push(Span {
+            text: text.to_string(),
+            ..style.clone()
+        }),
     }
 }
 
@@ -388,7 +414,10 @@ impl<'a> Builder<'a> {
         loop {
             if let Some(piece) = self.pending.pop_front() {
                 match piece {
-                    Piece::Html(text) => out.push(Block::Paragraph(vec![Span { text, ..Span::default() }])),
+                    Piece::Html(text) => out.push(Block::Paragraph(vec![Span {
+                        text,
+                        ..Span::default()
+                    }])),
                     Piece::Open => out.push(self.details()),
                     Piece::Summary(spans) => out.push(Block::Paragraph(spans)),
                     Piece::Image(image) => out.push(Block::Image(image)),
@@ -399,7 +428,9 @@ impl<'a> Builder<'a> {
                 }
                 continue;
             }
-            let Some(event) = self.events.peek() else { break };
+            let Some(event) = self.events.peek() else {
+                break;
+            };
             if closer.closes(event) {
                 self.events.next();
                 break;
@@ -414,7 +445,9 @@ impl<'a> Builder<'a> {
             {
                 break;
             }
-            let Some(event) = self.events.next() else { break };
+            let Some(event) = self.events.next() else {
+                break;
+            };
             // Text sitting directly in the container, as a tight list
             // item's does, styled or not.
             if is_inline(&event) {
@@ -434,11 +467,17 @@ impl<'a> Builder<'a> {
                 }
                 Event::Start(Tag::Heading { level, .. }) => {
                     let spans = self.inlines(InlineCloser::Heading);
-                    out.push(Block::Heading { level: heading_level(level), spans });
+                    out.push(Block::Heading {
+                        level: heading_level(level),
+                        spans,
+                    });
                 }
                 Event::Start(Tag::BlockQuote(kind)) => {
                     let blocks = self.blocks(Closer::Quote);
-                    out.push(Block::Quote { alert: kind.map(Alert::from), blocks });
+                    out.push(Block::Quote {
+                        alert: kind.map(Alert::from),
+                        blocks,
+                    });
                 }
                 Event::Start(Tag::List(start)) => out.push(self.list(start)),
                 Event::Start(Tag::CodeBlock(kind)) => out.push(self.code(kind)),
@@ -489,7 +528,9 @@ impl<'a> Builder<'a> {
                 }
                 break;
             }
-            let Some(event) = self.events.next() else { break };
+            let Some(event) = self.events.next() else {
+                break;
+            };
             self.take(event, spans, style);
         }
         self.flush_text(spans, style);
@@ -518,7 +559,9 @@ impl<'a> Builder<'a> {
         if let Some(link) = style.links.last() {
             // `<address>`, or a link written out as its own address,
             // shortens as a bare one does.
-            let short = (text == *link).then(|| issue_address(&text, self.repo)).flatten();
+            let short = (text == *link)
+                .then(|| issue_address(&text, self.repo))
+                .flatten();
             let text = match short {
                 Some(short) => short,
                 None => emojify(&text).into_owned(),
@@ -531,12 +574,26 @@ impl<'a> Builder<'a> {
                 let run = emojify(run);
                 for (piece, link) in issue_refs(&run, self.repo) {
                     let Some(repo) = self.repo.filter(|_| link.is_none()) else {
-                        push_text(spans, &Span { link, ..style.span() }, piece);
+                        push_text(
+                            spans,
+                            &Span {
+                                link,
+                                ..style.span()
+                            },
+                            piece,
+                        );
                         continue;
                     };
                     for (piece, link) in mentions(piece) {
                         if link.is_some() {
-                            push_text(spans, &Span { link, ..style.span() }, piece);
+                            push_text(
+                                spans,
+                                &Span {
+                                    link,
+                                    ..style.span()
+                                },
+                                piece,
+                            );
                             continue;
                         }
                         // A commit is drawn as GitHub draws one: its
@@ -561,8 +618,15 @@ impl<'a> Builder<'a> {
                 Some(_) => format!("http://{run}"),
                 None => run.to_string(),
             };
-            let s = Span { link: Some(link), ..style.span() };
-            push_text(spans, &s, issue_address(run, self.repo).as_deref().unwrap_or(run));
+            let s = Span {
+                link: Some(link),
+                ..style.span()
+            };
+            push_text(
+                spans,
+                &s,
+                issue_address(run, self.repo).as_deref().unwrap_or(run),
+            );
         }
     }
 
@@ -570,7 +634,10 @@ impl<'a> Builder<'a> {
         match event {
             Event::Text(t) => push_text(spans, &style.span(), &t),
             Event::Code(t) => {
-                let s = Span { code: true, ..style.span() };
+                let s = Span {
+                    code: true,
+                    ..style.span()
+                };
                 push_text(spans, &s, &t);
             }
             Event::InlineMath(t) => push_math(spans, style, &t, false),
@@ -598,9 +665,20 @@ impl<'a> Builder<'a> {
                 if images::fetchable(&dest_url) {
                     let alt = match blank {
                         true => file_name(&dest_url),
-                        false => alt.iter().map(|s| s.text.as_str()).collect::<String>().trim().to_string(),
+                        false => alt
+                            .iter()
+                            .map(|s| s.text.as_str())
+                            .collect::<String>()
+                            .trim()
+                            .to_string(),
                     };
-                    let image = Image { src: dest_url.to_string(), alt, link, width: None, height: None };
+                    let image = Image {
+                        src: dest_url.to_string(),
+                        alt,
+                        link,
+                        width: None,
+                        height: None,
+                    };
                     push_image(spans, style, image);
                 } else if blank {
                     push_text(spans, &style.span(), &file_name(&dest_url));
@@ -621,7 +699,10 @@ impl<'a> Builder<'a> {
             // for that: "v2¹", not "v21".
             Event::FootnoteReference(label) => {
                 let number = self.number(&label);
-                let s = Span { footnote: true, ..style.span() };
+                let s = Span {
+                    footnote: true,
+                    ..style.span()
+                };
                 push_text(spans, &s, &superscript(number));
             }
             Event::InlineHtml(html) => match inline_html(&html) {
@@ -633,7 +714,10 @@ impl<'a> Builder<'a> {
                 // An image, by its alt text or file name, as a markdown
                 // image reads, and a link to it.
                 InlineHtml::Picture(name, src) => {
-                    let s = Span { link: src, ..style.span() };
+                    let s = Span {
+                        link: src,
+                        ..style.span()
+                    };
                     push_text(spans, &s, &name);
                 }
                 InlineHtml::Nothing => {}
@@ -646,7 +730,8 @@ impl<'a> Builder<'a> {
 
     fn skip_until(&mut self, end: TagEnd) {
         for event in self.events.by_ref() {
-            if matches!(event, Event::End(e) if std::mem::discriminant(&e) == std::mem::discriminant(&end)) {
+            if matches!(event, Event::End(e) if std::mem::discriminant(&e) == std::mem::discriminant(&end))
+            {
                 break;
             }
         }
@@ -685,7 +770,11 @@ impl<'a> Builder<'a> {
         let tight = !self.loose;
         self.loose = outer;
         self.task = task;
-        Block::List { start, tight, items }
+        Block::List {
+            start,
+            tight,
+            items,
+        }
     }
 
     fn code(&mut self, kind: CodeBlockKind) -> Block {
@@ -762,14 +851,22 @@ impl<'a> Builder<'a> {
     /// HTML block when a blank line comes between, and the blocks up to
     /// its close. GitHub calls one with no summary "Details".
     fn details(&mut self) -> Block {
-        if self.pending.is_empty() && matches!(self.events.peek(), Some(Event::Start(Tag::HtmlBlock))) {
+        if self.pending.is_empty()
+            && matches!(self.events.peek(), Some(Event::Start(Tag::HtmlBlock)))
+        {
             self.events.next();
             let pieces = html_pieces(&self.html_block());
             self.pending.extend(pieces);
         }
-        let summary = match self.pending.pop_front_if(|piece| matches!(piece, Piece::Summary(_))) {
+        let summary = match self
+            .pending
+            .pop_front_if(|piece| matches!(piece, Piece::Summary(_)))
+        {
             Some(Piece::Summary(spans)) if !spans.is_empty() => spans,
-            _ => vec![Span { text: "Details".into(), ..Span::default() }],
+            _ => vec![Span {
+                text: "Details".into(),
+                ..Span::default()
+            }],
         };
         let blocks = self.blocks(Closer::Details);
         Block::Details { summary, blocks }
@@ -812,7 +909,11 @@ impl From<Alignment> for Align {
 /// A picture as a run of its alt text, linked to it, that a paragraph
 /// takes out to draw.
 fn push_image(spans: &mut Vec<Span>, style: &Marks, image: Image) {
-    let s = Span { link: Some(image.src.clone()), image: Some(Box::new(image.clone())), ..style.span() };
+    let s = Span {
+        link: Some(image.src.clone()),
+        image: Some(Box::new(image.clone())),
+        ..style.span()
+    };
     push_text(spans, &s, &image.alt);
 }
 
@@ -827,8 +928,19 @@ fn push_math(spans: &mut Vec<Span>, style: &Marks, tex: &str, display: bool) {
     };
     let tex = tex.trim();
     match math::typeset(tex, display) {
-        Some(formula) => spans.push(Span { text: tex.to_string(), math: Some(formula), ..style.span() }),
-        None => push_text(spans, &Span { code: true, ..style.span() }, tex),
+        Some(formula) => spans.push(Span {
+            text: tex.to_string(),
+            math: Some(formula),
+            ..style.span()
+        }),
+        None => push_text(
+            spans,
+            &Span {
+                code: true,
+                ..style.span()
+            },
+            tex,
+        ),
     }
 }
 
@@ -850,7 +962,11 @@ fn shown(span: &Span) -> &str {
 /// The last part of an address's path: what a picture with no alt text
 /// is called.
 fn file_name(src: &str) -> String {
-    src.trim_end_matches('/').rsplit('/').next().unwrap_or(src).to_string()
+    src.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(src)
+        .to_string()
 }
 
 /// A paragraph with its pictures and display math taken out to be drawn,
@@ -872,7 +988,10 @@ fn paragraphs(spans: Vec<Span>) -> Vec<Block> {
             out.push(Block::Paragraph(run));
         }
     };
-    if spans.iter().all(|span| span.image.is_none() && !is_display(span)) {
+    if spans
+        .iter()
+        .all(|span| span.image.is_none() && !is_display(span))
+    {
         if !spans.is_empty() {
             out.push(Block::Paragraph(spans));
         }
@@ -969,7 +1088,13 @@ fn image_tag(name: &str, inner: &str) -> Option<Image> {
             .and_then(|v| v.trim().trim_end_matches("px").parse::<f64>().ok())
             .filter(|v| v.is_finite() && *v > 0.0)
     };
-    Some(Image { src, alt, link: None, width: size("width"), height: size("height") })
+    Some(Image {
+        src,
+        alt,
+        link: None,
+        width: size("width"),
+        height: size("height"),
+    })
 }
 
 /// The value of `name="..."` (or `name='...'`, or bare) in a tag.
@@ -991,7 +1116,10 @@ fn attribute(inner: &str, name: &str) -> Option<String> {
         let rest = rest.trim_start();
         let value = match rest.chars().next() {
             Some(quote @ ('"' | '\'')) => rest[1..].split(quote).next().unwrap_or(""),
-            _ => rest.split(|c: char| c.is_whitespace() || c == '>').next().unwrap_or(""),
+            _ => rest
+                .split(|c: char| c.is_whitespace() || c == '>')
+                .next()
+                .unwrap_or(""),
         };
         return Some(value.to_string());
     }
@@ -1009,7 +1137,10 @@ fn html_pieces(html: &str) -> Vec<Piece> {
     while let Some(lt) = html[at..].find('<').map(|i| at + i) {
         let after = &html[lt + 1..];
         if after.starts_with("!--") {
-            at = after.find("-->").map(|i| lt + 1 + i + 3).unwrap_or(html.len());
+            at = after
+                .find("-->")
+                .map(|i| lt + 1 + i + 3)
+                .unwrap_or(html.len());
             continue;
         }
         let Some(gt) = after.find('>') else { break };
@@ -1064,7 +1195,10 @@ fn html_runs(html: &str, pieces: &mut Vec<Piece>) {
     while let Some(lt) = html[at..].find('<').map(|i| at + i) {
         let after = &html[lt + 1..];
         if after.starts_with("!--") {
-            at = after.find("-->").map(|i| lt + 1 + i + 3).unwrap_or(html.len());
+            at = after
+                .find("-->")
+                .map(|i| lt + 1 + i + 3)
+                .unwrap_or(html.len());
             continue;
         }
         let Some(gt) = after.find('>') else { break };
@@ -1102,7 +1236,10 @@ fn html_spans(html: &str) -> Vec<Span> {
             continue;
         }
         if let Some(after) = rest.strip_prefix('<') {
-            let opens = after.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '/');
+            let opens = after
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '/');
             if let Some((inner, r)) = after.split_once('>').filter(|_| opens) {
                 let count = match tag_name(inner).as_str() {
                     "b" | "strong" => Some(&mut bold),
@@ -1124,7 +1261,10 @@ fn html_spans(html: &str) -> Vec<Span> {
         }
         // A `<` that opened no tag is text.
         let skip = usize::from(rest.starts_with('<'));
-        let end = rest[skip..].find('<').map(|i| i + skip).unwrap_or(rest.len());
+        let end = rest[skip..]
+            .find('<')
+            .map(|i| i + skip)
+            .unwrap_or(rest.len());
         let mut squeezed = String::new();
         for c in decode_entities(&rest[..end]).chars() {
             let c = if c.is_ascii_whitespace() { ' ' } else { c };
@@ -1170,7 +1310,10 @@ fn html_text(html: &str) -> String {
         }
         if let Some(after) = rest.strip_prefix('<') {
             // A `<` with no tag behind it is a less-than sign.
-            let opens = after.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, '/' | '!' | '?'));
+            let opens = after
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, '/' | '!' | '?'));
             let Some((inner, r)) = after.split_once('>').filter(|_| opens) else {
                 out.push('<');
                 rest = after;
@@ -1274,7 +1417,10 @@ fn decode_entities(text: &str) -> String {
 
 /// A number in superscript digits, as a footnote's mark.
 fn superscript(number: usize) -> String {
-    const DIGITS: [char; 10] = ['\u{2070}', '\u{b9}', '\u{b2}', '\u{b3}', '\u{2074}', '\u{2075}', '\u{2076}', '\u{2077}', '\u{2078}', '\u{2079}'];
+    const DIGITS: [char; 10] = [
+        '\u{2070}', '\u{b9}', '\u{b2}', '\u{b3}', '\u{2074}', '\u{2075}', '\u{2076}', '\u{2077}',
+        '\u{2078}', '\u{2079}',
+    ];
     number
         .to_string()
         .chars()
@@ -1315,26 +1461,36 @@ fn next_address(text: &str) -> Option<(usize, usize)> {
         from = start + prefix.len();
         // Only at a word's start: after whitespace or one of the
         // delimiters GFM allows.
-        let opens = text[..start]
-            .chars()
-            .next_back()
-            .is_none_or(|c| c.is_whitespace() || matches!(c, '*' | '_' | '~' | '(' | '[' | '"' | '\'' | '<'));
+        let opens = text[..start].chars().next_back().is_none_or(|c| {
+            c.is_whitespace() || matches!(c, '*' | '_' | '~' | '(' | '[' | '"' | '\'' | '<')
+        });
         if !opens {
             continue;
         }
         let after = &text[start..];
-        let mut end = after.find(|c: char| c.is_whitespace() || c == '<').unwrap_or(after.len());
+        let mut end = after
+            .find(|c: char| c.is_whitespace() || c == '<')
+            .unwrap_or(after.len());
         // Trailing punctuation is prose, not address. A `)` closes only
         // a `(` inside the address, and an entity at the end is dropped
         // whole.
         loop {
             let run = &after[..end];
-            let Some(last) = run.chars().next_back() else { break };
+            let Some(last) = run.chars().next_back() else {
+                break;
+            };
             let cut = match last {
                 '?' | '!' | '.' | ',' | ':' | '*' | '_' | '~' | '"' | '\'' => last.len_utf8(),
                 ')' if run.matches('(').count() < run.matches(')').count() => 1,
                 ';' => match run.rfind('&') {
-                    Some(amp) if end > amp + 2 && run[amp + 1..end - 1].chars().all(|c| c.is_ascii_alphanumeric()) => end - amp,
+                    Some(amp)
+                        if end > amp + 2
+                            && run[amp + 1..end - 1]
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric()) =>
+                    {
+                        end - amp
+                    }
                     _ => 0,
                 },
                 _ => 0,
@@ -1344,7 +1500,9 @@ fn next_address(text: &str) -> Option<(usize, usize)> {
             }
             end -= cut;
         }
-        let host_end = after[prefix.len()..end].find(['/', '?', '#']).map_or(end, |h| prefix.len() + h);
+        let host_end = after[prefix.len()..end]
+            .find(['/', '?', '#'])
+            .map_or(end, |h| prefix.len() + h);
         let host = &after[prefix.len()..host_end];
         if host.contains('.') && !host.starts_with('.') && !host.ends_with('.') {
             return Some((start, end));
@@ -1361,12 +1519,18 @@ fn issue_refs<'t>(text: &'t str, repo: Option<&str>) -> Vec<(&'t str, Option<Str
     let mut out = Vec::new();
     let mut from = 0;
     for (hash, _) in text.match_indices('#') {
-        let digits = text[hash + 1..].find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len() - hash - 1);
+        let digits = text[hash + 1..]
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(text.len() - hash - 1);
         let end = hash + 1 + digits;
         if digits == 0 || text[hash + 1..].starts_with('0') {
             continue;
         }
-        if text[end..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+        if text[end..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+        {
             continue;
         }
         let named = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '/');
@@ -1378,7 +1542,11 @@ fn issue_refs<'t>(text: &'t str, repo: Option<&str>) -> Vec<(&'t str, Option<Str
             continue;
         }
         // Not glued to a word, an entity or another `#`.
-        if text[..start].chars().next_back().is_some_and(|c| c.is_alphanumeric() || matches!(c, '&' | '#' | '@')) {
+        if text[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || matches!(c, '&' | '#' | '@'))
+        {
             continue;
         }
         let number = &text[hash + 1..end];
@@ -1392,7 +1560,9 @@ fn issue_refs<'t>(text: &'t str, repo: Option<&str>) -> Vec<(&'t str, Option<Str
                     if !owner.is_empty()
                         && !repo.is_empty()
                         && owner.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-                        && repo.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_')) =>
+                        && repo
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_')) =>
                 {
                     format!("https://github.com/{name}/issues/{number}")
                 }
@@ -1454,10 +1624,17 @@ fn mentions(text: &str) -> Vec<(&str, Option<String>)> {
                 if team == login + 1 || !ends(&text[team..]) {
                     continue;
                 }
-                let url = format!("https://github.com/orgs/{}/teams/{}", &text[at + 1..login], &text[login + 1..team]);
+                let url = format!(
+                    "https://github.com/orgs/{}/teams/{}",
+                    &text[at + 1..login],
+                    &text[login + 1..team]
+                );
                 (team, url)
             }
-            None if ends(&text[login..]) => (login, format!("https://github.com/{}", &text[at + 1..login])),
+            None if ends(&text[login..]) => (
+                login,
+                format!("https://github.com/{}", &text[at + 1..login]),
+            ),
             None => continue,
         };
         if at > from {
@@ -1485,7 +1662,9 @@ fn sha_words(text: &str) -> Vec<Range<usize>> {
     let mut out = Vec::new();
     let mut at = 0;
     while let Some(start) = text[at..].find(hex).map(|i| at + i) {
-        let end = text[start..].find(|c| !hex(c)).map_or(text.len(), |i| start + i);
+        let end = text[start..]
+            .find(|c| !hex(c))
+            .map_or(text.len(), |i| start + i);
         at = end;
         let before = text[..start].chars().next_back();
         if (SHORT_SHA..=40).contains(&(end - start))
@@ -1541,12 +1720,23 @@ fn issue_address(url: &str, repo: Option<&str>) -> Option<String> {
     let [owner, name, "issues" | "pull", number] = path.split('/').collect::<Vec<_>>()[..] else {
         return None;
     };
-    if owner.is_empty() || name.is_empty() || number.is_empty() || number.starts_with('0') || !number.chars().all(|c| c.is_ascii_digit()) {
+    if owner.is_empty()
+        || name.is_empty()
+        || number.is_empty()
+        || number.starts_with('0')
+        || !number.chars().all(|c| c.is_ascii_digit())
+    {
         return None;
     }
     let comment = match fragment {
         None => "",
-        Some(f) if f.starts_with("issuecomment-") || f.starts_with("discussion_r") || f.starts_with("pullrequestreview-") => " (comment)",
+        Some(f)
+            if f.starts_with("issuecomment-")
+                || f.starts_with("discussion_r")
+                || f.starts_with("pullrequestreview-") =>
+        {
+            " (comment)"
+        }
         Some(_) => return None,
     };
     let here = repo.is_some_and(|r| r.eq_ignore_ascii_case(&format!("{owner}/{name}")));
@@ -1581,11 +1771,18 @@ pub fn render_linked(text: &str, state: ReviewState) -> impl IntoView {
 /// has no SHA in it is drawn once; text that does is drawn again when
 /// the commits it names change, as the pull request's and the checkout's
 /// land.
-fn review_body(text: &str, state: ReviewState, draw: impl Fn(Vec<Block>) -> AnyView + 'static) -> AnyView {
+fn review_body(
+    text: &str,
+    state: ReviewState,
+    draw: impl Fn(Vec<Block>) -> AnyView + 'static,
+) -> AnyView {
     let repo = state
         .item
         .with_untracked(|i| i.as_ref().map(|i| i.repo_full_name.clone()));
-    let written: Vec<String> = sha_words(text).into_iter().map(|w| text[w].to_string()).collect();
+    let written: Vec<String> = sha_words(text)
+        .into_iter()
+        .map(|w| text[w].to_string())
+        .collect();
     if written.is_empty() {
         return draw(parse_in(text, repo.as_deref()));
     }
@@ -1640,7 +1837,9 @@ pub fn render_suggesting(
         refs: Refs::of(state),
         foot,
     };
-    passage(review_body(text, state, move |blocks| stack(suggesting(blocks, &original), ctx)))
+    passage(review_body(text, state, move |blocks| {
+        stack(suggesting(blocks, &original), ctx)
+    }))
 }
 
 /// The blocks with each `suggestion` fence made a suggested change to
@@ -1649,17 +1848,34 @@ fn suggesting(blocks: Vec<Block>, original: &Option<Original>) -> Vec<Block> {
     blocks
         .into_iter()
         .map(|block| match block {
-            Block::Code { lang: Some(lang), text } if lang == "suggestion" => {
-                Block::Suggestion { text, original: original.clone() }
-            }
-            Block::Quote { alert, blocks } => Block::Quote { alert, blocks: suggesting(blocks, original) },
-            Block::Details { summary, blocks } => Block::Details { summary, blocks: suggesting(blocks, original) },
-            Block::List { start, tight, items } => Block::List {
+            Block::Code {
+                lang: Some(lang),
+                text,
+            } if lang == "suggestion" => Block::Suggestion {
+                text,
+                original: original.clone(),
+            },
+            Block::Quote { alert, blocks } => Block::Quote {
+                alert,
+                blocks: suggesting(blocks, original),
+            },
+            Block::Details { summary, blocks } => Block::Details {
+                summary,
+                blocks: suggesting(blocks, original),
+            },
+            Block::List {
+                start,
+                tight,
+                items,
+            } => Block::List {
                 start,
                 tight,
                 items: items
                     .into_iter()
-                    .map(|item| Item { checked: item.checked, blocks: suggesting(item.blocks, original) })
+                    .map(|item| Item {
+                        checked: item.checked,
+                        blocks: suggesting(item.blocks, original),
+                    })
                     .collect(),
             },
             other => other,
@@ -1672,7 +1888,16 @@ fn suggesting(blocks: Vec<Block>, original: &Option<Original>) -> Vec<Block> {
 /// conversation card draws one; a tooltip hands its blocks here at the
 /// meta size, so a doc comment reads a step below the signature.
 pub fn render_blocks(blocks: Vec<Block>, size: f32) -> impl IntoView {
-    passage(stack(blocks, Ctx { size, color: theme::fg, depth: 0, refs: None, foot: None }))
+    passage(stack(
+        blocks,
+        Ctx {
+            size,
+            color: theme::fg,
+            depth: 0,
+            refs: None,
+            foot: None,
+        },
+    ))
 }
 
 /// How the blocks in a container are drawn: the prose size, its colour,
@@ -1719,7 +1944,9 @@ fn gap_before(prev: &Block, block: &Block) -> f64 {
             Block::Paragraph(_) | Block::Details { .. } | Block::Image(_) | Block::Math(_),
             Block::Paragraph(_) | Block::Details { .. } | Block::Image(_) | Block::Math(_),
         ) => 4.0,
-        (Block::Paragraph(_), Block::List { .. } | Block::Table { .. } | Block::Quote { .. }) => 1.0,
+        (Block::Paragraph(_), Block::List { .. } | Block::Table { .. } | Block::Quote { .. }) => {
+            1.0
+        }
         _ => 2.0,
     }
 }
@@ -1727,12 +1954,20 @@ fn gap_before(prev: &Block, block: &Block) -> f64 {
 fn stack(blocks: Vec<Block>, ctx: Ctx) -> AnyView {
     let unit = space(ctx.size);
     let gaps: Vec<f64> = std::iter::once(0.0)
-        .chain(blocks.windows(2).map(|pair| gap_before(&pair[0], &pair[1]) * unit))
+        .chain(
+            blocks
+                .windows(2)
+                .map(|pair| gap_before(&pair[0], &pair[1]) * unit),
+        )
         .collect();
     let children: Vec<AnyView> = blocks
         .into_iter()
         .zip(gaps)
-        .map(|(block, gap)| block_view(block, ctx).style(move |s| s.margin_top(gap)).into_any())
+        .map(|(block, gap)| {
+            block_view(block, ctx)
+                .style(move |s| s.margin_top(gap))
+                .into_any()
+        })
         .collect();
     Stack::vertical_from_iter(children)
         .style(move |s| s.flex_col().width_full())
@@ -1750,18 +1985,41 @@ fn block_view(block: Block, ctx: Ctx) -> AnyView {
             ctx.refs,
         ),
         Block::Image(image) => image_view(image, ctx),
-        Block::Math(formula) => math::display(formula, f64::from(ctx.size * math::SCALE), ctx.color).into_any(),
+        Block::Math(formula) => {
+            math::display(formula, f64::from(ctx.size * math::SCALE), ctx.color).into_any()
+        }
         Block::Heading { level, spans } => heading_view(level, spans, ctx),
-        Block::Quote { alert: None, blocks } => stack(blocks, Ctx { color: theme::fg_muted, ..ctx })
-            .style(|s| s.padding_left(10.0).border_left(3.0).border_color(theme::border()))
-            .into_any(),
-        Block::Quote { alert: Some(alert), blocks } => alert_view(alert, blocks, ctx),
+        Block::Quote {
+            alert: None,
+            blocks,
+        } => stack(
+            blocks,
+            Ctx {
+                color: theme::fg_muted,
+                ..ctx
+            },
+        )
+        .style(|s| {
+            s.padding_left(10.0)
+                .border_left(3.0)
+                .border_color(theme::border())
+        })
+        .into_any(),
+        Block::Quote {
+            alert: Some(alert),
+            blocks,
+        } => alert_view(alert, blocks, ctx),
         Block::List { start, items, .. } => list_view(start, items, ctx),
         Block::Code { lang, text } => code_view(text, lang, ctx),
         Block::Suggestion { text, original } => suggestion_view(text, original, ctx.foot),
         Block::Table { align, head, rows } => table_view(align, head, rows, ctx),
         Block::Rule => Empty::new()
-            .style(|s| s.width_full().height(1.0).background(theme::border()).margin_vert(4.0))
+            .style(|s| {
+                s.width_full()
+                    .height(1.0)
+                    .background(theme::border())
+                    .margin_vert(4.0)
+            })
             .into_any(),
         Block::Details { summary, blocks } => details_view(summary, blocks, ctx),
         Block::Footnotes(notes) => footnotes_view(notes, ctx),
@@ -1792,7 +2050,11 @@ fn image_view(image: Image, ctx: Ctx) -> AnyView {
                     .into_any()
             }
             None => text_view(
-                vec![Span { text: image.alt.clone(), link: Some(image.src.clone()), ..Span::default() }],
+                vec![Span {
+                    text: image.alt.clone(),
+                    link: Some(image.src.clone()),
+                    ..Span::default()
+                }],
                 ctx.size,
                 theme::weight_body(),
                 ctx.color,
@@ -1847,8 +2109,16 @@ fn details_view(summary: Vec<Span>, blocks: Vec<Block>, ctx: Ctx) -> AnyView {
     });
     let head = Stack::horizontal((
         chevron,
-        prose_view(summary, ctx.size, theme::weight_body(), ctx.color, prose_leading(), None, false)
-            .style(|s| s.min_width(0.0).flex_shrink(1.0_f32)),
+        prose_view(
+            summary,
+            ctx.size,
+            theme::weight_body(),
+            ctx.color,
+            prose_leading(),
+            None,
+            false,
+        )
+        .style(|s| s.min_width(0.0).flex_shrink(1.0_f32)),
     ))
     .on_event_stop(el::Click, move |_, _| open.update(|open| *open = !*open))
     .style(|s| clickable(s).items_start().max_width_full())
@@ -1951,12 +2221,17 @@ fn bullet(depth: usize) -> &'static str {
 }
 
 fn list_view(start: Option<u64>, items: Vec<Item>, ctx: Ctx) -> AnyView {
-    let inner = Ctx { depth: ctx.depth + 1, ..ctx };
+    let inner = Ctx {
+        depth: ctx.depth + 1,
+        ..ctx
+    };
     // One column for every marker in the list, wide enough for its
     // last number, so the text lines up down the list and the numbers
     // line up on their dots.
     let column = match start {
-        Some(n) => (text_width(&format!("{}.", n + items.len() as u64 - 1), ctx.size) + 4.0).max(18.0),
+        Some(n) => {
+            (text_width(&format!("{}.", n + items.len() as u64 - 1), ctx.size) + 4.0).max(18.0)
+        }
         None => 18.0,
     };
     let rows: Vec<AnyView> = items
@@ -2044,7 +2319,11 @@ fn task_box(checked: bool, size: f32) -> AnyView {
             s.background(theme::canvas()).border_color(theme::border())
         }
     })
-    .debug_name(if checked { "task:checked" } else { "task:empty" })
+    .debug_name(if checked {
+        "task:checked"
+    } else {
+        "task:empty"
+    })
     .into_any()
 }
 
@@ -2073,9 +2352,11 @@ fn code_view(text: String, lang: Option<String>, ctx: Ctx) -> AnyView {
     let run = linked_run(plan, ctx.refs, move |links| {
         let text = text.clone();
         let styled_links = links.clone();
-        linked_text(text, links, move || (code_attrs(code_size, &styled_links), Vec::new()))
-            .style(|s| s.width_full())
-            .into_any()
+        linked_text(text, links, move || {
+            (code_attrs(code_size, &styled_links), Vec::new())
+        })
+        .style(|s| s.width_full())
+        .into_any()
     });
     Container::new(run).style(code_box).into_any()
 }
@@ -2128,16 +2409,16 @@ fn suggestion_view(text: String, original: Option<Original>, foot: Option<Foot>)
         Stack::vertical_from_iter(rows).style(|s| s.flex_col().width_full()),
         foot,
     ))
-        .debug_name("suggested-change")
-        .clip()
-        .style(|s| {
-            s.flex_col()
-                .width_full()
-                .border(1.0)
-                .border_color(theme::border_muted())
-                .border_radius(theme::RADIUS)
-        })
-        .into_any()
+    .debug_name("suggested-change")
+    .clip()
+    .style(|s| {
+        s.flex_col()
+            .width_full()
+            .border(1.0)
+            .border_color(theme::border_muted())
+            .border_radius(theme::RADIUS)
+    })
+    .into_any()
 }
 
 /// A fenced block's text in the code font, its links in the links'
@@ -2159,19 +2440,32 @@ fn code_attrs(size: f32, links: &[(Range<usize>, Target)]) -> AttrsList {
     list
 }
 
-fn table_view(align: Vec<Align>, head: Vec<Vec<Span>>, rows: Vec<Vec<Vec<Span>>>, ctx: Ctx) -> AnyView {
+fn table_view(
+    align: Vec<Align>,
+    head: Vec<Vec<Span>>,
+    rows: Vec<Vec<Vec<Span>>>,
+    ctx: Ctx,
+) -> AnyView {
     let columns = align.len().max(head.len()).max(1);
     let align_of = |col: usize| align.get(col).copied().unwrap_or(Align::Left);
     let mut cells: Vec<AnyView> = Vec::new();
     let mut head = head;
     head.resize(columns, Vec::new());
     for (col, spans) in head.into_iter().enumerate() {
-        cells.push(cell_view(spans, align_of(col), ctx, Cell::Head).debug_name(format!("cell:0:{col}")).into_any());
+        cells.push(
+            cell_view(spans, align_of(col), ctx, Cell::Head)
+                .debug_name(format!("cell:0:{col}"))
+                .into_any(),
+        );
     }
     let count = rows.len();
     for (r, mut row) in rows.into_iter().enumerate() {
         row.resize(columns, Vec::new());
-        let kind = if r + 1 == count { Cell::Last } else { Cell::Body };
+        let kind = if r + 1 == count {
+            Cell::Last
+        } else {
+            Cell::Body
+        };
         for (col, spans) in row.into_iter().enumerate() {
             cells.push(
                 cell_view(spans, align_of(col), ctx, kind)
@@ -2219,12 +2513,24 @@ enum Cell {
 }
 
 fn cell_view(spans: Vec<Span>, align: Align, ctx: Ctx, kind: Cell) -> AnyView {
-    let weight = if kind == Cell::Head { theme::weight_strong() } else { theme::weight_body() };
+    let weight = if kind == Cell::Head {
+        theme::weight_strong()
+    } else {
+        theme::weight_body()
+    };
     // The text sizes to its words, and sits where the alignment puts it:
     // a width of its own, even a percentage, would throw the column's
     // measure off. A table is set a step under the prose, as Codex sets it.
     let size = small_size(ctx.size);
-    let text = prose_view(spans, size, weight, ctx.color, prose_leading(), ctx.refs, false);
+    let text = prose_view(
+        spans,
+        size,
+        weight,
+        ctx.color,
+        prose_leading(),
+        ctx.refs,
+        false,
+    );
     Container::new(text)
         .style(move |s| {
             let s = s.padding_horiz(10.0).padding_vert(5.0);
@@ -2244,8 +2550,17 @@ fn cell_view(spans: Vec<Span>, align: Align, ctx: Ctx, kind: Cell) -> AnyView {
 
 fn footnotes_view(notes: Vec<Vec<Block>>, ctx: Ctx) -> AnyView {
     // A step below the prose, as GitHub sets its footnotes.
-    let small = Ctx { size: (ctx.size - 2.0).max(theme::TEXT_SECTION), ..ctx };
-    let items = notes.into_iter().map(|blocks| Item { checked: None, blocks }).collect();
+    let small = Ctx {
+        size: (ctx.size - 2.0).max(theme::TEXT_SECTION),
+        ..ctx
+    };
+    let items = notes
+        .into_iter()
+        .map(|blocks| Item {
+            checked: None,
+            blocks,
+        })
+        .collect();
     Stack::vertical((
         Empty::new().style(|s| s.width_full().height(1.0).background(theme::border())),
         list_view(Some(1), items, small),
@@ -2286,11 +2601,12 @@ fn prose_view(
         let (text, _, links, _, formulas) = layout(&spans, size, weight, color, leading, links);
         let (spans, styled_links) = (spans.clone(), links.clone());
         linked_text_with(text, links, formulas, move || {
-            let (_, attrs, _, strikes, _) = layout(&spans, size, weight, color, leading, styled_links.clone());
+            let (_, attrs, _, strikes, _) =
+                layout(&spans, size, weight, color, leading, styled_links.clone());
             (attrs, strikes)
         })
-            .style(move |s| if fill { s.width_full() } else { s })
-            .into_any()
+        .style(move |s| if fill { s.width_full() } else { s })
+        .into_any()
     })
 }
 
@@ -2345,7 +2661,13 @@ fn layout(
     color: fn() -> Color,
     leading: LineHeightValue,
     links: Vec<(Range<usize>, Target)>,
-) -> (String, AttrsList, Vec<(Range<usize>, Target)>, Vec<Strike>, Vec<Inline>) {
+) -> (
+    String,
+    AttrsList,
+    Vec<(Range<usize>, Target)>,
+    Vec<Strike>,
+    Vec<Inline>,
+) {
     let body: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::FONT_STACK).collect();
     let code: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect();
     let base = || {
@@ -2371,8 +2693,17 @@ fn layout(
                 width: width as f32,
                 height: height as f32,
             });
-            let ink: fn() -> Color = if span.link.is_some() { theme::link } else { color };
-            formulas.push(Inline { index: text.len(), formula: formula.clone(), em, ink });
+            let ink: fn() -> Color = if span.link.is_some() {
+                theme::link
+            } else {
+                color
+            };
+            formulas.push(Inline {
+                index: text.len(),
+                formula: formula.clone(),
+                em,
+                ink,
+            });
             continue;
         }
         let start = text.len();
@@ -2387,17 +2718,25 @@ fn layout(
         // rest's.
         let mut cuts = vec![range.start, range.end];
         for (link, _) in &links {
-            cuts.extend([link.start, link.end].into_iter().filter(|&e| range.start < e && e < range.end));
+            cuts.extend(
+                [link.start, link.end]
+                    .into_iter()
+                    .filter(|&e| range.start < e && e < range.end),
+            );
         }
         cuts.sort_unstable();
         cuts.dedup();
         for piece in cuts.windows(2).map(|pair| pair[0]..pair[1]) {
             let linked = span.footnote
-                || links.iter().any(|(link, _)| link.start <= piece.start && piece.end <= link.end);
+                || links
+                    .iter()
+                    .any(|(link, _)| link.start <= piece.start && piece.end <= link.end);
             let ink = if linked { theme::link() } else { color() };
             if span.strike {
                 match strikes.last_mut() {
-                    Some((last, tint)) if last.end == piece.start && *tint == ink => last.end = piece.end,
+                    Some((last, tint)) if last.end == piece.start && *tint == ink => {
+                        last.end = piece.end
+                    }
                     _ => strikes.push((piece.clone(), ink)),
                 }
             }
@@ -2427,7 +2766,10 @@ mod tests {
     use super::*;
 
     fn plain(s: &str) -> Span {
-        Span { text: s.into(), ..Default::default() }
+        Span {
+            text: s.into(),
+            ..Default::default()
+        }
     }
 
     fn paragraph(s: &str) -> Block {
@@ -2435,7 +2777,10 @@ mod tests {
     }
 
     fn item(s: &str) -> Item {
-        Item { checked: None, blocks: vec![paragraph(s)] }
+        Item {
+            checked: None,
+            blocks: vec![paragraph(s)],
+        }
     }
 
     /// The spans laid out as a paragraph with no review to look in: the
@@ -2443,8 +2788,14 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn laid(spans: &[Span]) -> (String, Vec<(Range<usize>, Target)>, Vec<Strike>) {
         let links = plan(spans, None).links;
-        let (text, _, links, strikes, _) =
-            layout(spans, 14.0, theme::weight_body(), theme::fg, prose_leading(), links);
+        let (text, _, links, strikes, _) = layout(
+            spans,
+            14.0,
+            theme::weight_body(),
+            theme::fg,
+            prose_leading(),
+            links,
+        );
         (text, links, strikes)
     }
 
@@ -2455,9 +2806,17 @@ mod tests {
             blocks,
             vec![Block::Paragraph(vec![
                 plain("Use "),
-                Span { text: "epoch".into(), code: true, ..Default::default() },
+                Span {
+                    text: "epoch".into(),
+                    code: true,
+                    ..Default::default()
+                },
                 plain(" here, "),
-                Span { text: "not".into(), bold: true, ..Default::default() },
+                Span {
+                    text: "not".into(),
+                    bold: true,
+                    ..Default::default()
+                },
                 plain(" there."),
             ])]
         );
@@ -2465,15 +2824,46 @@ mod tests {
 
     #[test]
     fn lists_headings_and_code_are_their_own_blocks() {
-        let blocks = parse("## Why\n\n1. first\n2. second\n\n- bullet\n\n```rust\nlet a = 1;\n```\n\n> note");
-        assert_eq!(blocks[0], Block::Heading { level: 2, spans: vec![plain("Why")] });
+        let blocks = parse(
+            "## Why\n\n1. first\n2. second\n\n- bullet\n\n```rust\nlet a = 1;\n```\n\n> note",
+        );
+        assert_eq!(
+            blocks[0],
+            Block::Heading {
+                level: 2,
+                spans: vec![plain("Why")]
+            }
+        );
         assert_eq!(
             blocks[1],
-            Block::List { start: Some(1), tight: true, items: vec![item("first"), item("second")] }
+            Block::List {
+                start: Some(1),
+                tight: true,
+                items: vec![item("first"), item("second")]
+            }
         );
-        assert_eq!(blocks[2], Block::List { start: None, tight: true, items: vec![item("bullet")] });
-        assert_eq!(blocks[3], Block::Code { lang: Some("rust".into()), text: "let a = 1;".into() });
-        assert_eq!(blocks[4], Block::Quote { alert: None, blocks: vec![paragraph("note")] });
+        assert_eq!(
+            blocks[2],
+            Block::List {
+                start: None,
+                tight: true,
+                items: vec![item("bullet")]
+            }
+        );
+        assert_eq!(
+            blocks[3],
+            Block::Code {
+                lang: Some("rust".into()),
+                text: "let a = 1;".into()
+            }
+        );
+        assert_eq!(
+            blocks[4],
+            Block::Quote {
+                alert: None,
+                blocks: vec![paragraph("note")]
+            }
+        );
     }
 
     /// The TeX of each formula in `spans`, and whether it is display math.
@@ -2486,23 +2876,40 @@ mod tests {
 
     #[test]
     fn dollars_around_tex_are_a_formula_in_the_line() {
-        let Block::Paragraph(spans) = &parse("I pay $O(memtablesize)$ in that case.")[0] else { panic!() };
-        assert_eq!(formulas(spans), vec![("O(memtablesize)".to_string(), false)]);
+        let Block::Paragraph(spans) = &parse("I pay $O(memtablesize)$ in that case.")[0] else {
+            panic!()
+        };
+        assert_eq!(
+            formulas(spans),
+            vec![("O(memtablesize)".to_string(), false)]
+        );
         assert_eq!(spans[0].text, "I pay ");
         assert_eq!(spans[2].text, " in that case.");
         // GitHub's other spelling is the same formula.
-        let Block::Paragraph(spans) = &parse("so $`a+b`$ here")[0] else { panic!() };
+        let Block::Paragraph(spans) = &parse("so $`a+b`$ here")[0] else {
+            panic!()
+        };
         assert_eq!(formulas(spans), vec![("a+b".to_string(), false)]);
     }
 
     #[test]
     fn prices_are_not_math() {
-        assert_eq!(parse("costs $5 and $10 total"), vec![paragraph("costs $5 and $10 total")]);
+        assert_eq!(
+            parse("costs $5 and $10 total"),
+            vec![paragraph("costs $5 and $10 total")]
+        );
         assert_eq!(parse("a $ b $ c"), vec![paragraph("a $ b $ c")]);
         assert_eq!(parse(r"escaped \$x\$"), vec![paragraph("escaped $x$")]);
         assert_eq!(
             spans_of("`$x$` in code"),
-            vec![Span { text: "$x$".into(), code: true, ..Default::default() }, plain(" in code")]
+            vec![
+                Span {
+                    text: "$x$".into(),
+                    code: true,
+                    ..Default::default()
+                },
+                plain(" in code")
+            ]
         );
     }
 
@@ -2512,7 +2919,11 @@ mod tests {
             spans_of(r"see $\nosuch{x}$ here"),
             vec![
                 plain("see "),
-                Span { text: r"\nosuch{x}".into(), code: true, ..Default::default() },
+                Span {
+                    text: r"\nosuch{x}".into(),
+                    code: true,
+                    ..Default::default()
+                },
                 plain(" here"),
             ]
         );
@@ -2524,16 +2935,31 @@ mod tests {
         let shown: Vec<String> = blocks
             .iter()
             .map(|b| match b {
-                Block::Paragraph(spans) => format!("p:{}", spans.iter().map(|s| s.text.as_str()).collect::<String>()),
+                Block::Paragraph(spans) => format!(
+                    "p:{}",
+                    spans.iter().map(|s| s.text.as_str()).collect::<String>()
+                ),
                 Block::Math(f) => format!("m:{}:{}", f.source, f.display),
                 other => format!("{other:?}"),
             })
             .collect();
-        assert_eq!(shown, vec!["p:Before", "m:\\sum_i x_i:true", "p:after", "m:x = 1:true", "m:y^2:true"]);
+        assert_eq!(
+            shown,
+            vec![
+                "p:Before",
+                "m:\\sum_i x_i:true",
+                "p:after",
+                "m:x = 1:true",
+                "m:y^2:true"
+            ]
+        );
         // A fence of math that cannot be set is the code it is.
         assert_eq!(
             parse("```math\n\\nosuch\n```"),
-            vec![Block::Code { lang: Some("math".into()), text: "\\nosuch".into() }]
+            vec![Block::Code {
+                lang: Some("math".into()),
+                text: "\\nosuch".into()
+            }]
         );
     }
 
@@ -2546,8 +2972,14 @@ mod tests {
         assert_eq!(links.len(), 1);
         assert_eq!(&text[links[0].0.clone()], "it");
         let plan = plan(&spans, None);
-        let (_, attrs, _, _, formulas) =
-            layout(&spans, 14.0, theme::weight_body(), theme::fg, prose_leading(), plan.links);
+        let (_, attrs, _, _, formulas) = layout(
+            &spans,
+            14.0,
+            theme::weight_body(),
+            theme::fg,
+            prose_leading(),
+            plan.links,
+        );
         assert_eq!(formulas.len(), 1);
         assert_eq!(formulas[0].index, 4);
         let boxes = attrs.inline_boxes();
@@ -2572,8 +3004,14 @@ mod tests {
                 start: None,
                 tight: true,
                 items: vec![
-                    Item { checked: Some(false), blocks: vec![paragraph("todo")] },
-                    Item { checked: Some(true), blocks: vec![paragraph("done")] },
+                    Item {
+                        checked: Some(false),
+                        blocks: vec![paragraph("todo")]
+                    },
+                    Item {
+                        checked: Some(true),
+                        blocks: vec![paragraph("done")]
+                    },
                     item("plain"),
                 ],
             }]
@@ -2585,8 +3023,14 @@ mod tests {
                 start: None,
                 tight: false,
                 items: vec![
-                    Item { checked: Some(false), blocks: vec![paragraph("todo")] },
-                    Item { checked: Some(true), blocks: vec![paragraph("done")] },
+                    Item {
+                        checked: Some(false),
+                        blocks: vec![paragraph("todo")]
+                    },
+                    Item {
+                        checked: Some(true),
+                        blocks: vec![paragraph("done")]
+                    },
                 ],
             }]
         );
@@ -2594,15 +3038,22 @@ mod tests {
 
     #[test]
     fn the_pr_template_checklist_parses_as_tasks_with_inline_code() {
-        let blocks = parse("## Checklist\n\n- [ ] Small, scoped PR\n- [ ] Ran `cargo fmt`\n\nThank you!");
-        let Block::List { items, .. } = &blocks[1] else { panic!("{blocks:?}") };
+        let blocks =
+            parse("## Checklist\n\n- [ ] Small, scoped PR\n- [ ] Ran `cargo fmt`\n\nThank you!");
+        let Block::List { items, .. } = &blocks[1] else {
+            panic!("{blocks:?}")
+        };
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].checked, Some(false));
         assert_eq!(
             items[1].blocks,
             vec![Block::Paragraph(vec![
                 plain("Ran "),
-                Span { text: "cargo fmt".into(), code: true, ..Default::default() },
+                Span {
+                    text: "cargo fmt".into(),
+                    code: true,
+                    ..Default::default()
+                },
             ])]
         );
         assert_eq!(blocks[2], paragraph("Thank you!"));
@@ -2613,35 +3064,53 @@ mod tests {
         // "- **Label**: text" is the commonest line in a PR description,
         // and a tight item's text arrives without a paragraph around it.
         let blocks = parse("- **Fix**: thing\n- ~~gone~~ two\n- ![](i.png)");
-        let Block::List { items, tight, .. } = &blocks[0] else { panic!("{blocks:?}") };
+        let Block::List { items, tight, .. } = &blocks[0] else {
+            panic!("{blocks:?}")
+        };
         assert!(tight);
         assert_eq!(
             items[0].blocks,
             vec![Block::Paragraph(vec![
-                Span { text: "Fix".into(), bold: true, ..Default::default() },
+                Span {
+                    text: "Fix".into(),
+                    bold: true,
+                    ..Default::default()
+                },
                 plain(": thing"),
             ])]
         );
         assert_eq!(
             items[1].blocks,
             vec![Block::Paragraph(vec![
-                Span { text: "gone".into(), strike: true, ..Default::default() },
+                Span {
+                    text: "gone".into(),
+                    strike: true,
+                    ..Default::default()
+                },
                 plain(" two"),
             ])]
         );
         assert_eq!(
             items[2].blocks,
-            vec![Block::Paragraph(vec![Span { text: "i.png".into(), link: Some("i.png".into()), ..Default::default() }])]
+            vec![Block::Paragraph(vec![Span {
+                text: "i.png".into(),
+                link: Some("i.png".into()),
+                ..Default::default()
+            }])]
         );
     }
 
     #[test]
     fn a_task_item_keeps_its_box_over_a_nested_list() {
         let blocks = parse("- [ ] outer\n  - plain\n  - [x] inner\n- [x] next");
-        let Block::List { items, .. } = &blocks[0] else { panic!("{blocks:?}") };
+        let Block::List { items, .. } = &blocks[0] else {
+            panic!("{blocks:?}")
+        };
         assert_eq!(items[0].checked, Some(false));
         assert_eq!(items[1].checked, Some(true));
-        let Block::List { items: inner, .. } = &items[0].blocks[1] else { panic!("{blocks:?}") };
+        let Block::List { items: inner, .. } = &items[0].blocks[1] else {
+            panic!("{blocks:?}")
+        };
         assert_eq!(inner[0].checked, None);
         assert_eq!(inner[1].checked, Some(true));
     }
@@ -2649,9 +3118,17 @@ mod tests {
     #[test]
     fn a_quote_inside_a_tight_item_leaves_the_list_tight() {
         let blocks = parse("- a\n  > q\n- b");
-        let Block::List { tight, items, .. } = &blocks[0] else { panic!("{blocks:?}") };
+        let Block::List { tight, items, .. } = &blocks[0] else {
+            panic!("{blocks:?}")
+        };
         assert!(tight, "{blocks:?}");
-        assert_eq!(items[0].blocks[1], Block::Quote { alert: None, blocks: vec![paragraph("q")] });
+        assert_eq!(
+            items[0].blocks[1],
+            Block::Quote {
+                alert: None,
+                blocks: vec![paragraph("q")]
+            }
+        );
     }
 
     #[test]
@@ -2683,14 +3160,24 @@ mod tests {
 
     #[test]
     fn issue_references_link_to_github_as_github_links_them() {
-        let issue = |text: &str, url: &str| Span { text: text.into(), link: Some(url.into()), ..Default::default() };
+        let issue = |text: &str, url: &str| Span {
+            text: text.into(),
+            link: Some(url.into()),
+            ..Default::default()
+        };
         assert_eq!(
-            parse_in("Fixes #2118 (and slatedb/slatedb#7).", Some("criccomini/perch")),
+            parse_in(
+                "Fixes #2118 (and slatedb/slatedb#7).",
+                Some("criccomini/perch")
+            ),
             vec![Block::Paragraph(vec![
                 plain("Fixes "),
                 issue("#2118", "https://github.com/criccomini/perch/issues/2118"),
                 plain(" (and "),
-                issue("slatedb/slatedb#7", "https://github.com/slatedb/slatedb/issues/7"),
+                issue(
+                    "slatedb/slatedb#7",
+                    "https://github.com/slatedb/slatedb/issues/7"
+                ),
                 plain(")."),
             ])]
         );
@@ -2699,24 +3186,46 @@ mod tests {
         for repo in [None, Some("local/perch")] {
             assert_eq!(
                 parse_in("#1 and o/r#2", repo),
-                vec![Block::Paragraph(vec![plain("#1 and "), issue("o/r#2", "https://github.com/o/r/issues/2")])]
+                vec![Block::Paragraph(vec![
+                    plain("#1 and "),
+                    issue("o/r#2", "https://github.com/o/r/issues/2")
+                ])]
             );
         }
         let linked = |text: &str| -> Vec<String> {
-            issue_refs(text, Some("o/r")).into_iter().filter(|(_, l)| l.is_some()).map(|(t, _)| t.to_string()).collect()
+            issue_refs(text, Some("o/r"))
+                .into_iter()
+                .filter(|(_, l)| l.is_some())
+                .map(|(t, _)| t.to_string())
+                .collect()
         };
         assert_eq!(linked("#1, #22: #3."), vec!["#1", "#22", "#3"]);
         assert!(linked("a#1 #1a #0 # #x x/y/z#1 &#1 #1_ o/r/#1 é#1 /#1 -#1").is_empty());
-        assert_eq!(linked("(#4) [#5] \"#6\" *#7*"), vec!["#4", "#5", "#6", "#7"]);
+        assert_eq!(
+            linked("(#4) [#5] \"#6\" *#7*"),
+            vec!["#4", "#5", "#6", "#7"]
+        );
         // Not inside a link, a code span or an address.
         assert_eq!(
             parse_in("[#1](https://x.y) `#2` https://x.y/#3", Some("o/r")),
             vec![Block::Paragraph(vec![
-                Span { text: "#1".into(), link: Some("https://x.y".into()), ..Default::default() },
+                Span {
+                    text: "#1".into(),
+                    link: Some("https://x.y".into()),
+                    ..Default::default()
+                },
                 plain(" "),
-                Span { text: "#2".into(), code: true, ..Default::default() },
+                Span {
+                    text: "#2".into(),
+                    code: true,
+                    ..Default::default()
+                },
                 plain(" "),
-                Span { text: "https://x.y/#3".into(), link: Some("https://x.y/#3".into()), ..Default::default() },
+                Span {
+                    text: "https://x.y/#3".into(),
+                    link: Some("https://x.y/#3".into()),
+                    ..Default::default()
+                },
             ])]
         );
     }
@@ -2724,48 +3233,91 @@ mod tests {
     #[test]
     fn shortcodes_are_drawn_as_their_emoji_but_not_in_code_or_an_address() {
         assert_eq!(
-            parse_in("Ship it :rocket: [:tada:](https://x.y) `:fire:` https://x.y/:fire:/a", Some("o/r")),
+            parse_in(
+                "Ship it :rocket: [:tada:](https://x.y) `:fire:` https://x.y/:fire:/a",
+                Some("o/r")
+            ),
             vec![Block::Paragraph(vec![
                 plain("Ship it 🚀 "),
-                Span { text: "🎉".into(), link: Some("https://x.y".into()), ..Default::default() },
+                Span {
+                    text: "🎉".into(),
+                    link: Some("https://x.y".into()),
+                    ..Default::default()
+                },
                 plain(" "),
-                Span { text: ":fire:".into(), code: true, ..Default::default() },
+                Span {
+                    text: ":fire:".into(),
+                    code: true,
+                    ..Default::default()
+                },
                 plain(" "),
-                Span { text: "https://x.y/:fire:/a".into(), link: Some("https://x.y/:fire:/a".into()), ..Default::default() },
+                Span {
+                    text: "https://x.y/:fire:/a".into(),
+                    link: Some("https://x.y/:fire:/a".into()),
+                    ..Default::default()
+                },
             ])]
         );
     }
 
     #[test]
     fn mentions_link_to_the_person_as_github_links_them() {
-        let person = |text: &str, url: &str| Span { text: text.into(), link: Some(url.into()), ..Default::default() };
+        let person = |text: &str, url: &str| Span {
+            text: text.into(),
+            link: Some(url.into()),
+            ..Default::default()
+        };
         assert_eq!(
-            parse_in("@Barre @rodesai WDYT? cc @slatedb/core.", Some("slatedb/slatedb")),
+            parse_in(
+                "@Barre @rodesai WDYT? cc @slatedb/core.",
+                Some("slatedb/slatedb")
+            ),
             vec![Block::Paragraph(vec![
                 person("@Barre", "https://github.com/Barre"),
                 plain(" "),
                 person("@rodesai", "https://github.com/rodesai"),
                 plain(" WDYT? cc "),
-                person("@slatedb/core", "https://github.com/orgs/slatedb/teams/core"),
+                person(
+                    "@slatedb/core",
+                    "https://github.com/orgs/slatedb/teams/core"
+                ),
                 plain("."),
             ])]
         );
         // Only where GitHub would read it: an agent's `@path` is a file.
         for repo in [None, Some("local/perch")] {
-            assert_eq!(parse_in("@a", repo), vec![Block::Paragraph(vec![plain("@a")])]);
+            assert_eq!(
+                parse_in("@a", repo),
+                vec![Block::Paragraph(vec![plain("@a")])]
+            );
         }
         let linked = |text: &str| -> Vec<String> {
-            mentions(text).into_iter().filter(|(_, l)| l.is_some()).map(|(t, _)| t.to_string()).collect()
+            mentions(text)
+                .into_iter()
+                .filter(|(_, l)| l.is_some())
+                .map(|(t, _)| t.to_string())
+                .collect()
         };
-        assert_eq!(linked("@a, (@b-c) \"@d\" @e... @f!"), vec!["@a", "@b-c", "@d", "@e", "@f"]);
+        assert_eq!(
+            linked("@a, (@b-c) \"@d\" @e... @f!"),
+            vec!["@a", "@b-c", "@d", "@e", "@f"]
+        );
         assert!(linked("a@b.com @a_b @a.b @-a @ @_a x@a @a/ @a/_b @a/b.c").is_empty());
         // Not inside a link or a code span.
         assert_eq!(
             parse_in("[@a](https://x.y) `@b`", Some("o/r")),
             vec![Block::Paragraph(vec![
-                Span { text: "@a".into(), link: Some("https://x.y".into()), ..Default::default() },
+                Span {
+                    text: "@a".into(),
+                    link: Some("https://x.y".into()),
+                    ..Default::default()
+                },
                 plain(" "),
-                Span { text: "@b".into(), code: true, ..Default::default() },
+                Span {
+                    text: "@b".into(),
+                    code: true,
+                    ..Default::default()
+                },
             ])]
         );
     }
@@ -2783,48 +3335,99 @@ mod tests {
         // Cut to seven, in the code font; a word that is only hex, or a
         // SHA no known commit has, is left as written.
         assert_eq!(
-            parse_naming("Fixed in 89af92ef. Not deadbee, 89af92e1 or 1234567.", Some("o/r"), &commits),
+            parse_naming(
+                "Fixed in 89af92ef. Not deadbee, 89af92e1 or 1234567.",
+                Some("o/r"),
+                &commits
+            ),
             vec![Block::Paragraph(vec![
                 plain("Fixed in "),
                 commit("89af92e", &fix),
                 plain(". Not deadbee, 89af92e1 or 1234567."),
             ])]
         );
-        assert_eq!(parse_naming(&fix, Some("o/r"), &commits), vec![Block::Paragraph(vec![commit("89af92e", &fix)])]);
+        assert_eq!(
+            parse_naming(&fix, Some("o/r"), &commits),
+            vec![Block::Paragraph(vec![commit("89af92e", &fix)])]
+        );
         // Not inside a link, a code span or an address, and not without
         // a repository on GitHub to link to.
         assert_eq!(
-            parse_naming("[89af92e](https://x.y) `89af92e` https://x.y/89af92e", Some("o/r"), &commits),
+            parse_naming(
+                "[89af92e](https://x.y) `89af92e` https://x.y/89af92e",
+                Some("o/r"),
+                &commits
+            ),
             vec![Block::Paragraph(vec![
-                Span { text: "89af92e".into(), link: Some("https://x.y".into()), ..Default::default() },
+                Span {
+                    text: "89af92e".into(),
+                    link: Some("https://x.y".into()),
+                    ..Default::default()
+                },
                 plain(" "),
-                Span { text: "89af92e".into(), code: true, ..Default::default() },
+                Span {
+                    text: "89af92e".into(),
+                    code: true,
+                    ..Default::default()
+                },
                 plain(" "),
-                Span { text: "https://x.y/89af92e".into(), link: Some("https://x.y/89af92e".into()), ..Default::default() },
+                Span {
+                    text: "https://x.y/89af92e".into(),
+                    link: Some("https://x.y/89af92e".into()),
+                    ..Default::default()
+                },
             ])]
         );
         for repo in [None, Some("local/perch")] {
-            assert_eq!(parse_naming("89af92e", repo, &commits), vec![Block::Paragraph(vec![plain("89af92e")])]);
+            assert_eq!(
+                parse_naming("89af92e", repo, &commits),
+                vec![Block::Paragraph(vec![plain("89af92e")])]
+            );
         }
         // A SHA two commits start with names neither.
         let twin = format!("89af92e{}", "1".repeat(33));
         assert_eq!(named_commit("89af92e", &[fix.clone(), twin.clone()]), None);
-        assert_eq!(named_commit("89af92e1", &[fix.clone(), twin.clone()]), Some(twin.as_str()));
+        assert_eq!(
+            named_commit("89af92e1", &[fix.clone(), twin.clone()]),
+            Some(twin.as_str())
+        );
 
-        let words = |text: &str| -> Vec<String> { sha_words(text).into_iter().map(|w| text[w].to_string()).collect() };
-        assert_eq!(words("abc1234, (abc12345) \"abc1234\" abc1234."), vec!["abc1234", "abc12345", "abc1234", "abc1234"]);
+        let words = |text: &str| -> Vec<String> {
+            sha_words(text)
+                .into_iter()
+                .map(|w| text[w].to_string())
+                .collect()
+        };
+        assert_eq!(
+            words("abc1234, (abc12345) \"abc1234\" abc1234."),
+            vec!["abc1234", "abc12345", "abc1234", "abc1234"]
+        );
         assert_eq!(words(&"a".repeat(40)).len(), 1);
-        assert!(words(&format!("abc123 {} ABC1234 Abc1234 xabc1234 abc1234x abc1234_", "a".repeat(41))).is_empty());
-        assert!(words("#abc1234 @abc1234 a/abc1234 &abc1234 v1.abc1234 fix-abc1234 abc1234-dirty éabc1234").is_empty());
+        assert!(words(&format!(
+            "abc123 {} ABC1234 Abc1234 xabc1234 abc1234x abc1234_",
+            "a".repeat(41)
+        ))
+        .is_empty());
+        assert!(words(
+            "#abc1234 @abc1234 a/abc1234 &abc1234 v1.abc1234 fix-abc1234 abc1234-dirty éabc1234"
+        )
+        .is_empty());
     }
 
     #[test]
     fn issue_addresses_read_as_references_as_github_writes_them() {
-        let issue = |text: &str, url: &str| Span { text: text.into(), link: Some(url.into()), ..Default::default() };
+        let issue = |text: &str, url: &str| Span {
+            text: text.into(),
+            link: Some(url.into()),
+            ..Default::default()
+        };
         let here = "https://github.com/slatedb/slatedb/issues/2097";
         let there = "https://github.com/o/r/pull/5#issuecomment-9";
         assert_eq!(
-            parse_in(&format!("Fixes {here}, see {there}. Also <{here}>."), Some("slatedb/slatedb")),
+            parse_in(
+                &format!("Fixes {here}, see {there}. Also <{here}>."),
+                Some("slatedb/slatedb")
+            ),
             vec![Block::Paragraph(vec![
                 plain("Fixes "),
                 issue("#2097", here),
@@ -2835,8 +3438,14 @@ mod tests {
                 plain("."),
             ])]
         );
-        assert_eq!(issue_address(here, None).as_deref(), Some("slatedb/slatedb#2097"));
-        assert_eq!(issue_address(here, Some("SlateDB/SlateDB")).as_deref(), Some("#2097"));
+        assert_eq!(
+            issue_address(here, None).as_deref(),
+            Some("slatedb/slatedb#2097")
+        );
+        assert_eq!(
+            issue_address(here, Some("SlateDB/SlateDB")).as_deref(),
+            Some("#2097")
+        );
         for url in [
             "https://github.com/o/r/issues",
             "https://github.com/o/r/issues/1/",
@@ -2868,7 +3477,11 @@ mod tests {
                         checked: None,
                         blocks: vec![
                             paragraph("a"),
-                            Block::List { start: None, tight: true, items: vec![item("b"), item("c")] },
+                            Block::List {
+                                start: None,
+                                tight: true,
+                                items: vec![item("b"), item("c")]
+                            },
                         ],
                     },
                     item("d"),
@@ -2880,16 +3493,30 @@ mod tests {
     #[test]
     fn a_loose_inner_list_does_not_loosen_the_outer() {
         let blocks = parse("- a\n  - b\n\n  - c\n- d");
-        let Block::List { tight, items, .. } = &blocks[0] else { panic!("{blocks:?}") };
+        let Block::List { tight, items, .. } = &blocks[0] else {
+            panic!("{blocks:?}")
+        };
         assert!(tight, "{blocks:?}");
-        let Block::List { tight: inner_tight, .. } = &items[0].blocks[1] else { panic!("{blocks:?}") };
+        let Block::List {
+            tight: inner_tight, ..
+        } = &items[0].blocks[1]
+        else {
+            panic!("{blocks:?}")
+        };
         assert!(!inner_tight, "{blocks:?}");
     }
 
     #[test]
     fn ordered_lists_keep_their_start() {
         let blocks = parse("3. c\n4. d");
-        assert_eq!(blocks[0], Block::List { start: Some(3), tight: true, items: vec![item("c"), item("d")] });
+        assert_eq!(
+            blocks[0],
+            Block::List {
+                start: Some(3),
+                tight: true,
+                items: vec![item("c"), item("d")]
+            }
+        );
     }
 
     #[test]
@@ -2901,7 +3528,14 @@ mod tests {
                 align: vec![Align::Left, Align::Right],
                 head: vec![vec![plain("h1")], vec![plain("h2")]],
                 rows: vec![
-                    vec![vec![Span { text: "a".into(), bold: true, ..Default::default() }], vec![plain("b")]],
+                    vec![
+                        vec![Span {
+                            text: "a".into(),
+                            bold: true,
+                            ..Default::default()
+                        }],
+                        vec![plain("b")]
+                    ],
                     vec![vec![plain("c")], vec![]],
                 ],
             }]
@@ -2914,8 +3548,14 @@ mod tests {
         assert_eq!(
             blocks,
             vec![
-                Block::Quote { alert: Some(Alert::Warning), blocks: vec![paragraph("careful")] },
-                Block::Quote { alert: None, blocks: vec![paragraph("two"), paragraph("paras")] },
+                Block::Quote {
+                    alert: Some(Alert::Warning),
+                    blocks: vec![paragraph("careful")]
+                },
+                Block::Quote {
+                    alert: None,
+                    blocks: vec![paragraph("two"), paragraph("paras")]
+                },
             ]
         );
     }
@@ -2927,29 +3567,53 @@ mod tests {
             blocks,
             vec![
                 Block::Paragraph(vec![
-                    Span { text: "gone".into(), strike: true, ..Default::default() },
+                    Span {
+                        text: "gone".into(),
+                        strike: true,
+                        ..Default::default()
+                    },
                     plain(" text"),
                 ]),
                 Block::Rule,
-                Block::Heading { level: 1, spans: vec![plain("H1")] },
-                Block::Heading { level: 6, spans: vec![plain("H6")] },
+                Block::Heading {
+                    level: 1,
+                    spans: vec![plain("H1")]
+                },
+                Block::Heading {
+                    level: 6,
+                    spans: vec![plain("H6")]
+                },
             ]
         );
     }
 
     #[test]
     fn footnotes_are_numbered_by_first_reference_and_gathered_at_the_end() {
-        let blocks = parse("[^b]: bee\n\nfirst[^a] then[^b] again[^a] and[^none]\n\n[^a]: ay\n\n[^unused]: never");
+        let blocks = parse(
+            "[^b]: bee\n\nfirst[^a] then[^b] again[^a] and[^none]\n\n[^a]: ay\n\n[^unused]: never",
+        );
         assert_eq!(
             blocks,
             vec![
                 Block::Paragraph(vec![
                     plain("first"),
-                    Span { text: "\u{b9}".into(), footnote: true, ..Default::default() },
+                    Span {
+                        text: "\u{b9}".into(),
+                        footnote: true,
+                        ..Default::default()
+                    },
                     plain(" then"),
-                    Span { text: "\u{b2}".into(), footnote: true, ..Default::default() },
+                    Span {
+                        text: "\u{b2}".into(),
+                        footnote: true,
+                        ..Default::default()
+                    },
                     plain(" again"),
-                    Span { text: "\u{b9}".into(), footnote: true, ..Default::default() },
+                    Span {
+                        text: "\u{b9}".into(),
+                        footnote: true,
+                        ..Default::default()
+                    },
                     plain(" and[^none]"),
                 ]),
                 Block::Footnotes(vec![vec![paragraph("ay")], vec![paragraph("bee")]]),
@@ -2965,10 +3629,17 @@ mod tests {
         assert_eq!(
             blocks,
             vec![
-                Block::Details { summary: vec![plain("More")], blocks: vec![paragraph("inside")] },
+                Block::Details {
+                    summary: vec![plain("More")],
+                    blocks: vec![paragraph("inside")]
+                },
                 Block::Paragraph(vec![
                     plain("line\nbreak Ctrl & "),
-                    Span { text: "pic".into(), link: Some("x.png".into()), ..Default::default() },
+                    Span {
+                        text: "pic".into(),
+                        link: Some("x.png".into()),
+                        ..Default::default()
+                    },
                 ]),
             ]
         );
@@ -2988,9 +3659,16 @@ mod tests {
                 Block::Details {
                     summary: vec![
                         plain("\u{1f4dd} "),
-                        Span { text: "configuration".into(), bold: true, ..Default::default() },
+                        Span {
+                            text: "configuration".into(),
+                            bold: true,
+                            ..Default::default()
+                        },
                     ],
-                    blocks: vec![Block::Code { lang: Some("diff".into()), text: "+ a".into() }],
+                    blocks: vec![Block::Code {
+                        lang: Some("diff".into()),
+                        text: "+ a".into()
+                    }],
                 },
                 paragraph("After"),
             ]
@@ -3010,12 +3688,23 @@ mod tests {
                     blocks: vec![Block::Details {
                         summary: vec![
                             plain("Inner "),
-                            Span { text: "x".into(), code: true, ..Default::default() },
+                            Span {
+                                text: "x".into(),
+                                code: true,
+                                ..Default::default()
+                            },
                         ],
-                        blocks: vec![Block::List { start: None, tight: true, items: vec![item("one")] }],
+                        blocks: vec![Block::List {
+                            start: None,
+                            tight: true,
+                            items: vec![item("one")]
+                        }],
                     }],
                 },
-                Block::Details { summary: vec![plain("Details")], blocks: vec![paragraph("raw text")] },
+                Block::Details {
+                    summary: vec![plain("Details")],
+                    blocks: vec![paragraph("raw text")]
+                },
             ]
         );
     }
@@ -3028,7 +3717,10 @@ mod tests {
             vec![
                 Block::Quote {
                     alert: None,
-                    blocks: vec![Block::Details { summary: vec![plain("S")], blocks: vec![paragraph("quoted")] }],
+                    blocks: vec![Block::Details {
+                        summary: vec![plain("S")],
+                        blocks: vec![paragraph("quoted")]
+                    }],
                 },
                 paragraph("after"),
             ]
@@ -3042,18 +3734,32 @@ mod tests {
         let blocks = parse("## Screenshots\n\n<img width=\"1052\" alt=\"Screenshot 2024-05-01\" src=\"https://x/assets/abc\">\n\nBefore: <img src=before.png> After: <video src=\"clip.mp4\"></video>");
         assert_eq!(
             blocks[1],
-            Block::Image(Image { width: Some(1052.0), ..image("https://x/assets/abc", "Screenshot 2024-05-01") })
+            Block::Image(Image {
+                width: Some(1052.0),
+                ..image("https://x/assets/abc", "Screenshot 2024-05-01")
+            })
         );
         assert_eq!(
             blocks[2],
             Block::Paragraph(vec![
                 plain("Before: "),
-                Span { text: "before.png".into(), link: Some("before.png".into()), ..Default::default() },
+                Span {
+                    text: "before.png".into(),
+                    link: Some("before.png".into()),
+                    ..Default::default()
+                },
                 plain(" After: "),
-                Span { text: "clip.mp4".into(), link: Some("clip.mp4".into()), ..Default::default() },
+                Span {
+                    text: "clip.mp4".into(),
+                    link: Some("clip.mp4".into()),
+                    ..Default::default()
+                },
             ])
         );
-        assert_eq!(attribute("img alt='single' src=x", "alt").as_deref(), Some("single"));
+        assert_eq!(
+            attribute("img alt='single' src=x", "alt").as_deref(),
+            Some("single")
+        );
         assert_eq!(attribute("img data-alt=\"no\" src=x", "alt"), None);
     }
 
@@ -3082,28 +3788,68 @@ mod tests {
     fn a_picture_is_its_size_or_the_size_its_tag_asks_for() {
         let plain = image("https://x/a.png", "a");
         assert_eq!(shown_size(&plain, (800, 400)), (800.0, 2.0));
-        assert_eq!(shown_size(&Image { width: Some(200.0), ..plain.clone() }, (800, 400)), (200.0, 2.0));
-        assert_eq!(shown_size(&Image { height: Some(100.0), ..plain.clone() }, (800, 400)), (200.0, 2.0));
         assert_eq!(
-            shown_size(&Image { width: Some(300.0), height: Some(300.0), ..plain }, (800, 400)),
+            shown_size(
+                &Image {
+                    width: Some(200.0),
+                    ..plain.clone()
+                },
+                (800, 400)
+            ),
+            (200.0, 2.0)
+        );
+        assert_eq!(
+            shown_size(
+                &Image {
+                    height: Some(100.0),
+                    ..plain.clone()
+                },
+                (800, 400)
+            ),
+            (200.0, 2.0)
+        );
+        assert_eq!(
+            shown_size(
+                &Image {
+                    width: Some(300.0),
+                    height: Some(300.0),
+                    ..plain
+                },
+                (800, 400)
+            ),
             (300.0, 1.0)
         );
     }
 
     #[test]
     fn html_tables_keep_a_gap_between_cells_and_a_bare_less_than_stays() {
-        assert_eq!(html_text("<table><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></table>"), "a b\nc");
-        assert_eq!(html_text("<p>1 < 2 &lt; 3 &mdash; &copy; &#x41;</p>"), "1 < 2 < 3 \u{2014} \u{a9} A");
+        assert_eq!(
+            html_text("<table><tr><td>a</td><td>b</td></tr><tr><td>c</td></tr></table>"),
+            "a b\nc"
+        );
+        assert_eq!(
+            html_text("<p>1 < 2 &lt; 3 &mdash; &copy; &#x41;</p>"),
+            "1 < 2 < 3 \u{2014} \u{a9} A"
+        );
     }
 
     #[test]
     fn an_html_block_of_only_a_comment_draws_nothing() {
         assert_eq!(parse("<!-- a -->\n<!-- b -->"), vec![]);
-        assert_eq!(html_text("<p align=\"center\">\n  <b>Hi</b> &lt;there&gt;\n</p>"), "Hi <there>");
+        assert_eq!(
+            html_text("<p align=\"center\">\n  <b>Hi</b> &lt;there&gt;\n</p>"),
+            "Hi <there>"
+        );
     }
 
     fn image(src: &str, alt: &str) -> Image {
-        Image { src: src.into(), alt: alt.into(), link: None, width: None, height: None }
+        Image {
+            src: src.into(),
+            alt: alt.into(),
+            link: None,
+            width: None,
+            height: None,
+        }
     }
 
     #[test]
@@ -3120,21 +3866,31 @@ mod tests {
         // In a link, a click on it goes where the link does.
         assert_eq!(
             parse("[![build](https://ci/badge.png)](https://ci/run)"),
-            vec![Block::Image(Image { link: Some("https://ci/run".into()), ..image("https://ci/badge.png", "build") })]
+            vec![Block::Image(Image {
+                link: Some("https://ci/run".into()),
+                ..image("https://ci/badge.png", "build")
+            })]
         );
     }
 
     #[test]
     fn an_image_in_a_cell_or_at_a_relative_address_stays_its_linked_alt_text() {
-        let blocks = parse("| a |\n|---|\n| ![shot](https://x/y.png) |\n\n![local](docs/a.png) here");
-        let Block::Table { rows, .. } = &blocks[0] else { panic!("{blocks:?}") };
+        let blocks =
+            parse("| a |\n|---|\n| ![shot](https://x/y.png) |\n\n![local](docs/a.png) here");
+        let Block::Table { rows, .. } = &blocks[0] else {
+            panic!("{blocks:?}")
+        };
         assert_eq!(rows[0][0].len(), 1);
         assert_eq!(rows[0][0][0].text, "shot");
         assert_eq!(rows[0][0][0].link.as_deref(), Some("https://x/y.png"));
         assert_eq!(
             blocks[1],
             Block::Paragraph(vec![
-                Span { text: "local".into(), link: Some("docs/a.png".into()), ..Default::default() },
+                Span {
+                    text: "local".into(),
+                    link: Some("docs/a.png".into()),
+                    ..Default::default()
+                },
                 plain(" here"),
             ])
         );
@@ -3146,31 +3902,68 @@ mod tests {
         assert_eq!(
             blocks,
             vec![Block::Paragraph(vec![
-                Span { text: "a ".into(), bold: true, ..Default::default() },
-                Span { text: "b".into(), bold: true, italic: true, ..Default::default() },
-                Span { text: " c".into(), bold: true, ..Default::default() },
+                Span {
+                    text: "a ".into(),
+                    bold: true,
+                    ..Default::default()
+                },
+                Span {
+                    text: "b".into(),
+                    bold: true,
+                    italic: true,
+                    ..Default::default()
+                },
+                Span {
+                    text: " c".into(),
+                    bold: true,
+                    ..Default::default()
+                },
             ])]
         );
     }
 
     #[test]
     fn smart_punctuation_and_wikilinks_stay_as_written() {
-        assert_eq!(parse("\"quoted\" -- [[not a link]]"), vec![paragraph("\"quoted\" -- [[not a link]]")]);
+        assert_eq!(
+            parse("\"quoted\" -- [[not a link]]"),
+            vec![paragraph("\"quoted\" -- [[not a link]]")]
+        );
     }
 
     #[test]
     fn a_fence_without_a_language_is_plain_and_indented_code_too() {
         let blocks = parse("```\nx\n```\n\n    y\n");
-        assert_eq!(blocks[0], Block::Code { lang: None, text: "x".into() });
-        assert_eq!(blocks[1], Block::Code { lang: None, text: "y".into() });
+        assert_eq!(
+            blocks[0],
+            Block::Code {
+                lang: None,
+                text: "x".into()
+            }
+        );
+        assert_eq!(
+            blocks[1],
+            Block::Code {
+                lang: None,
+                text: "y".into()
+            }
+        );
     }
 
     #[test]
     fn spans_map_to_byte_ranges_and_strikes_run_together() {
         let spans = vec![
             plain("a "),
-            Span { text: "b".into(), code: true, strike: true, ..Default::default() },
-            Span { text: "c".into(), strike: true, ..Default::default() },
+            Span {
+                text: "b".into(),
+                code: true,
+                strike: true,
+                ..Default::default()
+            },
+            Span {
+                text: "c".into(),
+                strike: true,
+                ..Default::default()
+            },
             plain(" d"),
         ];
         let (text, links, strikes) = laid(&spans);
@@ -3182,8 +3975,17 @@ mod tests {
     #[test]
     fn a_struck_link_is_ruled_in_the_link_colour() {
         let spans = vec![
-            Span { text: "a".into(), strike: true, ..Default::default() },
-            Span { text: "b".into(), strike: true, link: Some("https://x".into()), ..Default::default() },
+            Span {
+                text: "a".into(),
+                strike: true,
+                ..Default::default()
+            },
+            Span {
+                text: "b".into(),
+                strike: true,
+                link: Some("https://x".into()),
+                ..Default::default()
+            },
         ];
         let (_, links, strikes) = laid(&spans);
         assert_eq!(links, vec![(1..2, Target::Url("https://x".into()))]);
@@ -3199,7 +4001,11 @@ mod tests {
         };
         assert_eq!(
             spans[1],
-            Span { text: "the ".into(), link: Some("https://example.com/x".into()), ..Default::default() }
+            Span {
+                text: "the ".into(),
+                link: Some("https://example.com/x".into()),
+                ..Default::default()
+            }
         );
         assert_eq!(
             spans[2],
@@ -3273,8 +4079,14 @@ mod tests {
     fn a_link_inside_a_code_span_is_drawn_as_a_link_and_the_rest_as_code() {
         let spans = spans_of("A `regular: Option<WalGcPolicy>` field");
         let links = vec![(18..29, local("src/gc.rs:3"))];
-        let (text, attrs, links, _, _) =
-            layout(&spans, 14.0, theme::weight_body(), theme::fg, prose_leading(), links);
+        let (text, attrs, links, _, _) = layout(
+            &spans,
+            14.0,
+            theme::weight_body(),
+            theme::fg,
+            prose_leading(),
+            links,
+        );
         assert_eq!(&text[18..29], "WalGcPolicy");
         assert_eq!(links.len(), 1);
         // Three pieces of code: before, the link in the links' colour,
@@ -3315,7 +4127,8 @@ mod tests {
         /// The markdown laid out in a column `width` wide.
         fn harness_at(markdown: &str, width: f64) -> HeadlessHarness {
             let root = TestRoot::new();
-            let view = Container::new(render_blocks(parse(markdown), theme::TEXT_BODY)).style(move |s| s.width(width).padding(0.0));
+            let view = Container::new(render_blocks(parse(markdown), theme::TEXT_BODY))
+                .style(move |s| s.width(width).padding(0.0));
             let mut harness = HeadlessHarness::new_with_size(root, view, width, 2000.0);
             harness.rebuild();
             harness.paint();
@@ -3350,7 +4163,9 @@ mod tests {
             images::asked();
             let wide = "https://x/layout-wide.png";
             let small = "https://x/layout-small.png";
-            let mut h = harness(&format!("Before\n\n![wide]({wide})\n\n<img alt=small src=\"{small}\">\n\nAfter"));
+            let mut h = harness(&format!(
+                "Before\n\n![wide]({wide})\n\n<img alt=small src=\"{small}\">\n\nAfter"
+            ));
             assert_eq!(images::asked(), vec![wide.to_string(), small.to_string()]);
             assert!(rects(&h, "comment picture").is_empty());
             let waiting = rect(&h, "Before").y1;
@@ -3363,8 +4178,16 @@ mod tests {
             h.paint();
             let pictures = rects(&h, "comment picture");
             assert_eq!(pictures.len(), 2);
-            assert_eq!((pictures[0].width(), pictures[0].height()), (WIDTH, WIDTH / 2.0), "the column narrows it");
-            assert_eq!((pictures[1].width(), pictures[1].height()), (100.0, 50.0), "a point a pixel");
+            assert_eq!(
+                (pictures[0].width(), pictures[0].height()),
+                (WIDTH, WIDTH / 2.0),
+                "the column narrows it"
+            );
+            assert_eq!(
+                (pictures[1].width(), pictures[1].height()),
+                (100.0, 50.0),
+                "a point a pixel"
+            );
             assert!(pictures[0].y0 >= waiting && pictures[1].y0 > pictures[0].y1);
             assert!(rect(&h, "After").y0 >= pictures[1].y1);
 
@@ -3376,11 +4199,16 @@ mod tests {
 
         #[test]
         fn details_stay_shut_until_their_summary_is_clicked() {
-            let mut h = harness("<details>\n<summary>More</summary>\n\ninside\n\n</details>\n\nafter");
+            let mut h =
+                harness("<details>\n<summary>More</summary>\n\ninside\n\n</details>\n\nafter");
             let summary = rect(&h, "details:summary");
             let whole = |h: &HeadlessHarness| rects(h, "details")[0];
             assert!(summary.height() > 0.0);
-            assert_eq!(whole(&h).height(), summary.height(), "shut details are their summary");
+            assert_eq!(
+                whole(&h).height(),
+                summary.height(),
+                "shut details are their summary"
+            );
             let at = summary.center();
             h.click(at.x, at.y);
             h.rebuild();
@@ -3397,31 +4225,52 @@ mod tests {
 
         #[test]
         fn table_cells_line_up_in_columns_and_rows() {
-            let h = harness("| Name | Count | Note |\n|---|---:|:---:|\n| a | 1 | x |\n| bbbbbb | 22 | yy |");
+            let h = harness(
+                "| Name | Count | Note |\n|---|---:|:---:|\n| a | 1 | x |\n| bbbbbb | 22 | yy |",
+            );
             for col in 0..3 {
-                let column: Vec<Rect> = (0..3).map(|row| rect(&h, &format!("cell:{row}:{col}"))).collect();
+                let column: Vec<Rect> = (0..3)
+                    .map(|row| rect(&h, &format!("cell:{row}:{col}")))
+                    .collect();
                 for cell in &column[1..] {
                     assert_eq!(cell.x0, column[0].x0, "column {col} drifts: {column:?}");
-                    assert_eq!(cell.width(), column[0].width(), "column {col} widths differ: {column:?}");
+                    assert_eq!(
+                        cell.width(),
+                        column[0].width(),
+                        "column {col} widths differ: {column:?}"
+                    );
                 }
             }
             for row in 0..3 {
-                let cells: Vec<Rect> = (0..3).map(|col| rect(&h, &format!("cell:{row}:{col}"))).collect();
+                let cells: Vec<Rect> = (0..3)
+                    .map(|col| rect(&h, &format!("cell:{row}:{col}")))
+                    .collect();
                 for cell in &cells[1..] {
                     assert_eq!(cell.y0, cells[0].y0, "row {row} drifts: {cells:?}");
                 }
-                assert!(cells[0].x1 <= cells[1].x0 && cells[1].x1 <= cells[2].x0, "{cells:?}");
+                assert!(
+                    cells[0].x1 <= cells[1].x0 && cells[1].x1 <= cells[2].x0,
+                    "{cells:?}"
+                );
             }
             let head = rect(&h, "cell:0:0");
             let body = rect(&h, "cell:1:0");
-            assert!(body.y0 >= head.y1, "the body starts under the head: {head:?} {body:?}");
+            assert!(
+                body.y0 >= head.y1,
+                "the body starts under the head: {head:?} {body:?}"
+            );
             // A wide column is wider than a narrow one: the tracks size to
             // their cells, not to a share of the width.
-            let widths: Vec<f64> = (0..3).map(|col| rect(&h, &format!("cell:0:{col}")).width()).collect();
+            let widths: Vec<f64> = (0..3)
+                .map(|col| rect(&h, &format!("cell:0:{col}")).width())
+                .collect();
             assert!(widths[0] > widths[1], "{widths:?}");
             let table = rect(&h, "table");
             assert!(table.width() <= WIDTH, "{table:?}");
-            assert!(table.width() < WIDTH - 50.0, "content-wide, not stretched: {table:?}");
+            assert!(
+                table.width() < WIDTH - 50.0,
+                "content-wide, not stretched: {table:?}"
+            );
         }
 
         #[test]
@@ -3432,7 +4281,10 @@ mod tests {
             assert!(table.width() <= WIDTH + 0.5, "{table:?}");
             let short = rect(&h, "cell:0:0");
             let tall = rect(&h, "cell:1:0");
-            assert!(tall.height() > short.height() * 3.0, "the long cell wraps: {short:?} {tall:?}");
+            assert!(
+                tall.height() > short.height() * 3.0,
+                "the long cell wraps: {short:?} {tall:?}"
+            );
         }
 
         /// A table with room to spare is as wide as its words and holds
@@ -3485,7 +4337,10 @@ mod tests {
             // The box is centred on the first line of the text.
             let line = (theme::TEXT_BODY * theme::PROSE_LINE_HEIGHT) as f64;
             let centre = empty.y0 + empty.height() / 2.0;
-            assert!((centre - (bodies[0].y0 + line / 2.0)).abs() < 2.0, "{empty:?} {bodies:?}");
+            assert!(
+                (centre - (bodies[0].y0 + line / 2.0)).abs() < 2.0,
+                "{empty:?} {bodies:?}"
+            );
         }
 
         #[test]
@@ -3538,7 +4393,10 @@ mod tests {
                 repeat: false,
                 is_composing: false,
             }));
-            assert_eq!(copied(), vec!["Some bold words, code and a link.".to_string()]);
+            assert_eq!(
+                copied(),
+                vec!["Some bold words, code and a link.".to_string()]
+            );
         }
 
         /// A point on each link of the run of text with `index` among the
@@ -3554,7 +4412,10 @@ mod tests {
         fn linked_harness(markdown: &str, files: &[&str]) -> (HeadlessHarness, ReviewState) {
             let root = TestRoot::new();
             let state = crate::review::code_refs::review_of(files);
-            state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
+            state.set_server_status(
+                perch_lsp::ServerKind::RustAnalyzer,
+                perch_lsp::Status::Ready,
+            );
             let view = Container::new(render_linked(markdown, state))
                 .style(|s| s.width(WIDTH).padding(0.0));
             let mut harness = HeadlessHarness::new_with_size(root, view, WIDTH, 2000.0);
@@ -3575,15 +4436,24 @@ mod tests {
             assert_eq!(links.len(), 1, "{links:?}");
             h.click(links[0].x, links[0].y);
             assert_eq!(state.tab.get(), ItemTab::Code);
-            assert_eq!(state.pending_jump.get(), Some(("src/manifest.rs".into(), 11, 0)));
+            assert_eq!(
+                state.pending_jump.get(),
+                Some(("src/manifest.rs".into(), 11, 0))
+            );
 
             // A fenced block names it too, with a column.
             state.pending_jump.set(None);
             let links = links_on_first_line(&mut h, 1);
             assert_eq!(links.len(), 1, "{links:?}");
             h.click(links[0].x, links[0].y);
-            assert_eq!(state.pending_jump.get(), Some(("src/manifest.rs".into(), 39, 4)));
-            assert!(state.pending_names.get().is_empty(), "nothing here is a name");
+            assert_eq!(
+                state.pending_jump.get(),
+                Some(("src/manifest.rs".into(), 39, 4))
+            );
+            assert!(
+                state.pending_names.get().is_empty(),
+                "nothing here is a name"
+            );
         }
 
         /// A commit named by its SHA links once the review knows it: one
@@ -3593,9 +4463,18 @@ mod tests {
         fn a_commit_named_by_its_sha_opens_on_files_or_on_github() {
             use crate::review::model::ItemTab;
             use perch_github::{Discussion, PullEvent, PullEventKind};
-            let (here, away) = (format!("89af92ef{}", "0".repeat(32)), format!("1b2c3d4e{}", "0".repeat(32)));
-            let (mut h, state) = linked_harness(&format!("Fixed in {}, then {}.", &here[..8], &away[..12]), &[]);
-            assert!(links_on_first_line(&mut h, 0).is_empty(), "no commit is known yet");
+            let (here, away) = (
+                format!("89af92ef{}", "0".repeat(32)),
+                format!("1b2c3d4e{}", "0".repeat(32)),
+            );
+            let (mut h, state) = linked_harness(
+                &format!("Fixed in {}, then {}.", &here[..8], &away[..12]),
+                &[],
+            );
+            assert!(
+                links_on_first_line(&mut h, 0).is_empty(),
+                "no commit is known yet"
+            );
 
             state.commits.set(Arc::new(vec![perch_git::Commit {
                 sha: here.clone(),
@@ -3627,7 +4506,10 @@ mod tests {
 
             crate::ui::widgets::opened();
             h.click(links[0].x, links[0].y);
-            assert_eq!(state.pending_scope.get(), Some(perch_git::Scope::Commit { sha: here.clone() }));
+            assert_eq!(
+                state.pending_scope.get(),
+                Some(perch_git::Scope::Commit { sha: here.clone() })
+            );
             assert_eq!(state.tab.get(), ItemTab::Code);
             assert!(crate::ui::widgets::opened().is_empty());
 
@@ -3654,7 +4536,10 @@ mod tests {
                 assert!(table.width() <= WIDTH + 0.5, "{table:?}");
                 let short = rect(h, "cell:0:0");
                 let tall = rect(h, "cell:1:0");
-                assert!(tall.height() > short.height() * 3.0, "the long cell wraps: {short:?} {tall:?}");
+                assert!(
+                    tall.height() > short.height() * 3.0,
+                    "the long cell wraps: {short:?} {tall:?}"
+                );
             };
             check(&h);
             let (token, _) = state.pending_names.get()[0].clone();
@@ -3713,7 +4598,10 @@ mod tests {
             // Stopping in the quote takes it up to the pointer.
             let quoted = floem::kurbo::Point::new(WIDTH - 1.0, runs[1].y0 + 8.0);
             drag(&mut h, start, quoted);
-            assert_eq!(copy(&mut h), vec!["First words here.\n\nQuoted words.".to_string()]);
+            assert_eq!(
+                copy(&mut h),
+                vec!["First words here.\n\nQuoted words.".to_string()]
+            );
             // A click clears it all, wherever it lands.
             h.click(runs[2].x0 + 2.0, runs[2].y0 + 8.0);
             assert_eq!(copy(&mut h), Vec::<String>::new());
@@ -3732,7 +4620,10 @@ mod tests {
             drag(&mut h, start, end);
             let copied = copy(&mut h);
             assert_eq!(copied.len(), 1, "{copied:?}");
-            assert!(copied[0].starts_with("one\ntwo\n\nlet x = 1;"), "{copied:?}");
+            assert!(
+                copied[0].starts_with("one\ntwo\n\nlet x = 1;"),
+                "{copied:?}"
+            );
         }
 
         /// A drag on from a double click grows by words into the next
@@ -3748,7 +4639,10 @@ mod tests {
                 PointerState, PointerType,
             };
             let press = |h: &mut HeadlessHarness, at: Point, count: u8| {
-                let mut state = PointerState { count, ..PointerState::default() };
+                let mut state = PointerState {
+                    count,
+                    ..PointerState::default()
+                };
                 state.position.x = at.x;
                 state.position.y = at.y;
                 h.dispatch_event(Event::Pointer(PointerEvent::Down(PointerButtonEvent {
@@ -3771,7 +4665,10 @@ mod tests {
             let words = |run: ViewId| {
                 let at = run.get_visual_rect_no_clip().origin().to_vec2();
                 let start = linked_text::with_text(run, |t| t.find("words").unwrap()).unwrap();
-                linked_text::range_rect(run, start..start + 5).unwrap().center() + at
+                linked_text::range_rect(run, start..start + 5)
+                    .unwrap()
+                    .center()
+                    + at
             };
             let (from, to) = (words(runs[0]), words(runs[1]));
 
@@ -3780,21 +4677,34 @@ mod tests {
             h.pointer_move(from.x, from.y + 30.0);
             h.pointer_move(to.x, to.y);
             h.pointer_up(to.x, to.y);
-            assert_eq!(copy(&mut h), vec!["words here.\n\nSecond words".to_string()]);
+            assert_eq!(
+                copy(&mut h),
+                vec!["words here.\n\nSecond words".to_string()]
+            );
             // Back up from the second paragraph's word, the same.
             press(&mut h, to, 2);
             h.pointer_move(to.x, to.y);
             h.pointer_move(from.x, from.y);
             h.pointer_up(from.x, from.y);
-            assert_eq!(copy(&mut h), vec!["words here.\n\nSecond words".to_string()]);
+            assert_eq!(
+                copy(&mut h),
+                vec!["words here.\n\nSecond words".to_string()]
+            );
 
             press(&mut h, from, 3);
             h.pointer_move(from.x, from.y);
             h.pointer_move(from.x + 20.0, from.y);
-            assert_eq!(copy(&mut h), vec!["First words here.".to_string()], "whole while in it");
+            assert_eq!(
+                copy(&mut h),
+                vec!["First words here.".to_string()],
+                "whole while in it"
+            );
             h.pointer_move(to.x, to.y);
             h.pointer_up(to.x, to.y);
-            assert_eq!(copy(&mut h), vec!["First words here.\n\nSecond words here.".to_string()]);
+            assert_eq!(
+                copy(&mut h),
+                vec!["First words here.\n\nSecond words here.".to_string()]
+            );
         }
 
         #[test]
@@ -3813,17 +4723,26 @@ mod tests {
                     server: None,
                 }]
             );
-            assert!(links_on_first_line(&mut h, 0).is_empty(), "no link before the answer");
+            assert!(
+                links_on_first_line(&mut h, 0).is_empty(),
+                "no link before the answer"
+            );
 
             let found = vec![located("src/manifest.rs", 12, 11)];
-            state.finish_names(token, vec![("Manifest::load()".into(), Some((2, Arc::new(found))))]);
+            state.finish_names(
+                token,
+                vec![("Manifest::load()".into(), Some((2, Arc::new(found))))],
+            );
             h.rebuild();
             h.paint();
             let links = links_on_first_line(&mut h, 0);
             assert_eq!(links.len(), 1, "{links:?}");
             h.click(links[0].x, links[0].y);
             assert_eq!(state.tab.get(), ItemTab::Code);
-            assert_eq!(state.pending_jump.get(), Some(("src/manifest.rs".into(), 11, 11)));
+            assert_eq!(
+                state.pending_jump.get(),
+                Some(("src/manifest.rs".into(), 11, 11))
+            );
         }
 
         #[test]
@@ -3832,14 +4751,20 @@ mod tests {
             use crate::review::model::Locations;
             let (mut h, state) = linked_harness("A `Db` here.", &[]);
             let (token, _) = state.pending_names.get()[0].clone();
-            let found = vec![located("slatedb/src/db.rs", 594, 11), located("bindings/uniffi/src/db.rs", 19, 11)];
+            let found = vec![
+                located("slatedb/src/db.rs", 594, 11),
+                located("bindings/uniffi/src/db.rs", 19, 11),
+            ];
             state.finish_names(token, vec![("Db".into(), Some((1, Arc::new(found))))]);
             h.rebuild();
             h.paint();
             let links = links_on_first_line(&mut h, 0);
             h.click(links[0].x, links[0].y);
             let panel = state.references.get().expect("the panel opened");
-            assert_eq!((panel.kind, panel.symbol.as_str(), panel.locations.len()), (Locations::Definitions, "Db", 2));
+            assert_eq!(
+                (panel.kind, panel.symbol.as_str(), panel.locations.len()),
+                (Locations::Definitions, "Db", 2)
+            );
             assert_eq!(state.pending_jump.get(), None);
         }
 
@@ -3856,16 +4781,28 @@ mod tests {
                 (harness, state)
             };
             assert!(state.pending_names.get().is_empty(), "asked with no server");
-            state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Indexing { percent: Some(10) });
+            state.set_server_status(
+                perch_lsp::ServerKind::RustAnalyzer,
+                perch_lsp::Status::Indexing { percent: Some(10) },
+            );
             let asked = state.pending_names.get();
             assert_eq!(asked.len(), 1, "asked once the server is there");
-            let found = vec![crate::review::code_refs::located("slatedb/src/db.rs", 594, 11)];
+            let found = vec![crate::review::code_refs::located(
+                "slatedb/src/db.rs",
+                594,
+                11,
+            )];
             state.finish_names(asked[0].0, vec![("Db".into(), Some((1, Arc::new(found))))]);
             h.rebuild();
             h.paint();
             assert_eq!(links_on_first_line(&mut h, 0).len(), 1);
             // A server that fails takes its links with it.
-            state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Failed { reason: "gone".into() });
+            state.set_server_status(
+                perch_lsp::ServerKind::RustAnalyzer,
+                perch_lsp::Status::Failed {
+                    reason: "gone".into(),
+                },
+            );
             h.rebuild();
             h.paint();
             assert!(links_on_first_line(&mut h, 0).is_empty());

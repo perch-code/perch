@@ -842,7 +842,9 @@ impl Refs {
             .with_untracked(|i| i.as_ref().map(|i| i.repo_full_name.clone()))?;
         let sha = commit_in(url, &repo)?.to_string();
         let state = self.state;
-        let tip = state.commit_subject(&sha).unwrap_or_else(|| url.to_string());
+        let tip = state
+            .commit_subject(&sha)
+            .unwrap_or_else(|| url.to_string());
         let url = url.to_string();
         Some(Target::Local {
             tip,
@@ -1039,13 +1041,31 @@ mod tests {
     fn a_commit_address_is_read_for_its_sha_in_its_repository() {
         let full = "89af92ef".repeat(5);
         let url = |path: &str| format!("https://github.com/{path}");
-        assert_eq!(commit_in(&url(&format!("o/r/commit/{full}")), "o/r"), Some(full.as_str()));
-        assert_eq!(commit_in(&url("O/R/commit/89af92e/"), "o/r"), Some("89af92e"));
-        assert_eq!(commit_in(&url("o/r/commit/89af92e#diff-1"), "o/r"), Some("89af92e"));
-        for path in ["x/r/commit/89af92e", "o/r/commit/89af92", "o/r/commit/89AF92E", "o/r/commits/89af92e", "o/r/pull/1"] {
+        assert_eq!(
+            commit_in(&url(&format!("o/r/commit/{full}")), "o/r"),
+            Some(full.as_str())
+        );
+        assert_eq!(
+            commit_in(&url("O/R/commit/89af92e/"), "o/r"),
+            Some("89af92e")
+        );
+        assert_eq!(
+            commit_in(&url("o/r/commit/89af92e#diff-1"), "o/r"),
+            Some("89af92e")
+        );
+        for path in [
+            "x/r/commit/89af92e",
+            "o/r/commit/89af92",
+            "o/r/commit/89AF92E",
+            "o/r/commits/89af92e",
+            "o/r/pull/1",
+        ] {
             assert_eq!(commit_in(&url(path), "o/r"), None, "{path}");
         }
-        assert_eq!(commit_in("http://github.com/o/r/commit/89af92e", "o/r"), None);
+        assert_eq!(
+            commit_in("http://github.com/o/r/commit/89af92e", "o/r"),
+            None
+        );
     }
 
     #[test]

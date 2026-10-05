@@ -14,7 +14,8 @@ use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::{CursorStyle, Position};
 use floem::text::{Attrs, AttrsList, FamilyOwned, LineHeightValue};
 use floem::views::{
-    ClipExt, Container, Decorators, Empty, Label, ScrollExt, Stack, dyn_container, dyn_stack, rich_text,
+    dyn_container, dyn_stack, rich_text, ClipExt, Container, Decorators, Empty, Label, ScrollExt,
+    Stack,
 };
 
 use crate::backend::Backend;
@@ -69,7 +70,10 @@ pub fn symbol_at_cursor(state: ReviewState) -> Option<Symbol> {
 /// answer comes back with the same token. Nothing while the server is not
 /// there.
 pub fn find(state: ReviewState, backend: &Backend, symbol: &Symbol, kind: Locations) {
-    if !state.lsp_status.with_untracked(|s| s.usable_for(&symbol.path)) {
+    if !state
+        .lsp_status
+        .with_untracked(|s| s.usable_for(&symbol.path))
+    {
         return;
     }
     let token = state.next_token();
@@ -132,7 +136,10 @@ pub fn identifier_at(line: &str, column: usize) -> Option<(usize, &str)> {
 
 /// The first identifier on a line, and where it starts.
 pub fn first_identifier(line: &str) -> Option<(usize, &str)> {
-    let start = line.char_indices().find(|(_, c)| is_identifier_char(*c)).map(|(i, _)| i)?;
+    let start = line
+        .char_indices()
+        .find(|(_, c)| is_identifier_char(*c))
+        .map(|(i, _)| i)?;
     identifier_at(line, start)
 }
 
@@ -192,7 +199,10 @@ pub fn occurrences(text: &str, symbol: &str) -> Vec<std::ops::Range<usize>> {
     while let Some(i) = text[from..].find(symbol) {
         let start = from + i;
         let end = start + symbol.len();
-        let before = text[..start].chars().next_back().is_some_and(is_identifier_char);
+        let before = text[..start]
+            .chars()
+            .next_back()
+            .is_some_and(is_identifier_char);
         let after = text[end..].chars().next().is_some_and(is_identifier_char);
         if !before && !after {
             out.push(start..end);
@@ -210,10 +220,21 @@ enum Row {
     Notice(String),
     /// A file's heading: the path and how many lines under it, with the
     /// chip's label for a file outside the worktree.
-    File { path: String, outside: Option<String>, count: usize, first: bool },
+    File {
+        path: String,
+        outside: Option<String>,
+        count: usize,
+        first: bool,
+    },
     /// A line of a file. Carries the symbol, so asking about another
     /// symbol on the same line draws the row again with the new emphasis.
-    Location { path: String, line: usize, character: usize, text: String, symbol: String },
+    Location {
+        path: String,
+        line: usize,
+        character: usize,
+        text: String,
+        symbol: String,
+    },
 }
 
 fn rows(references: &References) -> Vec<Row> {
@@ -229,7 +250,12 @@ fn rows(references: &References) -> Vec<Row> {
     let mut out = Vec::new();
     for (i, (path, lines)) in groups.into_iter().enumerate() {
         let outside = lines.first().and_then(|l| l.outside.clone());
-        out.push(Row::File { path, outside, count: lines.len(), first: i == 0 });
+        out.push(Row::File {
+            path,
+            outside,
+            count: lines.len(),
+            first: i == 0,
+        });
         out.extend(lines.into_iter().map(|r| Row::Location {
             path: r.path,
             line: r.line,
@@ -308,16 +334,29 @@ pub(crate) fn panel_frame(
 /// close glyph.
 fn header(state: ReviewState) -> impl IntoView {
     let heading = move || {
+        state.references.with(|r| {
+            r.as_ref()
+                .map(|r| r.kind.heading().to_string())
+                .unwrap_or_default()
+        })
+    };
+    let symbol = move || {
         state
             .references
-            .with(|r| r.as_ref().map(|r| r.kind.heading().to_string()).unwrap_or_default())
+            .with(|r| r.as_ref().map(|r| r.symbol.clone()).unwrap_or_default())
     };
-    let symbol = move || state.references.with(|r| r.as_ref().map(|r| r.symbol.clone()).unwrap_or_default());
-    let count = move || state.references.with(|r| r.as_ref().map(|r| summary(r)).unwrap_or_default());
+    let count = move || {
+        state
+            .references
+            .with(|r| r.as_ref().map(|r| summary(r)).unwrap_or_default())
+    };
 
     Stack::horizontal((
         Label::derived(heading).style(|s| {
-            s.font_size(theme::TEXT_META).color(theme::fg_muted()).selectable(false).flex_shrink(0.0_f32)
+            s.font_size(theme::TEXT_META)
+                .color(theme::fg_muted())
+                .selectable(false)
+                .flex_shrink(0.0_f32)
         }),
         Label::derived(symbol).style(|s| {
             s.font_family(theme::CODE_FONT_STACK.to_string())
@@ -345,30 +384,43 @@ fn header(state: ReviewState) -> impl IntoView {
 /// The close glyph at a header's right end: the references' and the call
 /// hierarchy's panels have it, and so does the find bar.
 pub(crate) fn close_button(on_close: impl Fn() + 'static) -> impl IntoView {
-    Container::new(sidebar_glyph(SidebarIcon::Close, theme::fg_subtle).style(|s| s.size(11.0, 11.0)))
-        .on_event_stop(el::Click, move |_, _| on_close())
-        .style(|s| {
-            clickable(s)
-                .size(18.0, 18.0)
-                .items_center()
-                .justify_center()
-                .border_radius(3.0)
-                .hover(|s| s.background(theme::badge_bg()))
-        })
+    Container::new(
+        sidebar_glyph(SidebarIcon::Close, theme::fg_subtle).style(|s| s.size(11.0, 11.0)),
+    )
+    .on_event_stop(el::Click, move |_, _| on_close())
+    .style(|s| {
+        clickable(s)
+            .size(18.0, 18.0)
+            .items_center()
+            .justify_center()
+            .border_radius(3.0)
+            .hover(|s| s.background(theme::badge_bg()))
+    })
 }
 
 fn list(state: ReviewState, open_file: OpenFile) -> impl IntoView {
     dyn_stack(
-        move || state.references.with(|r| r.as_ref().map(|r| rows(r)).unwrap_or_default()),
+        move || {
+            state
+                .references
+                .with(|r| r.as_ref().map(|r| rows(r)).unwrap_or_default())
+        },
         |row| row.clone(),
         move |row| match row {
             Row::Notice(text) => notice(text).into_any(),
-            Row::File { path, outside, count, first } => {
-                file_row(state, open_file.clone(), path, outside, count, first).into_any()
-            }
-            Row::Location { path, line, character, text, symbol } => {
-                location_row(state, path, line, character, text, symbol).into_any()
-            }
+            Row::File {
+                path,
+                outside,
+                count,
+                first,
+            } => file_row(state, open_file.clone(), path, outside, count, first).into_any(),
+            Row::Location {
+                path,
+                line,
+                character,
+                text,
+                symbol,
+            } => location_row(state, path, line, character, text, symbol).into_any(),
         },
     )
     .style(|s| s.flex_col().width_full().padding_bottom(6.0))
@@ -457,7 +509,9 @@ fn file_row(
             .padding_right(12.0)
             // A hairline between groups, and none above the first: the
             // header's border is already there.
-            .apply_if(!first, |s| s.border_top(1.0).border_color(theme::border_muted()))
+            .apply_if(!first, |s| {
+                s.border_top(1.0).border_color(theme::border_muted())
+            })
             .hover(|s| s.background(theme::canvas_hover()))
     })
 }
@@ -510,7 +564,11 @@ pub(crate) fn line_text(text: String, symbol: String) -> impl IntoView {
     rich_text(first, attrs, move || layout(&text, &symbol))
         .style(|s| s.width_full())
         .clip()
-        .style(|s| s.height(theme::REFERENCES_ROW_HEIGHT).flex_grow(1.0_f32).min_width(0.0))
+        .style(|s| {
+            s.height(theme::REFERENCES_ROW_HEIGHT)
+                .flex_grow(1.0_f32)
+                .min_width(0.0)
+        })
 }
 
 fn layout(text: &str, symbol: &str) -> (String, AttrsList) {
@@ -524,7 +582,10 @@ fn layout(text: &str, symbol: &str) -> (String, AttrsList) {
     };
     let mut list = AttrsList::new(base());
     for range in occurrences(text, symbol) {
-        list.add_span(range, base().weight(theme::weight_strong()).color(theme::accent()));
+        list.add_span(
+            range,
+            base().weight(theme::weight_strong()).color(theme::accent()),
+        );
     }
     (text.to_string(), list)
 }
@@ -570,15 +631,19 @@ pub(crate) fn resize_handle(state: ReviewState, resizing: RwSignal<bool>) -> imp
             // The panel's top edge moves with the pointer, so its height is
             // what it was at the grab plus how far up the pointer went.
             let dy = e.start_state.logical_point().y - e.current_state.logical_point().y;
-            let height = (grab.get() + dy).clamp(theme::REFERENCES_MIN_HEIGHT, theme::REFERENCES_MAX_HEIGHT);
+            let height =
+                (grab.get() + dy).clamp(theme::REFERENCES_MIN_HEIGHT, theme::REFERENCES_MAX_HEIGHT);
             state.references_height.set(height);
         })
         .on_event_stop(el::DragEnd, move |_, _: &floem::event::DragEndEvent| {
             resizing.set(false);
         })
-        .on_event_stop(el::DragCancel, move |_, _: &floem::event::DragCancelEvent| {
-            resizing.set(false);
-        })
+        .on_event_stop(
+            el::DragCancel,
+            move |_, _: &floem::event::DragCancelEvent| {
+                resizing.set(false);
+            },
+        )
         .style(|s| {
             s.position(Position::Absolute)
                 .inset_left(0.0)
@@ -614,11 +679,23 @@ mod tests {
     use super::*;
 
     fn reference(path: &str, line: usize, character: usize, text: &str) -> Located {
-        Located { path: path.into(), outside: None, line, character, text: text.into() }
+        Located {
+            path: path.into(),
+            outside: None,
+            line,
+            character,
+            text: text.into(),
+        }
     }
 
     fn outside(path: &str, label: &str, line: usize, text: &str) -> Located {
-        Located { path: path.into(), outside: Some(label.into()), line, character: 0, text: text.into() }
+        Located {
+            path: path.into(),
+            outside: Some(label.into()),
+            line,
+            character: 0,
+            text: text.into(),
+        }
     }
 
     fn references(symbol: &str, locations: Vec<Located>, pending: bool) -> References {
@@ -636,17 +713,33 @@ mod tests {
     #[test]
     fn the_identifier_under_a_caret_is_found_from_either_end_and_inside() {
         let line = "let next_token = state.next_token();";
-        assert_eq!(identifier_at(line, 4), Some((4, "next_token")), "at the start");
-        assert_eq!(identifier_at(line, 14), Some((4, "next_token")), "just past the end");
+        assert_eq!(
+            identifier_at(line, 4),
+            Some((4, "next_token")),
+            "at the start"
+        );
+        assert_eq!(
+            identifier_at(line, 14),
+            Some((4, "next_token")),
+            "just past the end"
+        );
         assert_eq!(identifier_at(line, 9), Some((4, "next_token")), "inside");
-        assert_eq!(identifier_at(line, 23), Some((23, "next_token")), "after a dot");
+        assert_eq!(
+            identifier_at(line, 23),
+            Some((23, "next_token")),
+            "after a dot"
+        );
         assert_eq!(identifier_at(line, 0), Some((0, "let")));
     }
 
     #[test]
     fn a_caret_on_punctuation_or_past_the_line_finds_nothing_or_the_last_word() {
         assert_eq!(identifier_at("a + b", 2), None, "on the plus");
-        assert_eq!(identifier_at("foo(bar)", 8), None, "after the closing bracket");
+        assert_eq!(
+            identifier_at("foo(bar)", 8),
+            None,
+            "after the closing bracket"
+        );
         assert_eq!(identifier_at("   ", 1), None);
         assert_eq!(identifier_at("", 0), None);
         // A caret past the end is treated as at the end.
@@ -685,12 +778,23 @@ mod tests {
 
     #[test]
     fn two_references_on_one_line_make_one_row() {
-        let locations = vec![reference("a.rs", 3, 4, "foo(foo)"), reference("a.rs", 3, 8, "foo(foo)")];
+        let locations = vec![
+            reference("a.rs", 3, 4, "foo(foo)"),
+            reference("a.rs", 3, 8, "foo(foo)"),
+        ];
         let groups = group_by_file(&locations);
         assert_eq!(groups[0].1.len(), 1);
         let rows = rows(&references("foo", locations, false));
         assert_eq!(rows.len(), 2, "a heading and one line");
-        assert_eq!(rows[0], Row::File { path: "a.rs".into(), outside: None, count: 1, first: true });
+        assert_eq!(
+            rows[0],
+            Row::File {
+                path: "a.rs".into(),
+                outside: None,
+                count: 1,
+                first: true
+            }
+        );
     }
 
     #[test]
@@ -726,10 +830,19 @@ mod tests {
         };
         assert_eq!(
             rows(&loading),
-            vec![Row::Notice("None found (rust-analyzer is still loading).".into())]
+            vec![Row::Notice(
+                "None found (rust-analyzer is still loading).".into()
+            )]
         );
 
-        let away = references("s", vec![outside("/r/x-1.0.0/src/lib.rs", "x 1.0.0", 1, ""), outside("/r/x-1.0.0/src/lib.rs", "x 1.0.0", 2, "")], false);
+        let away = references(
+            "s",
+            vec![
+                outside("/r/x-1.0.0/src/lib.rs", "x 1.0.0", 1, ""),
+                outside("/r/x-1.0.0/src/lib.rs", "x 1.0.0", 2, ""),
+            ],
+            false,
+        );
         assert_eq!(summary(&away), "2 elsewhere");
     }
 
@@ -739,12 +852,25 @@ mod tests {
             "Read",
             vec![
                 reference("src/a.rs", 4, 0, "impl Read for A"),
-                outside("/r/tokio-1.40.0/src/io.rs", "tokio 1.40.0", 7, "impl Read for B"),
+                outside(
+                    "/r/tokio-1.40.0/src/io.rs",
+                    "tokio 1.40.0",
+                    7,
+                    "impl Read for B",
+                ),
             ],
             false,
         );
         let rows = rows(&listed);
-        assert_eq!(rows[0], Row::File { path: "src/a.rs".into(), outside: None, count: 1, first: true });
+        assert_eq!(
+            rows[0],
+            Row::File {
+                path: "src/a.rs".into(),
+                outside: None,
+                count: 1,
+                first: true
+            }
+        );
         assert_eq!(
             rows[2],
             Row::File {
@@ -765,10 +891,16 @@ mod tests {
 
     #[test]
     fn only_whole_words_are_emphasised() {
-        assert_eq!(occurrences("let token = next_token(token);", "token"), vec![4..9, 23..28]);
+        assert_eq!(
+            occurrences("let token = next_token(token);", "token"),
+            vec![4..9, 23..28]
+        );
         assert!(occurrences("no match here", "token").is_empty());
         assert!(occurrences("x", "").is_empty());
-        assert!(occurrences("aaa", "aa").is_empty(), "one identifier, not two");
+        assert!(
+            occurrences("aaa", "aa").is_empty(),
+            "one identifier, not two"
+        );
     }
 
     #[test]
@@ -794,9 +926,12 @@ mod tests {
         let mut asked = move || {
             std::iter::from_fn(|| commands.try_recv().ok())
                 .filter_map(|c| match c {
-                    Command::References { token, path, line, character } => {
-                        Some((token, path, line, character))
-                    }
+                    Command::References {
+                        token,
+                        path,
+                        line,
+                        character,
+                    } => Some((token, path, line, character)),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -816,13 +951,18 @@ mod tests {
         assert!(!open.pending);
         assert_eq!(
             rows(&open),
-            vec![Row::Notice("None found (rust-analyzer is still loading).".into())]
+            vec![Row::Notice(
+                "None found (rust-analyzer is still loading).".into()
+            )]
         );
 
         state.ask_again(&backend, perch_lsp::ServerKind::Gopls);
         assert!(asked().is_empty(), "not its server");
 
-        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
+        state.set_server_status(
+            perch_lsp::ServerKind::RustAnalyzer,
+            perch_lsp::Status::Ready,
+        );
         state.ask_again(&backend, perch_lsp::ServerKind::RustAnalyzer);
         let again = asked();
         assert_eq!(again.len(), 1);
@@ -862,7 +1002,11 @@ mod window {
     fn goes_dark_with_the_system() {
         let mut harness = app_harness().0;
         let left = crate::theme::dark_check::light_left(&mut harness);
-        assert!(left.is_empty(), "light colours left in dark:\n{}", left.join("\n"));
+        assert!(
+            left.is_empty(),
+            "light colours left in dark:\n{}",
+            left.join("\n")
+        );
     }
 
     /// The whole window on Code, with one file open and loaded.
@@ -922,7 +1066,10 @@ mod window {
         state.tab.set(crate::review::model::ItemTab::Code);
         state.pull_request.set(Some(Arc::new(pr)));
         state.composer_autofocus.set(false);
-        state.set_server_status(perch_lsp::ServerKind::RustAnalyzer, perch_lsp::Status::Ready);
+        state.set_server_status(
+            perch_lsp::ServerKind::RustAnalyzer,
+            perch_lsp::Status::Ready,
+        );
         let backend = crate::backend::Backend::detached();
         let view = crate::ui::app_view(app, state, Rc::new(backend));
         let mut harness = HeadlessHarness::new_with_size(root, view, WIDTH, HEIGHT);
@@ -1024,7 +1171,10 @@ mod window {
         harness.dispatch_event(key(Code::Escape, Modifiers::empty()));
         harness.rebuild();
         harness.paint();
-        assert!(state.references.get().is_none(), "escape did not close the panel");
+        assert!(
+            state.references.get().is_none(),
+            "escape did not close the panel"
+        );
     }
 
     #[test]
@@ -1035,27 +1185,45 @@ mod window {
         state.cursor_line.set(1);
         state.last_position.set(Some((1, 4)));
         harness.dispatch_event(key(Code::F12, Modifiers::SHIFT));
-        assert_eq!(state.references.get().map(|r| r.symbol.clone()).as_deref(), Some("beta"));
+        assert_eq!(
+            state.references.get().map(|r| r.symbol.clone()).as_deref(),
+            Some("beta")
+        );
 
         // The change nav moved the cursor line without a click: the
         // click's column is not that line's, so its first identifier.
         state.references.set(None);
         state.cursor_line.set(2);
         harness.dispatch_event(key(Code::F12, Modifiers::SHIFT));
-        assert_eq!(state.references.get().map(|r| r.symbol.clone()).as_deref(), Some("alpha"));
+        assert_eq!(
+            state.references.get().map(|r| r.symbol.clone()).as_deref(),
+            Some("alpha")
+        );
     }
 
     #[test]
     fn escape_leaves_the_panel_to_an_open_composer() {
         let (mut harness, state) = app_harness();
         state.references.set(Some(answered("alpha")));
-        state.open_composer(None, None, String::new(), (perch_agent::Backend::ClaudeCode, "sonnet".into(), perch_agent::Effort::Medium));
+        state.open_composer(
+            None,
+            None,
+            String::new(),
+            (
+                perch_agent::Backend::ClaudeCode,
+                "sonnet".into(),
+                perch_agent::Effort::Medium,
+            ),
+        );
         harness.rebuild();
         harness.paint();
         harness.dispatch_event(key(Code::Escape, Modifiers::empty()));
         harness.rebuild();
         harness.paint();
-        assert!(state.composer.get().is_none(), "the composer takes the first escape");
+        assert!(
+            state.composer.get().is_none(),
+            "the composer takes the first escape"
+        );
         assert!(state.references.get().is_some(), "and the panel stays");
     }
 
@@ -1078,7 +1246,10 @@ mod window {
         harness.pointer_up(x, y - 80.0);
         harness.rebuild();
         harness.paint();
-        assert_eq!(state.references_height.get(), crate::theme::REFERENCES_HEIGHT + 80.0);
+        assert_eq!(
+            state.references_height.get(),
+            crate::theme::REFERENCES_HEIGHT + 80.0
+        );
 
         // Past the limit, it stops at the limit.
         let y = panel_top() - 80.0;
@@ -1089,7 +1260,10 @@ mod window {
         harness.pointer_up(x, y - 2000.0);
         harness.rebuild();
         harness.paint();
-        assert_eq!(state.references_height.get(), crate::theme::REFERENCES_MAX_HEIGHT);
+        assert_eq!(
+            state.references_height.get(),
+            crate::theme::REFERENCES_MAX_HEIGHT
+        );
     }
 
     #[test]

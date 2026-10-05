@@ -60,7 +60,10 @@ fn spawn(total: Arc<AtomicUsize>) -> (String, Arc<Mutex<Vec<Request>>>) {
             let Some((path, if_none_match)) = read_request(&mut stream) else {
                 continue;
             };
-            assert!(path.starts_with("/repos/a/b/issues/7/timeline?per_page=100&page="), "{path}");
+            assert!(
+                path.starts_with("/repos/a/b/issues/7/timeline?per_page=100&page="),
+                "{path}"
+            );
             let page: usize = path.rsplit("page=").next().unwrap().parse().unwrap();
             seen.lock().unwrap().push(Request {
                 page,
@@ -81,9 +84,17 @@ fn spawn(total: Arc<AtomicUsize>) -> (String, Arc<Mutex<Vec<Request>>>) {
                 let link = if last <= 1 {
                     String::new()
                 } else if page < last {
-                    format!("Link: {}; rel=\"next\", {}; rel=\"last\"\r\n", at(page + 1), at(last))
+                    format!(
+                        "Link: {}; rel=\"next\", {}; rel=\"last\"\r\n",
+                        at(page + 1),
+                        at(last)
+                    )
                 } else {
-                    format!("Link: {}; rel=\"prev\", {}; rel=\"first\"\r\n", at(page - 1), at(1))
+                    format!(
+                        "Link: {}; rel=\"prev\", {}; rel=\"first\"\r\n",
+                        at(page - 1),
+                        at(1)
+                    )
                 };
                 let body = format!("[{}]", events.join(","));
                 format!(
@@ -162,11 +173,23 @@ async fn a_timeline_that_grew_behind_an_unchanged_first_page_is_still_read_to_it
     total.store(1250, Ordering::SeqCst);
     let labels = labels(&github).await;
 
-    let tagged = requests.lock().unwrap().iter().map(|r| r.tagged).collect::<Vec<_>>();
-    assert_eq!(tagged, [[true; 10].as_slice(), &[false]].concat(), "only page 13 is new");
+    let tagged = requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|r| r.tagged)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tagged,
+        [[true; 10].as_slice(), &[false]].concat(),
+        "only page 13 is new"
+    );
     assert_eq!(pages(&requests), [1, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     assert_eq!(labels.len(), 100 + 800 + 50);
     assert_eq!(labels.last().map(String::as_str), Some("l1249"));
-    assert!(!labels.contains(&"l399".to_string()), "page 4 fell out of the nine newest");
+    assert!(
+        !labels.contains(&"l399".to_string()),
+        "page 4 fell out of the nine newest"
+    );
     assert!(labels.contains(&"l400".to_string()));
 }

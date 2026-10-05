@@ -646,7 +646,13 @@ fn version_number(text: &str) -> Option<String> {
 /// machine.
 async fn language_servers(ctx: &Ctx, request: &PrepareRequest) -> Vec<String> {
     let mut clients: Vec<(&str, Arc<perch_lsp::Client>)> = Vec::new();
-    let mut open: Vec<_> = ctx.language_servers.lock().await.values().cloned().collect();
+    let mut open: Vec<_> = ctx
+        .language_servers
+        .lock()
+        .await
+        .values()
+        .cloned()
+        .collect();
     open.sort_by_key(|client| client.kind());
     for client in open {
         clients.push(("Open checkout", client));
@@ -698,7 +704,12 @@ async fn language_servers(ctx: &Ctx, request: &PrepareRequest) -> Vec<String> {
             .collect();
         if !found.is_empty() {
             let total: u64 = found.iter().map(|p| p.rss_kb).sum();
-            others.push(format!("{} {}, {}", found.len(), kind.name(), megabytes(total)));
+            others.push(format!(
+                "{} {}, {}",
+                found.len(),
+                kind.name(),
+                megabytes(total)
+            ));
         }
     }
     lines.push(if others.is_empty() {

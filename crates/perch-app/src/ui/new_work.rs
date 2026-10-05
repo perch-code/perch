@@ -162,10 +162,17 @@ fn remove_repo(state: AppState, backend: &Backend, identity: &str) {
         .repos
         .update(|repos| repos.retain(|r| !r.identity.eq_ignore_ascii_case(identity)));
     let nw = state.new_work;
-    if !nw.repo.get_untracked().is_some_and(|r| r.eq_ignore_ascii_case(identity)) {
+    if !nw
+        .repo
+        .get_untracked()
+        .is_some_and(|r| r.eq_ignore_ascii_case(identity))
+    {
         return;
     }
-    match state.repos.with_untracked(|repos| repos.first().map(|r| r.identity.clone())) {
+    match state
+        .repos
+        .with_untracked(|repos| repos.first().map(|r| r.identity.clone()))
+    {
         Some(next) => choose_repo(state, backend, &next),
         None => {
             nw.repo.set(None);
@@ -304,7 +311,10 @@ fn agent_chips(state: AppState) -> impl IntoView {
             let (_, selected, effort) = floem::reactive::Effect::untrack(|| chosen_agent(state));
             let agent = state.agent.get_untracked();
             let mut menu = Menu::new();
-            for (i, group) in crate::review::threads::model_groups(&agent).into_iter().enumerate() {
+            for (i, group) in crate::review::threads::model_groups(&agent)
+                .into_iter()
+                .enumerate()
+            {
                 if i > 0 {
                     menu = menu.separator();
                 }
@@ -327,7 +337,8 @@ fn agent_chips(state: AppState) -> impl IntoView {
     let effort = menu_button(
         move || chosen_agent(state).2.label().to_string(),
         move || {
-            let (backend, model, selected) = floem::reactive::Effect::untrack(|| chosen_agent(state));
+            let (backend, model, selected) =
+                floem::reactive::Effect::untrack(|| chosen_agent(state));
             let agent = state.agent.get_untracked();
             let mut menu = Menu::new();
             for effort in perch_agent::Effort::ALL {
@@ -685,7 +696,10 @@ mod tests {
         let backend = Backend::detached();
         open(app, &backend);
         assert!(app.new_work.open.get_untracked());
-        assert_eq!(app.new_work.repo.get_untracked().as_deref(), Some("local/notes"));
+        assert_eq!(
+            app.new_work.repo.get_untracked().as_deref(),
+            Some("local/notes")
+        );
         assert_eq!(
             request(app).unwrap_err(),
             "Listing branches…",
@@ -693,13 +707,18 @@ mod tests {
         );
 
         // An answer for a repository no longer chosen is dropped.
-        app.new_work
-            .take_bases("acme/widgets".into(), Ok(vec![BaseBranch::on("origin", "main")]));
+        app.new_work.take_bases(
+            "acme/widgets".into(),
+            Ok(vec![BaseBranch::on("origin", "main")]),
+        );
         assert_eq!(app.new_work.base.get_untracked(), None);
 
         app.new_work.take_bases(
             "local/notes".into(),
-            Ok(vec![BaseBranch::local("main"), BaseBranch::local("feature")]),
+            Ok(vec![
+                BaseBranch::local("main"),
+                BaseBranch::local("feature"),
+            ]),
         );
         app.new_work.prefix.set("chris/".into());
         app.new_work.text.set("Add a README".into());
@@ -714,7 +733,8 @@ mod tests {
         let app = app();
         app.new_work.prefix.set("chris/".into());
         app.new_work.repo.set(Some("local/notes".into()));
-        app.new_work.take_bases("local/notes".into(), Ok(vec![BaseBranch::local("main")]));
+        app.new_work
+            .take_bases("local/notes".into(), Ok(vec![BaseBranch::local("main")]));
         let root = TestRoot::new();
         let view = new_work_view(app, Rc::new(Backend::detached()));
         let mut harness = HeadlessHarness::new_with_size(root, view, 1100.0, 700.0);
@@ -734,7 +754,10 @@ mod tests {
         assert!(start.y0 >= repo.y1, "Start is under the chips");
         assert!(start.x1 <= 1100.0, "{start:?}");
         assert!(message.width() <= theme::CONVERSATION_WIDTH + 1.0);
-        assert!(named(root, "new-work-agent").is_none(), "no agent without a message");
+        assert!(
+            named(root, "new-work-agent").is_none(),
+            "no agent without a message"
+        );
 
         // With a message, who it goes to sits beside the repository.
         app.new_work.text.set("Add a README".into());
@@ -760,17 +783,26 @@ mod tests {
         assert_eq!(suggested_branch("chris/", "   "), "chris/work");
         assert_eq!(suggested_branch("", "-- !!"), "work");
         let long = "internationalization ".repeat(5);
-        assert_eq!(suggested_branch("", &long), "internationalization-internationalization");
+        assert_eq!(
+            suggested_branch("", &long),
+            "internationalization-internationalization"
+        );
     }
 
     #[test]
     fn a_link_in_the_message_names_what_it_points_at() {
         assert_eq!(
-            suggested_branch("", "Fix https://github.com/slatedb/slatedb/actions/runs/36595615717/job/109499634151"),
+            suggested_branch(
+                "",
+                "Fix https://github.com/slatedb/slatedb/actions/runs/36595615717/job/109499634151"
+            ),
             "fix-ci-36595615717"
         );
         assert_eq!(
-            suggested_branch("", "Review https://github.com/acme/widgets/pull/12#discussion_r1"),
+            suggested_branch(
+                "",
+                "Review https://github.com/acme/widgets/pull/12#discussion_r1"
+            ),
             "review-pr-12"
         );
         assert_eq!(
@@ -778,13 +810,22 @@ mod tests {
             "do-issue-7"
         );
         assert_eq!(
-            suggested_branch("", "Revert https://github.com/acme/widgets/commit/0123456789abcdef"),
+            suggested_branch(
+                "",
+                "Revert https://github.com/acme/widgets/commit/0123456789abcdef"
+            ),
             "revert-commit-0123456"
         );
         assert_eq!(
-            suggested_branch("", "Read https://docs.rs/tokio/latest/tokio/fn.spawn.html please"),
+            suggested_branch(
+                "",
+                "Read https://docs.rs/tokio/latest/tokio/fn.spawn.html please"
+            ),
             "read-fn-spawn"
         );
-        assert_eq!(suggested_branch("", "See https://example.com/"), "see-example");
+        assert_eq!(
+            suggested_branch("", "See https://example.com/"),
+            "see-example"
+        );
     }
 }

@@ -49,7 +49,11 @@ async fn scan(args: &[String]) {
 
     for repo in &config.repo {
         let roots: Vec<PathBuf> = repo.root_paths();
-        println!("repo {} ({})", repo.display_name(), repo.identity().unwrap_or("unresolved"));
+        println!(
+            "repo {} ({})",
+            repo.display_name(),
+            repo.identity().unwrap_or("unresolved")
+        );
         if roots.is_empty() {
             println!("  no roots");
             continue;
@@ -74,12 +78,18 @@ async fn print_root(git: &Git, root: &Path, base: Option<&str>, hosts: &[&str]) 
 
     match (&scan.github, &scan.remote) {
         (Some(github), Some(remote)) => {
-            println!("    github {github} (remote {remote}), base {}, diffed against {}", scan.base, scan.base_ref)
+            println!(
+                "    github {github} (remote {remote}), base {}, diffed against {}",
+                scan.base, scan.base_ref
+            )
         }
         _ => println!("    no GitHub remote (local), base {}", scan.base),
     }
     for entry in &scan.entries {
-        println!("    {}", describe(git, entry, &scan.base, &scan.base_ref).await);
+        println!(
+            "    {}",
+            describe(git, entry, &scan.base, &scan.base_ref).await
+        );
     }
 }
 
@@ -94,7 +104,10 @@ async fn describe(git: &Git, entry: &WorktreeEntry, base: &str, base_ref: &str) 
     match entry.branch.as_deref() {
         None => format!("{}  (detached)  {head}{main}", entry.path.display()),
         Some(branch) if entry.prunable || !entry.path.join(".git").exists() => {
-            format!("{}  {branch}  {head}  (gone, not an item){main}", entry.path.display())
+            format!(
+                "{}  {branch}  {head}  (gone, not an item){main}",
+                entry.path.display()
+            )
         }
         Some(branch) if branch == base => {
             format!(

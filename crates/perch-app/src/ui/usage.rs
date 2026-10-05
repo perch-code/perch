@@ -506,14 +506,23 @@ mod tests {
         let (mut harness, _app, review) = window_with_usage();
         let gauge = rect(&harness, "usage-button");
         let footer = rect(&harness, "drawer footer");
-        assert!(footer.contains(gauge.center()), "the gauge is not in the drawer's footer");
+        assert!(
+            footer.contains(gauge.center()),
+            "the gauge is not in the drawer's footer"
+        );
 
         open(&mut harness);
         assert!(review.usage_open.get());
         let popover = rect(&harness, "usage-popover");
         assert!(popover.y1 <= gauge.y0, "{popover:?} {gauge:?}");
-        assert!((popover.x0 - gauge.x0).abs() < 1.0, "left edges aligned: {popover:?} {gauge:?}");
-        assert!((popover.width() - theme::FOOTER_POPOVER_WIDTH).abs() < 1.0, "as wide as the bug report");
+        assert!(
+            (popover.x0 - gauge.x0).abs() < 1.0,
+            "left edges aligned: {popover:?} {gauge:?}"
+        );
+        assert!(
+            (popover.width() - theme::FOOTER_POPOVER_WIDTH).abs() < 1.0,
+            "as wide as the bug report"
+        );
         let claude = rect(&harness, "usage-section:Claude");
         let codex = rect(&harness, "usage-section:Codex");
         assert!(claude.y1 <= codex.y0, "Claude before Codex");
@@ -573,6 +582,9 @@ mod tests {
         assert!(review.agents_dropdown_open.get());
         harness.click(page.x0 + 100.0, page.y0 + 400.0);
         settle(&mut harness);
-        assert!(!review.agents_dropdown_open.get(), "a press outside left it up");
+        assert!(
+            !review.agents_dropdown_open.get(),
+            "a press outside left it up"
+        );
     }
 }

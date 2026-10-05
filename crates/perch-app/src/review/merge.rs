@@ -11,12 +11,14 @@ use floem::event::EventPropagation;
 use floem::peniko::Color;
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::views::{dyn_container, dyn_stack, Container, Decorators, Empty, Label, Stack, TextInput};
+use floem::views::{
+    dyn_container, dyn_stack, Container, Decorators, Empty, Label, Stack, TextInput,
+};
 use floem::AnyView;
 use perch_github::{
-    Check, CheckRunState, CheckState, Checks, CommitMessage, Item, MergeMethod, MergeMethods, MergeState,
-    MergeableState, PullRequest, PullRequestOverview, RepositoryPermission, ReviewDecision,
-    SubjectState,
+    Check, CheckRunState, CheckState, Checks, CommitMessage, Item, MergeMethod, MergeMethods,
+    MergeState, MergeableState, PullRequest, PullRequestOverview, RepositoryPermission,
+    ReviewDecision, SubjectState,
 };
 
 use crate::backend::Backend;
@@ -102,7 +104,9 @@ impl MessageDraft {
             request.method,
         );
         let default = default.cloned().unwrap_or_default();
-        let ours = self.filled_for.with_untracked(|filled| filled.as_ref() == Some(&key));
+        let ours = self
+            .filled_for
+            .with_untracked(|filled| filled.as_ref() == Some(&key));
         let stale = self.filled_with.with_untracked(|filled| {
             *filled != default
                 && self.title.with_untracked(|title| *title == filled.title)
@@ -625,9 +629,10 @@ fn merge_section(
             // request's head, so its files can be ahead of, behind, or
             // beside what GitHub would merge.
             stale: state.stale_head.with(Option::is_some)
-                || state
-                    .item
-                    .with(|item| item.as_ref().is_some_and(|item| item.divergence().is_some())),
+                || state.item.with(|item| {
+                    item.as_ref()
+                        .is_some_and(|item| item.divergence().is_some())
+                }),
             selected_method: selected_method.get(),
             bypass_requirements: bypass_requirements.get(),
             confirmation: confirmation.get(),
@@ -666,14 +671,18 @@ fn merge_content(
     // Nothing is left to decide once it is merged or closed: it says so,
     // with no button that can never be pressed.
     if let Some((state, title, detail)) = finished_copy(pull) {
-        return status_row(state_glyph(state, move || state_color(state)), title, detail)
-            .style(|s| {
-                s.padding(16.0)
-                    .border_top(1.0)
-                    .border_color(theme::border())
-            })
-            .debug_name("merge-finished")
-            .into_any();
+        return status_row(
+            state_glyph(state, move || state_color(state)),
+            title,
+            detail,
+        )
+        .style(|s| {
+            s.padding(16.0)
+                .border_top(1.0)
+                .border_color(theme::border())
+        })
+        .debug_name("merge-finished")
+        .into_any();
     }
     let decision = merge_decision(&snapshot, pull, item);
     let status = merge_status(decision, snapshot.overview.as_deref(), item.divergence());
@@ -838,9 +847,12 @@ fn merge_controls(
                 push_label(item.divergence().and_then(|d| d.ahead))
             };
             let pending = snapshot.push_pending;
-            merge_button(label, true, move || !pending, move || {
-                crate::review::summary::push(state, &backend)
-            })
+            merge_button(
+                label,
+                true,
+                move || !pending,
+                move || crate::review::summary::push(state, &backend),
+            )
             .into_any()
         }
         // A draft can't be merged, and Ready for review is what clears it.
@@ -855,9 +867,12 @@ fn merge_controls(
             } else {
                 "Ready for review"
             };
-            merge_button(label.to_string(), true, move || !pending, move || {
-                crate::review::summary::set_draft(state, &backend, false)
-            })
+            merge_button(
+                label.to_string(),
+                true,
+                move || !pending,
+                move || crate::review::summary::set_draft(state, &backend, false),
+            )
             .into_any()
         }
         MergeDecision::Disabled(_) => {
@@ -1038,7 +1053,10 @@ fn confirmation_controls(
                 return;
             }
             let message = with_message.then(|| message.message());
-            if message.as_ref().is_some_and(|message| message.title.is_empty()) {
+            if message
+                .as_ref()
+                .is_some_and(|message| message.title.is_empty())
+            {
                 return;
             }
             state.merge_pending.set(true);
@@ -1638,11 +1656,20 @@ mod tests {
 
     #[test]
     fn a_diverged_worktree_says_how_in_the_reason() {
-        let diverged = perch_github::Diverged { ahead: Some(1), behind: Some(0) };
+        let diverged = perch_github::Diverged {
+            ahead: Some(1),
+            behind: Some(0),
+        };
         let (_, detail) = disabled_copy(DisabledReason::StaleCheckout, None, Some(diverged));
-        assert_eq!(detail, "The worktree isn't at the pull request's head: 1 unpushed.");
+        assert_eq!(
+            detail,
+            "The worktree isn't at the pull request's head: 1 unpushed."
+        );
         let (_, detail) = disabled_copy(DisabledReason::StaleCheckout, None, None);
-        assert_eq!(detail, "The files on screen do not match GitHub's current pull request head.");
+        assert_eq!(
+            detail,
+            "The files on screen do not match GitHub's current pull request head."
+        );
     }
 
     #[test]
@@ -1716,7 +1743,10 @@ mod tests {
         ]);
         assert_eq!(checks_summary(&partway), "1 running · 2 waiting · 1 passed");
 
-        let between = rerun(vec![check(CheckRunState::Waiting), check(CheckRunState::Success)]);
+        let between = rerun(vec![
+            check(CheckRunState::Waiting),
+            check(CheckRunState::Success),
+        ]);
         assert_eq!(checks_summary(&between), "1 waiting · 1 passed");
     }
 
@@ -1740,7 +1770,11 @@ mod tests {
     fn rendered_surface_shows_checks_and_supports_keyboard_bypass_confirmation() {
         let root = TestRoot::new();
         let state = review_state(MergeState::Blocked, true);
-        let view = surface(crate::state::AppState::new(), state, Rc::new(Backend::detached()));
+        let view = surface(
+            crate::state::AppState::new(),
+            state,
+            Rc::new(Backend::detached()),
+        );
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         harness.rebuild();
         harness.paint();
@@ -1778,7 +1812,9 @@ mod tests {
         let state = review_state(MergeState::Clean, false);
         state.item.update(|slot| {
             let mut item = (**slot.as_ref().unwrap()).clone();
-            item.subject = Some(perch_github::ItemSubject::PullRequest((*pull_request("head-42")).clone()));
+            item.subject = Some(perch_github::ItemSubject::PullRequest(
+                (*pull_request("head-42")).clone(),
+            ));
             let checkout = item.checkout.as_mut().unwrap();
             checkout.head_sha = "head-43".into();
             checkout.divergence = Some(perch_github::Divergence {
@@ -1804,7 +1840,8 @@ mod tests {
         harness.rebuild();
         harness.paint();
 
-        let push = named(harness.root_id(), "merge-action:Push-2-commits").expect("Push in the merge box");
+        let push =
+            named(harness.root_id(), "merge-action:Push-2-commits").expect("Push in the merge box");
         assert!(named(harness.root_id(), "merge-action:Merge-unavailable").is_none());
         push.request_focus();
         harness.rebuild();
@@ -1814,7 +1851,8 @@ mod tests {
 
         let sent: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
         assert!(
-            sent.iter().any(|c| matches!(c, Command::PushBranch { item_id } if item_id == "item-42")),
+            sent.iter()
+                .any(|c| matches!(c, Command::PushBranch { item_id } if item_id == "item-42")),
             "{sent:?}"
         );
         assert!(state.push_pending.get_untracked());
@@ -1822,7 +1860,9 @@ mod tests {
 
         // A refused push says why, and Push comes back.
         state.push_pending.set(false);
-        state.push_error.set(Some("The remote has commits this branch doesn't.".into()));
+        state
+            .push_error
+            .set(Some("The remote has commits this branch doesn't.".into()));
         harness.rebuild();
         harness.paint();
         assert!(named(harness.root_id(), "merge-push-error").is_some());
@@ -1865,7 +1905,8 @@ mod tests {
         may_set_draft.set(true);
         harness.rebuild();
         harness.paint();
-        let ready = named(harness.root_id(), "merge-action:Ready-for-review").expect("Ready for review");
+        let ready =
+            named(harness.root_id(), "merge-action:Ready-for-review").expect("Ready for review");
         ready.request_focus();
         harness.rebuild();
         harness.dispatch_event(key(Code::Enter));
@@ -2031,7 +2072,10 @@ mod tests {
         read("Merge support (#42)", "* Add the merge box\n* Say why");
         press(&mut harness, "merge-action:Squash-and-merge");
         assert_eq!(message.title.get_untracked(), "Merge support (#42)");
-        assert_eq!(message.body.get_untracked(), "* Add the merge box\n* Say why");
+        assert_eq!(
+            message.body.get_untracked(),
+            "* Add the merge box\n* Say why"
+        );
 
         // Typed in, then read again: the typing stays.
         message.title.set("Add a merge box (#42)".into());
@@ -2039,7 +2083,10 @@ mod tests {
         read("Merge support (#42)", "* Something else");
         press(&mut harness, "merge-action:Squash-and-merge");
         assert_eq!(message.title.get_untracked(), "Add a merge box (#42)");
-        assert_eq!(message.body.get_untracked(), "* Add the merge box\n* Say why");
+        assert_eq!(
+            message.body.get_untracked(),
+            "* Add the merge box\n* Say why"
+        );
     }
 
     #[test]
@@ -2060,7 +2107,11 @@ mod tests {
         merged.merged = true;
         merged.merged_by = Some("criccomini".into());
         state.pull_request.set(Some(Arc::new(merged.clone())));
-        let view = surface(crate::state::AppState::new(), state, Rc::new(Backend::detached()));
+        let view = surface(
+            crate::state::AppState::new(),
+            state,
+            Rc::new(Backend::detached()),
+        );
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         harness.rebuild();
         harness.paint();

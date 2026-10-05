@@ -17,10 +17,10 @@ use crate::backend::Backend;
 use crate::icons::{self, SidebarIcon};
 use crate::items::InboxView;
 use crate::review::start_work;
+use crate::snooze;
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
-use crate::snooze;
 use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::nav_row;
 use crate::ui::widgets::{icon_button, open_in_browser, sidebar_glyph, state_glyph};
@@ -39,12 +39,12 @@ pub fn notification_list(state: AppState, backend: Rc<Backend>) -> impl IntoView
                         InboxView::Snoozed => "No snoozed notifications",
                         InboxView::Inbox => "No matching notifications",
                     })
-                        .style(|s| {
-                            s.font_size(theme::TEXT_META)
-                                .color(theme::nav_subtle())
-                                .padding(24.0)
-                        })
-                        .into_any()
+                    .style(|s| {
+                        s.font_size(theme::TEXT_META)
+                            .color(theme::nav_subtle())
+                            .padding(24.0)
+                    })
+                    .into_any()
                 } else {
                     Empty::new().into_any()
                 }
@@ -53,7 +53,9 @@ pub fn notification_list(state: AppState, backend: Rc<Backend>) -> impl IntoView
         dyn_stack(
             move || {
                 let away = show().is_put_away();
-                visible_notifications(state).into_iter().map(move |thread| (thread, away))
+                visible_notifications(state)
+                    .into_iter()
+                    .map(move |thread| (thread, away))
             },
             |(thread, away): &(Thread, bool)| {
                 (
@@ -83,7 +85,12 @@ pub fn visible_notifications(state: AppState) -> Vec<Thread> {
 
 /// A row of the inbox, or with `away` of View › Done or Snoozed, where
 /// the row's action moves it back instead.
-fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread, away: bool) -> impl IntoView {
+fn notification_row(
+    state: AppState,
+    backend: Rc<Backend>,
+    thread: Thread,
+    away: bool,
+) -> impl IntoView {
     let hovered = RwSignal::new(false);
     let unread = thread.unread;
     let title = thread.subject.title.clone();
@@ -131,7 +138,9 @@ fn notification_row(state: AppState, backend: Rc<Backend>, thread: Thread, away:
         })
         .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
         .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
-        .right_click_menu(move || notification_menu(state, menu_backend.clone(), &menu_thread, away))
+        .right_click_menu(move || {
+            notification_menu(state, menu_backend.clone(), &menu_thread, away)
+        })
         .style(|s| nav_row::row_style(s, false));
     Container::new(row).style(nav_row::row_gutter)
 }
@@ -176,7 +185,12 @@ fn notification_glyph(thread: &Thread) -> impl IntoView {
 /// even that, and on a subject nobody opened: a workflow run, a release.
 fn byline(state: AppState, thread: &Thread) -> impl IntoView {
     let faces = match thread.subject_snapshot.as_ref() {
-        Some(snapshot) if snapshot.participants.as_ref().is_some_and(|p| !p.is_empty()) => {
+        Some(snapshot)
+            if snapshot
+                .participants
+                .as_ref()
+                .is_some_and(|p| !p.is_empty()) =>
+        {
             nav_row::participant_faces(snapshot.participants.as_deref().unwrap_or_default())
         }
         Some(snapshot) if !snapshot.author_login.is_empty() => vec![nav_row::Face::new(
@@ -185,7 +199,12 @@ fn byline(state: AppState, thread: &Thread) -> impl IntoView {
         )],
         _ => vec![nav_row::Face::new(
             thread.repository.owner_avatar_url.clone(),
-            thread.repository.full_name.split('/').next().unwrap_or_default(),
+            thread
+                .repository
+                .full_name
+                .split('/')
+                .next()
+                .unwrap_or_default(),
         )],
     };
     let snapshot = thread.subject_snapshot.as_ref();
@@ -301,7 +320,10 @@ fn done(state: AppState, backend: &Backend, thread: &Thread) {
 /// request to the backend so a failure is told once.
 pub(crate) fn done_all(state: AppState, backend: &Backend, threads: &[Thread]) {
     backend.done_notifications(threads.iter().map(|thread| thread.id.clone()).collect());
-    if let Some(viewing) = threads.iter().find(|thread| state.is_viewing_thread(thread)) {
+    if let Some(viewing) = threads
+        .iter()
+        .find(|thread| state.is_viewing_thread(thread))
+    {
         close_if_viewing(state, backend, viewing);
     }
 }
@@ -368,7 +390,9 @@ fn notification_menu(state: AppState, backend: Rc<Backend>, thread: &Thread, awa
                 let thread = thread.clone();
                 item.icon(SidebarIcon::Branch)
                     .enabled(open)
-                    .action(move || start_work::ask(state, start_work::Pending::Thread(thread.clone())))
+                    .action(move || {
+                        start_work::ask(state, start_work::Pending::Thread(thread.clone()))
+                    })
             })
             .separator();
     }
@@ -401,7 +425,9 @@ fn notification_menu(state: AppState, backend: Rc<Backend>, thread: &Thread, awa
 /// commit's in its hash.
 fn number(thread: &Thread) -> Option<u64> {
     match thread.subject.kind {
-        SubjectKind::PullRequest | SubjectKind::Issue | SubjectKind::Discussion => thread.number_hint(),
+        SubjectKind::PullRequest | SubjectKind::Issue | SubjectKind::Discussion => {
+            thread.number_hint()
+        }
         _ => None,
     }
 }
@@ -499,9 +525,19 @@ mod tests {
         use crate::review::start_work::{thread_open_for_work, thread_subject};
         use perch_github::{ItemKind, SubjectSnapshot, SubjectState};
 
-        let mut pull = thread("42", "org/repo", "Pull", SubjectKind::PullRequest, Reason::Mention, true);
+        let mut pull = thread(
+            "42",
+            "org/repo",
+            "Pull",
+            SubjectKind::PullRequest,
+            Reason::Mention,
+            true,
+        );
         assert_eq!(thread_subject(&pull), Some((ItemKind::PullRequest, 42)));
-        assert!(thread_open_for_work(&pull), "not looked at yet: the backend judges");
+        assert!(
+            thread_open_for_work(&pull),
+            "not looked at yet: the backend judges"
+        );
         let look = |state| SubjectSnapshot {
             author_login: "rohan".into(),
             author_avatar_url: String::new(),
@@ -524,22 +560,64 @@ mod tests {
             assert_eq!(thread_open_for_work(&pull), open, "{state:?}");
         }
 
-        let issue = thread("7", "org/repo", "Issue", SubjectKind::Issue, Reason::Assign, true);
+        let issue = thread(
+            "7",
+            "org/repo",
+            "Issue",
+            SubjectKind::Issue,
+            Reason::Assign,
+            true,
+        );
         assert_eq!(thread_subject(&issue), Some((ItemKind::Issue, 7)));
-        let run = thread("9", "org/repo", "Run", SubjectKind::CheckSuite, Reason::CiActivity, true);
+        let run = thread(
+            "9",
+            "org/repo",
+            "Run",
+            SubjectKind::CheckSuite,
+            Reason::CiActivity,
+            true,
+        );
         assert_eq!(thread_subject(&run), None);
-        let talk = thread("3", "org/repo", "Talk", SubjectKind::Discussion, Reason::Mention, true);
+        let talk = thread(
+            "3",
+            "org/repo",
+            "Talk",
+            SubjectKind::Discussion,
+            Reason::Mention,
+            true,
+        );
         assert_eq!(thread_subject(&talk), None);
     }
 
     #[test]
     fn the_byline_numbers_only_what_github_numbers() {
-        let pull = thread("42", "org/repo", "Pull", SubjectKind::PullRequest, Reason::Mention, true);
+        let pull = thread(
+            "42",
+            "org/repo",
+            "Pull",
+            SubjectKind::PullRequest,
+            Reason::Mention,
+            true,
+        );
         assert_eq!(number(&pull), Some(42));
-        let mut release = thread("246813", "org/repo", "v1.0", SubjectKind::Release, Reason::Subscribed, true);
+        let mut release = thread(
+            "246813",
+            "org/repo",
+            "v1.0",
+            SubjectKind::Release,
+            Reason::Subscribed,
+            true,
+        );
         release.subject.url = Some("https://api.github.com/repos/org/repo/releases/246813".into());
         assert_eq!(number(&release), None);
-        let run = thread("9", "org/repo", "Run", SubjectKind::CheckSuite, Reason::CiActivity, true);
+        let run = thread(
+            "9",
+            "org/repo",
+            "Run",
+            SubjectKind::CheckSuite,
+            Reason::CiActivity,
+            true,
+        );
         assert_eq!(number(&run), None);
     }
 

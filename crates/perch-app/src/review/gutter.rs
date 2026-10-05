@@ -99,7 +99,11 @@ fn digit_width() -> f64 {
         let mut layout = TextLayout::new();
         layout.set_text(
             "0123456789",
-            AttrsList::new(Attrs::new().family(&family).font_size(theme::CODE_FONT_SIZE)),
+            AttrsList::new(
+                Attrs::new()
+                    .family(&family)
+                    .font_size(theme::CODE_FONT_SIZE),
+            ),
             None,
         );
         let width = layout.size().width / 10.0;
@@ -161,9 +165,13 @@ pub fn diff_gutter(
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
 ) -> impl IntoView {
-    column(viewport, scroll_delta, doc, file, move |file, row, entry| {
-        gutter_row(state, app, file, doc, row, entry)
-    })
+    column(
+        viewport,
+        scroll_delta,
+        doc,
+        file,
+        move |file, row, entry| gutter_row(state, app, file, doc, row, entry),
+    )
 }
 
 /// The gutter of a file outside the worktree: line numbers and nothing
@@ -177,13 +185,19 @@ pub fn plain_gutter(
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
 ) -> impl IntoView {
-    column(viewport, scroll_delta, doc, file, move |file, row, entry| {
-        let number = match entry {
-            DocRow::Line { display, .. } => Some(display + 1),
-            _ => None,
-        };
-        row_view(state, app, file, row, number, false, None, Slot::Blank)
-    })
+    column(
+        viewport,
+        scroll_delta,
+        doc,
+        file,
+        move |file, row, entry| {
+            let number = match entry {
+                DocRow::Line { display, .. } => Some(display + 1),
+                _ => None,
+            };
+            row_view(state, app, file, row, number, false, None, Slot::Blank)
+        },
+    )
 }
 
 /// One side of a split. `scroll_delta` is the editor a wheel over the
@@ -197,9 +211,13 @@ pub fn side_gutter(
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
 ) -> impl IntoView {
-    column(viewport, scroll_delta, doc, file, move |file, row, entry| {
-        side_row(state, app, file, side, doc, row, entry)
-    })
+    column(
+        viewport,
+        scroll_delta,
+        doc,
+        file,
+        move |file, row, entry| side_row(state, app, file, side, doc, row, entry),
+    )
 }
 
 /// The rows in view, slid to the scroll, in a column `width` wide beside
@@ -673,7 +691,11 @@ fn change_bar(color: Option<fn() -> Color>) -> impl IntoView {
             None => base,
         }
     }))
-    .style(|s| s.width(theme::GUTTER_BAR).height_full().flex_shrink(0.0_f32))
+    .style(|s| {
+        s.width(theme::GUTTER_BAR)
+            .height_full()
+            .flex_shrink(0.0_f32)
+    })
 }
 
 #[cfg(test)]
@@ -726,7 +748,10 @@ mod tests {
             let w = width(digits);
             assert_eq!(w, w.round(), "{digits} digits: a whole pixel");
             assert!(w - fixed >= digits as f64 * digit, "{digits} digits fit");
-            assert!(w - fixed < digits as f64 * digit + 1.0, "{digits} digits: no room to spare");
+            assert!(
+                w - fixed < digits as f64 * digit + 1.0,
+                "{digits} digits: no room to spare"
+            );
         }
     }
 

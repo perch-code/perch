@@ -18,9 +18,7 @@ use crate::backend::Backend;
 use crate::state::AppState;
 use crate::theme;
 
-use super::model::{
-    AgentRunPurpose, AgentRunStatus, AgentRunSummary,
-};
+use super::model::{AgentRunPurpose, AgentRunStatus, AgentRunSummary};
 use super::{status_color, text_action};
 
 /// What a run did, as its row in an item's Agents list opens to: its
@@ -132,8 +130,7 @@ fn detail_body(
             .inset_bottom(12.0)
             .z_index(3)
     });
-    Stack::new((scroller, jump))
-        .style(|s| s.flex_col().width_full().position(Position::Relative))
+    Stack::new((scroller, jump)).style(|s| s.flex_col().width_full().position(Position::Relative))
 }
 
 fn heading(text: &'static str) -> impl IntoView {
@@ -352,7 +349,10 @@ fn activity_rows(run: &AgentRunSummary, events: &[RunEventRecord]) -> Vec<Activi
                         .unwrap_or_else(|| message.clone()),
                     false,
                 ),
-                RunEvent::Steer { text } => (format!("You: {}", text.lines().next().unwrap_or_default()), true),
+                RunEvent::Steer { text } => (
+                    format!("You: {}", text.lines().next().unwrap_or_default()),
+                    true,
+                ),
                 RunEvent::Completed { .. } => ("Completed".into(), true),
                 RunEvent::Terminated { message, .. } => (message.clone(), false),
                 RunEvent::LegacyStep { summary, ok } => (summary.clone(), *ok),
@@ -738,7 +738,9 @@ mod tests {
 
     /// How tall `text` is in the code font, wrapped at `width`.
     fn code_height(text: &str, size: f32, leading: f32, wrap: OverflowWrap, width: f64) -> f64 {
-        use floem::text::{Attrs, AttrsList, FamilyOwned, LineHeightValue, TextLayout, TextWrapMode};
+        use floem::text::{
+            Attrs, AttrsList, FamilyOwned, LineHeightValue, TextLayout, TextWrapMode,
+        };
         let family: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect();
         let attrs = Attrs::new()
             .font_size(size)

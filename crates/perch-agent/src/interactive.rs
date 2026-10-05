@@ -230,7 +230,9 @@ impl ClaudeHost {
             // result of its own. A failed turn ends the run regardless.
             Some("result") => {
                 let failed = v.get("is_error").and_then(Value::as_bool) == Some(true)
-                    || v.get("subtype").and_then(Value::as_str).is_some_and(|s| s != "success");
+                    || v.get("subtype")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| s != "success");
                 if self.steers.is_empty() || failed {
                     Reply {
                         close: true,
@@ -496,7 +498,11 @@ impl CodexServer {
             return Reply::default();
         }
         // A response to one of Perch's requests.
-        if let Some(id) = v.get("id").and_then(Value::as_u64).filter(|_| v.get("method").is_none()) {
+        if let Some(id) = v
+            .get("id")
+            .and_then(Value::as_u64)
+            .filter(|_| v.get("method").is_none())
+        {
             if let Some(error) = v.get("error") {
                 if id >= LATER {
                     // A steer that missed its turn goes in the next one,
@@ -549,7 +555,10 @@ impl CodexServer {
                     }
                 }
                 id if id == TURN || self.later_turns.contains(&id) => {
-                    self.turn = result.pointer("/turn/id").and_then(Value::as_str).map(str::to_string);
+                    self.turn = result
+                        .pointer("/turn/id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
                     Reply {
                         writes: self.send_steers(),
                         ..Reply::default()
@@ -577,7 +586,10 @@ impl CodexServer {
             "item/started" => self.item_started(params.get("item").unwrap_or(&Value::Null)),
             "item/completed" => self.item_completed(params.get("item").unwrap_or(&Value::Null)),
             "thread/tokenUsage/updated" => {
-                let total = params.pointer("/tokenUsage/total").cloned().unwrap_or(Value::Null);
+                let total = params
+                    .pointer("/tokenUsage/total")
+                    .cloned()
+                    .unwrap_or(Value::Null);
                 Reply {
                     events: vec![RunEvent::Usage {
                         input_tokens: total.get("inputTokens").and_then(Value::as_u64),
@@ -711,7 +723,8 @@ impl CodexServer {
             Value::String(s) => s.clone(),
             other => other.to_string(),
         };
-        self.pending.insert(key.clone(), (id, method.to_string(), params));
+        self.pending
+            .insert(key.clone(), (id, method.to_string(), params));
         Reply {
             events: vec![RunEvent::Approval { id: key, request }],
             ..Reply::default()
@@ -838,7 +851,11 @@ impl CodexServer {
                     .unwrap_or_default();
                 if self.steers.front() == Some(&text.join("")) {
                     self.sent = self.sent.saturating_sub(1);
-                    self.steers.pop_front().map(RunEvent::Steered).into_iter().collect()
+                    self.steers
+                        .pop_front()
+                        .map(RunEvent::Steered)
+                        .into_iter()
+                        .collect()
                 } else {
                     Vec::new()
                 }
@@ -856,7 +873,10 @@ impl CodexServer {
 /// the command and the decision, and its reason when it refused.
 fn auto_review_step(params: &Value) -> Vec<RunEvent> {
     let id = format!("review-{}", str_of(params, "reviewId"));
-    let status = params.pointer("/review/status").and_then(Value::as_str).unwrap_or("");
+    let status = params
+        .pointer("/review/status")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let approved = status == "approved";
     let action = params.get("action").cloned().unwrap_or(Value::Null);
     let what = match str_of(&action, "command") {
@@ -899,13 +919,23 @@ fn request(id: u64, method: &str, params: Value) -> String {
 /// What a Codex permissions request asks for, in a line.
 fn permissions_summary(permissions: &Value) -> String {
     let mut parts = Vec::new();
-    if permissions.pointer("/network/enabled").and_then(Value::as_bool) == Some(true) {
+    if permissions
+        .pointer("/network/enabled")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
         parts.push("network access".to_string());
     }
     let writes: Vec<String> = permissions
         .pointer("/fileSystem/write")
         .and_then(Value::as_array)
-        .map(|paths| paths.iter().filter_map(Value::as_str).map(str::to_string).collect())
+        .map(|paths| {
+            paths
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_default();
     if !writes.is_empty() {
         parts.push(format!("writing {}", writes.join(", ")));
@@ -969,19 +999,26 @@ mod tests {
             RunEvent::Approval { request: ApprovalRequest { kind: ApprovalKind::Edit, subject, .. }, .. } if subject == "/Users/me/.zshrc"
         ));
 
-        let allowed: Value = serde_json::from_str(&host.answer("c1", &Decision::Allow).unwrap()).unwrap();
+        let allowed: Value =
+            serde_json::from_str(&host.answer("c1", &Decision::Allow).unwrap()).unwrap();
         assert_eq!(allowed["response"]["request_id"], "c1");
         assert_eq!(allowed["response"]["response"]["behavior"], "allow");
         assert_eq!(
-            allowed["response"]["response"]["updatedInput"]["command"],
-            "git commit -m x",
+            allowed["response"]["response"]["updatedInput"]["command"], "git commit -m x",
             "the input goes back as it came"
         );
         assert_eq!(host.answer("c1", &Decision::Allow), None, "answered once");
-        let denied: Value =
-            serde_json::from_str(&host.answer("n1", &Decision::deny("The reader said no")).unwrap()).unwrap();
+        let denied: Value = serde_json::from_str(
+            &host
+                .answer("n1", &Decision::deny("The reader said no"))
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(denied["response"]["response"]["behavior"], "deny");
-        assert_eq!(denied["response"]["response"]["message"], "The reader said no");
+        assert_eq!(
+            denied["response"]["response"]["message"],
+            "The reader said no"
+        );
     }
 
     #[test]
@@ -992,7 +1029,10 @@ mod tests {
         ));
         assert!(hook.events.is_empty());
         assert!(hook.writes[0].contains("\"subtype\":\"error\""));
-        assert!(host.after_line(&line(r#"{"type":"result","subtype":"success"}"#)).close);
+        assert!(
+            host.after_line(&line(r#"{"type":"result","subtype":"success"}"#))
+                .close
+        );
     }
 
     fn thread(resume: Option<&str>) -> CodexThread {
@@ -1022,21 +1062,29 @@ mod tests {
         assert_eq!(start["params"]["approvalsReviewer"], "user");
         assert_eq!(start["params"]["approvalPolicy"], "on-request");
         assert_eq!(start["params"]["developerInstructions"], "Work here.");
-        assert_eq!(start["params"]["config"]["default_permissions"], "perch_work");
-        let after_thread = server.after_line(&line(r#"{"id":2,"result":{"thread":{"id":"th-1"}}}"#));
+        assert_eq!(
+            start["params"]["config"]["default_permissions"],
+            "perch_work"
+        );
+        let after_thread =
+            server.after_line(&line(r#"{"id":2,"result":{"thread":{"id":"th-1"}}}"#));
         let turn: Value = serde_json::from_str(&after_thread.writes[0]).unwrap();
         assert_eq!(turn["method"], "turn/start");
         assert_eq!(turn["params"]["threadId"], "th-1");
         assert_eq!(turn["params"]["input"][0]["text"], "Do it");
         assert_eq!(
             after_thread.events,
-            vec![RunEvent::Started { session_id: "th-1".into(), model: "gpt".into() }]
+            vec![RunEvent::Started {
+                session_id: "th-1".into(),
+                model: "gpt".into()
+            }]
         );
 
         let mut resumed = CodexServer::new(thread(Some("th-0")));
         resumed.opening();
         let start: Value =
-            serde_json::from_str(&resumed.after_line(&line(r#"{"id":1,"result":{}}"#)).writes[1]).unwrap();
+            serde_json::from_str(&resumed.after_line(&line(r#"{"id":1,"result":{}}"#)).writes[1])
+                .unwrap();
         assert_eq!(start["method"], "thread/resume");
         assert_eq!(start["params"]["threadId"], "th-0");
     }
@@ -1048,18 +1096,26 @@ mod tests {
         let started = server.after_line(&line(
             r#"{"method":"item/started","params":{"item":{"type":"commandExecution","id":"c1","command":"/bin/zsh -lc ls"}}}"#,
         ));
-        assert!(matches!(&started.events[0], RunEvent::ToolCall { summary, .. } if summary == "Ran ls"));
+        assert!(
+            matches!(&started.events[0], RunEvent::ToolCall { summary, .. } if summary == "Ran ls")
+        );
         let done = server.after_line(&line(
             r#"{"method":"item/completed","params":{"item":{"type":"commandExecution","id":"c1","command":"/bin/zsh -lc ls","exitCode":1,"aggregatedOutput":"no such file\n"}}}"#,
         ));
         assert_eq!(
             done.events,
-            vec![RunEvent::ToolResult { id: "c1".into(), ok: false, summary: "no such file".into() }]
+            vec![RunEvent::ToolResult {
+                id: "c1".into(),
+                ok: false,
+                summary: "no such file".into()
+            }]
         );
         let edit = server.after_line(&line(
             r#"{"method":"item/completed","params":{"item":{"type":"fileChange","id":"f1","changes":[{"path":"/wt/notes.md"}],"status":"completed"}}}"#,
         ));
-        assert!(matches!(&edit.events[0], RunEvent::ToolCall { summary, .. } if summary == "Edited notes.md"));
+        assert!(
+            matches!(&edit.events[0], RunEvent::ToolCall { summary, .. } if summary == "Edited notes.md")
+        );
         // With diffs, the step ends with what they add and remove: all of
         // an added file, and an update's own lines.
         let counted = server.after_line(&line(
@@ -1078,11 +1134,19 @@ mod tests {
         ));
         assert_eq!(
             usage.events,
-            vec![RunEvent::Usage { input_tokens: Some(10), output_tokens: Some(2), cached_input_tokens: Some(1) }]
+            vec![RunEvent::Usage {
+                input_tokens: Some(10),
+                output_tokens: Some(2),
+                cached_input_tokens: Some(1)
+            }]
         );
-        let end = server.after_line(&line(r#"{"method":"turn/completed","params":{"turn":{"status":"completed"}}}"#));
+        let end = server.after_line(&line(
+            r#"{"method":"turn/completed","params":{"turn":{"status":"completed"}}}"#,
+        ));
         assert!(end.close);
-        assert!(matches!(&end.events[0], RunEvent::Finished { session_id, .. } if session_id == "th-1"));
+        assert!(
+            matches!(&end.events[0], RunEvent::Finished { session_id, .. } if session_id == "th-1")
+        );
     }
 
     #[test]
@@ -1111,10 +1175,12 @@ mod tests {
             RunEvent::Approval { id, request: ApprovalRequest { kind: ApprovalKind::Command, subject, .. } }
                 if id == "x8" && subject == "echo hi > /Users/me/f"
         ));
-        let accept: Value = serde_json::from_str(&server.answer("7", &Decision::Allow).unwrap()).unwrap();
+        let accept: Value =
+            serde_json::from_str(&server.answer("7", &Decision::Allow).unwrap()).unwrap();
         assert_eq!(accept["id"], 7, "the server's id, as it sent it");
         assert_eq!(accept["result"]["decision"], "accept");
-        let decline: Value = serde_json::from_str(&server.answer("x8", &Decision::deny("no")).unwrap()).unwrap();
+        let decline: Value =
+            serde_json::from_str(&server.answer("x8", &Decision::deny("no")).unwrap()).unwrap();
         assert_eq!(decline["id"], "x8");
         assert_eq!(decline["result"]["decision"], "decline");
 
@@ -1131,25 +1197,34 @@ mod tests {
         });
         server.opening();
         let start: Value =
-            serde_json::from_str(&server.after_line(&line(r#"{"id":1,"result":{}}"#)).writes[1]).unwrap();
+            serde_json::from_str(&server.after_line(&line(r#"{"id":1,"result":{}}"#)).writes[1])
+                .unwrap();
         assert_eq!(start["params"]["approvalsReviewer"], "auto_review");
 
         let approved = server.after_line(&line(
             r#"{"method":"item/autoApprovalReview/completed","params":{"reviewId":"r1","review":{"status":"approved","riskLevel":"low","rationale":"asked for"},"action":{"type":"command","command":"/bin/zsh -lc 'curl https://example.com'"}}}"#,
         ));
-        assert!(matches!(
-            &approved.events[..],
-            [RunEvent::ToolCall { summary, .. }, RunEvent::ToolResult { ok: true, .. }]
-                if summary == "Approved automatically: curl https://example.com (risk: low)"
-        ), "{:?}", approved.events);
+        assert!(
+            matches!(
+                &approved.events[..],
+                [RunEvent::ToolCall { summary, .. }, RunEvent::ToolResult { ok: true, .. }]
+                    if summary == "Approved automatically: curl https://example.com (risk: low)"
+            ),
+            "{:?}",
+            approved.events
+        );
         let refused = server.after_line(&line(
             r#"{"method":"item/autoApprovalReview/completed","params":{"reviewId":"r2","review":{"status":"denied","riskLevel":"high","rationale":"Deletes the home directory."},"action":{"type":"command","command":"rm -rf ~"}}}"#,
         ));
-        assert!(matches!(
-            &refused.events[..],
-            [RunEvent::ToolCall { summary, .. }, RunEvent::ToolResult { ok: false, .. }]
-                if summary == "Refused automatically: rm -rf ~ (risk: high). Deletes the home directory."
-        ), "{:?}", refused.events);
+        assert!(
+            matches!(
+                &refused.events[..],
+                [RunEvent::ToolCall { summary, .. }, RunEvent::ToolResult { ok: false, .. }]
+                    if summary == "Refused automatically: rm -rf ~ (risk: high). Deletes the home directory."
+            ),
+            "{:?}",
+            refused.events
+        );
     }
 
     #[test]
@@ -1163,15 +1238,24 @@ mod tests {
         let wrote: Value = serde_json::from_str(&host.steer("And the docs")[0]).unwrap();
         assert_eq!(wrote["message"]["content"], "And the docs");
         let held = host.after_line(&line(r#"{"type":"result","subtype":"success"}"#));
-        assert!(held.more && !held.close, "a steer not yet read keeps stdin open");
+        assert!(
+            held.more && !held.close,
+            "a steer not yet read keeps stdin open"
+        );
         let subagent = host.after_line(&line(
             r#"{"type":"user","message":{"role":"user","content":"And the docs"},"parent_tool_use_id":"t1","isReplay":true}"#,
         ));
-        assert!(subagent.events.is_empty(), "a subagent's prompt is not the reader's");
+        assert!(
+            subagent.events.is_empty(),
+            "a subagent's prompt is not the reader's"
+        );
         let landed = host.after_line(&line(
             r#"{"type":"user","message":{"role":"user","content":"And the docs"},"parent_tool_use_id":null,"isReplay":true}"#,
         ));
-        assert_eq!(landed.events, vec![RunEvent::Steered("And the docs".into())]);
+        assert_eq!(
+            landed.events,
+            vec![RunEvent::Steered("And the docs".into())]
+        );
         let end = host.after_line(&line(r#"{"type":"result","subtype":"success"}"#));
         assert!(end.close && !end.more);
     }
@@ -1180,37 +1264,61 @@ mod tests {
     fn a_codex_steer_waits_for_its_turn_and_a_refused_later_turn_ends_the_run() {
         let mut server = CodexServer::new(thread(None));
         server.after_line(&line(r#"{"id":2,"result":{"thread":{"id":"th-1"}}}"#));
-        assert!(server.steer("And the docs").is_empty(), "no turn to name yet");
+        assert!(
+            server.steer("And the docs").is_empty(),
+            "no turn to name yet"
+        );
         let turn = server.after_line(&line(r#"{"id":3,"result":{"turn":{"id":"tu-1"}}}"#));
         let steer: Value = serde_json::from_str(&turn.writes[0]).unwrap();
         assert_eq!(steer["method"], "turn/steer");
         assert_eq!(steer["params"]["expectedTurnId"], "tu-1");
-        let missed = server.after_line(&line(r#"{"id":steer_id,"error":{"message":"no active turn to steer"}}"#
-            .replace("steer_id", &steer["id"].to_string())
-            .as_str()));
+        let missed = server.after_line(&line(
+            r#"{"id":steer_id,"error":{"message":"no active turn to steer"}}"#
+                .replace("steer_id", &steer["id"].to_string())
+                .as_str(),
+        ));
         assert_eq!(missed, Reply::default(), "the turn's end resends it");
-        let next = server.after_line(&line(r#"{"method":"turn/completed","params":{"turn":{"status":"completed"}}}"#));
+        let next = server.after_line(&line(
+            r#"{"method":"turn/completed","params":{"turn":{"status":"completed"}}}"#,
+        ));
         assert!(!next.close && next.events.is_empty());
         let start: Value = serde_json::from_str(&next.writes[0]).unwrap();
         assert_eq!(start["method"], "turn/start");
-        let refused = server.after_line(&line(
-            &format!(r#"{{"id":{},"error":{{"message":"busy"}}}}"#, start["id"]),
-        ));
+        let refused = server.after_line(&line(&format!(
+            r#"{{"id":{},"error":{{"message":"busy"}}}}"#,
+            start["id"]
+        )));
         assert!(refused.close);
-        assert!(matches!(&refused.events[..], [RunEvent::Finished { .. }]), "{:?}", refused.events);
+        assert!(
+            matches!(&refused.events[..], [RunEvent::Finished { .. }]),
+            "{:?}",
+            refused.events
+        );
     }
 
     #[test]
     fn codex_failures_end_the_run() {
         let mut server = CodexServer::new(thread(None));
-        let refused = server.after_line(&line(r#"{"id":2,"error":{"code":1,"message":"no such model"}}"#));
+        let refused = server.after_line(&line(
+            r#"{"id":2,"error":{"code":1,"message":"no such model"}}"#,
+        ));
         assert!(refused.close);
-        assert_eq!(refused.events, vec![RunEvent::Failed { message: "no such model".into() }]);
+        assert_eq!(
+            refused.events,
+            vec![RunEvent::Failed {
+                message: "no such model".into()
+            }]
+        );
 
         let mut server = CodexServer::new(thread(None));
         let failed = server.after_line(&line(
             r#"{"method":"turn/completed","params":{"turn":{"status":"failed","error":{"message":"quota"}}}}"#,
         ));
-        assert_eq!(failed.events, vec![RunEvent::Failed { message: "quota".into() }]);
+        assert_eq!(
+            failed.events,
+            vec![RunEvent::Failed {
+                message: "quota".into()
+            }]
+        );
     }
 }

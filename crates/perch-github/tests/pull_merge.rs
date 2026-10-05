@@ -6,8 +6,8 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 
 use perch_github::{
-    CheckKind, CheckRunState, CheckState, CommitMessage, Error, GitHub, IssueCloseReason, MergeMethod, MergeState, MergeableState,
-    RepositoryPermission, ReviewDecision,
+    CheckKind, CheckRunState, CheckState, CommitMessage, Error, GitHub, IssueCloseReason,
+    MergeMethod, MergeState, MergeableState, RepositoryPermission, ReviewDecision,
 };
 
 #[derive(Debug)]
@@ -251,7 +251,9 @@ async fn overview_combines_merge_permissions_and_deduplicated_status_rollup() {
         })
     );
     assert_eq!(
-        overview.commit_message(MergeMethod::Merge).map(|m| m.title.as_str()),
+        overview
+            .commit_message(MergeMethod::Merge)
+            .map(|m| m.title.as_str()),
         Some("Merge pull request #42 from a/feature")
     );
     assert_eq!(overview.commit_message(MergeMethod::Rebase), None);
@@ -544,13 +546,22 @@ async fn marking_ready_asks_for_the_id_then_names_it_in_the_mutation() {
     ]);
     let github = GitHub::with_base_uri("token", &base).unwrap();
 
-    assert!(!github.set_pull_request_draft("a/b", 42, false).await.unwrap());
-    assert!(github.set_pull_request_draft("a/b", 42, true).await.unwrap());
+    assert!(!github
+        .set_pull_request_draft("a/b", 42, false)
+        .await
+        .unwrap());
+    assert!(github
+        .set_pull_request_draft("a/b", 42, true)
+        .await
+        .unwrap());
 
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 4);
-    assert!(requests.iter().all(|r| r.method == "POST" && r.path == "/graphql"));
-    let asked = |i: usize| -> serde_json::Value { serde_json::from_str(&requests[i].body).unwrap() };
+    assert!(requests
+        .iter()
+        .all(|r| r.method == "POST" && r.path == "/graphql"));
+    let asked =
+        |i: usize| -> serde_json::Value { serde_json::from_str(&requests[i].body).unwrap() };
     let lookup = asked(0);
     assert_eq!(lookup["variables"]["owner"], "a");
     assert_eq!(lookup["variables"]["name"], "b");
@@ -564,7 +575,10 @@ async fn marking_ready_asks_for_the_id_then_names_it_in_the_mutation() {
     );
     assert_eq!(ready["variables"]["pull"], "PR_kw1");
     let to_draft = asked(3);
-    assert!(to_draft["query"].as_str().unwrap().contains("convertPullRequestToDraft("));
+    assert!(to_draft["query"]
+        .as_str()
+        .unwrap()
+        .contains("convertPullRequestToDraft("));
     assert_eq!(to_draft["variables"]["pull"], "PR_kw1");
 }
 
@@ -576,7 +590,10 @@ async fn a_pull_request_already_as_asked_is_not_changed() {
     )]);
     let github = GitHub::with_base_uri("token", &base).unwrap();
 
-    assert!(github.set_pull_request_draft("a/b", 42, true).await.unwrap());
+    assert!(github
+        .set_pull_request_draft("a/b", 42, true)
+        .await
+        .unwrap());
     assert_eq!(requests.lock().unwrap().len(), 1, "no mutation");
 }
 
@@ -595,12 +612,18 @@ async fn a_draft_change_github_refuses_is_an_error() {
     ]);
     let github = GitHub::with_base_uri("token", &base).unwrap();
 
-    let refused = github.set_pull_request_draft("a/b", 42, true).await.unwrap_err();
+    let refused = github
+        .set_pull_request_draft("a/b", 42, true)
+        .await
+        .unwrap_err();
     assert!(
         matches!(&refused, Error::Graphql(message) if message.contains("not accessible")),
         "{refused:?}"
     );
-    let missing = github.set_pull_request_draft("a/b", 43, true).await.unwrap_err();
+    let missing = github
+        .set_pull_request_draft("a/b", 43, true)
+        .await
+        .unwrap_err();
     assert!(matches!(missing, Error::Decode(_)), "{missing:?}");
 }
 
@@ -737,7 +760,10 @@ async fn assigning_posts_and_unassigning_deletes_and_github_answers_who_is_assig
         )
     };
     let (base, requests) = spawn(vec![
-        Response::new("201 Created", issue(r#"{"login":"rohan"},{"login":"criccomini"}"#)),
+        Response::new(
+            "201 Created",
+            issue(r#"{"login":"rohan"},{"login":"criccomini"}"#),
+        ),
         Response::new("200 OK", issue(r#"{"login":"rohan"}"#)),
     ]);
     let github = GitHub::with_base_uri("token", &base).unwrap();

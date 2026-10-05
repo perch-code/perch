@@ -11,7 +11,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use jiff::Timestamp;
-use perch_github::{NewRunEvent, RunEvent, RunMode, RunOwner, RunRecord, RunStatus, TerminalReason};
+use perch_github::{
+    NewRunEvent, RunEvent, RunMode, RunOwner, RunRecord, RunStatus, TerminalReason,
+};
 use tokio::sync::{watch, Notify, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
 
 use super::{Event, SharedCache};
@@ -94,11 +96,7 @@ pub(crate) struct OwnerDeletion {
 }
 
 impl RunManager {
-    pub(crate) fn new(
-        limit: usize,
-        cache: SharedCache,
-        events: super::EventSender<Event>,
-    ) -> Self {
+    pub(crate) fn new(limit: usize, cache: SharedCache, events: super::EventSender<Event>) -> Self {
         Self {
             inner: Arc::new(Inner {
                 limit: Arc::new(Semaphore::new(limit.max(1))),
@@ -146,9 +144,7 @@ impl RunManager {
         if !owner_exists(&guard, &run.owner)? {
             return Err("The discussion or item for that run is gone".into());
         }
-        let active = guard
-            .active_run_summaries()
-            .map_err(|e| e.to_string())?;
+        let active = guard.active_run_summaries().map_err(|e| e.to_string())?;
         if let RunOwner::Discussion { thread_id, .. } = &run.owner {
             if active.iter().any(|other| {
                 other.id != run.id
@@ -392,7 +388,9 @@ impl RunManager {
             .ok()
             .and_then(|entries| entries.get(id).cloned());
         let Some(entry) = entry else { return };
-        let Ok(slot) = entry.process.lock() else { return };
+        let Ok(slot) = entry.process.lock() else {
+            return;
+        };
         match slot.as_ref() {
             Some(process) => {
                 process.steer(text);
@@ -507,7 +505,9 @@ impl RunManager {
     /// Whether a Work run is queued or running in `worktree`: it may
     /// commit at any moment, which a push should not race.
     pub(crate) fn has_active_work(&self, worktree: &Path) -> bool {
-        let worktree = worktree.canonicalize().unwrap_or_else(|_| worktree.to_path_buf());
+        let worktree = worktree
+            .canonicalize()
+            .unwrap_or_else(|_| worktree.to_path_buf());
         self.inner.entries.lock().is_ok_and(|entries| {
             entries.values().any(|entry| {
                 entry.worktree.as_deref() == Some(worktree.as_path())
@@ -1051,7 +1051,10 @@ mod tests {
             tokio::spawn(async move { manager.start(second).await.unwrap() })
         };
         tokio::task::yield_now().await;
-        assert!(!second_waiter.is_finished(), "slots are free, but the worktree is not");
+        assert!(
+            !second_waiter.is_finished(),
+            "slots are free, but the worktree is not"
+        );
         assert_eq!(
             manager.load("two").unwrap().latest_activity.as_deref(),
             Some("Waiting for the Work run in this worktree")
@@ -1205,7 +1208,10 @@ mod tests {
         {
             tokio::task::yield_now().await;
         }
-        assert!(!shutdown.is_finished(), "shutdown returned before the worker");
+        assert!(
+            !shutdown.is_finished(),
+            "shutdown returned before the worker"
+        );
         let (status, reason) = manager.stop_terminal("one");
         assert_eq!(
             (status, reason),

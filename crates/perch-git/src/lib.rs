@@ -27,8 +27,9 @@ pub use review_snapshot::{
     MERGE_BASE_REF,
 };
 pub use scan::{
-    branch_churn, branch_readiness, github_remote, head_commit_time, parse_remotes, parse_worktree_list, remotes,
-    repo_from_remote, scan_root, BranchReadiness, RootScan, WorktreeEntry,
+    branch_churn, branch_readiness, github_remote, head_commit_time, parse_remotes,
+    parse_worktree_list, remotes, repo_from_remote, scan_root, BranchReadiness, RootScan,
+    WorktreeEntry,
 };
 pub use scope::{alignment, changed_files, dirt, log, read_side, Commit, Dirt, Rev, Scope};
 pub use store::{RepoId, Store};

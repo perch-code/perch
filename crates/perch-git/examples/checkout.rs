@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use perch_git::{diff, RepoId, Preparer, Step, Store};
+use perch_git::{diff, Preparer, RepoId, Step, Store};
 use perch_github::{resolve_token, Config, GitHub};
 
 #[tokio::main]
@@ -26,46 +26,84 @@ async fn main() -> anyhow::Result<()> {
     let pr = gh.fetch_pull_request(full_name, number).await?;
     eprintln!(
         "  {} by {}  {} <- {}  (+{} -{}, {} files)",
-        pr.title, pr.author_login, pr.base_ref, pr.head_ref, pr.additions, pr.deletions, pr.changed_files
+        pr.title,
+        pr.author_login,
+        pr.base_ref,
+        pr.head_ref,
+        pr.additions,
+        pr.deletions,
+        pr.changed_files
     );
 
-    let root = perch_github::config::data_dir()
-        .ok_or_else(|| anyhow::anyhow!("no data directory"))?;
+    let root =
+        perch_github::config::data_dir().ok_or_else(|| anyhow::anyhow!("no data directory"))?;
     let preparer = Preparer::new(Store::new(root), Some(token.value.clone()));
 
     let started = std::time::Instant::now();
     let branch = format!("perch/pr-{number}");
     let checkout = preparer
-        .prepare(&id, number, &pr.head_sha, &pr.base_ref, &branch, |step| match step {
-            Step::Cloning { phase, percent } => match percent {
-                Some(p) => eprint!("\r  cloning: {phase} {p}%   "),
-                None => eprint!("\r  cloning: {phase}   "),
+        .prepare(
+            &id,
+            number,
+            &pr.head_sha,
+            &pr.base_ref,
+            &branch,
+            |step| match step {
+                Step::Cloning { phase, percent } => match percent {
+                    Some(p) => eprint!("\r  cloning: {phase} {p}%   "),
+                    None => eprint!("\r  cloning: {phase}   "),
+                },
+                Step::Fetching => eprintln!("\n  fetching pull request ref"),
+                Step::CreatingWorktree => eprintln!("  creating worktree"),
+                Step::ComputingDiff => eprintln!("  diffing"),
             },
-            Step::Fetching => eprintln!("\n  fetching pull request ref"),
-            Step::CreatingWorktree => eprintln!("  creating worktree"),
-            Step::ComputingDiff => eprintln!("  diffing"),
-        })
+        )
         .await?;
 
-    eprintln!("  worktree: {}  ({})", checkout.worktree.display(), checkout.branch);
+    eprintln!(
+        "  worktree: {}  ({})",
+        checkout.worktree.display(),
+        checkout.branch
+    );
     if let Some(wanted) = &checkout.stale {
-        eprintln!("  stale: dirty, left at {} instead of {}", &checkout.head_sha[..12], &wanted[..12]);
+        eprintln!(
+            "  stale: dirty, left at {} instead of {}",
+            &checkout.head_sha[..12],
+            &wanted[..12]
+        );
     }
-    eprintln!("  merge base: {}", &checkout.merge_base[..12.min(checkout.merge_base.len())]);
+    eprintln!(
+        "  merge base: {}",
+        &checkout.merge_base[..12.min(checkout.merge_base.len())]
+    );
     eprintln!("  prepared in {:.1}s", started.elapsed().as_secs_f32());
 
     let git = preparer.git();
     let name_status = git
         .run(
             Some(&checkout.bare),
-            ["diff", "-M", "--name-status", "-z", &checkout.merge_base, &checkout.head_sha],
+            [
+                "diff",
+                "-M",
+                "--name-status",
+                "-z",
+                &checkout.merge_base,
+                &checkout.head_sha,
+            ],
             Duration::from_secs(60),
         )
         .await?;
     let numstat = git
         .run(
             Some(&checkout.bare),
-            ["diff", "-M", "--numstat", "-z", &checkout.merge_base, &checkout.head_sha],
+            [
+                "diff",
+                "-M",
+                "--numstat",
+                "-z",
+                &checkout.merge_base,
+                &checkout.head_sha,
+            ],
             Duration::from_secs(60),
         )
         .await?;
@@ -87,20 +125,33 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Exercise the line diff on the first text file that still exists.
-    if let Some(f) = files.iter().find(|f| {
-        !f.binary && f.status != diff::ChangeStatus::Deleted && f.path.ends_with(".rs")
-    }) {
-        let head = preparer.show_blob(&checkout.bare, &checkout.head_sha, &f.path).await?;
+    if let Some(f) = files
+        .iter()
+        .find(|f| !f.binary && f.status != diff::ChangeStatus::Deleted && f.path.ends_with(".rs"))
+    {
+        let head = preparer
+            .show_blob(&checkout.bare, &checkout.head_sha, &f.path)
+            .await?;
         let base = if f.status == diff::ChangeStatus::Added {
             String::new()
         } else {
             let source = f.old_path.as_deref().unwrap_or(&f.path);
-            preparer.show_blob(&checkout.bare, &checkout.merge_base, source).await?
+            preparer
+                .show_blob(&checkout.bare, &checkout.merge_base, source)
+                .await?
         };
 
         let d = diff::file_diff(&base, &head);
-        let added = d.line_status.iter().filter(|s| **s == diff::LineStatus::Added).count();
-        let modified = d.line_status.iter().filter(|s| **s == diff::LineStatus::Modified).count();
+        let added = d
+            .line_status
+            .iter()
+            .filter(|s| **s == diff::LineStatus::Added)
+            .count();
+        let modified = d
+            .line_status
+            .iter()
+            .filter(|s| **s == diff::LineStatus::Modified)
+            .count();
         let ghosts: usize = d.deleted.iter().map(|r| r.lines.len()).sum();
         eprintln!(
             "\nline diff for {}: {} lines, {added} added, {modified} modified, {ghosts} ghost, {} hunks",

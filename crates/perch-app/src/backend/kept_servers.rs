@@ -411,7 +411,9 @@ time.sleep(600)
             options: serde_json::Value::Null,
         };
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let client = perch_lsp::Client::start(spec, dir.path(), tx).await.unwrap();
+        let client = perch_lsp::Client::start(spec, dir.path(), tx)
+            .await
+            .unwrap();
         let pid = client.pid().unwrap();
 
         // A file too big for the pipe: its open blocks holding the

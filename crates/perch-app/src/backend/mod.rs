@@ -15,21 +15,20 @@ use jiff::Timestamp;
 use perch_git::{Preparer, RepoId, ReviewSnapshotStore, Store};
 use perch_github::{
     resolve_token, Anchor, Author, Cache, CacheError, CacheOpen, CommentMessage, CommentPlace,
-    CommentThread, CommitMessage,
-    Config, DraftRow, GitHub, Item, ItemCheckout, ItemKind, ItemSubject, MergeMethod, MergeState,
-    MergeableState, NewRunEvent, PullRequest, PullRequestOverview, PullReviewEvent,
-    ReactionKind, Reactions, RepositoryPermission, Review, ReviewCommentDraft, RevisionContext,
-    RunEvent as StoredRunEvent, RunEventRecord,
+    CommentThread, CommitMessage, Config, DraftRow, GitHub, Item, ItemCheckout, ItemKind,
+    ItemSubject, MergeMethod, MergeState, MergeableState, NewRunEvent, PullRequest,
+    PullRequestOverview, PullReviewEvent, ReactionKind, Reactions, RepositoryPermission, Review,
+    ReviewCommentDraft, RevisionContext, RunEvent as StoredRunEvent, RunEventRecord,
     RunHistoryFilter, RunLabels, RunMode, RunOwner, RunPurpose, RunRecord, RunStatus, RunSummary,
     SubjectKind, TerminalReason, Thread, ThreadOrigin,
 };
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::Semaphore;
 
-pub use open_pull::{DescriptionOutcome, OpenStep, PullRequestReadiness};
 pub(crate) use issue_draft::with_found_in;
-pub use windows::{EventSender, WindowId, NO_WINDOW};
+pub use open_pull::{DescriptionOutcome, OpenStep, PullRequestReadiness};
 use windows::{CommandSender, View, Views};
+pub use windows::{EventSender, WindowId, NO_WINDOW};
 
 mod avatar;
 mod check_watch;
@@ -761,7 +760,9 @@ pub enum Command {
     },
     /// Swap the downloaded `version` in for the running app and reopen it.
     /// `UpdateInstalled` or `Update(Failed)` answers.
-    InstallUpdate { version: String },
+    InstallUpdate {
+        version: String,
+    },
 }
 
 /// How the reader answered a request.
@@ -852,8 +853,14 @@ pub enum LastRun {
     None,
     /// Work runs finished, and none of them changed anything; the sides
     /// are the newest one's, for the greyed entry.
-    Unchanged { before: String, after: String },
-    Changed { before: String, after: String },
+    Unchanged {
+        before: String,
+        after: String,
+    },
+    Changed {
+        before: String,
+        after: String,
+    },
 }
 
 impl LastRun {
@@ -1002,10 +1009,15 @@ pub enum Event {
     },
     /// The reader told a running agent something. It waits at the end of
     /// the run's steps until an `AgentStep` says the agent read it.
-    AgentSteer { run_id: String, text: String },
+    AgentSteer {
+        run_id: String,
+        text: String,
+    },
     /// App-wide run summaries. Every active run is included; terminal
     /// history is the requested newest-first prefix.
-    AgentRuns { runs: Vec<RunSummary> },
+    AgentRuns {
+        runs: Vec<RunSummary>,
+    },
     /// One item's active runs and a page of its history, newest first.
     ItemRuns {
         item_id: String,
@@ -1697,14 +1709,8 @@ enum NavigationTarget {
     Current,
     Item(String),
     Closed,
-    Group {
-        item_id: String,
-        group_id: String,
-    },
-    ReviewAttempt {
-        item_id: String,
-        attempt_id: String,
-    },
+    Group { item_id: String, group_id: String },
+    ReviewAttempt { item_id: String, attempt_id: String },
     SuspendedItem(String),
 }
 
@@ -2004,11 +2010,10 @@ impl NavigationRequests {
         let Ok(latest) = self.latest.lock() else {
             return false;
         };
-        if fence.is_some_and(|fence| {
-            !fence.committed && fence.previous_id == Some(request_id)
-        }) && latest
-            .as_ref()
-            .is_some_and(|request| request.id == request_id)
+        if fence.is_some_and(|fence| !fence.committed && fence.previous_id == Some(request_id))
+            && latest
+                .as_ref()
+                .is_some_and(|request| request.id == request_id)
         {
             return true;
         }
@@ -2038,8 +2043,9 @@ impl NavigationRequests {
         !latest.as_ref().is_some_and(|request| {
             request.id > suspended.fence_id
                 && match &request.target {
-                    NavigationTarget::Item(item_id)
-                    | NavigationTarget::SuspendedItem(item_id) => item_id == &suspended.item_id,
+                    NavigationTarget::Item(item_id) | NavigationTarget::SuspendedItem(item_id) => {
+                        item_id == &suspended.item_id
+                    }
                     NavigationTarget::Group { item_id, .. }
                     | NavigationTarget::ReviewAttempt { item_id, .. } => {
                         item_id == &suspended.item_id
@@ -2102,17 +2108,14 @@ impl NavigationRequests {
         let fences = self.archive_fences.lock().ok()?;
         let fence = fences.get(item_id).copied();
         let mut latest = self.latest.lock().ok()?;
-        if fence.is_some_and(|fence| {
-            !fence.committed && fence.previous_id == Some(request_id)
-        }) && latest
-            .as_ref()
-            .is_some_and(|request| request.id == request_id)
+        if fence.is_some_and(|fence| !fence.committed && fence.previous_id == Some(request_id))
+            && latest
+                .as_ref()
+                .is_some_and(|request| request.id == request_id)
         {
             return Some(commit());
         }
-        let request = latest
-            .as_mut()
-            .filter(|request| request.id == request_id)?;
+        let request = latest.as_mut().filter(|request| request.id == request_id)?;
         if fence.is_some_and(|fence| {
             request_id <= fence.id
                 && (fence.committed || !matches!(&request.target, NavigationTarget::Current))
@@ -2696,7 +2699,9 @@ impl Backend {
         if thread_ids.is_empty() {
             return;
         }
-        let _ = self.commands.send(Command::DoneNotifications { thread_ids });
+        let _ = self
+            .commands
+            .send(Command::DoneNotifications { thread_ids });
     }
 
     pub fn restore_notification(&self, thread_id: &str) {
@@ -2738,16 +2743,20 @@ impl Backend {
         let Some(attempt_id) = self.merge_attempts.begin(item_id) else {
             return;
         };
-        if self.commands.send(Command::MergePullRequest {
-            attempt_id,
-            item_id: item_id.to_string(),
-            repo_full_name: repo_full_name.to_string(),
-            number,
-            expected_head_sha: expected_head_sha.to_string(),
-            method,
-            bypass_requirements,
-            message,
-        }).is_err() {
+        if self
+            .commands
+            .send(Command::MergePullRequest {
+                attempt_id,
+                item_id: item_id.to_string(),
+                repo_full_name: repo_full_name.to_string(),
+                number,
+                expected_head_sha: expected_head_sha.to_string(),
+                method,
+                bypass_requirements,
+                message,
+            })
+            .is_err()
+        {
             self.merge_attempts.finish(item_id, attempt_id);
         }
     }
@@ -2765,7 +2774,14 @@ impl Backend {
         });
     }
 
-    pub fn create_pull_request(&self, item_id: &str, title: &str, body: &str, base: &str, draft: bool) {
+    pub fn create_pull_request(
+        &self,
+        item_id: &str,
+        title: &str,
+        body: &str,
+        base: &str,
+        draft: bool,
+    ) {
         let _ = self.commands.send(Command::CreatePullRequest {
             item_id: item_id.to_string(),
             title: title.to_string(),
@@ -2813,7 +2829,9 @@ impl Backend {
     }
 
     pub fn prepare_feedback(&self, request: crate::feedback::PrepareRequest) {
-        let _ = self.commands.send(Command::PrepareFeedback(Box::new(request)));
+        let _ = self
+            .commands
+            .send(Command::PrepareFeedback(Box::new(request)));
     }
 
     pub fn stop_feedback_diagnosis(&self) {
@@ -2867,16 +2885,21 @@ impl Backend {
         event: PullReviewEvent,
     ) -> Option<u64> {
         let attempt_id = self.pull_request_review_attempts.begin(item_id)?;
-        if self.commands.send(Command::SubmitPullRequestReview {
-            attempt_id,
-            item_id: item_id.to_string(),
-            repo_full_name: repo_full_name.to_string(),
-            number,
-            expected_head_sha: expected_head_sha.to_string(),
-            body: body.to_string(),
-            event,
-        }).is_err() {
-            self.pull_request_review_attempts.finish(item_id, attempt_id);
+        if self
+            .commands
+            .send(Command::SubmitPullRequestReview {
+                attempt_id,
+                item_id: item_id.to_string(),
+                repo_full_name: repo_full_name.to_string(),
+                number,
+                expected_head_sha: expected_head_sha.to_string(),
+                body: body.to_string(),
+                event,
+            })
+            .is_err()
+        {
+            self.pull_request_review_attempts
+                .finish(item_id, attempt_id);
             return None;
         }
         Some(attempt_id)
@@ -3242,7 +3265,9 @@ impl Backend {
     }
 
     pub fn revoke_grant(&self, id: &str) {
-        let _ = self.commands.send(Command::RevokeGrant { id: id.to_string() });
+        let _ = self
+            .commands
+            .send(Command::RevokeGrant { id: id.to_string() });
     }
 
     pub fn run_changes(&self, run_id: &str) {
@@ -3269,7 +3294,9 @@ impl Backend {
 
     /// Download a picture a comment shows.
     pub fn want_picture(&self, url: &str) {
-        let _ = self.commands.send(Command::WantPicture { url: url.to_string() });
+        let _ = self.commands.send(Command::WantPicture {
+            url: url.to_string(),
+        });
     }
 
     pub fn set_meta(&self, key: &str, value: &str) {
@@ -3516,7 +3543,11 @@ impl Backend {
 
     /// Commit a suggestion on the open pull request's head. The token
     /// comes back on `SuggestionCommitted`.
-    pub fn commit_suggestion(&self, item_id: &str, commit: crate::review::suggestion::Commit) -> u64 {
+    pub fn commit_suggestion(
+        &self,
+        item_id: &str,
+        commit: crate::review::suggestion::Commit,
+    ) -> u64 {
         let token = next_posting_token();
         let _ = self.commands.send(Command::CommitSuggestion {
             item_id: item_id.to_string(),
@@ -3587,7 +3618,11 @@ impl Backend {
         token
     }
 
-    pub fn install_language_server(&self, kind: perch_lsp::ServerKind, install: perch_lsp::Install) {
+    pub fn install_language_server(
+        &self,
+        kind: perch_lsp::ServerKind,
+        install: perch_lsp::Install,
+    ) {
         let _ = self
             .commands
             .send(Command::InstallLanguageServer { kind, install });
@@ -3696,9 +3731,8 @@ const USAGE_POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// Ask every installed CLI for plan usage now and on a timer, and send the
 /// board on whenever it changes, by a poll or by a run.
 fn watch_usage(agent: &perch_github::AgentConfig, data_root: &Path, events: &EventSender<Event>) {
-    let installed = |binary: &str, models: &[String]| {
-        (!models.is_empty()).then(|| PathBuf::from(binary))
-    };
+    let installed =
+        |binary: &str, models: &[String]| (!models.is_empty()).then(|| PathBuf::from(binary));
     perch_agent::usage::keep_fresh(perch_agent::usage::Poll {
         claude: installed(&agent.binary, &agent.models),
         codex: installed(&agent.codex.binary, &agent.codex.models),
@@ -4128,15 +4162,16 @@ async fn run(
         let checkout = ctx.slot.clone();
         let language_servers = ctx.language_servers.clone();
 
-        if !matches!(&command, Command::Refresh | Command::WakeSnoozed | Command::Hover { .. }) {
+        if !matches!(
+            &command,
+            Command::Refresh | Command::WakeSnoozed | Command::Hover { .. }
+        ) {
             tracing::debug!(command = ?command, "command");
         }
         match command {
             Command::Refresh => {
                 let now = tokio::time::Instant::now();
-                let mode = if pending_notification_reconcile
-                    || now >= next_notification_reconcile
-                {
+                let mode = if pending_notification_reconcile || now >= next_notification_reconcile {
                     NotificationPollMode::Reconcile
                 } else {
                     NotificationPollMode::Conditional
@@ -4309,7 +4344,9 @@ async fn run(
                     // limit they run into gates the next poll through the
                     // client.
                     let ctx = ctx.clone();
-                    tokio::spawn(async move { done_notifications(&ctx, &github, &thread_ids).await });
+                    tokio::spawn(
+                        async move { done_notifications(&ctx, &github, &thread_ids).await },
+                    );
                 } else {
                     ctx.notice("A GitHub token is required to change notifications");
                 }
@@ -4372,7 +4409,9 @@ async fn run(
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     let readiness = open_pull::readiness(&ctx, &item_id, base).await;
-                    let _ = ctx.events.send(Event::PullRequestReadiness { item_id, readiness });
+                    let _ = ctx
+                        .events
+                        .send(Event::PullRequestReadiness { item_id, readiness });
                 });
             }
             Command::PullRequestBases { item_id } => {
@@ -4541,8 +4580,7 @@ async fn run(
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     if open_item(&ctx, &id, navigation_id).await {
-                        start_language_server(&ctx, navigation_id)
-                        .await;
+                        start_language_server(&ctx, navigation_id).await;
                     }
                 });
             }
@@ -4565,8 +4603,7 @@ async fn run(
                         }
                         show_retained_review_owner(&ctx, item, navigation_id);
                     } else if open_item(&ctx, &id, navigation_id).await {
-                        start_language_server(&ctx, navigation_id)
-                        .await;
+                        start_language_server(&ctx, navigation_id).await;
                     }
                 });
             }
@@ -4588,8 +4625,7 @@ async fn run(
                 ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    if let Err(message) =
-                        archive_item(&ctx, &id, Some(&suspended_navigation)).await
+                    if let Err(message) = archive_item(&ctx, &id, Some(&suspended_navigation)).await
                     {
                         tracing::warn!(id, %message, "could not archive item");
                         let _ = ctx.events.send(Event::Notice(message));
@@ -4635,7 +4671,8 @@ async fn run(
                 ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    let source = subject_item(&ctx, &repo_full_name, kind, number, navigation_id).await;
+                    let source =
+                        subject_item(&ctx, &repo_full_name, kind, number, navigation_id).await;
                     start_work_and_open(ctx, source, navigation_id).await;
                 });
             }
@@ -4644,7 +4681,9 @@ async fn run(
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     let Some(config) = perch_github::config::config_path() else {
-                        let _ = ctx.events.send(Event::Notice("There is no place for config.toml".into()));
+                        let _ = ctx
+                            .events
+                            .send(Event::Notice("There is no place for config.toml".into()));
                         return;
                     };
                     match add_repository(&ctx, &path, &config).await {
@@ -4735,8 +4774,7 @@ async fn run(
                                         .await;
                                     });
                                 }
-                                start_language_server(&ctx, navigation_id)
-                                .await;
+                                start_language_server(&ctx, navigation_id).await;
                             }
                         }
                         Err(message) => {
@@ -4997,9 +5035,9 @@ async fn run(
                 comment_on,
             } => {
                 let ctx = ctx.clone();
-                tokio::spawn(async move {
-                    feedback::file(&ctx, &title, &body, kind, comment_on).await
-                });
+                tokio::spawn(
+                    async move { feedback::file(&ctx, &title, &body, kind, comment_on).await },
+                );
             }
             Command::PlusOneFeedback {
                 number,
@@ -5007,7 +5045,9 @@ async fn run(
                 react,
             } => {
                 let ctx = ctx.clone();
-                tokio::spawn(async move { feedback::plus_one(&ctx, number, &node_id, react).await });
+                tokio::spawn(
+                    async move { feedback::plus_one(&ctx, number, &node_id, react).await },
+                );
             }
             Command::Invite { login, note } => {
                 let ctx = ctx.clone();
@@ -5109,7 +5149,11 @@ async fn run(
                     trust_language_servers(&ctx, navigation_id, &item_id, &everywhere).await
                 });
             }
-            Command::TrustServerInRepo { repo, kind, trusted } => {
+            Command::TrustServerInRepo {
+                repo,
+                kind,
+                trusted,
+            } => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move { trust_server_in_repo(&ctx, &repo, kind, trusted).await });
             }
@@ -5629,7 +5673,10 @@ fn spawn_calls(
 
         // Each call as its item and the location of its first call site.
         let named: Result<
-            Vec<(perch_lsp::lsp_types::CallHierarchyItem, perch_lsp::lsp_types::Location)>,
+            Vec<(
+                perch_lsp::lsp_types::CallHierarchyItem,
+                perch_lsp::lsp_types::Location,
+            )>,
             perch_lsp::Error,
         > = match direction {
             Direction::Callers => client.incoming_calls(item).await.map(|calls| {
@@ -5664,7 +5711,10 @@ fn spawn_calls(
         let named = match named {
             Ok(named) => named,
             Err(e) => {
-                let _ = events.send(Event::LspCalls { token, calls: Err(e.to_string()) });
+                let _ = events.send(Event::LspCalls {
+                    token,
+                    calls: Err(e.to_string()),
+                });
                 return;
             }
         };
@@ -5692,7 +5742,10 @@ fn spawn_calls(
                 .then_with(|| a.site.path.cmp(&b.site.path))
                 .then(a.site.line.cmp(&b.site.line))
         });
-        let _ = events.send(Event::LspCalls { token, calls: Ok(calls) });
+        let _ = events.send(Event::LspCalls {
+            token,
+            calls: Ok(calls),
+        });
     });
 }
 
@@ -5713,8 +5766,9 @@ async fn trim_language_servers(ctx: &Ctx) {
 
 /// A window's language servers for the worktree it shows, one of each
 /// kind.
-pub(super) type Servers =
-    Arc<tokio::sync::Mutex<std::collections::HashMap<perch_lsp::ServerKind, Arc<perch_lsp::Client>>>>;
+pub(super) type Servers = Arc<
+    tokio::sync::Mutex<std::collections::HashMap<perch_lsp::ServerKind, Arc<perch_lsp::Client>>>,
+>;
 
 /// How long a worktree Perch made stays on disk without being opened
 /// before the sweep removes it.
@@ -5823,7 +5877,8 @@ struct Ctx {
     /// did it, so an open subject is looked at again every
     /// [`SUBJECT_RECHECK`]. Empty at launch: every open row is looked at
     /// once, for what happened while Perch was closed.
-    rechecked_subjects: Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    rechecked_subjects:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
     /// Workflow run notifications a look did not find the run of, by id
     /// and time, with how many looks missed. Looked for again at the next
     /// poll until [`RUN_LOOKS`] have.
@@ -5872,7 +5927,10 @@ impl Ctx {
 
     /// Put a new `[[repo]]` list in place, keeping everything else.
     fn replace_repos(&self, repos: Vec<perch_github::RepoConfig>) {
-        let mut guard = self.config.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = self
+            .config
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut config = (**guard).clone();
         config.repo = repos;
         *guard = Arc::new(config);
@@ -5911,10 +5969,12 @@ impl Ctx {
             let decoded = match bytes {
                 Ok(bytes) => {
                     let at = url.clone();
-                    let decoded = tokio::task::spawn_blocking(move || crate::review::images::decode(&bytes, &at))
-                        .await
-                        .ok()
-                        .flatten();
+                    let decoded = tokio::task::spawn_blocking(move || {
+                        crate::review::images::decode(&bytes, &at)
+                    })
+                    .await
+                    .ok()
+                    .flatten();
                     if decoded.is_none() {
                         tracing::debug!(url, "picture did not decode");
                     }
@@ -5925,7 +5985,10 @@ impl Ctx {
                     None
                 }
             };
-            let _ = events.send(Event::Picture { url, decoded: decoded.map(Arc::new) });
+            let _ = events.send(Event::Picture {
+                url,
+                decoded: decoded.map(Arc::new),
+            });
         });
     }
 
@@ -6009,7 +6072,10 @@ impl Ctx {
                                 && snapshot.head_sha == *head
                         })
                         .cloned();
-                    match (committed, reviews::WorktreeProjection::of(scope, merge_base, head, files)) {
+                    match (
+                        committed,
+                        reviews::WorktreeProjection::of(scope, merge_base, head, files),
+                    ) {
                         (Some(snapshot), _) => (Some(snapshot), None),
                         (None, Some(projection)) => (
                             reviews::WorktreeProjection::target(snapshots, head),
@@ -6212,11 +6278,9 @@ impl Ctx {
             for batch in wanted.chunks(SUBJECTS_PER_LOOK) {
                 match github.look_at_participants(batch).await {
                     Ok(found) => {
-                        ctx.want_avatars(
-                            found
-                                .iter()
-                                .flat_map(|(_, participants)| participants.iter().map(|p| p.avatar_url.clone())),
-                        );
+                        ctx.want_avatars(found.iter().flat_map(|(_, participants)| {
+                            participants.iter().map(|p| p.avatar_url.clone())
+                        }));
                         let _ = ctx.events.send(Event::Participants(found));
                     }
                     Err(e) => {
@@ -6346,7 +6410,9 @@ impl Ctx {
             *current = threads.clone();
         }
         self.want_avatars(notification_avatars(&threads));
-        let _ = self.events.send(Event::NotificationsPolled(threads.clone()));
+        let _ = self
+            .events
+            .send(Event::NotificationsPolled(threads.clone()));
         threads
     }
 
@@ -6447,7 +6513,10 @@ impl Ctx {
     /// watermark is what keeps the row out until newer activity arrives.
     fn dismiss_notification(&self, thread_id: &str) {
         let thread = self.notifications.lock().ok().and_then(|threads| {
-            threads.iter().find(|thread| thread.id == thread_id).cloned()
+            threads
+                .iter()
+                .find(|thread| thread.id == thread_id)
+                .cloned()
         });
         if let Some(thread) = thread {
             if let Some(Err(error)) = self.with_cache(|cache| cache.dismiss_notification(&thread)) {
@@ -6471,7 +6540,9 @@ impl Ctx {
             Some(Ok(thread)) => thread,
             Some(Err(error)) => {
                 tracing::warn!(thread = %thread_id, error = %error, "could not restore notification");
-                self.notice(format!("Could not move the notification to the inbox: {error}"));
+                self.notice(format!(
+                    "Could not move the notification to the inbox: {error}"
+                ));
                 return;
             }
             None => None,
@@ -6487,7 +6558,10 @@ impl Ctx {
     /// in Perch's database, and without one there is no snoozing.
     fn snooze_notification(&self, thread_id: &str, until: Timestamp) {
         let thread = self.notifications.lock().ok().and_then(|threads| {
-            threads.iter().find(|thread| thread.id == thread_id).cloned()
+            threads
+                .iter()
+                .find(|thread| thread.id == thread_id)
+                .cloned()
         });
         let Some(thread) = thread else {
             return;
@@ -6957,11 +7031,9 @@ async fn view_review_attempt_owner(ctx: &Ctx, item_id: &str, attempt_id: &str, r
         return;
     }
     if !owner_was_open
-        && !ctx.navigation_requests.checkpoint_attempt_owner(
-            item_id,
-            attempt_id,
-            request_id,
-        )
+        && !ctx
+            .navigation_requests
+            .checkpoint_attempt_owner(item_id, attempt_id, request_id)
     {
         return;
     }
@@ -7445,7 +7517,8 @@ async fn refresh_checkout_pulls(ctx: &Ctx) {
                     .filter(|(_, state)| {
                         matches!(
                             state,
-                            perch_github::SubjectState::PrMerged | perch_github::SubjectState::PrClosed
+                            perch_github::SubjectState::PrMerged
+                                | perch_github::SubjectState::PrClosed
                         )
                     })
                     .map(|(subject, _)| subject),
@@ -7464,7 +7537,10 @@ async fn refresh_checkout_pulls(ctx: &Ctx) {
         if !ended.contains(&(pr.repo_full_name.clone(), pr.number)) {
             continue;
         }
-        let fresh = match github.fetch_pull_request(&pr.repo_full_name, pr.number).await {
+        let fresh = match github
+            .fetch_pull_request(&pr.repo_full_name, pr.number)
+            .await
+        {
             Ok(fresh) => fresh,
             Err(e) => {
                 tracing::debug!(id = %item.id, error = %e, "could not ask after a checkout's pull request");
@@ -7527,7 +7603,10 @@ async fn recheck_open_pulls(ctx: &Ctx) {
         let Some((item_id, pr)) = open else {
             continue;
         };
-        match github.fetch_pull_request(&pr.repo_full_name, pr.number).await {
+        match github
+            .fetch_pull_request(&pr.repo_full_name, pr.number)
+            .await
+        {
             Ok(fresh) if !fresh.is_open() => {
                 refresh_open_item(&view, &item_id).await;
             }
@@ -7581,10 +7660,9 @@ async fn archive_item(
     suspended_navigation: Option<&SuspendedNavigation>,
 ) -> Result<(), String> {
     let lifecycle = ctx.item_lifecycle.lock().await;
-    if suspended_navigation.is_some_and(|suspended| {
-        !ctx.navigation_requests
-            .archive_fence_is_current(suspended)
-    }) {
+    if suspended_navigation
+        .is_some_and(|suspended| !ctx.navigation_requests.archive_fence_is_current(suspended))
+    {
         return Ok(());
     }
     let Some(item) = ctx.item(id) else {
@@ -7615,12 +7693,8 @@ async fn archive_item(
         }
     }
     if let Some(suspended) = suspended_navigation {
-        if !ctx
-            .navigation_requests
-            .archive_fence_is_current(suspended)
-            || !ctx
-                .navigation_requests
-                .commit_archive_fence(suspended)
+        if !ctx.navigation_requests.archive_fence_is_current(suspended)
+            || !ctx.navigation_requests.commit_archive_fence(suspended)
         {
             return Ok(());
         }
@@ -7915,10 +7989,7 @@ async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), Strin
 /// Open whatever an item is.
 async fn open_item(ctx: &Ctx, id: &str, navigation_id: u64) -> bool {
     let _lifecycle = ctx.item_lifecycle.lock().await;
-    if !ctx
-        .navigation_requests
-        .is_current_item(id, navigation_id)
-    {
+    if !ctx.navigation_requests.is_current_item(id, navigation_id) {
         return false;
     }
     let Some(item) = ctx.item(id) else {
@@ -8548,9 +8619,9 @@ fn show_kept_conversation(ctx: &Ctx, item_id: &str, pr: &PullRequest) {
 fn ask_for_conversation(ctx: &Ctx, item_id: &str, pr: Arc<PullRequest>) {
     let (ctx2, item_id2, pr2) = (ctx.clone(), item_id.to_string(), pr.clone());
     let discussion_generation = ctx2.discussion_requests.begin(&item_id2);
-    tokio::spawn(async move {
-        fetch_discussion(&ctx2, &item_id2, &pr2, discussion_generation).await
-    });
+    tokio::spawn(
+        async move { fetch_discussion(&ctx2, &item_id2, &pr2, discussion_generation).await },
+    );
     let (ctx2, item_id2) = (ctx.clone(), item_id.to_string());
     let status_generation = begin_pull_request_status(&ctx2, &item_id2, &pr);
     tokio::spawn(async move { fetch_checks(&ctx2, &item_id2, &pr, status_generation).await });
@@ -8568,7 +8639,12 @@ fn show_pull_request_early(
 ) -> bool {
     // No checkout yet: a directory that does not exist keeps whatever
     // reads one honest until `ReviewReady` brings the real one.
-    let missing = ctx.preparer.store().root().join("worktrees").join("pending");
+    let missing = ctx
+        .preparer
+        .store()
+        .root()
+        .join("worktrees")
+        .join("pending");
     let checkout = perch_git::Checkout {
         worktree: missing.clone(),
         bare: missing,
@@ -8664,9 +8740,13 @@ async fn opening_scope(
     };
     let scope = match picked.as_deref() {
         Some("last-run") => last_run(ctx, item_id, None).await.scope(),
-        Some("since") => since
-            .filter(|from| *from != checkout.head_sha)
-            .map(|from| Scope::SinceLastLooked { from: from.to_string() }),
+        Some("since") => {
+            since
+                .filter(|from| *from != checkout.head_sha)
+                .map(|from| Scope::SinceLastLooked {
+                    from: from.to_string(),
+                })
+        }
         Some("uncommitted") => dirt().await.any().then_some(Scope::Uncommitted),
         Some("unstaged") => dirt().await.unstaged.then_some(Scope::Unstaged),
         Some("staged") => dirt().await.staged.then_some(Scope::Staged),
@@ -8689,7 +8769,8 @@ async fn last_run(ctx: &Ctx, item_id: &str, skip: Option<&str>) -> LastRun {
         .rev()
         .filter(|run| run.mode == RunMode::Work && Some(run.id.as_str()) != skip)
     {
-        let (Some(before), Some(after)) = (run.work_before.as_deref(), run.work_after.as_deref()) else {
+        let (Some(before), Some(after)) = (run.work_before.as_deref(), run.work_after.as_deref())
+        else {
             continue;
         };
         if found == LastRun::None {
@@ -9099,12 +9180,7 @@ fn begin_pull_request_status(ctx: &Ctx, item_id: &str, pr: &PullRequest) -> u64 
 }
 
 /// Returns whether GitHub's head has moved past the one asked about.
-async fn fetch_checks(
-    ctx: &Ctx,
-    item_id: &str,
-    pr: &PullRequest,
-    status_generation: u64,
-) -> bool {
+async fn fetch_checks(ctx: &Ctx, item_id: &str, pr: &PullRequest, status_generation: u64) -> bool {
     let view = ctx.view_for(item_id);
     let ctx = &view;
     let Some(github) = ctx.github() else {
@@ -9611,9 +9687,17 @@ async fn submit_open_pull_request_review(
         }
     }
     for (draft, body) in &drafts.on_file {
-        let Some(anchor) = &draft.anchor else { continue };
+        let Some(anchor) = &draft.anchor else {
+            continue;
+        };
         match github
-            .create_file_comment(repo_full_name, number, expected_head_sha, &anchor.path, body)
+            .create_file_comment(
+                repo_full_name,
+                number,
+                expected_head_sha,
+                &anchor.path,
+                body,
+            )
             .await
         {
             Ok(comment) => {
@@ -9641,9 +9725,7 @@ async fn submit_open_pull_request_review(
                     }),
                     _ => None,
                 };
-                if let Some(Err(e)) =
-                    ctx.with_cache(|c| c.store_discussion(item_id, &discussion))
-                {
+                if let Some(Err(e)) = ctx.with_cache(|c| c.store_discussion(item_id, &discussion)) {
                     tracing::warn!(
                         item = item_id, %e,
                         "could not cache the discussion after the review"
@@ -9733,7 +9815,10 @@ async fn submit_open_pull_request_review(
     } else if posted == 0 {
         "Nothing posted".to_string()
     } else {
-        format!("Posted {}", crate::review::timeline::count_of(posted, "comment", "comments"))
+        format!(
+            "Posted {}",
+            crate::review::timeline::count_of(posted, "comment", "comments")
+        )
     };
     if kept > 0 {
         // The open item says which did not post, and why.
@@ -9741,7 +9826,11 @@ async fn submit_open_pull_request_review(
             notice.push_str(&format!(
                 "; {} still {}",
                 crate::review::timeline::count_of(kept, "comment", "comments"),
-                if kept == 1 { "is a draft" } else { "are drafts" }
+                if kept == 1 {
+                    "is a draft"
+                } else {
+                    "are drafts"
+                }
             ));
             ctx.notice(notice);
         }
@@ -9956,7 +10045,10 @@ async fn github_merge_base(
 /// A draft as the review, or a comment on its own, carries it. A draft's
 /// anchor is checked before this is asked.
 fn review_comment_draft(draft: &DraftRow) -> ReviewCommentDraft {
-    let anchor = draft.anchor.as_ref().expect("a draft that opens a thread has an anchor");
+    let anchor = draft
+        .anchor
+        .as_ref()
+        .expect("a draft that opens a thread has an anchor");
     let ranged = anchor.start_line != anchor.line;
     ReviewCommentDraft {
         path: anchor.path.clone(),
@@ -10064,7 +10156,10 @@ async fn assignable_users(ctx: &Ctx, repo_full_name: &str) {
     let Some(github) = ctx.github() else {
         return;
     };
-    match github.assignable_users(repo_full_name, ASSIGNABLE_USERS).await {
+    match github
+        .assignable_users(repo_full_name, ASSIGNABLE_USERS)
+        .await
+    {
         Ok(users) => {
             if let Some(users) = &users {
                 ctx.want_avatars(users.iter().map(|u| u.avatar_url.clone()));
@@ -10109,7 +10204,10 @@ async fn set_assigned(ctx: &Ctx, item_id: &str, login: &str, assign: bool) {
             return ctx.notice(format!("GitHub could not {doing} {login}: {error}"));
         }
     };
-    let now_assigned = assigned.assignees.iter().any(|a| a.eq_ignore_ascii_case(login));
+    let now_assigned = assigned
+        .assignees
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case(login));
     if now_assigned != assign {
         let doing = if assign { "assign" } else { "unassign" };
         ctx.notice(format!("GitHub did not {doing} {login}"));
@@ -10128,7 +10226,10 @@ async fn set_assigned(ctx: &Ctx, item_id: &str, login: &str, assign: bool) {
         Some(ItemSubject::PullRequest(pr)) => {
             let mut pr = pr.clone();
             pr.assignees = assigned.assignees;
-            pr.updated_at = Some(pr.updated_at.map_or(assigned.updated_at, |at| at.max(assigned.updated_at)));
+            pr.updated_at = Some(
+                pr.updated_at
+                    .map_or(assigned.updated_at, |at| at.max(assigned.updated_at)),
+            );
             install_pull_request_snapshot(ctx, item_id, pr, None);
         }
         None => {}
@@ -10187,9 +10288,9 @@ async fn set_reaction(ctx: &Ctx, item_id: &str, node_id: &str, kind: ReactionKin
             return;
         }
     };
-    let _ = ctx
-        .discussion_requests
-        .fence_with(item_id, || upsert_cached_reactions(ctx, item_id, node_id, &reactions));
+    let _ = ctx.discussion_requests.fence_with(item_id, || {
+        upsert_cached_reactions(ctx, item_id, node_id, &reactions)
+    });
     if ctx.is_open(item_id) {
         let _ = ctx.events.send(Event::ReactionsUpdated {
             item_id: item_id.to_string(),
@@ -10215,7 +10316,12 @@ async fn delete_github_comment(ctx: &Ctx, item_id: &str, node_id: &str, place: C
     };
     match deleted {
         Ok(()) => {
-            tracing::info!(item = item_id, node_id, ?place, "deleted a comment on GitHub");
+            tracing::info!(
+                item = item_id,
+                node_id,
+                ?place,
+                "deleted a comment on GitHub"
+            );
             forget_cached_comment(ctx, item_id, node_id);
         }
         Err(message) => {
@@ -10249,7 +10355,12 @@ async fn update_github_comment(
     let edited = updated.is_ok();
     match updated {
         Ok(kept) => {
-            tracing::info!(item = item_id, node_id, ?place, "edited a comment on GitHub");
+            tracing::info!(
+                item = item_id,
+                node_id,
+                ?place,
+                "edited a comment on GitHub"
+            );
             rewrite_cached_comment(ctx, item_id, node_id, place, &kept);
         }
         Err(message) => {
@@ -10288,8 +10399,7 @@ async fn read_after_comment_change(ctx: &Ctx, item_id: &str) {
             let read = match ctx.github() {
                 Some(github) => {
                     let discussion_generation = ctx.discussion_requests.begin(item_id);
-                    refresh_open_issue(ctx, &github, item_id, &issue.0, discussion_generation)
-                        .await
+                    refresh_open_issue(ctx, &github, item_id, &issue.0, discussion_generation).await
                         == Some(true)
                 }
                 None => false,
@@ -10623,7 +10733,9 @@ async fn post_issue_comment(ctx: &Ctx, item_id: &str, token: u64, body: &str) {
         (Some(pull), _) => (pull.repo_full_name.clone(), pull.number),
         (None, Some(issue)) => (issue.repo_full_name.clone(), issue.number),
         (None, None) => {
-            answer(Err("Only a pull request or an issue takes a comment from here".into()));
+            answer(Err(
+                "Only a pull request or an issue takes a comment from here".into(),
+            ));
             return;
         }
     };
@@ -10631,7 +10743,10 @@ async fn post_issue_comment(ctx: &Ctx, item_id: &str, token: u64, body: &str) {
         answer(Err("GitHub is unavailable while Perch is offline".into()));
         return;
     };
-    let comment = match github.create_issue_comment(&repo_full_name, number, body).await {
+    let comment = match github
+        .create_issue_comment(&repo_full_name, number, body)
+        .await
+    {
         Ok(comment) => comment,
         Err(error) => {
             answer(Err(format!("GitHub could not post the comment: {error}")));
@@ -10679,7 +10794,12 @@ async fn reply_to_thread(ctx: &Ctx, item_id: &str, token: u64, thread_id: &str, 
         return answer(Err("GitHub is unavailable while Perch is offline".into()));
     };
     let comment = match github
-        .reply_to_review_comment(&pull_request.repo_full_name, pull_request.number, root, body)
+        .reply_to_review_comment(
+            &pull_request.repo_full_name,
+            pull_request.number,
+            root,
+            body,
+        )
         .await
     {
         Ok(comment) => comment,
@@ -10731,7 +10851,13 @@ async fn commit_suggestion(
             .with_cache(|cache| cache.load_comment_threads(item_id))
             .and_then(Result::ok)
             .and_then(|threads| threads.into_iter().find(|t| t.id == thread_id))
-            .is_some_and(|t| !t.resolved && matches!(resolved_in(&t, false, "resolve"), Ok(ResolvedIn::GitHub { .. })));
+            .is_some_and(|t| {
+                !t.resolved
+                    && matches!(
+                        resolved_in(&t, false, "resolve"),
+                        Ok(ResolvedIn::GitHub { .. })
+                    )
+            });
     let committed = result.is_ok();
     let _ = ctx.events.send(Event::SuggestionCommitted {
         item_id: item_id.to_string(),
@@ -10855,7 +10981,12 @@ async fn apply_suggestion(
 /// the file on disk is read again; any other shows a commit, where the
 /// edit is not, so the view moves to Uncommitted, which has it on the
 /// same lines. Left alone if the reader picked a scope since.
-async fn show_applied_suggestion(ctx: &Ctx, item_id: &str, navigation_id: u64, scope_revision: u64) {
+async fn show_applied_suggestion(
+    ctx: &Ctx,
+    item_id: &str,
+    navigation_id: u64,
+    scope_revision: u64,
+) {
     let scope = ctx.slot.lock().ok().and_then(|g| {
         g.as_ref()
             .filter(|c| c.item_id == item_id && c.navigation_id == navigation_id)
@@ -10872,7 +11003,14 @@ async fn show_applied_suggestion(ctx: &Ctx, item_id: &str, navigation_id: u64, s
                 return;
             }
             let request_id = ctx.scope_requests.begin(item_id);
-            set_scope(ctx, item_id, perch_git::Scope::Uncommitted, request_id, navigation_id).await;
+            set_scope(
+                ctx,
+                item_id,
+                perch_git::Scope::Uncommitted,
+                request_id,
+                navigation_id,
+            )
+            .await;
         }
     }
 }
@@ -10914,7 +11052,12 @@ async fn show_posted_issue_comment(ctx: &Ctx, item_id: &str, comment: &perch_git
         }
     }
     if ctx.is_open(item_id) {
-        ctx.want_avatars(discussion.comments.iter().map(|c| c.user_avatar_url.clone()));
+        ctx.want_avatars(
+            discussion
+                .comments
+                .iter()
+                .map(|c| c.user_avatar_url.clone()),
+        );
         let _ = ctx.events.send(Event::IssueComments {
             item_id: item_id.to_string(),
             comments: Arc::new(discussion.comments),
@@ -10934,7 +11077,9 @@ async fn show_posted_comment(
 ) {
     let appended = ctx
         .discussion_requests
-        .fence_with(item_id, || append_cached_issue_comment(ctx, item_id, comment))
+        .fence_with(item_id, || {
+            append_cached_issue_comment(ctx, item_id, comment)
+        })
         .unwrap_or(false);
     if !appended {
         let discussion_generation = ctx.discussion_requests.begin(item_id);
@@ -10960,7 +11105,10 @@ async fn set_draft(ctx: &Ctx, item_id: &str, draft: bool) {
 /// `set_draft` up to GitHub's answer, kept in the item. Whether GitHub
 /// answered at all.
 async fn change_draft(ctx: &Ctx, item_id: &str, draft: bool) -> bool {
-    let Some(pull_request) = ctx.item(item_id).and_then(|item| item.pull_request().cloned()) else {
+    let Some(pull_request) = ctx
+        .item(item_id)
+        .and_then(|item| item.pull_request().cloned())
+    else {
         return false;
     };
     if !pull_request.is_open() || pull_request.merged {
@@ -10977,7 +11125,10 @@ async fn change_draft(ctx: &Ctx, item_id: &str, draft: bool) -> bool {
     } else {
         "mark the pull request ready for review"
     };
-    let now_draft = match github.set_pull_request_draft(repo_full_name, number, draft).await {
+    let now_draft = match github
+        .set_pull_request_draft(repo_full_name, number, draft)
+        .await
+    {
         Ok(now_draft) => now_draft,
         Err(error) => {
             tracing::info!(item = item_id, draft, %error, "draft state not changed");
@@ -10989,7 +11140,10 @@ async fn change_draft(ctx: &Ctx, item_id: &str, draft: bool) -> bool {
         ctx.notice(format!("GitHub did not {doing}"));
     }
     // Read again: the item may have moved while GitHub answered.
-    if let Some(mut pull_request) = ctx.item(item_id).and_then(|item| item.pull_request().cloned()) {
+    if let Some(mut pull_request) = ctx
+        .item(item_id)
+        .and_then(|item| item.pull_request().cloned())
+    {
         pull_request.draft = now_draft;
         install_pull_request_snapshot(ctx, item_id, pull_request, None);
     }
@@ -11071,7 +11225,10 @@ async fn close_issue(
     let (repo_full_name, number) = (&issue.repo_full_name, issue.number);
     let body = body.trim();
     if !body.is_empty() {
-        match github.create_issue_comment(repo_full_name, number, body).await {
+        match github
+            .create_issue_comment(repo_full_name, number, body)
+            .await
+        {
             Ok(comment) => show_posted_issue_comment(ctx, item_id, &comment).await,
             Err(error) => {
                 return answer(Err(format!("GitHub could not post the comment: {error}")))
@@ -11193,12 +11350,19 @@ async fn close_as_issue(ctx: &Ctx, item_id: &str, title: &str, body: &str, comme
         return answer(Err("GitHub is unavailable while Perch is offline".into()));
     };
     let repo_full_name = pull_request.repo_full_name.clone();
-    let issue = match github.create_issue(&repo_full_name, title, body.trim()).await {
+    let issue = match github
+        .create_issue(&repo_full_name, title, body.trim())
+        .await
+    {
         Ok(issue) => issue,
         Err(error) => return answer(Err(format!("GitHub could not open the issue: {error}"))),
     };
     let number = issue.number;
-    tracing::info!(item = item_id, issue = number, "opened an issue from a pull request");
+    tracing::info!(
+        item = item_id,
+        issue = number,
+        "opened an issue from a pull request"
+    );
     let comment = comment.trim().replace("{issue}", &format!("#{number}"));
     match comment_and_close(ctx, item_id, &pull_request, &comment).await {
         Ok(installed) => {
@@ -11255,7 +11419,10 @@ async fn comment_and_close(
     let repo_full_name = &pull_request.repo_full_name;
     let number = pull_request.number;
     if !body.is_empty() {
-        match github.create_issue_comment(repo_full_name, number, body).await {
+        match github
+            .create_issue_comment(repo_full_name, number, body)
+            .await
+        {
             Ok(comment) => show_posted_comment(ctx, item_id, pull_request, &comment).await,
             Err(error) => {
                 return Err(CloseFailure::Comment(format!(
@@ -11338,11 +11505,16 @@ fn upsert_cached_review(
         return;
     }
     let kept = edit_kept_discussion(ctx, item_id, "could not cache the submitted review", |d| {
-        match d.reviews.iter_mut().find(|existing| existing.id == review.id) {
+        match d
+            .reviews
+            .iter_mut()
+            .find(|existing| existing.id == review.id)
+        {
             Some(existing) => *existing = review.clone(),
             None => d.reviews.push(review.clone()),
         }
-        d.reviews.sort_by_key(|review| (review.submitted_at, review.id));
+        d.reviews
+            .sort_by_key(|review| (review.submitted_at, review.id));
         true
     });
     if kept.is_some() && ctx.is_open(item_id) {
@@ -11397,7 +11569,9 @@ fn validate_merge_attempt(
         || overview.head_sha != expected_head_sha
         || checkout_head_sha != expected_head_sha
     {
-        return Err("The pull request moved; refresh and review the new head before merging".into());
+        return Err(
+            "The pull request moved; refresh and review the new head before merging".into(),
+        );
     }
     if !overview.allowed_merge_methods.allows(method) {
         return Err(format!(
@@ -11495,7 +11669,8 @@ fn install_pull_request_snapshot(
         return None;
     }
     let stored = item.subject.as_ref().and_then(ItemSubject::updated_at);
-    let pull_request = if merge_attempt_id.is_none() && stored_is_newer(stored, fetched.updated_at) {
+    let pull_request = if merge_attempt_id.is_none() && stored_is_newer(stored, fetched.updated_at)
+    {
         item.pull_request()?.clone()
     } else {
         item.subject = Some(ItemSubject::PullRequest(fetched.clone()));
@@ -11712,11 +11887,16 @@ async fn start_work_and_open(ctx: Ctx, source: Result<String, String>, navigatio
         }
     };
     if let Some(prompt) = source.as_ref().and_then(crate::review::start_work::draft) {
-        ctx.send_navigation_event(navigation_id, Event::StartWorkDraft { navigation_id, prompt });
+        ctx.send_navigation_event(
+            navigation_id,
+            Event::StartWorkDraft {
+                navigation_id,
+                prompt,
+            },
+        );
     }
     if open_item(&ctx, &id, navigation_id).await {
-        start_language_server(&ctx, navigation_id)
-        .await;
+        start_language_server(&ctx, navigation_id).await;
     }
 }
 
@@ -11731,13 +11911,19 @@ async fn subject_item(
     navigation_id: u64,
 ) -> Result<String, String> {
     let found = ctx
-        .with_cache(|c| c.find_item_by_subject(repo_full_name, kind, number).ok().flatten())
+        .with_cache(|c| {
+            c.find_item_by_subject(repo_full_name, kind, number)
+                .ok()
+                .flatten()
+        })
         .flatten();
     if let Some(item) = found {
         // A pull request whose worktree was removed. Opening it puts the
         // worktree back.
         if item.is_archived() {
-            return Err(format!("Open #{number} to restore it, then start work from it"));
+            return Err(format!(
+                "Open #{number} to restore it, then start work from it"
+            ));
         }
         return Ok(item.id);
     }
@@ -11774,7 +11960,11 @@ async fn subject_item(
 
 /// Cut `perch/issue-<n>` from the default branch and make the item for it,
 /// or find the one that already has that branch.
-async fn start_work_on_issue(ctx: &Ctx, issue_item_id: &str, navigation_id: u64) -> Result<String, String> {
+async fn start_work_on_issue(
+    ctx: &Ctx,
+    issue_item_id: &str,
+    navigation_id: u64,
+) -> Result<String, String> {
     let Some(issue_item) = ctx.item(issue_item_id) else {
         return Err("That item is gone".into());
     };
@@ -11892,7 +12082,11 @@ async fn start_work_on_issue(ctx: &Ctx, issue_item_id: &str, navigation_id: u64)
 async fn add_repository(ctx: &Ctx, folder: &Path, path: &Path) -> Result<String, String> {
     let git = ctx.preparer.git();
     let top = git
-        .run(Some(folder), ["rev-parse", "--show-toplevel"], Duration::from_secs(30))
+        .run(
+            Some(folder),
+            ["rev-parse", "--show-toplevel"],
+            Duration::from_secs(30),
+        )
         .await
         .map_err(|_| format!("{} is not in a git repository", folder.display()))?;
     let root = ctx
@@ -11914,7 +12108,8 @@ async fn add_repository(ctx: &Ctx, folder: &Path, path: &Path) -> Result<String,
             }
         }
     }
-    perch_github::append_repo(path, &root).map_err(|e| format!("Could not write {}: {e}", path.display()))?;
+    perch_github::append_repo(path, &root)
+        .map_err(|e| format!("Could not write {}: {e}", path.display()))?;
 
     let reloaded = take_up_config(ctx, path).await;
     let identity = reloaded
@@ -11930,11 +12125,13 @@ async fn add_repository(ctx: &Ctx, folder: &Path, path: &Path) -> Result<String,
         .ok_or_else(|| {
             // Most likely a repository already declared by its `github`,
             // which the new entry repeated and so was dropped.
-            reloaded
-                .warnings
-                .last()
-                .cloned()
-                .unwrap_or_else(|| format!("{} was added to {} but not taken up", root.display(), path.display()))
+            reloaded.warnings.last().cloned().unwrap_or_else(|| {
+                format!(
+                    "{} was added to {} but not taken up",
+                    root.display(),
+                    path.display()
+                )
+            })
         })?;
     if scan_roots(ctx).await {
         ctx.send_items();
@@ -11948,11 +12145,10 @@ async fn add_repository(ctx: &Ctx, folder: &Path, path: &Path) -> Result<String,
 /// checkouts, worktrees and clone are the reader's to keep or delete.
 async fn remove_repository(ctx: &Ctx, identity: &str, path: &Path) -> Result<(), String> {
     let config = ctx.config();
-    let Some(entry) = config
-        .repo
-        .iter()
-        .find(|r| r.identity().is_some_and(|i| i.eq_ignore_ascii_case(identity)))
-    else {
+    let Some(entry) = config.repo.iter().find(|r| {
+        r.identity()
+            .is_some_and(|i| i.eq_ignore_ascii_case(identity))
+    }) else {
         return Ok(());
     };
     match perch_github::remove_repo(path, entry) {
@@ -11988,7 +12184,10 @@ fn configured_base(ctx: &Ctx, identity: &str) -> Option<String> {
     ctx.config()
         .repo
         .iter()
-        .find(|r| r.identity().is_some_and(|i| i.eq_ignore_ascii_case(identity)))
+        .find(|r| {
+            r.identity()
+                .is_some_and(|i| i.eq_ignore_ascii_case(identity))
+        })
         .and_then(|r| r.base.clone())
 }
 
@@ -12012,7 +12211,8 @@ async fn list_bases(ctx: &Ctx, identity: &str) -> Result<Vec<perch_git::BaseBran
     if perch_github::is_local(identity) {
         return Err(no_root_for_local(ctx, identity).unwrap_or_default());
     }
-    let repo = RepoId::parse(identity).ok_or_else(|| format!("{identity} is not a repository name"))?;
+    let repo =
+        RepoId::parse(identity).ok_or_else(|| format!("{identity} is not a repository name"))?;
     let default = ctx
         .preparer
         .default_branch(&repo)
@@ -12050,7 +12250,8 @@ async fn create_worktree(ctx: &Ctx, work: &NewWork, navigation_id: u64) -> Resul
     if !ctx.config().is_declared(identity) {
         return Err(format!("{identity} is not a repository in the config"));
     }
-    let repo = RepoId::parse(identity).ok_or_else(|| format!("{identity} is not a repository name"))?;
+    let repo =
+        RepoId::parse(identity).ok_or_else(|| format!("{identity} is not a repository name"))?;
     let progress = |message: String| {
         ctx.send_navigation_event(
             navigation_id,
@@ -12241,9 +12442,8 @@ async fn fork_item(ctx: &Ctx, id: &str) -> Result<String, String> {
         if checkout.owned {
             // Owned, local, and not cut from a root: a row from before
             // the repository was local. There is nowhere to cut.
-            return Err(no_root_for_local(ctx, &source.repo_full_name).unwrap_or_else(|| {
-                format!("{} was not cut from a root", checkout.branch)
-            }));
+            return Err(no_root_for_local(ctx, &source.repo_full_name)
+                .unwrap_or_else(|| format!("{} was not cut from a root", checkout.branch)));
         }
         Some(
             ctx.preparer
@@ -12403,7 +12603,11 @@ async fn start_work_on_pull(ctx: &Ctx, id: &str, navigation_id: u64) -> Result<S
         // root of the reader's, or another of Perch's clones.
         Some(checkout) => {
             let head = git
-                .run(Some(&checkout.path), ["rev-parse", "HEAD"], Duration::from_secs(30))
+                .run(
+                    Some(&checkout.path),
+                    ["rev-parse", "HEAD"],
+                    Duration::from_secs(30),
+                )
                 .await
                 .map_err(|e| e.to_string())?
                 .trim()
@@ -12811,7 +13015,11 @@ async fn look_at_subjects(ctx: &Ctx) {
             }
         };
         if let Ok(mut asked) = ctx.asked_subjects.lock() {
-            asked.extend(batch.iter().map(|thread| (thread.id.clone(), thread.updated_at)));
+            asked.extend(
+                batch
+                    .iter()
+                    .map(|thread| (thread.id.clone(), thread.updated_at)),
+            );
         }
         if let Ok(mut rechecked) = ctx.rechecked_subjects.lock() {
             let now = std::time::Instant::now();
@@ -12831,7 +13039,11 @@ async fn look_at_subjects(ctx: &Ctx) {
         if found.is_empty() {
             continue;
         }
-        ctx.want_avatars(found.iter().flat_map(|(_, snapshot)| snapshot_avatars(snapshot)));
+        ctx.want_avatars(
+            found
+                .iter()
+                .flat_map(|(_, snapshot)| snapshot_avatars(snapshot)),
+        );
         ctx.edit_polled_notifications(|threads| {
             for (id, snapshot) in found {
                 if let Some(thread) = threads.iter_mut().find(|thread| thread.id == id) {
@@ -13122,7 +13334,10 @@ async fn refresh_open_issue(
         if !once_more {
             return Some(false);
         }
-        let Some(next) = ctx.discussion_requests.again(item_id, discussion_generation) else {
+        let Some(next) = ctx
+            .discussion_requests
+            .again(item_id, discussion_generation)
+        else {
             return Some(false);
         };
         discussion_generation = next;
@@ -13202,7 +13417,10 @@ struct IssueView {
     issue: perch_github::Issue,
     /// Its conversation and timeline. None when the conversation could not
     /// be read though the issue was.
-    conversation: Option<(Vec<perch_github::IssueComment>, Vec<perch_github::PullEvent>)>,
+    conversation: Option<(
+        Vec<perch_github::IssueComment>,
+        Vec<perch_github::PullEvent>,
+    )>,
     /// Whether the reactions on the body and whether the reader may edit
     /// it were read. Unless they were, the issue has none and may not.
     read_nodes: bool,
@@ -13804,7 +14022,10 @@ async fn done_notifications(ctx: &Ctx, github: &GitHub, thread_ids: &[String]) {
             }
             Err(e) => {
                 tracing::warn!(thread = %thread_id, error = %e, "could not mark notification done");
-                let stop = matches!(e, perch_github::Error::RateLimited { .. } | perch_github::Error::Network(_));
+                let stop = matches!(
+                    e,
+                    perch_github::Error::RateLimited { .. } | perch_github::Error::Network(_)
+                );
                 failure = Some(e);
                 if stop {
                     break;
@@ -13814,7 +14035,11 @@ async fn done_notifications(ctx: &Ctx, github: &GitHub, thread_ids: &[String]) {
     }
     if let Some(e) = failure {
         let left = thread_ids.len() - done;
-        let noun = if left == 1 { "notification" } else { "notifications" };
+        let noun = if left == 1 {
+            "notification"
+        } else {
+            "notifications"
+        };
         ctx.notice(format!("Could not mark {left} {noun} done: {e}"));
     }
 }
@@ -13911,12 +14136,7 @@ async fn open_subject(
 /// and a row in All or Authored is the same subject. A Perch-only unread
 /// reminder is cleared without a request; a thread GitHub has unread is
 /// marked read there, and its row follows once GitHub agrees.
-async fn read_subject_notifications(
-    ctx: &Ctx,
-    repo_full_name: &str,
-    kind: ItemKind,
-    number: u64,
-) {
+async fn read_subject_notifications(ctx: &Ctx, repo_full_name: &str, kind: ItemKind, number: u64) {
     let unread: Vec<Thread> = ctx
         .notifications
         .lock()
@@ -13987,15 +14207,17 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
 
     // The conversation as it was last kept, for offline and for a first
     // paint that does not wait on the network.
-    let (kept, kept_events): (Vec<perch_github::IssueComment>, Vec<perch_github::PullEvent>) =
-        existing
-            .as_ref()
-            .and_then(|i| {
-                ctx.with_cache(|c| c.load_discussion(&i.id).ok().flatten())
-                    .flatten()
-            })
-            .map(|(_, d)| (d.comments, d.events))
-            .unwrap_or_default();
+    let (kept, kept_events): (
+        Vec<perch_github::IssueComment>,
+        Vec<perch_github::PullEvent>,
+    ) = existing
+        .as_ref()
+        .and_then(|i| {
+            ctx.with_cache(|c| c.load_discussion(&i.id).ok().flatten())
+                .flatten()
+        })
+        .map(|(_, d)| (d.comments, d.events))
+        .unwrap_or_default();
     let snapshot = existing.as_ref().and_then(|item| item.issue().cloned());
     // Whether what shows now is the kept snapshot, to be fetched again
     // once it does.
@@ -14250,9 +14472,12 @@ async fn prepare_issue_home(ctx: &Ctx, repo: &RepoId) {
     };
     if let Ok(mut guard) = ctx.slot.lock() {
         let open = guard.as_mut().filter(|open| {
-            open.issue
-                .as_ref()
-                .is_some_and(|issue| issue.0.repo_full_name.eq_ignore_ascii_case(&repo.full_name()))
+            open.issue.as_ref().is_some_and(|issue| {
+                issue
+                    .0
+                    .repo_full_name
+                    .eq_ignore_ascii_case(&repo.full_name())
+            })
         });
         if let Some(open) = open {
             open.checkout = checkout;
@@ -14352,7 +14577,16 @@ async fn open_pull_request(
         .as_ref()
         .and_then(|i| i.checkout.as_ref())
         .and_then(|c| c.last_seen_head.clone());
-    open_pull_request_at(ctx, existing, pull_request, source, since, None, navigation_id).await
+    open_pull_request_at(
+        ctx,
+        existing,
+        pull_request,
+        source,
+        since,
+        None,
+        navigation_id,
+    )
+    .await
 }
 
 /// A pull request read before whose checkout is not on disk: shown from
@@ -14386,7 +14620,11 @@ async fn open_pull_request_ahead(
     let prefetch = async {
         let clone = clone.as_ref()?;
         let on_step = checkout_progress(ctx, clone, navigation_id);
-        Some(ctx.preparer.prefetch(clone, number, &shown.base_ref, on_step).await)
+        Some(
+            ctx.preparer
+                .prefetch(clone, number, &shown.base_ref, on_step)
+                .await,
+        )
     };
     let (fetched, prefetched) = tokio::join!(
         github.fetch_pull_request(&shown.repo_full_name, number),
@@ -14395,7 +14633,13 @@ async fn open_pull_request_ahead(
     let pull_request = match fetched {
         Ok(pr) => pr,
         Err(e) => {
-            return fail_pull_request_open(ctx, &shown.repo_full_name, number, navigation_id, e.to_string())
+            return fail_pull_request_open(
+                ctx,
+                &shown.repo_full_name,
+                number,
+                navigation_id,
+                e.to_string(),
+            )
         }
     };
     // A fetch that failed is tried again by `prepare`, which says why.
@@ -14529,11 +14773,9 @@ async fn open_pull_request_at(
     // checkout is of the pull request's own repository, whichever fork the
     // head is on: that is the clone it is cut in.
     let is_new = existing.is_none();
-    let item = existing
-        .unwrap_or_else(|| Item::new(&pull_request.repo_full_name, Timestamp::now()));
-    let on_disk = kept
-        .as_ref()
-        .is_some_and(|c| c.path.join(".git").exists());
+    let item =
+        existing.unwrap_or_else(|| Item::new(&pull_request.repo_full_name, Timestamp::now()));
+    let on_disk = kept.as_ref().is_some_and(|c| c.path.join(".git").exists());
     if source == PullSource::Fetched && !on_disk {
         let shown = Arc::new(pull_request.clone());
         if !show_pull_request_early(ctx, &item, shown.clone(), navigation_id) {
@@ -14742,7 +14984,11 @@ async fn open_owned_branch_for_pull(
     let bare = ctx.preparer.ensure_bare(clone, |_| {}).await?;
     // The last fetch may have brought this head already, as `prepare`
     // checks before its own.
-    if !ctx.preparer.has_pull(&bare, number, pr_head_sha, base_ref).await {
+    if !ctx
+        .preparer
+        .has_pull(&bare, number, pr_head_sha, base_ref)
+        .await
+    {
         ctx.send_navigation_event(
             navigation_id,
             Event::ReviewProgress {
@@ -14799,7 +15045,11 @@ async fn count_divergence(git: &perch_git::cmd::Git, item: &mut Item) -> bool {
     let (Some(checkout), Some(pr)) = (item.checkout.as_ref(), item.pull_request()) else {
         return false;
     };
-    let (dir, head, pr_head) = (checkout.path.clone(), checkout.head_sha.clone(), pr.head_sha.clone());
+    let (dir, head, pr_head) = (
+        checkout.path.clone(),
+        checkout.head_sha.clone(),
+        pr.head_sha.clone(),
+    );
     if !dir.join(".git").exists() {
         return false;
     }
@@ -14818,7 +15068,12 @@ async fn count_divergence(git: &perch_git::cmd::Git, item: &mut Item) -> bool {
     let Ok(counts) = git
         .run(
             Some(&dir),
-            ["rev-list", "--left-right", "--count", &format!("{head}...{pr_head}")],
+            [
+                "rev-list",
+                "--left-right",
+                "--count",
+                &format!("{head}...{pr_head}"),
+            ],
             timeout,
         )
         .await
@@ -14830,7 +15085,12 @@ async fn count_divergence(git: &perch_git::cmd::Git, item: &mut Item) -> bool {
         return false;
     };
     if let Some(checkout) = item.checkout.as_mut() {
-        checkout.divergence = Some(perch_github::Divergence { head, pr_head, ahead, behind });
+        checkout.divergence = Some(perch_github::Divergence {
+            head,
+            pr_head,
+            ahead,
+            behind,
+        });
     }
     true
 }
@@ -14938,7 +15198,10 @@ async fn fetch_discussion(
             Ok(d) => d,
             Err(e) => {
                 tracing::warn!(repo = %pr.repo_full_name, number = pr.number, error = %e, "could not fetch the discussion");
-                if ctx.discussion_requests.is_current(item_id, discussion_generation) {
+                if ctx
+                    .discussion_requests
+                    .is_current(item_id, discussion_generation)
+                {
                     let _ = ctx.events.send(Event::Notice(format!(
                         "Could not fetch the discussion: {e}"
                     )));
@@ -14947,14 +15210,14 @@ async fn fetch_discussion(
             }
         };
 
-        let committed = ctx
-            .discussion_requests
-            .with_current(item_id, discussion_generation, || {
-                // Kept whole, so the next open paints it before the network
-                // answers. The generation check and this cache write share one
-                // lock with review-submission fences.
-                ctx.with_cache(|c| c.store_discussion(item_id, &discussion))
-            });
+        let committed =
+            ctx.discussion_requests
+                .with_current(item_id, discussion_generation, || {
+                    // Kept whole, so the next open paints it before the network
+                    // answers. The generation check and this cache write share one
+                    // lock with review-submission fences.
+                    ctx.with_cache(|c| c.store_discussion(item_id, &discussion))
+                });
         if committed.is_some() {
             publish_discussion(ctx, item_id, discussion);
             return true;
@@ -14962,7 +15225,10 @@ async fn fetch_discussion(
         if !once_more {
             return false;
         }
-        let Some(next) = ctx.discussion_requests.again(item_id, discussion_generation) else {
+        let Some(next) = ctx
+            .discussion_requests
+            .again(item_id, discussion_generation)
+        else {
             return false;
         };
         discussion_generation = next;
@@ -15184,7 +15450,10 @@ async fn review_finding_followup(
     let original_code = match (original_anchor, original_snapshot.as_ref()) {
         (Some(anchor), Some(snapshot)) => {
             retained_excerpt(ctx, &snapshot.id, anchor, || {
-                format!("The retained source for finding {} is unavailable", finding.id)
+                format!(
+                    "The retained source for finding {} is unavailable",
+                    finding.id
+                )
             })
             .await?
         }
@@ -15193,7 +15462,10 @@ async fn review_finding_followup(
     let mapped_code = match (target_anchor.as_ref(), target_snapshot.as_ref()) {
         (Some(anchor), Some(snapshot)) => {
             retained_excerpt(ctx, &snapshot.id, anchor, || {
-                format!("The retained mapped source for finding {} is unavailable", finding.id)
+                format!(
+                    "The retained mapped source for finding {} is unavailable",
+                    finding.id
+                )
             })
             .await?
         }
@@ -15652,12 +15924,8 @@ async fn ask(
             (None, since, Some(manifest))
         }
         Some(archive) => {
-            let (text, manifest) = crate::context::for_first(
-                archive,
-                prompt_anchor,
-                asked_in,
-                context_dir.as_deref(),
-            );
+            let (text, manifest) =
+                crate::context::for_first(archive, prompt_anchor, asked_in, context_dir.as_deref());
             (Some(text), None, Some(manifest))
         }
     };
@@ -15750,7 +16018,10 @@ async fn on_approval(
     id: &str,
     request: &perch_agent::ApprovalRequest,
 ) {
-    let repo = ctx.item(item_id).map(|item| item.repo_full_name).unwrap_or_default();
+    let repo = ctx
+        .item(item_id)
+        .map(|item| item.repo_full_name)
+        .unwrap_or_default();
     let grants = ctx
         .with_cache(|c| c.grants_for(&repo))
         .and_then(Result::ok)
@@ -15758,12 +16029,24 @@ async fn on_approval(
     let line = crate::approvals::one_line(request);
     if ctx.config().approvals_for(&repo) == perch_github::Approvals::Never {
         handle.answer(id, perch_agent::Decision::Allow);
-        record_approval_step(ctx, &run.id, &format!("approval-{id}"), &format!("Allowed without asking: {line}"), Some(true));
+        record_approval_step(
+            ctx,
+            &run.id,
+            &format!("approval-{id}"),
+            &format!("Allowed without asking: {line}"),
+            Some(true),
+        );
         return;
     }
     if crate::approvals::covering(&grants, request).is_some() {
         handle.answer(id, perch_agent::Decision::Allow);
-        record_approval_step(ctx, &run.id, &format!("approval-{id}"), &format!("Allowed by a grant: {line}"), Some(true));
+        record_approval_step(
+            ctx,
+            &run.id,
+            &format!("approval-{id}"),
+            &format!("Allowed by a grant: {line}"),
+            Some(true),
+        );
         return;
     }
     if let Ok(mut pending) = ctx.approvals.lock() {
@@ -15776,14 +16059,21 @@ async fn on_approval(
             },
         );
     }
-    record_approval_step(ctx, &run.id, &format!("approval-{id}"), &format!("Asked: {line}"), None);
+    record_approval_step(
+        ctx,
+        &run.id,
+        &format!("approval-{id}"),
+        &format!("Asked: {line}"),
+        None,
+    );
     let _ = ctx.events.send(Event::ApprovalRequested(ApprovalView {
         run_id: run.id.clone(),
         id: id.to_string(),
         item_id: item_id.to_string(),
         thread_id: thread_id.to_string(),
         title: crate::approvals::title(request),
-        command: matches!(request.kind, perch_agent::ApprovalKind::Command).then(|| request.subject.clone()),
+        command: matches!(request.kind, perch_agent::ApprovalKind::Command)
+            .then(|| request.subject.clone()),
         detail: request.detail.clone(),
         always: crate::approvals::always_button(request),
     }));
@@ -15803,7 +16093,11 @@ async fn settle_approval(ctx: &Ctx, run_id: &str, id: &str, how: Settle) {
         return;
     };
     let (decision, ok, summary) = match how {
-        Settle::Answered(ApprovalAnswer::Once) => (Some(perch_agent::Decision::Allow), true, "Allowed once".to_string()),
+        Settle::Answered(ApprovalAnswer::Once) => (
+            Some(perch_agent::Decision::Allow),
+            true,
+            "Allowed once".to_string(),
+        ),
         Settle::Answered(ApprovalAnswer::Always) => {
             let (grant_key, label) = crate::approvals::always(&pending.request);
             let grant = perch_github::WorkGrantRecord {
@@ -15815,7 +16109,11 @@ async fn settle_approval(ctx: &Ctx, run_id: &str, id: &str, how: Settle) {
             };
             ctx.with_cache(|c| c.insert_grant(&grant));
             send_grants(ctx, &pending.repo);
-            (Some(perch_agent::Decision::Allow), true, "Always allowed".to_string())
+            (
+                Some(perch_agent::Decision::Allow),
+                true,
+                "Always allowed".to_string(),
+            )
         }
         Settle::Answered(ApprovalAnswer::Deny) => (
             Some(perch_agent::Decision::deny(crate::approvals::DENIED)),
@@ -15847,7 +16145,13 @@ async fn settle_approval(ctx: &Ctx, run_id: &str, id: &str, how: Settle) {
     };
     let _ = append_stored_event(ctx, run_id, &format!("{ask}-closed"), stored);
     let line = crate::approvals::one_line(&pending.request);
-    record_approval_step(ctx, run_id, &format!("{ask}-answer"), &format!("{summary}: {line}"), Some(ok));
+    record_approval_step(
+        ctx,
+        run_id,
+        &format!("{ask}-answer"),
+        &format!("{summary}: {line}"),
+        Some(ok),
+    );
     let _ = ctx.events.send(Event::ApprovalSettled {
         run_id: run_id.to_string(),
         approval_id: id.to_string(),
@@ -15973,7 +16277,10 @@ async fn drop_work_refs(ctx: &Ctx, runs: &[RunRecord]) {
         let Some(repo) = run_repository(ctx, run) else {
             continue;
         };
-        let refs = [work_ref(&run.id, WorkSide::Before), work_ref(&run.id, WorkSide::After)];
+        let refs = [
+            work_ref(&run.id, WorkSide::Before),
+            work_ref(&run.id, WorkSide::After),
+        ];
         ctx.preparer.drop_refs(&repo, &refs).await;
     }
 }
@@ -15993,10 +16300,10 @@ fn work_setup(
         return Err("Work runs only on your own worktrees and pull requests".into());
     }
     let config = ctx.config();
-    let repo = config
-        .repo
-        .iter()
-        .find(|r| r.identity().is_some_and(|i| i.eq_ignore_ascii_case(&item.repo_full_name)));
+    let repo = config.repo.iter().find(|r| {
+        r.identity()
+            .is_some_and(|i| i.eq_ignore_ascii_case(&item.repo_full_name))
+    });
     let grants = ctx
         .with_cache(|c| c.grants_for(&item.repo_full_name))
         .and_then(Result::ok)
@@ -16277,7 +16584,8 @@ async fn execute_question(
                         // What it said before a tool call, or before the
                         // reader's steer, was narration, kept among the
                         // steps; the answer is what it says after the last.
-                        perch_agent::RunEvent::ToolCall { .. } | perch_agent::RunEvent::Steered(_)
+                        perch_agent::RunEvent::ToolCall { .. }
+                        | perch_agent::RunEvent::Steered(_)
                             if !answer.is_empty() =>
                         {
                             narration.append(&mut answer)
@@ -16554,7 +16862,18 @@ fn follow_up_run(ctx: &Ctx, run: &RunRecord, text: String) {
     };
     let (ctx, model, mode) = (ctx.clone(), run.requested_model.clone(), run.mode);
     tokio::spawn(async move {
-        ask(&ctx, item_id, Some(thread_id), None, text, backend, model, effort, mode).await;
+        ask(
+            &ctx,
+            item_id,
+            Some(thread_id),
+            None,
+            text,
+            backend,
+            model,
+            effort,
+            mode,
+        )
+        .await;
     });
 }
 
@@ -17352,11 +17671,11 @@ async fn open_file(
                 &item_id,
                 scope_gen,
                 Event::FileLoaded {
-                navigation_id,
-                scope_gen,
-                item_id: item_id.clone(),
-                path: file.path.clone(),
-                file: Arc::new(file),
+                    navigation_id,
+                    scope_gen,
+                    item_id: item_id.clone(),
+                    path: file.path.clone(),
+                    file: Arc::new(file),
                 },
             )
             .then_some(shown)
@@ -17385,7 +17704,13 @@ async fn open_outside_file(
                 guard
                     .as_ref()
                     .filter(|context| context.navigation_id == navigation_id)
-                    .map(|context| (context.scope.clone(), context.item_id.clone(), context.scope_gen))
+                    .map(|context| {
+                        (
+                            context.scope.clone(),
+                            context.item_id.clone(),
+                            context.scope_gen,
+                        )
+                    })
             })
         })
         .flatten()
@@ -17395,7 +17720,11 @@ async fn open_outside_file(
 
     // A class file is read from jdtls, which gives its source.
     let class_file = if perch_lsp::server::is_class_file(&path) {
-        let jdtls = servers.lock().await.get(&perch_lsp::ServerKind::Jdtls).cloned();
+        let jdtls = servers
+            .lock()
+            .await
+            .get(&perch_lsp::ServerKind::Jdtls)
+            .cloned();
         Some(match jdtls {
             Some(jdtls) => jdtls.class_file_contents(&path).await,
             None => None,
@@ -17422,15 +17751,8 @@ async fn open_outside_file(
     let loaded = tokio::task::spawn_blocking({
         let path = path.clone();
         move || {
-            let mut file = build_loaded_file(
-                path,
-                text,
-                String::new(),
-                None,
-                false,
-                scope,
-                String::new(),
-            );
+            let mut file =
+                build_loaded_file(path, text, String::new(), None, false, scope, String::new());
             if truncated {
                 file.truncated = true;
                 file.language = None;
@@ -17582,7 +17904,8 @@ fn code_trusted_now(ctx: &Ctx, item: &Item, kind: perch_lsp::ServerKind) -> bool
 /// `code_trusted_now` for the item with an id; an item with no row is
 /// untrusted.
 fn item_code_trusted(ctx: &Ctx, item_id: &str, kind: perch_lsp::ServerKind) -> bool {
-    ctx.item(item_id).is_some_and(|item| code_trusted_now(ctx, &item, kind))
+    ctx.item(item_id)
+        .is_some_and(|item| code_trusted_now(ctx, &item, kind))
 }
 
 /// Tell every window which servers the reader trusts on everything in a
@@ -17594,7 +17917,9 @@ fn send_trusted_servers(cache: &SharedCache, events: &EventSender<Event>) {
         .unwrap_or_default()
         .into_iter()
         .filter_map(|(repo, server)| {
-            let kind = perch_lsp::ServerKind::ALL.into_iter().find(|k| k.name() == server)?;
+            let kind = perch_lsp::ServerKind::ALL
+                .into_iter()
+                .find(|k| k.name() == server)?;
             Some((repo, kind))
         })
         .collect();
@@ -17640,7 +17965,8 @@ async fn start_server(ctx: &Ctx, navigation_id: u64, kind: perch_lsp::ServerKind
     if let Ok(mut held) = ctx.held_servers.lock() {
         held.remove(&(ctx.window, worktree.clone(), kind));
     }
-    let Some(_starting) = Starting::claim(&ctx.starting_servers, ctx.window, &worktree, kind) else {
+    let Some(_starting) = Starting::claim(&ctx.starting_servers, ctx.window, &worktree, kind)
+    else {
         return;
     };
 
@@ -17649,7 +17975,10 @@ async fn start_server(ctx: &Ctx, navigation_id: u64, kind: perch_lsp::ServerKind
         tokio::task::spawn_blocking(move || {
             let env = perch_lsp::Env::current(servers_dir());
             let found = perch_lsp::find(kind, &worktree, &env);
-            let outdated = found.as_ref().ok().and_then(|spec| perch_lsp::outdated(spec, &env));
+            let outdated = found
+                .as_ref()
+                .ok()
+                .and_then(|spec| perch_lsp::outdated(spec, &env));
             (found, outdated)
         })
         .await
@@ -17721,7 +18050,10 @@ async fn show_server(ctx: &Ctx, navigation_id: u64, worktree: &Path, spec: perch
         }
     }
 
-    let client = match ctx.kept_servers.take(ctx.window, worktree, kind, &spec.binary) {
+    let client = match ctx
+        .kept_servers
+        .take(ctx.window, worktree, kind, &spec.binary)
+    {
         Some(client) => {
             tracing::info!(server = kind.name(), "language server taken up again");
             client
@@ -17899,7 +18231,10 @@ async fn trust_language_servers(
         })
         .unwrap_or(false);
     if !on_show {
-        tracing::info!(item = item_id, "trust asked for an item no longer on show; nothing recorded");
+        tracing::info!(
+            item = item_id,
+            "trust asked for an item no longer on show; nothing recorded"
+        );
         return;
     }
     let repo = match everywhere {
@@ -17954,7 +18289,10 @@ async fn trust_server_in_repo(ctx: &Ctx, repo: &str, kind: perch_lsp::ServerKind
         Some(Ok(())) => {}
         Some(Err(error)) => {
             tracing::warn!(%error, repo, server = kind.name(), trusted, "could not record a server's trust on a repository");
-            ctx.notice(format!("Could not {what} {} in {repo}: {error}", kind.name()));
+            ctx.notice(format!(
+                "Could not {what} {} in {repo}: {error}",
+                kind.name()
+            ));
             return;
         }
         None => {
@@ -18009,7 +18347,11 @@ async fn hold_untrusted_servers(ctx: &Ctx, kind: perch_lsp::ServerKind) {
     for client in kept {
         let trusted = items
             .iter()
-            .find(|item| item.checkout.as_ref().is_some_and(|c| c.path == client.root()))
+            .find(|item| {
+                item.checkout
+                    .as_ref()
+                    .is_some_and(|c| c.path == client.root())
+            })
             .is_some_and(|item| code_trusted_now(ctx, item, kind));
         if !trusted {
             ctx.kept_servers.stop_kind_at(client.root(), kind).await;
@@ -18056,7 +18398,11 @@ fn forget_server_data(worktree: &Path) {
 /// Run a server's install, once at a time for every window, telling every
 /// window as it starts and ends. The windows that wanted it start it again
 /// themselves.
-async fn install_language_server(ctx: &Ctx, kind: perch_lsp::ServerKind, install: perch_lsp::Install) {
+async fn install_language_server(
+    ctx: &Ctx,
+    kind: perch_lsp::ServerKind,
+    install: perch_lsp::Install,
+) {
     let claimed = ctx
         .installing_servers
         .lock()
@@ -18151,7 +18497,10 @@ fn forward_language_server_events(
             }
             // Held for this window and worktree: a server set aside for
             // code the reader hasn't trusted says nothing to the window.
-            if held.lock().is_ok_and(|held| held.contains(&(window, worktree.clone(), kind))) {
+            if held
+                .lock()
+                .is_ok_and(|held| held.contains(&(window, worktree.clone(), kind)))
+            {
                 continue;
             }
             // On show, or still starting with none other of its kind on
@@ -18411,11 +18760,17 @@ async fn read_locations(
             }
             let line = location.range.start.line as usize;
             out.push(crate::review::model::Located {
-                outside: Some(crate::review::model::outside_label(&target, home.as_deref())),
+                outside: Some(crate::review::model::outside_label(
+                    &target,
+                    home.as_deref(),
+                )),
                 path: key,
                 line: line + 1,
                 character: location.range.start.character as usize,
-                text: texts[&target].get(line).map(|l| l.trim().to_string()).unwrap_or_default(),
+                text: texts[&target]
+                    .get(line)
+                    .map(|l| l.trim().to_string())
+                    .unwrap_or_default(),
             });
             continue;
         }
@@ -18426,7 +18781,10 @@ async fn read_locations(
             Ok(relative) => (relative.to_string_lossy().into_owned(), None),
             Err(_) => (
                 target.to_string_lossy().into_owned(),
-                Some(crate::review::model::outside_label(&target, home.as_deref())),
+                Some(crate::review::model::outside_label(
+                    &target,
+                    home.as_deref(),
+                )),
             ),
         };
         if !texts.contains_key(&target) {
@@ -18710,7 +19068,10 @@ mod tests {
         use perch_lsp::ServerKind;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        assert_eq!(wanted_servers(root, &[changed("src/lib.rs")]), [ServerKind::RustAnalyzer]);
+        assert_eq!(
+            wanted_servers(root, &[changed("src/lib.rs")]),
+            [ServerKind::RustAnalyzer]
+        );
         assert_eq!(
             wanted_servers(root, &[changed("a.rs"), changed("b.rs")]),
             [ServerKind::RustAnalyzer],
@@ -18718,16 +19079,26 @@ mod tests {
         );
         assert!(wanted_servers(root, &[changed("README.md")]).is_empty());
         std::fs::write(root.join("Cargo.toml"), "").unwrap();
-        assert_eq!(wanted_servers(root, &[changed("README.md")]), [ServerKind::RustAnalyzer]);
+        assert_eq!(
+            wanted_servers(root, &[changed("README.md")]),
+            [ServerKind::RustAnalyzer]
+        );
         assert_eq!(wanted_servers(root, &[]), [ServerKind::RustAnalyzer]);
         assert_eq!(
             wanted_servers(root, &[changed("cmd/main.go"), changed("src/lib.rs")]),
             [ServerKind::RustAnalyzer, ServerKind::Gopls]
         );
-        assert_eq!(wanted_servers(root, &[changed("main.go")]), [ServerKind::Gopls]);
+        assert_eq!(
+            wanted_servers(root, &[changed("main.go")]),
+            [ServerKind::Gopls]
+        );
         std::fs::remove_file(root.join("Cargo.toml")).unwrap();
         std::fs::write(root.join("go.mod"), "module x\n").unwrap();
-        assert_eq!(wanted_servers(root, &[]), [ServerKind::Gopls], "an issue in a Go repository");
+        assert_eq!(
+            wanted_servers(root, &[]),
+            [ServerKind::Gopls],
+            "an issue in a Go repository"
+        );
     }
 
     #[test]
@@ -18991,7 +19362,12 @@ mod tests {
             .unwrap_or(0);
         let mut sent = vec![0; length];
         reader.read_exact(&mut sent).ok()?;
-        Some((method, path, headers, String::from_utf8_lossy(&sent).into_owned()))
+        Some((
+            method,
+            path,
+            headers,
+            String::from_utf8_lossy(&sent).into_owned(),
+        ))
     }
 
     /// A base nothing listens on, so a request the code should not make
@@ -19105,10 +19481,7 @@ mod tests {
             let _ = done.send(findings.len());
         });
 
-        assert_eq!(
-            completed.recv_timeout(Duration::from_secs(2)).unwrap(),
-            0
-        );
+        assert_eq!(completed.recv_timeout(Duration::from_secs(2)).unwrap(), 0);
     }
 
     #[test]
@@ -19158,9 +19531,7 @@ mod tests {
     #[test]
     fn opening_an_ordinary_agent_owner_cancels_a_historical_load() {
         let backend = Backend::detached();
-        let request = backend
-            .navigation_requests
-            .begin_group("item", "group-a");
+        let request = backend.navigation_requests.begin_group("item", "group-a");
         assert!(backend
             .navigation_requests
             .is_current_group("group-a", request));
@@ -19280,7 +19651,9 @@ mod tests {
         let published = received
             .try_iter()
             .filter_map(|event| match event {
-                Event::Notifications(threads) | Event::NotificationsPolled(threads) => Some(threads),
+                Event::Notifications(threads) | Event::NotificationsPolled(threads) => {
+                    Some(threads)
+                }
                 _ => None,
             })
             .last()
@@ -19327,7 +19700,10 @@ mod tests {
         read_subject_notifications(&ctx, "a/b", ItemKind::Issue, 9).await;
         read_subject_notifications(&ctx, "a/c", ItemKind::PullRequest, 9).await;
 
-        assert_eq!(asked.lock().unwrap().as_slice(), ["/notifications/threads/7"]);
+        assert_eq!(
+            asked.lock().unwrap().as_slice(),
+            ["/notifications/threads/7"]
+        );
         let threads = ctx.notifications.lock().unwrap().clone();
         assert!(!threads[0].unread && !threads[0].local_unread);
         assert!(threads[0].last_read_at.is_some(), "read now");
@@ -19335,16 +19711,22 @@ mod tests {
             !threads[1].unread && !threads[1].local_unread,
             "the reminder went without a request"
         );
-        assert!(threads[2].unread, "another subject's notification is left alone");
+        assert!(
+            threads[2].unread,
+            "another subject's notification is left alone"
+        );
         assert_eq!(
-            ctx.with_cache(|cache| cache.load_threads().unwrap()).unwrap(),
+            ctx.with_cache(|cache| cache.load_threads().unwrap())
+                .unwrap(),
             threads,
             "the read state survives a restart"
         );
         let published = received
             .try_iter()
             .filter_map(|event| match event {
-                Event::Notifications(threads) | Event::NotificationsPolled(threads) => Some(threads),
+                Event::Notifications(threads) | Event::NotificationsPolled(threads) => {
+                    Some(threads)
+                }
                 _ => None,
             })
             .last()
@@ -19369,13 +19751,22 @@ mod tests {
         assert!(ctx.prepare_notification_open(&opened));
         assert!(ctx.claim_notification_read("7"));
         read_subject_notifications(&ctx, "a/b", ItemKind::PullRequest, 7).await;
-        assert!(asked.lock().unwrap().is_empty(), "the subject's open left it to the first");
+        assert!(
+            asked.lock().unwrap().is_empty(),
+            "the subject's open left it to the first"
+        );
 
         let github = ctx.github().unwrap();
         mark_read_on_github(&ctx, &github, "7").await;
-        assert_eq!(asked.lock().unwrap().as_slice(), ["/notifications/threads/7"]);
+        assert_eq!(
+            asked.lock().unwrap().as_slice(),
+            ["/notifications/threads/7"]
+        );
         assert!(!ctx.notifications.lock().unwrap()[0].unread);
-        assert!(ctx.claim_notification_read("7"), "released once GitHub answered");
+        assert!(
+            ctx.claim_notification_read("7"),
+            "released once GitHub answered"
+        );
     }
 
     /// GitHub's list can still say unread for a while after it has taken
@@ -19397,9 +19788,14 @@ mod tests {
         let held = ctx.notifications.lock().unwrap()[0].clone();
         assert!(!held.unread, "GitHub's stale unread does not undo the read");
         assert!(held.local_read);
-        assert_eq!(held.last_read_at, Some(read_at), "and when it was read is kept");
         assert_eq!(
-            ctx.with_cache(|cache| cache.load_threads().unwrap()).unwrap(),
+            held.last_read_at,
+            Some(read_at),
+            "and when it was read is kept"
+        );
+        assert_eq!(
+            ctx.with_cache(|cache| cache.load_threads().unwrap())
+                .unwrap(),
             vec![held],
             "across a restart too"
         );
@@ -19471,10 +19867,7 @@ mod tests {
         let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
         let dismissed = thread("7", "seven");
         let other = thread("8", "eight");
-        ctx.replace_notifications(
-            vec![dismissed.clone(), other.clone()],
-            Some("first"),
-        );
+        ctx.replace_notifications(vec![dismissed.clone(), other.clone()], Some("first"));
 
         ctx.dismiss_notification(&dismissed.id);
         assert_eq!(*ctx.notifications.lock().unwrap(), vec![other.clone()]);
@@ -19493,10 +19886,8 @@ mod tests {
 
         let mut newer = dismissed;
         newer.updated_at = "2026-09-18T18:00:00Z".parse().unwrap();
-        let visible = ctx.replace_notifications(
-            vec![newer.clone(), other.clone()],
-            Some("newer-revision"),
-        );
+        let visible =
+            ctx.replace_notifications(vec![newer.clone(), other.clone()], Some("newer-revision"));
         assert_eq!(visible, vec![newer.clone(), other.clone()]);
         assert_eq!(*ctx.notifications.lock().unwrap(), visible);
         assert_eq!(
@@ -19521,12 +19912,19 @@ mod tests {
             Some("first"),
         );
         ctx.dismiss_notification(&dismissed.id);
-        let done = || ctx.with_cache(|cache| cache.load_done_threads().unwrap()).unwrap();
+        let done = || {
+            ctx.with_cache(|cache| cache.load_done_threads().unwrap())
+                .unwrap()
+        };
         assert_eq!(done(), vec![dismissed.clone()]);
 
         ctx.restore_notification(&dismissed.id);
         let inbox = vec![newest, dismissed, oldest];
-        assert_eq!(*ctx.notifications.lock().unwrap(), inbox, "back in its place");
+        assert_eq!(
+            *ctx.notifications.lock().unwrap(),
+            inbox,
+            "back in its place"
+        );
         assert!(done().is_empty());
 
         // GitHub still lists it, now with no mark to hide it.
@@ -19549,22 +19947,34 @@ mod tests {
         let until = Timestamp::now() + jiff::SignedDuration::from_hours(3);
         ctx.snooze_notification(&snoozed.id, until);
         assert_eq!(*ctx.notifications.lock().unwrap(), vec![newest.clone()]);
-        let listed = ctx.with_cache(|cache| cache.load_snoozed_threads().unwrap()).unwrap();
+        let listed = ctx
+            .with_cache(|cache| cache.load_snoozed_threads().unwrap())
+            .unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].snoozed_until, Some(until));
-        assert!(ctx.with_cache(|cache| cache.load_done_threads().unwrap()).unwrap().is_empty());
+        assert!(ctx
+            .with_cache(|cache| cache.load_done_threads().unwrap())
+            .unwrap()
+            .is_empty());
 
         // A poll of the same revision leaves it snoozed.
         let visible = ctx.replace_notifications(inbox.clone(), Some("second"));
         assert_eq!(visible, vec![newest.clone()]);
 
         ctx.wake_snoozed_notifications(Timestamp::now());
-        assert_eq!(*ctx.notifications.lock().unwrap(), vec![newest.clone()], "not yet");
+        assert_eq!(
+            *ctx.notifications.lock().unwrap(),
+            vec![newest.clone()],
+            "not yet"
+        );
         ctx.wake_snoozed_notifications(until);
         let back = ctx.notifications.lock().unwrap().clone();
         assert_eq!(back.len(), 2);
         assert_eq!(back[1].id, snoozed.id, "in its place");
-        assert!(!back[1].unread && !back[1].local_unread, "back read, as it went");
+        assert!(
+            !back[1].unread && !back[1].local_unread,
+            "back read, as it went"
+        );
 
         // The next poll of the same revision keeps it listed.
         let visible = ctx.replace_notifications(inbox.clone(), Some("third"));
@@ -19764,7 +20174,9 @@ mod tests {
         assert_eq!(attempts.begin("item"), None, "a stale finish is ignored");
 
         attempts.finish("item", first);
-        let second = attempts.begin("item").expect("matching finish releases item");
+        let second = attempts
+            .begin("item")
+            .expect("matching finish releases item");
         assert!(second > first);
     }
 
@@ -19779,7 +20191,9 @@ mod tests {
         assert_eq!(attempts.begin("item"), None, "a stale finish is ignored");
 
         attempts.finish("item", first);
-        let second = attempts.begin("item").expect("matching finish releases item");
+        let second = attempts
+            .begin("item")
+            .expect("matching finish releases item");
         assert!(second > first);
     }
 
@@ -19800,17 +20214,31 @@ mod tests {
         let read = requests.begin("item");
         assert_eq!(requests.again("item", read), None, "nothing turned it away");
         requests.fence_with("item", || ());
-        let again = requests.again("item", read).expect("a fence alone turned it away");
+        let again = requests
+            .again("item", read)
+            .expect("a fence alone turned it away");
         assert!(requests.is_current("item", again));
-        assert_eq!(requests.again("item", read), None, "the read again stands for it");
+        assert_eq!(
+            requests.again("item", read),
+            None,
+            "the read again stands for it"
+        );
 
         let older = requests.begin("item");
         let newer = requests.begin("item");
         requests.fence_with("item", || ());
-        assert_eq!(requests.again("item", older), None, "the newer read stands for it");
+        assert_eq!(
+            requests.again("item", older),
+            None,
+            "the newer read stands for it"
+        );
         {
             let _hold = requests.hold("item");
-            assert_eq!(requests.again("item", newer), None, "the submission reads itself");
+            assert_eq!(
+                requests.again("item", newer),
+                None,
+                "the submission reads itself"
+            );
         }
         assert!(requests.again("item", newer).is_some());
     }
@@ -19909,7 +20337,7 @@ mod tests {
                 "h7",
                 "",
                 PullReviewEvent::Approve,
-            false,
+                false,
             ),
             Ok(())
         );
@@ -19925,7 +20353,7 @@ mod tests {
                 "h7",
                 "Looks good",
                 PullReviewEvent::Approve,
-            false,
+                false,
             ),
             Ok(()),
             "draft pull requests may still be reviewed"
@@ -19939,7 +20367,7 @@ mod tests {
             "h7",
             "Looks good",
             PullReviewEvent::Approve,
-        false,
+            false,
         )
         .unwrap_err()
         .contains("current review"));
@@ -19954,7 +20382,7 @@ mod tests {
             "h7",
             "Looks good",
             PullReviewEvent::Approve,
-        false,
+            false,
         )
         .unwrap_err()
         .contains("moved"));
@@ -19967,7 +20395,7 @@ mod tests {
             "h7",
             " \n ",
             PullReviewEvent::RequestChanges,
-        false,
+            false,
         )
         .unwrap_err()
         .contains("summary"));
@@ -19982,7 +20410,7 @@ mod tests {
             "h7",
             "A comment",
             PullReviewEvent::Comment,
-        false,
+            false,
         )
         .unwrap_err()
         .contains("no longer open"));
@@ -20050,7 +20478,9 @@ mod tests {
         ];
         let split = split_drafts(drafts, "h7");
         let ids = |rows: &[DraftRow]| {
-            rows.iter().map(|d| d.message_id.clone()).collect::<Vec<_>>()
+            rows.iter()
+                .map(|d| d.message_id.clone())
+                .collect::<Vec<_>>()
         };
         assert_eq!(ids(&split.in_review), ["opens"]);
         assert_eq!(
@@ -20092,7 +20522,11 @@ mod tests {
         git(repo, &["commit", "-q", "-m", "base"]);
         let merge_base = git(repo, &["rev-parse", "HEAD"]);
         git(repo, &["checkout", "-q", "-b", "feature"]);
-        std::fs::write(repo.join("code.rs"), base.replace("line 10\n", "line ten\n")).unwrap();
+        std::fs::write(
+            repo.join("code.rs"),
+            base.replace("line 10\n", "line ten\n"),
+        )
+        .unwrap();
         git(repo, &["commit", "-q", "-am", "feature"]);
         (merge_base, git(repo, &["rev-parse", "HEAD"]))
     }
@@ -20135,7 +20569,9 @@ mod tests {
             ..SplitDrafts::default()
         };
         let ids = |rows: &[DraftRow]| {
-            rows.iter().map(|d| d.message_id.clone()).collect::<Vec<_>>()
+            rows.iter()
+                .map(|d| d.message_id.clone())
+                .collect::<Vec<_>>()
         };
 
         let mut drafts = split(vec![
@@ -20147,7 +20583,9 @@ mod tests {
             on("removed", "code.rs", perch_github::Side::Left, 10, 10),
         ]);
         let repo_url = "https://github.com/a/b";
-        drafts.in_review.push(on("base", "code.rs", perch_github::Side::Left, 25, 26));
+        drafts
+            .in_review
+            .push(on("base", "code.rs", perch_github::Side::Left, 25, 26));
         hold_back_outside_diff(&ctx, &checkout, repo_url, &merge_base, &head, &mut drafts).await;
         assert_eq!(ids(&drafts.in_review), ["changed", "hunk", "removed"]);
         assert_eq!(ids(&drafts.outside_diff), ["untouched"]);
@@ -20169,8 +20607,7 @@ mod tests {
                 ),
                 (
                     "base",
-                    format!("{repo_url}/blob/{merge_base}/code.rs#L25-L26\n\ndraft base")
-                        .as_str()
+                    format!("{repo_url}/blob/{merge_base}/code.rs#L25-L26\n\ndraft base").as_str()
                 ),
             ]
         );
@@ -20194,7 +20631,12 @@ mod tests {
         for (checkout, base) in [(&unmerged, &unfetched), (&gone, &merge_base)] {
             let mut drafts = split(vec![at("below", 20, 20)]);
             hold_back_outside_diff(&ctx, checkout, repo_url, base, &head, &mut drafts).await;
-            assert_eq!(ids(&drafts.in_review), ["below"], "{}", checkout.bare.display());
+            assert_eq!(
+                ids(&drafts.in_review),
+                ["below"],
+                "{}",
+                checkout.bare.display()
+            );
             assert!(drafts.outside_diff.is_empty() && drafts.on_file.is_empty());
         }
     }
@@ -20239,14 +20681,29 @@ mod tests {
         install_pull_request_snapshot(&ctx, &item.id, merged, Some(1)).unwrap();
 
         let state = |id: &str| {
-            ctx.notifications.lock().unwrap().iter().find(|t| t.id == id).unwrap()
-                .subject_snapshot.as_ref().unwrap().state
+            ctx.notifications
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|t| t.id == id)
+                .unwrap()
+                .subject_snapshot
+                .as_ref()
+                .unwrap()
+                .state
         };
         assert_eq!(state("7"), perch_github::SubjectState::PrMerged);
         assert_eq!(state("8"), perch_github::SubjectState::PrOpen);
         let cached = ctx.with_cache(|c| c.load_threads().unwrap()).unwrap();
         assert_eq!(
-            cached.iter().find(|t| t.id == "7").unwrap().subject_snapshot.as_ref().unwrap().state,
+            cached
+                .iter()
+                .find(|t| t.id == "7")
+                .unwrap()
+                .subject_snapshot
+                .as_ref()
+                .unwrap()
+                .state,
             perch_github::SubjectState::PrMerged,
             "kept for the next launch"
         );
@@ -20376,11 +20833,14 @@ mod tests {
             let item = store_editable_issue(&ctx, 8);
             open_issue_in_slot(&ctx, &item);
 
-            update_github_comment(&ctx, &item.id, "I_8", CommentPlace::IssueBody, "Rewritten").await;
+            update_github_comment(&ctx, &item.id, "I_8", CommentPlace::IssueBody, "Rewritten")
+                .await;
 
             let events: Vec<Event> = received.try_iter().collect();
             assert!(
-                events.iter().any(|e| matches!(e, Event::Notice(m) if m.contains("could not edit"))),
+                events
+                    .iter()
+                    .any(|e| matches!(e, Event::Notice(m) if m.contains("could not edit"))),
                 "{base}: {events:?}"
             );
             let shown = events.iter().rev().find_map(|e| match e {
@@ -20390,7 +20850,10 @@ mod tests {
             let shown = shown.unwrap_or_else(|| panic!("{base}: the view is not told: {events:?}"));
             assert_eq!(shown.body, "As written", "{base}");
             assert!(shown.viewer_can_update, "{base}: Edit stays");
-            assert_eq!(ctx.item(&item.id).unwrap().issue().unwrap().body, "As written");
+            assert_eq!(
+                ctx.item(&item.id).unwrap().issue().unwrap().body,
+                "As written"
+            );
         }
     }
 
@@ -20413,7 +20876,10 @@ mod tests {
 
         update_github_comment(&ctx, &item.id, "I_8", CommentPlace::IssueBody, "Rewritten").await;
 
-        assert_eq!(ctx.item(&item.id).unwrap().issue().unwrap().body, "Rewritten");
+        assert_eq!(
+            ctx.item(&item.id).unwrap().issue().unwrap().body,
+            "Rewritten"
+        );
         let events: Vec<Event> = received.try_iter().collect();
         let shown = events.iter().rev().find_map(|e| match e {
             Event::IssueUpdated { issue, .. } => Some(issue.body.clone()),
@@ -20458,7 +20924,11 @@ mod tests {
             let kept = row.issue().unwrap();
             let had = item.issue().unwrap();
             assert_eq!(kept.viewer_can_update, keeps, "{comments} then {reactions}");
-            assert_eq!(kept.reactions == had.reactions, keeps, "{comments} then {reactions}");
+            assert_eq!(
+                kept.reactions == had.reactions,
+                keeps,
+                "{comments} then {reactions}"
+            );
         }
     }
 
@@ -20578,7 +21048,8 @@ mod tests {
         delete_github_comment(&ctx, &item.id, "IC_1", CommentPlace::Conversation).await;
         let _: Vec<Event> = received.try_iter().collect();
         stale.store(true, std::sync::atomic::Ordering::SeqCst);
-        let read = refresh_open_issue(&ctx, &github, &item.id, item.issue().unwrap(), older_read).await;
+        let read =
+            refresh_open_issue(&ctx, &github, &item.id, item.issue().unwrap(), older_read).await;
 
         assert_eq!(read, Some(false));
         let row = ctx.item(&item.id).unwrap();
@@ -20587,14 +21058,21 @@ mod tests {
         assert_eq!(kept.updated_at, "2026-09-16T12:00:00Z".parse().unwrap());
         let discussion = kept_discussion(&ctx, &item.id).unwrap();
         assert!(discussion.comments.is_empty(), "{:?}", discussion.comments);
-        let open = ctx.slot.lock().unwrap().as_ref().unwrap().issue.clone().unwrap();
+        let open = ctx
+            .slot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .issue
+            .clone()
+            .unwrap();
         assert!(open.1.iter().all(|c| c.node_id != "IC_1"), "{:?}", open.1);
         let events: Vec<Event> = received.try_iter().collect();
         assert!(
-            !events.iter().any(|e| matches!(
-                e,
-                Event::IssueUpdated { .. } | Event::IssueComments { .. }
-            )),
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::IssueUpdated { .. } | Event::IssueComments { .. })),
             "{events:?}"
         );
     }
@@ -20609,7 +21087,8 @@ mod tests {
             match (method, path) {
                 ("POST", "/graphql") if body.contains("updateIssueComment(") => (
                     "200 OK",
-                    r#"{"data":{"updateIssueComment":{"issueComment":{"body":"fixed"}}}}"#.to_string(),
+                    r#"{"data":{"updateIssueComment":{"issueComment":{"body":"fixed"}}}}"#
+                        .to_string(),
                 ),
                 ("GET", "/repos/a/b/issues/8") => ("200 OK", editable_issue_json(8)),
                 ("GET", "/repos/a/b/issues/8/comments") => ("200 OK", issue_comments_json("fixed")),
@@ -20627,7 +21106,10 @@ mod tests {
         update_github_comment(&ctx, &item.id, "IC_1", CommentPlace::Conversation, "fixed").await;
 
         let asked = paths.lock().unwrap().clone();
-        assert!(asked.iter().any(|p| p == "/repos/a/b/issues/8"), "{asked:?}");
+        assert!(
+            asked.iter().any(|p| p == "/repos/a/b/issues/8"),
+            "{asked:?}"
+        );
         let events: Vec<Event> = received.try_iter().collect();
         let shown = events.iter().rev().find_map(|e| match e {
             Event::IssueComments { comments, .. } => Some(comments.clone()),
@@ -20708,7 +21190,14 @@ mod tests {
                 .unwrap_or_else(|| panic!("the view is not told: {events:?}"))
         };
 
-        update_github_comment(&ctx, &item.id, "PR_7", CommentPlace::PullRequestBody, "New words").await;
+        update_github_comment(
+            &ctx,
+            &item.id,
+            "PR_7",
+            CommentPlace::PullRequestBody,
+            "New words",
+        )
+        .await;
         assert_eq!(shown().body, "As written");
 
         delete_github_comment(&ctx, &item.id, "IC_1", CommentPlace::Conversation).await;
@@ -20727,7 +21216,8 @@ mod tests {
             ),
             ("POST", "/graphql") if body.contains("updatePullRequest(") => (
                 "200 OK",
-                r#"{"data":{"updatePullRequest":{"pullRequest":{"body":"New words"}}}}"#.to_string(),
+                r#"{"data":{"updatePullRequest":{"pullRequest":{"body":"New words"}}}}"#
+                    .to_string(),
             ),
             _ => ("404 Not Found", "{}".to_string()),
         });
@@ -20737,12 +21227,27 @@ mod tests {
         let issue = store_editable_issue(&ctx, 8);
         open_issue_in_slot(&ctx, &issue);
         update_github_comment(&ctx, &issue.id, "I_8", CommentPlace::IssueBody, "Rewritten").await;
-        let open = ctx.slot.lock().unwrap().as_ref().unwrap().issue.clone().unwrap();
+        let open = ctx
+            .slot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .issue
+            .clone()
+            .unwrap();
         assert_eq!(open.0.body, "Rewritten");
 
         let pull = store_pull(&ctx, 7);
         open_in_slot(&ctx, &pull);
-        update_github_comment(&ctx, &pull.id, "PR_7", CommentPlace::PullRequestBody, "New words").await;
+        update_github_comment(
+            &ctx,
+            &pull.id,
+            "PR_7",
+            CommentPlace::PullRequestBody,
+            "New words",
+        )
+        .await;
         let body = ctx.slot.lock().unwrap().as_ref().unwrap().body.clone();
         assert_eq!(body.as_deref(), Some("New words"));
     }
@@ -20804,11 +21309,16 @@ mod tests {
 
         let older_read = ctx.discussion_requests.begin(&item.id);
         show_posted_issue_comment(&ctx, &item.id, &posted).await;
-        let read = refresh_open_issue(&ctx, &github, &item.id, item.issue().unwrap(), older_read).await;
+        let read =
+            refresh_open_issue(&ctx, &github, &item.id, item.issue().unwrap(), older_read).await;
 
         assert_eq!(read, Some(true));
         let kept = kept_discussion(&ctx, &item.id).unwrap();
-        assert!(kept.comments.iter().any(|c| c.node_id == "IC_2"), "{:?}", kept.comments);
+        assert!(
+            kept.comments.iter().any(|c| c.node_id == "IC_2"),
+            "{:?}",
+            kept.comments
+        );
     }
 
     /// A comment posted on an issue with no conversation kept to put it in
@@ -20850,10 +21360,19 @@ mod tests {
         show_posted_issue_comment(&ctx, &item.id, &posted).await;
 
         let asked = paths.lock().unwrap().clone();
-        assert!(asked.iter().any(|p| p == "/repos/a/b/issues/8"), "{asked:?}");
-        assert!(!ctx.discussion_requests.is_current(&item.id, refresh_under_way));
+        assert!(
+            asked.iter().any(|p| p == "/repos/a/b/issues/8"),
+            "{asked:?}"
+        );
+        assert!(!ctx
+            .discussion_requests
+            .is_current(&item.id, refresh_under_way));
         let kept = kept_discussion(&ctx, &item.id).unwrap();
-        assert!(kept.comments.iter().any(|c| c.node_id == "IC_2"), "{:?}", kept.comments);
+        assert!(
+            kept.comments.iter().any(|c| c.node_id == "IC_2"),
+            "{:?}",
+            kept.comments
+        );
         let events: Vec<Event> = received.try_iter().collect();
         let shown = events.iter().rev().find_map(|e| match e {
             Event::IssueComments { comments, .. } => Some(comments.clone()),
@@ -20901,9 +21420,16 @@ mod tests {
         show_posted_issue_comment(&ctx.for_window(1), &item.id, &posted).await;
 
         let asked = paths.lock().unwrap().clone();
-        assert!(asked.iter().any(|p| p == "/repos/a/b/issues/8"), "{asked:?}");
+        assert!(
+            asked.iter().any(|p| p == "/repos/a/b/issues/8"),
+            "{asked:?}"
+        );
         let kept = kept_discussion(&ctx, &item.id).unwrap();
-        assert!(kept.comments.iter().any(|c| c.node_id == "IC_2"), "{:?}", kept.comments);
+        assert!(
+            kept.comments.iter().any(|c| c.node_id == "IC_2"),
+            "{:?}",
+            kept.comments
+        );
     }
 
     /// A read of a pull request's discussion, or of an issue's, that a
@@ -20951,7 +21477,8 @@ mod tests {
         let _: Vec<Event> = received.try_iter().collect();
         let older_read = ctx.discussion_requests.begin(&issue.id);
         set_reaction(&ctx, &issue.id, "IC_1", ReactionKind::ThumbsUp, true).await;
-        let read = refresh_open_issue(&ctx, &github, &issue.id, issue.issue().unwrap(), older_read).await;
+        let read =
+            refresh_open_issue(&ctx, &github, &issue.id, issue.issue().unwrap(), older_read).await;
         assert_eq!(read, Some(true));
         assert!(has_the_post(&issue));
         let events: Vec<Event> = received.try_iter().collect();
@@ -20985,7 +21512,11 @@ mod tests {
                     ("200 OK", PULL_7.to_string())
                 }
                 ("GET", "/repos/a/b/issues/7/comments") => {
-                    let body = if taken.load(std::sync::atomic::Ordering::SeqCst) { "fixed" } else { "q" };
+                    let body = if taken.load(std::sync::atomic::Ordering::SeqCst) {
+                        "fixed"
+                    } else {
+                        "q"
+                    };
                     ("200 OK", issue_comments_json(body))
                 }
                 ("GET", _) => ("200 OK", "[]".to_string()),
@@ -21260,12 +21791,10 @@ while True:
             ctx.language_servers.clone(),
             EventSender::from(events),
         );
-        let answers = tokio::task::spawn_blocking(move || {
-            loop {
-                match received.recv().unwrap() {
-                    Event::LspNames { answers, .. } => return answers,
-                    _ => continue,
-                }
+        let answers = tokio::task::spawn_blocking(move || loop {
+            match received.recv().unwrap() {
+                Event::LspNames { answers, .. } => return answers,
+                _ => continue,
             }
         })
         .await
@@ -21278,7 +21807,10 @@ while True:
             found,
             [
                 ("GoThing".to_string(), Some("gopls.txt".to_string())),
-                ("RustThing".to_string(), Some("rust-analyzer.txt".to_string())),
+                (
+                    "RustThing".to_string(),
+                    Some("rust-analyzer.txt".to_string())
+                ),
                 ("gopls:RustThing".to_string(), None),
             ]
         );
@@ -21304,7 +21836,10 @@ while True:
             open.checkout.worktree = worktree.clone();
         }
         let jdtls = named_server(&worktree, ServerKind::Jdtls, "-").await;
-        ctx.language_servers.lock().await.insert(ServerKind::Jdtls, jdtls.clone());
+        ctx.language_servers
+            .lock()
+            .await
+            .insert(ServerKind::Jdtls, jdtls.clone());
 
         let uri = "jdt://contents/java.base/java.util/List.class?=demo/%5C/jrt-fs.jar%60java.base";
         let at = perch_lsp::lsp_types::Position {
@@ -21315,7 +21850,8 @@ while True:
             uri: uri.parse().unwrap(),
             range: perch_lsp::lsp_types::Range { start: at, end: at },
         };
-        let located = read_locations(&worktree, std::slice::from_ref(&location), Some(&jdtls)).await;
+        let located =
+            read_locations(&worktree, std::slice::from_ref(&location), Some(&jdtls)).await;
         let key = "jdt://contents/java.base/java.util/List.class";
         assert_eq!(located.len(), 1);
         assert_eq!(located[0].path, key);
@@ -21323,13 +21859,22 @@ while True:
         assert_eq!(located[0].line, 2);
         assert_eq!(located[0].text, "public interface List<E> {}");
         // Without jdtls a class file is nothing to read.
-        assert!(read_locations(&worktree, &[location], None).await.is_empty());
+        assert!(read_locations(&worktree, &[location], None)
+            .await
+            .is_empty());
 
-        let (client, full) = resolve(&ctx.slot, &ctx.language_servers, key).await.unwrap();
+        let (client, full) = resolve(&ctx.slot, &ctx.language_servers, key)
+            .await
+            .unwrap();
         assert_eq!(client.kind(), ServerKind::Jdtls);
         assert_eq!(full, Path::new(key));
         assert_eq!(
-            client.class_file_contents(key).await.unwrap().lines().next(),
+            client
+                .class_file_contents(key)
+                .await
+                .unwrap()
+                .lines()
+                .next(),
             Some(format!("// {uri}").as_str())
         );
         jdtls.shutdown().await;
@@ -21370,7 +21915,9 @@ while True:
             stale: None,
             merge_base: base,
         };
-        let files = scoped_files(&ctx.preparer, &checkout, &scope).await.unwrap();
+        let files = scoped_files(&ctx.preparer, &checkout, &scope)
+            .await
+            .unwrap();
         if let Some(open) = ctx.slot.lock().unwrap().as_mut() {
             open.checkout = checkout;
             open.files = Arc::new(files);
@@ -21407,14 +21954,22 @@ while True:
             )
         };
         announce(loaded).await;
-        assert_eq!(rust.given(&full).as_deref(), Some("fn shown() {}\n"), "the commit's, not the disk's");
+        assert_eq!(
+            rust.given(&full).as_deref(),
+            Some("fn shown() {}\n"),
+            "the commit's, not the disk's"
+        );
 
         let stale = Shown {
             text: Some("fn other() {}\n".into()),
             scope_gen: 99,
         };
         announce(stale).await;
-        assert_eq!(rust.given(&full).as_deref(), Some("fn shown() {}\n"), "a stale load gives nothing");
+        assert_eq!(
+            rust.given(&full).as_deref(),
+            Some("fn shown() {}\n"),
+            "a stale load gives nothing"
+        );
 
         let at = perch_lsp::lsp_types::Position {
             line: 0,
@@ -21425,10 +21980,16 @@ while True:
             range: perch_lsp::lsp_types::Range { start: at, end: at },
         };
         let located = read_locations(&worktree, std::slice::from_ref(&location), Some(&rust)).await;
-        assert_eq!(located[0].text, "fn shown() {}", "a line is read as the server counts it");
+        assert_eq!(
+            located[0].text, "fn shown() {}",
+            "a line is read as the server counts it"
+        );
 
         close_given_files(&ctx.language_servers, Path::new("/elsewhere")).await;
-        assert!(rust.given(&full).is_some(), "another worktree's servers are not this one's");
+        assert!(
+            rust.given(&full).is_some(),
+            "another worktree's servers are not this one's"
+        );
         close_given_files(&ctx.language_servers, &worktree).await;
         assert_eq!(rust.given(&full), None, "read from disk again");
         let located = read_locations(&worktree, &[location], Some(&rust)).await;
@@ -21447,7 +22008,10 @@ while True:
         let runs = dir.path().join("runs");
         let install = perch_lsp::Install::Command {
             program: "/bin/sh".into(),
-            args: vec!["-c".into(), format!("echo ran >> {}; sleep 0.3", runs.display())],
+            args: vec![
+                "-c".into(),
+                format!("echo ran >> {}; sleep 0.3", runs.display()),
+            ],
             env: Vec::new(),
             into: None,
         };
@@ -21477,7 +22041,9 @@ while True:
     /// `viewer` the reader when one is known.
     fn open_pull_seven(ctx: &Ctx, viewer: Option<&str>) -> (Item, u64) {
         if let Some(viewer) = viewer {
-            ctx.with_cache(|c| c.set_meta("viewer.login", viewer)).unwrap().unwrap();
+            ctx.with_cache(|c| c.set_meta("viewer.login", viewer))
+                .unwrap()
+                .unwrap();
         }
         let item = store_pull(ctx, 7);
         open_in_slot(ctx, &item);
@@ -21530,10 +22096,20 @@ while True:
 
         start_server(&ctx, navigation_id, ServerKind::RustAnalyzer).await;
 
-        assert_eq!(lsp_statuses(&received), [(ServerKind::RustAnalyzer, Status::Held)]);
-        assert!(!ctx.language_servers.lock().await.contains_key(&ServerKind::RustAnalyzer));
+        assert_eq!(
+            lsp_statuses(&received),
+            [(ServerKind::RustAnalyzer, Status::Held)]
+        );
+        assert!(!ctx
+            .language_servers
+            .lock()
+            .await
+            .contains_key(&ServerKind::RustAnalyzer));
         assert!(
-            ctx.kept_servers.clients().iter().any(|kept| Arc::ptr_eq(kept, &other)),
+            ctx.kept_servers
+                .clients()
+                .iter()
+                .any(|kept| Arc::ptr_eq(kept, &other)),
             "set aside, not stopped"
         );
         assert!(held_at_x(&ctx, ServerKind::RustAnalyzer));
@@ -21572,11 +22148,20 @@ while True:
         let (ctx, received) = ctx(dir.path(), &nowhere(), &["a/b"]);
         let (_, navigation_id) = open_pull_seven(&ctx, None);
         start_server(&ctx, navigation_id, kind).await;
-        assert_eq!(lsp_statuses(&received), [(kind, perch_lsp::Status::Held)], "nobody's yet");
-        ctx.with_cache(|c| c.set_meta("viewer.login", "u")).unwrap().unwrap();
+        assert_eq!(
+            lsp_statuses(&received),
+            [(kind, perch_lsp::Status::Held)],
+            "nobody's yet"
+        );
+        ctx.with_cache(|c| c.set_meta("viewer.login", "u"))
+            .unwrap()
+            .unwrap();
         let _claim = claim_at_x(&ctx, kind);
         start_held_servers_everywhere(&ctx).await;
-        assert!(!held_at_x(&ctx, kind), "the reader's, now the reader is known");
+        assert!(
+            !held_at_x(&ctx, kind),
+            "the reader's, now the reader is known"
+        );
         assert!(lsp_statuses(&received).is_empty());
     }
 
@@ -21596,7 +22181,8 @@ while True:
         trust_language_servers(&ctx, navigation_id, &item.id, &[]).await;
 
         assert_eq!(
-            ctx.with_cache(|c| c.item_code_trust(&item.id).unwrap()).unwrap(),
+            ctx.with_cache(|c| c.item_code_trust(&item.id).unwrap())
+                .unwrap(),
             Some(true)
         );
         assert!(!held_at_x(&ctx, kind), "past the gate, so no longer held");
@@ -21614,7 +22200,10 @@ while True:
         let (ctx, _received) = ctx(dir.path(), &nowhere(), &["a/b"]);
         let (item, navigation_id) = open_pull_seven(&ctx, Some("chris"));
         start_server(&ctx, navigation_id, kind).await;
-        let trust = || ctx.with_cache(|c| c.item_code_trust(&item.id).unwrap()).unwrap();
+        let trust = || {
+            ctx.with_cache(|c| c.item_code_trust(&item.id).unwrap())
+                .unwrap()
+        };
 
         ctx.navigation_requests.begin_current();
         trust_language_servers(&ctx, navigation_id, &item.id, &[]).await;
@@ -21658,8 +22247,14 @@ while True:
         assert_eq!(told, [vec![("a/b".to_string(), kind)]]);
         assert!(!held_at_x(&ctx, kind));
         let other = store_pull(&ctx, 8);
-        assert!(item_code_trusted(&ctx, &other.id, kind), "another pull request there");
-        assert!(!item_code_trusted(&ctx, &other.id, ServerKind::Jdtls), "jdtls asks for itself");
+        assert!(
+            item_code_trusted(&ctx, &other.id, kind),
+            "another pull request there"
+        );
+        assert!(
+            !item_code_trusted(&ctx, &other.id, ServerKind::Jdtls),
+            "jdtls asks for itself"
+        );
     }
 
     /// Stop Trusting holds the server again where nothing else trusts the
@@ -21700,7 +22295,9 @@ while True:
         };
         checked_out(8, &paths[1]);
         let trusted = checked_out(9, &paths[2]);
-        ctx.with_cache(|c| c.trust_item_code(&trusted.id)).unwrap().unwrap();
+        ctx.with_cache(|c| c.trust_item_code(&trusted.id))
+            .unwrap()
+            .unwrap();
         ctx.with_cache(|c| c.set_repo_server_trust("a/b", kind.name(), true))
             .unwrap()
             .unwrap();
@@ -21720,7 +22317,10 @@ while True:
         assert!(ctx.language_servers.lock().await.is_empty());
         let kept = ctx.kept_servers.clients();
         assert_eq!(kept.len(), 1, "the stranger's stops");
-        assert!(Arc::ptr_eq(&kept[0], &kept_trusted), "one trusted for itself stays");
+        assert!(
+            Arc::ptr_eq(&kept[0], &kept_trusted),
+            "one trusted for itself stays"
+        );
         kept_trusted.shutdown().await;
     }
 
@@ -21760,8 +22360,15 @@ while True:
             .is_none());
 
         start_server_for_file(&ctx, navigation_id, "src/lib.rs").await;
-        assert_eq!(lsp_statuses(&received), [(ServerKind::RustAnalyzer, Status::Held)]);
-        assert!(!ctx.language_servers.lock().await.contains_key(&ServerKind::RustAnalyzer));
+        assert_eq!(
+            lsp_statuses(&received),
+            [(ServerKind::RustAnalyzer, Status::Held)]
+        );
+        assert!(!ctx
+            .language_servers
+            .lock()
+            .await
+            .contains_key(&ServerKind::RustAnalyzer));
         other.shutdown().await;
     }
 
@@ -21787,14 +22394,19 @@ while True:
             }
         };
 
-        tx.send(ServerEvent::Status(Status::Indexing { percent: Some(10) })).unwrap();
+        tx.send(ServerEvent::Status(Status::Indexing { percent: Some(10) }))
+            .unwrap();
         settle().await;
         assert!(lsp_statuses(&received).is_empty(), "held");
 
         ctx.held_servers.lock().unwrap().clear();
         tx.send(ServerEvent::Status(Status::Ready)).unwrap();
         settle().await;
-        assert_eq!(lsp_statuses(&received), [(kind, Status::Ready)], "no longer held");
+        assert_eq!(
+            lsp_statuses(&received),
+            [(kind, Status::Ready)],
+            "no longer held"
+        );
     }
 
     /// A server already running the held worktree's code is stopped, not
@@ -21829,12 +22441,18 @@ while True:
 
         assert_eq!(
             lsp_statuses(&received),
-            [(ServerKind::RustAnalyzer, Status::Held), (ServerKind::Jdtls, Status::Held)]
+            [
+                (ServerKind::RustAnalyzer, Status::Held),
+                (ServerKind::Jdtls, Status::Held)
+            ]
         );
         assert!(ctx.language_servers.lock().await.is_empty());
         let kept = ctx.kept_servers.clients();
         assert_eq!(kept.len(), 1, "this worktree's are stopped");
-        assert!(Arc::ptr_eq(&kept[0], &kept_there), "another worktree's stays set aside");
+        assert!(
+            Arc::ptr_eq(&kept[0], &kept_there),
+            "another worktree's stays set aside"
+        );
 
         // As if it had started while the code was trusted.
         let started = named_server(&worktree, ServerKind::RustAnalyzer, "-").await;
@@ -21843,7 +22461,10 @@ while True:
             .await
             .insert(ServerKind::RustAnalyzer, started);
         start_server_for_file(&ctx, navigation_id, "src/lib.rs").await;
-        assert_eq!(lsp_statuses(&received), [(ServerKind::RustAnalyzer, Status::Held)]);
+        assert_eq!(
+            lsp_statuses(&received),
+            [(ServerKind::RustAnalyzer, Status::Held)]
+        );
         assert!(ctx.language_servers.lock().await.is_empty());
         assert_eq!(ctx.kept_servers.clients().len(), 1);
         kept_there.shutdown().await;
@@ -21863,7 +22484,13 @@ while True:
             held.insert((2, PathBuf::from("/x"), kind));
         }
         close_window(ctx.clone());
-        let held: Vec<_> = ctx.held_servers.lock().unwrap().iter().map(|(w, _, _)| *w).collect();
+        let held: Vec<_> = ctx
+            .held_servers
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(w, _, _)| *w)
+            .collect();
         assert_eq!(held, [2]);
     }
 
@@ -21915,10 +22542,19 @@ while True:
         let (declared, _) = ctx(dir.path(), &nowhere(), &["a/b"]);
         let (pr, _) = open_pull_seven(&declared, Some("chris"));
         assert!(cut_starts_untrusted(&declared, &pr));
-        declared.with_cache(|c| c.set_meta("viewer.login", "u")).unwrap().unwrap();
+        declared
+            .with_cache(|c| c.set_meta("viewer.login", "u"))
+            .unwrap()
+            .unwrap();
         assert!(!cut_starts_untrusted(&declared, &pr), "the reader's own");
-        declared.with_cache(|c| c.set_meta("viewer.login", "chris")).unwrap().unwrap();
-        declared.with_cache(|c| c.trust_item_code(&pr.id)).unwrap().unwrap();
+        declared
+            .with_cache(|c| c.set_meta("viewer.login", "chris"))
+            .unwrap()
+            .unwrap();
+        declared
+            .with_cache(|c| c.trust_item_code(&pr.id))
+            .unwrap()
+            .unwrap();
         assert!(!cut_starts_untrusted(&declared, &pr), "trusted");
 
         let dir = tempfile::tempdir().unwrap();
@@ -21973,10 +22609,8 @@ while True:
         publish_discussion(&ctx, &item.id, perch_github::Discussion::default());
 
         let sent: Vec<_> = received.try_iter().collect();
-        assert!(sent
-            .iter()
-            .any(|(window, event)| *window == 2
-                && matches!(event, Event::DiscussionReady { item_id, .. } if *item_id == item.id)));
+        assert!(sent.iter().any(|(window, event)| *window == 2
+            && matches!(event, Event::DiscussionReady { item_id, .. } if *item_id == item.id)));
         assert!(!sent.iter().any(|(window, _)| *window == 1));
     }
 
@@ -22086,9 +22720,9 @@ while True:
         open_in_slot(&ctx, &pull);
         ctx.slot.lock().unwrap().as_mut().unwrap().checkout.worktree = worktree.clone();
         ask_it(&pull, None, RunMode::Work).await;
-        assert!(
-            notices(&received).iter().any(|n| n == "Work runs only on your own worktrees and pull requests"),
-        );
+        assert!(notices(&received)
+            .iter()
+            .any(|n| n == "Work runs only on your own worktrees and pull requests"),);
         assert!(!dir.path().join("args-1").exists(), "no agent ran");
 
         // A worktree of the reader's own.
@@ -22121,9 +22755,18 @@ while True:
         assert_eq!(runs[0].status, RunStatus::Completed, "{:?}", runs[0].error);
         let args = std::fs::read_to_string(dir.path().join("args-1")).unwrap();
         assert!(args.contains("\"autoAllowBashIfSandboxed\":true"), "{args}");
-        assert!(args.contains("Commit only when the reader asks you to"), "{args}");
-        assert!(args.contains("on the branch chris/readme, which started from main"), "{args}");
-        assert!(args.contains("--permission-mode\nauto\n"), "the automatic reviewer by default: {args}");
+        assert!(
+            args.contains("Commit only when the reader asks you to"),
+            "{args}"
+        );
+        assert!(
+            args.contains("on the branch chris/readme, which started from main"),
+            "{args}"
+        );
+        assert!(
+            args.contains("--permission-mode\nauto\n"),
+            "the automatic reviewer by default: {args}"
+        );
         assert!(args.contains("an automatic reviewer decides it"), "{args}");
         assert!(!args.contains("Do not change any file"), "{args}");
 
@@ -22133,15 +22776,24 @@ while True:
         ask_it(&branch, Some(thread.id.clone()), RunMode::Ask).await;
         let args = std::fs::read_to_string(dir.path().join("args-2")).unwrap();
         assert!(!args.contains("--resume"), "{args}");
-        assert!(args.contains("\"autoAllowBashIfSandboxed\":false"), "{args}");
+        assert!(
+            args.contains("\"autoAllowBashIfSandboxed\":false"),
+            "{args}"
+        );
         assert!(args.contains("Do not change any file"), "{args}");
         ask_it(&branch, Some(thread.id.clone()), RunMode::Work).await;
         let args = std::fs::read_to_string(dir.path().join("args-3")).unwrap();
         assert!(!args.contains("--resume"), "{args}");
-        assert!(args.contains("Commit only when the reader asks you to"), "{args}");
+        assert!(
+            args.contains("Commit only when the reader asks you to"),
+            "{args}"
+        );
         ask_it(&branch, Some(thread.id.clone()), RunMode::Work).await;
         let args = std::fs::read_to_string(dir.path().join("args-4")).unwrap();
-        assert!(args.contains("--resume"), "the Work session is resumed: {args}");
+        assert!(
+            args.contains("--resume"),
+            "the Work session is resumed: {args}"
+        );
     }
 
     #[tokio::test]
@@ -22153,7 +22805,11 @@ while True:
         entry.resolve(None);
         let (ctx, _received) = ctx_declaring(dir.path(), &nowhere(), vec![entry]);
         assert!(scan_roots(&ctx).await);
-        let load = || ctx.with_cache(|c| c.load_items().unwrap()).unwrap().remove(0);
+        let load = || {
+            ctx.with_cache(|c| c.load_items().unwrap())
+                .unwrap()
+                .remove(0)
+        };
         let set_pr_head = |head: &str| {
             let mut item = load();
             let mut pr = pull_request(7);
@@ -22163,7 +22819,10 @@ while True:
         };
         let pushed = git(&worktree, &["rev-parse", "HEAD"]);
         set_pr_head(&pushed);
-        assert!(!scan_roots(&ctx).await, "nothing to count while the heads match");
+        assert!(
+            !scan_roots(&ctx).await,
+            "nothing to count while the heads match"
+        );
         assert_eq!(load().divergence(), None);
 
         // An agent commits and nobody pushes.
@@ -22176,12 +22835,18 @@ while True:
         // head: both sides.
         git(&worktree, &["branch", "elsewhere", &pushed]);
         git(&worktree, &["checkout", "-q", "elsewhere"]);
-        git(&worktree, &["commit", "-q", "--allow-empty", "-m", "theirs"]);
+        git(
+            &worktree,
+            &["commit", "-q", "--allow-empty", "-m", "theirs"],
+        );
         let theirs = git(&worktree, &["rev-parse", "HEAD"]);
         git(&worktree, &["checkout", "-q", "feature"]);
         set_pr_head(&theirs);
         assert!(scan_roots(&ctx).await);
-        assert_eq!(load().divergence().unwrap().label(), "2 unpushed \u{b7} 1 behind PR");
+        assert_eq!(
+            load().divergence().unwrap().label(),
+            "2 unpushed \u{b7} 1 behind PR"
+        );
 
         // A head that was never fetched here is not fetched to count it.
         set_pr_head("0123456789012345678901234567890123456789");
@@ -22216,7 +22881,10 @@ while True:
         config.agent.binary = agent.to_string_lossy().into_owned();
         ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
         assert!(scan_roots(&ctx).await);
-        let item = ctx.with_cache(|c| c.load_items().unwrap()).unwrap().remove(0);
+        let item = ctx
+            .with_cache(|c| c.load_items().unwrap())
+            .unwrap()
+            .remove(0);
         open_in_slot(&ctx, &item);
         ctx.slot.lock().unwrap().as_mut().unwrap().checkout.worktree = worktree.clone();
 
@@ -22242,9 +22910,18 @@ while True:
             .unwrap()
             .remove(0);
         assert_eq!(run.status, RunStatus::Completed, "{:?}", run.error);
-        let (before, after) = (run.work_before.clone().unwrap(), run.work_after.clone().unwrap());
+        let (before, after) = (
+            run.work_before.clone().unwrap(),
+            run.work_after.clone().unwrap(),
+        );
         assert_ne!(before, after);
-        assert_eq!(git(&root, &["rev-parse", &format!("refs/perch/runs/{}/after", run.id)]), after);
+        assert_eq!(
+            git(
+                &root,
+                &["rev-parse", &format!("refs/perch/runs/{}/after", run.id)]
+            ),
+            after
+        );
         assert_eq!(run_changes(&ctx, &run.id).await, Some((1, 1, 0)));
         assert_eq!(
             git(&worktree, &["status", "--porcelain"]),
@@ -22290,7 +22967,10 @@ while True:
         config.agent.binary = agent.to_string_lossy().into_owned();
         ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
         assert!(scan_roots(&ctx).await);
-        let item = ctx.with_cache(|c| c.load_items().unwrap()).unwrap().remove(0);
+        let item = ctx
+            .with_cache(|c| c.load_items().unwrap())
+            .unwrap()
+            .remove(0);
         open_in_slot(&ctx, &item);
         let navigation_id = ctx.navigation_requests.begin_item(&item.id);
         {
@@ -22315,7 +22995,11 @@ while True:
                     RunMode::Work,
                 )
                 .await;
-                let run = ctx.with_cache(|c| c.runs_for_item(&item_id).unwrap()).unwrap().pop().unwrap();
+                let run = ctx
+                    .with_cache(|c| c.runs_for_item(&item_id).unwrap())
+                    .unwrap()
+                    .pop()
+                    .unwrap();
                 assert_eq!(run.status, RunStatus::Completed, "{:?}", run.error);
                 run
             }
@@ -22331,24 +23015,45 @@ while True:
         }
         .scope()
         .unwrap();
-        assert_eq!(last_run(&ctx, &item.id, None).await.scope(), Some(first_scope.clone()));
+        assert_eq!(
+            last_run(&ctx, &item.id, None).await.scope(),
+            Some(first_scope.clone())
+        );
 
         // With no pick, and with a pick this item has nothing under, the
         // branch; else the pick.
-        assert_eq!(opening_scope(&ctx, &item.id, &checkout(), None).await, perch_git::Scope::Branch);
+        assert_eq!(
+            opening_scope(&ctx, &item.id, &checkout(), None).await,
+            perch_git::Scope::Branch
+        );
         pick("staged");
-        assert_eq!(opening_scope(&ctx, &item.id, &checkout(), None).await, perch_git::Scope::Branch);
+        assert_eq!(
+            opening_scope(&ctx, &item.id, &checkout(), None).await,
+            perch_git::Scope::Branch
+        );
         pick("uncommitted");
-        assert_eq!(opening_scope(&ctx, &item.id, &checkout(), None).await, perch_git::Scope::Uncommitted);
+        assert_eq!(
+            opening_scope(&ctx, &item.id, &checkout(), None).await,
+            perch_git::Scope::Uncommitted
+        );
         pick("last-run");
-        assert_eq!(opening_scope(&ctx, &item.id, &checkout(), None).await, first_scope);
+        assert_eq!(
+            opening_scope(&ctx, &item.id, &checkout(), None).await,
+            first_scope
+        );
 
         // A run that changes nothing is passed over.
         ctx.slot.lock().unwrap().as_mut().unwrap().scope = first_scope.clone();
         let idle = work("true").await;
         follow_last_run(&ctx, &idle).await;
-        assert_eq!(last_run(&ctx, &item.id, None).await.scope(), Some(first_scope.clone()));
-        assert_eq!(ctx.slot.lock().unwrap().as_ref().unwrap().scope, first_scope);
+        assert_eq!(
+            last_run(&ctx, &item.id, None).await.scope(),
+            Some(first_scope.clone())
+        );
+        assert_eq!(
+            ctx.slot.lock().unwrap().as_ref().unwrap().scope,
+            first_scope
+        );
 
         // One that changes something is shown in its place.
         let second = work("printf 'more\\n' >> made.txt").await;
@@ -22357,14 +23062,23 @@ while True:
             before: second.work_before.clone().unwrap(),
             after: second.work_after.clone().unwrap(),
         };
-        assert_eq!(last_run(&ctx, &item.id, None).await.scope(), Some(second_scope.clone()));
-        assert_eq!(ctx.slot.lock().unwrap().as_ref().unwrap().scope, second_scope);
+        assert_eq!(
+            last_run(&ctx, &item.id, None).await.scope(),
+            Some(second_scope.clone())
+        );
+        assert_eq!(
+            ctx.slot.lock().unwrap().as_ref().unwrap().scope,
+            second_scope
+        );
 
         // Under any other scope the reader's pick stays.
         ctx.slot.lock().unwrap().as_mut().unwrap().scope = perch_git::Scope::Branch;
         let third = work("printf 'again\\n' >> made.txt").await;
         follow_last_run(&ctx, &third).await;
-        assert_eq!(ctx.slot.lock().unwrap().as_ref().unwrap().scope, perch_git::Scope::Branch);
+        assert_eq!(
+            ctx.slot.lock().unwrap().as_ref().unwrap().scope,
+            perch_git::Scope::Branch
+        );
     }
 
     /// Under Uncommitted a look at the checkout reads the list again with
@@ -22379,7 +23093,10 @@ while True:
         entry.resolve(None);
         let (ctx, received) = ctx_declaring(dir.path(), &nowhere(), vec![entry.clone()]);
         assert!(scan_roots(&ctx).await);
-        let item = ctx.with_cache(|c| c.load_items().unwrap()).unwrap().remove(0);
+        let item = ctx
+            .with_cache(|c| c.load_items().unwrap())
+            .unwrap()
+            .remove(0);
         open_in_slot(&ctx, &item);
         let navigation_id = ctx.navigation_requests.begin_item(&item.id);
         {
@@ -22415,12 +23132,18 @@ while True:
 
         std::fs::write(worktree.join("made.txt"), "made\n").unwrap();
         assert_eq!(look().await, 1);
-        assert_eq!(blob().unwrap(), git(&worktree, &["hash-object", "made.txt"]));
+        assert_eq!(
+            blob().unwrap(),
+            git(&worktree, &["hash-object", "made.txt"])
+        );
         assert_eq!(look().await, 0);
 
         std::fs::write(worktree.join("made.txt"), "made\nedited\n").unwrap();
         assert_eq!(look().await, 1);
-        assert_eq!(blob().unwrap(), git(&worktree, &["hash-object", "made.txt"]));
+        assert_eq!(
+            blob().unwrap(),
+            git(&worktree, &["hash-object", "made.txt"])
+        );
     }
 
     /// A suggestion put in the file under Branch, which shows the head
@@ -22436,7 +23159,10 @@ while True:
         entry.resolve(None);
         let (ctx, received) = ctx_declaring(dir.path(), &nowhere(), vec![entry.clone()]);
         assert!(scan_roots(&ctx).await);
-        let item = ctx.with_cache(|c| c.load_items().unwrap()).unwrap().remove(0);
+        let item = ctx
+            .with_cache(|c| c.load_items().unwrap())
+            .unwrap()
+            .remove(0);
         open_in_slot(&ctx, &item);
         let navigation_id = ctx.navigation_requests.begin_item(&item.id);
         {
@@ -22449,10 +23175,15 @@ while True:
         }
         let scope = || ctx.slot.lock().unwrap().as_ref().unwrap().scope.clone();
         let suggest = |from: &str, to: &str| {
-            let original = crate::review::suggestion::Original { first: 1, lines: vec![from.into()] };
+            let original = crate::review::suggestion::Original {
+                first: 1,
+                lines: vec![from.into()],
+            };
             let (ctx, item_id, to) = (&ctx, item.id.clone(), to.to_string());
             async move {
-                apply_suggestion(ctx, &item_id, "two.txt", &original, &[to]).await.unwrap();
+                apply_suggestion(ctx, &item_id, "two.txt", &original, &[to])
+                    .await
+                    .unwrap();
                 let revision = ctx.scope_requests.stable_revision().unwrap();
                 show_applied_suggestion(ctx, &item_id, navigation_id, revision).await;
             }
@@ -22468,7 +23199,10 @@ while True:
         };
 
         suggest("two", "TWO").await;
-        assert_eq!(std::fs::read_to_string(worktree.join("two.txt")).unwrap(), "TWO\n");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("two.txt")).unwrap(),
+            "TWO\n"
+        );
         assert_eq!(scope(), perch_git::Scope::Uncommitted);
         let sent = readies();
         assert_eq!(sent.len(), 1);
@@ -22477,15 +23211,26 @@ while True:
 
         suggest("TWO", "Two").await;
         assert_eq!(scope(), perch_git::Scope::Uncommitted, "already on disk");
-        assert!(readies().iter().all(|(s, _)| *s == perch_git::Scope::Uncommitted));
+        assert!(readies()
+            .iter()
+            .all(|(s, _)| *s == perch_git::Scope::Uncommitted));
 
         ctx.slot.lock().unwrap().as_mut().unwrap().scope = perch_git::Scope::Branch;
-        let original = crate::review::suggestion::Original { first: 1, lines: vec!["Two".into()] };
-        apply_suggestion(&ctx, &item.id, "two.txt", &original, &["2".into()]).await.unwrap();
+        let original = crate::review::suggestion::Original {
+            first: 1,
+            lines: vec!["Two".into()],
+        };
+        apply_suggestion(&ctx, &item.id, "two.txt", &original, &["2".into()])
+            .await
+            .unwrap();
         let revision = ctx.scope_requests.stable_revision().unwrap();
         ctx.scope_requests.begin(&item.id);
         show_applied_suggestion(&ctx, &item.id, navigation_id, revision).await;
-        assert_eq!(scope(), perch_git::Scope::Branch, "the reader picked a scope since");
+        assert_eq!(
+            scope(),
+            perch_git::Scope::Branch,
+            "the reader picked a scope since"
+        );
     }
 
     /// A Claude Code that asks its host about `$PERCH_ASK` (a
@@ -22540,7 +23285,10 @@ read eof || true
     /// shell before it asks, and on a loaded machine that alone passed 5s.
     /// The test runtime has one thread, so the channel is polled rather
     /// than blocked on, which would starve the run being waited for.
-    async fn next_event<T>(received: &Receiver<Event>, mut pick: impl FnMut(Event) -> Option<T>) -> T {
+    async fn next_event<T>(
+        received: &Receiver<Event>,
+        mut pick: impl FnMut(Event) -> Option<T>,
+    ) -> T {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let mut passed = Vec::new();
         while std::time::Instant::now() < deadline {
@@ -22557,13 +23305,22 @@ read eof || true
     }
 
     fn step_summaries(ctx: &Ctx, item: &Item) -> Vec<String> {
-        let thread = ctx.with_cache(|c| c.load_comment_threads(&item.id).unwrap()).unwrap();
+        let thread = ctx
+            .with_cache(|c| c.load_comment_threads(&item.id).unwrap())
+            .unwrap();
         let mut out = Vec::new();
         for thread in thread {
-            for run in ctx.with_cache(|c| c.runs_for_discussion(&thread.id).unwrap()).unwrap() {
+            for run in ctx
+                .with_cache(|c| c.runs_for_discussion(&thread.id).unwrap())
+                .unwrap()
+            {
                 let run = ctx.runs.load(&run.id).unwrap();
                 for step in run.steps.into_iter().filter(|step| !step.note) {
-                    out.push(format!("{} [{}]", step.summary, if step.ok { "ok" } else { "no" }));
+                    out.push(format!(
+                        "{} [{}]",
+                        step.summary,
+                        if step.ok { "ok" } else { "no" }
+                    ));
                 }
             }
         }
@@ -22607,11 +23364,24 @@ read eof || true
         assert_eq!(view.title, "Connect to example.com");
         assert_eq!(view.always, "Always allow example.com here");
         assert_eq!(view.item_id, item.id);
-        settle_approval(&ctx, &view.run_id, &view.id, Settle::Answered(ApprovalAnswer::Always)).await;
+        settle_approval(
+            &ctx,
+            &view.run_id,
+            &view.id,
+            Settle::Answered(ApprovalAnswer::Always),
+        )
+        .await;
         running.await.unwrap();
 
         let answers = std::fs::read_to_string(dir.path().join("answers")).unwrap();
-        assert!(answers.lines().next().unwrap().contains("\"behavior\":\"allow\""), "{answers}");
+        assert!(
+            answers
+                .lines()
+                .next()
+                .unwrap()
+                .contains("\"behavior\":\"allow\""),
+            "{answers}"
+        );
         let grants = ctx.with_cache(|c| c.grants_for("a/b").unwrap()).unwrap();
         assert_eq!(grants.len(), 1);
         assert_eq!(grants[0].key, "network:example.com");
@@ -22623,12 +23393,18 @@ read eof || true
         ctx.slot.lock().unwrap().as_mut().unwrap().checkout.worktree = worktree.clone();
         ask_it(ctx.clone(), item.id.clone()).await;
         assert!(
-            !received.try_iter().any(|e| matches!(e, Event::ApprovalRequested(_))),
+            !received
+                .try_iter()
+                .any(|e| matches!(e, Event::ApprovalRequested(_))),
             "nobody was asked"
         );
         let answers = std::fs::read_to_string(dir.path().join("answers")).unwrap();
         assert_eq!(answers.lines().count(), 2);
-        assert!(answers.lines().nth(1).unwrap().contains("\"behavior\":\"allow\""));
+        assert!(answers
+            .lines()
+            .nth(1)
+            .unwrap()
+            .contains("\"behavior\":\"allow\""));
         let steps = step_summaries(&ctx, &item);
         for want in [
             "Asked: Connect to example.com [ok]",
@@ -22671,17 +23447,24 @@ read eof || true
         .await;
 
         assert!(
-            !received.try_iter().any(|e| matches!(e, Event::ApprovalRequested(_))),
+            !received
+                .try_iter()
+                .any(|e| matches!(e, Event::ApprovalRequested(_))),
             "nobody was asked"
         );
         let answers = std::fs::read_to_string(dir.path().join("answers")).unwrap();
         assert!(answers.contains("\"behavior\":\"allow\""), "{answers}");
         let steps = step_summaries(&ctx, &item);
         assert!(
-            steps.iter().any(|s| s == "Allowed without asking: Run outside the sandbox: git push [ok]"),
+            steps
+                .iter()
+                .any(|s| s == "Allowed without asking: Run outside the sandbox: git push [ok]"),
             "{steps:?}"
         );
-        assert!(ctx.with_cache(|c| c.grants_for("a/b").unwrap()).unwrap().is_empty());
+        assert!(ctx
+            .with_cache(|c| c.grants_for("a/b").unwrap())
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -22717,19 +23500,30 @@ read eof || true
         assert!(answers.contains("did not answer"), "{answers}");
         let settled: Vec<Event> = received
             .try_iter()
-            .filter(|e| matches!(e, Event::ApprovalRequested(_) | Event::ApprovalSettled { .. }))
+            .filter(|e| {
+                matches!(
+                    e,
+                    Event::ApprovalRequested(_) | Event::ApprovalSettled { .. }
+                )
+            })
             .collect();
         assert_eq!(settled.len(), 2, "asked, then settled");
         let steps = step_summaries(&ctx, &item);
         assert!(
-            steps.iter().any(|s| s == "Asked: Run outside the sandbox: git push [no]"),
+            steps
+                .iter()
+                .any(|s| s == "Asked: Run outside the sandbox: git push [no]"),
             "{steps:?}"
         );
         assert!(
-            steps.iter().any(|s| s.starts_with("Denied: no answer in 0 minutes: Run outside the sandbox: git push")),
+            steps.iter().any(|s| s
+                .starts_with("Denied: no answer in 0 minutes: Run outside the sandbox: git push")),
             "{steps:?}"
         );
-        assert!(ctx.with_cache(|c| c.grants_for("a/b").unwrap()).unwrap().is_empty());
+        assert!(ctx
+            .with_cache(|c| c.grants_for("a/b").unwrap())
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -22782,7 +23576,11 @@ read eof || true
         let reply = thread.messages.last().unwrap();
         assert_eq!(reply.body, "It landed last week.");
         let run = ctx.runs.load(&reply.run.as_ref().unwrap().id).unwrap();
-        let steps: Vec<_> = run.steps.iter().map(|s| (s.summary.as_str(), s.note)).collect();
+        let steps: Vec<_> = run
+            .steps
+            .iter()
+            .map(|s| (s.summary.as_str(), s.note))
+            .collect();
         assert_eq!(
             steps,
             [
@@ -22852,7 +23650,10 @@ read eof || true
         assert!(first.ends_with("Question: Why?"));
         assert!(first_dir.join("INDEX.md").is_file());
         assert!(first_dir.join("threads/r31.md").is_file());
-        assert!(!worktree.join("INDEX.md").exists(), "nothing in the worktree");
+        assert!(
+            !worktree.join("INDEX.md").exists(),
+            "nothing in the worktree"
+        );
         let recorded = ctx
             .with_cache(|c| c.run_context(&runs[0].id).unwrap().unwrap())
             .unwrap();
@@ -22974,15 +23775,24 @@ read eof || true
             diff_hunk: None,
             reactions: Default::default(),
         };
-        ctx.with_cache(|c| c.insert_comment_message(&question)).unwrap().unwrap();
+        ctx.with_cache(|c| c.insert_comment_message(&question))
+            .unwrap()
+            .unwrap();
 
         delete_private_messages(&ctx, "gh-31").await;
 
-        let threads = ctx.with_cache(|c| c.load_comment_threads(&item.id)).unwrap().unwrap();
+        let threads = ctx
+            .with_cache(|c| c.load_comment_threads(&item.id))
+            .unwrap()
+            .unwrap();
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].id, "gh-31");
         let ids: Vec<_> = threads[0].messages.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, vec!["gh-31"], "GitHub's comment stays; the question goes");
+        assert_eq!(
+            ids,
+            vec!["gh-31"],
+            "GitHub's comment stays; the question goes"
+        );
         let events: Vec<Event> = received.try_iter().collect();
         assert!(
             matches!(&events[..], [Event::CommentThreads { item_id, threads, .. }]
@@ -22997,7 +23807,9 @@ read eof || true
 
     /// The item's threads as the cache holds them.
     fn threads_of(ctx: &Ctx, item: &Item) -> Vec<CommentThread> {
-        ctx.with_cache(|c| c.load_comment_threads(&item.id)).unwrap().unwrap()
+        ctx.with_cache(|c| c.load_comment_threads(&item.id))
+            .unwrap()
+            .unwrap()
     }
 
     /// The threads sent since the last look, one event's worth.
@@ -23028,7 +23840,14 @@ read eof || true
         let item = store_pull(&ctx, 7);
         open_in_slot(&ctx, &item);
 
-        save_draft(&ctx, &item.id, None, Some(lines(3, 4)), "please".into(), None);
+        save_draft(
+            &ctx,
+            &item.id,
+            None,
+            Some(lines(3, 4)),
+            "please".into(),
+            None,
+        );
 
         let threads = threads_of(&ctx, &item);
         assert_eq!(threads.len(), 1);
@@ -23039,12 +23858,19 @@ read eof || true
         assert_eq!(t.messages.len(), 1);
         assert!(t.messages[0].is_draft());
         assert_eq!(t.messages[0].body, "please");
-        assert_eq!(threads_sent(&received).len(), 1, "the threads went to the view");
+        assert_eq!(
+            threads_sent(&received).len(),
+            1,
+            "the threads went to the view"
+        );
 
         // Nowhere to land: refused, and said.
         save_draft(&ctx, &item.id, None, None, "where?".into(), None);
         assert_eq!(threads_of(&ctx, &item).len(), 1);
-        assert_eq!(notices(&received), vec!["A comment for GitHub needs lines to go on"]);
+        assert_eq!(
+            notices(&received),
+            vec!["A comment for GitHub needs lines to go on"]
+        );
     }
 
     #[tokio::test]
@@ -23055,7 +23881,14 @@ read eof || true
         store_line_commented_discussion(&ctx, &item);
         open_in_slot(&ctx, &item);
 
-        save_draft(&ctx, &item.id, Some("gh-31".into()), None, "will do".into(), None);
+        save_draft(
+            &ctx,
+            &item.id,
+            Some("gh-31".into()),
+            None,
+            "will do".into(),
+            None,
+        );
 
         let threads = threads_of(&ctx, &item);
         assert_eq!(threads.len(), 1);
@@ -23100,9 +23933,18 @@ read eof || true
                 reactions: Default::default(),
             }],
         };
-        ctx.with_cache(|c| c.insert_comment_thread(&mine)).unwrap().unwrap();
+        ctx.with_cache(|c| c.insert_comment_thread(&mine))
+            .unwrap()
+            .unwrap();
 
-        save_draft(&ctx, &item.id, Some("t1".into()), None, "fix this".into(), None);
+        save_draft(
+            &ctx,
+            &item.id,
+            Some("t1".into()),
+            None,
+            "fix this".into(),
+            None,
+        );
 
         let t = threads_of(&ctx, &item).pop().unwrap();
         assert_eq!(t.origin, ThreadOrigin::GitHub);
@@ -23126,7 +23968,14 @@ read eof || true
         let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
         let item = store_pull(&ctx, 7);
         open_in_slot(&ctx, &item);
-        save_draft(&ctx, &item.id, None, Some(lines(3, 4)), "please".into(), None);
+        save_draft(
+            &ctx,
+            &item.id,
+            None,
+            Some(lines(3, 4)),
+            "please".into(),
+            None,
+        );
         let before = threads_of(&ctx, &item).pop().unwrap();
         let draft = before.messages[0].clone();
         let _ = threads_sent(&received);
@@ -23148,7 +23997,14 @@ read eof || true
         assert_eq!(threads_sent(&received).len(), 1);
 
         // Only a draft's body is rewritten.
-        save_draft(&ctx, &item.id, None, None, "no".into(), Some("gh-31".into()));
+        save_draft(
+            &ctx,
+            &item.id,
+            None,
+            None,
+            "no".into(),
+            Some("gh-31".into()),
+        );
         assert_eq!(notices(&received).len(), 1);
     }
 
@@ -23159,11 +24015,29 @@ read eof || true
         let item = store_pull(&ctx, 7);
         store_line_commented_discussion(&ctx, &item);
         open_in_slot(&ctx, &item);
-        save_draft(&ctx, &item.id, None, Some(lines(3, 4)), "please".into(), None);
-        save_draft(&ctx, &item.id, Some("gh-31".into()), None, "will do".into(), None);
+        save_draft(
+            &ctx,
+            &item.id,
+            None,
+            Some(lines(3, 4)),
+            "please".into(),
+            None,
+        );
+        save_draft(
+            &ctx,
+            &item.id,
+            Some("gh-31".into()),
+            None,
+            "will do".into(),
+            None,
+        );
         let threads = threads_of(&ctx, &item);
         assert_eq!(threads.len(), 2);
-        let fresh = threads.iter().find(|t| t.github_id.is_none()).unwrap().clone();
+        let fresh = threads
+            .iter()
+            .find(|t| t.github_id.is_none())
+            .unwrap()
+            .clone();
         let reply = threads.iter().find(|t| t.id == "gh-31").unwrap().clone();
         let _ = threads_sent(&received);
 
@@ -23185,7 +24059,10 @@ read eof || true
         assert_eq!(threads_of(&ctx, &item)[0].messages.len(), 1);
         let events: Vec<Event> = received.try_iter().collect();
         assert!(
-            matches!(&events[..], [Event::Notice(_), Event::CommentThreads { .. }]),
+            matches!(
+                &events[..],
+                [Event::Notice(_), Event::CommentThreads { .. }]
+            ),
             "{events:?}"
         );
     }
@@ -23326,7 +24203,10 @@ read eof || true
             ),
             "{events:?}"
         );
-        assert!(threads_of(&ctx, &item)[0].resolved, "kept for the next open");
+        assert!(
+            threads_of(&ctx, &item)[0].resolved,
+            "kept for the next open"
+        );
         // A read that began before the change cannot put the thread back.
         assert!(!ctx.discussion_requests.is_current(&item.id, older_read));
     }
@@ -23356,7 +24236,10 @@ read eof || true
             ),
             "{events:?}"
         );
-        assert!(threads_of(&ctx, &item)[0].resolved, "still as GitHub has it");
+        assert!(
+            threads_of(&ctx, &item)[0].resolved,
+            "still as GitHub has it"
+        );
     }
 
     #[tokio::test]
@@ -23408,7 +24291,9 @@ read eof || true
             created_at: "2026-09-16T12:00:00Z".parse().unwrap(),
             messages: Vec::new(),
         };
-        ctx.with_cache(|c| c.insert_comment_thread(&own)).unwrap().unwrap();
+        ctx.with_cache(|c| c.insert_comment_thread(&own))
+            .unwrap()
+            .unwrap();
         open_in_slot(&ctx, &item);
 
         resolve_thread(&ctx, &item.id, "t1", true).await;
@@ -23427,17 +24312,24 @@ read eof || true
 
         resolve_thread(&ctx, &item.id, "t1", false).await;
         assert!(!threads_of(&ctx, &item)[0].resolved);
-        assert!(paths.lock().unwrap().is_empty(), "nothing is asked of GitHub");
+        assert!(
+            paths.lock().unwrap().is_empty(),
+            "nothing is asked of GitHub"
+        );
         assert!(notices(&received).is_empty());
     }
 
     #[test]
     fn a_thread_resolves_on_github_where_it_is_there_and_in_perch_where_it_is_not() {
-        let thread = |github_id: Option<u64>, node_id: Option<&str>, can_resolve: bool| {
-            CommentThread {
+        let thread =
+            |github_id: Option<u64>, node_id: Option<&str>, can_resolve: bool| CommentThread {
                 id: "t".into(),
                 worktree_id: "w".into(),
-                origin: if github_id.is_some() { ThreadOrigin::GitHub } else { ThreadOrigin::Local },
+                origin: if github_id.is_some() {
+                    ThreadOrigin::GitHub
+                } else {
+                    ThreadOrigin::Local
+                },
                 github_id,
                 anchor: None,
                 outdated: false,
@@ -23446,22 +24338,37 @@ read eof || true
                 can_resolve,
                 created_at: "2026-09-16T12:00:00Z".parse().unwrap(),
                 messages: Vec::new(),
-            }
-        };
-        assert_eq!(resolved_in(&thread(None, None, false), false, "resolve"), Ok(ResolvedIn::Perch));
+            };
+        assert_eq!(
+            resolved_in(&thread(None, None, false), false, "resolve"),
+            Ok(ResolvedIn::Perch)
+        );
         let mut draft = thread(None, None, false);
         draft.origin = ThreadOrigin::GitHub;
-        assert_eq!(resolved_in(&draft, false, "resolve"), Ok(ResolvedIn::Perch), "not on GitHub yet");
+        assert_eq!(
+            resolved_in(&draft, false, "resolve"),
+            Ok(ResolvedIn::Perch),
+            "not on GitHub yet"
+        );
         assert_eq!(
             resolved_in(&thread(Some(31), Some("PRRT_31"), true), false, "resolve"),
-            Ok(ResolvedIn::GitHub { node_id: "PRRT_31".into() })
+            Ok(ResolvedIn::GitHub {
+                node_id: "PRRT_31".into()
+            })
         );
 
         // A finding's is dismissed, and GitHub's is GitHub's to allow.
         let finding = resolved_in(&thread(None, None, false), true, "resolve").unwrap_err();
         assert!(finding.contains("finding"), "{finding}");
-        let refused = resolved_in(&thread(Some(31), Some("PRRT_31"), false), false, "unresolve");
-        assert_eq!(refused, Err("GitHub does not let you unresolve this thread".into()));
+        let refused = resolved_in(
+            &thread(Some(31), Some("PRRT_31"), false),
+            false,
+            "unresolve",
+        );
+        assert_eq!(
+            refused,
+            Err("GitHub does not let you unresolve this thread".into())
+        );
         let unnamed = resolved_in(&thread(Some(31), None, true), false, "resolve");
         assert!(unnamed.is_err(), "no id to ask GitHub by");
     }
@@ -23479,12 +24386,18 @@ read eof || true
             );
             let later = requests.begin("wt");
             assert!(requests.with_current("wt", later, || ()).is_none());
-            assert!(requests.fence_with("wt", || ()).is_some(), "the submission's own writes go");
+            assert!(
+                requests.fence_with("wt", || ()).is_some(),
+                "the submission's own writes go"
+            );
         }
         assert!(!requests.is_held("wt"));
         let fresh = requests.begin("wt");
         assert!(requests.with_current("wt", fresh, || ()).is_some());
-        assert!(requests.with_current("wt", read, || ()).is_none(), "and the old read is old");
+        assert!(
+            requests.with_current("wt", read, || ()).is_none(),
+            "and the old read is old"
+        );
     }
 
     /// GitHub's comment `id` on `src/x.rs:41`, replying under `root`.
@@ -23548,7 +24461,16 @@ read eof || true
         let events: Vec<Event> = received.try_iter().collect();
         let answered = events
             .iter()
-            .position(|e| matches!(e, Event::ReplyPosted { token: 4, result: Ok(()), .. }))
+            .position(|e| {
+                matches!(
+                    e,
+                    Event::ReplyPosted {
+                        token: 4,
+                        result: Ok(()),
+                        ..
+                    }
+                )
+            })
             .expect("answered");
         let threads_sent = events
             .iter()
@@ -23556,7 +24478,11 @@ read eof || true
             .expect("threads sent");
         assert!(threads_sent < answered, "{events:?}");
 
-        assert!(ctx.with_cache(|c| c.load_drafts(&item.id)).unwrap().unwrap().is_empty());
+        assert!(ctx
+            .with_cache(|c| c.load_drafts(&item.id))
+            .unwrap()
+            .unwrap()
+            .is_empty());
         let threads = threads_of(&ctx, &item);
         assert_eq!(threads.len(), 1);
         let replies: Vec<_> = threads[0]
@@ -23572,9 +24498,10 @@ read eof || true
     async fn a_reply_github_refuses_is_answered_and_nothing_is_kept() {
         let dir = tempfile::tempdir().unwrap();
         let (base, _) = serve_by_method(|method, path, _| match (method, path) {
-            ("POST", "/repos/a/b/pulls/7/comments") => {
-                ("422 Unprocessable Entity", r#"{"message":"nope"}"#.to_string())
-            }
+            ("POST", "/repos/a/b/pulls/7/comments") => (
+                "422 Unprocessable Entity",
+                r#"{"message":"nope"}"#.to_string(),
+            ),
             _ => ("404 Not Found", "{}".to_string()),
         });
         let (ctx, received) = ctx(dir.path(), &base, &[]);
@@ -23651,11 +24578,15 @@ read eof || true
         // The reply went on its own; no review was made of nothing.
         let asked = asked.lock().unwrap().clone();
         assert!(
-            asked.iter().any(|r| r == "POST /repos/a/b/pulls/7/comments"),
+            asked
+                .iter()
+                .any(|r| r == "POST /repos/a/b/pulls/7/comments"),
             "{asked:?}"
         );
         assert!(
-            !asked.iter().any(|r| r.contains("/reviews") && r.starts_with("POST")),
+            !asked
+                .iter()
+                .any(|r| r.contains("/reviews") && r.starts_with("POST")),
             "{asked:?}"
         );
         let events: Vec<Event> = received.try_iter().collect();
@@ -23670,18 +24601,30 @@ read eof || true
             _ => None,
         });
         assert_eq!(outcome, Some((true, 1, 0, 0)), "{events:?}");
-        assert!(!events.iter().any(|e| matches!(e, Event::PullRequestReviewFailed { .. })));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, Event::PullRequestReviewFailed { .. })));
         assert!(
-            events.iter().any(|e| matches!(e, Event::Done(m) if m == "Posted 1 comment")),
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Done(m) if m == "Posted 1 comment")),
             "everything went, so the line is not a complaint: {events:?}"
         );
         assert!(!ctx.discussion_requests.is_held(&item.id));
 
         // The draft is the reader's comment now, under the same thread.
-        assert!(ctx.with_cache(|c| c.load_drafts(&item.id)).unwrap().unwrap().is_empty());
+        assert!(ctx
+            .with_cache(|c| c.load_drafts(&item.id))
+            .unwrap()
+            .unwrap()
+            .is_empty());
         let threads = threads_of(&ctx, &item);
         assert_eq!(threads.len(), 1);
-        let posted = threads[0].messages.iter().find(|m| m.id == "d1").expect("kept its id");
+        let posted = threads[0]
+            .messages
+            .iter()
+            .find(|m| m.id == "d1")
+            .expect("kept its id");
         assert_eq!(posted.github_id, Some(602));
         assert_eq!(posted.author, Author::User);
     }
@@ -23763,7 +24706,10 @@ read eof || true
                     ("200 OK", review.clone())
                 }
                 ("POST", "/repos/a/b/pulls/7/comments") => {
-                    seen_comments.lock().unwrap().push(serde_json::from_str(sent).unwrap());
+                    seen_comments
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::from_str(sent).unwrap());
                     ("201 Created", on_file.clone())
                 }
                 ("GET", "/repos/a/b/pulls/7/comments") => ("200 OK", listed.clone()),
@@ -23821,7 +24767,9 @@ read eof || true
                     reactions: Default::default(),
                 }],
             };
-            ctx.with_cache(|c| c.insert_comment_thread(&thread)).unwrap().unwrap();
+            ctx.with_cache(|c| c.insert_comment_thread(&thread))
+                .unwrap()
+                .unwrap();
         }
 
         let submitted = submit_open_pull_request_review(
@@ -23883,9 +24831,14 @@ read eof || true
         assert_eq!(sent_comments[0]["body"], on_file_body.as_str());
 
         // The one on a file the pull request leaves alone is a draft still.
-        let kept = ctx.with_cache(|c| c.load_drafts(&item.id)).unwrap().unwrap();
+        let kept = ctx
+            .with_cache(|c| c.load_drafts(&item.id))
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            kept.iter().map(|d| d.message_id.as_str()).collect::<Vec<_>>(),
+            kept.iter()
+                .map(|d| d.message_id.as_str())
+                .collect::<Vec<_>>(),
             ["untouched"]
         );
         let threads = threads_of(&ctx, &item);
@@ -23895,7 +24848,10 @@ read eof || true
             .expect("kept its id");
         assert_eq!(outside.github_id, Some(701));
         assert_eq!(
-            outside.anchor.as_ref().map(|a| (a.path.as_str(), a.start_line, a.line)),
+            outside
+                .anchor
+                .as_ref()
+                .map(|a| (a.path.as_str(), a.start_line, a.line)),
             Some(("code.rs", 20, 20)),
             "back on its line"
         );
@@ -23954,7 +24910,9 @@ read eof || true
         store_commented_discussion(&ctx, &item);
         ctx.with_cache(|c| {
             let mut kept = c.load_discussion(&item.id).unwrap().unwrap().1;
-            kept.comments[0].reactions.toggle(ReactionKind::Rocket, true);
+            kept.comments[0]
+                .reactions
+                .toggle(ReactionKind::Rocket, true);
             c.store_discussion(&item.id, &kept)
         })
         .unwrap()
@@ -24068,16 +25026,29 @@ read eof || true
         close_pull_request(&ctx, &item.id, 9, "  Superseded  ").await;
 
         let paths = paths.lock().unwrap().clone();
-        assert_eq!(&paths[..2], ["/repos/a/b/issues/7/comments", "/repos/a/b/pulls/7"]);
+        assert_eq!(
+            &paths[..2],
+            ["/repos/a/b/issues/7/comments", "/repos/a/b/pulls/7"]
+        );
         let events: Vec<Event> = received.try_iter().collect();
         let updated = events.iter().position(|e| {
             matches!(e, Event::PullRequestUpdated { pull_request, .. } if !pull_request.is_open())
         });
         let answered = events.iter().position(|e| {
-            matches!(e, Event::PullRequestClosed { token: 9, result: Ok(()), .. })
+            matches!(
+                e,
+                Event::PullRequestClosed {
+                    token: 9,
+                    result: Ok(()),
+                    ..
+                }
+            )
         });
         assert!(updated.is_some() && answered.is_some(), "{events:?}");
-        assert!(updated < answered, "the closed pull request is in before the answer");
+        assert!(
+            updated < answered,
+            "the closed pull request is in before the answer"
+        );
         assert!(events
             .iter()
             .any(|e| matches!(e, Event::Done(m) if m == "Closed a/b#7")));
@@ -24115,7 +25086,11 @@ read eof || true
         )), "{events:?}");
         assert!(matches!(
             events.last(),
-            Some(Event::PullRequestClosed { token: 10, result: Ok(()), .. })
+            Some(Event::PullRequestClosed {
+                token: 10,
+                result: Ok(()),
+                ..
+            })
         ));
 
         close_pull_request(&ctx, &item.id, 11, "   ").await;
@@ -24128,7 +25103,12 @@ read eof || true
             ),
             "{events:?}"
         );
-        assert!(ctx.item(&item.id).unwrap().pull_request().unwrap().is_open());
+        assert!(ctx
+            .item(&item.id)
+            .unwrap()
+            .pull_request()
+            .unwrap()
+            .is_open());
     }
 
     /// What GitHub answers `POST /repos/a/b/issues` with.
@@ -24154,15 +25134,26 @@ read eof || true
         let sent = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
         let seen = sent.clone();
         let (base, _) = serve_by_body(move |method, path, _, body| {
-            seen.lock().unwrap().push((path.to_string(), body.to_string()));
+            seen.lock()
+                .unwrap()
+                .push((path.to_string(), body.to_string()));
             match (method, path) {
-                ("POST", "/repos/perch-code/perch/issues") => ("201 Created", created_issue_json(123)),
+                ("POST", "/repos/perch-code/perch/issues") => {
+                    ("201 Created", created_issue_json(123))
+                }
                 _ => ("404 Not Found", "{}".to_string()),
             }
         });
         let (ctx, received) = ctx(dir.path(), &base, &[]);
         let body = "It hung.\n\n---\n\nPerch 0.1.0";
-        feedback::file(&ctx, " RA failed ", body, crate::feedback::FeedbackKind::Bug, None).await;
+        feedback::file(
+            &ctx,
+            " RA failed ",
+            body,
+            crate::feedback::FeedbackKind::Bug,
+            None,
+        )
+        .await;
         let sent = sent.lock().unwrap().clone();
         assert_eq!(sent.len(), 1, "{sent:?}");
         let issue: serde_json::Value = serde_json::from_str(&sent[0].1).unwrap();
@@ -24174,7 +25165,10 @@ read eof || true
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                Event::FeedbackSent { number: 123, outcome: crate::feedback::Sent::Filed }
+                Event::FeedbackSent {
+                    number: 123,
+                    outcome: crate::feedback::Sent::Filed
+                }
             )),
             "{events:?}"
         );
@@ -24192,12 +25186,25 @@ read eof || true
             _ => ("404 Not Found", "{}".to_string()),
         });
         let (ctx, received) = ctx(dir.path(), &base, &[]);
-        feedback::file(&ctx, "RA failed", "It hung.", crate::feedback::FeedbackKind::Idea, Some(57)).await;
-        assert_eq!(paths.lock().unwrap().clone(), ["/repos/perch-code/perch/issues/57/comments"]);
+        feedback::file(
+            &ctx,
+            "RA failed",
+            "It hung.",
+            crate::feedback::FeedbackKind::Idea,
+            Some(57),
+        )
+        .await;
+        assert_eq!(
+            paths.lock().unwrap().clone(),
+            ["/repos/perch-code/perch/issues/57/comments"]
+        );
         let events: Vec<Event> = received.try_iter().collect();
         assert!(events.iter().any(|e| matches!(
             e,
-            Event::FeedbackSent { number: 57, outcome: crate::feedback::Sent::Commented }
+            Event::FeedbackSent {
+                number: 57,
+                outcome: crate::feedback::Sent::Commented
+            }
         )));
     }
 
@@ -24233,9 +25240,19 @@ read eof || true
     #[tokio::test]
     async fn feedback_refused_for_the_token_offers_github() {
         let dir = tempfile::tempdir().unwrap();
-        let (base, _) = serve("403 Forbidden", r#"{"message":"Resource not accessible by personal access token"}"#);
+        let (base, _) = serve(
+            "403 Forbidden",
+            r#"{"message":"Resource not accessible by personal access token"}"#,
+        );
         let (ctx, received) = ctx(dir.path(), &base, &[]);
-        feedback::file(&ctx, "RA failed", "It hung.", crate::feedback::FeedbackKind::Bug, None).await;
+        feedback::file(
+            &ctx,
+            "RA failed",
+            "It hung.",
+            crate::feedback::FeedbackKind::Bug,
+            None,
+        )
+        .await;
         let events: Vec<Event> = received.try_iter().collect();
         assert!(
             events.iter().any(|e| matches!(
@@ -24296,7 +25313,10 @@ read eof || true
         feedback::prepare(&ctx, request).await;
 
         let asked = asked.lock().unwrap().clone();
-        assert!(asked[0].starts_with("/search/issues?q=repo%3Aperch%2Dcode%2Fperch"), "{asked:?}");
+        assert!(
+            asked[0].starts_with("/search/issues?q=repo%3Aperch%2Dcode%2Fperch"),
+            "{asked:?}"
+        );
         assert_eq!(asked[1], "/graphql");
         let events: Vec<Event> = received.try_iter().collect();
         let steps: Vec<_> = events
@@ -24308,7 +25328,10 @@ read eof || true
             .collect();
         assert_eq!(
             steps,
-            [crate::feedback::Step::Collecting, crate::feedback::Step::Searching],
+            [
+                crate::feedback::Step::Collecting,
+                crate::feedback::Step::Searching
+            ],
             "no agent without a choice"
         );
         let ready = events
@@ -24319,7 +25342,13 @@ read eof || true
             })
             .expect("no FeedbackReady");
         assert_eq!(ready.attempt, 7);
-        assert!(ready.preview.starts_with("It hung in ‹repo›. Mail me at ‹email›."), "{}", ready.preview);
+        assert!(
+            ready
+                .preview
+                .starts_with("It hung in ‹repo›. Mail me at ‹email›."),
+            "{}",
+            ready.preview
+        );
         assert!(ready.preview.contains("<summary>Diagnostics</summary>"));
         assert!(ready.redacted >= 2);
         assert!(ready.notes.is_none());
@@ -24339,9 +25368,12 @@ read eof || true
         let asked = Arc::new(Mutex::new(Vec::new()));
         let seen = asked.clone();
         let (base, _) = serve_by_body(move |method, path, _, body| {
-            seen.lock().unwrap().push((format!("{method} {path}"), body.to_string()));
+            seen.lock()
+                .unwrap()
+                .push((format!("{method} {path}"), body.to_string()));
             if path == "/users/octo-cat" {
-                let user = serde_json::json!({ "login": "Octo-Cat", "avatar_url": "", "type": kind });
+                let user =
+                    serde_json::json!({ "login": "Octo-Cat", "avatar_url": "", "type": kind });
                 ("200 OK", user.to_string())
             } else if path.starts_with("/users/") {
                 ("404 Not Found", r#"{"message":"Not Found"}"#.to_string())
@@ -24380,7 +25412,10 @@ read eof || true
         let asked = asked.lock().unwrap().clone();
         let paths: Vec<_> = asked.iter().map(|(path, _)| path.as_str()).collect();
         assert_eq!(paths[0], "GET /users/octo-cat");
-        assert!(paths[1].starts_with("GET /search/issues?q=repo%3Aperch%2Dcode%2Fperch"), "{paths:?}");
+        assert!(
+            paths[1].starts_with("GET /search/issues?q=repo%3Aperch%2Dcode%2Fperch"),
+            "{paths:?}"
+        );
         assert_eq!(paths[2], "POST /repos/perch-code/perch/issues");
         let issue: serde_json::Value = serde_json::from_str(&asked[2].1).unwrap();
         assert_eq!(
@@ -24408,14 +25443,22 @@ read eof || true
         let (ctx, received) = ctx(dir.path(), &base, &[]);
         invite::send(&ctx, "octo-cat", "").await;
         assert!(
-            !asked.lock().unwrap().iter().any(|(path, _)| path.starts_with("POST")),
+            !asked
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(path, _)| path.starts_with("POST")),
             "filed a second one"
         );
         let events: Vec<Event> = received.try_iter().collect();
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                Event::InviteSent { number: 12, existing: true, .. }
+                Event::InviteSent {
+                    number: 12,
+                    existing: true,
+                    ..
+                }
             )),
             "{events:?}"
         );
@@ -24425,8 +25468,16 @@ read eof || true
     #[tokio::test]
     async fn invite_for_no_one_or_an_organization_is_refused() {
         for (kind, login, message) in [
-            ("User", "nobody-here", "There's no GitHub user called nobody-here."),
-            ("Organization", "octo-cat", "Octo-Cat is an organization, not a person."),
+            (
+                "User",
+                "nobody-here",
+                "There's no GitHub user called nobody-here.",
+            ),
+            (
+                "Organization",
+                "octo-cat",
+                "Octo-Cat is an organization, not a person.",
+            ),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let (base, asked) = invite_github(kind, None);
@@ -24480,18 +25531,24 @@ read eof || true
         let (base, asked) = plus_one_graphql("UNSUBSCRIBED", SUBSCRIBED);
         let (ctx, received) = ctx(dir.path(), &base, &[]);
         feedback::plus_one(&ctx, 57, "I_57", true).await;
-        assert_eq!(asked.lock().unwrap().clone(), ["react", "read", "subscribe"]);
+        assert_eq!(
+            asked.lock().unwrap().clone(),
+            ["react", "read", "subscribe"]
+        );
         let events: Vec<Event> = received.try_iter().collect();
-        assert!(events.iter().any(|e| matches!(
-            e,
-            Event::FeedbackSent {
-                number: 57,
-                outcome: crate::feedback::Sent::PlusOned {
-                    reacted: true,
-                    subscription: crate::feedback::Subscribed::Yes
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Event::FeedbackSent {
+                    number: 57,
+                    outcome: crate::feedback::Sent::PlusOned {
+                        reacted: true,
+                        subscription: crate::feedback::Subscribed::Yes
+                    }
                 }
-            }
-        )), "{events:?}");
+            )),
+            "{events:?}"
+        );
     }
 
     /// An issue the reader ignores stays ignored, even when they ignored it
@@ -24551,7 +25608,9 @@ read eof || true
         let sent = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
         let seen = sent.clone();
         let (base, paths) = serve_by_body(move |method, path, _, body| {
-            seen.lock().unwrap().push((path.to_string(), body.to_string()));
+            seen.lock()
+                .unwrap()
+                .push((path.to_string(), body.to_string()));
             match (method, path) {
                 ("POST", "/repos/a/b/issues") => ("201 Created", created_issue_json(58)),
                 ("POST", "/repos/a/b/issues/7/comments") => {
@@ -24578,7 +25637,11 @@ read eof || true
         let paths = paths.lock().unwrap().clone();
         assert_eq!(
             &paths[..3],
-            ["/repos/a/b/issues", "/repos/a/b/issues/7/comments", "/repos/a/b/pulls/7"]
+            [
+                "/repos/a/b/issues",
+                "/repos/a/b/issues/7/comments",
+                "/repos/a/b/pulls/7"
+            ]
         );
         let sent = sent.lock().unwrap().clone();
         let issue: serde_json::Value = serde_json::from_str(&sent[0].1).unwrap();
@@ -24597,11 +25660,17 @@ read eof || true
             .iter()
             .position(|e| matches!(e, Event::ClosedAsIssue { result: Ok(58), .. }));
         assert!(updated.is_some() && answered.is_some(), "{events:?}");
-        assert!(updated < answered, "the closed pull request is in before the answer");
+        assert!(
+            updated < answered,
+            "the closed pull request is in before the answer"
+        );
         assert!(events
             .iter()
             .any(|e| matches!(e, Event::Done(m) if m == "Opened a/b#58 and closed #7")));
-        assert_eq!(ctx.item(&item.id).unwrap().pull_request().unwrap().state, "closed");
+        assert_eq!(
+            ctx.item(&item.id).unwrap().pull_request().unwrap().state,
+            "closed"
+        );
     }
 
     /// With the comment emptied the pull request closes with nothing said.
@@ -24637,10 +25706,11 @@ read eof || true
         let refuse_issue = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let refusing = refuse_issue.clone();
         let (base, paths) = serve_by_method(move |method, path, _| match (method, path) {
-            ("POST", "/repos/a/b/issues")
-                if refusing.load(std::sync::atomic::Ordering::SeqCst) =>
-            {
-                ("410 Gone", r#"{"message":"Issues are disabled for this repo"}"#.to_string())
+            ("POST", "/repos/a/b/issues") if refusing.load(std::sync::atomic::Ordering::SeqCst) => {
+                (
+                    "410 Gone",
+                    r#"{"message":"Issues are disabled for this repo"}"#.to_string(),
+                )
             }
             ("POST", "/repos/a/b/issues") => ("201 Created", created_issue_json(58)),
             ("POST", "/repos/a/b/issues/7/comments") => {
@@ -24673,15 +25743,23 @@ read eof || true
         refuse_issue.store(false, std::sync::atomic::Ordering::SeqCst);
         close_as_issue(&ctx, &item.id, "Bug", "Body", "Tracked in {issue}.").await;
         let events: Vec<Event> = received.try_iter().collect();
-        assert!(events.iter().any(|e| matches!(
-            e,
-            Event::Notice(m) if m.starts_with("Opened a/b#58, but GitHub could not close")
-        )), "{events:?}");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Event::Notice(m) if m.starts_with("Opened a/b#58, but GitHub could not close")
+            )),
+            "{events:?}"
+        );
         assert!(matches!(
             events.last(),
             Some(Event::ClosedAsIssue { result: Ok(58), .. })
         ));
-        assert!(ctx.item(&item.id).unwrap().pull_request().unwrap().is_open());
+        assert!(ctx
+            .item(&item.id)
+            .unwrap()
+            .pull_request()
+            .unwrap()
+            .is_open());
 
         // A title of nothing never reaches GitHub.
         let before = paths.lock().unwrap().len();
@@ -24734,22 +25812,18 @@ read eof || true
 
         ctx.set_session(None);
         post_issue_comment(&ctx, &item.id, 7, "Looks good").await;
-        assert!(
-            matches!(
-                received.try_recv(),
-                Ok(Event::IssueCommentPosted { token: 7, result: Err(message), .. })
-                    if message.contains("offline")
-            ),
-        );
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Event::IssueCommentPosted { token: 7, result: Err(message), .. })
+                if message.contains("offline")
+        ),);
 
         post_issue_comment(&ctx, "gone", 8, "Looks good").await;
-        assert!(
-            matches!(
-                received.try_recv(),
-                Ok(Event::IssueCommentPosted { token: 8, result: Err(message), .. })
-                    if message.contains("pull request or an issue")
-            ),
-        );
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Event::IssueCommentPosted { token: 8, result: Err(message), .. })
+                if message.contains("pull request or an issue")
+        ),);
         assert!(paths.lock().unwrap().is_empty(), "GitHub was not asked");
     }
 
@@ -24774,7 +25848,10 @@ read eof || true
 
         post_issue_comment(&ctx, &issue.id, 9, "Thanks").await;
 
-        assert_eq!(paths.lock().unwrap().as_slice(), ["/repos/a/b/issues/8/comments"]);
+        assert_eq!(
+            paths.lock().unwrap().as_slice(),
+            ["/repos/a/b/issues/8/comments"]
+        );
         let events: Vec<Event> = received.try_iter().collect();
         assert!(
             matches!(
@@ -24791,8 +25868,19 @@ read eof || true
         let kept = ctx
             .with_cache(|c| c.load_discussion(&issue.id).unwrap().unwrap().1)
             .unwrap();
-        assert_eq!(kept.comments.iter().map(|c| c.id).collect::<Vec<_>>(), [1, 920]);
-        let prompted = ctx.slot.lock().unwrap().as_ref().unwrap().issue.clone().unwrap();
+        assert_eq!(
+            kept.comments.iter().map(|c| c.id).collect::<Vec<_>>(),
+            [1, 920]
+        );
+        let prompted = ctx
+            .slot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .issue
+            .clone()
+            .unwrap();
         assert_eq!(prompted.1.len(), 2, "the next question sees it");
     }
 
@@ -24817,7 +25905,9 @@ read eof || true
                 .to_string()
             };
             match (method, path) {
-                ("POST", "/repos/a/b/issues/8/assignees") => ("201 Created", answer(8, &["criccomini"])),
+                ("POST", "/repos/a/b/issues/8/assignees") => {
+                    ("201 Created", answer(8, &["criccomini"]))
+                }
                 ("DELETE", "/repos/a/b/issues/9/assignees") => ("200 OK", answer(9, &[])),
                 // Nobody GitHub will assign: the issue as it was.
                 ("POST", "/repos/a/b/issues/9/assignees") => ("201 Created", answer(9, &[])),
@@ -24831,13 +25921,19 @@ read eof || true
         let snapshot = issue.issue().cloned().unwrap();
         ctx.slot.lock().unwrap().as_mut().unwrap().issue = Some(Arc::new((snapshot, Vec::new())));
         set_assigned(&ctx, &issue.id, "criccomini", true).await;
-        assert_eq!(ctx.item(&issue.id).unwrap().issue().unwrap().assignees, ["criccomini"]);
+        assert_eq!(
+            ctx.item(&issue.id).unwrap().issue().unwrap().assignees,
+            ["criccomini"]
+        );
         let events: Vec<Event> = received.try_iter().collect();
         assert!(
             events.iter().any(|e| matches!(e, Event::IssueUpdated { issue, .. } if issue.assignees == ["criccomini"])),
             "{events:?}"
         );
-        assert!(!events.iter().any(|e| matches!(e, Event::Notice(_))), "{events:?}");
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::Notice(_))),
+            "{events:?}"
+        );
 
         let mut pull = store_pull(&ctx, 9);
         pull.subject = pull.pull_request().cloned().map(|mut pr| {
@@ -24847,7 +25943,13 @@ read eof || true
         ctx.with_cache(|c| c.update_item(&pull)).unwrap().unwrap();
         open_in_slot(&ctx, &pull);
         set_assigned(&ctx, &pull.id, "rohan", false).await;
-        assert!(ctx.item(&pull.id).unwrap().pull_request().unwrap().assignees.is_empty());
+        assert!(ctx
+            .item(&pull.id)
+            .unwrap()
+            .pull_request()
+            .unwrap()
+            .assignees
+            .is_empty());
         let events: Vec<Event> = received.try_iter().collect();
         assert!(
             events.iter().any(|e| matches!(e, Event::PullRequestUpdated { pull_request, .. } if pull_request.assignees.is_empty())),
@@ -24864,14 +25966,19 @@ read eof || true
             .cloned()
             .collect();
         assert_eq!(
-            sent.iter().map(|r| r.split(' ').take(2).collect::<Vec<_>>().join(" ")).collect::<Vec<_>>(),
+            sent.iter()
+                .map(|r| r.split(' ').take(2).collect::<Vec<_>>().join(" "))
+                .collect::<Vec<_>>(),
             [
                 "POST /repos/a/b/issues/8/assignees",
                 "DELETE /repos/a/b/issues/9/assignees",
                 "POST /repos/a/b/issues/9/assignees",
             ]
         );
-        assert!(sent[0].ends_with(r#"{"assignees":["criccomini"]}"#), "{sent:?}");
+        assert!(
+            sent[0].ends_with(r#"{"assignees":["criccomini"]}"#),
+            "{sent:?}"
+        );
     }
 
     /// Marking a draft ready asks GitHub by the pull request's node id and
@@ -24885,7 +25992,8 @@ read eof || true
         let (base, _) = serve_by_body(move |method, path, _, body| match (method, path) {
             ("POST", "/graphql") if body.contains("pullRequest(number") => (
                 "200 OK",
-                r#"{"data":{"repository":{"pullRequest":{"id":"PR_9","isDraft":true}}}}"#.to_string(),
+                r#"{"data":{"repository":{"pullRequest":{"id":"PR_9","isDraft":true}}}}"#
+                    .to_string(),
             ),
             ("POST", "/graphql") if body.contains("markPullRequestReadyForReview") => {
                 if refusing.load(std::sync::atomic::Ordering::SeqCst) {
@@ -24937,9 +26045,14 @@ read eof || true
             )),
             "{events:?}"
         );
-        assert!(matches!(events.last(), Some(Event::DraftSet { .. })), "{events:?}");
         assert!(
-            !events.iter().any(|e| matches!(e, Event::Notice(n) if n.contains("ready for review"))),
+            matches!(events.last(), Some(Event::DraftSet { .. })),
+            "{events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::Notice(n) if n.contains("ready for review"))),
             "{events:?}"
         );
     }
@@ -24992,22 +26105,43 @@ read eof || true
         .await;
 
         let sent = sent.lock().unwrap().clone();
-        assert!(sent[0].starts_with("POST /repos/a/b/issues/8/comments"), "{sent:?}");
-        assert!(sent[1].starts_with("PATCH /repos/a/b/issues/8 "), "{sent:?}");
-        assert!(sent[1].contains(r#""state_reason":"not_planned""#), "{sent:?}");
         assert!(
-            sent[2..].iter().any(|r| r.starts_with("GET /repos/a/b/issues/8/comments")),
+            sent[0].starts_with("POST /repos/a/b/issues/8/comments"),
+            "{sent:?}"
+        );
+        assert!(
+            sent[1].starts_with("PATCH /repos/a/b/issues/8 "),
+            "{sent:?}"
+        );
+        assert!(
+            sent[1].contains(r#""state_reason":"not_planned""#),
+            "{sent:?}"
+        );
+        assert!(
+            sent[2..]
+                .iter()
+                .any(|r| r.starts_with("GET /repos/a/b/issues/8/comments")),
             "the comments are read again: {sent:?}"
         );
         let events: Vec<Event> = received.try_iter().collect();
-        let updated = events.iter().position(|e| {
-            matches!(e, Event::IssueUpdated { issue, .. } if !issue.is_open())
-        });
-        let answered = events
+        let updated = events
             .iter()
-            .position(|e| matches!(e, Event::IssueClosed { token: 12, result: Ok(()), .. }));
+            .position(|e| matches!(e, Event::IssueUpdated { issue, .. } if !issue.is_open()));
+        let answered = events.iter().position(|e| {
+            matches!(
+                e,
+                Event::IssueClosed {
+                    token: 12,
+                    result: Ok(()),
+                    ..
+                }
+            )
+        });
         assert!(updated.is_some() && answered.is_some(), "{events:?}");
-        assert!(updated < answered, "the closed issue is in before the answer");
+        assert!(
+            updated < answered,
+            "the closed issue is in before the answer"
+        );
         assert!(events
             .iter()
             .any(|e| matches!(e, Event::Done(m) if m == "Closed a/b#8")));
@@ -25016,7 +26150,15 @@ read eof || true
             kept.issue().unwrap().state_reason.as_deref(),
             Some("not_planned")
         );
-        let open = ctx.slot.lock().unwrap().as_ref().unwrap().issue.clone().unwrap();
+        let open = ctx
+            .slot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .issue
+            .clone()
+            .unwrap();
         assert!(!open.0.is_open(), "the next question sees it closed");
 
         // Closed, it is not closed again.
@@ -25065,7 +26207,9 @@ read eof || true
         let asked = asked.lock().unwrap().clone();
         assert_eq!(asked[0], "POST /repos/a/b/issues/7/comments", "{asked:?}");
         assert!(
-            asked.iter().any(|r| r == "GET /repos/a/b/issues/7/comments"),
+            asked
+                .iter()
+                .any(|r| r == "GET /repos/a/b/issues/7/comments"),
             "{asked:?}"
         );
         let events: Vec<Event> = received.try_iter().collect();
@@ -25195,10 +26339,7 @@ read eof || true
             }
         });
         let (ctx, _received) = ctx(dir.path(), &base, &[]);
-        ctx.replace_notifications(
-            vec![old.clone()],
-            Some("Sat, 19 Sep 2026 12:00:00 GMT"),
-        );
+        ctx.replace_notifications(vec![old.clone()], Some("Sat, 19 Sep 2026 12:00:00 GMT"));
 
         refresh(&ctx, NotificationPollMode::Conditional).await;
         assert_eq!(*ctx.notifications.lock().unwrap(), vec![old]);
@@ -25227,25 +26368,39 @@ read eof || true
         });
         let (ctx, received) = ctx(dir.path(), &base, &[]);
         let at: Timestamp = "2026-09-09T00:00:00Z".parse().unwrap();
-        let wanted = vec![("org/one".to_string(), 7, at), ("org/one".to_string(), 7, at)];
+        let wanted = vec![
+            ("org/one".to_string(), 7, at),
+            ("org/one".to_string(), 7, at),
+        ];
 
         ctx.look_at_participants(wanted.clone());
         let mut found = None;
         for _ in 0..500 {
-            if let Some(Event::Participants(told)) = received.try_iter().find(|e| matches!(e, Event::Participants(_))) {
+            if let Some(Event::Participants(told)) = received
+                .try_iter()
+                .find(|e| matches!(e, Event::Participants(_)))
+            {
                 found = Some(told);
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        let logins: Vec<_> = found.expect("no answer")[0].1.iter().map(|p| p.login.clone()).collect();
+        let logins: Vec<_> = found.expect("no answer")[0]
+            .1
+            .iter()
+            .map(|p| p.login.clone())
+            .collect();
         assert_eq!(logins, ["replier", "opener"]);
 
         // Asked once for that revision; asked again once it moves.
         ctx.look_at_participants(wanted);
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(paths.lock().unwrap().len(), 1);
-        ctx.look_at_participants(vec![("org/one".to_string(), 7, "2026-09-10T00:00:00Z".parse().unwrap())]);
+        ctx.look_at_participants(vec![(
+            "org/one".to_string(),
+            7,
+            "2026-09-10T00:00:00Z".parse().unwrap(),
+        )]);
         for _ in 0..500 {
             if paths.lock().unwrap().len() == 2 {
                 break;
@@ -25303,10 +26458,23 @@ read eof || true
             vec![open(thread("7", "seven")), open(thread("9", "nine"))],
             Some("first"),
         );
-        assert!(ctx.notifications.lock().unwrap().iter().all(|t| !t.wants_snapshot()));
+        assert!(ctx
+            .notifications
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|t| !t.wants_snapshot()));
         let state = |id: &str| {
-            ctx.notifications.lock().unwrap().iter().find(|t| t.id == id).unwrap()
-                .subject_snapshot.as_ref().unwrap().state
+            ctx.notifications
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|t| t.id == id)
+                .unwrap()
+                .subject_snapshot
+                .as_ref()
+                .unwrap()
+                .state
         };
 
         // Launch: every open row is looked at once.
@@ -25323,12 +26491,17 @@ read eof || true
         // it was tells nothing.
         let _ = received.try_iter().count();
         let long_ago = std::time::Instant::now() - SUBJECT_RECHECK;
-        ctx.rechecked_subjects.lock().unwrap().values_mut().for_each(|at| *at = long_ago);
+        ctx.rechecked_subjects
+            .lock()
+            .unwrap()
+            .values_mut()
+            .for_each(|at| *at = long_ago);
         look_at_subjects(&ctx).await;
         assert_eq!(paths.lock().unwrap().len(), 2);
-        assert!(!received
-            .try_iter()
-            .any(|event| matches!(event, Event::Notifications(_) | Event::NotificationsPolled(_))));
+        assert!(!received.try_iter().any(|event| matches!(
+            event,
+            Event::Notifications(_) | Event::NotificationsPolled(_)
+        )));
     }
 
     #[tokio::test]
@@ -25386,7 +26559,9 @@ read eof || true
         let told = received
             .try_iter()
             .filter_map(|event| match event {
-                Event::Notifications(threads) | Event::NotificationsPolled(threads) => Some(threads),
+                Event::Notifications(threads) | Event::NotificationsPolled(threads) => {
+                    Some(threads)
+                }
                 _ => None,
             })
             .last()
@@ -25404,7 +26579,10 @@ read eof || true
         ctx.replace_notifications(vec![newer], Some("second"));
         let carried = ctx.notifications.lock().unwrap()[0].clone();
         assert_eq!(
-            carried.subject_snapshot.as_ref().map(|s| s.author_login.as_str()),
+            carried
+                .subject_snapshot
+                .as_ref()
+                .map(|s| s.author_login.as_str()),
             Some("someone")
         );
         assert!(carried.wants_snapshot());
@@ -25509,7 +26687,9 @@ read eof || true
         let told = received
             .try_iter()
             .filter_map(|event| match event {
-                Event::Notifications(threads) | Event::NotificationsPolled(threads) => Some(threads),
+                Event::Notifications(threads) | Event::NotificationsPolled(threads) => {
+                    Some(threads)
+                }
                 _ => None,
             })
             .last()
@@ -25582,7 +26762,10 @@ read eof || true
                 if newest.load(std::sync::atomic::Ordering::SeqCst) {
                     ("200 OK", tonight.to_string())
                 } else {
-                    ("200 OK", r#"{"total_count":0,"workflow_runs":[]}"#.to_string())
+                    (
+                        "200 OK",
+                        r#"{"total_count":0,"workflow_runs":[]}"#.to_string(),
+                    )
                 }
             } else {
                 ("404 Not Found", "{}".to_string())
@@ -25666,10 +26849,7 @@ read eof || true
 
     /// A GitHub that refuses every token but `accepted`, and answers the
     /// inbox with `body` for that one.
-    fn serve_accepting(
-        accepted: &'static str,
-        body: String,
-    ) -> (String, Arc<Mutex<Vec<String>>>) {
+    fn serve_accepting(accepted: &'static str, body: String) -> (String, Arc<Mutex<Vec<String>>>) {
         serve_by_request(move |_path, headers| {
             let bearer = format!("Bearer {accepted}");
             let authorized = headers.iter().any(|header| {
@@ -25825,7 +27005,9 @@ read eof || true
     async fn an_items_runs_are_its_own_a_page_at_a_time() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
-        let at = |minute: u32| -> Timestamp { format!("2026-09-19T10:{minute:02}:00Z").parse().unwrap() };
+        let at = |minute: u32| -> Timestamp {
+            format!("2026-09-19T10:{minute:02}:00Z").parse().unwrap()
+        };
         let discussion = |item: &str, id: &str| RunOwner::Discussion {
             item_id: item.into(),
             thread_id: format!("t-{id}"),
@@ -25852,17 +27034,33 @@ read eof || true
                 2,
             ),
             run("new", discussion("one", "new"), RunStatus::Completed, 3),
-            run("working", discussion("one", "working"), RunStatus::Running, 4),
-            run("elsewhere", discussion("two", "elsewhere"), RunStatus::Completed, 5),
+            run(
+                "working",
+                discussion("one", "working"),
+                RunStatus::Running,
+                4,
+            ),
+            run(
+                "elsewhere",
+                discussion("two", "elsewhere"),
+                RunStatus::Completed,
+                5,
+            ),
         ];
         for run in &runs {
-            ctx.with_cache(|cache| cache.insert_run(run)).unwrap().unwrap();
+            ctx.with_cache(|cache| cache.insert_run(run))
+                .unwrap()
+                .unwrap();
         }
         let sent = |received: &std::sync::mpsc::Receiver<Event>| {
             received
                 .try_iter()
                 .find_map(|event| match event {
-                    Event::ItemRuns { item_id, runs, has_more } => Some((
+                    Event::ItemRuns {
+                        item_id,
+                        runs,
+                        has_more,
+                    } => Some((
                         item_id,
                         runs.into_iter().map(|run| run.id).collect::<Vec<_>>(),
                         has_more,
@@ -25914,9 +27112,16 @@ read eof || true
                         r#"{"data":{"repository":{"object":{"text":"a\nb\nc\n","isBinary":false,"isTruncated":false}}}}"#.to_string(),
                     )
                 } else if body.contains("createCommitOnBranch") {
-                    ("200 OK", r#"{"data":{"createCommitOnBranch":{"commit":{"oid":"c8"}}}}"#.to_string())
+                    (
+                        "200 OK",
+                        r#"{"data":{"createCommitOnBranch":{"commit":{"oid":"c8"}}}}"#.to_string(),
+                    )
                 } else {
-                    ("200 OK", r#"{"data":{"resolveReviewThread":{"thread":{"isResolved":true}}}}"#.to_string())
+                    (
+                        "200 OK",
+                        r#"{"data":{"resolveReviewThread":{"thread":{"isResolved":true}}}}"#
+                            .to_string(),
+                    )
                 }
             }
             _ => ("404 Not Found", "{}".to_string()),
@@ -25927,7 +27132,10 @@ read eof || true
         let commit = |lines: &[&str]| crate::review::suggestion::Commit {
             thread_id: "gh-31".into(),
             path: "src/x.rs".into(),
-            original: crate::review::suggestion::Original { first: 2, lines: lines.iter().map(|l| l.to_string()).collect() },
+            original: crate::review::suggestion::Original {
+                first: 2,
+                lines: lines.iter().map(|l| l.to_string()).collect(),
+            },
             lines: vec!["B".into()],
             headline: "Update src/x.rs".into(),
             body: String::new(),
@@ -26016,9 +27224,9 @@ read eof || true
 
         let offered = received
             .try_iter()
-            .filter(|event| {
-                matches!(event, Event::OpenItemChanged { item_id } if *item_id == item.id)
-            })
+            .filter(
+                |event| matches!(event, Event::OpenItemChanged { item_id } if *item_id == item.id),
+            )
             .count();
         assert_eq!(offered, 1);
         assert!(
@@ -26081,10 +27289,7 @@ read eof || true
             })
         ));
         assert_eq!(items_sent(&received), 0);
-        assert_eq!(
-            paths.lock().unwrap().as_slice(),
-            ["/graphql"]
-        );
+        assert_eq!(paths.lock().unwrap().as_slice(), ["/graphql"]);
     }
 
     /// The merge form's commit message is made from the description, so
@@ -26110,7 +27315,8 @@ read eof || true
             } else if body.contains("updateIssueComment(") {
                 (
                     "200 OK",
-                    r#"{"data":{"updateIssueComment":{"issueComment":{"body":"fixed"}}}}"#.to_string(),
+                    r#"{"data":{"updateIssueComment":{"issueComment":{"body":"fixed"}}}}"#
+                        .to_string(),
                 )
             } else if body.contains("updatePullRequest(")
                 && refusing.load(std::sync::atomic::Ordering::SeqCst)
@@ -26123,7 +27329,8 @@ read eof || true
             } else if body.contains("updatePullRequest(") {
                 (
                     "200 OK",
-                    r#"{"data":{"updatePullRequest":{"pullRequest":{"body":"New words"}}}}"#.to_string(),
+                    r#"{"data":{"updatePullRequest":{"pullRequest":{"body":"New words"}}}}"#
+                        .to_string(),
                 )
             } else {
                 ("404 Not Found", "{}".to_string())
@@ -26139,18 +27346,42 @@ read eof || true
         assert!(!overview_asked(), "{:?}", asked.lock().unwrap());
 
         refuse.store(true, std::sync::atomic::Ordering::SeqCst);
-        update_github_comment(&ctx, &item.id, "PR_7", CommentPlace::PullRequestBody, "New words").await;
+        update_github_comment(
+            &ctx,
+            &item.id,
+            "PR_7",
+            CommentPlace::PullRequestBody,
+            "New words",
+        )
+        .await;
         assert!(!overview_asked(), "{:?}", asked.lock().unwrap());
         let _: Vec<Event> = received.try_iter().collect();
 
         refuse.store(false, std::sync::atomic::Ordering::SeqCst);
-        update_github_comment(&ctx, &item.id, "PR_7", CommentPlace::PullRequestBody, "New words").await;
+        update_github_comment(
+            &ctx,
+            &item.id,
+            "PR_7",
+            CommentPlace::PullRequestBody,
+            "New words",
+        )
+        .await;
         let asked = asked.lock().unwrap().clone();
-        assert_eq!(asked.last().map(String::as_str), Some("overview"), "{asked:?}");
-        assert_eq!(asked.iter().filter(|a| *a == "overview").count(), 1, "{asked:?}");
+        assert_eq!(
+            asked.last().map(String::as_str),
+            Some("overview"),
+            "{asked:?}"
+        );
+        assert_eq!(
+            asked.iter().filter(|a| *a == "overview").count(),
+            1,
+            "{asked:?}"
+        );
         let events: Vec<Event> = received.try_iter().collect();
         assert!(
-            events.iter().any(|e| matches!(e, Event::PullRequestOverviewReady { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, Event::PullRequestOverviewReady { .. })),
             "{events:?}"
         );
     }
@@ -26524,9 +27755,14 @@ read eof || true
         entry.resolve(None);
         let (ctx, received) = ctx_declaring(dir.path(), &nowhere(), vec![entry]);
         assert!(scan_roots(&ctx).await);
-        let source = ctx.with_cache(|c| c.load_items().unwrap()).unwrap().remove(0);
+        let source = ctx
+            .with_cache(|c| c.load_items().unwrap())
+            .unwrap()
+            .remove(0);
 
-        let id = start_work(&ctx, &source.id, 0).await.expect("work starts from a local branch");
+        let id = start_work(&ctx, &source.id, 0)
+            .await
+            .expect("work starts from a local branch");
 
         let fork = ctx.item(&id).unwrap();
         let checkout = fork.checkout.clone().unwrap();
@@ -26535,7 +27771,9 @@ read eof || true
         assert_eq!(checkout.branch, "feature-2");
         assert!(checkout.owned);
         assert_eq!(checkout.source.as_deref(), Some(root.as_path()));
-        assert!(checkout.path.starts_with(ctx.preparer.store().worktrees_dir()));
+        assert!(checkout
+            .path
+            .starts_with(ctx.preparer.store().worktrees_dir()));
         assert_eq!(
             git(&root, &["rev-parse", "refs/heads/feature-2"]),
             source.checkout.as_ref().unwrap().head_sha,
@@ -26545,7 +27783,10 @@ read eof || true
             !scan_roots(&ctx).await,
             "the scan sees the new worktree and leaves Perch's row alone"
         );
-        assert_eq!(ctx.with_cache(|c| c.load_items().unwrap()).unwrap().len(), 2);
+        assert_eq!(
+            ctx.with_cache(|c| c.load_items().unwrap()).unwrap().len(),
+            2
+        );
 
         std::fs::write(checkout.path.join("three.txt"), "three\n").unwrap();
         git(&checkout.path, &["add", "."]);
@@ -26574,7 +27815,11 @@ read eof || true
         assert!(ctx.item(&id).is_some(), "nothing was deleted yet");
         assert!(checkout.path.exists());
 
-        assert_eq!(ctx.kept_servers.clients().len(), 1, "nothing was deleted yet");
+        assert_eq!(
+            ctx.kept_servers.clients().len(),
+            1,
+            "nothing was deleted yet"
+        );
         delete_item(&ctx, &id, true).await.unwrap();
         assert!(ctx.item(&id).is_none());
         assert!(!checkout.path.exists());
@@ -26635,7 +27880,10 @@ read eof || true
 
         // The same name again moves on.
         let id = create_worktree(&ctx, &work, 2).await.unwrap();
-        assert_eq!(ctx.item(&id).unwrap().checkout.unwrap().branch, "chris/readme-2");
+        assert_eq!(
+            ctx.item(&id).unwrap().checkout.unwrap().branch,
+            "chris/readme-2"
+        );
     }
 
     #[tokio::test]
@@ -26650,7 +27898,10 @@ read eof || true
 
         let cuts = ctx.root_cuts.lock().await;
         let path = dir.path().join("cut");
-        git(&root, &["worktree", "add", "-q", "-b", "cut", path.to_str().unwrap()]);
+        git(
+            &root,
+            &["worktree", "add", "-q", "-b", "cut", path.to_str().unwrap()],
+        );
         let scan = scan_roots(&ctx);
         tokio::pin!(scan);
         assert!(
@@ -26683,7 +27934,10 @@ read eof || true
 
     #[test]
     fn a_new_work_row_is_named_for_the_first_line_of_its_message() {
-        assert_eq!(work_title("\n  Add a README\nwith more").as_deref(), Some("Add a README"));
+        assert_eq!(
+            work_title("\n  Add a README\nwith more").as_deref(),
+            Some("Add a README")
+        );
         assert_eq!(work_title("  \n "), None);
         let long = format!("{} tail", "word ".repeat(20));
         let title = work_title(&long).unwrap();
@@ -26708,7 +27962,15 @@ read eof || true
         let upstream = dir.path().join("upstream");
         root_with_branch(&upstream, "feature");
         let root = dir.path().join("notes");
-        git(dir.path(), &["clone", "-q", upstream.to_str().unwrap(), root.to_str().unwrap()]);
+        git(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                upstream.to_str().unwrap(),
+                root.to_str().unwrap(),
+            ],
+        );
         let mut entry = rooted(None, &root);
         entry.resolve(None);
         let (ctx, received) = ctx_declaring(dir.path(), &nowhere(), vec![entry]);
@@ -26719,16 +27981,32 @@ read eof || true
 
         let work = new_work(perch_git::BaseBranch::on("origin", "main"), "fresh");
         let id = create_worktree(&ctx, &work, 1).await.unwrap();
-        assert_eq!(ctx.item(&id).unwrap().checkout.unwrap().head_sha, moved, "cut from the fetched tip");
+        assert_eq!(
+            ctx.item(&id).unwrap().checkout.unwrap().head_sha,
+            moved,
+            "cut from the fetched tip"
+        );
         assert!(notices(&received).is_empty());
 
-        git(&root, &["remote", "set-url", "origin", dir.path().join("gone").to_str().unwrap()]);
+        git(
+            &root,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                dir.path().join("gone").to_str().unwrap(),
+            ],
+        );
         let work = new_work(perch_git::BaseBranch::on("origin", "main"), "stale");
         let id = create_worktree(&ctx, &work, 2).await.unwrap();
         assert_eq!(ctx.item(&id).unwrap().checkout.unwrap().head_sha, moved);
         let notices = notices(&received);
         assert_eq!(notices.len(), 1, "{notices:?}");
-        assert!(notices[0].starts_with("Could not fetch origin; started from the origin/main"), "{}", notices[0]);
+        assert!(
+            notices[0].starts_with("Could not fetch origin; started from the origin/main"),
+            "{}",
+            notices[0]
+        );
     }
 
     #[tokio::test]
@@ -26745,8 +28023,14 @@ read eof || true
 
         assert_eq!(identity, "local/notes");
         let text = std::fs::read_to_string(&config).unwrap();
-        assert!(text.starts_with("# mine\npoll_interval_secs = 30\n\n[[repo]]\nroots = ["), "{text}");
-        assert!(text.contains(&notes.canonicalize().unwrap().display().to_string()), "{text}");
+        assert!(
+            text.starts_with("# mine\npoll_interval_secs = 30\n\n[[repo]]\nroots = ["),
+            "{text}"
+        );
+        assert!(
+            text.contains(&notes.canonicalize().unwrap().display().to_string()),
+            "{text}"
+        );
         assert_eq!(ctx.config().declared(), ["local/notes"]);
         let repos: Vec<_> = received
             .try_iter()
@@ -26762,7 +28046,10 @@ read eof || true
         let again = add_repository(&ctx, &notes, &config).await.unwrap_err();
         assert!(again.contains("is already a root of notes"), "{again}");
         let elsewhere = add_repository(&ctx, dir.path(), &config).await.unwrap_err();
-        assert!(elsewhere.contains("is not in a git repository"), "{elsewhere}");
+        assert!(
+            elsewhere.contains("is not in a git repository"),
+            "{elsewhere}"
+        );
     }
 
     #[tokio::test]
@@ -26775,9 +28062,14 @@ read eof || true
         std::fs::write(&config, "# mine\npoll_interval_secs = 30\n").unwrap();
         add_repository(&ctx, &notes, &config).await.unwrap();
 
-        remove_repository(&ctx, "LOCAL/notes", &config).await.unwrap();
+        remove_repository(&ctx, "LOCAL/notes", &config)
+            .await
+            .unwrap();
 
-        assert_eq!(std::fs::read_to_string(&config).unwrap(), "# mine\npoll_interval_secs = 30\n");
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "# mine\npoll_interval_secs = 30\n"
+        );
         assert!(ctx.config().declared().is_empty());
         let repos: Vec<_> = received
             .try_iter()
@@ -26794,7 +28086,9 @@ read eof || true
         // Taken out by hand meanwhile: said so, and the file left alone.
         add_repository(&ctx, &notes, &config).await.unwrap();
         std::fs::write(&config, "# mine\n").unwrap();
-        let gone = remove_repository(&ctx, "local/notes", &config).await.unwrap_err();
+        let gone = remove_repository(&ctx, "local/notes", &config)
+            .await
+            .unwrap_err();
         assert!(gone.contains("has no [[repo]] for notes"), "{gone}");
         assert_eq!(std::fs::read_to_string(&config).unwrap(), "# mine\n");
     }
@@ -27072,9 +28366,19 @@ read eof || true
         let cache = Arc::new(std::sync::Mutex::new(cache));
         let (events, received) = std::sync::mpsc::channel();
 
-        spawn_avatar(None, Some(cache.clone()), events.into(), Arc::new(Semaphore::new(1)), url.clone());
+        spawn_avatar(
+            None,
+            Some(cache.clone()),
+            events.into(),
+            Arc::new(Semaphore::new(1)),
+            url.clone(),
+        );
 
-        let Ok(Event::Avatar { url: face_url, bytes }) = received.try_recv() else {
+        let Ok(Event::Avatar {
+            url: face_url,
+            bytes,
+        }) = received.try_recv()
+        else {
             panic!("no face was sent");
         };
         assert_eq!(face_url, url);
@@ -27239,15 +28543,29 @@ read eof || true
         git(&source, &["add", "."]);
         git(&source, &["commit", "-q", "-m", "one"]);
         let remote = dir.join("remote.git");
-        git(&source, &["clone", "-q", "--bare", ".", remote.to_str().unwrap()]);
+        git(
+            &source,
+            &["clone", "-q", "--bare", ".", remote.to_str().unwrap()],
+        );
         let bare = ctx.preparer.store().bare_path(&repo);
         std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
-        git(&remote, &["clone", "-q", "--bare", ".", bare.to_str().unwrap()]);
+        git(
+            &remote,
+            &["clone", "-q", "--bare", ".", bare.to_str().unwrap()],
+        );
         git(&source, &["checkout", "-q", "-b", "theirs"]);
         std::fs::write(source.join("two.txt"), "two\n").unwrap();
         git(&source, &["add", "."]);
         git(&source, &["commit", "-q", "-m", "two"]);
-        git(&source, &["push", "-q", remote.to_str().unwrap(), "HEAD:refs/pull/7/head"]);
+        git(
+            &source,
+            &[
+                "push",
+                "-q",
+                remote.to_str().unwrap(),
+                "HEAD:refs/pull/7/head",
+            ],
+        );
         git(&source, &["rev-parse", "HEAD"])
     }
 
@@ -27260,12 +28578,28 @@ read eof || true
         // The pull request as Perch reads it, in `perch/pr-7`, with a
         // commit of the reader's that GitHub hasn't seen.
         let bare = ctx.preparer.store().bare_path(&repo);
-        git(&bare, &["fetch", "-q", "origin", "+refs/pull/7/head:refs/perch/pull/7/head"]);
+        git(
+            &bare,
+            &[
+                "fetch",
+                "-q",
+                "origin",
+                "+refs/pull/7/head:refs/perch/pull/7/head",
+            ],
+        );
         let worktree = ctx.preparer.store().worktree_path(&repo, "perch/pr-7");
         std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
         git(
             &bare,
-            &["worktree", "add", "-q", "-b", "perch/pr-7", worktree.to_str().unwrap(), "refs/perch/pull/7/head"],
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "perch/pr-7",
+                worktree.to_str().unwrap(),
+                "refs/perch/pull/7/head",
+            ],
         );
         std::fs::write(worktree.join("three.txt"), "three\n").unwrap();
         git(&worktree, &["add", "."]);
@@ -27286,34 +28620,66 @@ read eof || true
         });
         ctx.with_cache(|c| c.update_item(&pr)).unwrap().unwrap();
 
-        let id = start_work(&ctx, &pr.id, 0).await.expect("work starts from the pull request");
+        let id = start_work(&ctx, &pr.id, 0)
+            .await
+            .expect("work starts from the pull request");
 
         let checkout = ctx.item(&id).unwrap().checkout.unwrap();
-        assert_ne!(id, pr.id, "a branch of its own, not the pull request's checkout");
+        assert_ne!(
+            id, pr.id,
+            "a branch of its own, not the pull request's checkout"
+        );
         assert_eq!(checkout.branch, "perch/pr-7-work");
-        assert_eq!(checkout.head_sha, unpushed, "the commit Code shows, not GitHub's head");
-        assert_eq!(open_pull::readiness(&ctx, &id, None).await.unwrap().ahead, 2);
+        assert_eq!(
+            checkout.head_sha, unpushed,
+            "the commit Code shows, not GitHub's head"
+        );
+        assert_eq!(
+            open_pull::readiness(&ctx, &id, None).await.unwrap().ahead,
+            2
+        );
     }
 
     #[tokio::test]
-    async fn start_work_on_a_pull_request_cuts_its_head_against_its_base_and_its_successor_closes_it() {
+    async fn start_work_on_a_pull_request_cuts_its_head_against_its_base_and_its_successor_closes_it(
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
         let theirs = pull_seven_on_github(&ctx, dir.path());
 
         let pr = store_pull(&ctx, 7);
-        let id = start_work(&ctx, &pr.id, 0).await.expect("work starts from the pull request");
+        let id = start_work(&ctx, &pr.id, 0)
+            .await
+            .expect("work starts from the pull request");
 
         let item = ctx.item(&id).unwrap();
         let checkout = item.checkout.clone().unwrap();
-        assert_eq!(checkout.branch, "perch/pr-7-work", "perch/pr-7 is the pull request's own checkout");
-        assert_eq!(checkout.base_ref, "main", "diffed against the base, not the head");
-        assert_eq!(checkout.head_sha, theirs, "the contributor's commits are the branch's");
-        assert!(checkout.owned && checkout.source.is_none(), "Perch's clone, which pushes with Perch's token");
+        assert_eq!(
+            checkout.branch, "perch/pr-7-work",
+            "perch/pr-7 is the pull request's own checkout"
+        );
+        assert_eq!(
+            checkout.base_ref, "main",
+            "diffed against the base, not the head"
+        );
+        assert_eq!(
+            checkout.head_sha, theirs,
+            "the contributor's commits are the branch's"
+        );
+        assert!(
+            checkout.owned && checkout.source.is_none(),
+            "Perch's clone, which pushes with Perch's token"
+        );
         assert_eq!(item.from_item_id.as_deref(), Some(pr.id.as_str()));
         assert_eq!(item.title(), "pull 7");
-        assert!(item.subject.is_none(), "no pull request until the reader opens one");
-        assert!(!item_code_trusted(&ctx, &id, perch_lsp::ServerKind::RustAnalyzer), "someone else's pull request's code");
+        assert!(
+            item.subject.is_none(),
+            "no pull request until the reader opens one"
+        );
+        assert!(
+            !item_code_trusted(&ctx, &id, perch_lsp::ServerKind::RustAnalyzer),
+            "someone else's pull request's code"
+        );
 
         let ready = open_pull::readiness(&ctx, &id, None).await.unwrap();
         assert_eq!(ready.base, "main");
@@ -27340,11 +28706,19 @@ read eof || true
             let pr = store_pull(&ctx, 7);
             let answer = |id: &str| ctx.with_cache(|c| c.item_code_trust(id).unwrap()).unwrap();
 
-            let id = start_work(&ctx, &pr.id, 0).await.expect("work starts from the pull request");
+            let id = start_work(&ctx, &pr.id, 0)
+                .await
+                .expect("work starts from the pull request");
             assert_eq!(answer(&id), Some(false), "{declared:?}");
-            assert!(!item_code_trusted(&ctx, &id, perch_lsp::ServerKind::RustAnalyzer));
+            assert!(!item_code_trusted(
+                &ctx,
+                &id,
+                perch_lsp::ServerKind::RustAnalyzer
+            ));
 
-            let forked = start_work(&ctx, &id, 0).await.expect("work starts from the branch");
+            let forked = start_work(&ctx, &id, 0)
+                .await
+                .expect("work starts from the branch");
             assert_ne!(forked, id);
             assert_eq!(answer(&forked), Some(false), "{declared:?}");
         }
@@ -27374,24 +28748,41 @@ read eof || true
             .expect("the issue's row is made");
         let item = ctx.item(&made).unwrap();
         assert_eq!(item.issue().unwrap().title, "Fence the manifest");
-        assert!(item.checkout.is_none(), "a row to cut from, with no checkout of its own");
+        assert!(
+            item.checkout.is_none(),
+            "a row to cut from, with no checkout of its own"
+        );
         assert_eq!(
-            subject_item(&ctx, "a/b", ItemKind::Issue, 5, 0).await.unwrap(),
+            subject_item(&ctx, "a/b", ItemKind::Issue, 5, 0)
+                .await
+                .unwrap(),
             made,
             "found the second time, not made again"
         );
         assert_eq!(paths.lock().unwrap().len(), 1);
 
         let mut pr = store_pull(&ctx, 7);
-        assert_eq!(subject_item(&ctx, "a/b", ItemKind::PullRequest, 7, 0).await.unwrap(), pr.id);
+        assert_eq!(
+            subject_item(&ctx, "a/b", ItemKind::PullRequest, 7, 0)
+                .await
+                .unwrap(),
+            pr.id
+        );
         pr.archived_at = Some(Timestamp::now());
         ctx.with_cache(|c| c.update_item(&pr)).unwrap().unwrap();
         assert_eq!(
-            subject_item(&ctx, "a/b", ItemKind::PullRequest, 7, 0).await.unwrap_err(),
+            subject_item(&ctx, "a/b", ItemKind::PullRequest, 7, 0)
+                .await
+                .unwrap_err(),
             "Open #7 to restore it, then start work from it"
         );
 
-        assert!(subject_item(&ctx, "a/b", ItemKind::Issue, 9, 0).await.is_err(), "GitHub has no #9");
+        assert!(
+            subject_item(&ctx, "a/b", ItemKind::Issue, 9, 0)
+                .await
+                .is_err(),
+            "GitHub has no #9"
+        );
     }
 
     /// Start work leaves the prompt for the new worktree's composer before
@@ -27422,8 +28813,21 @@ read eof || true
         let root = dir.join("widgets");
         let worktree = root_with_branch(&root, "feature").canonicalize().unwrap();
         let remote = dir.join("remote.git");
-        git(dir, &["init", "-q", "--bare", "-b", "main", remote.to_str().unwrap()]);
-        git(&root, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(
+            dir,
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        git(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
         git(&root, &["push", "-q", "origin", "main"]);
         let mut item = Item::new("a/b", "2026-09-10T00:00:00Z".parse().unwrap());
         item.checkout = Some(ItemCheckout {
@@ -27484,7 +28888,10 @@ read eof || true
         *head.lock().unwrap() = git(&worktree, &["rev-parse", "HEAD"]);
 
         let ready = open_pull::readiness(&ctx, &item.id, None).await.unwrap();
-        assert_eq!((ready.base.as_str(), ready.ahead, ready.dirty_files), ("main", 1, 0));
+        assert_eq!(
+            (ready.base.as_str(), ready.ahead, ready.dirty_files),
+            ("main", 1, 0)
+        );
         assert_eq!(ready.title, "two");
 
         open_pull::create(&ctx, &item.id, "Add two", "Adds two.", "main", true).await;
@@ -27495,11 +28902,17 @@ read eof || true
             git(&worktree, &["rev-parse", "HEAD"])
         );
         assert_eq!(
-            git(&worktree, &["rev-parse", "--abbrev-ref", "feature@{upstream}"]),
+            git(
+                &worktree,
+                &["rev-parse", "--abbrev-ref", "feature@{upstream}"]
+            ),
             "origin/feature"
         );
         let paths = paths.lock().unwrap().clone();
-        assert!(paths[0].starts_with("/repos/a/b/pulls?head=a%3Afeature"), "{paths:?}");
+        assert!(
+            paths[0].starts_with("/repos/a/b/pulls?head=a%3Afeature"),
+            "{paths:?}"
+        );
         assert_eq!(paths[1], "/repos/a/b/pulls");
         let body: serde_json::Value = serde_json::from_str(&sent.lock().unwrap()[0]).unwrap();
         assert_eq!(body["head"], "a:feature");
@@ -27509,7 +28922,10 @@ read eof || true
         assert_eq!(body["draft"], true);
         let row = ctx.item(&item.id).unwrap();
         assert_eq!(row.pull_request().map(|pr| pr.number), Some(12));
-        assert_eq!(row.checkout.as_ref().map(|c| c.branch.as_str()), Some("feature"));
+        assert_eq!(
+            row.checkout.as_ref().map(|c| c.branch.as_str()),
+            Some("feature")
+        );
     }
 
     #[tokio::test]
@@ -27530,7 +28946,13 @@ read eof || true
             Ok((5, Some("#5 was already open on this branch.".into())))
         );
         assert_eq!(paths.lock().unwrap().len(), 1);
-        assert_eq!(ctx.item(&item.id).unwrap().pull_request().map(|pr| pr.number), Some(5));
+        assert_eq!(
+            ctx.item(&item.id)
+                .unwrap()
+                .pull_request()
+                .map(|pr| pr.number),
+            Some(5)
+        );
         let pushed = std::process::Command::new("git")
             .current_dir(&remote)
             .args(["rev-parse", "--verify", "--quiet", "refs/heads/feature"])
@@ -27567,7 +28989,13 @@ read eof || true
         open_pull::create(&ctx, &item.id, "Add two", "", "main", false).await;
 
         assert_eq!(open_outcome(&received), Ok((8, None)));
-        assert_eq!(ctx.item(&item.id).unwrap().pull_request().map(|pr| pr.number), Some(8));
+        assert_eq!(
+            ctx.item(&item.id)
+                .unwrap()
+                .pull_request()
+                .map(|pr| pr.number),
+            Some(8)
+        );
     }
 
     #[tokio::test]
@@ -27578,7 +29006,15 @@ read eof || true
         let (item, _worktree, remote) = pushable_branch(&ctx, dir.path());
         // Someone else's feature, already on the remote.
         let other = dir.path().join("other");
-        git(dir.path(), &["clone", "-q", remote.to_str().unwrap(), other.to_str().unwrap()]);
+        git(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                other.to_str().unwrap(),
+            ],
+        );
         git(&other, &["checkout", "-q", "-b", "feature"]);
         git(&other, &["commit", "-q", "--allow-empty", "-m", "theirs"]);
         git(&other, &["push", "-q", "origin", "feature"]);
@@ -27592,7 +29028,11 @@ read eof || true
         );
         assert_eq!(git(&remote, &["rev-parse", "refs/heads/feature"]), theirs);
         assert!(
-            paths.lock().unwrap().iter().all(|p| p != "/repos/a/b/pulls"),
+            paths
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|p| p != "/repos/a/b/pulls"),
             "nothing was created"
         );
         assert!(ctx.item(&item.id).unwrap().subject.is_none());
@@ -27605,7 +29045,10 @@ read eof || true
         let (item, worktree, _remote) = pushable_branch(&ctx, dir.path());
 
         open_pull::create(&ctx, &item.id, "  ", "", "main", false).await;
-        assert_eq!(open_outcome(&received), Err("The pull request needs a title".into()));
+        assert_eq!(
+            open_outcome(&received),
+            Err("The pull request needs a title".into())
+        );
 
         git(&worktree, &["checkout", "-q", "-b", "elsewhere"]);
         open_pull::create(&ctx, &item.id, "Add two", "", "main", false).await;
@@ -27624,7 +29067,10 @@ read eof || true
         let fresh = head.clone();
         let (base, paths) = serve_by_path(move |path| {
             let head = fresh.lock().unwrap().clone();
-            assert_eq!(path, "/repos/a/b/pulls/12", "only the pull request is fetched");
+            assert_eq!(
+                path, "/repos/a/b/pulls/12",
+                "only the pull request is fetched"
+            );
             ("200 OK", opened_pull(12, &head, "open"))
         });
         let (ctx, received) = ctx(dir.path(), &base, &[]);
@@ -27645,7 +29091,9 @@ read eof || true
 
         open_pull::push_to_pull(&ctx, &item.id).await;
 
-        assert!(received.try_iter().any(|e| matches!(e, Event::BranchPushed { .. })));
+        assert!(received
+            .try_iter()
+            .any(|e| matches!(e, Event::BranchPushed { .. })));
         assert_eq!(git(&remote, &["rev-parse", "refs/heads/feature"]), new);
         assert_eq!(paths.lock().unwrap().len(), 1);
         assert_eq!(ctx.item(&item.id).unwrap().divergence(), None);
@@ -27659,7 +29107,10 @@ read eof || true
         let pushed_head = head.clone();
         let (base, _paths) = serve_by_method(move |method, _, _| {
             if method == "POST" {
-                ("201 Created", opened_pull(12, &pushed_head.lock().unwrap(), "open"))
+                (
+                    "201 Created",
+                    opened_pull(12, &pushed_head.lock().unwrap(), "open"),
+                )
             } else {
                 ("200 OK", "[]".to_string())
             }
@@ -27673,11 +29124,7 @@ read eof || true
         let hooks = dir.path().join("widgets/.git/hooks");
         std::fs::create_dir_all(&hooks).unwrap();
         let hook = hooks.join("pre-push");
-        std::fs::write(
-            &hook,
-            format!("#!/bin/sh\nenv > '{}'\n", seen.display()),
-        )
-        .unwrap();
+        std::fs::write(&hook, format!("#!/bin/sh\nenv > '{}'\n", seen.display())).unwrap();
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         open_pull::create(&ctx, &item.id, "Add two", "", "main", false).await;
@@ -27753,8 +29200,14 @@ read eof || true
         );
         let args = std::fs::read_to_string(dir.path().join("args")).unwrap();
         assert!(args.contains("The branch feature goes into main"), "{args}");
-        assert!(args.contains("- two"), "the commit is in the prompt: {args}");
-        assert!(args.contains("two.txt"), "the diff stat is in the prompt: {args}");
+        assert!(
+            args.contains("- two"),
+            "the commit is in the prompt: {args}"
+        );
+        assert!(
+            args.contains("two.txt"),
+            "the diff stat is in the prompt: {args}"
+        );
         // Ask's tools, never Work's.
         assert!(!args.contains("--permission-prompt-tool"), "{args}");
         let spec = crate::ask::run_spec(
@@ -27763,7 +29216,10 @@ read eof || true
             "sonnet",
             perch_agent::Effort::Medium,
             dir.path().into(),
-            &crate::ask::Prompt { system: None, user: "q".into() },
+            &crate::ask::Prompt {
+                system: None,
+                user: "q".into(),
+            },
             None,
             perch_agent::Mode::Ask,
         );
@@ -27775,7 +29231,10 @@ read eof || true
                 .map(str::to_string)
         };
         assert_eq!(tools_line(&args), tools_line(&ask_tools));
-        assert!(ctx.with_cache(|c| c.active_run_summaries().unwrap()).unwrap().is_empty());
+        assert!(ctx
+            .with_cache(|c| c.active_run_summaries().unwrap())
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -27806,7 +29265,10 @@ read eof || true
         .await;
         stopper.abort();
 
-        assert_eq!(description_of(&received), open_pull::DescriptionOutcome::Stopped);
+        assert_eq!(
+            description_of(&received),
+            open_pull::DescriptionOutcome::Stopped
+        );
         assert!(started.elapsed() < Duration::from_secs(20));
     }
 
@@ -27843,9 +29305,25 @@ read eof || true
             })
             .expect("the issue showed");
         assert_eq!(shown.title, "t", "as it was kept");
-        let home = ctx.preparer.store().home_path(&RepoId::parse("a/b").unwrap());
-        let worktree = |ctx: &Ctx| ctx.slot.lock().unwrap().as_ref().unwrap().checkout.worktree.clone();
-        assert_ne!(worktree(&ctx), home, "no home yet, and the issue did not wait for one");
+        let home = ctx
+            .preparer
+            .store()
+            .home_path(&RepoId::parse("a/b").unwrap());
+        let worktree = |ctx: &Ctx| {
+            ctx.slot
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .checkout
+                .worktree
+                .clone()
+        };
+        assert_ne!(
+            worktree(&ctx),
+            home,
+            "no home yet, and the issue did not wait for one"
+        );
 
         let mut fresh = None;
         for _ in 0..500 {
@@ -27865,8 +29343,12 @@ read eof || true
         assert_eq!(worktree(&ctx), home, "the home came after");
         assert!(home.join("one.txt").is_file());
         let asked = paths.lock().unwrap().clone();
-        assert!(asked.iter().any(|p| p.starts_with("/repos/a/b/issues/5/comments")));
-        assert!(asked.iter().any(|p| p.starts_with("/repos/a/b/issues/5/timeline")));
+        assert!(asked
+            .iter()
+            .any(|p| p.starts_with("/repos/a/b/issues/5/comments")));
+        assert!(asked
+            .iter()
+            .any(|p| p.starts_with("/repos/a/b/issues/5/timeline")));
     }
 
     /// A pull request read before, with its checkout on disk, as a row
@@ -27930,7 +29412,13 @@ read eof || true
         release.send(()).unwrap();
         let mut title = String::new();
         for _ in 0..500 {
-            title = ctx.item(&item.id).unwrap().pull_request().unwrap().title.clone();
+            title = ctx
+                .item(&item.id)
+                .unwrap()
+                .pull_request()
+                .unwrap()
+                .title
+                .clone();
             if title == "two" {
                 break;
             }
@@ -27938,7 +29426,11 @@ read eof || true
         }
         assert_eq!(title, "two", "GitHub's answer followed into the row");
         assert!(
-            received.try_iter().filter_map(review_ready_head).next().is_none(),
+            received
+                .try_iter()
+                .filter_map(review_ready_head)
+                .next()
+                .is_none(),
             "the same head does not open again"
         );
     }
@@ -27995,7 +29487,9 @@ read eof || true
             .filter(|event| {
                 matches!(
                     event,
-                    Event::PullRequestReady { .. } | Event::ReviewReady { .. } | Event::ReviewFailed { .. }
+                    Event::PullRequestReady { .. }
+                        | Event::ReviewReady { .. }
+                        | Event::ReviewFailed { .. }
                 )
             })
             .collect()
@@ -28022,10 +29516,15 @@ read eof || true
 
         let opening = {
             let ctx = ctx.clone();
-            tokio::spawn(async move { open_pull_request(&ctx, "a/b".into(), 3, navigation_id).await })
+            tokio::spawn(
+                async move { open_pull_request(&ctx, "a/b".into(), 3, navigation_id).await },
+            )
         };
 
-        let bare = ctx.preparer.store().bare_path(&RepoId::parse("a/b").unwrap());
+        let bare = ctx
+            .preparer
+            .store()
+            .bare_path(&RepoId::parse("a/b").unwrap());
         let mut fetched = String::new();
         for _ in 0..500 {
             let out = std::process::Command::new("git")
@@ -28081,7 +29580,11 @@ read eof || true
         assert!(open_pull_request(&ctx, "a/b".into(), 3, navigation_id).await);
 
         let events = open_events(&received);
-        let [Event::PullRequestReady { item: shown, pull_request, .. }, Event::ReviewReady {
+        let [Event::PullRequestReady {
+            item: shown,
+            pull_request,
+            ..
+        }, Event::ReviewReady {
             item,
             files,
             shown_early,
@@ -28106,17 +29609,29 @@ read eof || true
         let dir = tempfile::tempdir().unwrap();
         let (base, paths) = serve_by_path(|path| {
             if path.starts_with("/repos/a/b/issues/7") {
-                ("200 OK", r#"{"number":7,"updated_at":"2026-09-16T11:40:00Z","pull_request":{}}"#.into())
+                (
+                    "200 OK",
+                    r#"{"number":7,"updated_at":"2026-09-16T11:40:00Z","pull_request":{}}"#.into(),
+                )
             } else if path.starts_with("/repos/a/b/issues/42") {
-                ("200 OK", r#"{"number":42,"updated_at":"2026-09-16T11:40:00Z"}"#.into())
+                (
+                    "200 OK",
+                    r#"{"number":42,"updated_at":"2026-09-16T11:40:00Z"}"#.into(),
+                )
             } else {
                 ("404 Not Found", r#"{"message":"Not Found"}"#.into())
             }
         });
         let (ctx, _events) = ctx(dir.path(), &base, &["a/b"]);
 
-        assert_eq!(resolve_reference(&ctx, "a/b", 7, None).await, Ok(ItemKind::PullRequest));
-        assert_eq!(resolve_reference(&ctx, "a/b", 42, None).await, Ok(ItemKind::Issue));
+        assert_eq!(
+            resolve_reference(&ctx, "a/b", 7, None).await,
+            Ok(ItemKind::PullRequest)
+        );
+        assert_eq!(
+            resolve_reference(&ctx, "a/b", 42, None).await,
+            Ok(ItemKind::Issue)
+        );
         assert_eq!(
             resolve_reference(&ctx, "a/b", 9, None).await,
             Err("No #9 in a/b".to_string())
@@ -28127,7 +29642,11 @@ read eof || true
             resolve_reference(&ctx, "a/b", 5, Some(ItemKind::Issue)).await,
             Ok(ItemKind::Issue)
         );
-        assert_eq!(paths.lock().unwrap().len(), asked, "the URL said, so nothing was asked");
+        assert_eq!(
+            paths.lock().unwrap().len(),
+            asked,
+            "the URL said, so nothing was asked"
+        );
 
         let local = resolve_reference(&ctx, "local/notes", 5, Some(ItemKind::Issue)).await;
         assert!(local.unwrap_err().ends_with("is not on GitHub"));
@@ -28146,17 +29665,37 @@ read eof || true
         git(&source, &["commit", "-q", "-m", "one"]);
         let bare = ctx.preparer.store().bare_path(&repo);
         std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
-        git(&source, &["clone", "-q", "--bare", ".", bare.to_str().unwrap()]);
+        git(
+            &source,
+            &["clone", "-q", "--bare", ".", bare.to_str().unwrap()],
+        );
         bare
     }
 
     /// A worktree Perch made in the clone on a new `branch` at `main`,
     /// given to `item`, opened `days` ago, and the item in the cache.
-    fn owned_worktree(ctx: &Ctx, bare: &Path, branch: &str, mut item: Item, days: i64) -> (Item, PathBuf) {
+    fn owned_worktree(
+        ctx: &Ctx,
+        bare: &Path,
+        branch: &str,
+        mut item: Item,
+        days: i64,
+    ) -> (Item, PathBuf) {
         let repo = RepoId::parse("a/b").unwrap();
         let worktree = ctx.preparer.store().worktree_path(&repo, branch);
         std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
-        git(bare, &["worktree", "add", "-q", "-b", branch, worktree.to_str().unwrap(), "main"]);
+        git(
+            bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                worktree.to_str().unwrap(),
+                "main",
+            ],
+        );
         let head = git(&worktree, &["rev-parse", "HEAD"]);
         item.checkout = Some(ItemCheckout {
             branch: branch.into(),
@@ -28191,7 +29730,11 @@ read eof || true
 
     fn removed(ctx: &Ctx, item: &Item, worktree: &Path) -> bool {
         let archived = ctx.item(&item.id).unwrap().is_archived();
-        assert_eq!(archived, !worktree.exists(), "the row and the directory agree");
+        assert_eq!(
+            archived,
+            !worktree.exists(),
+            "the row and the directory agree"
+        );
         archived
     }
 
@@ -28213,21 +29756,33 @@ read eof || true
         let (merged, merged_dir) = owned_worktree(&ctx, &bare, "perch/pr-7", merged, 0);
         let (open, open_dir) = owned_worktree(&ctx, &bare, "perch/pr-8", store_pull(&ctx, 8), 0);
         let (old, old_dir) = owned_worktree(&ctx, &bare, "chris/old", branch_item("old"), 15);
-        let (recent, recent_dir) = owned_worktree(&ctx, &bare, "chris/recent", branch_item("recent"), 13);
-        let (fresh, fresh_dir) = owned_worktree(&ctx, &bare, "chris/fresh", branch_item("fresh"), 0);
-        let (ignored, ignored_dir) = owned_worktree(&ctx, &bare, "chris/env", branch_item("env"), 15);
+        let (recent, recent_dir) =
+            owned_worktree(&ctx, &bare, "chris/recent", branch_item("recent"), 13);
+        let (fresh, fresh_dir) =
+            owned_worktree(&ctx, &bare, "chris/fresh", branch_item("fresh"), 0);
+        let (ignored, ignored_dir) =
+            owned_worktree(&ctx, &bare, "chris/env", branch_item("env"), 15);
         std::fs::write(ignored_dir.join(".env"), "SECRET=1\n").unwrap();
 
         sweep_items(&ctx).await;
 
         assert!(removed(&ctx, &merged, &merged_dir), "merged and clean");
         assert!(!removed(&ctx, &open, &open_dir), "open and new");
-        assert!(removed(&ctx, &old, &old_dir), "a branch unopened for fifteen days");
+        assert!(
+            removed(&ctx, &old, &old_dir),
+            "a branch unopened for fifteen days"
+        );
         assert!(!removed(&ctx, &recent, &recent_dir), "thirteen days");
         assert!(!removed(&ctx, &fresh, &fresh_dir), "a new worktree");
-        assert!(removed(&ctx, &ignored, &ignored_dir), "what git ignores doesn't count");
+        assert!(
+            removed(&ctx, &ignored, &ignored_dir),
+            "what git ignores doesn't count"
+        );
         for branch in ["perch/pr-7", "chris/old", "chris/env"] {
-            assert_eq!(git(&bare, &["branch", "--list", branch]).trim_start_matches(['*', '+', ' ']), branch);
+            assert_eq!(
+                git(&bare, &["branch", "--list", branch]).trim_start_matches(['*', '+', ' ']),
+                branch
+            );
         }
     }
 
@@ -28239,19 +29794,36 @@ read eof || true
         let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
         let bare = owned_clone(&ctx, dir.path());
 
-        let (dirty, dirty_dir) = owned_worktree(&ctx, &bare, "chris/dirty", branch_item("dirty"), 15);
+        let (dirty, dirty_dir) =
+            owned_worktree(&ctx, &bare, "chris/dirty", branch_item("dirty"), 15);
         std::fs::write(dirty_dir.join("one.txt"), "changed\n").unwrap();
-        let (untracked, untracked_dir) = owned_worktree(&ctx, &bare, "chris/new-file", branch_item("new-file"), 15);
+        let (untracked, untracked_dir) =
+            owned_worktree(&ctx, &bare, "chris/new-file", branch_item("new-file"), 15);
         std::fs::write(untracked_dir.join("notes.txt"), "mine\n").unwrap();
-        let (unpushed, unpushed_dir) = owned_worktree(&ctx, &bare, "chris/unpushed", branch_item("unpushed"), 15);
+        let (unpushed, unpushed_dir) =
+            owned_worktree(&ctx, &bare, "chris/unpushed", branch_item("unpushed"), 15);
         std::fs::write(unpushed_dir.join("two.txt"), "two\n").unwrap();
         git(&unpushed_dir, &["add", "."]);
-        git(&unpushed_dir, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "two"]);
-        let (scanned, scanned_dir) = owned_worktree(&ctx, &bare, "chris/scanned", branch_item("scanned"), 15);
+        git(
+            &unpushed_dir,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "two",
+            ],
+        );
+        let (scanned, scanned_dir) =
+            owned_worktree(&ctx, &bare, "chris/scanned", branch_item("scanned"), 15);
         let mut theirs = scanned.clone();
         theirs.checkout.as_mut().unwrap().owned = false;
         ctx.with_cache(|c| c.update_item(&theirs)).unwrap().unwrap();
-        let (working, working_dir) = owned_worktree(&ctx, &bare, "chris/working", branch_item("working"), 15);
+        let (working, working_dir) =
+            owned_worktree(&ctx, &bare, "chris/working", branch_item("working"), 15);
         let run = RunRecord {
             id: "sweep-run".into(),
             owner: RunOwner::Review {
@@ -28275,10 +29847,22 @@ read eof || true
         sweep_items(&ctx).await;
 
         assert!(!removed(&ctx, &dirty, &dirty_dir), "a modified file");
-        assert!(!removed(&ctx, &untracked, &untracked_dir), "an untracked file");
-        assert!(!removed(&ctx, &unpushed, &unpushed_dir), "a commit no other ref has");
-        assert!(!removed(&ctx, &scanned, &scanned_dir), "the reader's own checkout");
-        assert!(!removed(&ctx, &working, &working_dir), "an agent working in it");
+        assert!(
+            !removed(&ctx, &untracked, &untracked_dir),
+            "an untracked file"
+        );
+        assert!(
+            !removed(&ctx, &unpushed, &unpushed_dir),
+            "a commit no other ref has"
+        );
+        assert!(
+            !removed(&ctx, &scanned, &scanned_dir),
+            "the reader's own checkout"
+        );
+        assert!(
+            !removed(&ctx, &working, &working_dir),
+            "an agent working in it"
+        );
 
         ctx.runs.transition(
             "sweep-run",
@@ -28295,8 +29879,10 @@ read eof || true
     #[tokio::test]
     async fn a_checkouts_pull_request_merged_elsewhere_is_seen() {
         let dir = tempfile::tempdir().unwrap();
-        let merged = PULL_7
-            .replace(r#""state":"open""#, r#""state":"closed","merged":true,"merged_at":"2026-09-20T10:00:00Z""#);
+        let merged = PULL_7.replace(
+            r#""state":"open""#,
+            r#""state":"closed","merged":true,"merged_at":"2026-09-20T10:00:00Z""#,
+        );
         let merged: &'static str = Box::leak(merged.into_boxed_str());
         let queries = Arc::new(Mutex::new(Vec::new()));
         let asked = queries.clone();
@@ -28347,8 +29933,14 @@ read eof || true
         );
         let query = &queries.lock().unwrap()[0];
         assert!(query.contains("n7:") && query.contains("n9:"), "{query}");
-        assert!(!query.contains("n8:"), "only the checkouts' pull requests are asked after");
-        assert!(sweep_due(&ctx.item(&item.id).unwrap(), Timestamp::now() - jiff::SignedDuration::from_hours(24 * 14)));
+        assert!(
+            !query.contains("n8:"),
+            "only the checkouts' pull requests are asked after"
+        );
+        assert!(sweep_due(
+            &ctx.item(&item.id).unwrap(),
+            Timestamp::now() - jiff::SignedDuration::from_hours(24 * 14)
+        ));
     }
 
     /// Merging on github.com moves no thread and the checkouts' sweep
@@ -28449,7 +30041,11 @@ while True:
             .unwrap();
 
         ctx.kept_servers.keep(ctx.window, ending.clone()).await;
-        assert_eq!(ctx.kept_servers.clients().len(), 1, "set aside while it runs");
+        assert_eq!(
+            ctx.kept_servers.clients().len(),
+            1,
+            "set aside while it runs"
+        );
         let ended = async {
             while !ending.has_ended() {
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -28459,23 +30055,42 @@ while True:
             .await
             .expect("the server ends");
         let python = Path::new("python3");
-        let taken = ctx.kept_servers.take(ctx.window, &worktree, ServerKind::Gopls, python);
+        let taken = ctx
+            .kept_servers
+            .take(ctx.window, &worktree, ServerKind::Gopls, python);
         assert!(taken.is_none(), "taken up again once ended");
-        assert!(ctx.kept_servers.clients().is_empty(), "still set aside once ended");
+        assert!(
+            ctx.kept_servers.clients().is_empty(),
+            "still set aside once ended"
+        );
         ctx.kept_servers.keep(ctx.window, ending.clone()).await;
-        assert!(ctx.kept_servers.clients().is_empty(), "set aside once ended");
+        assert!(
+            ctx.kept_servers.clients().is_empty(),
+            "set aside once ended"
+        );
 
         ctx.language_servers
             .lock()
             .await
             .insert(ServerKind::Gopls, ending.clone());
         show_server(&ctx, navigation_id, &worktree, spec(None)).await;
-        let shown = ctx.language_servers.lock().await.get(&ServerKind::Gopls).cloned();
+        let shown = ctx
+            .language_servers
+            .lock()
+            .await
+            .get(&ServerKind::Gopls)
+            .cloned();
         let shown = shown.expect("a server on show");
-        assert!(!Arc::ptr_eq(&shown, &ending), "the one that ended is still on show");
+        assert!(
+            !Arc::ptr_eq(&shown, &ending),
+            "the one that ended is still on show"
+        );
         assert!(!shown.has_ended());
         assert_ne!(shown.pid(), ending.pid(), "no new process");
-        assert!(ctx.kept_servers.clients().is_empty(), "the one that ended is set aside");
+        assert!(
+            ctx.kept_servers.clients().is_empty(),
+            "the one that ended is set aside"
+        );
         shown.shutdown().await;
     }
 }

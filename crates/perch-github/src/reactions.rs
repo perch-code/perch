@@ -428,7 +428,10 @@ mod tests {
         let by_id = data.by_id(&["mine".into(), "theirs".into(), "review".into()]);
         assert!(by_id["mine"].viewer_can_delete);
         assert!(!by_id["theirs"].viewer_can_delete);
-        assert!(!by_id["review"].viewer_can_delete, "a node GitHub does not call deletable is not");
+        assert!(
+            !by_id["review"].viewer_can_delete,
+            "a node GitHub does not call deletable is not"
+        );
     }
 
     #[test]
@@ -501,7 +504,8 @@ mod tests {
     fn the_queries_ask_for_the_groups_on_a_reactable() {
         assert!(reactions_query().contains("nodes(ids: $ids)"));
         assert!(reactions_query().contains("... on Reactable"));
-        assert!(reactions_query().contains("reactors(first: 10) { totalCount nodes { ... on Actor { login } } }"));
+        assert!(reactions_query()
+            .contains("reactors(first: 10) { totalCount nodes { ... on Actor { login } } }"));
         assert!(reaction_mutation(false).contains("reactors(first: 10)"));
         assert!(reaction_mutation(true).starts_with("mutation("));
         assert!(reaction_mutation(true)

@@ -120,7 +120,11 @@ fn section_header(app: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         Label::derived(move || {
             let label = counts.get().label();
             match counts.get().active() {
-                true => label.split(" \u{b7} ").next().unwrap_or_default().to_string(),
+                true => label
+                    .split(" \u{b7} ")
+                    .next()
+                    .unwrap_or_default()
+                    .to_string(),
                 false => label,
             }
         })
@@ -219,7 +223,10 @@ fn entry_key(entry: &AgentRunEntry) -> String {
                 .as_ref()
                 .map(|summary| {
                     let g = &summary.group;
-                    format!("{}/{}/{}/{}", g.new_findings, g.still_present, g.verified_fixed, g.not_verified)
+                    format!(
+                        "{}/{}/{}/{}",
+                        g.new_findings, g.still_present, g.verified_fixed, g.not_verified
+                    )
                 })
                 .unwrap_or_default();
             format!("review:{}:{runs}:{status}:{done}:{counts}", group.key)
@@ -230,14 +237,17 @@ fn entry_key(entry: &AgentRunEntry) -> String {
 /// The Agents section: its header, and the list under it while
 /// unfolded. Absent until the item has had a run or a review.
 pub fn section(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    Stack::vertical((section_header(app, review, backend.clone()), list(app, review, backend)))
-        .debug_name("agents section")
-        // Perch's own runs, so on Perch's grey, as the reader's threads are.
-        .style(move |s| {
-            crate::review::cards::perch_surface(s.flex_col().width_full())
-                .margin_top(theme::CONVERSATION_ENTRY_PADDING)
-                .apply_if(!present(app, review), |s| s.hide())
-        })
+    Stack::vertical((
+        section_header(app, review, backend.clone()),
+        list(app, review, backend),
+    ))
+    .debug_name("agents section")
+    // Perch's own runs, so on Perch's grey, as the reader's threads are.
+    .style(move |s| {
+        crate::review::cards::perch_surface(s.flex_col().width_full())
+            .margin_top(theme::CONVERSATION_ENTRY_PADDING)
+            .apply_if(!present(app, review), |s| s.hide())
+    })
 }
 
 /// The section's list while it is unfolded.
@@ -420,7 +430,9 @@ pub(super) fn run_row(
             }
         },
     )
-    .on_event_stop(el::Click, move |_, _| toggle_run(app, review, &click_backend, &click_id))
+    .on_event_stop(el::Click, move |_, _| {
+        toggle_run(app, review, &click_backend, &click_id)
+    })
     .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
         if matches!(key.code, Code::Enter | Code::Space) {
             toggle_run(app, review, &key_backend, &key_id);
@@ -552,7 +564,11 @@ fn header(
                     .style(move |s| {
                         let s = s
                             .font_size(theme::TEXT_BADGE)
-                            .color(if failed { theme::closed() } else { theme::fg_muted() })
+                            .color(if failed {
+                                theme::closed()
+                            } else {
+                                theme::fg_muted()
+                            })
                             .text_ellipsis()
                             .min_width(0.0)
                             .selectable(false);
@@ -566,7 +582,13 @@ fn header(
                 None => Empty::new().into_any(),
             },
         ))
-        .style(|s| s.flex_col().gap(3.0).min_width(0.0).flex_grow(1.0_f32).flex_basis(0.0)),
+        .style(|s| {
+            s.flex_col()
+                .gap(3.0)
+                .min_width(0.0)
+                .flex_grow(1.0_f32)
+                .flex_basis(0.0)
+        }),
         Label::derived(when)
             .debug_name("agent-run-when")
             .style(move |s| {
@@ -606,7 +628,10 @@ fn reviewer_header(
     let color = status_color(run.status);
     let status = run.status;
     let name = crate::review::threads::agent_name(&run.backend, &run.model, &run.effort);
-    let cost = run.cost_usd.map(|cost| format!(" \u{b7} ${cost:.2}")).unwrap_or_default();
+    let cost = run
+        .cost_usd
+        .map(|cost| format!(" \u{b7} ${cost:.2}"))
+        .unwrap_or_default();
     let activity = run.latest_activity.clone().filter(|_| status.is_active());
     let live = activity.is_some();
     let elapsed_run = run.clone();
@@ -677,7 +702,12 @@ fn reviewer_header(
                 },
             )
             .debug_name("agent-reviewer raw output")
-            .style(|s| s.size(16.0, 16.0).items_center().justify_center().flex_shrink(0.0_f32)),
+            .style(|s| {
+                s.size(16.0, 16.0)
+                    .items_center()
+                    .justify_center()
+                    .flex_shrink(0.0_f32)
+            }),
             "Raw output".to_string(),
         ),
     ))
@@ -705,7 +735,10 @@ fn run_when(app: AppState, run: &AgentRunSummary) -> impl Fn() -> String + 'stat
         match run.status {
             AgentRunStatus::Queued => {
                 let elapsed = elapsed_label(&run, now);
-                let queued_for = elapsed.strip_prefix("Queued ").unwrap_or(&elapsed).to_string();
+                let queued_for = elapsed
+                    .strip_prefix("Queued ")
+                    .unwrap_or(&elapsed)
+                    .to_string();
                 match queue {
                     Some(position) => format!("Queue #{position} \u{b7} {queued_for}"),
                     None => format!("Queued \u{b7} {queued_for}"),
@@ -772,8 +805,14 @@ fn actions(
                 }
                 AgentRetryTarget::Run(id) => Rc::new(move || backend.retry_run(&id)),
             };
-            hover_action(hovered, SidebarIcon::Refresh, "Retry", "agent-run retry", retry)
-                .into_any()
+            hover_action(
+                hovered,
+                SidebarIcon::Refresh,
+                "Retry",
+                "agent-run retry",
+                retry,
+            )
+            .into_any()
         }
         _ => Empty::new().into_any(),
     };
@@ -947,7 +986,10 @@ mod tests {
         let row = named(harness.root_id(), "agent-run:a").unwrap();
         let show = named(row, "agent-run show in thread").unwrap();
         let show = show.get_visual_rect_no_clip();
-        assert!(show.height() > 0.0, "Show in thread is not drawn under the pointer");
+        assert!(
+            show.height() > 0.0,
+            "Show in thread is not drawn under the pointer"
+        );
         harness.click(show.center().x, show.center().y);
         settle(&mut harness);
         assert_eq!(review.focus_card.get(), Some(CardId::Thread("t-a".into())));
@@ -1027,7 +1069,9 @@ mod tests {
         let raw = raw.get_visual_rect_no_clip();
         harness.click(raw.center().x, raw.center().y);
         settle(&mut harness);
-        assert!(review.agents_open_runs.with(|open| open.contains("claude-run")));
+        assert!(review
+            .agents_open_runs
+            .with(|open| open.contains("claude-run")));
 
         let group = named(harness.root_id(), "agent-review-group:group-3").unwrap();
         group.scroll_to(None);
@@ -1076,8 +1120,9 @@ mod tests {
             named(row, label).unwrap().debug_name()
         };
         assert!(when(&harness, "agent-run:q", "agent-run-when").contains("\"2h\""));
-        assert!(when(&harness, "agent-review-group:group-3", "review-group-when")
-            .contains("\"2h\""));
+        assert!(
+            when(&harness, "agent-review-group:group-3", "review-group-when").contains("\"2h\"")
+        );
 
         app.now.set(at("2026-09-19T13:40:00Z"));
         settle(&mut harness);
@@ -1096,7 +1141,10 @@ mod tests {
         app.review_groups.update(|all| {
             all.insert(
                 "pr".into(),
-                Arc::new(vec![super::super::model::tests::review_summary("group-3", &[])]),
+                Arc::new(vec![super::super::model::tests::review_summary(
+                    "group-3",
+                    &[],
+                )]),
             );
         });
         let when = at("2026-09-19T10:00:00Z");
@@ -1143,40 +1191,47 @@ mod tests {
             thread("t-dismissed", "**Note · A name could be shorter.**", 5),
             emptied,
         ]));
-        let finding = |id: &str, thread: &str, severity| crate::review::model::ReviewFindingSummary {
-            finding: perch_github::Finding {
-                id: id.into(),
-                item_id: "pr".into(),
-                stable_key: id.into(),
-                thread_id: thread.into(),
-                created_group_id: Some("group-3".into()),
-                disposition: perch_github::FindingDisposition::Open,
-                verification: perch_github::FindingVerification::Present,
-                dismissal_reason: None,
-                possible_duplicate_of: None,
-                duplicate_of: None,
-                last_verified_snapshot_id: None,
-                last_verified_head_sha: None,
-                last_checked_snapshot_id: None,
-                last_checked_head_sha: None,
-                created_at: when,
-                updated_at: when,
-            },
-            severity,
-            attributions: Vec::new(),
-            seen_in_reviews: vec![3],
-            backend: None,
-            model: None,
-            original_review_number: Some(3),
-            title: format!("{id} as reported"),
-        };
+        let finding =
+            |id: &str, thread: &str, severity| crate::review::model::ReviewFindingSummary {
+                finding: perch_github::Finding {
+                    id: id.into(),
+                    item_id: "pr".into(),
+                    stable_key: id.into(),
+                    thread_id: thread.into(),
+                    created_group_id: Some("group-3".into()),
+                    disposition: perch_github::FindingDisposition::Open,
+                    verification: perch_github::FindingVerification::Present,
+                    dismissal_reason: None,
+                    possible_duplicate_of: None,
+                    duplicate_of: None,
+                    last_verified_snapshot_id: None,
+                    last_verified_head_sha: None,
+                    last_checked_snapshot_id: None,
+                    last_checked_head_sha: None,
+                    created_at: when,
+                    updated_at: when,
+                },
+                severity,
+                attributions: Vec::new(),
+                seen_in_reviews: vec![3],
+                backend: None,
+                model: None,
+                original_review_number: Some(3),
+                title: format!("{id} as reported"),
+            };
         let dismissed = |id: &str, thread: &str| {
             let mut summary = finding(id, thread, perch_github::FindingSeverity::Note);
             summary.finding.disposition = perch_github::FindingDisposition::Dismissed;
             summary
         };
-        app.update_review_finding("pr".into(), finding("f-low", "t-low", perch_github::FindingSeverity::Low));
-        app.update_review_finding("pr".into(), finding("f-high", "t-high", perch_github::FindingSeverity::High));
+        app.update_review_finding(
+            "pr".into(),
+            finding("f-low", "t-low", perch_github::FindingSeverity::Low),
+        );
+        app.update_review_finding(
+            "pr".into(),
+            finding("f-high", "t-high", perch_github::FindingSeverity::High),
+        );
         app.update_review_finding("pr".into(), dismissed("f-dismissed", "t-dismissed"));
         app.update_review_finding("pr".into(), dismissed("f-emptied", "t-emptied"));
         review.apply_review_finding_filter(
@@ -1191,7 +1246,10 @@ mod tests {
             .children();
         assert_eq!(rows.len(), 4);
         let first = rows[0];
-        assert!(named(first, "\"The lock is held across an await.\"").is_some(), "worst first");
+        assert!(
+            named(first, "\"The lock is held across an await.\"").is_some(),
+            "worst first"
+        );
         assert!(named(first, "\"a.rs:7\"").is_some());
         assert!(named(rows[1], "\"A comment is stale.\"").is_some());
         let (shown, emptied) = match named(rows[2], "\"A name could be shorter.\"") {
@@ -1199,8 +1257,14 @@ mod tests {
             None => (rows[3], rows[2]),
         };
         assert!(named(shown, "\"A name could be shorter.\"").is_some());
-        assert!(named(emptied, "\"f-emptied as reported\"").is_some(), "blank line");
-        assert!(named(emptied, "review-finding show").is_none(), "nothing to show");
+        assert!(
+            named(emptied, "\"f-emptied as reported\"").is_some(),
+            "blank line"
+        );
+        assert!(
+            named(emptied, "review-finding show").is_none(),
+            "nothing to show"
+        );
 
         let hover = |harness: &mut HeadlessHarness, row: floem::ViewId| {
             row.scroll_to(None);
@@ -1233,7 +1297,11 @@ mod tests {
             review.review_finding_filter.get(),
             crate::review::model::ReviewFindingFilter::All
         );
-        assert_eq!(review.pending_focus_card.get(), None, "the card never took it");
+        assert_eq!(
+            review.pending_focus_card.get(),
+            None,
+            "the card never took it"
+        );
         assert_eq!(
             review.focus_card.get(),
             Some(crate::review::doc::CardId::Thread("t-dismissed".into()))
@@ -1252,13 +1320,19 @@ mod tests {
             all.insert("pr".into(), Arc::new(vec![empty]));
         });
         settle(&mut harness);
-        assert!(shown(&harness, "agents section"), "a review alone brings the section");
+        assert!(
+            shown(&harness, "agents section"),
+            "a review alone brings the section"
+        );
         review.agents_unfolded.set(true);
         settle(&mut harness);
         assert!(shown(&harness, "agent-review-group:group-3"));
         assert!(named(harness.root_id(), "review-group-instructions").is_some());
         assert!(named(harness.root_id(), "\"No reviewer attempts were admitted\"").is_some());
-        assert!(named(harness.root_id(), "Review latest").is_none(), "no Review latest");
+        assert!(
+            named(harness.root_id(), "Review latest").is_none(),
+            "no Review latest"
+        );
     }
 
     /// While a review runs, the bar's Review says so, and Show in its
@@ -1322,4 +1396,3 @@ mod tests {
         assert_eq!(review.pending_run_reveal.get(), None);
     }
 }
-

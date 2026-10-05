@@ -36,7 +36,10 @@ pub fn frame(body: &str) -> Vec<u8> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Incoming {
     /// A response to a request we sent.
-    Response { id: i64, result: Result<Value, String> },
+    Response {
+        id: i64,
+        result: Result<Value, String>,
+    },
     /// A notification from the server.
     Notification { method: String, params: Value },
     /// A request from the server, which must be answered.
@@ -73,7 +76,10 @@ pub fn decode(body: &str) -> Incoming {
                     .and_then(Value::as_str)
                     .unwrap_or("request failed")
                     .to_string();
-                return Incoming::Response { id, result: Err(message) };
+                return Incoming::Response {
+                    id,
+                    result: Err(message),
+                };
             }
             Incoming::Response {
                 id,
@@ -120,10 +126,16 @@ mod tests {
 
     #[test]
     fn a_line_that_is_no_header_is_skipped() {
-        assert_eq!(parse_header_block("starting up\r\nContent-Length: 19"), Some(19));
+        assert_eq!(
+            parse_header_block("starting up\r\nContent-Length: 19"),
+            Some(19)
+        );
         assert_eq!(parse_header_block("\r\nContent-Length: 19"), Some(19));
         // Printed with a bare newline, before the headers proper.
-        assert_eq!(parse_header_block("loading config\nContent-Length: 19"), Some(19));
+        assert_eq!(
+            parse_header_block("loading config\nContent-Length: 19"),
+            Some(19)
+        );
     }
 
     #[test]
@@ -155,14 +167,18 @@ mod tests {
     fn an_error_response_carries_its_message() {
         let m = decode(r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32601,"message":"nope"}}"#);
         match m {
-            Incoming::Response { result: Err(message), .. } => assert_eq!(message, "nope"),
+            Incoming::Response {
+                result: Err(message),
+                ..
+            } => assert_eq!(message, "nope"),
             other => panic!("expected an error, got {other:?}"),
         }
     }
 
     #[test]
     fn notifications_are_distinguished_from_requests_by_their_id() {
-        let n = decode(r#"{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{}}"#);
+        let n =
+            decode(r#"{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{}}"#);
         assert!(matches!(n, Incoming::Notification { .. }));
 
         // rust-analyzer asks the client for things; those carry an id and

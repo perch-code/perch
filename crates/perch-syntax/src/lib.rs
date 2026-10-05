@@ -311,7 +311,11 @@ pub fn highlight(language: Language, source: &str) -> Vec<Span> {
     // Markdown's emphasis, code spans and links live in a second grammar
     // the block grammar injects; everything else injects nothing.
     let events = match highlighter.highlight(config, source.as_bytes(), None, None, |name| {
-        if name == "markdown_inline" { markdown_inline() } else { None }
+        if name == "markdown_inline" {
+            markdown_inline()
+        } else {
+            None
+        }
     }) {
         Ok(events) => events,
         Err(e) => {
@@ -333,7 +337,11 @@ pub fn highlight(language: Language, source: &str) -> Vec<Span> {
                 // The innermost capture wins, which is what a theme expects.
                 if let Some(&capture) = stack.last() {
                     if start < end {
-                        spans.push(Span { start, end, capture });
+                        spans.push(Span {
+                            start,
+                            end,
+                            capture,
+                        });
                     }
                 }
             }
@@ -376,7 +384,11 @@ pub fn highlight_markdown(source: &str) -> Vec<Span> {
                 if let Some(&capture) = stack.last() {
                     let in_fence = fences.iter().any(|f| f.contains(&start));
                     if start < end && !in_fence {
-                        spans.push(Span { start, end, capture });
+                        spans.push(Span {
+                            start,
+                            end,
+                            capture,
+                        });
                     }
                 }
             }
@@ -488,16 +500,26 @@ mod tests {
     fn markdown_highlighting_covers_headings_inline_styles_and_skips_fences() {
         let src = "# Title\n\nplain **bold** and `code` and *em*\n\n```\n**not bold**\n```\n";
         let spans = highlight_markdown(src);
-        let names: Vec<(&str, &str)> =
-            spans.iter().map(|s| (super::capture_name(s.capture), &src[s.start..s.end])).collect();
+        let names: Vec<(&str, &str)> = spans
+            .iter()
+            .map(|s| (super::capture_name(s.capture), &src[s.start..s.end]))
+            .collect();
         assert!(names.contains(&("text.title", "Title")), "{names:?}");
         assert!(names.contains(&("text.strong", "bold")), "{names:?}");
         assert!(names.contains(&("text.literal", "code")), "{names:?}");
         assert!(names.contains(&("text.emphasis", "em")), "{names:?}");
         // Inside a fence the block grammar's literal wins; nothing there is
         // strong.
-        assert!(names.contains(&("text.literal", "**not bold**\n")), "{names:?}");
-        assert!(!names.iter().any(|(n, t)| *n == "text.strong" && t.contains("not bold")), "{names:?}");
+        assert!(
+            names.contains(&("text.literal", "**not bold**\n")),
+            "{names:?}"
+        );
+        assert!(
+            !names
+                .iter()
+                .any(|(n, t)| *n == "text.strong" && t.contains("not bold")),
+            "{names:?}"
+        );
     }
 
     fn capture_name(span: &Span) -> &'static str {
@@ -512,11 +534,23 @@ mod tests {
         assert_eq!(Language::from_path("README.md"), Some(Language::Markdown));
         assert_eq!(Language::from_path("ci.yml"), Some(Language::Yaml));
         assert_eq!(Language::from_path("cmd/main.go"), Some(Language::Go));
-        assert_eq!(Language::from_path("src/index.js"), Some(Language::JavaScript));
-        assert_eq!(Language::from_path("src/App.jsx"), Some(Language::JavaScript));
+        assert_eq!(
+            Language::from_path("src/index.js"),
+            Some(Language::JavaScript)
+        );
+        assert_eq!(
+            Language::from_path("src/App.jsx"),
+            Some(Language::JavaScript)
+        );
         assert_eq!(Language::from_path("lib/a.mjs"), Some(Language::JavaScript));
-        assert_eq!(Language::from_path("src/index.ts"), Some(Language::TypeScript));
-        assert_eq!(Language::from_path("src/a.d.mts"), Some(Language::TypeScript));
+        assert_eq!(
+            Language::from_path("src/index.ts"),
+            Some(Language::TypeScript)
+        );
+        assert_eq!(
+            Language::from_path("src/a.d.mts"),
+            Some(Language::TypeScript)
+        );
         assert_eq!(Language::from_path("src/App.tsx"), Some(Language::Tsx));
         assert_eq!(Language::from_path("src/Main.java"), Some(Language::Java));
         assert_eq!(
@@ -530,7 +564,10 @@ mod tests {
         assert_eq!(Language::from_fence("Go"), Some(Language::Go));
         assert_eq!(Language::from_fence("ts"), Some(Language::TypeScript));
         assert_eq!(Language::from_fence("tsx"), Some(Language::Tsx));
-        assert_eq!(Language::from_fence("javascript"), Some(Language::JavaScript));
+        assert_eq!(
+            Language::from_fence("javascript"),
+            Some(Language::JavaScript)
+        );
         assert_eq!(Language::from_fence("java"), Some(Language::Java));
         assert_eq!(Language::from_fence("diff"), None);
     }
@@ -581,13 +618,26 @@ mod tests {
             (Language::Yaml, "key: value\n"),
             (Language::Markdown, "# Heading\n\ntext\n"),
             (Language::Go, "package main\n\nfunc f() int { return 1 }\n"),
-            (Language::JavaScript, "const a = () => <div className=\"x\">{1}</div>;\n"),
-            (Language::TypeScript, "interface A { b: number }\nconst c: A = { b: 1 };\n"),
-            (Language::Tsx, "const a = (p: { n: number }) => <b>{p.n}</b>;\n"),
+            (
+                Language::JavaScript,
+                "const a = () => <div className=\"x\">{1}</div>;\n",
+            ),
+            (
+                Language::TypeScript,
+                "interface A { b: number }\nconst c: A = { b: 1 };\n",
+            ),
+            (
+                Language::Tsx,
+                "const a = (p: { n: number }) => <b>{p.n}</b>;\n",
+            ),
             (Language::Java, "class A { int f() { return 1; } }\n"),
         ];
         for (lang, src) in cases {
-            assert!(lang.config().is_some(), "{} grammar failed to load", lang.name());
+            assert!(
+                lang.config().is_some(),
+                "{} grammar failed to load",
+                lang.name()
+            );
             assert!(
                 !highlight(lang, src).is_empty(),
                 "{} produced no spans for {src:?}",

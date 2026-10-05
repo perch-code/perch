@@ -181,7 +181,12 @@ pub fn doing_now(run: &RunRecord) -> (String, String, bool) {
         RunStatus::Queued => word("Queued"),
         RunStatus::Starting => word("Starting"),
         RunStatus::Stopping => word("Stopping"),
-        _ => match run.steps.iter().rev().find(|s| s.pending && !s.note && !s.user) {
+        _ => match run
+            .steps
+            .iter()
+            .rev()
+            .find(|s| s.pending && !s.note && !s.user)
+        {
             Some(step) => {
                 let line = step_line(&step.summary);
                 (line.doing, line.arg, is_code(line.kind))
@@ -659,7 +664,11 @@ fn step_row(state: ReviewState, step: RunStep, live: bool) -> floem::AnyView {
     let line = step_line(&step.summary);
     let pending = live && step.pending;
     let failed = !step.ok;
-    let tint = if failed { theme::closed } else { theme::fg_muted };
+    let tint = if failed {
+        theme::closed
+    } else {
+        theme::fg_muted
+    };
     let icon = if pending {
         spinner(theme::fg_muted)
             .style(|s| s.size(11.0, 11.0))
@@ -1059,6 +1068,9 @@ mod tests {
         let page = crate::review::header::tests::named(harness.root_id(), "page").unwrap();
         walk(page, &mut ends);
         let widest = ends.into_iter().fold(0.0, f64::max);
-        assert!(widest <= right + 0.5, "a view ends at {widest}, past {right}");
+        assert!(
+            widest <= right + 0.5,
+            "a view ends at {widest}, past {right}"
+        );
     }
 }

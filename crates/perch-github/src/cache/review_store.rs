@@ -3231,7 +3231,10 @@ mod tests {
         cache.admit_review_group(&admitted).unwrap();
         let loaded = cache.load_review_snapshot("s1").unwrap().unwrap();
         assert_eq!(loaded, admitted.snapshot);
-        assert_eq!(cache.list_review_snapshots("item").unwrap(), [admitted.snapshot]);
+        assert_eq!(
+            cache.list_review_snapshots("item").unwrap(),
+            [admitted.snapshot]
+        );
     }
 
     #[test]
@@ -4073,7 +4076,10 @@ mod tests {
         cache.delete_private_messages("t1").unwrap();
         cache.delete_draft("d1").unwrap();
         let threads = cache.load_comment_threads("item").unwrap();
-        let t = threads.iter().find(|t| t.id == "t1").expect("the finding keeps its thread");
+        let t = threads
+            .iter()
+            .find(|t| t.id == "t1")
+            .expect("the finding keeps its thread");
         assert_eq!(t.origin, crate::comments::ThreadOrigin::Local);
         assert!(t.messages.is_empty());
         assert!(cache.load_finding("f1").unwrap().is_some());

@@ -310,7 +310,11 @@ pub(crate) mod tests {
     fn goes_dark_with_the_system() {
         let mut harness = pull_request_harness().0;
         let left = crate::theme::dark_check::light_left(&mut harness);
-        assert!(left.is_empty(), "light colours left in dark:\n{}", left.join("\n"));
+        assert!(
+            left.is_empty(),
+            "light colours left in dark:\n{}",
+            left.join("\n")
+        );
     }
 
     pub(crate) fn pull_request_harness() -> (HeadlessHarness, AppState, ReviewState) {
@@ -515,9 +519,7 @@ pub(crate) mod tests {
     fn popover_covers_the_item(harness: &HeadlessHarness, popover: floem::ViewId) {
         let bounds = popover.get_visual_rect_no_clip();
         let x = bounds.x0 + 2.0;
-        let title_y = theme::REVIEW_HEADER_HEIGHT
-            + theme::CONVERSATION_PADDING
-            + 10.0;
+        let title_y = theme::REVIEW_HEADER_HEIGHT + theme::CONVERSATION_PADDING + 10.0;
         let summary_y = title_y + theme::TEXT_PAGE_TITLE as f64 + theme::CONVERSATION_TITLE_GAP;
         assert!(
             bounds.y0 < title_y && bounds.y1 > summary_y,
@@ -578,7 +580,10 @@ pub(crate) mod tests {
         let (mut harness, _, state) = pull_request_harness();
         let bar = rect(&harness, "item bar");
         let title = rect(&harness, "conversation-title");
-        assert!(named(harness.root_id(), "tab strip").is_none(), "Conversation has no tabs");
+        assert!(
+            named(harness.root_id(), "tab strip").is_none(),
+            "Conversation has no tabs"
+        );
         assert_eq!(
             title.y0,
             bar.y1 + theme::CONVERSATION_PADDING,
@@ -680,11 +685,7 @@ pub(crate) mod tests {
         let github = rect(&harness, "github button");
         let start = rect(&harness, "start work button");
         let close = rect(&harness, "close button");
-        for (name, r) in [
-            ("github", github),
-            ("start work", start),
-            ("close", close),
-        ] {
+        for (name, r) in [("github", github), ("start work", start), ("close", close)] {
             assert!(within(r, bar), "{name} at {r:?} is not in the bar {bar:?}");
             assert!(r.width() > 0.0, "{name} has no width");
         }

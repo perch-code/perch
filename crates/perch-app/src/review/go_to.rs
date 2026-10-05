@@ -1493,7 +1493,12 @@ fn cut(text: &str, matches: &[Range<usize>]) -> Vec<(String, bool)> {
 /// heavier, as a row of labels, one to a run: floem's rich text wraps and
 /// has no ellipsis, and a long directory wants one. The last run takes
 /// it.
-pub(crate) fn highlighted(text: &str, matches: &[Range<usize>], size: f32, color: impl theme::Ink) -> Stack {
+pub(crate) fn highlighted(
+    text: &str,
+    matches: &[Range<usize>],
+    size: f32,
+    color: impl theme::Ink,
+) -> Stack {
     let runs = cut(text, matches);
     let last = runs.len().saturating_sub(1);
     Stack::horizontal_from_iter(runs.into_iter().enumerate().map(move |(i, (run, hit))| {
@@ -2001,7 +2006,11 @@ mod window {
         focus_the_code(&mut harness);
         cmd_p(&mut harness);
         let left = crate::theme::dark_check::light_left(&mut harness);
-        assert!(left.is_empty(), "light colours left in dark:\n{}", left.join("\n"));
+        assert!(
+            left.is_empty(),
+            "light colours left in dark:\n{}",
+            left.join("\n")
+        );
     }
 
     /// The window on Code with `src/x.rs` open, a branch that changed it

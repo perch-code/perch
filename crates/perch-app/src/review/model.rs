@@ -332,7 +332,10 @@ pub struct References {
 pub fn outside_label(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
     // jdt://contents/<jar or module>/<package>/<Class>.class: the jar, or
     // the JDK for its modules and its old rt.jar.
-    if let Some(rest) = path.to_str().and_then(|p| p.strip_prefix("jdt://contents/")) {
+    if let Some(rest) = path
+        .to_str()
+        .and_then(|p| p.strip_prefix("jdt://contents/"))
+    {
         let container = rest.split('/').next().unwrap_or(rest);
         return if container.ends_with(".jar") && container != "rt.jar" {
             container.to_string()
@@ -353,7 +356,10 @@ pub fn outside_label(path: &std::path::Path, home: Option<&std::path::Path>) -> 
     };
 
     // ~/.cargo/registry/src/<index>/<name>-<version>/...
-    if let Some(at) = parts.windows(3).position(|w| w == [".cargo", "registry", "src"]) {
+    if let Some(at) = parts
+        .windows(3)
+        .position(|w| w == [".cargo", "registry", "src"])
+    {
         if let Some(dir) = parts.get(at + 4) {
             return match crate_name_and_version(dir) {
                 Some((name, version)) => format!("{name} {version}"),
@@ -385,7 +391,12 @@ pub fn outside_label(path: &std::path::Path, home: Option<&std::path::Path>) -> 
         let rest = &parts[at + 2..];
         if let Some(i) = rest.iter().position(|p| p.contains('@')) {
             if let Some((last, version)) = rest[i].split_once('@') {
-                let module = rest[..i].iter().copied().chain([last]).collect::<Vec<_>>().join("/");
+                let module = rest[..i]
+                    .iter()
+                    .copied()
+                    .chain([last])
+                    .collect::<Vec<_>>()
+                    .join("/");
                 return format!("{} {version}", unescape_module(&module));
             }
         }
@@ -410,7 +421,9 @@ fn go_std_package(path: &std::path::Path, parts: &[&str]) -> Option<String> {
         || root.starts_with("toolchain@")
         || (root.starts_with("go") && {
             let up = parts.len() - at;
-            path.ancestors().nth(up).is_some_and(|dir| dir.join("VERSION").is_file())
+            path.ancestors()
+                .nth(up)
+                .is_some_and(|dir| dir.join("VERSION").is_file())
         });
     is_root.then(|| parts[at + 1..parts.len() - 1].join("/"))
 }
@@ -532,7 +545,10 @@ pub struct HierarchyRow {
 impl HierarchyRow {
     /// Whether two items are the same function: the server's items carry
     /// no identity but where they are.
-    fn same(a: &perch_lsp::lsp_types::CallHierarchyItem, b: &perch_lsp::lsp_types::CallHierarchyItem) -> bool {
+    fn same(
+        a: &perch_lsp::lsp_types::CallHierarchyItem,
+        b: &perch_lsp::lsp_types::CallHierarchyItem,
+    ) -> bool {
         a.uri == b.uri && a.selection_range == b.selection_range && a.name == b.name
     }
 }
@@ -644,7 +660,9 @@ impl Hierarchy {
 
     /// Fold a row: its subtree goes. Nothing for one that is not open.
     pub fn collapse(&mut self, at: usize) {
-        let Some(row) = self.rows.get_mut(at) else { return };
+        let Some(row) = self.rows.get_mut(at) else {
+            return;
+        };
         if !row.expanded {
             return;
         }
@@ -738,7 +756,6 @@ impl History {
         self.back.push(current);
         Some(place)
     }
-
 }
 
 /// What the review view has on screen. One signal, written once per
@@ -881,8 +898,7 @@ pub fn default_destination(
                     .iter()
                     .chain(agent.codex_models())
                     .any(|m| m == model);
-                let Some(backend) = perch_agent::Backend::parse(backend).filter(|_| offered)
-                else {
+                let Some(backend) = perch_agent::Backend::parse(backend).filter(|_| offered) else {
                     return last_agent();
                 };
                 let effort = message
@@ -975,7 +991,10 @@ pub fn submit_review_outcome(
         }
         text.push('.');
     } else if posted > 0 {
-        text.push_str(&format!("Posted {}.", count_of(posted, "comment", "comments")));
+        text.push_str(&format!(
+            "Posted {}.",
+            count_of(posted, "comment", "comments")
+        ));
     }
     if !outside_diff.is_empty() {
         let n = outside_diff.len();
@@ -1725,8 +1744,7 @@ pub struct ReviewState {
     /// Who each repository's issues and pull requests can be assigned
     /// to, by its identity in lower case, when the reader may assign
     /// them; none when they may not, and absent until GitHub says.
-    pub assignable:
-        RwSignal<HashMap<String, Option<Arc<Vec<perch_github::MentionableUser>>>>>,
+    pub assignable: RwSignal<HashMap<String, Option<Arc<Vec<perch_github::MentionableUser>>>>>,
     /// The destination last sent from each face, by `ThreadFace::index`:
     /// inline in the code, and on Conversation. A new composer on lines
     /// starts on its face's. Kept for the app's life, as `agent_last` is.
@@ -1936,7 +1954,8 @@ impl Default for ReviewState {
 impl ReviewState {
     /// Keep what the server of `kind` last said.
     pub fn set_server_status(&self, kind: perch_lsp::ServerKind, status: perch_lsp::Status) {
-        self.lsp_status.update(|statuses| statuses.set(kind, status));
+        self.lsp_status
+            .update(|statuses| statuses.set(kind, status));
     }
 
     pub fn new() -> Self {
@@ -2485,7 +2504,8 @@ impl ReviewState {
             self.code_seen.set(pane.code_seen);
             self.tree_wanted.set(false);
             if !paths.is_empty() {
-                self.loading.update(|loading| loading.extend(paths.iter().cloned()));
+                self.loading
+                    .update(|loading| loading.extend(paths.iter().cloned()));
             }
         });
         paths
@@ -2559,7 +2579,11 @@ impl ReviewState {
                     return;
                 };
                 let mut current = (**current).clone();
-                match current.reviews.iter_mut().find(|known| known.id == review.id) {
+                match current
+                    .reviews
+                    .iter_mut()
+                    .find(|known| known.id == review.id)
+                {
                     Some(known) => *known = review.clone(),
                     None => current.reviews.push(review.clone()),
                 }
@@ -2774,7 +2798,10 @@ impl ReviewState {
             .with_untracked(|comments| comments.iter().any(|c| c.node_id == node_id))
         {
             self.issue_comments.update(|comments| {
-                for c in Arc::make_mut(comments).iter_mut().filter(|c| c.node_id == node_id) {
+                for c in Arc::make_mut(comments)
+                    .iter_mut()
+                    .filter(|c| c.node_id == node_id)
+                {
                     c.body = body.to_string();
                 }
             });
@@ -2794,7 +2821,10 @@ impl ReviewState {
                 .iter()
                 .any(|m| m.node_id.as_deref() == Some(node_id))
         };
-        if self.comment_threads.with_untracked(|threads| threads.iter().any(holds)) {
+        if self
+            .comment_threads
+            .with_untracked(|threads| threads.iter().any(holds))
+        {
             self.comment_threads.update(|threads| {
                 for m in Arc::make_mut(threads)
                     .iter_mut()
@@ -2871,7 +2901,10 @@ impl ReviewState {
                 .iter()
                 .any(|m| m.node_id.as_deref() == Some(node_id))
         };
-        if self.comment_threads.with_untracked(|threads| threads.iter().any(holds)) {
+        if self
+            .comment_threads
+            .with_untracked(|threads| threads.iter().any(holds))
+        {
             self.comment_threads.update(|threads| {
                 let threads = Arc::make_mut(threads);
                 threads.retain_mut(|t| {
@@ -2919,7 +2952,12 @@ impl ReviewState {
             return;
         }
         let token = self.next_token();
-        backend.hover(token, &symbol.path, symbol.line as u32, symbol.column as u32);
+        backend.hover(
+            token,
+            &symbol.path,
+            symbol.line as u32,
+            symbol.column as u32,
+        );
         self.hover.set(Some(HoverAnswer {
             symbol,
             markdown: String::new(),
@@ -2940,11 +2978,19 @@ impl ReviewState {
 
     /// Ask for every use in the file of the symbol the caret rests on.
     pub fn ask_highlights(&self, backend: &crate::backend::Backend, symbol: Symbol) {
-        if !self.lsp_status.with_untracked(|s| s.usable_for(&symbol.path)) {
+        if !self
+            .lsp_status
+            .with_untracked(|s| s.usable_for(&symbol.path))
+        {
             return;
         }
         let token = self.next_token();
-        backend.document_highlight(token, &symbol.path, symbol.line as u32, symbol.column as u32);
+        backend.document_highlight(
+            token,
+            &symbol.path,
+            symbol.line as u32,
+            symbol.column as u32,
+        );
         self.highlight_ask.set(Some((token, symbol)));
     }
 
@@ -3000,7 +3046,9 @@ impl ReviewState {
         let hover = self.hover.get_untracked().filter(|h| {
             h.markdown.is_empty()
                 && served(&h.symbol)
-                && self.pointer_symbol.with_untracked(|p| p.as_ref() == Some(&h.symbol))
+                && self
+                    .pointer_symbol
+                    .with_untracked(|p| p.as_ref() == Some(&h.symbol))
         });
         if let Some(hover) = hover {
             // The slot is let go first: a symbol with one is not asked.
@@ -3053,12 +3101,15 @@ impl ReviewState {
         if let Some(from) = self.current_place() {
             self.history.update(|h| h.push(from));
         }
-        self.pending_jump.set(Some((path.to_string(), line, column)));
+        self.pending_jump
+            .set(Some((path.to_string(), line, column)));
     }
 
     /// `Ctrl--`: back to where the last jump left.
     pub fn go_back(&self) {
-        let Some(current) = self.current_place() else { return };
+        let Some(current) = self.current_place() else {
+            return;
+        };
         let place = self.history.try_update(|h| h.back(current)).flatten();
         if let Some(place) = place {
             self.pending_jump.set(Some((place.path, place.line, 0)));
@@ -3067,7 +3118,9 @@ impl ReviewState {
 
     /// `Ctrl-Shift--`: forward again.
     pub fn go_forward(&self) {
-        let Some(current) = self.current_place() else { return };
+        let Some(current) = self.current_place() else {
+            return;
+        };
         let place = self.history.try_update(|h| h.forward(current)).flatten();
         if let Some(place) = place {
             self.pending_jump.set(Some((place.path, place.line, 0)));
@@ -3077,7 +3130,11 @@ impl ReviewState {
     /// Open a location rust-analyzer named: the file, at the line, with
     /// the caret on the symbol.
     pub fn open_located(&self, located: &Located) {
-        self.navigate_to(&located.path, located.line.saturating_sub(1), located.character);
+        self.navigate_to(
+            &located.path,
+            located.line.saturating_sub(1),
+            located.character,
+        );
     }
 
     /// Go to a file a comment or an answer names, on Code: at the head
@@ -3120,7 +3177,8 @@ impl ReviewState {
                 })
                 .collect()
         });
-        self.commits.with(|c| known.extend(c.iter().map(|c| c.sha.clone())));
+        self.commits
+            .with(|c| known.extend(c.iter().map(|c| c.sha.clone())));
         known.sort_unstable();
         known.dedup();
         known
@@ -3130,16 +3188,20 @@ impl ReviewState {
     /// cut short.
     pub fn commit_subject(&self, sha: &str) -> Option<String> {
         let checkout = self.commits.with_untracked(|c| {
-            c.iter().find(|c| c.sha.starts_with(sha)).map(|c| c.subject.clone())
+            c.iter()
+                .find(|c| c.sha.starts_with(sha))
+                .map(|c| c.subject.clone())
         });
         checkout.or_else(|| {
             self.discussion.with_untracked(|d| {
-                d.iter().flat_map(|d| &d.events).find_map(|e| match &e.kind {
-                    PullEventKind::Committed { sha: s, subject, .. } if s.starts_with(sha) => {
-                        Some(subject.clone())
-                    }
-                    _ => None,
-                })
+                d.iter()
+                    .flat_map(|d| &d.events)
+                    .find_map(|e| match &e.kind {
+                        PullEventKind::Committed {
+                            sha: s, subject, ..
+                        } if s.starts_with(sha) => Some(subject.clone()),
+                        _ => None,
+                    })
             })
         })
     }
@@ -3148,9 +3210,11 @@ impl ReviewState {
     /// full or cut short, when the checkout has it: whether it does. A
     /// checkout that has not fetched a push yet lacks its commits.
     pub fn show_commit(&self, sha: &str) -> bool {
-        let full = self
-            .commits
-            .with_untracked(|c| c.iter().find(|c| c.sha.starts_with(sha)).map(|c| c.sha.clone()));
+        let full = self.commits.with_untracked(|c| {
+            c.iter()
+                .find(|c| c.sha.starts_with(sha))
+                .map(|c| c.sha.clone())
+        });
         let Some(sha) = full else {
             return false;
         };
@@ -3200,7 +3264,8 @@ impl ReviewState {
                     names.insert(ask.key.clone(), Named::Asked(token));
                 }
             });
-            self.pending_names.update(|pending| pending.push((token, fresh)));
+            self.pending_names
+                .update(|pending| pending.push((token, fresh)));
         });
     }
 
@@ -3220,8 +3285,12 @@ impl ReviewState {
     /// have been asked before it had read the workspace, so it is asked
     /// again by whatever still shows it.
     pub fn forget_missing_names(&self) {
-        if self.names.with_untracked(|n| n.values().any(|n| *n == Named::Missing)) {
-            self.names.update(|names| names.retain(|_, n| *n != Named::Missing));
+        if self
+            .names
+            .with_untracked(|n| n.values().any(|n| *n == Named::Missing))
+        {
+            self.names
+                .update(|names| names.retain(|_, n| *n != Named::Missing));
         }
     }
 
@@ -3230,7 +3299,10 @@ impl ReviewState {
     /// error, says so in a notice: a click that opens nothing and says
     /// nothing reads as a click that missed.
     pub fn finish_goto(&self, token: u64, answer: Result<Vec<Located>, String>) {
-        let ask = self.goto.try_update(|g| g.take_if(|g| g.token == token)).flatten();
+        let ask = self
+            .goto
+            .try_update(|g| g.take_if(|g| g.token == token))
+            .flatten();
         let Some(ask) = ask else { return };
         let locations = match answer {
             Ok(locations) => locations,
@@ -3243,10 +3315,9 @@ impl ReviewState {
             }
         };
         match locations.as_slice() {
-            [] => self.pending_notice.set(Some(format!(
-                "No {} found for `{}`",
-                ask.noun, ask.symbol
-            ))),
+            [] => self
+                .pending_notice
+                .set(Some(format!("No {} found for `{}`", ask.noun, ask.symbol))),
             [one] => self.open_located(one),
             _ => self.open_references(References {
                 kind: ask.kind,
@@ -3275,9 +3346,14 @@ impl ReviewState {
 
     /// Ask for the calls under an item, one way or the other: queued for
     /// the panel to send, under a fresh token, which the answer carries.
-    pub fn ask_calls(&self, item: perch_lsp::lsp_types::CallHierarchyItem, direction: Direction) -> u64 {
+    pub fn ask_calls(
+        &self,
+        item: perch_lsp::lsp_types::CallHierarchyItem,
+        direction: Direction,
+    ) -> u64 {
         let token = self.next_token();
-        self.pending_calls.update(|p| p.push((token, item, direction)));
+        self.pending_calls
+            .update(|p| p.push((token, item, direction)));
         token
     }
 
@@ -3306,7 +3382,9 @@ impl ReviewState {
                 return;
             }
         };
-        let Some(root) = items.into_iter().next() else { return };
+        let Some(root) = items.into_iter().next() else {
+            return;
+        };
         let place = place.unwrap_or_else(|| Located {
             path: root.uri.as_str().to_string(),
             outside: None,
@@ -3322,8 +3400,12 @@ impl ReviewState {
     /// that repeats a function open above it, a recursive call, expands
     /// to nothing and says so, and asks nothing.
     pub fn expand_hierarchy_row(&self, at: usize) {
-        let Some(hierarchy) = self.hierarchy.get_untracked() else { return };
-        let Some(row) = hierarchy.rows.get(at) else { return };
+        let Some(hierarchy) = self.hierarchy.get_untracked() else {
+            return;
+        };
+        let Some(row) = hierarchy.rows.get(at) else {
+            return;
+        };
         if row.expanded || row.pending.is_some() {
             return;
         }
@@ -3344,7 +3426,9 @@ impl ReviewState {
 
     /// Fold a row of the call hierarchy: its subtree goes.
     pub fn collapse_hierarchy_row(&self, at: usize) {
-        let Some(hierarchy) = self.hierarchy.get_untracked() else { return };
+        let Some(hierarchy) = self.hierarchy.get_untracked() else {
+            return;
+        };
         let mut open = (*hierarchy).clone();
         open.collapse(at);
         self.hierarchy.set(Some(Arc::new(open)));
@@ -3353,12 +3437,15 @@ impl ReviewState {
     /// Turn the call hierarchy the other way: the same root, its tree
     /// started again.
     pub fn turn_hierarchy(&self, direction: Direction) {
-        let Some(hierarchy) = self.hierarchy.get_untracked() else { return };
+        let Some(hierarchy) = self.hierarchy.get_untracked() else {
+            return;
+        };
         if hierarchy.direction == direction {
             return;
         }
         let token = self.ask_calls(hierarchy.root.clone(), direction);
-        self.hierarchy.set(Some(Arc::new(hierarchy.turned(direction, token))));
+        self.hierarchy
+            .set(Some(Arc::new(hierarchy.turned(direction, token))));
     }
 
     /// The calls under a row arrived, or the server's error did.
@@ -3769,7 +3856,8 @@ impl ReviewState {
         if all {
             return self.reload_loaded(|_| true);
         }
-        let entry = |list: &[ChangedFile], path: &str| list.iter().find(|f| f.path == path).cloned();
+        let entry =
+            |list: &[ChangedFile], path: &str| list.iter().find(|f| f.path == path).cloned();
         let loaded = self.files.get_untracked();
         let loading = self.loading.get_untracked();
         self.reload_loaded(|path| {
@@ -4065,7 +4153,11 @@ impl ReviewState {
                     c.remove(&card);
                 });
             }
-            if resolve && self.shown_resolved.with_untracked(|s| s.contains(thread_id)) {
+            if resolve
+                && self
+                    .shown_resolved
+                    .with_untracked(|s| s.contains(thread_id))
+            {
                 self.shown_resolved.update(|s| {
                     s.remove(thread_id);
                 });
@@ -4097,7 +4189,10 @@ impl ReviewState {
     /// How the commit sent under `token` went, kept while its popover
     /// is still waiting on it.
     pub fn settle_suggestion_commit(&self, token: u64, result: Result<(), String>) {
-        if self.suggestion_commits.with_untracked(|c| c.contains_key(&token)) {
+        if self
+            .suggestion_commits
+            .with_untracked(|c| c.contains_key(&token))
+        {
             self.suggestion_commits.update(|c| {
                 c.insert(token, Some(result));
             });
@@ -4106,7 +4201,10 @@ impl ReviewState {
 
     /// The commit sent under `token` is no longer waited on.
     pub fn forget_suggestion_commit(&self, token: u64) {
-        if self.suggestion_commits.with_untracked(|c| c.contains_key(&token)) {
+        if self
+            .suggestion_commits
+            .with_untracked(|c| c.contains_key(&token))
+        {
             self.suggestion_commits.update(|c| {
                 c.remove(&token);
             });
@@ -4145,14 +4243,20 @@ impl ReviewState {
     /// stays open if it is unresolved.
     pub fn toggle_fold(&self, thread_id: &str) {
         if self.is_resolved(thread_id) {
-            let showing = self.shown_resolved.with_untracked(|s| !s.contains(thread_id));
+            let showing = self
+                .shown_resolved
+                .with_untracked(|s| !s.contains(thread_id));
             floem::reactive::Effect::batch(|| {
                 self.shown_resolved.update(|s| {
                     if !s.remove(thread_id) {
                         s.insert(thread_id.to_string());
                     }
                 });
-                if showing && self.folded_threads.with_untracked(|f| f.contains(thread_id)) {
+                if showing
+                    && self
+                        .folded_threads
+                        .with_untracked(|f| f.contains(thread_id))
+                {
                     self.folded_threads.update(|f| {
                         f.remove(thread_id);
                     });
@@ -4378,7 +4482,10 @@ impl ReviewState {
                 .iter()
                 .any(|m| m.run.as_ref().is_some_and(|r| r.id == run_id))
         };
-        if !self.comment_threads.with_untracked(|threads| threads.iter().any(holds)) {
+        if !self
+            .comment_threads
+            .with_untracked(|threads| threads.iter().any(holds))
+        {
             return;
         }
         self.comment_threads.update(|threads| {
@@ -4640,7 +4747,8 @@ impl ReviewState {
             if let Some(mode) = self.work_modes.with_untracked(|m| m.get(&item.id).copied()) {
                 return mode;
             }
-            let made_here = item.subject.is_none() && item.checkout.as_ref().is_some_and(|c| c.owned);
+            let made_here =
+                item.subject.is_none() && item.checkout.as_ref().is_some_and(|c| c.owned);
             if made_here {
                 RunMode::Work
             } else {
@@ -4657,7 +4765,10 @@ impl ReviewState {
                 c.mode = mode;
             }
         });
-        if let Some(id) = self.item.with_untracked(|i| i.as_ref().map(|i| i.id.clone())) {
+        if let Some(id) = self
+            .item
+            .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+        {
             self.work_modes.update(|m| {
                 m.insert(id, mode);
             });
@@ -4723,11 +4834,9 @@ impl ReviewState {
     /// send that is not the one in flight is ignored, and one whose
     /// composer was put away since only clears the flight.
     pub fn settle_issue_comment(&self, token: u64, result: Result<(), String>) {
-        let sent_from = self.posting.with_untracked(|p| {
-            p.as_ref()
-                .filter(|p| p.token == token)
-                .map(|p| p.opening)
-        });
+        let sent_from = self
+            .posting
+            .with_untracked(|p| p.as_ref().filter(|p| p.token == token).map(|p| p.opening));
         let Some(sent_from) = sent_from else {
             return;
         };
@@ -4822,10 +4931,8 @@ impl ReviewState {
             return open_pull;
         }
         let on_github = thread_id.is_some_and(|id| {
-            self.comment_threads.with_untracked(|t| {
-                t.iter()
-                    .any(|t| t.id == id && t.github_id.is_some())
-            })
+            self.comment_threads
+                .with_untracked(|t| t.iter().any(|t| t.id == id && t.github_id.is_some()))
         });
         if on_github {
             return open_pull;
@@ -5343,32 +5450,42 @@ mod tests {
         state.set_changed_files(Arc::new(Vec::new()));
         state.show_in_tree("src/untouched.rs");
         assert!(state.changed_only.get());
-        assert_eq!(state.scroll_to_row.get().as_deref(), Some("src/untouched.rs"));
+        assert_eq!(
+            state.scroll_to_row.get().as_deref(),
+            Some("src/untouched.rs")
+        );
     }
 
     #[test]
     fn the_anchors_in_a_file_are_its_threads_head_side_lines() {
         use perch_github::{CommentThread, Side, ThreadOrigin};
         let at = "2026-09-18T09:59:00Z".parse().unwrap();
-        let thread = |id: &str, path: &str, start_line: u32, line: u32, side: Side, outdated: bool| CommentThread {
-            id: id.into(),
-            worktree_id: "wt".into(),
-            origin: if id.starts_with("gh-") { ThreadOrigin::GitHub } else { ThreadOrigin::Local },
-            github_id: id.strip_prefix("gh-").and_then(|n| n.parse().ok()),
-            anchor: Some(Anchor {
-                path: path.into(),
-                start_line,
-                line,
-                side,
-                commit_sha: "h".into(),
-            }),
-            outdated,
-            resolved: false,
-            node_id: None,
-            can_resolve: false,
-            created_at: at,
-            messages: anchored(id, 1, 1, "2026-09-18T09:59:00Z", false).messages,
-        };
+        let thread =
+            |id: &str, path: &str, start_line: u32, line: u32, side: Side, outdated: bool| {
+                CommentThread {
+                    id: id.into(),
+                    worktree_id: "wt".into(),
+                    origin: if id.starts_with("gh-") {
+                        ThreadOrigin::GitHub
+                    } else {
+                        ThreadOrigin::Local
+                    },
+                    github_id: id.strip_prefix("gh-").and_then(|n| n.parse().ok()),
+                    anchor: Some(Anchor {
+                        path: path.into(),
+                        start_line,
+                        line,
+                        side,
+                        commit_sha: "h".into(),
+                    }),
+                    outdated,
+                    resolved: false,
+                    node_id: None,
+                    can_resolve: false,
+                    created_at: at,
+                    messages: anchored(id, 1, 1, "2026-09-18T09:59:00Z", false).messages,
+                }
+            };
         let mut worktree = thread("w", "", 0, 0, Side::Right, false);
         worktree.anchor = None;
         let threads = vec![
@@ -5385,7 +5502,10 @@ mod tests {
         // GitHub's on 100. Not the outdated threads, the base side, or
         // anything from the other file or the worktree.
         assert_eq!(anchors_of(&threads, "src/x.rs"), vec![(40, 57), (99, 99)]);
-        assert_eq!(anchors_of(&threads, "src/z.rs"), Vec::<(usize, usize)>::new());
+        assert_eq!(
+            anchors_of(&threads, "src/z.rs"),
+            Vec::<(usize, usize)>::new()
+        );
 
         let state = ReviewState::new();
         state.comment_threads.set(Arc::new(threads));
@@ -5526,8 +5646,7 @@ mod tests {
         );
         let on_a = [anchored("end", 1, 1, "2026-09-18T10:00:00Z", false)];
         assert_eq!(
-            cards_of(&on_a, None, &cut, &HashSet::new(), &HashMap::new())[0]
-                .after_display_line,
+            cards_of(&on_a, None, &cut, &HashSet::new(), &HashMap::new())[0].after_display_line,
             2
         );
 
@@ -5613,14 +5732,8 @@ mod tests {
             "2026-09-18T13:00:00Z",
         )];
         assert_eq!(
-            cards_of(
-                &left_on_a,
-                None,
-                &cut,
-                &HashSet::new(),
-                &HashMap::new()
-            )[0]
-            .after_display_line,
+            cards_of(&left_on_a, None, &cut, &HashSet::new(), &HashMap::new())[0]
+                .after_display_line,
             2
         );
 
@@ -5751,14 +5864,21 @@ mod tests {
         );
         let threads = state.comment_threads.get();
         assert_eq!(threads.len(), 2);
-        assert_eq!(threads[1].messages.len(), 1, "the reply went, the root stayed");
+        assert_eq!(
+            threads[1].messages.len(),
+            1,
+            "the reply went, the root stayed"
+        );
 
         assert_eq!(
             state.take_out_github_comment("PRRC_10", "chris"),
             Some(CommentPlace::Line)
         );
         let threads = state.comment_threads.get();
-        assert_eq!(threads.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["gh-20"]);
+        assert_eq!(
+            threads.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["gh-20"]
+        );
         assert!(state.issue_events.get().is_empty());
 
         assert_eq!(state.take_out_github_comment("PRRC_99", "chris"), None);
@@ -5788,30 +5908,47 @@ mod tests {
             viewer_can_update: true,
         }]));
 
-        assert_eq!(state.github_comment_place("IC_1"), Some(CommentPlace::Conversation));
-        assert_eq!(state.github_comment_place("PRRC_10"), Some(CommentPlace::Line));
+        assert_eq!(
+            state.github_comment_place("IC_1"),
+            Some(CommentPlace::Conversation)
+        );
+        assert_eq!(
+            state.github_comment_place("PRRC_10"),
+            Some(CommentPlace::Line)
+        );
         assert_eq!(state.github_comment_place("PRRC_99"), None);
-        state.discussion.set(Some(Arc::new(perch_github::Discussion {
-            node_id: "PR_1".into(),
-            reviews: vec![Review {
-                id: 9,
-                node_id: "PRR_9".into(),
-                user: "rohan".into(),
-                body: "lgtm".into(),
-                state: "APPROVED".into(),
-                submitted_at: None,
-                html_url: String::new(),
-                reactions: Default::default(),
-                viewer_can_update: true,
-            }],
-            ..Default::default()
-        })));
-        assert_eq!(state.github_comment_place("PR_1"), Some(CommentPlace::PullRequestBody));
-        assert_eq!(state.github_comment_place("PRR_9"), Some(CommentPlace::Review));
+        state
+            .discussion
+            .set(Some(Arc::new(perch_github::Discussion {
+                node_id: "PR_1".into(),
+                reviews: vec![Review {
+                    id: 9,
+                    node_id: "PRR_9".into(),
+                    user: "rohan".into(),
+                    body: "lgtm".into(),
+                    state: "APPROVED".into(),
+                    submitted_at: None,
+                    html_url: String::new(),
+                    reactions: Default::default(),
+                    viewer_can_update: true,
+                }],
+                ..Default::default()
+            })));
+        assert_eq!(
+            state.github_comment_place("PR_1"),
+            Some(CommentPlace::PullRequestBody)
+        );
+        assert_eq!(
+            state.github_comment_place("PRR_9"),
+            Some(CommentPlace::Review)
+        );
         state.rewrite_github_comment("PR_1", "described");
         state.rewrite_github_comment("PRR_9", "approved");
         let d = state.discussion.get().unwrap();
-        assert_eq!((d.body.as_str(), d.reviews[0].body.as_str()), ("described", "approved"));
+        assert_eq!(
+            (d.body.as_str(), d.reviews[0].body.as_str()),
+            ("described", "approved")
+        );
         assert_eq!(state.github_comment_place(""), None);
 
         state.rewrite_github_comment("IC_1", "typo");
@@ -5838,9 +5975,10 @@ mod tests {
             viewer_can_delete: true,
             viewer_can_update: false,
         };
-        state
-            .issue_comments
-            .set(Arc::new(vec![comment(1, "IC_1", "kvnloo"), comment(2, "IC_2", "rohan")]));
+        state.issue_comments.set(Arc::new(vec![
+            comment(1, "IC_1", "kvnloo"),
+            comment(2, "IC_2", "rohan"),
+        ]));
 
         assert_eq!(
             state.take_out_github_comment("IC_1", "criccomini"),
@@ -5861,7 +5999,13 @@ mod tests {
 
     /// One of GitHub's threads on head line `line` of `src/x.rs`,
     /// one-based, with `replies` comments under its first.
-    fn github_thread(id: u64, line: u32, side: perch_github::Side, at: &str, replies: usize) -> CommentThread {
+    fn github_thread(
+        id: u64,
+        line: u32,
+        side: perch_github::Side,
+        at: &str,
+        replies: usize,
+    ) -> CommentThread {
         use perch_github::{Author, CommentMessage, ThreadOrigin};
         let at = at.parse().unwrap();
         let thread_id = format!("gh-{id}");
@@ -5972,9 +6116,10 @@ mod tests {
 
         // Laid out and collapsed, as the reader's cards are.
         let collapsed: HashSet<CardId> = [CardId::Thread("gh-10".into())].into_iter().collect();
-        let rows: HashMap<CardId, usize> = [(CardId::Thread("gh-20".into()), 6), (CardId::Composer, 12)]
-            .into_iter()
-            .collect();
+        let rows: HashMap<CardId, usize> =
+            [(CardId::Thread("gh-20".into()), 6), (CardId::Composer, 12)]
+                .into_iter()
+                .collect();
         let cards = cards_of(&threads, Some(&composer), &file, &collapsed, &rows);
         assert_eq!(cards[0].rows, doc::COLLAPSED_ROWS);
         assert_eq!(cards[4].rows, 6);
@@ -6063,7 +6208,11 @@ mod tests {
         });
         state.item.set(Some(Arc::new(item.clone())));
         state.open_composer(None, None, String::new(), choice.clone());
-        assert_eq!(mode(), RunMode::Work, "a branch Perch made is there to be worked on");
+        assert_eq!(
+            mode(),
+            RunMode::Work,
+            "a branch Perch made is there to be worked on"
+        );
 
         // Picked, it is what the next question on the item starts on.
         state.set_composer_mode(RunMode::Ask);
@@ -6110,7 +6259,10 @@ mod tests {
 
         state.toggle_card(&card);
         assert!(!state.is_collapsed(&card));
-        assert!(state.collapsed_cards.get().is_empty(), "opening a resolved thread is its own set");
+        assert!(
+            state.collapsed_cards.get().is_empty(),
+            "opening a resolved thread is its own set"
+        );
         assert_ne!(state.cards_in("src/x.rs")[0].rows, doc::COLLAPSED_ROWS);
         state.toggle_card(&card);
         assert!(state.is_collapsed(&card));
@@ -6161,7 +6313,9 @@ mod tests {
         let mut resolved = github_thread(10, 3, Side::Right, "2026-09-18T09:00:00Z", 1);
         resolved.resolved = true;
         let open = github_thread(20, 4, Side::Right, "2026-09-18T09:30:00Z", 0);
-        state.comment_threads.set(Arc::new(vec![resolved.clone(), open.clone()]));
+        state
+            .comment_threads
+            .set(Arc::new(vec![resolved.clone(), open.clone()]));
         let card = CardId::Thread("gh-10".into());
         assert!(state.is_folded("gh-10"), "resolved, so folded");
         assert!(!state.is_folded("gh-20"), "open until folded");
@@ -6186,13 +6340,21 @@ mod tests {
         state.toggle_fold("gh-10");
         let mut reopened = resolved.clone();
         reopened.resolved = false;
-        state.comment_threads.set(Arc::new(vec![reopened, open.clone()]));
-        assert!(!state.is_folded("gh-10"), "unresolved on GitHub, it stays as the reader left it");
+        state
+            .comment_threads
+            .set(Arc::new(vec![reopened, open.clone()]));
+        assert!(
+            !state.is_folded("gh-10"),
+            "unresolved on GitHub, it stays as the reader left it"
+        );
         assert!(state.begin_resolve("gh-10", true));
         assert!(state.is_folded("gh-10"), "resolved here, folded at once");
         state.comment_threads.set(Arc::new(vec![resolved, open]));
         state.settle_resolution("gh-10");
-        assert!(state.is_folded("gh-10"), "and still folded once GitHub has it");
+        assert!(
+            state.is_folded("gh-10"),
+            "and still folded once GitHub has it"
+        );
         assert!(state.begin_resolve("gh-20", true));
         assert!(state.is_folded("gh-20"));
 
@@ -6468,29 +6630,32 @@ mod tests {
     fn code_opens_no_file_asks_for_the_tree_once_and_stays_when_its_last_tab_closes() {
         let state = ReviewState::new();
         let open = |id: &str| {
-            let mut item = perch_github::Item::new(
-                "slatedb/slatedb",
-                "2026-09-18T09:59:00Z".parse().unwrap(),
-            );
+            let mut item =
+                perch_github::Item::new("slatedb/slatedb", "2026-09-18T09:59:00Z".parse().unwrap());
             item.id = id.into();
             state.begin("Reading the worktree");
             state.item.set(Some(Arc::new(item)));
             state.restore_pane();
         };
         open("a");
-        state.changed_files.set(Arc::new(vec![perch_git::ChangedFile {
-            path: "src/a.rs".into(),
-            old_path: None,
-            status: perch_git::ChangeStatus::Modified,
-            additions: 1,
-            deletions: 0,
-            binary: false,
-            head_blob: None,
-        }]));
+        state
+            .changed_files
+            .set(Arc::new(vec![perch_git::ChangedFile {
+                path: "src/a.rs".into(),
+                old_path: None,
+                status: perch_git::ChangeStatus::Modified,
+                additions: 1,
+                deletions: 0,
+                binary: false,
+                head_blob: None,
+            }]));
         state.show_tab(ItemTab::Code);
         assert_eq!(state.tab.get(), ItemTab::Code);
         assert_eq!(state.pending_open.get(), None, "a change opened by itself");
-        assert!(state.tree_wanted.get(), "the first visit did not ask for the tree");
+        assert!(
+            state.tree_wanted.get(),
+            "the first visit did not ask for the tree"
+        );
 
         state.tree_wanted.set(false);
         state.show_tab(ItemTab::Conversation);
@@ -6500,12 +6665,18 @@ mod tests {
         // Another item's first visit asks; back on the first, none does.
         open("b");
         state.show_tab(ItemTab::Code);
-        assert!(state.tree_wanted.get(), "another item's first visit did not ask");
+        assert!(
+            state.tree_wanted.get(),
+            "another item's first visit did not ask"
+        );
         open("a");
         assert!(!state.tree_wanted.get(), "the ask followed the item away");
         state.show_tab(ItemTab::Conversation);
         state.show_tab(ItemTab::Code);
-        assert!(!state.tree_wanted.get(), "the item came back and asked again");
+        assert!(
+            !state.tree_wanted.get(),
+            "the item came back and asked again"
+        );
 
         state.open_tab("src/a.rs");
         state.close_tab("src/a.rs");
@@ -6520,10 +6691,8 @@ mod tests {
     fn an_item_opens_on_conversation_the_first_time_and_on_its_pane_after() {
         let state = ReviewState::new();
         let open = |id: &str| {
-            let mut item = perch_github::Item::new(
-                "slatedb/slatedb",
-                "2026-09-18T09:59:00Z".parse().unwrap(),
-            );
+            let mut item =
+                perch_github::Item::new("slatedb/slatedb", "2026-09-18T09:59:00Z".parse().unwrap());
             item.id = id.into();
             state.begin("Reading the worktree");
             state.item.set(Some(Arc::new(item)));
@@ -6576,10 +6745,8 @@ mod tests {
     fn the_agents_row_waits_with_the_items_pane() {
         let state = ReviewState::new();
         let open = |id: &str| {
-            let mut item = perch_github::Item::new(
-                "slatedb/slatedb",
-                "2026-09-18T09:59:00Z".parse().unwrap(),
-            );
+            let mut item =
+                perch_github::Item::new("slatedb/slatedb", "2026-09-18T09:59:00Z".parse().unwrap());
             item.id = id.into();
             state.begin("Reading the worktree");
             state.item.set(Some(Arc::new(item)));
@@ -6608,10 +6775,8 @@ mod tests {
     fn the_places_on_an_items_tabs_wait_with_its_pane() {
         let state = ReviewState::new();
         let open = |id: &str| {
-            let mut item = perch_github::Item::new(
-                "slatedb/slatedb",
-                "2026-09-18T09:59:00Z".parse().unwrap(),
-            );
+            let mut item =
+                perch_github::Item::new("slatedb/slatedb", "2026-09-18T09:59:00Z".parse().unwrap());
             item.id = id.into();
             state.begin("Reading the worktree");
             state.item.set(Some(Arc::new(item)));
@@ -6797,7 +6962,10 @@ mod tests {
         state.settle_issue_comment(7, Ok(()));
         assert!(state.composer.get().is_none());
         assert_eq!(state.sent_composer.get(), None);
-        assert!(!state.cards_in("src/x.rs").iter().any(|c| c.id == CardId::Composer));
+        assert!(!state
+            .cards_in("src/x.rs")
+            .iter()
+            .any(|c| c.id == CardId::Composer));
     }
 
     #[test]
@@ -7024,7 +7192,10 @@ mod tests {
             label("/Users/me/.rustup/toolchains/stable/lib/rustlib/src/rust/library/std/src/io/mod.rs"),
             "std"
         );
-        assert_eq!(label("/Users/me/Code/other/src/lib.rs"), "Code/other/src/lib.rs");
+        assert_eq!(
+            label("/Users/me/Code/other/src/lib.rs"),
+            "Code/other/src/lib.rs"
+        );
         assert_eq!(label("/opt/vendor/src/lib.rs"), "/opt/vendor/src/lib.rs");
         assert_eq!(
             outside_label(Path::new("/Users/me/Code/other/src/lib.rs"), None),
@@ -7072,7 +7243,10 @@ mod tests {
         use std::path::Path;
         let home = Path::new("/Users/me");
         let label = |p: &str| outside_label(Path::new(p), Some(home));
-        assert_eq!(label("/Users/me/Code/app/node_modules/react/index.d.ts"), "react");
+        assert_eq!(
+            label("/Users/me/Code/app/node_modules/react/index.d.ts"),
+            "react"
+        );
         assert_eq!(
             label("/Users/me/Code/app/node_modules/@types/node/fs.d.ts"),
             "@types/node"
@@ -7082,10 +7256,15 @@ mod tests {
             "react-dom 18.2.0"
         );
         assert_eq!(
-            label("jdt://contents/guava-33.3.1-jre.jar/com.google.common.collect/ImmutableList.class"),
+            label(
+                "jdt://contents/guava-33.3.1-jre.jar/com.google.common.collect/ImmutableList.class"
+            ),
             "guava-33.3.1-jre.jar"
         );
-        assert_eq!(label("jdt://contents/java.base/java.util/List.class"), "JDK");
+        assert_eq!(
+            label("jdt://contents/java.base/java.util/List.class"),
+            "JDK"
+        );
         assert_eq!(
             label("/Users/me/Code/app/node_modules/.pnpm/@scope+pkg@1.2.3/node_modules/@scope/pkg/a.d.ts"),
             "@scope/pkg 1.2.3"
@@ -7098,7 +7277,10 @@ mod tests {
 
     #[test]
     fn the_history_goes_back_and_forward_and_drops_the_oldest() {
-        let place = |line: usize| Place { path: "src/a.rs".into(), line };
+        let place = |line: usize| Place {
+            path: "src/a.rs".into(),
+            line,
+        };
         let mut history = History::default();
         assert_eq!(history.back(place(0)), None);
         assert_eq!(history.forward(place(0)), None);
@@ -7206,7 +7388,11 @@ mod tests {
         state.pending_jump.set(None);
         state.goto.set(Some(ask(8)));
         state.finish_goto(8, Ok(vec![located("src/a.rs", 3), located("src/b.rs", 9)]));
-        assert_eq!(state.pending_jump.get(), None, "several open the panel, not a file");
+        assert_eq!(
+            state.pending_jump.get(),
+            None,
+            "several open the panel, not a file"
+        );
         let panel = state.references.get().expect("the panel opened");
         assert_eq!(panel.kind, Locations::Definitions);
         assert_eq!(panel.symbol, "x");
@@ -7270,7 +7456,9 @@ mod tests {
         state.open_tab("/opt/vendor/src/lib.rs");
         assert_eq!(
             state.tabs.get()[0].origin,
-            Origin::Outside { label: "/opt/vendor/src/lib.rs".into() },
+            Origin::Outside {
+                label: "/opt/vendor/src/lib.rs".into()
+            },
             "the tab carries the origin before the file has loaded"
         );
     }
@@ -7363,7 +7551,11 @@ mod tests {
         let draft = thread_ending_in(Author::User, ThreadOrigin::GitHub, None, None);
         assert_eq!(under(draft), Destination::GitHub, "a draft of the reader's");
         let posted = thread_ending_in(Author::User, ThreadOrigin::GitHub, Some(32), None);
-        assert_eq!(under(posted), Destination::GitHub, "a comment the reader posted");
+        assert_eq!(
+            under(posted),
+            Destination::GitHub,
+            "a comment the reader posted"
+        );
     }
 
     #[test]
@@ -7533,7 +7725,11 @@ mod tests {
             false,
             &agent,
         );
-        assert_eq!(d, Destination::agent(opus_high()), "nothing sent from this face yet");
+        assert_eq!(
+            d,
+            Destination::agent(opus_high()),
+            "nothing sent from this face yet"
+        );
         let d = default_destination(
             None,
             None,
@@ -7543,7 +7739,11 @@ mod tests {
             false,
             &agent,
         );
-        assert_eq!(d, Destination::agent(opus_high()), "no anchor: an agent, whatever was last");
+        assert_eq!(
+            d,
+            Destination::agent(opus_high()),
+            "no anchor: an agent, whatever was last"
+        );
         let d = default_destination(None, None, None, None, sonnet_medium(), false, &agent);
         assert_eq!(d, Destination::agent(sonnet_medium()));
     }
@@ -7566,7 +7766,9 @@ mod tests {
         let mine = anchored("t3", 7, 7, "2026-09-18T10:02:00Z", false);
 
         let state = ReviewState::new();
-        state.comment_threads.set(Arc::new(vec![reply, fresh, mine]));
+        state
+            .comment_threads
+            .set(Arc::new(vec![reply, fresh, mine]));
         let drafts = state.drafts();
         assert_eq!(drafts.len(), 2);
         assert_eq!(drafts[0].thread_id, "gh-31");
@@ -7575,8 +7777,14 @@ mod tests {
         assert_eq!(drafts[0].commit_sha, "h");
         assert_eq!(drafts[0].body, "I will fix it");
         assert_eq!(drafts[1].thread_id, "t2");
-        assert_eq!(drafts[1].in_reply_to, None, "a new thread has no root there yet");
-        assert_eq!(drafts[1].anchor.as_ref().map(|a| (a.start_line, a.line)), Some((5, 6)));
+        assert_eq!(
+            drafts[1].in_reply_to, None,
+            "a new thread has no root there yet"
+        );
+        assert_eq!(
+            drafts[1].anchor.as_ref().map(|a| (a.start_line, a.line)),
+            Some((5, 6))
+        );
         assert!(drafts[0].reply);
         assert!(!drafts[1].reply);
     }
@@ -7619,7 +7827,11 @@ mod tests {
             "3 comments"
         );
         assert_eq!(
-            drafts_summary(&[a_draft("a", Some(1)), a_draft("b", None), a_draft("c", None)]),
+            drafts_summary(&[
+                a_draft("a", Some(1)),
+                a_draft("b", None),
+                a_draft("c", None)
+            ]),
             "1 reply, 2 comments"
         );
         assert_eq!(
@@ -7632,7 +7844,11 @@ mod tests {
     fn the_outcome_says_what_did_not_post_and_nothing_when_all_did() {
         assert_eq!(submit_review_outcome(true, 3, &[], &[], &[], &[]), None);
         assert_eq!(submit_review_outcome(false, 1, &[], &[], &[], &[]), None);
-        let kept = [a_draft("r1", Some(31)), a_draft("c1", None), a_draft("c2", None)];
+        let kept = [
+            a_draft("r1", Some(31)),
+            a_draft("c1", None),
+            a_draft("c2", None),
+        ];
         assert_eq!(
             submit_review_outcome(
                 true,
@@ -7649,8 +7865,7 @@ mod tests {
             )
         );
         assert_eq!(
-            submit_review_outcome(true, 0, &["c1".into(), "c2".into()], &[], &[], &kept)
-                .as_deref(),
+            submit_review_outcome(true, 0, &["c1".into(), "c2".into()], &[], &[], &kept).as_deref(),
             Some(
                 "Posted the review. 2 comments could not be matched to what GitHub returned and \
                  are still drafts."
@@ -7659,13 +7874,27 @@ mod tests {
         // No review went: a reply on its own that did not post, or one
         // that did beside one that did not.
         assert_eq!(
-            submit_review_outcome(false, 0, &[], &[("r1".into(), "offline".into())], &[], &kept)
-                .as_deref(),
+            submit_review_outcome(
+                false,
+                0,
+                &[],
+                &[("r1".into(), "offline".into())],
+                &[],
+                &kept
+            )
+            .as_deref(),
             Some("1 reply did not post: offline.")
         );
         assert_eq!(
-            submit_review_outcome(false, 1, &[], &[("r1".into(), "offline".into())], &[], &kept)
-                .as_deref(),
+            submit_review_outcome(
+                false,
+                1,
+                &[],
+                &[("r1".into(), "offline".into())],
+                &[],
+                &kept
+            )
+            .as_deref(),
             Some("Posted 1 comment. 1 reply did not post: offline.")
         );
         assert_eq!(
@@ -7717,8 +7946,7 @@ mod tests {
             )
         );
         assert_eq!(
-            submit_review_outcome(true, 0, &[], &[], &["a".into(), "b".into()], &kept)
-                .as_deref(),
+            submit_review_outcome(true, 0, &[], &[], &["a".into(), "b".into()], &kept).as_deref(),
             Some(
                 "Posted the review. GitHub takes comments only on files the pull request \
                  changes, so src/a.rs:9 and src/b.rs:3\u{2013}5 are still drafts."
@@ -7726,7 +7954,10 @@ mod tests {
         );
         // No review went, and a reply under one of them could not follow it.
         let four = ["a".into(), "b".into(), "c".into(), "d".into()];
-        let orphaned = [("r1".into(), "the comment that opens its thread did not post".into())];
+        let orphaned = [(
+            "r1".into(),
+            "the comment that opens its thread did not post".into(),
+        )];
         assert_eq!(
             submit_review_outcome(false, 0, &[], &orphaned, &four, &kept).as_deref(),
             Some(

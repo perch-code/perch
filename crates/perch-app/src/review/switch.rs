@@ -42,7 +42,11 @@ fn segment(state: ReviewState, which: ItemTab, name: &'static str) -> impl IntoV
             } else {
                 theme::weight_body()
             })
-            .color(if active() { theme::fg() } else { theme::fg_muted() })
+            .color(if active() {
+                theme::fg()
+            } else {
+                theme::fg_muted()
+            })
             .selectable(false)
     }))
     .debug_name(format!("{name} pill"))

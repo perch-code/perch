@@ -56,7 +56,10 @@ impl Row {
 /// is added all the same: the listing's order puts a directory's contents
 /// under it, and a file with contents under it is not a shape the order
 /// can place.
-pub fn with_paths<'a>(tree: &[TreeEntry], paths: impl IntoIterator<Item = &'a str>) -> Option<Vec<TreeEntry>> {
+pub fn with_paths<'a>(
+    tree: &[TreeEntry],
+    paths: impl IntoIterator<Item = &'a str>,
+) -> Option<Vec<TreeEntry>> {
     let present: HashSet<(&str, bool)> = tree.iter().map(|e| (e.path.as_str(), e.is_dir)).collect();
     let mut missing: Vec<TreeEntry> = Vec::new();
     let mut added: HashSet<(String, bool)> = HashSet::new();
@@ -87,12 +90,16 @@ pub fn with_paths<'a>(tree: &[TreeEntry], paths: impl IntoIterator<Item = &'a st
 /// The changed files and the directories on the way to them, in the
 /// order they came. A changed path the worktree has as a directory, a
 /// submodule say, is kept as that directory.
-pub fn changed_only<'a>(all: &[TreeEntry], changed: impl IntoIterator<Item = &'a str>) -> Vec<TreeEntry> {
+pub fn changed_only<'a>(
+    all: &[TreeEntry],
+    changed: impl IntoIterator<Item = &'a str>,
+) -> Vec<TreeEntry> {
     let files: HashSet<&str> = changed.into_iter().collect();
     let dirs: HashSet<&str> = files.iter().flat_map(|path| ancestors(path)).collect();
     all.iter()
         .filter(|entry| {
-            files.contains(entry.path.as_str()) || (entry.is_dir && dirs.contains(entry.path.as_str()))
+            files.contains(entry.path.as_str())
+                || (entry.is_dir && dirs.contains(entry.path.as_str()))
         })
         .cloned()
         .collect()
@@ -139,7 +146,9 @@ pub fn rows(entries: &[TreeEntry], fold: bool) -> Vec<Row> {
                 Some(above) => entry.path[above.len() + 1..].to_string(),
                 None => entry.path.clone(),
             };
-            let removed = ancestors(&entry.path).filter(|dir| folded.contains(dir)).count();
+            let removed = ancestors(&entry.path)
+                .filter(|dir| folded.contains(dir))
+                .count();
             Row {
                 path: entry.path.clone(),
                 head: head.to_string(),
@@ -276,7 +285,15 @@ mod tests {
 
         assert_eq!(
             row_paths(&shown(&fixture(), &expanded(&["src", "src/ui"]))),
-            ["src", "src/ui", "src/ui/row.rs", "src/ui/mod.rs", "src/main.rs", "docs", "README.md"]
+            [
+                "src",
+                "src/ui",
+                "src/ui/row.rs",
+                "src/ui/mod.rs",
+                "src/main.rs",
+                "docs",
+                "README.md"
+            ]
         );
     }
 
@@ -284,7 +301,10 @@ mod tests {
     fn order_is_preserved_so_contents_follow_their_directory() {
         let visible = shown(&fixture(), &expanded(&["src", "src/ui"]));
         let ui = visible.iter().position(|e| e.path == "src/ui").unwrap();
-        let row = visible.iter().position(|e| e.path == "src/ui/row.rs").unwrap();
+        let row = visible
+            .iter()
+            .position(|e| e.path == "src/ui/row.rs")
+            .unwrap();
         assert_eq!(row, ui + 1);
     }
 
@@ -296,7 +316,10 @@ mod tests {
         assert_eq!(row.head, "src/ui/row.rs");
         assert_eq!(row.depth, 2);
         assert!(!row.is_dir);
-        assert!(row.directories().is_empty(), "a file stands for no directory");
+        assert!(
+            row.directories().is_empty(),
+            "a file stands for no directory"
+        );
 
         let dir = rows.iter().find(|r| r.path == "src/ui").unwrap();
         assert_eq!(dir.label, "ui");
@@ -343,7 +366,10 @@ mod tests {
         reveal(&mut expanded, "src/ui/row.rs");
         assert!(expanded.contains("src"));
         assert!(expanded.contains("src/ui"));
-        assert!(!expanded.contains("src/ui/row.rs"), "the file itself is not a directory");
+        assert!(
+            !expanded.contains("src/ui/row.rs"),
+            "the file itself is not a directory"
+        );
 
         let visible = shown(&fixture(), &expanded);
         assert!(row_paths(&visible).contains(&"src/ui/row.rs"));
@@ -361,14 +387,26 @@ mod tests {
     #[test]
     fn the_filter_keeps_changed_files_and_the_way_to_them() {
         let pruned = changed_only(&fixture(), ["src/ui/row.rs", "README.md"]);
-        assert_eq!(paths(&pruned), ["src", "src/ui", "src/ui/row.rs", "README.md"]);
+        assert_eq!(
+            paths(&pruned),
+            ["src", "src/ui", "src/ui/row.rs", "README.md"]
+        );
     }
 
     #[test]
     fn the_filter_drops_a_directory_that_only_shares_a_prefix() {
-        let all = vec![entry("src", true), entry("src/a.rs", false), entry("src2", true), entry("src2/b.rs", false)];
+        let all = vec![
+            entry("src", true),
+            entry("src/a.rs", false),
+            entry("src2", true),
+            entry("src2/b.rs", false),
+        ];
         let pruned = changed_only(&all, ["src2/b.rs"]);
-        assert_eq!(paths(&pruned), ["src2", "src2/b.rs"], "src is not on the way to src2/b.rs");
+        assert_eq!(
+            paths(&pruned),
+            ["src2", "src2/b.rs"],
+            "src is not on the way to src2/b.rs"
+        );
     }
 
     #[test]
@@ -380,7 +418,8 @@ mod tests {
 
     #[test]
     fn a_path_the_worktree_lacks_is_added_with_its_directories() {
-        let merged = with_paths(&fixture(), ["src/gone.rs", "lib/old/thing.rs"]).expect("two were missing");
+        let merged =
+            with_paths(&fixture(), ["src/gone.rs", "lib/old/thing.rs"]).expect("two were missing");
         assert_eq!(
             paths(&merged),
             [
@@ -414,7 +453,11 @@ mod tests {
     fn a_changed_path_the_worktree_has_as_a_directory_stays_a_directory() {
         // A submodule: the change is at `vendor/lib`, which the listing
         // walked into.
-        let all = vec![entry("vendor", true), entry("vendor/lib", true), entry("vendor/lib/lib.c", false)];
+        let all = vec![
+            entry("vendor", true),
+            entry("vendor/lib", true),
+            entry("vendor/lib/lib.c", false),
+        ];
         assert_eq!(with_paths(&all, ["vendor/lib"]), None, "nothing to add");
         let pruned = changed_only(&all, ["vendor/lib"]);
         assert_eq!(paths(&pruned), ["vendor", "vendor/lib"]);
@@ -422,7 +465,10 @@ mod tests {
         // Folded into one row, as a lone run is.
         let rows = rows(&pruned, true);
         assert_eq!(rows.len(), 1);
-        assert_eq!((rows[0].label.as_str(), rows[0].path.as_str()), ("vendor/lib", "vendor/lib"));
+        assert_eq!(
+            (rows[0].label.as_str(), rows[0].path.as_str()),
+            ("vendor/lib", "vendor/lib")
+        );
     }
 
     #[test]
@@ -437,10 +483,20 @@ mod tests {
             entry("config", false),
             entry("README.md", false),
         ];
-        let merged = with_paths(&all, ["config", "config/default.toml"]).expect("the old contents are missing");
+        let merged = with_paths(&all, ["config", "config/default.toml"])
+            .expect("the old contents are missing");
         assert_eq!(
             paths(&merged),
-            ["config", "config/default.toml", "crates", "crates/app", "crates/app/main.rs", "Cargo.toml", "config", "README.md"],
+            [
+                "config",
+                "config/default.toml",
+                "crates",
+                "crates/app",
+                "crates/app/main.rs",
+                "Cargo.toml",
+                "config",
+                "README.md"
+            ],
             "the directory sits among the directories, the file among the files"
         );
         assert!(merged[0].is_dir);
@@ -449,8 +505,14 @@ mod tests {
         assert_eq!(paths(&pruned), ["config", "config/default.toml", "config"]);
         let rows = rows(&pruned, true);
         assert_eq!(
-            rows.iter().map(|r| (r.label.as_str(), r.depth, r.is_dir)).collect::<Vec<_>>(),
-            [("config", 0, true), ("default.toml", 1, false), ("config", 0, false)]
+            rows.iter()
+                .map(|r| (r.label.as_str(), r.depth, r.is_dir))
+                .collect::<Vec<_>>(),
+            [
+                ("config", 0, true),
+                ("default.toml", 1, false),
+                ("config", 0, false)
+            ]
         );
     }
 
@@ -498,7 +560,10 @@ mod tests {
         assert_eq!(review.path, "crates/app/src/review");
         assert_eq!(review.head, "crates/app");
         assert!(review.is_dir);
-        assert_eq!(review.directories(), ["crates/app", "crates/app/src", "crates/app/src/review"]);
+        assert_eq!(
+            review.directories(),
+            ["crates/app", "crates/app/src", "crates/app/src/review"]
+        );
     }
 
     #[test]
@@ -509,35 +574,68 @@ mod tests {
         let rows = rows(&fixture(), true);
         assert_eq!(
             row_paths(&rows),
-            ["src", "src/ui", "src/ui/row.rs", "src/ui/mod.rs", "src/main.rs", "docs", "docs/guide.md", "README.md"]
+            [
+                "src",
+                "src/ui",
+                "src/ui/row.rs",
+                "src/ui/mod.rs",
+                "src/main.rs",
+                "docs",
+                "docs/guide.md",
+                "README.md"
+            ]
         );
     }
 
     #[test]
     fn a_run_from_the_top_folds_to_depth_zero() {
-        let all = vec![entry("a", true), entry("a/b", true), entry("a/b/c", true), entry("a/b/c/x.rs", false)];
+        let all = vec![
+            entry("a", true),
+            entry("a/b", true),
+            entry("a/b/c", true),
+            entry("a/b/c/x.rs", false),
+        ];
         let rows = rows(&all, true);
         assert_eq!(rows.len(), 2);
-        assert_eq!((rows[0].label.as_str(), rows[0].depth, rows[0].head.as_str()), ("a/b/c", 0, "a"));
+        assert_eq!(
+            (rows[0].label.as_str(), rows[0].depth, rows[0].head.as_str()),
+            ("a/b/c", 0, "a")
+        );
         assert_eq!((rows[1].label.as_str(), rows[1].depth), ("x.rs", 1));
     }
 
     #[test]
     fn a_folded_row_is_visible_by_its_outermost_directory() {
-        let all = vec![entry("a", true), entry("a/b", true), entry("a/b/c", true), entry("a/b/c/x.rs", false)];
+        let all = vec![
+            entry("a", true),
+            entry("a/b", true),
+            entry("a/b/c", true),
+            entry("a/b/c/x.rs", false),
+        ];
         let rows = rows(&all, true);
         // Nothing expanded: the folded row is top level, so it shows, shut.
         let shown = visible(&rows, &HashSet::new());
         assert_eq!(row_paths(&shown), ["a/b/c"]);
         assert!(!is_expanded(&rows[0], &HashSet::new()));
         // Its contents need every directory of the run open.
-        assert_eq!(row_paths(&visible(&rows, &expanded(&["a", "a/b"]))), ["a/b/c"]);
-        assert_eq!(row_paths(&visible(&rows, &expanded(&["a", "a/b", "a/b/c"]))), ["a/b/c", "a/b/c/x.rs"]);
+        assert_eq!(
+            row_paths(&visible(&rows, &expanded(&["a", "a/b"]))),
+            ["a/b/c"]
+        );
+        assert_eq!(
+            row_paths(&visible(&rows, &expanded(&["a", "a/b", "a/b/c"]))),
+            ["a/b/c", "a/b/c/x.rs"]
+        );
     }
 
     #[test]
     fn toggling_a_folded_row_opens_the_run_and_shuts_its_innermost() {
-        let all = vec![entry("a", true), entry("a/b", true), entry("a/b/c", true), entry("a/b/c/x.rs", false)];
+        let all = vec![
+            entry("a", true),
+            entry("a/b", true),
+            entry("a/b/c", true),
+            entry("a/b/c/x.rs", false),
+        ];
         let rows = rows(&all, true);
         let mut expanded = HashSet::new();
         toggle_row(&mut expanded, &rows[0]);
@@ -545,7 +643,11 @@ mod tests {
         assert!(is_expanded(&rows[0], &expanded));
 
         toggle_row(&mut expanded, &rows[0]);
-        assert_eq!(expanded, self::expanded(&["a", "a/b"]), "the outer ones stay open for the whole tree");
+        assert_eq!(
+            expanded,
+            self::expanded(&["a", "a/b"]),
+            "the outer ones stay open for the whole tree"
+        );
         assert!(!is_expanded(&rows[0], &expanded));
         assert_eq!(row_paths(&visible(&rows, &expanded)), ["a/b/c"]);
     }
@@ -576,7 +678,9 @@ mod tests {
         let tree = with_paths(&tree, changed).unwrap();
         let rows = rows(&changed_only(&tree, changed), true);
         assert_eq!(
-            rows.iter().map(|r| (r.label.as_str(), r.depth)).collect::<Vec<_>>(),
+            rows.iter()
+                .map(|r| (r.label.as_str(), r.depth))
+                .collect::<Vec<_>>(),
             [("src", 0), ("ui", 1), ("row.rs", 2), ("gone.rs", 1)]
         );
     }

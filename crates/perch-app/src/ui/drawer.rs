@@ -210,9 +210,12 @@ pub fn header_bar(
 
 /// The control at the bar's right end that shuts the drawer.
 pub fn close_button(state: AppState, backend: Rc<Backend>, debug: &'static str) -> impl View {
-    crate::ui::widgets::icon_action(SidebarIcon::Close, debug, || true, move || {
-        close(state, &backend, true)
-    })
+    crate::ui::widgets::icon_action(
+        SidebarIcon::Close,
+        debug,
+        || true,
+        move || close(state, &backend, true),
+    )
 }
 
 /// The strip along the drawer's left edge that drags it wider or narrower.

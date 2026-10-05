@@ -16,10 +16,10 @@ use std::rc::Rc;
 
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate};
-use floem::views::editor::Editor;
 use floem::views::editor::core::cursor::{Cursor, CursorAffinity, CursorMode};
 use floem::views::editor::core::selection::Selection;
-use floem::views::{Container, Decorators, Empty, Label, Scroll, Stack, dyn_container};
+use floem::views::editor::Editor;
+use floem::views::{dyn_container, Container, Decorators, Empty, Label, Scroll, Stack};
 
 use crate::icons::SidebarIcon;
 use crate::review::cards::tip;

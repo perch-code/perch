@@ -18,7 +18,11 @@ impl TreeEntry {
     pub fn new(path: impl Into<String>, is_dir: bool) -> Self {
         let path = path.into();
         let depth = path.matches('/').count();
-        TreeEntry { path, is_dir, depth }
+        TreeEntry {
+            path,
+            is_dir,
+            depth,
+        }
     }
 }
 
@@ -50,7 +54,9 @@ pub fn list_tree(worktree: &Path, max_entries: usize) -> Result<Vec<TreeEntry>, 
 
     for entry in walker {
         let Ok(entry) = entry else { continue };
-        let Ok(relative) = entry.path().strip_prefix(worktree) else { continue };
+        let Ok(relative) = entry.path().strip_prefix(worktree) else {
+            continue;
+        };
         if relative.as_os_str().is_empty() {
             continue;
         }
@@ -67,7 +73,10 @@ pub fn list_tree(worktree: &Path, max_entries: usize) -> Result<Vec<TreeEntry>, 
     // adjacent to its own contents.
     paths.sort_by(|a, b| compare_paths(&a.0, a.1, &b.0, b.1));
 
-    Ok(paths.into_iter().map(|(path, is_dir)| TreeEntry::new(path, is_dir)).collect())
+    Ok(paths
+        .into_iter()
+        .map(|(path, is_dir)| TreeEntry::new(path, is_dir))
+        .collect())
 }
 
 /// The order two paths take in the tree: a directory before a file
@@ -100,7 +109,11 @@ pub fn compare_paths(a: &str, a_dir: bool, b: &str, b_dir: bool) -> std::cmp::Or
                 }
                 // Same name, but one path continues: the shorter is the
                 // parent and must come first.
-                return if last_a { Ordering::Less } else { Ordering::Greater };
+                return if last_a {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                };
             }
             (Some(_), None) => return Ordering::Greater,
             (None, Some(_)) => return Ordering::Less,
@@ -120,7 +133,11 @@ mod tests {
 
     #[test]
     fn directories_sort_before_files_at_the_same_level() {
-        let got = order(vec![("README.md", false), ("src", true), ("Cargo.toml", false)]);
+        let got = order(vec![
+            ("README.md", false),
+            ("src", true),
+            ("Cargo.toml", false),
+        ]);
         assert_eq!(got, vec!["src", "Cargo.toml", "README.md"]);
     }
 
@@ -151,8 +168,16 @@ mod tests {
         let dir = TreeEntry::new("src", true);
         let file = TreeEntry::new("src/main.rs", false);
         let readme = TreeEntry::new("README.md", false);
-        assert_eq!(compare_entries(&dir, &file), Ordering::Less, "a directory comes before its contents");
-        assert_eq!(compare_entries(&file, &readme), Ordering::Less, "a directory's contents come before a file beside it");
+        assert_eq!(
+            compare_entries(&dir, &file),
+            Ordering::Less,
+            "a directory comes before its contents"
+        );
+        assert_eq!(
+            compare_entries(&file, &readme),
+            Ordering::Less,
+            "a directory's contents come before a file beside it"
+        );
         assert_eq!(compare_entries(&readme, &readme), Ordering::Equal);
     }
 

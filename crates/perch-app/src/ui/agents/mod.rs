@@ -107,7 +107,9 @@ pub(super) fn status_mark(app: AppState, status: AgentRunStatus) -> impl IntoVie
     let glyph: Option<(SidebarIcon, fn() -> Color)> = match status {
         AgentRunStatus::Starting | AgentRunStatus::Running => None,
         AgentRunStatus::Completed => Some((SidebarIcon::Check, theme::open)),
-        AgentRunStatus::Failed | AgentRunStatus::Interrupted => Some((SidebarIcon::Close, theme::closed)),
+        AgentRunStatus::Failed | AgentRunStatus::Interrupted => {
+            Some((SidebarIcon::Close, theme::closed))
+        }
         AgentRunStatus::Queued => Some((SidebarIcon::Clock, theme::draft_yellow)),
         AgentRunStatus::Stopping => Some((SidebarIcon::Stop, theme::draft_yellow)),
         AgentRunStatus::Stopped => Some((SidebarIcon::Stop, theme::fg_subtle)),
@@ -152,7 +154,9 @@ pub(super) fn live_dot(app: AppState, size: f64) -> impl IntoView {
             .border_radius(size / 2.0)
             .flex_shrink(0.0_f32)
             .background(if faded { color.with_alpha(0.35) } else { color })
-            .transition_background(floem::style::Transition::ease_in_out(Duration::from_millis(900)))
+            .transition_background(floem::style::Transition::ease_in_out(
+                Duration::from_millis(900),
+            ))
     })
 }
 
@@ -221,9 +225,12 @@ pub(crate) fn completion_toast(
         state.dismiss_toast(token);
         dropdown::go_to_run(state, review, &backend, &run);
     });
-    let dismiss = icon_action(SidebarIcon::Close, "Dismiss agent completion", || true, move || {
-        state.dismiss_toast(token)
-    });
+    let dismiss = icon_action(
+        SidebarIcon::Close,
+        "Dismiss agent completion",
+        || true,
+        move || state.dismiss_toast(token),
+    );
     let body = Stack::horizontal((
         crate::ui::toast::dot(color),
         Stack::vertical((
@@ -291,5 +298,4 @@ mod tests {
         harness.rebuild();
         assert!(app.agents_clock_armed.get());
     }
-
 }

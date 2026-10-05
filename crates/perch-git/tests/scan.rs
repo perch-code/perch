@@ -168,7 +168,9 @@ impl LocalFixture {
 async fn a_root_lists_itself_and_its_worktrees_with_their_branches() {
     let f = RootFixture::new();
 
-    let scan = scan_root(&f.git, &f.root, None, GITHUB).await.expect("scan");
+    let scan = scan_root(&f.git, &f.root, None, GITHUB)
+        .await
+        .expect("scan");
 
     assert_eq!(scan.github.as_deref(), Some("acme/widgets"));
     assert_eq!(scan.remote.as_deref(), Some("origin"));
@@ -244,11 +246,15 @@ async fn a_directory_that_is_not_a_checkout_is_an_error() {
     let plain = tmp.path().join("plain");
     std::fs::create_dir_all(&plain).unwrap();
 
-    let err = scan_root(&Git::new(None), &plain, None, GITHUB).await.unwrap_err();
+    let err = scan_root(&Git::new(None), &plain, None, GITHUB)
+        .await
+        .unwrap_err();
     assert!(matches!(err, perch_git::Error::Git { .. }), "{err}");
 
     let missing = tmp.path().join("missing");
-    assert!(scan_root(&Git::new(None), &missing, None, GITHUB).await.is_err());
+    assert!(scan_root(&Git::new(None), &missing, None, GITHUB)
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -272,7 +278,9 @@ async fn a_repository_with_no_remote_scans_as_local_on_main() {
     // so nothing here can reach the network.
     let f = LocalFixture::new("main");
 
-    let scan = scan_root(&f.git, &f.root, None, GITHUB).await.expect("scan");
+    let scan = scan_root(&f.git, &f.root, None, GITHUB)
+        .await
+        .expect("scan");
 
     assert_eq!(scan.github, None);
     assert_eq!(scan.remote, None);
@@ -290,7 +298,9 @@ async fn a_repository_with_no_remote_scans_as_local_on_main() {
 async fn a_repository_with_no_remote_on_master_has_master_as_its_base() {
     let f = LocalFixture::new("master");
 
-    let scan = scan_root(&f.git, &f.root, None, GITHUB).await.expect("scan");
+    let scan = scan_root(&f.git, &f.root, None, GITHUB)
+        .await
+        .expect("scan");
 
     assert_eq!(scan.github, None);
     assert_eq!(scan.remote, None);
@@ -301,7 +311,9 @@ async fn a_repository_with_no_remote_on_master_has_master_as_its_base() {
 async fn a_base_from_config_names_a_branch_that_is_neither_main_nor_master() {
     let f = LocalFixture::new("trunk");
 
-    let scan = scan_root(&f.git, &f.root, Some("trunk"), GITHUB).await.expect("scan");
+    let scan = scan_root(&f.git, &f.root, Some("trunk"), GITHUB)
+        .await
+        .expect("scan");
 
     assert_eq!(scan.base, "trunk");
     assert_eq!(scan.base_ref, "trunk");
@@ -330,31 +342,60 @@ async fn a_fork_is_named_by_upstream_and_its_base_falls_back_to_the_local_branch
     // refs/remotes/upstream/main exists.
     git(
         &f.root,
-        &["remote", "set-url", "origin", "https://github.com/me/widgets.git"],
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/me/widgets.git",
+        ],
     );
     git(
         &f.root,
-        &["remote", "add", "upstream", "https://github.com/acme/widgets.git"],
+        &[
+            "remote",
+            "add",
+            "upstream",
+            "https://github.com/acme/widgets.git",
+        ],
     );
 
-    let scan = scan_root(&f.git, &f.root, None, GITHUB).await.expect("scan");
+    let scan = scan_root(&f.git, &f.root, None, GITHUB)
+        .await
+        .expect("scan");
 
     assert_eq!(scan.github.as_deref(), Some("acme/widgets"));
     assert_eq!(scan.remote.as_deref(), Some("upstream"));
-    assert_eq!(scan.base, "main", "past the missing upstream/HEAD to refs/heads/main");
-    assert_eq!(scan.base_ref, "main", "upstream has no main to diff against yet");
-    assert_eq!(branch_churn(&f.git, &f.one, &scan.base_ref).await.unwrap(), (2, 0));
+    assert_eq!(
+        scan.base, "main",
+        "past the missing upstream/HEAD to refs/heads/main"
+    );
+    assert_eq!(
+        scan.base_ref, "main",
+        "upstream has no main to diff against yet"
+    );
+    assert_eq!(
+        branch_churn(&f.git, &f.one, &scan.base_ref).await.unwrap(),
+        (2, 0)
+    );
 
     // The first fetch of upstream brings its main, without an upstream/HEAD
     // on older gits, and the diff moves there.
     let main = git(&f.root, &["rev-parse", "refs/heads/main"]);
-    git(&f.root, &["update-ref", "refs/remotes/upstream/main", &main]);
+    git(
+        &f.root,
+        &["update-ref", "refs/remotes/upstream/main", &main],
+    );
 
-    let scan = scan_root(&f.git, &f.root, None, GITHUB).await.expect("scan");
+    let scan = scan_root(&f.git, &f.root, None, GITHUB)
+        .await
+        .expect("scan");
 
     assert_eq!(scan.base, "main");
     assert_eq!(scan.base_ref, "upstream/main");
-    assert_eq!(branch_churn(&f.git, &f.one, &scan.base_ref).await.unwrap(), (2, 0));
+    assert_eq!(
+        branch_churn(&f.git, &f.one, &scan.base_ref).await.unwrap(),
+        (2, 0)
+    );
 }
 
 #[tokio::test]
@@ -362,14 +403,24 @@ async fn a_root_whose_origin_is_elsewhere_scans_as_local() {
     let f = RootFixture::new();
     git(
         &f.root,
-        &["remote", "set-url", "origin", "https://gitlab.com/acme/widgets.git"],
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://gitlab.com/acme/widgets.git",
+        ],
     );
 
-    let scan = scan_root(&f.git, &f.root, None, GITHUB).await.expect("scan");
+    let scan = scan_root(&f.git, &f.root, None, GITHUB)
+        .await
+        .expect("scan");
 
     assert_eq!(scan.github, None);
     assert_eq!(scan.remote, None);
-    assert_eq!(scan.base, "main", "origin is not GitHub, so its HEAD does not count");
+    assert_eq!(
+        scan.base, "main",
+        "origin is not GitHub, so its HEAD does not count"
+    );
     assert_eq!(scan.entries.len(), 3);
 }
 
@@ -381,7 +432,10 @@ async fn churn_runs_against_the_scan_s_base_ref_for_github_and_local_roots() {
     git(&f.one, &["commit", "-q", "-m", "work"]);
     let scan = scan_root(&f.git, &f.root, None, GITHUB).await.unwrap();
     assert_eq!(scan.base_ref, "origin/main");
-    assert_eq!(branch_churn(&f.git, &f.one, &scan.base_ref).await.unwrap(), (2, 0));
+    assert_eq!(
+        branch_churn(&f.git, &f.one, &scan.base_ref).await.unwrap(),
+        (2, 0)
+    );
 
     let l = LocalFixture::new("main");
     std::fs::write(l.feature.join("c.txt"), "x\n").unwrap();
@@ -389,7 +443,12 @@ async fn churn_runs_against_the_scan_s_base_ref_for_github_and_local_roots() {
     git(&l.feature, &["commit", "-q", "-m", "work"]);
     let scan = scan_root(&l.git, &l.root, None, GITHUB).await.unwrap();
     assert_eq!(scan.base_ref, "main");
-    assert_eq!(branch_churn(&l.git, &l.feature, &scan.base_ref).await.unwrap(), (1, 0));
+    assert_eq!(
+        branch_churn(&l.git, &l.feature, &scan.base_ref)
+            .await
+            .unwrap(),
+        (1, 0)
+    );
 }
 
 #[tokio::test]
@@ -682,16 +741,33 @@ async fn a_cut_never_removes_a_checkout_at_its_path() {
     f.preparer.ensure_home(&f.id, "main").await.unwrap();
     let from = home_ref("main");
 
-    let first = f.preparer.cut_branch(&f.bare(), &f.id, "perch/issue-42", &from, &[]).await.unwrap();
+    let first = f
+        .preparer
+        .cut_branch(&f.bare(), &f.id, "perch/issue-42", &from, &[])
+        .await
+        .unwrap();
     std::fs::write(first.worktree.join("draft.txt"), "keep me").unwrap();
-    assert_eq!(first.worktree, f.store.worktree_path(&f.id, "perch-issue-42"));
+    assert_eq!(
+        first.worktree,
+        f.store.worktree_path(&f.id, "perch-issue-42")
+    );
 
-    let second = f.preparer.cut_branch(&f.bare(), &f.id, "perch-issue-42", &from, &[]).await.unwrap();
+    let second = f
+        .preparer
+        .cut_branch(&f.bare(), &f.id, "perch-issue-42", &from, &[])
+        .await
+        .unwrap();
 
     assert_eq!(second.branch, "perch-issue-42-2");
     assert_ne!(second.worktree, first.worktree);
-    assert_eq!(std::fs::read_to_string(first.worktree.join("draft.txt")).unwrap(), "keep me");
-    assert_eq!(git(&first.worktree, &["rev-parse", "--abbrev-ref", "HEAD"]), "perch/issue-42");
+    assert_eq!(
+        std::fs::read_to_string(first.worktree.join("draft.txt")).unwrap(),
+        "keep me"
+    );
+    assert_eq!(
+        git(&first.worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "perch/issue-42"
+    );
 }
 
 #[tokio::test]
@@ -704,12 +780,21 @@ async fn a_name_the_caller_reserves_is_skipped_like_one_the_clone_has() {
 
     let cut = f
         .preparer
-        .cut_branch(&f.bare(), &f.id, "feature", &from, &["feature".to_string(), "feature-2".to_string()])
+        .cut_branch(
+            &f.bare(),
+            &f.id,
+            "feature",
+            &from,
+            &["feature".to_string(), "feature-2".to_string()],
+        )
         .await
         .unwrap();
 
     assert_eq!(cut.branch, "feature-3");
-    assert_eq!(git(&cut.worktree, &["rev-parse", "--abbrev-ref", "HEAD"]), "feature-3");
+    assert_eq!(
+        git(&cut.worktree, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "feature-3"
+    );
 }
 
 #[tokio::test]

@@ -1971,7 +1971,12 @@ mod tests {
         assert_eq!(range.worktree_parent.as_deref(), Some(head.as_str()));
         assert_ne!(range.head, head);
         assert_eq!(range.merge_base, head);
-        let paths: Vec<&str> = snapshot.manifest.files.iter().map(|file| file.path.as_str()).collect();
+        let paths: Vec<&str> = snapshot
+            .manifest
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect();
         assert_eq!(paths, ["code.rs", "staged.rs", "untracked.rs"]);
         let diff = String::from_utf8(snapshot.read_diff().unwrap()).unwrap();
         assert!(diff.contains("local edit"));
@@ -1987,7 +1992,10 @@ mod tests {
 
         // Reopened from disk, the manifest still says what it reviewed.
         let reopened = store.open("work").unwrap().unwrap();
-        assert_eq!(reopened.manifest.range.worktree_parent.as_deref(), Some(head.as_str()));
+        assert_eq!(
+            reopened.manifest.range.worktree_parent.as_deref(),
+            Some(head.as_str())
+        );
     }
 
     #[tokio::test]

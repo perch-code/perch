@@ -14,7 +14,7 @@ use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
 use floem::style::{CursorStyle, CustomStylable, Style};
 use floem::views::scroll::ScrollCustomStyle;
 use floem::views::{
-    Container, Decorators, Empty, Label, ScrollExt, Stack, dyn_container, dyn_stack,
+    dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack,
 };
 
 use crate::backend::Backend;
@@ -38,19 +38,16 @@ pub fn tab_bar(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
     // show or goes, and not on every write to the tab.
     let showing_file = floem::reactive::Memo::new(move |_| on_file(state));
     Stack::horizontal((
-        dyn_container(
-            move || state.tabs.with(|t| t.is_empty()),
-            {
-                let backend = backend.clone();
-                move |empty| {
-                    if empty {
-                        strip_rule().style(|s| s.size_full()).into_any()
-                    } else {
-                        open_tabs(state, backend.clone()).into_any()
-                    }
+        dyn_container(move || state.tabs.with(|t| t.is_empty()), {
+            let backend = backend.clone();
+            move |empty| {
+                if empty {
+                    strip_rule().style(|s| s.size_full()).into_any()
+                } else {
+                    open_tabs(state, backend.clone()).into_any()
                 }
-            },
-        )
+            }
+        })
         // A zero basis, so the tabs take the room the notice and the
         // controls leave rather than their full width, which would have
         // squeezed the notice to its glyph; the strip scrolls sideways
@@ -127,7 +124,12 @@ fn open_tabs(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     .style(|s| s.height_full().width_full().scrollbar_width(0.0))
 }
 
-fn tab_view(state: ReviewState, backend: Rc<Backend>, path: String, origin: Origin) -> impl IntoView {
+fn tab_view(
+    state: ReviewState,
+    backend: Rc<Backend>,
+    path: String,
+    origin: Origin,
+) -> impl IntoView {
     let name = path.rsplit('/').next().unwrap_or(&path).to_string();
 
     // Active while the pane shows this file, not merely while it is the
@@ -135,11 +137,15 @@ fn tab_view(state: ReviewState, backend: Rc<Backend>, path: String, origin: Orig
     let (active_box, active_text) = (path.clone(), path.clone());
     let is_active_box = move || {
         state.tab.get() == ItemTab::Code
-            && state.active.with(|a| a.as_deref() == Some(active_box.as_str()))
+            && state
+                .active
+                .with(|a| a.as_deref() == Some(active_box.as_str()))
     };
     let is_active_text = move || {
         state.tab.get() == ItemTab::Code
-            && state.active.with(|a| a.as_deref() == Some(active_text.as_str()))
+            && state
+                .active
+                .with(|a| a.as_deref() == Some(active_text.as_str()))
     };
 
     let dot_path = path.clone();
@@ -162,7 +168,9 @@ fn tab_view(state: ReviewState, backend: Rc<Backend>, path: String, origin: Orig
     .debug_name(debug_name)
     // Its content is asked for when it is not here, as for a tab an item
     // opened on again whose load has failed.
-    .on_event_stop(el::Click, move |_, _| show_file(state, &backend, &select_path))
+    .on_event_stop(el::Click, move |_, _| {
+        show_file(state, &backend, &select_path)
+    })
     .style(move |s| tab_style(s, is_active_box()));
 
     // Where the file is on disk, since the tab has room for its name only.
@@ -206,7 +214,9 @@ fn show_file(state: ReviewState, backend: &Backend, path: &str) {
 /// The files' tabs, when there are files to have them.
 fn strip(state: ReviewState) -> Vec<String> {
     if state.has_files() {
-        state.tabs.with_untracked(|t| t.iter().map(|t| t.path.clone()).collect())
+        state
+            .tabs
+            .with_untracked(|t| t.iter().map(|t| t.path.clone()).collect())
     } else {
         Vec::new()
     }
@@ -284,7 +294,11 @@ fn tab_style(s: Style, active: bool) -> Style {
 /// A tab's name: dark while it shows, muted otherwise.
 fn tab_label(s: Style, active: bool) -> Style {
     s.font_size(theme::TEXT_META)
-        .color(if active { theme::fg() } else { theme::fg_muted() })
+        .color(if active {
+            theme::fg()
+        } else {
+            theme::fg_muted()
+        })
         .text_ellipsis()
         .flex_grow(1.0_f32)
         .min_width(0.0)
@@ -388,14 +402,26 @@ pub fn jump_to_change(state: ReviewState, forward: bool) {
     if state.drawn_picture().is_some() {
         return;
     }
-    let Some(file) = state.active_file() else { return };
+    let Some(file) = state.active_file() else {
+        return;
+    };
     let from = state.cursor_line.get();
-    let target = if forward { file.buffer.next_change(from) } else { file.buffer.previous_change(from) };
+    let target = if forward {
+        file.buffer.next_change(from)
+    } else {
+        file.buffer.previous_change(from)
+    };
     if let Some(display_line) = target {
         state.cursor_line.set(display_line);
         // The editor scrolls by head line, so translate back through the
         // row table; a ghost line has none, so use the line after.
-        let head = file.buffer.rows.iter().skip(display_line).find_map(|r| r.head_line()).unwrap_or(display_line);
+        let head = file
+            .buffer
+            .rows
+            .iter()
+            .skip(display_line)
+            .find_map(|r| r.head_line())
+            .unwrap_or(display_line);
         state.jump_to_line.set(Some(head));
     }
 }
@@ -403,7 +429,11 @@ pub fn jump_to_change(state: ReviewState, forward: bool) {
 fn nav_button(state: ReviewState, forward: bool) -> impl IntoView {
     use crate::ui::widgets::sidebar_glyph;
 
-    let glyph = if forward { SidebarIcon::ChevronDown } else { SidebarIcon::ChevronUp };
+    let glyph = if forward {
+        SidebarIcon::ChevronDown
+    } else {
+        SidebarIcon::ChevronUp
+    };
 
     Container::new(sidebar_glyph(glyph, theme::fg_muted))
         .on_event_stop(el::Click, move |_, _| jump_to_change(state, forward))
@@ -447,10 +477,7 @@ fn tiles(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoVi
         ))
         .debug_name("file tiles")
         .style(move |s| s.items_center().apply_if(!on_file(state), |s| s.hide())),
-        Stack::horizontal((
-            tree_tile(app, backend),
-        ))
-        .style(|s| s.items_center().gap(2.0)),
+        Stack::horizontal((tree_tile(app, backend),)).style(|s| s.items_center().gap(2.0)),
     ))
     .style(|s| {
         s.flex_shrink(0.0_f32)
@@ -507,8 +534,10 @@ fn source_tile(state: ReviewState) -> impl IntoView {
             .with(|a| a.as_deref().is_some_and(|path| state.shows_source(path)))
     };
     tip_with(
-        tile(SidebarIcon::Source, shows_source, move || state.toggle_source())
-            .debug_name("source tile"),
+        tile(SidebarIcon::Source, shows_source, move || {
+            state.toggle_source()
+        })
+        .debug_name("source tile"),
         move || {
             if shows_source() {
                 "Shown as markup. Click to draw the picture.".to_string()
@@ -519,7 +548,12 @@ fn source_tile(state: ReviewState) -> impl IntoView {
     )
 }
 
-fn layout_tile(app: AppState, state: ReviewState, layout: Layout, glyph: SidebarIcon) -> impl IntoView {
+fn layout_tile(
+    app: AppState,
+    state: ReviewState,
+    layout: Layout,
+    glyph: SidebarIcon,
+) -> impl IntoView {
     let active = move || state.layout.get() == layout;
     tile(glyph, active, move || {
         // A write of the same value would still rebuild the editor.
@@ -527,7 +561,8 @@ fn layout_tile(app: AppState, state: ReviewState, layout: Layout, glyph: Sidebar
             return;
         }
         state.layout.set(layout);
-        app.pending_meta.set(Some(("review.layout".into(), layout.name().into())));
+        app.pending_meta
+            .set(Some(("review.layout".into(), layout.name().into())));
     })
     .debug_name(format!("{} tile", layout.name()))
 }
@@ -538,8 +573,10 @@ fn layout_tile(app: AppState, state: ReviewState, layout: Layout, glyph: Sidebar
 fn tree_tile(app: AppState, backend: std::rc::Rc<Backend>) -> impl IntoView {
     let active = move || app.tree_shown();
     tip_with(
-        tile(SidebarIcon::Folder, active, move || drawer::toggle(app, &backend, None))
-            .debug_name("files tile"),
+        tile(SidebarIcon::Folder, active, move || {
+            drawer::toggle(app, &backend, None)
+        })
+        .debug_name("files tile"),
         move || {
             if active() {
                 "Hide the files".to_string()
@@ -559,33 +596,49 @@ fn fold_tile(state: ReviewState) -> impl IntoView {
             .active
             .with(|a| a.as_deref().is_none_or(|path| state.folded(path)))
     };
-    tip_with(tile(SidebarIcon::Fold, folded, move || state.toggle_whole()), move || {
-        if folded() {
-            "Folded to the changes. Click to show the file whole.".to_string()
-        } else {
-            "Shown whole. Click to fold to the changes.".to_string()
-        }
-    })
+    tip_with(
+        tile(SidebarIcon::Fold, folded, move || state.toggle_whole()),
+        move || {
+            if folded() {
+                "Folded to the changes. Click to show the file whole.".to_string()
+            } else {
+                "Shown whole. Click to fold to the changes.".to_string()
+            }
+        },
+    )
 }
 
 /// One `LAYOUT_TILE` square: filled while `active`, a glyph otherwise.
-fn tile(glyph: SidebarIcon, active: impl Fn() -> bool + Copy + 'static, on_click: impl Fn() + 'static) -> impl IntoView {
-    let color = move || if active() { theme::fg() } else { theme::fg_muted() };
+fn tile(
+    glyph: SidebarIcon,
+    active: impl Fn() -> bool + Copy + 'static,
+    on_click: impl Fn() + 'static,
+) -> impl IntoView {
+    let color = move || {
+        if active() {
+            theme::fg()
+        } else {
+            theme::fg_muted()
+        }
+    };
 
-    Container::new(icon_in(move || crate::icons::sidebar_icon(glyph, color()), color))
-        .on_event_stop(el::Click, move |_, _| on_click())
-        .style(move |s| {
-            let base = crate::ui::widgets::clickable(s)
-                .size(theme::LAYOUT_TILE, theme::LAYOUT_TILE)
-                .items_center()
-                .justify_center()
-                .border_radius(4.0);
-            if active() {
-                base.background(theme::badge_bg())
-            } else {
-                base.hover(|s| s.background(theme::canvas_hover()))
-            }
-        })
+    Container::new(icon_in(
+        move || crate::icons::sidebar_icon(glyph, color()),
+        color,
+    ))
+    .on_event_stop(el::Click, move |_, _| on_click())
+    .style(move |s| {
+        let base = crate::ui::widgets::clickable(s)
+            .size(theme::LAYOUT_TILE, theme::LAYOUT_TILE)
+            .items_center()
+            .justify_center()
+            .border_radius(4.0);
+        if active() {
+            base.background(theme::badge_bg())
+        } else {
+            base.hover(|s| s.background(theme::canvas_hover()))
+        }
+    })
 }
 
 #[cfg(test)]
@@ -593,9 +646,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use crate::review::header::tests::{
-        issue_harness, named, pull_request_harness, rect, within,
-    };
+    use crate::review::header::tests::{issue_harness, named, pull_request_harness, rect, within};
     use crate::review::model::ItemTab;
 
     /// The tree's tile, after the layout tiles: a click opens the tree in
@@ -614,7 +665,10 @@ mod tests {
         state.open_tab("README.md");
         state.code_seen.set(true);
         state.show_tab(ItemTab::Code);
-        state.tree.set(Arc::new(vec![perch_git::TreeEntry::new("README.md", false)]));
+        state.tree.set(Arc::new(vec![perch_git::TreeEntry::new(
+            "README.md",
+            false,
+        )]));
         harness.rebuild();
         harness.paint();
         assert!(!app.tree_shown());
@@ -624,7 +678,10 @@ mod tests {
         let files = rect(&harness, "files tile");
         assert!(split.x1 <= files.x0, "after the layout tiles");
         assert!(within(files, tabs));
-        assert!(named(harness.root_id(), "agents tile").is_none(), "the agents have no tile");
+        assert!(
+            named(harness.root_id(), "agents tile").is_none(),
+            "the agents have no tile"
+        );
 
         harness.click(files.center().x, files.center().y);
         harness.rebuild();
@@ -634,7 +691,11 @@ mod tests {
         assert_eq!(drawer.x1, 1400.0);
         assert_eq!(drawer.width(), theme::DRAWER_WIDTH);
         assert_eq!(drawer.y0, tabs.y1, "the drawer starts under the tabs");
-        assert_eq!(rect(&harness, "tab strip"), tabs, "the tabs run over the drawer");
+        assert_eq!(
+            rect(&harness, "tab strip"),
+            tabs,
+            "the tabs run over the drawer"
+        );
         assert_eq!(rect(&harness, "files tile"), files, "the tile stays put");
         assert_eq!(
             rect(&harness, "pane-body").x1,
@@ -683,14 +744,22 @@ mod tests {
         harness.paint();
         assert!(!app.tree_available());
         assert!(!app.tree_shown());
-        assert_eq!(rect(&harness, "pane-body").x1, 1400.0, "the body has the window");
+        assert_eq!(
+            rect(&harness, "pane-body").x1,
+            1400.0,
+            "the body has the window"
+        );
 
         state.begin("Reading the issue");
         harness.rebuild();
         harness.paint();
         assert!(!app.tree_available(), "an item on its way has no tree");
         assert!(app.tree_open.get() && !app.tree_shown());
-        assert_eq!(rect(&harness, "pane-body").x1, 1400.0, "the body has the window");
+        assert_eq!(
+            rect(&harness, "pane-body").x1,
+            1400.0,
+            "the body has the window"
+        );
     }
 
     /// Code's strip is the files' tabs, the first at its left edge, then
@@ -706,8 +775,15 @@ mod tests {
         let strip = rect(&harness, "tab strip");
         let file = rect(&harness, "file tab:src/x.rs");
         assert_eq!(file.x0, strip.x0, "the file's tab is first");
-        assert_eq!((file.y0, file.y1), (strip.y0, strip.y1), "a file's tab fills the strip");
-        assert!(named(harness.root_id(), "chat").is_none(), "no Conversation in the strip");
+        assert_eq!(
+            (file.y0, file.y1),
+            (strip.y0, strip.y1),
+            "a file's tab fills the strip"
+        );
+        assert!(
+            named(harness.root_id(), "chat").is_none(),
+            "no Conversation in the strip"
+        );
         assert!(rect(&harness, "file tiles").width() > 0.0);
         assert!(rect(&harness, "file tiles").x1 <= rect(&harness, "files tile").x0);
         let rule = rect(&harness, "tabs rule");
@@ -792,7 +868,8 @@ mod tests {
     #[test]
     fn show_whole_is_the_open_tabs_alone_and_goes_with_the_tab() {
         let state = ReviewState::new();
-        let mut item = perch_github::Item::new("slatedb/slatedb", "2026-09-18T09:59:00Z".parse().unwrap());
+        let mut item =
+            perch_github::Item::new("slatedb/slatedb", "2026-09-18T09:59:00Z".parse().unwrap());
         item.id = "wt".into();
         state.item.set(Some(Arc::new(item)));
 
