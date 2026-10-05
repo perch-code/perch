@@ -4701,6 +4701,22 @@ impl ReviewState {
         }
     }
 
+    /// Whether the composer's text, sent to GitHub, posts at once as a
+    /// reply: it answers a thread that is on GitHub, as github.com's
+    /// Reply does, rather than waiting in a draft for the review. A draft
+    /// being edited stays one. Untracked.
+    pub fn posts_reply(&self, composer: &Composer) -> bool {
+        let Some(id) = composer.thread_id.as_deref() else {
+            return false;
+        };
+        composer.editing.is_none()
+            && self.comment_threads.with_untracked(|t| {
+                t.iter()
+                    .find(|t| t.id == id)
+                    .is_some_and(|t| t.github_id.is_some())
+            })
+    }
+
     /// The backend complained about something, which may be the send
     /// whose thread a sent question's card is waiting for. The card's rows
     /// are given up, so a failed send does not leave blank rows under the

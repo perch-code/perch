@@ -2527,6 +2527,16 @@ impl AppState {
                     review.settle_issue_comment(token, result);
                 }
             }
+            // The reply came in the threads before this.
+            Event::ReplyPosted {
+                item_id,
+                token,
+                result,
+            } => {
+                if review.is_item(&item_id) {
+                    review.settle_issue_comment(token, result);
+                }
+            }
             // A thread resolved after its suggestion is committed folds
             // as one resolved by hand does, until `ThreadResolveSettled`.
             Event::SuggestionCommitted {
@@ -3058,6 +3068,7 @@ impl AppState {
             | Event::PullRequestClosed { .. }
             | Event::IssueClosed { .. }
             | Event::SuggestionApplied { .. }
+            | Event::ReplyPosted { .. }
             | Event::SuggestionCommitted { .. }
             | Event::IssueUpdated { .. }
             | Event::IssueClosable { .. }

@@ -3409,6 +3409,27 @@ impl Cache {
         Ok(())
     }
 
+    /// A reply posted under its thread on its own, as `comment`: `m` goes
+    /// in as a draft and is marked posted in one transaction, so it is
+    /// never a draft that would post again.
+    pub fn insert_posted_reply(
+        &self,
+        m: &CommentMessage,
+        comment: &crate::discussion::ReviewComment,
+    ) -> Result<(), CacheError> {
+        if !m.is_draft() {
+            return Err(CacheError::Corrupt(format!(
+                "comment message {} is not a draft",
+                m.id
+            )));
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        insert_comment_message_on(&tx, m)?;
+        mark_draft_posted_on(&tx, &m.id, comment, false)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Find the drafts that rode in review `review_id` among the comments
     /// GitHub lists for it, and mark each found one posted. A draft matches
     /// a comment of the review that opens a thread at its anchor: same

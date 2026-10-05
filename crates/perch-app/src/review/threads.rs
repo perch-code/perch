@@ -470,6 +470,18 @@ pub fn composer_view(
                 state.start_posting(token, body);
                 return;
             }
+            // A reply under GitHub's thread posts at once too, as
+            // github.com's Reply does, unasked: it lands where it was
+            // written.
+            if composer.destination.is_github() && state.posts_reply(&composer) {
+                if let Some(thread_id) = &composer.thread_id {
+                    let body = question.trim().to_string();
+                    let token = backend.reply_to_thread(&item_id, thread_id, &body);
+                    state.last_destination[face.index()].set(Some(composer.destination.clone()));
+                    state.start_posting(token, body);
+                }
+                return;
+            }
             // On a worktree GitHub has no pull request for, a suggestion
             // is the reader's own edit: it goes into the file at once,
             // as Commit suggestion puts it there on github.com.
@@ -1377,6 +1389,8 @@ fn send_label(state: ReviewState) -> String {
         Some(c) if c.destination.is_github() => {
             if state.posts_issue_comment(c) {
                 "Comment".to_string()
+            } else if state.posts_reply(c) {
+                "Reply".to_string()
             } else {
                 "Add to review".to_string()
             }
@@ -1388,7 +1402,8 @@ fn send_label(state: ReviewState) -> String {
 /// The one high-contrast action in the composer, matching Codex's dark
 /// primary controls while the model and effort remain quiet selectors.
 /// `Send` to an agent; `Add to review` when the text is bound for GitHub;
-/// `Comment`, then `Post`, for an issue comment.
+/// `Reply` under GitHub's thread; `Comment`, then `Post`, for an issue
+/// comment.
 fn send_button(label: impl Fn() -> String + 'static, on_click: Rc<dyn Fn()>) -> impl IntoView {
     Container::new(
         Stack::horizontal((
@@ -6786,8 +6801,8 @@ mod tests {
 
     /// At the foot of a pull request's conversation GitHub is offered
     /// and posts an issue comment: under a thread that is on GitHub it is
-    /// a reply for the review, under one of Perch's own with no lines it
-    /// is an issue comment too, and on an issue it is not offered.
+    /// a reply that posts at once, under one of Perch's own with no lines
+    /// it is an issue comment too, and on an issue it is not offered.
     #[test]
     fn github_is_offered_at_the_foot_of_a_pull_request_and_posts_at_once() {
         let state = state_with_pull_request();
@@ -6809,7 +6824,9 @@ mod tests {
         state.open_composer(Some("theirs".into()), None, String::new(), sonnet_medium());
         let reply = state.composer.get().unwrap();
         assert!(state.github_offered(&reply));
-        assert!(!state.posts_issue_comment(&reply), "a reply on GitHub's thread is a draft");
+        assert!(!state.posts_issue_comment(&reply), "a reply, not an issue comment");
+        assert!(state.posts_reply(&reply), "a reply on GitHub's thread posts at once");
+        assert!(!state.posts_reply(&foot));
 
         state.open_composer(Some("ours".into()), None, String::new(), sonnet_medium());
         let follow_up = state.composer.get().unwrap();
@@ -6957,6 +6974,72 @@ mod tests {
             state.composer.get().unwrap().destination,
             Destination::agent(sonnet_medium())
         );
+    }
+
+    /// Under a thread that is on GitHub the button reads Reply, and a send
+    /// posts the reply at once, unasked, as github.com's Reply does: no
+    /// draft waits for the review. The box is still while it goes, a
+    /// refusal keeps the text, and a reply that posted closes the
+    /// composer. A draft under the thread, edited, stays a draft.
+    #[test]
+    fn a_reply_under_githubs_thread_posts_at_once() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_pull_request();
+        let thread = github_thread_with_private_messages();
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        state.open_composer(Some(thread.id.clone()), None, "Fixed in abc".into(), sonnet_medium());
+        state.set_destination(Destination::GitHub);
+        let composer = state.composer.get().unwrap();
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Card);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        let root_id = harness.root_id();
+        assert!(find(root_id, "Label: \"Reply\"").is_some());
+        assert!(find(root_id, "Label: \"Add to review\"").is_none());
+
+        harness.dispatch_event(enter(Modifiers::META));
+        harness.rebuild();
+        harness.paint();
+        assert!(!state.composer_confirming.get(), "a reply is not asked about");
+        let token = match commands.try_recv() {
+            Ok(Command::ReplyToThread {
+                item_id,
+                token,
+                thread_id,
+                body,
+            }) => {
+                assert_eq!(item_id, "item-1");
+                assert_eq!(thread_id, thread.id);
+                assert_eq!(body, "Fixed in abc");
+                token
+            }
+            other => panic!("Cmd-Enter did not reply: {other:?}"),
+        };
+        assert!(commands.try_recv().is_err(), "no draft beside it");
+        assert_eq!(state.posting.get().map(|p| p.token), Some(token));
+        assert!(find(harness.root_id(), "composer-posting").is_some());
+
+        state.settle_issue_comment(token, Err("GitHub could not post the reply: 422".into()));
+        harness.rebuild();
+        harness.paint();
+        assert!(state.composer.get().is_some(), "refused, the text stays");
+        assert_eq!(state.composer_draft.get(), "Fixed in abc");
+
+        click(&mut harness, "composer-send");
+        let token = match commands.try_recv() {
+            Ok(Command::ReplyToThread { token, .. }) => token,
+            other => panic!("Reply did not reply: {other:?}"),
+        };
+        state.settle_issue_comment(token, Ok(()));
+        assert!(state.composer.get().is_none(), "posted, the composer closes");
+
+        state.open_composer(Some(thread.id.clone()), None, "draft".into(), sonnet_medium());
+        state.composer.update(|c| c.as_mut().unwrap().editing = Some("draft-1".into()));
+        let editing = state.composer.get().unwrap();
+        assert!(!state.posts_reply(&editing), "an edited draft stays one");
     }
 
     /// Close with comment sits beside Comment for the pull request's

@@ -659,6 +659,14 @@ pub enum Command {
         token: u64,
         body: String,
     },
+    /// Reply under a thread that is on GitHub, at once, as github.com's
+    /// Reply does: no draft and no review. `token` is `PostIssueComment`'s.
+    ReplyToThread {
+        item_id: String,
+        token: u64,
+        thread_id: String,
+        body: String,
+    },
     /// Make `original`'s lines of `path`, in the open item's worktree,
     /// read `lines`: a suggestion on a worktree GitHub has no pull request
     /// for, taken as it is sent. `token` is `PostIssueComment`'s; the
@@ -1342,6 +1350,13 @@ pub enum Event {
         item_id: String,
         token: u64,
         result: Result<Arc<perch_github::IssueComment>, String>,
+    },
+    /// GitHub took the reply under a thread, or said why not. On success
+    /// the reply is already in the threads sent out before this.
+    ReplyPosted {
+        item_id: String,
+        token: u64,
+        result: Result<(), String>,
     },
     /// The suggestion is in the file, or why not.
     SuggestionApplied {
@@ -3406,6 +3421,19 @@ impl Backend {
         token
     }
 
+    /// Reply under `thread_id`, a thread on GitHub, now. The token comes
+    /// back on `ReplyPosted`.
+    pub fn reply_to_thread(&self, item_id: &str, thread_id: &str, body: &str) -> u64 {
+        let token = next_posting_token();
+        let _ = self.commands.send(Command::ReplyToThread {
+            item_id: item_id.to_string(),
+            token,
+            thread_id: thread_id.to_string(),
+            body: body.to_string(),
+        });
+        token
+    }
+
     /// Put a suggestion into the open worktree's file. The token comes
     /// back on `SuggestionApplied`.
     pub fn apply_suggestion(
@@ -4797,6 +4825,17 @@ async fn run(
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     post_issue_comment(&ctx, &item_id, token, &body).await;
+                });
+            }
+            Command::ReplyToThread {
+                item_id,
+                token,
+                thread_id,
+                body,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    reply_to_thread(&ctx, &item_id, token, &thread_id, &body).await;
                 });
             }
             Command::ApplySuggestion {
@@ -10531,6 +10570,69 @@ async fn post_issue_comment(ctx: &Ctx, item_id: &str, token: u64, body: &str) {
         None => show_posted_issue_comment(ctx, item_id, &comment).await,
     }
     answer(Ok(Arc::new(comment)));
+}
+
+/// Reply under a thread that is on GitHub, at once. The reply goes under
+/// the thread in the cache as a posted message, as a draft that rode out
+/// after a review does, and the threads go out before the answer, so the
+/// composer closes on a thread that shows it. The discussion is fetched
+/// after for the views that read GitHub's list.
+async fn reply_to_thread(ctx: &Ctx, item_id: &str, token: u64, thread_id: &str, body: &str) {
+    let answer = |result: Result<(), String>| {
+        if let Err(message) = &result {
+            tracing::info!(item = item_id, %message, "reply not posted");
+        }
+        let _ = ctx.events.send(Event::ReplyPosted {
+            item_id: item_id.to_string(),
+            token,
+            result,
+        });
+    };
+    let Some(pull_request) = ctx
+        .item(item_id)
+        .and_then(|item| item.pull_request().cloned())
+    else {
+        return answer(Err("Only a pull request's threads take a reply".into()));
+    };
+    let root = ctx
+        .with_cache(|c| c.load_comment_threads(item_id))
+        .and_then(Result::ok)
+        .and_then(|all| all.into_iter().find(|t| t.id == thread_id))
+        .and_then(|t| t.github_id);
+    let Some(root) = root else {
+        return answer(Err("That thread is not on GitHub".into()));
+    };
+    let Some(github) = ctx.github() else {
+        return answer(Err("GitHub is unavailable while Perch is offline".into()));
+    };
+    let comment = match github
+        .reply_to_review_comment(&pull_request.repo_full_name, pull_request.number, root, body)
+        .await
+    {
+        Ok(comment) => comment,
+        Err(error) => return answer(Err(format!("GitHub could not post the reply: {error}"))),
+    };
+    let message = CommentMessage {
+        id: perch_github::comments::new_id(),
+        thread_id: thread_id.to_string(),
+        origin: ThreadOrigin::GitHub,
+        author: Author::User,
+        body: body.to_string(),
+        created_at: comment.created_at,
+        run: None,
+        github_id: None,
+        node_id: None,
+        html_url: None,
+        diff_hunk: None,
+        reactions: Default::default(),
+    };
+    if let Some(Err(e)) = ctx.with_cache(|c| c.insert_posted_reply(&message, &comment)) {
+        tracing::warn!(item = item_id, %e, "posted a reply but could not keep it");
+    }
+    ctx.send_threads(item_id);
+    answer(Ok(()));
+    let discussion_generation = ctx.discussion_requests.begin(item_id);
+    fetch_discussion(ctx, item_id, &pull_request, discussion_generation).await;
 }
 
 /// Commit a suggestion on the item's pull request, as Apply suggestion
@@ -23277,6 +23379,94 @@ read eof || true
             "html_url": format!("https://github.com/a/b/pull/7#discussion_r{id}"),
         })
         .to_string()
+    }
+
+    /// A reply under GitHub's thread posts at once, under the thread's
+    /// root and in no review. It is under the thread before the answer
+    /// goes out, and the discussion read after finds it there rather
+    /// than adding it twice.
+    #[tokio::test]
+    async fn a_reply_under_githubs_thread_posts_at_once_and_is_kept_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = review_comment_json(31, None, "rohan", "epoch");
+        let reply = review_comment_json(602, Some(31), "chris", "I will fix it");
+        let listed = format!("[{root},{reply}]");
+        let posted: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = posted.clone();
+        let (base, _) = serve_by_body(move |method, path, _, body| {
+            let path = path.split('?').next().unwrap_or(path);
+            match (method, path) {
+                ("GET", "/repos/a/b/pulls/7") => ("200 OK", PULL_7.to_string()),
+                ("POST", "/repos/a/b/pulls/7/comments") => {
+                    seen.lock().unwrap().push(body.to_string());
+                    ("201 Created", reply.clone())
+                }
+                ("GET", "/repos/a/b/pulls/7/comments") => ("200 OK", listed.clone()),
+                ("GET", _) => ("200 OK", "[]".to_string()),
+                _ => ("404 Not Found", "{}".to_string()),
+            }
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let item = store_pull(&ctx, 7);
+        store_line_commented_discussion(&ctx, &item);
+        open_in_slot_at(&ctx, &item, "h7");
+
+        reply_to_thread(&ctx, &item.id, 4, "gh-31", "I will fix it").await;
+
+        let posted = posted.lock().unwrap().clone();
+        assert_eq!(posted.len(), 1);
+        let request: serde_json::Value = serde_json::from_str(&posted[0]).unwrap();
+        assert_eq!(request["in_reply_to"], 31);
+        assert_eq!(request["body"], "I will fix it");
+        let events: Vec<Event> = received.try_iter().collect();
+        let answered = events
+            .iter()
+            .position(|e| matches!(e, Event::ReplyPosted { token: 4, result: Ok(()), .. }))
+            .expect("answered");
+        let threads_sent = events
+            .iter()
+            .position(|e| matches!(e, Event::CommentThreads { .. }))
+            .expect("threads sent");
+        assert!(threads_sent < answered, "{events:?}");
+
+        assert!(ctx.with_cache(|c| c.load_drafts(&item.id)).unwrap().unwrap().is_empty());
+        let threads = threads_of(&ctx, &item);
+        assert_eq!(threads.len(), 1);
+        let replies: Vec<_> = threads[0]
+            .messages
+            .iter()
+            .filter(|m| m.github_id == Some(602))
+            .collect();
+        assert_eq!(replies.len(), 1, "{:?}", threads[0].messages);
+        assert_eq!(replies[0].author, Author::User);
+    }
+
+    #[tokio::test]
+    async fn a_reply_github_refuses_is_answered_and_nothing_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, _) = serve_by_method(|method, path, _| match (method, path) {
+            ("POST", "/repos/a/b/pulls/7/comments") => {
+                ("422 Unprocessable Entity", r#"{"message":"nope"}"#.to_string())
+            }
+            _ => ("404 Not Found", "{}".to_string()),
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let item = store_pull(&ctx, 7);
+        store_line_commented_discussion(&ctx, &item);
+        let before = threads_of(&ctx, &item);
+
+        reply_to_thread(&ctx, &item.id, 5, "gh-31", "I will fix it").await;
+
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            matches!(
+                &events[..],
+                [Event::ReplyPosted { token: 5, result: Err(message), .. }]
+                    if message.contains("could not post the reply")
+            ),
+            "{events:?}"
+        );
+        assert_eq!(threads_of(&ctx, &item), before);
     }
 
     #[tokio::test]
