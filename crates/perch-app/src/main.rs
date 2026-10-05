@@ -104,8 +104,11 @@ fn main() {
     tracing::info!("perch starting");
     let config = perch_github::Config::load();
     theme::set_display(config.display);
-    theme::install_code_font(config.ui.code_font.as_deref());
+    let ui = config.ui;
+    theme::install_code_font(ui.code_font.as_deref());
     theme::install_symbol_fallbacks();
+    let preferred = theme::Appearance::chosen(ui.appearance);
+    theme::prefer(preferred);
 
     windows::load_frame();
     let (backend, events) = backend::spawn();
@@ -129,6 +132,11 @@ fn main() {
                 windows::reopen();
             }
         });
+    // floem's own widgets, and on macOS the window's frame, in the
+    // appearance `[ui] appearance` names, in every window.
+    if let Some(appearance) = preferred {
+        floem::action::set_global_theme(appearance.into());
+    }
     // After the application, which AppKit's screens are asked of.
     let (config, frame) = windows::config();
     app.window(
