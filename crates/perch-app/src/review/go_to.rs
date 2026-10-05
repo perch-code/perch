@@ -1106,7 +1106,9 @@ pub fn accept(state: ReviewState, open_file: &OpenFile, index: usize) {
 
 /// The palette's keys, from the window while it is up: Escape, Enter,
 /// the arrows, Ctrl-N and Ctrl-P, the page keys, and Cmd-P again, which
-/// walks down the list as VS Code's does. The rest are the box's.
+/// walks down the list as VS Code's does. Off macOS the command key is
+/// Ctrl, so Ctrl-P is Cmd-P's and walks down, as it does in VS Code there,
+/// and only the arrows and Page Up walk up. The rest are the box's.
 pub fn key(state: ReviewState, open_file: &OpenFile, key: &KeyboardEvent) -> EventPropagation {
     // A key an input method is composing with is the method's: Enter
     // takes what it composed.
@@ -1122,7 +1124,7 @@ pub fn key(state: ReviewState, open_file: &OpenFile, key: &KeyboardEvent) -> Eve
         Code::ArrowUp if plain => step(state, -1),
         Code::KeyP if key.modifiers == OS_MOD => step(state, 1),
         Code::KeyN if ctrl => step(state, 1),
-        Code::KeyP if ctrl => step(state, -1),
+        Code::KeyP if ctrl && cfg!(target_os = "macos") => step(state, -1),
         Code::PageDown if plain => page(state, true),
         Code::PageUp if plain => page(state, false),
         // Tab would walk the keyboard out of the box, and there is
@@ -2279,6 +2281,26 @@ mod window {
             "shown in the tree"
         );
         assert_eq!(state.recent(), ["src/lib/config.rs", "src/x.rs"]);
+    }
+
+    /// Ctrl-N walks down. Ctrl-P walks up on a Mac, as Emacs's keys do in
+    /// any list there; elsewhere it is the command key's P, and walks down.
+    #[test]
+    fn ctrl_n_walks_down_and_ctrl_p_up_only_where_it_is_not_the_command_key() {
+        let (mut harness, state) = harness();
+        cmd_p(&mut harness);
+        typed(&mut harness, "s");
+        let ctrl = |harness: &mut HeadlessHarness, code: Code, ch: &str| {
+            harness.dispatch_event(key(code, Key::Character(ch.into()), Modifiers::CONTROL));
+            settle(harness);
+        };
+        ctrl(&mut harness, Code::KeyN, "n");
+        ctrl(&mut harness, Code::KeyN, "n");
+        assert_eq!(state.go_to.selected.get(), 2);
+        ctrl(&mut harness, Code::KeyP, "p");
+        let after = if cfg!(target_os = "macos") { 1 } else { 3 };
+        assert_eq!(state.go_to.selected.get(), after);
+        assert!(state.go_to.open.get());
     }
 
     #[test]
