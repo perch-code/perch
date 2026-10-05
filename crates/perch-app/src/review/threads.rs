@@ -4908,8 +4908,9 @@ mod tests {
     /// any native box, and the box keeps the keyboard through them. Alt
     /// with an arrow is also the key floem walks the focus with, and a
     /// button beside the box used to take it, with the next keystroke.
+    /// Off macOS the word keys are Ctrl-Left and Ctrl-Right.
     #[test]
-    fn option_arrows_move_the_caret_by_a_word_and_keep_the_keyboard() {
+    fn word_arrows_move_the_caret_by_a_word_and_keep_the_keyboard() {
         let root = TestRoot::new();
         let app = AppState::new();
         let state = ReviewState::new();
@@ -4942,7 +4943,12 @@ mod tests {
         let text_box = state.composer_box.get().expect("the box registered itself");
         assert!(harness.is_focused(text_box), "the box took the keyboard");
 
-        let alt = |code: Code, name: NamedKey| key(Key::Named(name), code, Modifiers::ALT);
+        let word_key = if cfg!(target_os = "macos") {
+            Modifiers::ALT
+        } else {
+            Modifiers::CONTROL
+        };
+        let alt = |code: Code, name: NamedKey| key(Key::Named(name), code, word_key);
         let typed = |ch: &str, code: Code| key(Key::Character(ch.into()), code, Modifiers::empty());
 
         // The draft is typed under, so the caret starts at its end.
