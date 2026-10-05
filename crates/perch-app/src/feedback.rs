@@ -12,7 +12,7 @@ use regex::Regex;
 use crate::state::Tone;
 
 /// Where every report goes.
-pub const REPO: &str = "criccomini/perch";
+pub const REPO: &str = "perch-code/perch";
 
 /// GitHub refuses an issue body past this many characters.
 pub const BODY_LIMIT: usize = 65_536;
@@ -793,7 +793,7 @@ root /Users/alice/Code/rocket/src
 other /private/tmp/alice/x
 mail alice@example.com and 123+alice@users.noreply.github.com
 remote git@github.com:acme/rocket.git
-repo ACME/rocket and criccomini/perch";
+repo ACME/rocket and perch-code/perch";
         let (out, count) = redact(text, &secrets);
         assert!(!out.contains("s3cret"), "{out}");
         assert!(!out.contains("ghp_"), "{out}");
@@ -808,7 +808,7 @@ repo ACME/rocket and criccomini/perch";
             "{out}"
         );
         assert!(out.contains("git@github.com:‹repo›.git"), "{out}");
-        assert!(out.contains("repo ‹repo› and criccomini/perch"), "{out}");
+        assert!(out.contains("repo ‹repo› and perch-code/perch"), "{out}");
         // token, ghp, pat, sk-ant, bearer, root path, user, email, two repos
         assert_eq!(count, 10, "{out}");
     }
@@ -897,7 +897,7 @@ repo ACME/rocket and criccomini/perch";
         assert_eq!(
             search_query("rust-analyzer failed: the language server did not answer in time")
                 .as_deref(),
-            Some("repo:criccomini/perch is:issue is:open in:title rust-analyzer failed language")
+            Some("repo:perch-code/perch is:issue is:open in:title rust-analyzer failed language")
         );
         assert_eq!(search_query("a b"), None);
     }

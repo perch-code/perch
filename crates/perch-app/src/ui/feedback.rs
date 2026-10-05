@@ -125,6 +125,7 @@ pub fn open(app: AppState, review: ReviewState, kind: FeedbackKind, opener: Opti
     crate::review::review_menu::close(review, false);
     crate::ui::agents::dropdown::close(review, false);
     crate::ui::usage::close(review, false);
+    crate::ui::invite::close(review, false);
     if app.feedback.with_untracked(Option::is_none) {
         app.feedback.set(Some(FeedbackDraft::new(kind)));
     }
@@ -1770,7 +1771,7 @@ mod tests {
                 ref text,
                 open: Some(ToastOpen::Subject { number: 123, .. }),
                 ..
-            } if text == "Filed criccomini/perch#123"
+            } if text == "Filed perch-code/perch#123"
         ));
     }
 
@@ -1807,7 +1808,7 @@ mod tests {
             app,
             review,
             Event::FeedbackFailed(SendError {
-                message: "Your token can't open issues on criccomini/perch.".into(),
+                message: "Your token can't open issues on perch-code/perch.".into(),
                 forbidden: true,
             }),
         );
@@ -1823,7 +1824,7 @@ mod tests {
         assert_eq!(
             opened,
             vec![
-                "https://github.com/criccomini/perch/issues/new?title=rust-analyzer+failed"
+                "https://github.com/perch-code/perch/issues/new?title=rust-analyzer+failed"
                     .to_string()
             ]
         );

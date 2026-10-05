@@ -284,6 +284,7 @@ mod tests {
             actor: Some(UserPayload {
                 login: "criccomini".into(),
                 avatar_url: "https://avatars/1".into(),
+                kind: String::new(),
             }),
         }
     }

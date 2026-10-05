@@ -503,6 +503,14 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M2.8 13.6 C2.8 10.6 5.1 9.1 8 9.1 S13.2 10.6 13.2 13.6" fill="none"
                      stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>"#
         ),
+        // The Person, moved left and smaller, with a plus: invite someone.
+        SidebarIcon::Invite => format!(
+            r#"<circle cx="5.8" cy="5.5" r="2.5" fill="none" stroke="{c}" stroke-width="1.4"/>
+               <path d="M1.1 13.6 C1.1 10.9 3.2 9.3 5.8 9.3 S10.5 10.9 10.5 13.6" fill="none"
+                     stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>
+               <path d="M12.5 3.6 V8.4 M10.1 6 H14.9" fill="none" stroke="{c}"
+                     stroke-width="1.4" stroke-linecap="round"/>"#
+        ),
         SidebarIcon::Tag => format!(
             r#"<path d="M2.2 2.2 H7.6 L13.8 8.4 L8.4 13.8 L2.2 7.6 Z" fill="none" stroke="{c}"
                      stroke-width="1.4" stroke-linejoin="round"/>
@@ -667,13 +675,16 @@ pub enum SidebarIcon {
     File,
     /// A beetle: report a bug.
     Bug,
+    /// A head and shoulders with a plus: invite someone.
+    Invite,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 70] = [
+    pub const ALL: [SidebarIcon; 71] = [
+        SidebarIcon::Invite,
         SidebarIcon::Bug,
         SidebarIcon::Waiting,
         SidebarIcon::File,

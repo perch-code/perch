@@ -1425,6 +1425,12 @@ pub struct ReviewState {
     pub feedback_open: RwSignal<bool>,
     pub feedback_opener: RwSignal<Option<floem::ViewId>>,
     pub feedback_anchor: RwSignal<Option<floem::ViewId>>,
+    /// The invite popover over the drawer's footer, the same way, and
+    /// what is typed in it, kept while it is shut.
+    pub invite_open: RwSignal<bool>,
+    pub invite_opener: RwSignal<Option<floem::ViewId>>,
+    pub invite_anchor: RwSignal<Option<floem::ViewId>>,
+    pub invite: RwSignal<crate::invite::InviteDraft>,
     pub submit_review_focused: RwSignal<bool>,
     pub submit_review_autofocus: RwSignal<bool>,
     /// The backend-assigned attempt currently in flight, if any.
@@ -1962,6 +1968,10 @@ impl ReviewState {
             feedback_open: RwSignal::new(false),
             feedback_opener: RwSignal::new(None),
             feedback_anchor: RwSignal::new(None),
+            invite_open: RwSignal::new(false),
+            invite_opener: RwSignal::new(None),
+            invite_anchor: RwSignal::new(None),
+            invite: RwSignal::new(Default::default()),
             submit_review_focused: RwSignal::new(false),
             submit_review_autofocus: RwSignal::new(true),
             submit_review_pending: RwSignal::new(None),

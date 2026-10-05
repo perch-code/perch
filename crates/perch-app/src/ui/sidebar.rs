@@ -122,7 +122,7 @@ fn toggle_button(state: AppState) -> impl IntoView {
 
 /// The strip along the drawer's foot, as tall as the bar over the main
 /// pane: who is signed in, then what belongs to the app rather than to an
-/// item, bug reports and plan usage.
+/// item, invites, bug reports and plan usage.
 fn footer(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     let login = move || state.viewer.with(|v| v.as_ref().map(|(l, _)| l.clone()).unwrap_or_default());
     let url = move || state.viewer.with(|v| v.as_ref().map(|(_, a)| a.clone()).unwrap_or_default());
@@ -134,6 +134,7 @@ fn footer(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     .style(|s| s.flex_shrink(0.0_f32));
     let controls = match state.review.get_untracked() {
         Some(review) => Stack::horizontal((
+            crate::ui::invite::button(state, review, backend.clone()),
             crate::ui::feedback::button(state, review, backend.clone()),
             crate::ui::usage::button(state, review, backend),
         ))

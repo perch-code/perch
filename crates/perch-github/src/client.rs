@@ -1744,6 +1744,13 @@ impl GitHub {
         serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))
     }
 
+    /// A user or organization by login, or `Error::Status` 404 when there
+    /// is none.
+    pub async fn user(&self, login: &str) -> Result<crate::model::UserPayload, Error> {
+        let body = self.get_text(&format!("/users/{login}")).await?;
+        serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))
+    }
+
     /// The conversation on an issue, read to the end.
     pub async fn fetch_issue_comments(
         &self,

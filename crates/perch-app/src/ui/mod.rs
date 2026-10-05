@@ -4,6 +4,7 @@ pub mod agents;
 pub mod browse;
 pub mod drawer;
 pub mod feedback;
+pub mod invite;
 pub mod items;
 pub mod menu;
 pub mod nav_row;
@@ -470,6 +471,14 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     && review.feedback_open.get_untracked()
                 {
                     feedback::close(review, true);
+                    return EventPropagation::Stop;
+                }
+                // And the invite popover.
+                if key.code == Code::Escape
+                    && key.modifiers.is_empty()
+                    && review.invite_open.get_untracked()
+                {
+                    invite::close(review, true);
                     return EventPropagation::Stop;
                 }
                 // Page Up and Page Down move Conversation or the open file
@@ -1014,6 +1023,9 @@ fn dismiss_popovers(review: ReviewState, hit_path: Option<&[floem::ElementId]>) 
     }
     if review.feedback_open.get_untracked() && !inside(review.feedback_anchor.get_untracked()) {
         feedback::close(review, false);
+    }
+    if review.invite_open.get_untracked() && !inside(review.invite_anchor.get_untracked()) {
+        invite::close(review, false);
     }
 }
 

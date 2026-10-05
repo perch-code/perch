@@ -170,6 +170,7 @@ pub fn open(review: ReviewState, backend: &Backend, opener: Option<floem::ViewId
     crate::review::review_menu::close(review, false);
     crate::ui::usage::close(review, false);
     crate::ui::feedback::close(review, false);
+    crate::ui::invite::close(review, false);
     review.agents_dropdown_opener.set(opener);
     review.agents_dropdown_open.set(true);
     backend.load_agent_runs(RECENT_RUNS);

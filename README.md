@@ -47,12 +47,12 @@ you open. Writes also need:
 | Comment, review, resolve threads, react on a PR, open a PR | Pull requests: write |
 | Merge, push a branch | Contents: write |
 | React on an issue, Close as issue | Issues: write |
-| Send feedback | Issues: write on `criccomini/perch` |
+| Send feedback, invite someone | Issues: write on `perch-code/perch` |
 
 A fine-grained token can only write to repositories its owner picked, so it
-can't file feedback on Perch's repository unless it's yours. When filing is
-refused, Perch copies the report to your clipboard and opens GitHub's
-new-issue page instead.
+can't file feedback or an invite on Perch's repository unless it was made for
+`perch-code`. When filing is refused, Perch opens GitHub's new-issue page
+instead, with a bug report on your clipboard or the invite filled in.
 
 ### Repositories
 
@@ -169,7 +169,7 @@ file your user can.
 ## Feedback
 
 The bug icon at the top right, or **Send Feedback…** in the Perch menu,
-files a bug report or an idea as an issue on `criccomini/perch`. An error
+files a bug report or an idea as an issue on `perch-code/perch`. An error
 or warning toast has **Report**, which starts one about it.
 
 A report carries what Perch knows about itself: its version and commit,
@@ -182,6 +182,14 @@ emails, your home directory and user name, and every repository but Perch's
 are redacted. You see the whole issue, and can edit it, before anything is
 sent. If it's already been reported, you can comment on that issue instead,
 or +1 it, which also subscribes you.
+
+## Inviting someone
+
+The person-and-plus icon in the drawer's footer asks for a friend to be added
+to `perch-code/perch`. Give their GitHub username and, if you like, how you
+know them. Perch checks the user exists and isn't already asked for, then
+opens an issue titled `Invite @username`. The repository's owner adds people
+by hand, with read access, and GitHub emails them the invitation.
 
 ## Data
 

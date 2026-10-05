@@ -187,7 +187,7 @@ fn offline() -> SendError {
     }
 }
 
-fn send_error(e: &perch_github::Error, verb: &str) -> SendError {
+pub(super) fn send_error(e: &perch_github::Error, verb: &str) -> SendError {
     match e {
         perch_github::Error::Status {
             status: 403 | 404, ..
