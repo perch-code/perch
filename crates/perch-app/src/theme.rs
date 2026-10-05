@@ -401,11 +401,9 @@ pub const MAIN_MIN_WIDTH: f64 = 620.0;
 /// and as tall as this before it scrolls.
 pub const AGENTS_DROPDOWN_WIDTH: f64 = 430.0;
 pub const AGENTS_DROPDOWN_MAX_HEIGHT: f64 = 460.0;
-/// The plan usage popover under the bar's gauge.
-pub const USAGE_POPOVER_WIDTH: f64 = 320.0;
-/// Send Feedback's dropdown, a little wider than Agents': the preview's
-/// text wants the room.
-pub const FEEDBACK_DROPDOWN_WIDTH: f64 = 440.0;
+/// The popovers over the drawer's footer, bug reports and plan usage, one
+/// width for both: the bug report's preview wants the room.
+pub const FOOTER_POPOVER_WIDTH: f64 = 440.0;
 /// Past this the dropdown scrolls: the preview, with similar issues, is
 /// taller.
 pub const FEEDBACK_DROPDOWN_MAX_HEIGHT: f64 = 640.0;

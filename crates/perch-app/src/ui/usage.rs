@@ -24,7 +24,7 @@ use crate::review::cards::tip;
 use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::{clickable, icon_in};
+use crate::ui::widgets::icon_in;
 
 /// Past this share of a window, it is getting close.
 const WARM_PERCENT: f64 = 80.0;
@@ -94,9 +94,10 @@ fn board_tone(app: AppState) -> Tone {
     })
 }
 
-/// The gauge, and the popover under it while it is open.
+/// The gauge in the drawer's footer, and the popover over it while it is
+/// open.
 pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    let color = move || board_tone(app).color(theme::fg_muted());
+    let color = move || board_tone(app).color(theme::nav_muted());
     let button = Container::new(
         icon_in(
             move || icons::sidebar_icon(SidebarIcon::Gauge, color()),
@@ -118,17 +119,7 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
                 EventPropagation::Continue
             }
         })
-        .style(move |s| {
-            clickable(s)
-                .size(26.0, 26.0)
-                .items_center()
-                .justify_center()
-                .border_radius(13.0)
-                .keyboard_navigable()
-                .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
-                .hover(|s| s.background(theme::badge_bg()))
-                .apply_if(review.usage_open.get(), |s| s.background(theme::badge_bg()))
-        })
+        .style(move |s| crate::ui::sidebar::footer_button(s, review.usage_open.get()))
         .debug_name("usage-button");
 
     let stack = Stack::new((
@@ -143,13 +134,7 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
                 }
             },
         )
-        // Six pixels under the button, as the Agents dropdown hangs.
-        .style(|s| {
-            s.position(Position::Absolute)
-                .inset_top(32.0)
-                .inset_right(0.0)
-                .z_index(100)
-        }),
+        .style(crate::ui::sidebar::footer_popover),
     ));
     // A press outside the button and what hangs from it shuts it: see
     // `ui::dismiss_popovers`.
@@ -267,7 +252,7 @@ fn popover(app: AppState) -> impl IntoView {
         },
     )
     .style(|s| {
-        s.width(theme::USAGE_POPOVER_WIDTH)
+        s.width(theme::FOOTER_POPOVER_WIDTH)
             .flex_col()
             .apply(crate::ui::menu::panel_surface(floem::style::Style::new()))
     })
@@ -519,13 +504,15 @@ mod tests {
     fn the_popover_lists_each_clis_windows_under_the_gauge() {
         let (mut harness, _app, review) = window_with_usage();
         let gauge = rect(&harness, "usage-button");
-        let agents = rect(&harness, "agents-button");
-        assert!(gauge.x1 <= agents.x0, "the gauge is not before Agents");
+        let footer = rect(&harness, "drawer footer");
+        assert!(footer.contains(gauge.center()), "the gauge is not in the drawer's footer");
 
         open(&mut harness);
         assert!(review.usage_open.get());
         let popover = rect(&harness, "usage-popover");
-        assert!(popover.y0 >= gauge.y1);
+        assert!(popover.y1 <= gauge.y0, "{popover:?} {gauge:?}");
+        assert!((popover.x0 - gauge.x0).abs() < 1.0, "left edges aligned: {popover:?} {gauge:?}");
+        assert!((popover.width() - theme::FOOTER_POPOVER_WIDTH).abs() < 1.0, "as wide as the bug report");
         let claude = rect(&harness, "usage-section:Claude");
         let codex = rect(&harness, "usage-section:Codex");
         assert!(claude.y1 <= codex.y0, "Claude before Codex");
@@ -574,8 +561,8 @@ mod tests {
         assert!(review.usage_open.get(), "a press in it shut it");
 
         // Anywhere else, the page under the bar, it goes.
-        let page = rect(&harness, "usage-button");
-        harness.click(page.x0 - 300.0, page.y1 + 400.0);
+        let page = rect(&harness, "main-pane");
+        harness.click(page.x0 + 100.0, page.y0 + 400.0);
         settle(&mut harness);
         assert!(!review.usage_open.get(), "a press outside left it up");
 
@@ -583,7 +570,7 @@ mod tests {
         harness.click(agents.x, agents.y);
         settle(&mut harness);
         assert!(review.agents_dropdown_open.get());
-        harness.click(page.x0 - 300.0, page.y1 + 400.0);
+        harness.click(page.x0 + 100.0, page.y0 + 400.0);
         settle(&mut harness);
         assert!(!review.agents_dropdown_open.get(), "a press outside left it up");
     }

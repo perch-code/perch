@@ -29,8 +29,9 @@ use perch_github::Item;
 pub fn sidebar(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl IntoView {
     Stack::vertical((
         lights_strip(state, backend.clone()),
-        items_nav(state, backend, on_open)
+        items_nav(state, backend.clone(), on_open)
             .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0).flex_col()),
+        footer(state, backend.clone()),
     ))
     .style(move |s| {
         s.width(state.sidebar_width.get())
@@ -117,6 +118,93 @@ fn toggle_button(state: AppState) -> impl IntoView {
             .pointer_events_auto()
             .hover(|s| s.background(theme::nav_hover()))
     })
+}
+
+/// The strip along the drawer's foot, as tall as the bar over the main
+/// pane: who is signed in, then what belongs to the app rather than to an
+/// item, bug reports and plan usage.
+fn footer(state: AppState, backend: Rc<Backend>) -> impl IntoView {
+    let login = move || state.viewer.with(|v| v.as_ref().map(|(l, _)| l.clone()).unwrap_or_default());
+    let url = move || state.viewer.with(|v| v.as_ref().map(|(_, a)| a.clone()).unwrap_or_default());
+    // The face is built once, and the viewer can arrive after it: the
+    // initial follows the login.
+    let face = dyn_container(login, move |login| {
+        crate::ui::widgets::avatar(state, url, 22.0, login).into_any()
+    })
+    .style(|s| s.flex_shrink(0.0_f32));
+    let controls = match state.review.get_untracked() {
+        Some(review) => Stack::horizontal((
+            crate::ui::feedback::button(state, review, backend.clone()),
+            crate::ui::usage::button(state, review, backend),
+        ))
+        .into_any(),
+        None => Empty::new().into_any(),
+    };
+    Stack::horizontal((
+        face,
+        Label::derived(login).style(|s| {
+            s.font_size(theme::TEXT_BODY)
+                .color(theme::nav_fg())
+                .text_ellipsis()
+                .min_width(0.0)
+                .flex_grow(1.0_f32)
+                .margin_left(8.0)
+                .margin_right(8.0)
+        }),
+        controls.style(|s| s.items_center().gap(4.0).flex_shrink(0.0_f32)),
+    ))
+    .debug_name("drawer footer")
+    .style(|s| {
+        s.items_center()
+            .width_full()
+            .height(theme::TITLEBAR_HEIGHT)
+            .padding_horiz(theme::NAV_GUTTER)
+            .flex_shrink(0.0_f32)
+            .border_top(1.0)
+            .border_color(theme::nav_divider())
+    })
+}
+
+const FOOTER_BUTTON: f64 = 26.0;
+
+/// A button in the footer, in the drawer's own look, as the drawer
+/// control and `+` are, lit while what it opens is up.
+pub(crate) fn footer_button(s: floem::style::Style, open: bool) -> floem::style::Style {
+    crate::ui::widgets::clickable(s)
+        .size(FOOTER_BUTTON, FOOTER_BUTTON)
+        .items_center()
+        .justify_center()
+        .border_radius(8.0)
+        .keyboard_navigable()
+        .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+        .hover(|s| s.background(theme::nav_hover()))
+        .apply_if(open, |s| s.background(theme::nav_selected()))
+}
+
+/// Where a footer button's popover hangs: six points over the footer's
+/// line, left edges aligned, out over the main pane. The bar's dropdowns
+/// hang the same way upside down, under their buttons, right edges
+/// aligned.
+pub(crate) fn footer_popover(s: floem::style::Style) -> floem::style::Style {
+    // From the button's foot: the button, the footer above it, six points.
+    let over = FOOTER_BUTTON + (theme::TITLEBAR_HEIGHT - FOOTER_BUTTON) / 2.0 + 6.0;
+    s.position(floem::style::Position::Absolute)
+        .inset_bottom(over)
+        .inset_left(0.0)
+        .z_index(100)
+}
+
+/// How tall a footer popover can stand, `most` at the tallest: from just
+/// over the footer up to the bar's line, so a short window never pushes
+/// it over the traffic lights.
+pub(crate) fn footer_popover_room(state: AppState, most: f64) -> f64 {
+    let height = state.window_height.get();
+    if height <= 0.0 {
+        return most;
+    }
+    // The footer and the bar, each as tall as the other, and six points
+    // clear of each.
+    most.min(height - 2.0 * theme::TITLEBAR_HEIGHT - 12.0).max(160.0)
 }
 
 // ---------------------------------------------------------------------

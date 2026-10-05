@@ -299,7 +299,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         Empty::new().into_any()
                     }
                 },
-            ),
+            )
+            // Over the main pane, for the footer's popovers, which hang
+            // out over it.
+            .style(|s| s.z_index(1)),
             // The drawer on the right, the open item's tree, is the pane's:
             // under Code's tabs, beside the file.
             pane,
@@ -960,8 +963,6 @@ fn pane_with_bar(
                         .min_width(0.0)
                         .pointer_events_none()
                 }),
-                feedback::button(state, review, backend.clone()),
-                usage::button(state, review, backend.clone()),
                 agents::dropdown::button(state, review, backend),
                 close,
             ))

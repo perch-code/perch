@@ -53,9 +53,10 @@ fn page_of(step: Step) -> Page {
     }
 }
 
-/// The bug icon, and the dropdown under it while it is open.
+/// The bug icon in the drawer's footer, and the dropdown over it while it
+/// is open.
 pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    let color = move || theme::fg_muted();
+    let color = move || theme::nav_muted();
     let button = Container::new(
         icon_in(
             move || icons::sidebar_icon(SidebarIcon::Bug, color()),
@@ -74,19 +75,7 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
                 EventPropagation::Continue
             }
         })
-        .style(move |s| {
-            clickable(s)
-                .size(26.0, 26.0)
-                .items_center()
-                .justify_center()
-                .border_radius(13.0)
-                .keyboard_navigable()
-                .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
-                .hover(|s| s.background(theme::badge_bg()))
-                .apply_if(review.feedback_open.get(), |s| {
-                    s.background(theme::badge_bg())
-                })
-        })
+        .style(move |s| crate::ui::sidebar::footer_button(s, review.feedback_open.get()))
         .debug_name("feedback-button");
 
     let stack = Stack::new((
@@ -101,14 +90,7 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
                 }
             },
         )
-        // Six points under the button, right edges aligned, as the Agents
-        // dropdown hangs.
-        .style(|s| {
-            s.position(Position::Absolute)
-                .inset_top(32.0)
-                .inset_right(0.0)
-                .z_index(100)
-        }),
+        .style(crate::ui::sidebar::footer_popover),
     ));
     // A press outside the button and what hangs from it shuts it: see
     // `ui::dismiss_popovers`.
@@ -118,11 +100,12 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
             review.feedback_anchor.set(Some(anchor));
         }
     });
-    stack.style(|s| {
-        s.position(Position::Relative)
-            .flex_shrink(0.0_f32)
-            .pointer_events_auto()
-    })
+    stack
+        .style(|s| {
+            s.position(Position::Relative)
+                .flex_shrink(0.0_f32)
+                .pointer_events_auto()
+        })
 }
 
 /// Open the dropdown, or shut it when it is open.
@@ -135,8 +118,10 @@ pub fn toggle(app: AppState, review: ReviewState, opener: Option<floem::ViewId>)
 }
 
 /// Open the dropdown over whatever else hangs from the bar, on the draft
-/// there is, or a new one of `kind`.
+/// there is, or a new one of `kind`. It hangs from the drawer's footer, so
+/// a shut drawer opens with it.
 pub fn open(app: AppState, review: ReviewState, kind: FeedbackKind, opener: Option<floem::ViewId>) {
+    app.sidebar_open.set(true);
     crate::review::review_menu::close(review, false);
     crate::ui::agents::dropdown::close(review, false);
     crate::ui::usage::close(review, false);
@@ -407,7 +392,7 @@ fn dropdown(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl In
         .style(|s| s.width_full()),
     )
     .style(|s| {
-        s.width(theme::FEEDBACK_DROPDOWN_WIDTH)
+        s.width(theme::FOOTER_POPOVER_WIDTH)
             .flex_col()
             .apply(crate::ui::menu::panel_surface(floem::style::Style::new()))
     })
@@ -417,6 +402,7 @@ fn dropdown(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl In
 /// A page: its body, which scrolls when the dropdown would run too
 /// tall, over its buttons, which stay put under a rule.
 fn frame(
+    app: AppState,
     body: Vec<AnyView>,
     footer: impl IntoView + 'static,
     debug: &'static str,
@@ -431,9 +417,11 @@ fn frame(
                     .padding_bottom(14.0)
             })
             .scroll()
-            .style(|s| {
-                s.width_full()
-                    .max_height(theme::FEEDBACK_DROPDOWN_MAX_HEIGHT - FOOTER_HEIGHT)
+            .style(move |s| {
+                s.width_full().max_height(
+                    crate::ui::sidebar::footer_popover_room(app, theme::FEEDBACK_DROPDOWN_MAX_HEIGHT)
+                        - FOOTER_HEIGHT,
+                )
             }),
         Container::new(footer).style(|s| {
             s.width_full()
@@ -812,7 +800,7 @@ fn form(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoVi
         body.into_any(),
         diagnose.into_any(),
     ]);
-    frame(parts, footer, "feedback-form").on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+    frame(app, parts, footer, "feedback-form").on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
         if key.code == Code::Enter && key.modifiers.meta() && can_preview() {
             prepare(app, review, &enter_backend);
             EventPropagation::Stop
@@ -977,6 +965,7 @@ fn working(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
     ))
     .style(|s| s.items_center().gap(8.0).width_full());
     frame(
+        app,
         vec![
             header(
                 || "Getting your report ready".to_string(),
@@ -1161,7 +1150,7 @@ fn preview(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
     parts.push(title_input(app, "Title", sending).into_any());
     parts.push(body.into_any());
     parts.push(similar.into_any());
-    frame(parts, footer, "feedback-preview-page")
+    frame(app, parts, footer, "feedback-preview-page")
 }
 
 /// The token can't open issues on Perch's repository: copy the body and
@@ -1464,36 +1453,39 @@ mod tests {
     }
 
     #[test]
-    fn the_bug_icon_sits_just_before_usage_on_both_bars() {
+    fn the_bug_icon_sits_just_before_usage_in_the_drawers_footer() {
         let (harness, _app, _review, _commands) = empty_window();
+        let footer = rect(&harness, "drawer footer");
+        assert!((footer.height() - theme::TITLEBAR_HEIGHT).abs() < 1.0, "{footer:?}");
         let bug = rect(&harness, "feedback-button");
         let gauge = rect(&harness, "usage-button");
-        assert!(bug.width() > 0.0, "on the bar with nothing open");
+        assert!(bug.width() > 0.0, "with nothing open");
         assert!(
             bug.x1 <= gauge.x0 && gauge.x0 - bug.x1 < 16.0,
             "{bug:?} {gauge:?}"
         );
+        assert!(footer.contains(bug.center()) && footer.contains(gauge.center()));
+        assert!((footer.x1 - theme::NAV_GUTTER - gauge.x1).abs() < 1.0, "on the gutter: {footer:?} {gauge:?}");
 
         let (harness, _app, _review) = pull_request_harness();
-        let bug = rect(&harness, "feedback-button");
-        let gauge = rect(&harness, "usage-button");
-        assert!(bug.width() > 0.0, "on an item's bar");
-        assert!(
-            bug.x1 <= gauge.x0 && gauge.x0 - bug.x1 < 16.0,
-            "{bug:?} {gauge:?}"
-        );
+        let footer = rect(&harness, "drawer footer");
+        assert!(footer.contains(rect(&harness, "feedback-button").center()), "with an item open");
+        let bar = named(harness.root_id(), "item bar").expect("an item's bar");
+        assert!(named(bar, "feedback-button").is_none(), "gone from the item's bar");
+        assert!(named(bar, "usage-button").is_none(), "gone from the item's bar");
     }
 
     #[test]
-    fn the_icon_drops_a_bug_report_down_under_itself_and_folds_it_again() {
+    fn the_icon_raises_a_bug_report_over_itself_and_folds_it_again() {
         let (mut harness, app, review, _commands) = empty_window();
         click(&mut harness, "feedback-button");
         assert!(review.feedback_open.get());
         assert_eq!(draft_with(app, |d| d.kind), Some(FeedbackKind::Bug));
         let button = rect(&harness, "feedback-button");
         let dropdown = rect(&harness, "feedback-dropdown");
-        assert!(dropdown.y0 >= button.y1, "{dropdown:?} {button:?}");
-        assert!((dropdown.x1 - button.x1).abs() < 1.0, "right edges aligned");
+        assert!(dropdown.y1 <= button.y0, "{dropdown:?} {button:?}");
+        assert!((dropdown.x0 - button.x0).abs() < 1.0, "left edges aligned: {dropdown:?} {button:?}");
+        assert!((dropdown.width() - theme::FOOTER_POPOVER_WIDTH).abs() < 1.0);
         assert!(dropdown.height() <= theme::FEEDBACK_DROPDOWN_MAX_HEIGHT + 1.0);
         assert!(shown(&harness, "feedback-form"));
         click(&mut harness, "feedback-button");
@@ -1623,7 +1615,8 @@ mod tests {
         );
 
         // A press outside shuts it too.
-        harness.click(200.0, 600.0);
+        let page = rect(&harness, "main-pane");
+        harness.click(page.x0 + 600.0, page.y0 + 600.0);
         settle(&mut harness);
         assert!(!review.feedback_open.get());
         assert!(app.feedback.with(Option::is_some));

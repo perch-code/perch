@@ -129,13 +129,12 @@ fn state_glyph(state: ReviewState) -> impl IntoView {
     .style(|s| s.flex_shrink(0.0_f32))
 }
 
-/// What is reached for from anywhere in an item: GitHub, plan usage,
-/// every item's agents, Start work, Review, and closing it.
+/// What is reached for from anywhere in an item: GitHub, every item's
+/// agents, Start work, Review, and closing it. Bug reports and plan usage
+/// are the app's, and sit in the drawer's footer.
 fn trailing(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     Stack::horizontal((
         github_button(state),
-        crate::ui::feedback::button(app, state, backend.clone()),
-        crate::ui::usage::button(app, state, backend.clone()),
         crate::ui::agents::dropdown::button(app, state, backend.clone()),
         crate::review::start_work::button(app, state),
         review_control(app, state, backend.clone()),
