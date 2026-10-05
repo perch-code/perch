@@ -1288,6 +1288,15 @@ impl ServerStatuses {
         self.0.insert(kind, status);
     }
 
+    /// The kinds held back until the reader trusts the code, in order.
+    pub fn held(&self) -> Vec<perch_lsp::ServerKind> {
+        self.0
+            .iter()
+            .filter(|(_, status)| **status == perch_lsp::Status::Held)
+            .map(|(kind, _)| *kind)
+            .collect()
+    }
+
     /// Every server's status, as its status line says it, for a bug
     /// report: `none started` when none has said anything.
     pub fn describe(&self) -> String {

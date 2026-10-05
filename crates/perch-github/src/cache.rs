@@ -38,9 +38,12 @@ mod review_store;
 /// worktree review was run with. Version 30 keeps the `HEAD` a review of
 /// uncommitted work was captured over. Version 32 keeps the thread a Done
 /// mark hides, for the Inbox's Done list. Version 33 lets a mark be a
-/// snooze, which lapses at a time. Schemas 13 through 23 migrate in place
-/// so local conversations and agent history are never discarded.
-pub const SCHEMA_VERSION: u32 = 33;
+/// snooze, which lapses at a time. Version 34 keeps the reader's answer on
+/// running an item's code in a language server, and starts the branches
+/// already cut from a pull request untrusted. Schemas 13 through 23
+/// migrate in place so local conversations and agent history are never
+/// discarded.
+pub const SCHEMA_VERSION: u32 = 34;
 
 /// Metadata key holding the validator for the cached notifications snapshot.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
@@ -154,6 +157,17 @@ CREATE TABLE IF NOT EXISTS item_activity (
     read_at       TEXT,
     done_at       TEXT,
     local_unread  INTEGER NOT NULL DEFAULT 0
+);
+"#;
+
+/// The reader's answer on running an item's code in a language server
+/// that runs it (rust-analyzer, jdtls): 1 after Trust and start, 0 for a
+/// branch cut from code the reader hadn't trusted. An item with no row is
+/// judged by `[repo.lsp]` and whose work it is.
+const LSP_TRUST_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS item_lsp_trust (
+    item_id  TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
+    trusted  INTEGER NOT NULL
 );
 "#;
 
@@ -444,6 +458,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
         tx.execute_batch(review_store::REVIEW_SCHEMA)?;
         tx.execute_batch(GRANT_SCHEMA)?;
         tx.execute_batch(ACTIVITY_SCHEMA)?;
+        tx.execute_batch(LSP_TRUST_SCHEMA)?;
         tx.execute(
             "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
@@ -508,6 +523,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             30 => fold_saved_into_pinned(&tx)?,
             31 => add_dismissed_thread_column(&tx)?,
             32 => add_snoozed_until_column(&tx)?,
+            33 => add_code_trust_table(&tx)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -553,6 +569,32 @@ fn add_snoozed_until_column(tx: &Transaction<'_>) -> Result<(), CacheError> {
     if !present {
         tx.execute("ALTER TABLE notification_dismissals ADD COLUMN snoozed_until TEXT", [])?;
     }
+    Ok(())
+}
+
+/// The trust table, with the branches already cut from a pull request,
+/// and those cut from them, marked untrusted: they hold the pull
+/// request's author's code, and nothing before said whose code it was.
+/// A branch whose pull request was deleted lost its pointer
+/// (`delete_item`), so its name counts too: one cut or forked from a pull
+/// request's checkout, `perch/pr-N-work` or `perch/pr-N-2`, a pull request
+/// of its own since or not, and any other `perch/pr-` branch with none.
+/// A pull request's own checkout, `perch/pr-N`, is judged as the pull
+/// request is. Wrong here costs the reader one Trust and start.
+fn add_code_trust_table(tx: &Transaction<'_>) -> Result<(), CacheError> {
+    tx.execute_batch(LSP_TRUST_SCHEMA)?;
+    tx.execute(
+        "WITH RECURSIVE cut(id) AS (
+             SELECT id FROM items
+             WHERE from_item_id IN (SELECT id FROM items WHERE subject_kind = 'pr')
+                OR (from_item_id IS NULL AND branch LIKE 'perch/pr-%-%')
+                OR (subject_kind IS NULL AND branch LIKE 'perch/pr-%')
+             UNION
+             SELECT items.id FROM items JOIN cut ON items.from_item_id = cut.id
+         )
+         INSERT OR IGNORE INTO item_lsp_trust (item_id, trusted) SELECT id, 0 FROM cut",
+        [],
+    )?;
     Ok(())
 }
 
@@ -4320,6 +4362,47 @@ impl Cache {
         Ok(())
     }
 
+    /// What the reader said about running an item's code in a language
+    /// server: `Some(true)` once trusted, `Some(false)` for a branch cut
+    /// from code the reader hadn't trusted, `None` when nothing was said.
+    pub fn item_code_trust(&self, item_id: &str) -> Result<Option<bool>, CacheError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT trusted FROM item_lsp_trust WHERE item_id = ?1",
+                params![item_id],
+                |r| r.get::<_, bool>(0),
+            )
+            .optional()?)
+    }
+
+    /// Trust an item's code from now on, whatever was said before.
+    pub fn trust_item_code(&self, item_id: &str) -> Result<(), CacheError> {
+        self.conn.execute(
+            "INSERT INTO item_lsp_trust (item_id, trusted) VALUES (?1, 1)
+             ON CONFLICT(item_id) DO UPDATE SET trusted = 1",
+            params![item_id],
+        )?;
+        Ok(())
+    }
+
+    /// Insert a branch cut from another item, `untrusted` when it holds
+    /// code the reader hasn't trusted: in one transaction, so the row is
+    /// never there without what it starts out with.
+    pub fn insert_cut_item(&self, item: &Item, untrusted: bool) -> Result<(), CacheError> {
+        let tx = self.conn.unchecked_transaction()?;
+        self.insert_item(item)?;
+        if untrusted {
+            tx.execute(
+                "INSERT INTO item_lsp_trust (item_id, trusted) VALUES (?1, 0)
+                 ON CONFLICT(item_id) DO NOTHING",
+                params![item.id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Every item's latest activity. A record whose event no longer reads
     /// is passed over.
     pub fn load_item_activity(&self) -> Result<Vec<ItemActivity>, CacheError> {
@@ -6566,6 +6649,105 @@ mod tests {
         let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
         assert_eq!(outcome, CacheOpen::Migrated { from: 28, to: SCHEMA_VERSION });
         assert!(cache.load_item_activity().unwrap().is_empty(), "nothing is backfilled");
+    }
+
+    #[test]
+    fn an_item_s_code_trust_is_kept_and_goes_with_the_item() {
+        let c = Cache::open_in_memory().unwrap();
+        let item = branch_item("feature");
+        c.insert_item(&item).unwrap();
+        assert_eq!(c.item_code_trust(&item.id).unwrap(), None);
+
+        c.trust_item_code(&item.id).unwrap();
+        c.trust_item_code(&item.id).unwrap();
+        assert_eq!(c.item_code_trust(&item.id).unwrap(), Some(true));
+
+        // A whole-row write from a copy read before the trust leaves it,
+        // and so does archiving.
+        let mut stale = item.clone();
+        stale.archived_at = Some(stamp_of("2026-09-24T10:00:00Z"));
+        c.update_item(&stale).unwrap();
+        assert_eq!(c.item_code_trust(&item.id).unwrap(), Some(true));
+
+        c.delete_item(&item.id).unwrap();
+        assert_eq!(c.item_code_trust(&item.id).unwrap(), None);
+        assert!(c.trust_item_code("no-such-item").is_err(), "no row for no item");
+    }
+
+    #[test]
+    fn a_cut_branch_starts_with_its_answer_or_not_at_all() {
+        let c = Cache::open_in_memory().unwrap();
+        let a = branch_item("a");
+        c.insert_cut_item(&a, true).unwrap();
+        assert_eq!(c.item_code_trust(&a.id).unwrap(), Some(false));
+        let b = branch_item("b");
+        c.insert_cut_item(&b, false).unwrap();
+        assert_eq!(c.item_code_trust(&b.id).unwrap(), None);
+        c.trust_item_code(&a.id).unwrap();
+        assert_eq!(c.item_code_trust(&a.id).unwrap(), Some(true));
+
+        // A branch already taken refuses the row and leaves no answer.
+        let mut again = branch_item("a");
+        again.id = "item-a-again".into();
+        assert!(c.insert_cut_item(&again, true).is_err());
+        assert!(c.load_item(&again.id).unwrap().is_none());
+        assert_eq!(c.item_code_trust(&again.id).unwrap(), None);
+
+        // An answer that can't be written takes the row back with it.
+        c.conn.execute_batch("DROP TABLE item_lsp_trust").unwrap();
+        let d = branch_item("d");
+        assert!(c.insert_cut_item(&d, true).is_err());
+        assert!(c.load_item(&d.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn schema_33_gains_a_trust_table_with_cut_branches_untrusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        let pr = pr_item(7);
+        let mut work = branch_item("perch/pr-7-work");
+        work.from_item_id = Some(pr.id.clone());
+        let mut onward = branch_item("onward");
+        onward.from_item_id = Some(work.id.clone());
+        // Its pull request was deleted, which cleared the pointer.
+        let orphan = branch_item("perch/pr-9-work");
+        // Forked from a pull request's checkout, whose row went too.
+        let forked = branch_item("perch/pr-11-2");
+        // The same, with a pull request of its own since.
+        let mut forked_and_opened = branch_item("perch/pr-13-2");
+        forked_and_opened.subject = Some(ItemSubject::PullRequest(pull_request(14)));
+        // A pull request's own checkout.
+        let mut checked_out = branch_item("perch/pr-15");
+        checked_out.subject = Some(ItemSubject::PullRequest(pull_request(15)));
+        let feature = branch_item("feature");
+        let mut from_feature = branch_item("feature-2");
+        from_feature.from_item_id = Some(feature.id.clone());
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            for item in [
+                &pr,
+                &work,
+                &onward,
+                &orphan,
+                &forked,
+                &forked_and_opened,
+                &checked_out,
+                &feature,
+                &from_feature,
+            ] {
+                cache.insert_item(item).unwrap();
+            }
+            cache.conn.execute_batch("DROP TABLE item_lsp_trust").unwrap();
+            cache.set_meta("schema_version", "33").unwrap();
+        }
+        let (cache, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+        assert_eq!(outcome, CacheOpen::Migrated { from: 33, to: SCHEMA_VERSION });
+        for cut in [&work, &onward, &orphan, &forked, &forked_and_opened] {
+            assert_eq!(cache.item_code_trust(&cut.id).unwrap(), Some(false), "{}", cut.id);
+        }
+        for other in [&pr, &checked_out, &feature, &from_feature] {
+            assert_eq!(cache.item_code_trust(&other.id).unwrap(), None, "{}", other.id);
+        }
     }
 
     /// Save folded into Pin: a saved row is pinned as of its last open,

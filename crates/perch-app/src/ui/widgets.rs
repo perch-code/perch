@@ -193,18 +193,39 @@ pub(crate) fn copied() -> Vec<String> {
     COPIED.with(|copied| std::mem::take(&mut *copied.borrow_mut()))
 }
 
+/// What the worktree menu's Trust and Start names and runs: the servers
+/// held back until the reader trusts the code, and what trusts it.
+pub type TrustEntry = (Vec<perch_lsp::ServerKind>, std::rc::Rc<dyn Fn()>);
+
 /// The menu every worktree offers: where it is, and how to get there.
 ///
 /// Remove Worktree is appended when the caller passes a way to do it: the
-/// review header offers it for a worktree Perch made.
+/// review header offers it for a worktree Perch made. Trust and Start goes
+/// first when the caller passes the servers held back until the reader
+/// trusts the code, and a way to trust it: it is still there once the
+/// toast that asked has gone.
 pub fn worktree_menu(
     path: std::path::PathBuf,
     on_archive: Option<std::rc::Rc<dyn Fn()>>,
+    on_trust: Option<TrustEntry>,
 ) -> crate::ui::menu::Menu {
     use crate::ui::menu::Menu;
 
     let (reveal, terminal, copy) = (path.clone(), path.clone(), path);
-    let mut menu = Menu::new()
+    let mut menu = Menu::new();
+    if let Some((held, trust)) = on_trust {
+        let names = held
+            .iter()
+            .map(|kind| kind.name())
+            .collect::<Vec<_>>()
+            .join(" and ");
+        menu = menu
+            .item(format!("Trust and Start {names}"), move |item| {
+                item.icon(SidebarIcon::Check).action(move || trust())
+            })
+            .separator();
+    }
+    menu = menu
         .item("Reveal in Finder", move |item| {
             item.icon(SidebarIcon::Folder).action(move || reveal_in_finder(&reveal))
         })

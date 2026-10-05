@@ -18,7 +18,7 @@ use perch_github::{CheckState, Item, ItemKind, ItemSubject, MentionableUser, Sub
 
 use crate::backend::Backend;
 use crate::icons::{self, SidebarIcon};
-use crate::review::cards::{avatar_url_for, tip, verdict_glyph};
+use crate::review::cards::{avatar_url_for, tip, tip_with, verdict_glyph};
 use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
@@ -144,7 +144,7 @@ pub fn summary(
             SidebarIcon::Folder,
             "Worktree",
             move || checkout_on_disk(state).is_some(),
-            directory(state, directory_backend),
+            directory(app, state, directory_backend),
         ),
         dyn_row(
             SidebarIcon::Check,
@@ -598,11 +598,35 @@ fn checkout_on_disk(state: ReviewState) -> Option<perch_github::ItemCheckout> {
     })
 }
 
+/// The tip on the worktree's warning: what waits for the reader to trust
+/// the code, said once for all of them.
+fn held_tip(kinds: &[perch_lsp::ServerKind]) -> String {
+    match kinds {
+        [] => String::new(),
+        [kind] => perch_lsp::Status::Held.describe(*kind),
+        _ => {
+            let names = kinds
+                .iter()
+                .map(|kind| kind.name())
+                .collect::<Vec<_>>()
+                .join(" and ");
+            format!("{names} wait for you to trust this code")
+        }
+    }
+}
+
 /// The worktree's directory name, and a menu of ways to get there.
 ///
 /// This is what makes the checkout a place rather than a cache: the name
 /// on screen is the name in the Finder and in a shell.
-fn directory(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+///
+/// While a language server waits for the reader to trust the code, a
+/// warning sits by the name and the menu starts with Trust and Start. The
+/// toast that asked goes once it is closed; this stays while they wait.
+fn directory(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    // Read by the warning's style, not the container's key: a key on the
+    // statuses would rebuild the chip with every one a server sends.
+    let held = Memo::new(move |_| state.lsp_status.with(|s| s.held()));
     dyn_container(
         move || checkout_on_disk(state),
         move |checkout| {
@@ -629,6 +653,28 @@ fn directory(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                     backend.archive_item(&id);
                 }) as Rc<dyn Fn()>
             });
+            // Read as the menu opens, for the item open then.
+            let menu_backend = backend.clone();
+            let trust = move || {
+                let held = state.lsp_status.with_untracked(|s| s.held());
+                let item_id = state
+                    .item
+                    .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))?;
+                if held.is_empty() {
+                    return None;
+                }
+                let backend = menu_backend.clone();
+                let trust = Rc::new(move || {
+                    crate::ui::toast::trust_and_start(app, &backend, &item_id);
+                }) as Rc<dyn Fn()>;
+                Some((held, trust))
+            };
+            // The notice's caution colour, as the pill over the rows has it.
+            let warning = tip_with(
+                sidebar_glyph(SidebarIcon::Warning, theme::notice_fg)
+                    .style(|s| s.size(12.0, 12.0).pointer_events_none()),
+                move || held.with_untracked(|kinds| held_tip(kinds)),
+            );
 
             Stack::horizontal((
                 sidebar_glyph(SidebarIcon::Folder, theme::fg_muted).style(|s| {
@@ -646,6 +692,13 @@ fn directory(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                         .max_width(320.0)
                         .pointer_events_none()
                 }),
+                Container::new(warning)
+                    .debug_name("untrusted")
+                    .style(move |s| {
+                        s.margin_left(6.0)
+                            .flex_shrink(0.0_f32)
+                            .apply_if(held.with(Vec::is_empty), |s| s.hide())
+                    }),
                 sidebar_glyph(SidebarIcon::ChevronDown, theme::fg_subtle).style(|s| {
                     s.size(10.0, 10.0)
                         .margin_left(5.0)
@@ -653,7 +706,7 @@ fn directory(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                         .pointer_events_none()
                 }),
             ))
-            .dropdown(move || worktree_menu(path.clone(), archive.clone()))
+            .dropdown(move || worktree_menu(path.clone(), archive.clone(), trust()))
             .debug_name("worktree menu")
             .style(|s| {
                 s.items_center()
@@ -1997,6 +2050,102 @@ mod tests {
             }
         }
         assert_eq!(revoked, ["g1"]);
+    }
+
+    #[test]
+    fn the_worktree_warning_says_once_what_waits() {
+        use perch_lsp::ServerKind;
+        assert_eq!(
+            held_tip(&[ServerKind::RustAnalyzer]),
+            "rust-analyzer waits for you to trust this code"
+        );
+        assert_eq!(
+            held_tip(&[ServerKind::RustAnalyzer, ServerKind::Jdtls]),
+            "rust-analyzer and jdtls wait for you to trust this code"
+        );
+    }
+
+    /// While a server waits for the reader to trust the code, the worktree
+    /// has a warning and its menu starts with Trust and Start, which does
+    /// what the toast's button does, however long ago the toast went.
+    #[test]
+    fn a_held_server_is_trusted_from_the_worktree_menu() {
+        use crate::backend::Command;
+        let app = AppState::new();
+        let state = ReviewState::new();
+        let mut item = branch_item("slatedb/slatedb");
+        item.id = "branch".into();
+        state.item.set(Some(Arc::new(item.clone())));
+        state.ready.set(true);
+        state.phase.set(crate::review::model::Phase::Ready);
+        state.composer_autofocus.set(false);
+        app.open_item.set(Some("branch".into()));
+        let (backend, mut commands) = Backend::recording();
+        let root = floem::headless::TestRoot::new();
+        let view = crate::ui::app_view(app, state, Rc::new(backend));
+        let mut harness =
+            floem::headless::HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        let settle = |harness: &mut floem::headless::HeadlessHarness| {
+            harness.rebuild();
+            harness.paint();
+        };
+        settle(&mut harness);
+        let open_menu = |harness: &mut floem::headless::HeadlessHarness| {
+            let chip = rect(harness, "worktree menu").center();
+            harness.pointer_down(chip.x, chip.y);
+            settle(harness);
+            assert!(crate::ui::menu::is_open());
+        };
+        let trusted = |commands: &mut tokio::sync::mpsc::UnboundedReceiver<Command>| {
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .filter_map(|command| match command {
+                    Command::TrustLanguageServers { item_id, .. } => Some(item_id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // Nothing held: no warning, and nothing to trust in the menu.
+        assert_eq!(rect(&harness, "untrusted").width(), 0.0);
+        open_menu(&mut harness);
+        assert!(named(harness.root_id(), "menu-row:Reveal in Finder").is_some());
+        assert!(named(harness.root_id(), "menu-row:Trust").is_none());
+        crate::ui::menu::close();
+        settle(&mut harness);
+
+        let rust = perch_lsp::ServerKind::RustAnalyzer;
+        state.set_server_status(rust, perch_lsp::Status::Held);
+        state.set_server_status(perch_lsp::ServerKind::Jdtls, perch_lsp::Status::Held);
+        app.offer_server(
+            crate::state::ServerOffer::held(&item, &[rust, perch_lsp::ServerKind::Jdtls]),
+            false,
+        );
+        settle(&mut harness);
+        assert!(
+            rect(&harness, "untrusted").width() > 0.0,
+            "a warning by the name"
+        );
+        assert!(trusted(&mut commands).is_empty());
+        open_menu(&mut harness);
+        let row = rect(&harness, "menu-row:Trust and Start rust-analyzer and jdtls");
+        let first = rect(&harness, "menu-row:");
+        assert_eq!(row, first, "Trust and Start comes first");
+        harness.click(row.center().x, row.center().y);
+        settle(&mut harness);
+        assert!(!crate::ui::menu::is_open());
+        assert_eq!(trusted(&mut commands), ["branch"]);
+        assert!(
+            app.current_toast().is_none(),
+            "the toast's ask goes with it"
+        );
+
+        // In dark, the warning goes dark too.
+        let left = crate::theme::dark_check::light_left(&mut harness);
+        assert!(
+            left.is_empty(),
+            "light colours left in dark:\n{}",
+            left.join("\n")
+        );
     }
 
     #[test]

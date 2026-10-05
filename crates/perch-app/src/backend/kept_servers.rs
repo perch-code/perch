@@ -10,7 +10,7 @@
 //! much as the one on show.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -35,17 +35,37 @@ struct Kept {
     since: Instant,
 }
 
-/// The servers set aside, oldest first.
+#[derive(Default)]
+struct Shelf {
+    /// Oldest first.
+    kept: Vec<Kept>,
+    /// The roots whose checkout went, and when (see `stop_root`). The
+    /// clock is the one a server's age is told by, which tests don't pause.
+    gone: Vec<(PathBuf, std::time::Instant)>,
+}
+
+impl Shelf {
+    /// Whether `client` started before its root's checkout went: it
+    /// watches that checkout, not what came to the path after.
+    fn went_from_under(&self, client: &perch_lsp::Client) -> bool {
+        self.gone
+            .iter()
+            .any(|(root, at)| root == client.root() && client.age() >= at.elapsed())
+    }
+}
+
+/// The servers set aside.
 #[derive(Clone, Default)]
-pub(super) struct KeptServers(Arc<Mutex<Vec<Kept>>>);
+pub(super) struct KeptServers(Arc<Mutex<Shelf>>);
 
 impl KeptServers {
     /// Set aside `client`, which `window` no longer shows. The files it was
     /// given are closed first, so it reads them from disk when taken up
     /// again. The oldest past `KEPT` is stopped, and this one is stopped
     /// after `KEEP_FOR` unless it is taken up before. One whose files
-    /// can't be closed within `CLOSE_WAIT` is stopped instead of kept, and
-    /// one that has ended is let go.
+    /// can't be closed within `CLOSE_WAIT` is stopped instead of kept, one
+    /// that has ended is let go, and one whose checkout went meanwhile is
+    /// stopped now.
     pub(super) async fn keep(&self, window: WindowId, client: Arc<perch_lsp::Client>) {
         if client.has_ended() {
             tracing::info!(
@@ -67,17 +87,27 @@ impl KeptServers {
             return;
         }
         let since = Instant::now();
-        let overflow = {
-            let Ok(mut kept) = self.0.lock() else {
-                client.shutdown().await;
-                return;
-            };
-            kept.push(Kept {
+        // Checked under the lock `stop_root` marks the root under, so a
+        // set-aside lands before the stop, which stops it, or after, which
+        // sees the checkout went.
+        let kept = self.0.lock().ok().and_then(|mut shelf| {
+            if shelf.went_from_under(&client) {
+                tracing::info!(
+                    server = client.kind().name(),
+                    "language server stopped: its checkout went"
+                );
+                return None;
+            }
+            shelf.kept.push(Kept {
                 window,
                 client: client.clone(),
                 since,
             });
-            (kept.len() > KEPT).then(|| kept.remove(0).client)
+            Some((shelf.kept.len() > KEPT).then(|| shelf.kept.remove(0).client))
+        });
+        let Some(overflow) = kept else {
+            client.shutdown().await;
+            return;
         };
         if let Some(oldest) = overflow {
             tracing::info!(
@@ -104,7 +134,7 @@ impl KeptServers {
     pub(super) fn clients(&self) -> Vec<Arc<perch_lsp::Client>> {
         self.0
             .lock()
-            .map(|kept| kept.iter().map(|k| k.client.clone()).collect())
+            .map(|shelf| shelf.kept.iter().map(|k| k.client.clone()).collect())
             .unwrap_or_default()
     }
 
@@ -131,11 +161,11 @@ impl KeptServers {
         binary: &Path,
     ) -> Option<Arc<perch_lsp::Client>> {
         let ended: Vec<_> = match self.0.lock() {
-            Ok(mut kept) => {
-                let (ended, running) = std::mem::take(&mut *kept)
+            Ok(mut shelf) => {
+                let (ended, running) = std::mem::take(&mut shelf.kept)
                     .into_iter()
                     .partition(|k: &Kept| k.client.has_ended());
-                *kept = running;
+                shelf.kept = running;
                 ended
             }
             Err(_) => Vec::new(),
@@ -157,12 +187,40 @@ impl KeptServers {
 
     /// Stop every server `window` set aside.
     pub(super) async fn stop(&self, window: WindowId) {
+        self.stop_where(|k| k.window == window).await;
+    }
+
+    /// Stop every server set aside for `root`, in any window: its checkout
+    /// is going, and what comes to the same path next may be other code,
+    /// which a server still watching the path would load. One started
+    /// before now and set aside after, as a start or a set-aside still
+    /// under way would be, is stopped as it comes (see `keep`).
+    pub(super) async fn stop_root(&self, root: &Path) {
+        if let Ok(mut shelf) = self.0.lock() {
+            // Long past anything still under way.
+            shelf.gone.retain(|(_, at)| at.elapsed() < KEEP_FOR);
+            shelf
+                .gone
+                .push((root.to_path_buf(), std::time::Instant::now()));
+        }
+        self.stop_where(|k| k.client.root() == root).await;
+    }
+
+    /// Stop every server of `kind` set aside for `root`, in any window:
+    /// the code there isn't trusted now, and set aside it would go on
+    /// loading it.
+    pub(super) async fn stop_kind_at(&self, root: &Path, kind: perch_lsp::ServerKind) {
+        self.stop_where(|k| k.client.root() == root && k.client.kind() == kind)
+            .await;
+    }
+
+    async fn stop_where(&self, wanted: impl Fn(&Kept) -> bool) {
         let stopping: Vec<_> = match self.0.lock() {
-            Ok(mut kept) => {
-                let (stopping, staying) = std::mem::take(&mut *kept)
+            Ok(mut shelf) => {
+                let (stopping, staying) = std::mem::take(&mut shelf.kept)
                     .into_iter()
-                    .partition(|k| k.window == window);
-                *kept = staying;
+                    .partition(wanted);
+                shelf.kept = staying;
                 stopping
             }
             Err(_) => Vec::new(),
@@ -216,9 +274,9 @@ impl KeptServers {
     }
 
     fn take_where(&self, wanted: impl Fn(&Kept) -> bool) -> Option<Arc<perch_lsp::Client>> {
-        let mut kept = self.0.lock().ok()?;
-        let i = kept.iter().position(wanted)?;
-        Some(kept.remove(i).client)
+        let mut shelf = self.0.lock().ok()?;
+        let i = shelf.kept.iter().position(wanted)?;
+        Some(shelf.kept.remove(i).client)
     }
 }
 
@@ -377,5 +435,51 @@ time.sleep(600)
         };
         let gone = tokio::time::timeout(Duration::from_secs(15), gone).await;
         assert!(gone.is_ok(), "still running");
+    }
+
+    #[tokio::test]
+    async fn a_removed_worktree_s_kept_servers_stop_in_every_window() {
+        use crate::backend::tests::named_server;
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let rust = perch_lsp::ServerKind::RustAnalyzer;
+        let on_a = named_server(a.path(), rust, "-").await;
+        let on_b = named_server(b.path(), rust, "-").await;
+        let kept = KeptServers::default();
+        kept.keep(1, on_a).await;
+        kept.keep(2, on_b.clone()).await;
+
+        kept.stop_root(a.path()).await;
+        let left = kept.clients();
+        assert_eq!(left.len(), 1);
+        assert!(Arc::ptr_eq(&left[0], &on_b), "another worktree's stays");
+        kept.stop_root(b.path()).await;
+        assert!(kept.clients().is_empty());
+    }
+
+    /// A server set aside after its checkout went, as one still starting
+    /// or still closing its files would be, is stopped as it comes. One
+    /// started at the path since, for what came there next, is kept.
+    #[tokio::test]
+    async fn a_server_set_aside_after_its_checkout_went_is_stopped() {
+        use crate::backend::tests::named_server;
+        let tree = tempfile::tempdir().unwrap();
+        let rust = perch_lsp::ServerKind::RustAnalyzer;
+        let late = named_server(tree.path(), rust, "-").await;
+        let kept = KeptServers::default();
+
+        kept.stop_root(tree.path()).await;
+        kept.keep(1, late).await;
+        assert!(
+            kept.clients().is_empty(),
+            "it watched the checkout that went"
+        );
+
+        let next = named_server(tree.path(), rust, "-").await;
+        kept.keep(1, next.clone()).await;
+        let left = kept.clients();
+        assert_eq!(left.len(), 1);
+        assert!(Arc::ptr_eq(&left[0], &next), "the code that came next");
+        next.shutdown().await;
     }
 }

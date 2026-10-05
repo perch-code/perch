@@ -300,6 +300,20 @@ fn server_ready(state: ReviewState, noun: &str, symbol: &Symbol) -> bool {
             .set(Some(crate::state::ServerOffer::missing(&missing, Some(text))));
         return false;
     }
+    // A server held for want of trust says so with the offer to trust it.
+    // Once the reader has closed the toast, this is one way back to it.
+    let held = perch_lsp::ServerKind::for_path(&symbol.path).is_some_and(|kind| {
+        state
+            .lsp_status
+            .with_untracked(|s| s.get(kind) == Some(&perch_lsp::Status::Held))
+    });
+    if let (true, Some(item)) = (held, state.item.get_untracked()) {
+        let kinds = state.lsp_status.with_untracked(|s| s.held());
+        let mut offer = crate::state::ServerOffer::held(&item, &kinds);
+        offer.text = format!("No {noun} found for `{}`: {}", symbol.text, offer.text);
+        state.pending_offer.set(Some(offer));
+        return false;
+    }
     let why = state
         .lsp_status
         .with_untracked(|s| s.unusable_reason(&symbol.path));
@@ -1040,6 +1054,37 @@ mod tests {
         assert_eq!(
             app.notice().as_deref(),
             Some("No definition found for `alpha` (rust-analyzer is still loading)")
+        );
+    }
+
+    /// Over a server held for want of trust, a click asks again to trust
+    /// the code, though the toast that asked was closed.
+    #[test]
+    fn a_cmd_click_over_a_held_server_offers_to_trust_it() {
+        let (mut harness, app, state, mut commands) = app_harness();
+        let doc = stacked_doc(state);
+        let rust = perch_lsp::ServerKind::RustAnalyzer;
+        state.set_server_status(rust, perch_lsp::Status::Held);
+        let item = state.item.get_untracked().unwrap();
+        app.offer_server(crate::state::ServerOffer::held(&item, &[rust]), false);
+        let token = app.current_toast().unwrap().token;
+        app.decline_offer(token, "trust wt");
+        assert!(app.current_toast().is_none());
+
+        let (x, y) = point_of(doc.offset_of_row(3) + 6);
+        cmd_click_at(&mut harness, x, y);
+        harness.rebuild();
+        harness.paint();
+        assert!(definitions_asked(&mut commands).is_empty());
+        let toast = app.current_toast().map(|t| t.kind);
+        let Some(crate::state::ToastKind::Server(offer)) = toast else {
+            panic!("no ask");
+        };
+        assert_eq!(offer.trust.as_deref(), Some("wt"));
+        assert_eq!(
+            offer.text,
+            "No definition found for `alpha`: rust-analyzer would run the build scripts and \
+             proc macros in slatedb/slatedb on perch/pr-812."
         );
     }
 

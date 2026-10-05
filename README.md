@@ -111,12 +111,31 @@ the compiler; the others go in `~/.perch/servers`. Perch never installs Go,
 Node or a JDK, and never runs `npm install` in a checkout, so a TypeScript
 checkout without `node_modules` can't resolve its packages' types.
 
-Language servers run project code: rust-analyzer runs build scripts and
-proc macros, and jdtls runs a Gradle build when it imports one. Keep that
-in mind on a pull request from someone you don't know. Perch never lets
-typescript-language-server run a checkout's own TypeScript, which a pull
-request could replace; a server on `PATH` older than 2.1, or without a
-TypeScript of its own, gives way to Perch's.
+rust-analyzer and jdtls run the checkout's own code as they load it:
+rust-analyzer its build scripts and proc macros, jdtls its Gradle or Maven
+build. Perch starts them by itself only on your own work in a repository in
+your config: your branches, the default branch, and your pull requests whose
+branch is in that repository or your fork. On anything else, such as someone
+else's pull request, a branch you cut from one, or a repository not in your
+config, a toast says what would run, with **Trust and start**. Perch
+remembers that for the item, commits pushed to it later included; deleting
+the item forgets it. While they wait, the Worktree row on Conversation has a
+warning, and its menu has **Trust and Start** once the toast is closed. After
+upgrading, a branch you had already cut from a pull request, your own
+included, asks once. gopls and typescript-language-server start either way.
+To trust everything in a repository, pull requests from anyone included:
+
+```toml
+[[repo]]
+github = "slatedb/slatedb"
+
+[repo.lsp]
+trust = true
+```
+
+Perch never lets typescript-language-server run a checkout's own TypeScript,
+which a pull request could replace; a server on `PATH` older than 2.1, or
+without a TypeScript of its own, gives way to Perch's.
 
 ## Agent safety
 

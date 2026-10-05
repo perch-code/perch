@@ -353,6 +353,13 @@ pub enum Command {
         navigation_id: u64,
         kind: perch_lsp::ServerKind,
     },
+    /// Trust the code of `item_id`, the item open in `navigation_id`, for
+    /// good, as its toast's Trust and start says, and start the servers
+    /// held back for it. Nothing is recorded for an item no longer on show.
+    TrustLanguageServers {
+        navigation_id: u64,
+        item_id: String,
+    },
     /// Ask the language server about a position. `token` lets the UI drop an
     /// answer that arrives after the pointer has moved on.
     Hover {
@@ -3495,6 +3502,15 @@ impl Backend {
         });
     }
 
+    /// Trust `item_id`'s code and start what was held for it.
+    pub fn trust_language_servers(&self, item_id: &str) {
+        let navigation_id = self.navigation_requests.current_id().unwrap_or(0);
+        let _ = self.commands.send(Command::TrustLanguageServers {
+            navigation_id,
+            item_id: item_id.to_string(),
+        });
+    }
+
     pub fn hover(&self, token: u64, path: &str, line: u32, character: u32) {
         let _ = self.commands.send(Command::Hover {
             token,
@@ -3840,6 +3856,7 @@ async fn run(
         language_servers: language_servers.clone(),
         kept_servers: Default::default(),
         starting_servers: Default::default(),
+        held_servers: Default::default(),
         installing_servers: Default::default(),
         events: events.clone(),
         runs: run_manager,
@@ -3923,6 +3940,10 @@ async fn run(
                         });
                     }
                     ctx.want_avatars(std::iter::once(user.avatar_url));
+                    // The reader's own pull requests, held while nobody was
+                    // known to be the reader, start now. Last: it waits on
+                    // the starts.
+                    start_held_servers_everywhere(&ctx).await;
                 }
                 Ok(_) => {}
                 Err(e) => tracing::info!(error = %e, "could not ask who the token belongs to"),
@@ -4149,17 +4170,7 @@ async fn run(
                 if let Ok(mut views) = base.views.lock() {
                     views.retain(|view| view.window != window);
                 }
-                // `ctx` is still the window's, and nothing else holds its
-                // view now but work already under way. A newer navigation
-                // fences that off, so an open still going cannot fill the
-                // slot and start a language server nobody will stop.
-                if ctx.window != NO_WINDOW {
-                    ctx.navigation_requests.begin_closed();
-                    tokio::spawn(async move {
-                        ctx.close_review().await;
-                        ctx.kept_servers.stop(ctx.window).await;
-                    });
-                }
+                close_window(ctx);
             }
             Command::DoneNotification { thread_id } => {
                 ctx.clear_notice();
@@ -4947,6 +4958,15 @@ async fn run(
                 let ctx = ctx.clone();
                 tokio::spawn(async move { start_server(&ctx, navigation_id, kind).await });
             }
+            // One command, not a record and then a start: commands are
+            // spawned, and the start could run before the record.
+            Command::TrustLanguageServers {
+                navigation_id,
+                item_id,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { trust_language_servers(&ctx, navigation_id, &item_id).await });
+            }
             Command::Hover {
                 token,
                 path,
@@ -5358,11 +5378,21 @@ fn spawn_names(
     events: EventSender<Event>,
 ) {
     tokio::spawn(async move {
-        let clients: Vec<_> = language_servers.lock().await.values().cloned().collect();
         let worktree = checkout
             .lock()
             .ok()
             .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()));
+        // As `resolve`: never a server for another worktree's code.
+        let clients: Vec<_> = match &worktree {
+            Some(worktree) => language_servers
+                .lock()
+                .await
+                .values()
+                .filter(|client| client.root() == worktree.as_path())
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        };
         let mut answers = Vec::with_capacity(names.len());
         let (false, Some(worktree)) = (clients.is_empty(), worktree) else {
             let answers = names.into_iter().map(|name| (name.key, None)).collect();
@@ -5433,17 +5463,23 @@ fn spawn_calls(
         // The server whose language the item's file is in.
         let kind = perch_lsp::client::uri_to_path(item.uri.as_str())
             .and_then(|path| perch_lsp::ServerKind::for_path(&path.to_string_lossy()));
-        let Some(client) = (match kind {
-            Some(kind) => language_servers.lock().await.get(&kind).cloned(),
-            None => None,
-        }) else {
-            return;
-        };
         let worktree = checkout
             .lock()
             .ok()
             .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()));
         let Some(worktree) = worktree else { return };
+        // As `resolve`: never a server for another worktree's code.
+        let Some(client) = (match kind {
+            Some(kind) => language_servers
+                .lock()
+                .await
+                .get(&kind)
+                .filter(|client| client.root() == worktree.as_path())
+                .cloned(),
+            None => None,
+        }) else {
+            return;
+        };
 
         // Each call as its item and the location of its first call site.
         let named: Result<
@@ -5560,6 +5596,9 @@ struct Ctx {
     kept_servers: kept_servers::KeptServers,
     /// The servers being started, so one is started once.
     starting_servers: StartingServers,
+    /// Servers held back for want of trust (see `hold_server`). What a
+    /// server set aside for one of these worktrees says goes nowhere.
+    held_servers: HeldServers,
     /// The servers being installed, for every window: one install of a
     /// server at a time.
     installing_servers: Arc<std::sync::Mutex<std::collections::HashSet<perch_lsp::ServerKind>>>,
@@ -6522,6 +6561,32 @@ impl Ctx {
             client.shutdown().await;
         }
     }
+
+    /// Stop every language server rooted at `root`, on show in any window
+    /// or set aside: the checkout there is going, and what comes to the
+    /// same path next may be other code, which a server still watching the
+    /// path would load. A window that showed the checkout and moved on to
+    /// an item that wants no server of that kind still has its server.
+    async fn stop_servers_at(&self, root: &Path) {
+        for view in self.views() {
+            let going: Vec<_> = {
+                let mut shown = view.language_servers.lock().await;
+                let kinds: Vec<_> = shown
+                    .iter()
+                    .filter(|(_, client)| client.root() == root)
+                    .map(|(kind, _)| *kind)
+                    .collect();
+                kinds.iter().filter_map(|kind| shown.remove(kind)).collect()
+            };
+            for client in going {
+                client.shutdown().await;
+            }
+        }
+        if let Ok(mut held) = self.held_servers.lock() {
+            held.retain(|(_, held_root, _)| held_root != root);
+        }
+        self.kept_servers.stop_root(root).await;
+    }
 }
 
 /// What the faces on a list of rows need asked after: the avatar of whoever
@@ -7463,7 +7528,9 @@ async fn retire_archived_checkout(ctx: &Ctx, id: &str) -> Result<(), String> {
     if ctx.runs.has_active_owner(id, None) {
         return Ok(());
     }
-    retire_archived_checkout_from_cache(&ctx.cache, &ctx.preparer, &ctx.events, id).await
+    let stop_servers = async |path: &Path| ctx.stop_servers_at(path).await;
+    retire_archived_checkout_from_cache(&ctx.cache, &ctx.preparer, &ctx.events, id, stop_servers)
+        .await
 }
 
 /// Finish every archive whose checkout is still present. The live wrapper
@@ -7491,8 +7558,10 @@ async fn retire_archived_checkouts_from_cache(
         .and_then(|cache| cache.load_items().ok())
         .unwrap_or_default();
     for item in items.iter().filter(|item| archived_checkout_on_disk(item)) {
+        // Nothing has started a language server yet.
+        let no_servers = async |_: &Path| {};
         if let Err(error) =
-            retire_archived_checkout_from_cache(cache, preparer, events, &item.id).await
+            retire_archived_checkout_from_cache(cache, preparer, events, &item.id, no_servers).await
         {
             tracing::info!(item = %item.id, %error, "kept an archived checkout on disk");
         }
@@ -7507,11 +7576,16 @@ fn archived_checkout_on_disk(item: &Item) -> bool {
             .is_some_and(|checkout| checkout.owned && checkout.on_disk)
 }
 
+/// Remove an archived item's checkout, unless it has changes, and mark it
+/// no longer on disk. `stop_servers` stops the language servers rooted at
+/// the checkout once it is sure to go: what comes to the path next may be
+/// other code, which a server still watching it would load.
 async fn retire_archived_checkout_from_cache(
     cache: &SharedCache,
     preparer: &Preparer,
     events: &EventSender<Event>,
     id: &str,
+    stop_servers: impl AsyncFnOnce(&Path),
 ) -> Result<(), String> {
     let item = cache
         .as_ref()
@@ -7524,14 +7598,17 @@ async fn retire_archived_checkout_from_cache(
         return Ok(());
     };
     let checkout = item.checkout.as_ref().cloned().unwrap();
-    if checkout.path.join(".git").exists() {
-        if preparer
+    let present = checkout.path.join(".git").exists();
+    if present
+        && preparer
             .is_dirty(&checkout.path)
             .await
             .map_err(|error| error.to_string())?
-        {
-            return Err(format!("{} has uncommitted changes", checkout.branch));
-        }
+    {
+        return Err(format!("{} has uncommitted changes", checkout.branch));
+    }
+    stop_servers(&checkout.path).await;
+    if present {
         let bare = owned_repo(preparer.store(), &item)
             .ok_or_else(|| format!("{} is not a repository name", item.repo_full_name))?;
         preparer
@@ -7610,21 +7687,28 @@ async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), Strin
         .unwrap_or_default();
     drop_work_refs(ctx, &runs).await;
     if let Some(checkout) = item.checkout.as_ref().filter(|c| c.owned) {
-        if let Some(bare) = owned_repo(ctx.preparer.store(), &item) {
-            if checkout.path.join(".git").exists() {
-                // Cancellation is asynchronous and the checkout is also a
-                // normal directory the reader can edit. The first check
-                // protects existing work; this one protects changes made
-                // while Perch was waiting for the agent process to exit.
-                if ctx
-                    .preparer
-                    .is_dirty(&checkout.path)
-                    .await
-                    .map_err(|error| error.to_string())?
-                {
-                    return Err(format!("{} has uncommitted changes", checkout.branch));
-                }
-                ctx.close_everywhere(id).await;
+        let bare = owned_repo(ctx.preparer.store(), &item);
+        let present = bare.is_some() && checkout.path.join(".git").exists();
+        if present {
+            // Cancellation is asynchronous and the checkout is also a
+            // normal directory the reader can edit. The first check
+            // protects existing work; this one protects changes made
+            // while Perch was waiting for the agent process to exit.
+            if ctx
+                .preparer
+                .is_dirty(&checkout.path)
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                return Err(format!("{} has uncommitted changes", checkout.branch));
+            }
+            ctx.close_everywhere(id).await;
+        }
+        // Whatever is left of the checkout, nothing goes on watching the
+        // path: what comes to it next may be other code.
+        ctx.stop_servers_at(&checkout.path).await;
+        if let Some(bare) = bare {
+            if present {
                 ctx.preparer
                     .remove_worktree(&bare, &checkout.path)
                     .await
@@ -11526,7 +11610,8 @@ async fn start_work_on_issue(ctx: &Ctx, issue_item_id: &str, navigation_id: u64)
         source: None,
     });
     item.from_item_id = Some(issue_item.id.clone());
-    ctx.with_cache(|c| c.insert_item(&item))
+    let untrusted = cut_starts_untrusted(ctx, &issue_item);
+    ctx.with_cache(|c| c.insert_cut_item(&item, untrusted))
         .transpose()
         .map_err(|e| e.to_string())?;
     ctx.send_items();
@@ -11619,12 +11704,15 @@ async fn remove_repository(ctx: &Ctx, identity: &str, path: &Path) -> Result<(),
 }
 
 /// Read the `[[repo]]` entries again and resolve them as at startup, and
-/// tell the sidebar. The rest of the file waits for a restart.
+/// tell the sidebar. The rest of the file waits for a restart. A server
+/// held for an item in a repository now in the config may start.
 async fn take_up_config(ctx: &Ctx, path: &Path) -> Config {
     let mut reloaded = Config::load_from(path);
     crate::repos::resolve(&mut reloaded, &perch_git::cmd::Git::new(None)).await;
     ctx.replace_repos(reloaded.repo.clone());
     let _ = ctx.events.send(Event::Repos(ctx.config().declared_repos()));
+    let held = ctx.clone();
+    tokio::spawn(async move { start_held_servers_everywhere(&held).await });
     reloaded
 }
 
@@ -11956,7 +12044,8 @@ async fn fork_item(ctx: &Ctx, id: &str) -> Result<String, String> {
         source: root,
     });
     item.from_item_id = Some(source.id.clone());
-    ctx.with_cache(|c| c.insert_item(&item))
+    let untrusted = cut_starts_untrusted(ctx, &source);
+    ctx.with_cache(|c| c.insert_cut_item(&item, untrusted))
         .transpose()
         .map_err(|e| e.to_string())?;
     ctx.send_items();
@@ -12117,7 +12206,8 @@ async fn start_work_on_pull(ctx: &Ctx, id: &str, navigation_id: u64) -> Result<S
     // The pull request's title, which its successor's form starts from.
     item.name = Some(pr.title.clone()).filter(|t| !t.trim().is_empty());
     item.from_item_id = Some(source.id.clone());
-    ctx.with_cache(|c| c.insert_item(&item))
+    let untrusted = cut_starts_untrusted(ctx, &source);
+    ctx.with_cache(|c| c.insert_cut_item(&item, untrusted))
         .transpose()
         .map_err(|e| e.to_string())?;
     ctx.send_items();
@@ -17175,38 +17265,94 @@ fn wanted_servers(worktree: &Path, files: &[perch_git::ChangedFile]) -> Vec<perc
 }
 
 /// Start the server of the kind a newly opened file wants, when the
-/// window has none of that kind for its worktree yet, or the one it has
+/// window has none of that kind for this worktree yet, or the one it has
 /// has ended.
 async fn start_server_for_file(ctx: &Ctx, navigation_id: u64, path: &str) {
     let Some(kind) = perch_lsp::ServerKind::for_path(path) else {
         return;
     };
-    let wanted = ctx
+    let Some((worktree, item_id)) = ctx.slot.lock().ok().and_then(|g| {
+        g.as_ref()
+            .filter(|context| context.navigation_id == navigation_id)
+            .map(|context| (context.checkout.worktree.clone(), context.item_id.clone()))
+    }) else {
+        return;
+    };
+    // One on show for another item's worktree is no server for this one:
+    // starting puts this one's in its place, or holds it. One for this
+    // worktree that runs its code serves only while the code is trusted,
+    // which the config can stop saying; the gate in `start_server` stops it.
+    // One that has ended gives way to a new one.
+    let serving = ctx
         .language_servers
         .lock()
         .await
         .get(&kind)
-        .is_none_or(|client| client.has_ended());
-    if wanted {
+        .is_some_and(|client| client.root() == worktree.as_path() && !client.has_ended());
+    let trusted = || kind.project_code().is_none() || item_code_trusted(ctx, &item_id);
+    if !serving || !trusted() {
         start_server(ctx, navigation_id, kind).await;
     }
+}
+
+/// Whether `item`'s code may run in rust-analyzer or jdtls without asking,
+/// by what the cache and config say now (see `items::code_trusted`). Any
+/// read that fails, or no cache, is untrusted.
+fn code_trusted_now(ctx: &Ctx, item: &Item) -> bool {
+    let read = ctx.with_cache(|c| -> Result<_, CacheError> {
+        Ok((c.meta("viewer.login")?, c.item_code_trust(&item.id)?))
+    });
+    let Some(Ok((viewer, granted))) = read else {
+        return false;
+    };
+    crate::items::code_trusted(item, viewer.as_deref(), &ctx.config(), granted)
+}
+
+/// `code_trusted_now` for the item with an id; an item with no row is
+/// untrusted.
+fn item_code_trusted(ctx: &Ctx, item_id: &str) -> bool {
+    ctx.item(item_id).is_some_and(|item| code_trusted_now(ctx, &item))
+}
+
+/// Whether a branch cut from `source` starts out untrusted (see
+/// `items::cut_inherits_distrust`), whatever the config says of its
+/// repository. A read that fails says it does.
+fn cut_starts_untrusted(ctx: &Ctx, source: &Item) -> bool {
+    let read = ctx.with_cache(|c| -> Result<_, CacheError> {
+        Ok((c.meta("viewer.login")?, c.item_code_trust(&source.id)?))
+    });
+    let Some(Ok((viewer, granted))) = read else {
+        return true;
+    };
+    crate::items::cut_inherits_distrust(source, viewer.as_deref(), granted)
 }
 
 /// Start the server of `kind` for the open item's worktree, or take up
 /// the one already running or set aside. One start per window, worktree
 /// and kind at a time: a file opened while its server is still starting
-/// leaves that start to finish.
+/// leaves that start to finish. A server that would run code the reader
+/// hasn't trusted is held instead (see `hold_server`).
 async fn start_server(ctx: &Ctx, navigation_id: u64, kind: perch_lsp::ServerKind) {
     let checkout = &ctx.slot;
     let events = &ctx.events;
     let navigation_requests = &ctx.navigation_requests;
-    let Some(worktree) = checkout.lock().ok().and_then(|g| {
+    let Some((worktree, item_id)) = checkout.lock().ok().and_then(|g| {
         g.as_ref()
             .filter(|context| context.navigation_id == navigation_id)
-            .map(|context| context.checkout.worktree.clone())
+            .map(|context| (context.checkout.worktree.clone(), context.item_id.clone()))
     }) else {
         return;
     };
+    // Before `find`, which for rust-analyzer runs rustup in the worktree,
+    // where the checkout's toolchain file can name a binary of its own;
+    // and before a server on show or set aside for the worktree is taken up.
+    if kind.project_code().is_some() && !item_code_trusted(ctx, &item_id) {
+        hold_server(ctx, navigation_id, &worktree, kind).await;
+        return;
+    }
+    if let Ok(mut held) = ctx.held_servers.lock() {
+        held.remove(&(ctx.window, worktree.clone(), kind));
+    }
     let Some(_starting) = Starting::claim(&ctx.starting_servers, ctx.window, &worktree, kind) else {
         return;
     };
@@ -17355,6 +17501,157 @@ async fn show_server(ctx: &Ctx, navigation_id: u64, worktree: &Path, spec: perch
     }
 }
 
+/// Hold back a server that would run the open item's code, which the
+/// reader hasn't trusted: none of its kind serves the window meanwhile,
+/// what a server set aside for this worktree says goes nowhere, and the
+/// window is told, so it can ask. The one this window has on show is set
+/// aside when it is another worktree's, and stopped when it is this one's,
+/// as are any set aside for this worktree in any window: they would go on
+/// loading this code unasked, as after the config stops trusting it.
+/// Another window showing the worktree keeps its own until its next file
+/// open or navigation comes through the gate.
+async fn hold_server(ctx: &Ctx, navigation_id: u64, worktree: &Path, kind: perch_lsp::ServerKind) {
+    let mut language_servers = ctx.language_servers.lock().await;
+    // Recorded under the lock a navigation begins under, so a start for
+    // the next one, which takes the entry out, comes after it. Whether it
+    // is new: Held is told again with every file of its language opened.
+    let fresh = ctx
+        .navigation_requests
+        .with_current(navigation_id, || {
+            let current = ctx.slot.lock().ok().is_some_and(|context| {
+                context
+                    .as_ref()
+                    .is_some_and(|context| context.navigation_id == navigation_id)
+            });
+            current.then(|| {
+                ctx.held_servers
+                    .lock()
+                    .is_ok_and(|mut held| held.insert((ctx.window, worktree.to_path_buf(), kind)))
+            })
+        })
+        .flatten();
+    let Some(fresh) = fresh else {
+        return;
+    };
+    let shown = language_servers.remove(&kind);
+    drop(language_servers);
+    match shown {
+        Some(shown) if shown.root() == worktree => shown.shutdown().await,
+        Some(shown) => ctx.kept_servers.keep(ctx.window, shown).await,
+        None => {}
+    }
+    ctx.kept_servers.stop_kind_at(worktree, kind).await;
+    if fresh {
+        tracing::info!(
+            server = kind.name(),
+            "language server held until its code is trusted"
+        );
+    }
+    send_lsp_status_if_current(
+        &ctx.navigation_requests,
+        &ctx.slot,
+        &ctx.events,
+        navigation_id,
+        kind,
+        perch_lsp::Status::Held,
+    );
+}
+
+/// Ask again for the servers held for `worktree` in this window: the gate
+/// in `start_server` starts the ones now trusted and holds the rest again.
+async fn start_held_servers(ctx: &Ctx, navigation_id: u64, worktree: &Path) {
+    let kinds: Vec<_> = ctx
+        .held_servers
+        .lock()
+        .map(|held| {
+            held.iter()
+                .filter(|(window, root, _)| *window == ctx.window && root.as_path() == worktree)
+                .map(|(_, _, kind)| *kind)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut starts = tokio::task::JoinSet::new();
+    for kind in kinds {
+        let ctx = ctx.clone();
+        starts.spawn(async move { start_server(&ctx, navigation_id, kind).await });
+    }
+    while starts.join_next().await.is_some() {}
+}
+
+/// Ask again for what is held in every window, for the item each shows.
+async fn start_held_servers_everywhere(ctx: &Ctx) {
+    for view in ctx.views() {
+        let open = view.slot.lock().ok().and_then(|g| {
+            g.as_ref()
+                .map(|c| (c.navigation_id, c.checkout.worktree.clone()))
+        });
+        if let Some((navigation_id, worktree)) = open {
+            start_held_servers(&view, navigation_id, &worktree).await;
+        }
+    }
+}
+
+/// The reader trusted the open item's code: remember it for the item, and
+/// start what was held for it, in every window showing it. A click that
+/// lands after another item began opening trusts nothing: the toast was
+/// about the item it named, not the one coming.
+async fn trust_language_servers(ctx: &Ctx, navigation_id: u64, item_id: &str) {
+    let on_show = ctx
+        .navigation_requests
+        .with_current(navigation_id, || {
+            ctx.slot.lock().ok().is_some_and(|g| {
+                g.as_ref()
+                    .is_some_and(|c| c.navigation_id == navigation_id && c.item_id == item_id)
+            })
+        })
+        .unwrap_or(false);
+    if !on_show {
+        tracing::info!(item = item_id, "trust asked for an item no longer on show; nothing recorded");
+        return;
+    }
+    match ctx.with_cache(|c| c.trust_item_code(item_id)) {
+        Some(Ok(())) => {}
+        Some(Err(error)) => {
+            tracing::warn!(%error, item = item_id, "could not record that an item's code is trusted");
+            ctx.notice(format!("Could not trust this code: {error}"));
+            return;
+        }
+        None => {
+            ctx.notice("Could not trust this code: the local database is unavailable");
+            return;
+        }
+    }
+    for view in ctx.views() {
+        let open = view.slot.lock().ok().and_then(|g| {
+            g.as_ref()
+                .filter(|c| c.item_id == item_id)
+                .map(|c| (c.navigation_id, c.checkout.worktree.clone()))
+        });
+        if let Some((navigation_id, worktree)) = open {
+            start_held_servers(&view, navigation_id, &worktree).await;
+        }
+    }
+}
+
+/// Stop what a closed window ran. `ctx` is still the window's, and nothing
+/// else holds its view now but work already under way. A newer navigation
+/// fences that off, so an open still going cannot fill the slot and start
+/// a language server nobody will stop. What was held for the window goes
+/// at once.
+fn close_window(ctx: Ctx) {
+    if ctx.window == NO_WINDOW {
+        return;
+    }
+    ctx.navigation_requests.begin_closed();
+    if let Ok(mut held) = ctx.held_servers.lock() {
+        held.retain(|(window, _, _)| *window != ctx.window);
+    }
+    tokio::spawn(async move {
+        ctx.close_review().await;
+        ctx.kept_servers.stop(ctx.window).await;
+    });
+}
+
 /// Where Perch installs the servers that belong to no toolchain:
 /// `~/.perch/servers`.
 fn servers_dir() -> PathBuf {
@@ -17405,6 +17702,11 @@ async fn install_language_server(ctx: &Ctx, kind: perch_lsp::ServerKind, install
 type StartingServers =
     Arc<std::sync::Mutex<std::collections::HashSet<(WindowId, PathBuf, perch_lsp::ServerKind)>>>;
 
+/// The servers held back until the reader trusts the code on show, by
+/// window, worktree and kind.
+type HeldServers =
+    Arc<std::sync::Mutex<std::collections::HashSet<(WindowId, PathBuf, perch_lsp::ServerKind)>>>;
+
 /// A claim on starting one server, given up when dropped.
 struct Starting {
     set: StartingServers,
@@ -17450,6 +17752,7 @@ fn forward_language_server_events(
     let slot = ctx.language_servers.clone();
     let events = ctx.events.clone();
     let navigation_requests = ctx.navigation_requests.clone();
+    let (held, window) = (ctx.held_servers.clone(), ctx.window);
     let (worktree, binary) = (worktree.to_path_buf(), binary.to_path_buf());
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
@@ -17461,6 +17764,11 @@ fn forward_language_server_events(
                     tracing::warn!(server = kind.name(), %message, "language server");
                 }
                 perch_lsp::client::ServerEvent::Diagnostics { .. } => {}
+            }
+            // Held for this window and worktree: a server set aside for
+            // code the reader hasn't trusted says nothing to the window.
+            if held.lock().is_ok_and(|held| held.contains(&(window, worktree.clone(), kind))) {
+                continue;
             }
             // On show, or still starting with none other of its kind on
             // show for the worktree.
@@ -17585,7 +17893,15 @@ async fn announce_file(
     let Some(kind) = perch_lsp::ServerKind::for_path(&path) else {
         return;
     };
-    let Some(client) = slot.lock().await.get(&kind).cloned() else {
+    // Never a server for other code, as one on show for another worktree
+    // is while this one's start is under way, or held.
+    let Some(client) = slot
+        .lock()
+        .await
+        .get(&kind)
+        .filter(|client| client.root() == worktree.as_path())
+        .cloned()
+    else {
         return;
     };
     let full = worktree.join(&path);
@@ -17652,21 +17968,27 @@ async fn send_outline(
 }
 
 /// The server for a file of the open checkout, by the file's language,
-/// and the file's absolute path.
+/// and the file's absolute path. Never one rooted at another worktree, as
+/// one on show for the last item is while this one's starts, or is held.
 async fn resolve(
     checkout: &Arc<std::sync::Mutex<Option<ReviewContext>>>,
     slot: &Servers,
     path: &str,
 ) -> Option<(Arc<perch_lsp::Client>, std::path::PathBuf)> {
     let kind = perch_lsp::ServerKind::for_path(path)?;
-    let client = slot.lock().await.get(&kind).cloned()?;
-    if perch_lsp::server::is_class_file(path) {
-        return Some((client, std::path::PathBuf::from(path)));
-    }
     let worktree = checkout
         .lock()
         .ok()
         .and_then(|g| g.as_ref().map(|c| c.checkout.worktree.clone()))?;
+    let client = slot
+        .lock()
+        .await
+        .get(&kind)
+        .filter(|client| client.root() == worktree.as_path())
+        .cloned()?;
+    if perch_lsp::server::is_class_file(path) {
+        return Some((client, std::path::PathBuf::from(path)));
+    }
     Some((client, worktree.join(path)))
 }
 
@@ -18352,6 +18674,7 @@ mod tests {
             language_servers: Default::default(),
             kept_servers: Default::default(),
             starting_servers: Default::default(),
+            held_servers: Default::default(),
             installing_servers: Default::default(),
             events,
             runs,
@@ -20466,14 +20789,25 @@ while True:
 
     /// Start a `NAMED_SERVER` as `kind`, answering names that start with
     /// `prefix`.
-    async fn named_server(
+    pub(super) async fn named_server(
         root: &Path,
         kind: perch_lsp::ServerKind,
         prefix: &str,
     ) -> Arc<perch_lsp::Client> {
-        let script = root.join(format!("{}.py", kind.name()));
+        named_server_in(root, root, kind, prefix).await
+    }
+
+    /// `named_server` rooted at `root`, with its files in `files`, so a
+    /// checkout it is rooted at is left as it was.
+    async fn named_server_in(
+        files: &Path,
+        root: &Path,
+        kind: perch_lsp::ServerKind,
+        prefix: &str,
+    ) -> Arc<perch_lsp::Client> {
+        let script = files.join(format!("{}.py", kind.name()));
         std::fs::write(&script, NAMED_SERVER).unwrap();
-        std::fs::write(root.join(format!("{}.txt", kind.name())), "here\n").unwrap();
+        std::fs::write(files.join(format!("{}.txt", kind.name())), "here\n").unwrap();
         let spec = perch_lsp::ServerSpec {
             kind,
             binary: "python3".into(),
@@ -20752,6 +21086,383 @@ while True:
         // Done, it can run again.
         install_language_server(&ctx, kind, install).await;
         assert_eq!(std::fs::read_to_string(&runs).unwrap(), "ran\nran\n");
+    }
+
+    /// `a/b#7`, by `u`, open at `/x` under a current navigation, with
+    /// `viewer` the reader when one is known.
+    fn open_pull_seven(ctx: &Ctx, viewer: Option<&str>) -> (Item, u64) {
+        if let Some(viewer) = viewer {
+            ctx.with_cache(|c| c.set_meta("viewer.login", viewer)).unwrap().unwrap();
+        }
+        let item = store_pull(ctx, 7);
+        open_in_slot(ctx, &item);
+        let navigation_id = ctx.navigation_requests.begin_current();
+        ctx.slot.lock().unwrap().as_mut().unwrap().navigation_id = navigation_id;
+        (item, navigation_id)
+    }
+
+    /// The server statuses the window was told since last asked.
+    fn lsp_statuses(received: &Receiver<Event>) -> Vec<(perch_lsp::ServerKind, perch_lsp::Status)> {
+        received
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::LspStatus { kind, status, .. } => Some((kind, status)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether the server of `kind` is held for `/x` in the context's window.
+    fn held_at_x(ctx: &Ctx, kind: perch_lsp::ServerKind) -> bool {
+        ctx.held_servers
+            .lock()
+            .unwrap()
+            .contains(&(ctx.window, PathBuf::from("/x"), kind))
+    }
+
+    /// A claim on starting `kind` at `/x`, so a start that gets past the
+    /// gate stops at its claim, before any server runs.
+    fn claim_at_x(ctx: &Ctx, kind: perch_lsp::ServerKind) -> Starting {
+        Starting::claim(&ctx.starting_servers, ctx.window, Path::new("/x"), kind).unwrap()
+    }
+
+    /// rust-analyzer and jdtls run a checkout's build, so on someone else's
+    /// pull request they wait and the window is told. The server of another
+    /// item that was on show is set aside, not lent. gopls runs none of the
+    /// checkout's code and goes on to start.
+    #[tokio::test]
+    async fn someone_else_s_pull_request_holds_the_servers_that_run_its_code() {
+        use perch_lsp::{ServerKind, Status};
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &["a/b"]);
+        let (_, navigation_id) = open_pull_seven(&ctx, Some("chris"));
+        let tree = tempfile::tempdir().unwrap();
+        let other = named_server(tree.path(), ServerKind::RustAnalyzer, "-").await;
+        ctx.language_servers
+            .lock()
+            .await
+            .insert(ServerKind::RustAnalyzer, other.clone());
+
+        start_server(&ctx, navigation_id, ServerKind::RustAnalyzer).await;
+
+        assert_eq!(lsp_statuses(&received), [(ServerKind::RustAnalyzer, Status::Held)]);
+        assert!(!ctx.language_servers.lock().await.contains_key(&ServerKind::RustAnalyzer));
+        assert!(
+            ctx.kept_servers.clients().iter().any(|kept| Arc::ptr_eq(kept, &other)),
+            "set aside, not stopped"
+        );
+        assert!(held_at_x(&ctx, ServerKind::RustAnalyzer));
+
+        start_server(&ctx, navigation_id, ServerKind::Jdtls).await;
+        assert_eq!(lsp_statuses(&received), [(ServerKind::Jdtls, Status::Held)]);
+        assert!(held_at_x(&ctx, ServerKind::Jdtls));
+
+        let _claim = claim_at_x(&ctx, ServerKind::Gopls);
+        start_server(&ctx, navigation_id, ServerKind::Gopls).await;
+        assert!(lsp_statuses(&received).is_empty(), "gopls isn't held");
+        assert!(!held_at_x(&ctx, ServerKind::Gopls));
+        other.shutdown().await;
+    }
+
+    /// The reader's own pull request, its head in the repository, starts
+    /// its servers unasked in a repository in the config, and asks in one
+    /// that isn't. Held while the reader isn't known, it starts once they
+    /// are.
+    #[tokio::test]
+    async fn the_reader_s_own_pull_request_starts_its_servers() {
+        let kind = perch_lsp::ServerKind::RustAnalyzer;
+        for (declared, held) in [(&["a/b"][..], false), (&[][..], true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let (ctx, received) = ctx(dir.path(), &nowhere(), declared);
+            let (_, navigation_id) = open_pull_seven(&ctx, Some("U"));
+            let _claim = claim_at_x(&ctx, kind);
+
+            start_server(&ctx, navigation_id, kind).await;
+
+            assert_eq!(!lsp_statuses(&received).is_empty(), held, "{declared:?}");
+            assert_eq!(held_at_x(&ctx, kind), held, "{declared:?}");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &["a/b"]);
+        let (_, navigation_id) = open_pull_seven(&ctx, None);
+        start_server(&ctx, navigation_id, kind).await;
+        assert_eq!(lsp_statuses(&received), [(kind, perch_lsp::Status::Held)], "nobody's yet");
+        ctx.with_cache(|c| c.set_meta("viewer.login", "u")).unwrap().unwrap();
+        let _claim = claim_at_x(&ctx, kind);
+        start_held_servers_everywhere(&ctx).await;
+        assert!(!held_at_x(&ctx, kind), "the reader's, now the reader is known");
+        assert!(lsp_statuses(&received).is_empty());
+    }
+
+    /// Trust and start records the answer for the item and starts what was
+    /// held, and the next start on the item doesn't ask.
+    #[tokio::test]
+    async fn trust_and_start_remembers_the_item_and_starts_what_was_held() {
+        use perch_lsp::{ServerKind, Status};
+        let kind = ServerKind::RustAnalyzer;
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &["a/b"]);
+        let (item, navigation_id) = open_pull_seven(&ctx, Some("chris"));
+        start_server(&ctx, navigation_id, kind).await;
+        assert_eq!(lsp_statuses(&received), [(kind, Status::Held)]);
+
+        let _claim = claim_at_x(&ctx, kind);
+        trust_language_servers(&ctx, navigation_id, &item.id).await;
+
+        assert_eq!(
+            ctx.with_cache(|c| c.item_code_trust(&item.id).unwrap()).unwrap(),
+            Some(true)
+        );
+        assert!(!held_at_x(&ctx, kind), "past the gate, so no longer held");
+        assert!(lsp_statuses(&received).is_empty());
+        start_server(&ctx, navigation_id, kind).await;
+        assert!(lsp_statuses(&received).is_empty(), "reopening doesn't ask");
+    }
+
+    /// A Trust and start that lands after another navigation began, or
+    /// while another item is open, trusts nothing.
+    #[tokio::test]
+    async fn trust_for_an_item_no_longer_on_show_records_nothing() {
+        let kind = perch_lsp::ServerKind::RustAnalyzer;
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &["a/b"]);
+        let (item, navigation_id) = open_pull_seven(&ctx, Some("chris"));
+        start_server(&ctx, navigation_id, kind).await;
+        let trust = || ctx.with_cache(|c| c.item_code_trust(&item.id).unwrap()).unwrap();
+
+        ctx.navigation_requests.begin_current();
+        trust_language_servers(&ctx, navigation_id, &item.id).await;
+        assert_eq!(trust(), None, "another navigation began");
+        assert!(held_at_x(&ctx, kind));
+
+        let next = ctx.navigation_requests.begin_current();
+        if let Some(open) = ctx.slot.lock().unwrap().as_mut() {
+            open.navigation_id = next;
+            open.item_id = "other".into();
+        }
+        trust_language_servers(&ctx, next, &item.id).await;
+        assert_eq!(trust(), None, "another item is open");
+        assert!(held_at_x(&ctx, kind));
+    }
+
+    /// A file of the open item's is never given to a server on show for
+    /// another worktree, nor asked about. Its open starts this worktree's
+    /// server in that one's place, which here is held.
+    #[tokio::test]
+    async fn a_file_open_does_not_borrow_another_item_s_server() {
+        use perch_lsp::{ServerKind, Status};
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &["a/b"]);
+        let (_, navigation_id) = open_pull_seven(&ctx, Some("chris"));
+        let tree = tempfile::tempdir().unwrap();
+        let other = named_server(tree.path(), ServerKind::RustAnalyzer, "-").await;
+        ctx.language_servers
+            .lock()
+            .await
+            .insert(ServerKind::RustAnalyzer, other.clone());
+
+        announce_file(
+            ctx.slot.clone(),
+            ctx.language_servers.clone(),
+            ctx.navigation_requests.clone(),
+            ctx.events.clone(),
+            "src/lib.rs".into(),
+            navigation_id,
+            Some(Shown {
+                text: Some("fn x() {}\n".into()),
+                scope_gen: 0,
+            }),
+        )
+        .await;
+        assert_eq!(other.given(Path::new("/x/src/lib.rs")), None);
+        // Nor asked about one: a hover or a goto finds no server.
+        assert!(resolve(&ctx.slot, &ctx.language_servers, "src/lib.rs")
+            .await
+            .is_none());
+
+        start_server_for_file(&ctx, navigation_id, "src/lib.rs").await;
+        assert_eq!(lsp_statuses(&received), [(ServerKind::RustAnalyzer, Status::Held)]);
+        assert!(!ctx.language_servers.lock().await.contains_key(&ServerKind::RustAnalyzer));
+        other.shutdown().await;
+    }
+
+    /// A server set aside for a worktree whose server is held says nothing
+    /// to the window showing it: another item's server there isn't this
+    /// item's.
+    #[tokio::test]
+    async fn a_server_set_aside_for_a_held_worktree_says_nothing() {
+        use perch_lsp::{client::ServerEvent, ServerKind, Status};
+        let kind = ServerKind::RustAnalyzer;
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &["a/b"]);
+        let (_, navigation_id) = open_pull_seven(&ctx, Some("chris"));
+        start_server(&ctx, navigation_id, kind).await;
+        assert_eq!(lsp_statuses(&received), [(kind, Status::Held)]);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        forward_language_server_events(&ctx, Path::new("/x"), kind, Path::new("rust-analyzer"), rx);
+        // The test's runtime has one thread: each yield lets the forwarder
+        // take what was sent so far.
+        let settle = || async {
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+        };
+
+        tx.send(ServerEvent::Status(Status::Indexing { percent: Some(10) })).unwrap();
+        settle().await;
+        assert!(lsp_statuses(&received).is_empty(), "held");
+
+        ctx.held_servers.lock().unwrap().clear();
+        tx.send(ServerEvent::Status(Status::Ready)).unwrap();
+        settle().await;
+        assert_eq!(lsp_statuses(&received), [(kind, Status::Ready)], "no longer held");
+    }
+
+    /// A server already running the held worktree's code is stopped, not
+    /// set aside, on show or set aside before: it would go on loading the
+    /// code unasked. Another worktree's set aside stays. A file opened
+    /// while one for this worktree is on show asks the gate again.
+    #[tokio::test]
+    async fn holding_a_server_stops_the_ones_running_its_code() {
+        use perch_lsp::{ServerKind, Status};
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &["a/b"]);
+        let (_, navigation_id) = open_pull_seven(&ctx, Some("chris"));
+        let tree = tempfile::tempdir().unwrap();
+        let worktree = std::fs::canonicalize(tree.path()).unwrap();
+        if let Some(open) = ctx.slot.lock().unwrap().as_mut() {
+            open.checkout.worktree = worktree.clone();
+        }
+        let elsewhere = tempfile::tempdir().unwrap();
+        let shown = named_server(&worktree, ServerKind::RustAnalyzer, "-").await;
+        ctx.language_servers
+            .lock()
+            .await
+            .insert(ServerKind::RustAnalyzer, shown);
+        let kept_here = named_server(&worktree, ServerKind::Jdtls, "-").await;
+        let kept_there = named_server(elsewhere.path(), ServerKind::Jdtls, "-").await;
+        // The oldest, which setting one more aside would stop.
+        ctx.kept_servers.keep(NO_WINDOW, kept_there.clone()).await;
+        ctx.kept_servers.keep(NO_WINDOW, kept_here).await;
+
+        start_server(&ctx, navigation_id, ServerKind::RustAnalyzer).await;
+        start_server(&ctx, navigation_id, ServerKind::Jdtls).await;
+
+        assert_eq!(
+            lsp_statuses(&received),
+            [(ServerKind::RustAnalyzer, Status::Held), (ServerKind::Jdtls, Status::Held)]
+        );
+        assert!(ctx.language_servers.lock().await.is_empty());
+        let kept = ctx.kept_servers.clients();
+        assert_eq!(kept.len(), 1, "this worktree's are stopped");
+        assert!(Arc::ptr_eq(&kept[0], &kept_there), "another worktree's stays set aside");
+
+        // As if it had started while the code was trusted.
+        let started = named_server(&worktree, ServerKind::RustAnalyzer, "-").await;
+        ctx.language_servers
+            .lock()
+            .await
+            .insert(ServerKind::RustAnalyzer, started);
+        start_server_for_file(&ctx, navigation_id, "src/lib.rs").await;
+        assert_eq!(lsp_statuses(&received), [(ServerKind::RustAnalyzer, Status::Held)]);
+        assert!(ctx.language_servers.lock().await.is_empty());
+        assert_eq!(ctx.kept_servers.clients().len(), 1);
+        kept_there.shutdown().await;
+    }
+
+    /// A closed window's held servers are forgotten as it closes; another
+    /// window's stay held.
+    #[tokio::test]
+    async fn a_closed_window_forgets_what_was_held_for_it() {
+        let kind = perch_lsp::ServerKind::RustAnalyzer;
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, _) = ctx(dir.path(), &nowhere(), &[]);
+        ctx.window = 1;
+        {
+            let mut held = ctx.held_servers.lock().unwrap();
+            held.insert((1, PathBuf::from("/x"), kind));
+            held.insert((2, PathBuf::from("/x"), kind));
+        }
+        close_window(ctx.clone());
+        let held: Vec<_> = ctx.held_servers.lock().unwrap().iter().map(|(w, _, _)| *w).collect();
+        assert_eq!(held, [2]);
+    }
+
+    /// An archived checkout's servers stop once it goes: not while it has
+    /// changes, which keep it on disk.
+    #[tokio::test]
+    async fn an_archived_checkout_s_servers_stop_only_once_it_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(dir.path(), &nowhere(), &[]);
+        let tree = tempfile::tempdir().unwrap();
+        let worktree = std::fs::canonicalize(tree.path()).unwrap();
+        git(&worktree, &["init", "-q"]);
+        let mut item = store_pull(&ctx, 7);
+        item.archived_at = Some(Timestamp::now());
+        item.checkout = Some(ItemCheckout {
+            branch: "perch/pr-7".into(),
+            base_ref: "main".into(),
+            head_sha: "h".into(),
+            path: worktree.clone(),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            divergence: None,
+            source: None,
+        });
+        ctx.with_cache(|c| c.update_item(&item)).unwrap().unwrap();
+        // Its script is a change the checkout has.
+        let kept = named_server(&worktree, perch_lsp::ServerKind::RustAnalyzer, "-").await;
+        ctx.kept_servers.keep(NO_WINDOW, kept.clone()).await;
+
+        assert!(retire_archived_checkout(&ctx, &item.id).await.is_err());
+        assert_eq!(ctx.kept_servers.clients().len(), 1, "it stays, so they do");
+
+        std::fs::remove_dir_all(worktree.join(".git")).unwrap();
+        retire_archived_checkout(&ctx, &item.id).await.unwrap();
+        assert!(ctx.kept_servers.clients().is_empty());
+        assert!(!ctx.item(&item.id).unwrap().checkout.unwrap().on_disk);
+    }
+
+    /// A branch cut from someone else's pull request starts untrusted,
+    /// though by the rule it is the reader's own branch, in a repository in
+    /// the config or not: declaring it later doesn't make the branch the
+    /// reader's. One cut from the reader's own pull request, or from a
+    /// trusted one, doesn't.
+    #[tokio::test]
+    async fn a_branch_cut_from_someone_else_s_pull_request_starts_untrusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (declared, _) = ctx(dir.path(), &nowhere(), &["a/b"]);
+        let (pr, _) = open_pull_seven(&declared, Some("chris"));
+        assert!(cut_starts_untrusted(&declared, &pr));
+        declared.with_cache(|c| c.set_meta("viewer.login", "u")).unwrap().unwrap();
+        assert!(!cut_starts_untrusted(&declared, &pr), "the reader's own");
+        declared.with_cache(|c| c.set_meta("viewer.login", "chris")).unwrap().unwrap();
+        declared.with_cache(|c| c.trust_item_code(&pr.id)).unwrap().unwrap();
+        assert!(!cut_starts_untrusted(&declared, &pr), "trusted");
+
+        let dir = tempfile::tempdir().unwrap();
+        let (undeclared, _) = ctx(dir.path(), &nowhere(), &[]);
+        let (pr, _) = open_pull_seven(&undeclared, Some("chris"));
+        assert!(cut_starts_untrusted(&undeclared, &pr), "not in the config");
+    }
+
+    /// Trust and start names the item, with the window's latest navigation
+    /// for the worker to check it against.
+    #[test]
+    fn trust_and_start_sends_the_item_with_the_latest_navigation() {
+        let (backend, mut commands) = Backend::recording();
+        let navigation_id = backend.navigation_requests.begin_current();
+        backend.trust_language_servers("pr");
+        match commands.try_recv() {
+            Ok(Command::TrustLanguageServers {
+                navigation_id: sent,
+                item_id,
+            }) => assert_eq!((sent, item_id.as_str()), (navigation_id, "pr")),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// Give windows 1 and 2 views, as opening them does.
@@ -25084,6 +25795,15 @@ read eof || true
         git(&checkout.path, &["add", "."]);
         git(&checkout.path, &["commit", "-q", "-m", "three"]);
         received.try_iter().for_each(drop);
+        // Servers on the worktree, one on show in a window that moved on
+        // and one set aside, go with it.
+        let files = tempfile::tempdir().unwrap();
+        let rust = perch_lsp::ServerKind::RustAnalyzer;
+        let shown = named_server_in(files.path(), &checkout.path, rust, "-").await;
+        ctx.language_servers.lock().await.insert(rust, shown);
+        let jdtls = perch_lsp::ServerKind::Jdtls;
+        let kept = named_server_in(files.path(), &checkout.path, jdtls, "-").await;
+        ctx.kept_servers.keep(NO_WINDOW, kept).await;
 
         delete_item(&ctx, &id, false).await.unwrap();
         let prompts: Vec<LossPrompt> = received
@@ -25098,9 +25818,12 @@ read eof || true
         assert!(ctx.item(&id).is_some(), "nothing was deleted yet");
         assert!(checkout.path.exists());
 
+        assert_eq!(ctx.kept_servers.clients().len(), 1, "nothing was deleted yet");
         delete_item(&ctx, &id, true).await.unwrap();
         assert!(ctx.item(&id).is_none());
         assert!(!checkout.path.exists());
+        assert!(ctx.language_servers.lock().await.is_empty());
+        assert!(ctx.kept_servers.clients().is_empty());
         assert!(
             git(&root, &["branch", "--list", "feature-2"]).is_empty(),
             "the branch went from the root"
@@ -25834,6 +26557,7 @@ read eof || true
         assert_eq!(item.from_item_id.as_deref(), Some(pr.id.as_str()));
         assert_eq!(item.title(), "pull 7");
         assert!(item.subject.is_none(), "no pull request until the reader opens one");
+        assert!(!item_code_trusted(&ctx, &id), "someone else's pull request's code");
 
         let ready = open_pull::readiness(&ctx, &id, None).await.unwrap();
         assert_eq!(ready.base, "main");
@@ -25845,6 +26569,29 @@ read eof || true
             id,
             "a second press opens the branch it made"
         );
+    }
+
+    /// The rule would trust a branch cut from someone else's pull request
+    /// as the reader's own once its repository is in the config, so it
+    /// starts with the answer that it isn't, written with its row, in the
+    /// config or not. A branch forked from that one starts the same.
+    #[tokio::test]
+    async fn start_work_on_someone_else_s_pull_request_starts_its_branch_untrusted() {
+        for declared in [&["a/b"][..], &[]] {
+            let dir = tempfile::tempdir().unwrap();
+            let (ctx, _received) = ctx(dir.path(), &nowhere(), declared);
+            pull_seven_on_github(&ctx, dir.path());
+            let pr = store_pull(&ctx, 7);
+            let answer = |id: &str| ctx.with_cache(|c| c.item_code_trust(id).unwrap()).unwrap();
+
+            let id = start_work(&ctx, &pr.id, 0).await.expect("work starts from the pull request");
+            assert_eq!(answer(&id), Some(false), "{declared:?}");
+            assert!(!item_code_trusted(&ctx, &id));
+
+            let forked = start_work(&ctx, &id, 0).await.expect("work starts from the branch");
+            assert_ne!(forked, id);
+            assert_eq!(answer(&forked), Some(false), "{declared:?}");
+        }
     }
 
     /// Start work from a notification cuts from the subject's row: the

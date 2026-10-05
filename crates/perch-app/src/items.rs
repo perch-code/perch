@@ -912,6 +912,67 @@ pub fn work_allowed(item: &Item, viewer: Option<&str>) -> bool {
     }
 }
 
+/// Whether rust-analyzer or jdtls, which run a checkout's own code as they
+/// load it, may start on `item` without asking.
+///
+/// `[repo.lsp] trust` decides first. Then the reader's answer for the item
+/// (`granted`): Trust and start, or the `false` a branch cut from
+/// untrusted code starts with, which outranks the rules below, so a pull
+/// request the reader opens from such a branch asks too. Else only the
+/// reader's own work (`readers_own_code`) in a repository in the config
+/// (local ones always are).
+///
+/// A branch in a root that someone else's pull request attaches to
+/// (`branch_item_for`) becomes their pull request, and asks.
+pub fn code_trusted(
+    item: &Item,
+    viewer: Option<&str>,
+    config: &perch_github::Config,
+    granted: Option<bool>,
+) -> bool {
+    if config.lsp_trusted(&item.repo_full_name) {
+        return true;
+    }
+    if let Some(granted) = granted {
+        return granted;
+    }
+    config.is_declared(&item.repo_full_name) && readers_own_code(item, viewer)
+}
+
+/// Whether a branch cut from `source` starts out untrusted: it holds the
+/// source's code, and the reader neither trusted the source (`granted`)
+/// nor wrote it. Neither the config nor `[repo.lsp] trust` counts here.
+/// The cut is the reader's own branch by the rule, so without its `false`
+/// a stranger's code would pass as the reader's once the repository was
+/// added to the config, or once `[repo.lsp] trust` was turned off.
+pub fn cut_inherits_distrust(source: &Item, viewer: Option<&str>, granted: Option<bool>) -> bool {
+    !granted.unwrap_or_else(|| readers_own_code(source, viewer))
+}
+
+/// Whether `item` is the reader's own work, wherever it is: a branch, an
+/// issue's default-branch checkout, and a pull request the reader opened
+/// whose head is in its repository or the reader's own fork. One from
+/// someone else's fork can be pushed to by its owner, and one with no head
+/// repository (a deleted fork) is nobody's. With no viewer known, the
+/// first launch until GitHub answers, no pull request is the reader's.
+fn readers_own_code(item: &Item, viewer: Option<&str>) -> bool {
+    match &item.subject {
+        Some(ItemSubject::PullRequest(pr)) => {
+            let Some(login) = viewer.filter(|login| !login.is_empty()) else {
+                return false;
+            };
+            let head_is_theirs = pr.head_repo_full_name.as_deref().is_some_and(|head| {
+                head.eq_ignore_ascii_case(&pr.repo_full_name)
+                    || head
+                        .split_once('/')
+                        .is_some_and(|(owner, _)| owner.eq_ignore_ascii_case(login))
+            });
+            pr.author_login.eq_ignore_ascii_case(login) && head_is_theirs
+        }
+        Some(ItemSubject::Issue(_)) | None => true,
+    }
+}
+
 /// Repository identities from config and the cache, including repositories
 /// without visible rows. A declared spelling wins over the cache's spelling.
 pub fn repository_options(declared: &[DeclaredRepo], items: &[Item]) -> Vec<String> {
@@ -1310,6 +1371,113 @@ mod tests {
         issue.archived_at = None;
         issue.checkout = branch.checkout.clone();
         assert!(!work_allowed(&issue, Some(&author)));
+    }
+
+    #[test]
+    fn code_runs_unasked_only_on_the_reader_s_own_work() {
+        let (_, items) = fixture();
+        let find = |id: &str| items.iter().find(|i| i.id == id).cloned().unwrap();
+        let mut config = perch_github::Config::default();
+        let mut perch = perch_github::RepoConfig::default();
+        perch.github = Some("criccomini/perch".into());
+        let mut slatedb = perch_github::RepoConfig::default();
+        slatedb.github = Some("slatedb/slatedb".into());
+        slatedb.lsp.trust = true;
+        let mut notes = perch_github::RepoConfig::default();
+        notes.roots = vec!["/x/notes".into()];
+        notes.resolve(None); // local/notes, as the startup scan resolves it
+        config.repo = vec![perch, slatedb, notes];
+        let trusted = |item: &Item, viewer: Option<&str>, granted: Option<bool>| {
+            code_trusted(item, viewer, &config, granted)
+        };
+        let with_head = |item: &Item, head: Option<&str>| {
+            let mut item = item.clone();
+            if let Some(ItemSubject::PullRequest(pr)) = &mut item.subject {
+                pr.head_repo_full_name = head.map(str::to_string);
+            }
+            item
+        };
+
+        // "a" opened #57.
+        let wanted = with_head(&find("pr-wanted"), Some("criccomini/perch"));
+        assert!(trusted(&wanted, Some("A"), None), "the reader's own, from the repository");
+        assert!(!trusted(&with_head(&wanted, None), Some("a"), None), "a deleted fork");
+        assert!(
+            !trusted(&with_head(&wanted, Some("someone-else/perch")), Some("a"), None),
+            "its owner can push to it"
+        );
+        assert!(trusted(&with_head(&wanted, Some("A/perch")), Some("a"), None), "the reader's fork");
+        assert!(!trusted(&wanted, Some("someone-else"), None));
+        assert!(trusted(&wanted, Some("someone-else"), Some(true)), "trusted once");
+        assert!(!trusted(&wanted, None, None), "no viewer known yet");
+        assert!(!trusted(&wanted, Some(""), None));
+        assert!(
+            !trusted(&wanted, Some("a"), Some(false)),
+            "a branch cut from someone else's code stays asked"
+        );
+        let mut elsewhere = with_head(&wanted, Some("x/elsewhere"));
+        elsewhere.repo_full_name = "x/elsewhere".into();
+        if let Some(ItemSubject::PullRequest(pr)) = &mut elsewhere.subject {
+            pr.repo_full_name = "x/elsewhere".into();
+        }
+        assert!(!trusted(&elsewhere, Some("a"), None), "not in the config");
+
+        // [repo.lsp] trust decides first.
+        assert!(trusted(&find("slatedb-pr"), Some("someone-else"), None));
+        assert!(trusted(&find("slatedb-pr"), Some("someone-else"), Some(false)));
+
+        let branch = find("branch");
+        assert!(trusted(&branch, None, None));
+        assert!(!trusted(&branch, None, Some(false)));
+        let mut stray = branch.clone();
+        stray.repo_full_name = "x/elsewhere".into();
+        assert!(!trusted(&stray, None, None), "not in the config");
+
+        let issue = find("issue");
+        assert!(trusted(&issue, None, None));
+        let mut issue_elsewhere = issue.clone();
+        issue_elsewhere.repo_full_name = "x/elsewhere".into();
+        assert!(!trusted(&issue_elsewhere, None, None));
+        assert!(trusted(&issue_elsewhere, None, Some(true)));
+
+        let mut note = branch.clone();
+        note.repo_full_name = "local/notes".into();
+        assert!(trusted(&note, None, None));
+        assert!(!code_trusted(&note, None, &perch_github::Config::default(), None));
+    }
+
+    /// A branch cut from someone else's code starts untrusted wherever it
+    /// is, so neither declaring its repository later nor turning off
+    /// `[repo.lsp] trust` makes it the reader's own. One cut from the
+    /// reader's own work, or from code they trusted, doesn't.
+    #[test]
+    fn a_cut_inherits_distrust_from_anything_but_the_reader_s_own_work() {
+        let (_, items) = fixture();
+        let find = |id: &str| items.iter().find(|i| i.id == id).cloned().unwrap();
+        let mut wanted = find("pr-wanted");
+        if let Some(ItemSubject::PullRequest(pr)) = &mut wanted.subject {
+            pr.head_repo_full_name = Some("criccomini/perch".into());
+        }
+        assert!(cut_inherits_distrust(&wanted, Some("someone-else"), None));
+        assert!(cut_inherits_distrust(&wanted, None, None), "no viewer known yet");
+        assert!(!cut_inherits_distrust(&wanted, Some("a"), None), "the reader's own");
+        assert!(!cut_inherits_distrust(&wanted, Some("someone-else"), Some(true)), "trusted");
+        assert!(
+            cut_inherits_distrust(&wanted, Some("a"), Some(false)),
+            "itself cut from someone else's code"
+        );
+
+        // Whatever the config says of the repository.
+        let mut elsewhere = wanted.clone();
+        elsewhere.repo_full_name = "x/elsewhere".into();
+        assert!(cut_inherits_distrust(&elsewhere, Some("someone-else"), None));
+        assert!(cut_inherits_distrust(&find("slatedb-pr"), Some("someone-else"), None));
+
+        let mut stray = find("branch");
+        stray.repo_full_name = "x/elsewhere".into();
+        assert!(!cut_inherits_distrust(&stray, None, None), "a branch is the reader's");
+        assert!(cut_inherits_distrust(&stray, None, Some(false)));
+        assert!(!cut_inherits_distrust(&find("issue"), None, None));
     }
 
     #[test]

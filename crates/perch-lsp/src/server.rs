@@ -32,7 +32,18 @@ impl ServerKind {
         }
     }
 
-
+    /// What of a checkout's own code the server runs as it loads it, as a
+    /// toast says it, or `None` for one that runs none. rust-analyzer
+    /// builds and runs build scripts and proc macros, and follows the
+    /// checkout's `.cargo/config.toml` and toolchain file; jdtls imports a
+    /// Gradle or Maven build. On code the reader hasn't trusted these wait.
+    pub fn project_code(self) -> Option<&'static str> {
+        match self {
+            ServerKind::RustAnalyzer => Some("build scripts and proc macros"),
+            ServerKind::Jdtls => Some("Gradle or Maven build"),
+            ServerKind::Gopls | ServerKind::TypescriptLanguageServer => None,
+        }
+    }
 
     /// The kind that serves a file, by its extension. A path may be
     /// relative to the worktree or absolute.
@@ -142,6 +153,9 @@ pub enum Status {
     /// workspace failed to load answers every ask with nothing.
     Unhealthy { message: String },
     Failed { reason: String },
+    /// Not started: it would run the checkout's own code (see
+    /// `ServerKind::project_code`), which the reader hasn't trusted.
+    Held,
 }
 
 impl Status {
@@ -160,6 +174,7 @@ impl Status {
                 format!("{name}: {}", message.lines().next().unwrap_or(message))
             }
             Status::Failed { reason } => format!("{name} failed: {reason}"),
+            Status::Held => format!("{name} waits for you to trust this code"),
         }
     }
 
@@ -1607,6 +1622,17 @@ mod tests {
     }
 
     #[test]
+    fn only_rust_analyzer_and_jdtls_run_a_checkout_s_code() {
+        assert_eq!(
+            ServerKind::RustAnalyzer.project_code(),
+            Some("build scripts and proc macros")
+        );
+        assert_eq!(ServerKind::Jdtls.project_code(), Some("Gradle or Maven build"));
+        assert_eq!(ServerKind::Gopls.project_code(), None);
+        assert_eq!(ServerKind::TypescriptLanguageServer.project_code(), None);
+    }
+
+    #[test]
     fn status_text_is_written_for_a_status_line() {
         let rust = ServerKind::RustAnalyzer;
         assert_eq!(Status::Ready.describe(rust), "rust-analyzer ready");
@@ -1622,6 +1648,7 @@ mod tests {
             .describe(rust),
             "rust-analyzer: Failed to load workspaces"
         );
+        assert_eq!(Status::Held.describe(rust), "rust-analyzer waits for you to trust this code");
     }
 
     #[test]
@@ -1638,6 +1665,7 @@ mod tests {
         })
         .is_usable());
         assert!(!Status::Unhealthy { message: "no workspace".into() }.is_usable());
+        assert!(!Status::Held.is_usable());
     }
 
     #[test]
@@ -1647,5 +1675,7 @@ mod tests {
         assert!(!Status::Ready.is_loading());
         assert!(!Status::Unhealthy { message: "no workspace".into() }.is_loading());
         assert!(!Status::Failed { reason: "exited".into() }.is_loading());
+        // Held never loads: it waits on the reader, not the server.
+        assert!(!Status::Held.is_loading());
     }
 }

@@ -372,6 +372,32 @@ max_memory_mb = 8192           # the default
 Past it, the kept servers are stopped, oldest first. The ones on show never
 are, so their own total can go over.
 
+rust-analyzer and jdtls run a checkout's own code as they load it:
+rust-analyzer its build scripts and proc macros, following the checkout's
+`.cargo/config.toml` and `rust-toolchain.toml`, and jdtls its Gradle or Maven
+build. Perch starts them by itself only on your own work in a repository in
+your config: a branch, the default branch an issue reads, and a pull request
+you opened whose head is in that repository or your fork of it. A branch in
+one of your roots counts as your own, so one you check out there from
+someone else's fork, as `gh pr checkout` does, starts them too. On anything
+else, such as someone else's pull request, a branch you cut from one, or a
+repository not in your config, they wait, and a toast names the item with
+**Trust and start**. Perch remembers that answer for the item, commits pushed
+to it later included; deleting the item forgets it. While they wait, the
+Worktree row on Conversation has a warning, and its menu has **Trust and
+Start** once the toast is closed. After upgrading, a branch you had already
+cut from a pull request, your own included, asks once. gopls and
+typescript-language-server start either way. To start them on everything in
+a repository, anyone's pull requests included:
+
+```toml
+[[repo]]
+github = "slatedb/slatedb"
+
+[repo.lsp]
+trust = true                   # false, the default, asks as above
+```
+
 Perch's database, avatars, managed clones, worktrees, and agent state live
 under `~/.perch`. The database also holds local items, conversations, and
 review state, so it is not disposable. GitHub notifications and fetched
@@ -957,8 +983,10 @@ One location opens; several open the panel and the reader picks. The call
 hierarchy is a tree: a chevron on a row asks for that row's callers, and a
 toggle in the panel's header turns it to callees. The caret resting on an
 identifier tints its other uses in the file. All of it is read-only, and all
-of it is rust-analyzer: while the server is absent or failed, the status line
-says so and nothing else happens.
+of it is rust-analyzer: while the server is absent, failed or waiting for you
+to trust the code, the status line says so and nothing opens. A goto over an
+absent server offers the install again, and one over a server waiting for
+trust offers **Trust and start** again.
 
 `Cmd-F` puts a find bar over the top right of the code, as in VS Code: a box
 for the text, toggles for match case, whole word and regular expression, the
@@ -1019,7 +1047,7 @@ In a fenced block the paths link whatever the language, and the names that
 read as types do when the block is Rust, a diff, output or of no language
 named. A name links
 once rust-analyzer has answered, a moment after the text is drawn; while
-the server is absent or failed, only files do.
+the server is absent, failed or waiting for trust, only files do.
 
 ## Development
 

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use jiff::Timestamp;
-use perch_github::{AgentConfig, DeclaredRepo, Item, Thread};
+use perch_github::{AgentConfig, DeclaredRepo, Item, ItemSubject, Thread};
 
 use crate::backend::{Event, Status};
 use crate::items::{InboxView, SidebarTab};
@@ -78,12 +78,14 @@ pub enum ToastKind {
         open: Option<ToastOpen>,
     },
     /// A language server that isn't there, or is out of date, with the
-    /// button that installs it. It stays until it's closed or the install
-    /// ends; other news shows over it meanwhile.
+    /// button that installs it; or one held back until the reader trusts
+    /// the code, with the button that does. It stays until it's closed or
+    /// the install ends; other news shows over it meanwhile.
     Server(ServerOffer),
 }
 
-/// A toast's offer to install or update a language server.
+/// A toast's offer to install or update a language server, or to start
+/// the ones held back for an item whose code the reader hasn't trusted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerOffer {
     pub kind: perch_lsp::ServerKind,
@@ -95,6 +97,9 @@ pub struct ServerOffer {
     pub action: &'static str,
     /// Under which a closed offer stays closed for the session.
     pub key: String,
+    /// The item whose code the reader is asked to trust, for an offer to
+    /// start servers held back for it: its button is Trust and start.
+    pub trust: Option<String>,
 }
 
 impl ServerOffer {
@@ -107,6 +112,52 @@ impl ServerOffer {
             install: missing.install.as_deref().cloned(),
             action: "Install",
             key: missing.describe(),
+            trust: None,
+        }
+    }
+
+    /// The offer to start the servers held back because they would run
+    /// `item`'s code, which the reader hasn't trusted. `kinds` is not
+    /// empty. It names the item, so a click can't be read as being about
+    /// another, and says that trust outlasts later pushes. A pull request
+    /// is named in its own repository: a branch it attached to may be in
+    /// the fork its head is in.
+    pub fn held(item: &Item, kinds: &[perch_lsp::ServerKind]) -> Self {
+        let names = kinds
+            .iter()
+            .map(|k| k.name())
+            .collect::<Vec<_>>()
+            .join(" and ");
+        // A comma between servers: each one's code already has an "and".
+        let code = kinds
+            .iter()
+            .filter_map(|k| k.project_code())
+            .map(|code| format!("the {code}"))
+            .collect::<Vec<_>>()
+            .join(", and ");
+        let (place, later) = match &item.subject {
+            Some(ItemSubject::PullRequest(pr)) => (
+                format!(
+                    "{}#{} by @{}",
+                    pr.repo_full_name, pr.number, pr.author_login
+                ),
+                " Trusting it covers later pushes too.",
+            ),
+            Some(ItemSubject::Issue(_)) => {
+                (format!("{}'s default branch", item.repo_full_name), "")
+            }
+            None => match &item.checkout {
+                Some(c) => (format!("{} on {}", item.repo_full_name, c.branch), ""),
+                None => (item.repo_full_name.clone(), ""),
+            },
+        };
+        ServerOffer {
+            kind: kinds[0],
+            text: format!("{names} would run {code} in {place}.{later}"),
+            install: None,
+            action: "Trust and start",
+            key: format!("trust {}", item.id),
+            trust: Some(item.id.clone()),
         }
     }
 }
@@ -800,10 +851,11 @@ impl AppState {
         }
     }
 
-    /// Offer to install a language server, unless the same offer is up
-    /// already or, for one the reader didn't ask for, was closed this
-    /// session. `asked` is a goto that couldn't be answered for want of
-    /// the server, which offers it again whatever was closed.
+    /// Offer to install a language server, or to trust an item's code,
+    /// unless the same offer is up already or, for one the reader didn't
+    /// ask for, was closed this session. `asked` is a goto that couldn't
+    /// be answered for want of the server, which offers it again whatever
+    /// was closed.
     pub fn offer_server(&self, offer: ServerOffer, asked: bool) {
         if !asked && self.declined_offers.with_untracked(|d| d.contains(&offer.key)) {
             return;
@@ -830,6 +882,33 @@ impl AppState {
                 return;
             }
         } else if shown {
+            // A trust offer names every kind held so far, so one held
+            // after it is up changes its line. Only a change is written:
+            // Held comes again with every file of its language opened,
+            // and each write rebuilds the toast. A goto's line ends with
+            // the plain one, and is kept while the kinds are the same.
+            if offer.trust.is_some() {
+                let stale = self.toasts.with_untracked(|toasts| {
+                    toasts.iter().any(|toast| {
+                        matches!(
+                            &toast.kind,
+                            ToastKind::Server(up)
+                                if up.key == offer.key && !up.text.ends_with(&offer.text)
+                        )
+                    })
+                });
+                if stale {
+                    self.toasts.update(|toasts| {
+                        for toast in toasts.iter_mut() {
+                            if let ToastKind::Server(up) = &mut toast.kind {
+                                if up.key == offer.key {
+                                    up.text = offer.text.clone();
+                                }
+                            }
+                        }
+                    });
+                }
+            }
             return;
         }
         self.show_toast(ToastKind::Server(offer));
@@ -841,9 +920,24 @@ impl AppState {
         self.dismiss_toast(token);
     }
 
-    /// Take down the offers for `kind`.
+    /// Take down the offers to install `kind`. An offer to trust is left:
+    /// an install's news reaches every window, and has nothing to do with
+    /// whose code is open.
     fn drop_offers(&self, kind: perch_lsp::ServerKind) {
-        self.drop_toasts(|toast| matches!(toast, ToastKind::Server(offer) if offer.kind == kind));
+        self.drop_toasts(|toast| {
+            matches!(toast, ToastKind::Server(offer) if offer.kind == kind && offer.trust.is_none())
+        });
+    }
+
+    /// Take down the offers to trust an item's code, but `keep`'s: the
+    /// item they were about is no longer the one open, or was just trusted.
+    pub fn drop_trust_offers(&self, keep: Option<&str>) {
+        self.drop_toasts(|toast| {
+            matches!(
+                toast,
+                ToastKind::Server(ServerOffer { trust: Some(id), .. }) if Some(id.as_str()) != keep
+            )
+        });
     }
 
     pub fn current_toast(&self) -> Option<Toast> {
@@ -1161,6 +1255,7 @@ impl AppState {
         let token = self.agent_navigation_token.get_untracked().wrapping_add(1);
         self.agent_navigation_token.set(token);
         self.expected_navigation_id.set(Some(navigation_id));
+        self.drop_trust_offers(Some(&item_id));
         self.open_expectation
             .set(OpenExpectation::Item(item_id.clone()));
         self.open_item.set(Some(item_id.clone()));
@@ -1262,6 +1357,9 @@ impl AppState {
                 // already, whose pane is still on screen.
                 let fresh = !review.is_item(&item.id);
                 review.prepare_ready_for(&item.id);
+                // Whatever began this open, an offer about another item
+                // goes with it.
+                self.drop_trust_offers(Some(item.id.as_str()));
                 self.open_expectation
                     .set(OpenExpectation::Item(item.id.clone()));
                 review.preparing.set(Preparing::Idle);
@@ -1321,6 +1419,7 @@ impl AppState {
                 }
                 let fresh = !review.is_item(&item.id);
                 review.prepare_ready_for(&item.id);
+                self.drop_trust_offers(Some(item.id.as_str()));
                 self.open_expectation
                     .set(OpenExpectation::Item(item.id.clone()));
                 let message = review.preparing.with_untracked(|p| match p {
@@ -1370,6 +1469,7 @@ impl AppState {
                 }
                 let fresh = !review.is_item(&item.id);
                 review.prepare_ready_for(&item.id);
+                self.drop_trust_offers(Some(item.id.as_str()));
                 self.open_expectation
                     .set(OpenExpectation::Item(item.id.clone()));
                 review.preparing.set(Preparing::Idle);
@@ -1792,8 +1892,36 @@ impl AppState {
                     if let perch_lsp::Status::Missing(missing) = &status {
                         self.offer_server(ServerOffer::missing(missing, None), false);
                     }
+                    // One toast for the item, naming every kind held.
+                    if status == perch_lsp::Status::Held {
+                        if let Some(item) = review.item.get_untracked() {
+                            let mut kinds = review.lsp_status.with_untracked(|s| s.held());
+                            if !kinds.contains(&kind) {
+                                kinds.push(kind);
+                                kinds.sort();
+                            }
+                            self.offer_server(ServerOffer::held(&item, &kinds), false);
+                        }
+                    }
                     let ready = status == perch_lsp::Status::Ready;
-                    review.set_server_status(kind, status);
+                    let was_held = review
+                        .lsp_status
+                        .with_untracked(|s| s.get(kind) == Some(&perch_lsp::Status::Held));
+                    let again = was_held && status == perch_lsp::Status::Held;
+                    let released = was_held && !again;
+                    // Held comes again with every file of its language
+                    // opened. Written again, it would run all that reads
+                    // the statuses for nothing.
+                    if !again {
+                        review.set_server_status(kind, status);
+                    }
+                    // The last one held has moved on, as after Trust and
+                    // start in another window: the offer has nothing left
+                    // to start. Only then: a status from another server,
+                    // before this item's Held came, says nothing of it.
+                    if released && review.lsp_status.with_untracked(|s| s.held().is_empty()) {
+                        self.drop_trust_offers(None);
+                    }
                     // After it, so the hover and the uses asked again are
                     // asked of a server that is ready.
                     if ready {
@@ -2582,6 +2710,7 @@ impl AppState {
                             text,
                             install: Some(install),
                             action: "Update",
+                            trust: None,
                         },
                         false,
                     );
@@ -2900,6 +3029,7 @@ impl AppState {
     /// Put the progress card up with `message` until the backend says what
     /// it opened.
     pub fn begin_review(&self, review: crate::review::model::ReviewState, message: &str) {
+        self.drop_trust_offers(None);
         self.new_work.open.set(false);
         review.begin(message);
     }
@@ -2914,6 +3044,9 @@ impl AppState {
         navigation_id: u64,
     ) {
         self.expected_navigation_id.set(Some(navigation_id));
+        // An offer to trust another item's code goes as this one opens: a
+        // click on it now would be read as about this one.
+        self.drop_trust_offers(Some(item_id));
         self.open_expectation
             .set(OpenExpectation::Item(item_id.to_string()));
         self.open_item.set(Some(item_id.to_string()));
@@ -2925,6 +3058,7 @@ impl AppState {
     /// an act that ends in another item being opened: Start work.
     pub fn begin_open(&self, message: &str, navigation_id: u64) {
         self.expected_navigation_id.set(Some(navigation_id));
+        self.drop_trust_offers(None);
         self.pending_agent_navigation.set(None);
         self.agent_archived_owner.set(None);
         self.open_expectation.set(OpenExpectation::Any);
@@ -2938,6 +3072,7 @@ impl AppState {
     /// Register a known item without changing its visible loading state.
     pub fn expect_item_navigation(&self, item_id: &str, navigation_id: u64) {
         self.expected_navigation_id.set(Some(navigation_id));
+        self.drop_trust_offers(Some(item_id));
         self.open_expectation
             .set(OpenExpectation::Item(item_id.to_string()));
     }
@@ -2967,6 +3102,7 @@ impl AppState {
 
     /// Leave the review view. The sidebar is the only place to land.
     pub fn leave_review(&self, review: crate::review::model::ReviewState) {
+        self.drop_trust_offers(None);
         self.pending_agent_navigation.set(None);
         self.agent_archived_owner.set(None);
         self.open_expectation.set(OpenExpectation::Closed);
@@ -4092,6 +4228,152 @@ mod tests {
             true,
         );
         assert_eq!(offers(&app)[0].text, "No definition found for `x`: …");
+    }
+
+    /// A server held for want of trust asks once for the item, naming
+    /// every kind held. The ask goes as soon as another item begins
+    /// opening, and once nothing is held any more; an install leaves it.
+    #[test]
+    fn a_held_server_asks_for_trust_until_another_item_opens() {
+        let _root = floem::headless::TestRoot::new();
+        let app = AppState::new();
+        let review = ReviewState::new();
+        app.begin_item_review(review, "Open", "a", 91);
+        app.apply_with_review(review_ready("a", 91), review);
+        let rust = perch_lsp::ServerKind::RustAnalyzer;
+        let status = |navigation_id, kind, status| Event::LspStatus {
+            navigation_id,
+            kind,
+            status,
+        };
+        // Counted through what a write runs: Held again, as each file of
+        // its language opened sends it, writes nothing.
+        let writes = RwSignal::new(0);
+        floem::reactive::Effect::new(move |_| {
+            floem::reactive::SignalTrack::track(&review.lsp_status);
+            writes.update(|w| *w += 1);
+        });
+        app.apply_with_review(status(91, rust, perch_lsp::Status::Held), review);
+        app.apply_with_review(status(91, rust, perch_lsp::Status::Held), review);
+        assert_eq!(writes.get(), 2, "the effect's first run, and one write");
+        let offered = offers(&app);
+        assert_eq!(offered.len(), 1, "one ask for the item");
+        assert_eq!(
+            offered[0].text,
+            "rust-analyzer would run the build scripts and proc macros in slatedb/slatedb."
+        );
+        assert_eq!(offered[0].action, "Trust and start");
+        assert_eq!(offered[0].trust.as_deref(), Some("a"));
+        assert_eq!(offered[0].key, "trust a");
+
+        // A second kind held joins the same toast.
+        let jdtls = perch_lsp::ServerKind::Jdtls;
+        app.apply_with_review(status(91, jdtls, perch_lsp::Status::Held), review);
+        let offered = offers(&app);
+        assert_eq!(offered.len(), 1);
+        assert_eq!(
+            offered[0].text,
+            "rust-analyzer and jdtls would run the build scripts and proc macros, and the \
+             Gradle or Maven build in slatedb/slatedb."
+        );
+
+        // An install's news reaches every window, and leaves it.
+        app.apply_with_review(
+            Event::LspInstalled {
+                kind: rust,
+                install: *missing_rust().install.unwrap(),
+            },
+            review,
+        );
+        assert_eq!(offers(&app).len(), 1);
+        // The same item opening again keeps it.
+        app.begin_item_review(review, "Open", "a", 92);
+        assert_eq!(offers(&app).len(), 1);
+
+        // Another item beginning to open takes it down, before any Ready.
+        app.begin_item_review(review, "Open", "b", 93);
+        assert!(offers(&app).is_empty());
+
+        // As does a server no longer held, as after a trust in another
+        // window.
+        app.begin_item_review(review, "Open", "a", 94);
+        app.apply_with_review(review_ready("a", 94), review);
+        app.apply_with_review(status(94, rust, perch_lsp::Status::Held), review);
+        assert_eq!(offers(&app).len(), 1);
+        // The same item ready again starts its statuses over. Another
+        // server's, before Held comes again, leaves the ask where it is.
+        app.apply_with_review(review_ready("a", 94), review);
+        let gopls = perch_lsp::ServerKind::Gopls;
+        app.apply_with_review(status(94, gopls, perch_lsp::Status::Starting), review);
+        assert_eq!(offers(&app).len(), 1);
+        app.apply_with_review(status(94, rust, perch_lsp::Status::Held), review);
+        assert_eq!(offers(&app).len(), 1);
+        app.apply_with_review(status(94, rust, perch_lsp::Status::Starting), review);
+        assert!(offers(&app).is_empty());
+    }
+
+    /// A goto's ask says what it couldn't find. A Held for the same
+    /// servers, as each file opened sends, leaves that line; one for
+    /// another server names it.
+    #[test]
+    fn a_goto_s_ask_keeps_its_line_until_another_server_is_held() {
+        let _root = floem::headless::TestRoot::new();
+        let app = AppState::new();
+        let review = ReviewState::new();
+        app.begin_item_review(review, "Open", "a", 91);
+        app.apply_with_review(review_ready("a", 91), review);
+        let rust = perch_lsp::ServerKind::RustAnalyzer;
+        let item = review.item.get_untracked().unwrap();
+        let mut asked = ServerOffer::held(&item, &[rust]);
+        asked.text = format!("No definition found for `x`: {}", asked.text);
+        app.offer_server(asked.clone(), true);
+        let status = |kind| Event::LspStatus {
+            navigation_id: 91,
+            kind,
+            status: perch_lsp::Status::Held,
+        };
+        app.apply_with_review(status(rust), review);
+        assert_eq!(offers(&app)[0].text, asked.text);
+        app.apply_with_review(status(perch_lsp::ServerKind::Jdtls), review);
+        assert_eq!(
+            offers(&app)[0].text,
+            "rust-analyzer and jdtls would run the build scripts and proc macros, and the \
+             Gradle or Maven build in slatedb/slatedb."
+        );
+    }
+
+    /// The ask names a pull request with its author and says that trust
+    /// covers later pushes; a branch is named with its repository.
+    #[test]
+    fn a_held_offer_names_a_pull_request_and_its_author() {
+        let rust = perch_lsp::ServerKind::RustAnalyzer;
+        let mut item = Item::new("slatedb/slatedb", "2026-09-18T09:59:00Z".parse().unwrap());
+        item.id = "pr".into();
+        let pull = crate::review::header::tests::pull_request(812);
+        item.subject = Some(ItemSubject::PullRequest(pull));
+        assert_eq!(
+            ServerOffer::held(&item, &[rust]).text,
+            "rust-analyzer would run the build scripts and proc macros in slatedb/slatedb#812 \
+             by @u. Trusting it covers later pushes too."
+        );
+        item.subject = None;
+        item.checkout = Some(perch_github::ItemCheckout {
+            branch: "perch/pr-57-work".into(),
+            base_ref: "main".into(),
+            head_sha: "h".into(),
+            path: "/w/pr-57-work".into(),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            divergence: None,
+            source: None,
+        });
+        assert_eq!(
+            ServerOffer::held(&item, &[rust]).text,
+            "rust-analyzer would run the build scripts and proc macros in slatedb/slatedb on \
+             perch/pr-57-work."
+        );
     }
 
     /// An out-of-date install of Perch's is offered its update once, not

@@ -284,6 +284,16 @@ impl RepoWork {
     }
 }
 
+/// `[repo.lsp]`: the language servers in one repository.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct RepoLsp {
+    /// Start rust-analyzer and jdtls on every item here without asking,
+    /// anyone's pull request included. They run the checkout's build
+    /// scripts, proc macros and Gradle or Maven build as the reader.
+    #[serde(default)]
+    pub trust: bool,
+}
+
 /// Why a `[repo.work] write` entry is refused, if it is: it is, or holds,
 /// the home directory or Perch's own, or it is in or holds a root's git
 /// directory. A run that could write any of those could change what runs
@@ -487,6 +497,10 @@ pub struct RepoConfig {
     /// its worktree.
     #[serde(default)]
     pub work: RepoWork,
+    /// `[repo.lsp]`: whether servers that run a checkout's code start here
+    /// without asking.
+    #[serde(default)]
+    pub lsp: RepoLsp,
     /// The identity once known: `github` when given, else set by `resolve`
     /// from the first root's scan.
     #[serde(skip)]
@@ -582,6 +596,11 @@ impl Config {
         self.entry(identity)
             .and_then(|r| r.work.approvals)
             .unwrap_or(self.work.approvals)
+    }
+
+    /// Whether `[repo.lsp] trust` is set for the repository with an identity.
+    pub fn lsp_trusted(&self, identity: &str) -> bool {
+        self.entry(identity).is_some_and(|r| r.lsp.trust)
     }
 
     /// The declared roots of the repository with an identity, `~` expanded.
@@ -934,6 +953,19 @@ mod tests {
         let global = Config::parse("[work]\napprovals = \"never\"\n").unwrap();
         assert_eq!(global.work.approvals, Approvals::Auto);
         assert_eq!(global.warnings.len(), 1, "{:?}", global.warnings);
+    }
+
+    #[test]
+    fn language_server_trust_is_per_repository() {
+        let config = Config::parse(
+            "[[repo]]\ngithub = \"a/one\"\n[repo.lsp]\ntrust = true\n\n[[repo]]\ngithub = \"a/two\"\n[repo.work]\ntrust = true\n",
+        )
+        .unwrap();
+        assert!(config.lsp_trusted("a/one"));
+        assert!(config.lsp_trusted("A/One"));
+        assert!(!config.lsp_trusted("a/two"), "[repo.work] trust is for agents");
+        assert!(!config.lsp_trusted("a/undeclared"));
+        assert!(config.warnings.is_empty(), "{:?}", config.warnings);
     }
 
     #[test]

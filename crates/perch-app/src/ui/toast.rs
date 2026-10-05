@@ -1,10 +1,10 @@
 //! The popup at the window's bottom right: an agent run that finished, a
 //! line the reader should see, such as something that could not be done
-//! or a poll that failed, or an offer to install a language server. One at
-//! a time, each up for a few seconds but the offer, which waits. An error
-//! or a warning has Report, which starts a bug report about it; a line
-//! that names somewhere to go, such as a filed issue, goes there when
-//! clicked.
+//! or a poll that failed, or an offer to install a language server or to
+//! trust the code one would run. One at a time, each up for a few seconds
+//! but the offer, which waits. An error or a warning has Report, which
+//! starts a bug report about it; a line that names somewhere to go, such
+//! as a filed issue, goes there when clicked.
 
 use std::rc::Rc;
 
@@ -180,13 +180,15 @@ fn message(
     .style(|s| s.items_center().width_full().gap(9.0))
 }
 
-/// An offer to install a language server: its line, the button that runs
-/// the install, with the command as its tip, and the close that turns it
-/// down for the session. While the install runs, the line says so and the
-/// buttons go.
+/// An offer to install a language server, or to trust an item's code and
+/// start the servers held back for it: its line, the button that runs the
+/// install, with the command as its tip, or Trust and start, and the close
+/// that turns it down for the session. While an install runs, the line
+/// says so and the buttons go.
 fn server_offer(state: AppState, backend: Rc<Backend>, token: u64, offer: ServerOffer) -> impl IntoView {
     let kind = offer.kind;
-    let installing = move || state.installing_servers.with(|i| i.contains(&kind));
+    let installs = offer.trust.is_none();
+    let installing = move || installs && state.installing_servers.with(|i| i.contains(&kind));
     let text = offer.text.clone();
     let line = Label::derived(move || {
         if installing() {
@@ -203,8 +205,12 @@ fn server_offer(state: AppState, backend: Rc<Backend>, token: u64, offer: Server
             .flex_grow(1.0_f32)
             .flex_basis(0.0)
     });
-    let button = match offer.install.clone() {
-        Some(install) => {
+    let button = match (offer.trust.clone(), offer.install.clone()) {
+        (Some(item_id), _) => offer_button(offer.action, move || {
+            trust_and_start(state, &backend, &item_id)
+        })
+        .into_any(),
+        (None, Some(install)) => {
             let shown = install.shown();
             let run = move || {
                 state.installing_servers.update(|i| _ = i.insert(kind));
@@ -214,7 +220,7 @@ fn server_offer(state: AppState, backend: Rc<Backend>, token: u64, offer: Server
                 .style(move |s| s.apply_if(installing(), |s| s.hide()));
             crate::review::cards::tip(button, shown).into_any()
         }
-        None => Empty::new().into_any(),
+        (None, None) => Empty::new().into_any(),
     };
     let key = offer.key.clone();
     let close = widgets::icon_action(SidebarIcon::Close, "Dismiss message", || true, move || {
@@ -223,6 +229,18 @@ fn server_offer(state: AppState, backend: Rc<Backend>, token: u64, offer: Server
     .style(move |s| s.apply_if(installing(), |s| s.hide()));
     Stack::horizontal((dot(theme::draft), line, button, close))
         .style(|s| s.items_center().width_full().gap(9.0))
+}
+
+/// Trust and start, from the toast or the worktree menu: trust `item_id`'s
+/// code for good and start what was held back for it. The offers to trust
+/// go either way. The ask was about the item it named, so once another is
+/// open a click only takes them down; the backend checks again that the
+/// item is still on show before it records anything.
+pub(crate) fn trust_and_start(state: AppState, backend: &Backend, item_id: &str) {
+    state.drop_trust_offers(None);
+    if state.open_item.get_untracked().as_deref() == Some(item_id) {
+        backend.trust_language_servers(item_id);
+    }
 }
 
 /// A toast's small bordered button.
@@ -323,5 +341,64 @@ mod tests {
             .with_untracked(|i| i.contains(&perch_lsp::ServerKind::RustAnalyzer)));
         let toast = named(harness.root_id(), "toast").expect("the toast stays");
         assert!(named(toast, "Installing rust-analyzer…").is_some());
+    }
+
+    /// Trust and start sends the item its toast names and takes the toast
+    /// down. Once another item is open, a click only takes it down.
+    #[test]
+    fn trust_and_start_sends_the_open_item_to_the_backend() {
+        use std::rc::Rc;
+
+        use floem::headless::{HeadlessHarness, TestRoot};
+        use floem::prelude::*;
+
+        use crate::backend::{Backend, Command};
+        use crate::review::model::ReviewState;
+        use crate::state::{AppState, ServerOffer};
+
+        let state = AppState::new();
+        let review = ReviewState::new();
+        state.review.set(Some(review));
+        let (backend, mut commands) = Backend::recording();
+        let root = TestRoot::new();
+        let view = crate::ui::app_view(state, review, Rc::new(backend));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        let now = "2026-09-20T12:00:00Z".parse().unwrap();
+        let mut item = perch_github::Item::new("slatedb/slatedb", now);
+        item.id = "pr".into();
+        item.subject = Some(perch_github::ItemSubject::PullRequest(
+            crate::review::header::tests::pull_request(812),
+        ));
+        let offer = ServerOffer::held(&item, &[perch_lsp::ServerKind::RustAnalyzer]);
+        let mut press = |open: &str| {
+            state.open_item.set(Some(open.into()));
+            state.offer_server(offer.clone(), false);
+            harness.rebuild();
+            harness.paint();
+            let toast = named(harness.root_id(), "toast").expect("no toast");
+            assert!(named(
+                toast,
+                "rust-analyzer would run the build scripts and proc macros in \
+                 slatedb/slatedb#812 by @u. Trusting it covers later pushes too."
+            )
+            .is_some());
+            let button = named(toast, "Trust and start").expect("no Trust and start");
+            let at = button.get_visual_rect_no_clip().center();
+            harness.click(at.x, at.y);
+            harness.rebuild();
+            harness.paint();
+            assert!(state.current_toast().is_none(), "the toast goes");
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .filter_map(|command| match command {
+                    Command::TrustLanguageServers { item_id, .. } => Some(item_id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(press("pr"), ["pr"]);
+        assert!(
+            press("other").is_empty(),
+            "the toast was about another item"
+        );
     }
 }
