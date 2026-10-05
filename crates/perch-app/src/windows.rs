@@ -440,11 +440,17 @@ pub fn raise_holding(item_id: &str, asking: WindowId) -> bool {
     }
 }
 
-/// A new window's config, and the frame it opens at.
+/// A new window's config, and the frame it opens at. Off macOS the frame's
+/// origin is no position: Perch can't see the screens there to check one
+/// against, so the window manager, which can, places the window.
 pub fn config() -> (WindowConfig, Rect) {
     let frame = placement();
-    let config = WindowConfig::default()
-        .position(frame.origin())
+    let config = WindowConfig::default();
+    let config = match position(frame) {
+        Some(at) => config.position(at),
+        None => config,
+    };
+    let config = config
         .size(frame.size())
         .min_size(MIN_SIZE)
         .title("Perch")
@@ -466,11 +472,25 @@ pub fn config() -> (WindowConfig, Rect) {
     (config, frame)
 }
 
+/// Where `config` places a window opening at `frame`: there on macOS,
+/// and nowhere of Perch's choosing elsewhere.
+fn position(frame: Rect) -> Option<Point> {
+    cfg!(target_os = "macos").then(|| frame.origin())
+}
+
 /// Where a new window goes. Down and to the right of the key window, at
 /// its size, as macOS cascades a document's windows, so a new one does
 /// not land square on the last. With none open, where the last one was
 /// left; the first time, the middle of the main screen.
+///
+/// Off macOS only the size counts, the last window's or the default: with
+/// no screens to fit a frame to, every window had opened in the corner.
 fn placement() -> Rect {
+    if !cfg!(target_os = "macos") {
+        let size = LEFT_AT.get().map_or(DEFAULT_SIZE, |frame| frame.size());
+        let size = Size::new(size.width.max(MIN_SIZE.width), size.height.max(MIN_SIZE.height));
+        return Rect::from_origin_size(Point::ZERO, size);
+    }
     let screens = screens();
     match key_window_frame()
         .map(|key| key + Vec2::new(STEP, STEP))
@@ -621,6 +641,26 @@ mod tests {
     use super::*;
 
     const SCREEN: Rect = Rect::new(0.0, 24.0, 1920.0, 1080.0);
+
+    /// Off macOS a window opens at the last one's size, never under the
+    /// minimum, and with no position, for the window manager to choose.
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn off_macos_a_window_takes_the_last_size_and_no_position() {
+        LEFT_AT.set(None);
+        let frame = placement();
+        assert_eq!(frame.size(), DEFAULT_SIZE);
+        assert_eq!(position(frame), None);
+
+        LEFT_AT.set(Some(Rect::new(300.0, 200.0, 1500.0, 1100.0)));
+        let frame = placement();
+        assert_eq!(frame.size(), Size::new(1200.0, 900.0));
+        assert_eq!(position(frame), None, "where it was left is the window manager's to say");
+
+        LEFT_AT.set(Some(Rect::new(0.0, 0.0, 400.0, 300.0)));
+        assert_eq!(placement().size(), MIN_SIZE);
+        LEFT_AT.set(None);
+    }
 
     #[test]
     fn frames_round_trip() {
