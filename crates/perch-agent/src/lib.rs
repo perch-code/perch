@@ -183,6 +183,17 @@ pub const ORCHESTRATION_TOOLS: &[&str] = &["Workflow", "Agent", "Task"];
 /// unsandboxed retry, and a machine without the sandbox refuses to run
 /// rather than running without it.
 pub fn claude_settings(cwd: &std::path::Path) -> String {
+    claude_settings_with_dirs(cwd, &[])
+}
+
+/// [`claude_settings`] for a run also given `dirs` with `--add-dir`. That
+/// opens them to the shell's writes as well as its reads, so they are
+/// denied writes like the worktree.
+pub fn claude_settings_with_dirs(cwd: &std::path::Path, dirs: &[PathBuf]) -> String {
+    let deny_write: Vec<PathBuf> = std::iter::once(cwd)
+        .chain(dirs.iter().map(PathBuf::as_path))
+        .map(real_path)
+        .collect();
     serde_json::json!({
         "sandbox": {
             "enabled": true,
@@ -190,7 +201,7 @@ pub fn claude_settings(cwd: &std::path::Path) -> String {
             "allowUnsandboxedCommands": false,
             "failIfUnavailable": true,
             "filesystem": {
-                "denyWrite": [real_path(cwd)],
+                "denyWrite": deny_write,
             },
             "network": {
                 "allowedDomains": [],
