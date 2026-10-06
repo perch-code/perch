@@ -1207,6 +1207,49 @@ mod tests {
         id.children().into_iter().find_map(|c| find(c, text))
     }
 
+    /// Where `needle` is drawn on an event's line, in the window: the
+    /// line's linked text, and the box around the words.
+    fn on_event_line(root: floem::ViewId, needle: &str) -> (floem::ViewId, floem::kurbo::Rect) {
+        use crate::review::linked_text::{range_rect, shown_under, with_text};
+        let mut rows = Vec::new();
+        fn rows_under(id: floem::ViewId, out: &mut Vec<floem::ViewId>) {
+            if id.debug_name().contains("card:event") {
+                out.push(id);
+            }
+            for child in id.children() {
+                rows_under(child, out);
+            }
+        }
+        rows_under(root, &mut rows);
+        for line in rows.into_iter().flat_map(shown_under) {
+            let Some(Some(start)) = with_text(line, |text| text.find(needle)) else {
+                continue;
+            };
+            let rect = range_rect(line, start..start + needle.len()).expect("laid out");
+            return (
+                line,
+                rect + line.get_visual_rect_no_clip().origin().to_vec2(),
+            );
+        }
+        panic!("no event's line has {needle:?}");
+    }
+
+    /// Cmd-C, and what it copied.
+    fn copy(harness: &mut HeadlessHarness) -> Vec<String> {
+        use floem::event::Event;
+        use floem::ui_events::keyboard::{Code, Key, KeyState, KeyboardEvent};
+        harness.dispatch_event(Event::Key(KeyboardEvent {
+            state: KeyState::Down,
+            key: Key::Character("c".into()),
+            code: Code::KeyC,
+            location: Default::default(),
+            modifiers: crate::ui::OS_MOD,
+            repeat: false,
+            is_composing: false,
+        }));
+        crate::ui::widgets::copied()
+    }
+
     /// Whether a view is laid out at all: a hidden one has no size.
     fn shown(harness: &HeadlessHarness, text: &str) -> bool {
         find(harness.root_id(), text).is_some_and(|id| harness.get_layout_rect(id).height() > 0.0)
@@ -1539,34 +1582,35 @@ mod tests {
                 false,
             )]));
         });
-        let root = harness.root_id();
-        let click = |harness: &mut HeadlessHarness, id: floem::ViewId| {
-            let c = id.get_visual_rect_no_clip().center();
-            assert_eq!(
-                harness.element_id_at(c.x, c.y).map(|e| e.owning_id()),
-                Some(id),
-                "{} is not under the pointer at {c:?}",
-                id.debug_name()
-            );
-            harness.click(c.x, c.y);
-        };
         let opened = crate::ui::widgets::opened;
         opened();
+        let click = |harness: &mut HeadlessHarness, needle: &str| {
+            let at = on_event_line(harness.root_id(), needle).1.center();
+            harness.click(at.x, at.y);
+        };
 
         // The account's login, not git's name, as every other line names
-        // someone; a commit with no account is signed by git's name.
-        click(
-            &mut harness,
-            find(root, "name label - Label: \"criccomini\"").unwrap(),
-        );
-        assert_eq!(opened(), vec!["https://github.com/criccomini".to_string()]);
-        assert!(find(root, "name label - Label: \"Chris\"").is_some());
+        // someone; a commit with no account is signed by git's name, which
+        // leads nowhere.
+        click(&mut harness, "criccomini");
+        assert_eq!(opened(), ["https://github.com/criccomini"]);
+        click(&mut harness, "Chris");
+        assert!(opened().is_empty(), "git's name led somewhere");
 
-        let sha = |short: &str| {
-            find(root, &format!("event commit - Label: {short:?}"))
-                .unwrap_or_else(|| panic!("no commit {short}"))
-        };
-        click(&mut harness, sha("bbbbbbb"));
+        // The line is one text: a drag from the subject back over the sha
+        // takes both, to copy, and opens nothing.
+        let (line, subject) = on_event_line(harness.root_id(), "Fence");
+        let (other, sha) = on_event_line(harness.root_id(), "aaaaaaa");
+        assert_eq!(line, other, "the sha and the subject are one text");
+        let y = subject.center().y;
+        harness.pointer_down(subject.x1 - 1.0, y);
+        harness.pointer_move(subject.x0, y);
+        harness.pointer_move(sha.x0 + 1.0, y);
+        harness.pointer_up(sha.x0 + 1.0, y);
+        assert!(opened().is_empty(), "a drag is not a click");
+        assert_eq!(copy(&mut harness), ["aaaaaaa Fence"]);
+
+        click(&mut harness, "bbbbbbb");
         assert_eq!(
             opened(),
             vec![format!(
@@ -1575,7 +1619,7 @@ mod tests {
         );
 
         while commands.try_recv().is_ok() {}
-        click(&mut harness, sha("aaaaaaa"));
+        click(&mut harness, "aaaaaaa");
         assert!(opened().is_empty(), "the checkout has it");
         assert!(matches!(
             commands.try_recv(),
@@ -1587,33 +1631,7 @@ mod tests {
         state.show_tab(crate::review::ItemTab::Conversation);
         harness.rebuild();
         harness.paint();
-        let root = harness.root_id();
-        let file =
-            find(root, "event file - Label: \"src/manifest.rs\"").expect("the file is a link");
-        // The space before the file is kept, though it ends a label.
-        let words = find(root, "Label: \"Update \"").unwrap();
-        let (words, path) = (
-            words.get_visual_rect_no_clip(),
-            file.get_visual_rect_no_clip(),
-        );
-        let bare = {
-            use floem::text::{Attrs, AttrsList, FamilyOwned, TextLayout};
-            let family: Vec<FamilyOwned> =
-                FamilyOwned::parse_list(crate::theme::FONT_STACK).collect();
-            let attrs = AttrsList::new(
-                Attrs::new()
-                    .font_size(crate::theme::TEXT_META)
-                    .family(&family),
-            );
-            TextLayout::new_with_text("Update", attrs, None)
-                .size()
-                .width
-        };
-        assert!(
-            path.x0 >= words.x0 + bare + 2.0,
-            "no space: {words:?} then {path:?}, the word {bare} wide"
-        );
-        click(&mut harness, file);
+        click(&mut harness, "src/manifest.rs");
         assert_eq!(state.tab.get_untracked(), crate::review::ItemTab::Code);
         harness.rebuild();
         assert_eq!(
@@ -1658,8 +1676,8 @@ mod tests {
         let comment = find(root, "card:comment").unwrap();
         click(&mut harness, name_in(comment, "chris"));
         assert_eq!(opened(), vec!["https://github.com/chris".to_string()]);
-        let event = find(root, "card:event").unwrap();
-        click(&mut harness, name_in(event, "rohan"));
+        let rohan = on_event_line(root, "rohan").1.center();
+        harness.click(rohan.x, rohan.y);
         assert_eq!(opened(), vec!["https://github.com/rohan".to_string()]);
 
         // The reader: "You" has no underline and no pointer, and leads
@@ -1705,12 +1723,12 @@ mod tests {
         let (mut harness, ..) = app_harness();
         let opened = crate::ui::widgets::opened;
         opened();
-        let link = find(harness.root_id(), "opened link").expect("a number on the Opened line");
-        assert!(
-            find(harness.root_id(), "Label: \"#57\"").is_some(),
-            "the number reads #57"
+        let (line, number) = on_event_line(harness.root_id(), "#57");
+        assert_eq!(
+            crate::review::linked_text::with_text(line, str::to_string).as_deref(),
+            Some("rohan opened #57")
         );
-        let c = link.get_visual_rect_no_clip().center();
+        let c = number.center();
         harness.click(c.x, c.y);
         assert_eq!(opened(), ["https://github.com/criccomini/perch/pull/57"]);
     }

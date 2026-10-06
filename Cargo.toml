@@ -161,11 +161,15 @@ codegen-units = 4
 # Code. Then one that lets an `AttrsList` carry parley's inline boxes,
 # room in a line that the caller draws into, and says where each landed:
 # a comment's `$…$` is a typeset formula in its line of text, wrapping
-# with the words. Last, one that draws the caret at a line's start inside
+# with the words. Then one that draws the caret at a line's start inside
 # the editor. The caret is a 2px bar centred on its x, so at column 0 it
 # began at x = -1, half outside the editor's clip, and vger rounded the
 # half left inside away: a box opened on a quote, its caret on the empty
-# line under it, showed no caret until something was typed. Drop a
+# line under it, showed no caret until something was typed. Last, one
+# that lets a rich text view keep to one line, cut short with an
+# ellipsis as a label is, where it always wrapped: an event's line on
+# Conversation is one text, so a drag selects across its name, sha and
+# subject, and a long subject still ends in "...". Drop a
 # patch from the branch once upstream merges it; `cargo update -p floem`
 # takes the branch's new head. `floem_renderer` is patched too so that
 # perch-app's own dependency on it resolves to the checkout floem's does,

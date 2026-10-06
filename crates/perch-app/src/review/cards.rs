@@ -28,6 +28,7 @@ use floem::peniko::Color;
 use floem::prelude::*;
 use floem::reactive::{Memo, RwSignal, SignalGet, SignalTrack, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
+use floem::ui_events::pointer::PointerButtonEvent;
 use floem::views::{
     dyn_container, dyn_stack, Container, Decorators, Empty, Label, Overlay, Stack, TooltipClass,
     TooltipExt,
@@ -51,8 +52,8 @@ use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
 use crate::ui::widgets::{
-    avatar, clickable, confirmation, follow_link, name_label, open_in_browser, sidebar_glyph,
-    underlined_link, Name,
+    avatar, clickable, confirmation, name_label, open_in_browser, sidebar_glyph, underlined_link,
+    Name,
 };
 
 /// What a card's row in the column is keyed by. A row with the same key is
@@ -1853,10 +1854,14 @@ fn more_row(more: usize) -> impl IntoView {
 /// the pull request's or the issue's number and page, which the Opened
 /// line names after "opened" and opens.
 ///
-/// Everything after the name is the event's own pieces: words, a label
-/// in its colours, a commit in the code face, or a reference to open. A
-/// commit on the head opens by itself, and a file its subject names opens
-/// on Files. The line ends with when it happened.
+/// After the name come the event's own pieces: words, a label in its
+/// colours, a commit in the code face, or a reference to open. A commit
+/// on the head opens by itself, and a file its subject names opens on
+/// Files. The words are linked text on one line, cut short with an
+/// ellipsis when the row runs out, so a drag selects across the name, a
+/// sha and a subject as it does across a comment's words; a label's chip
+/// breaks the text, and the row is one passage so a drag runs on past
+/// it. The line ends with when it happened, which is never cut.
 pub fn event_row(
     app: AppState,
     state: ReviewState,
@@ -1887,7 +1892,11 @@ pub fn event_row(
     // words alone does not lay the line out again.
     let ago = Memo::new(move |_| timefmt::relative(at, app.now.get()));
     let pieces = event_pieces(&event);
-    let link = link.filter(|_| event.kind == PullEventKind::Opened);
+    let number = link.filter(|_| event.kind == PullEventKind::Opened);
+    let refs = crate::review::code_refs::Refs::of(state);
+    // What the line says and where its links go, which changes as the
+    // checkout's commits and its file listing land.
+    let parts = Memo::new(move |_| event_parts(state, refs, who.as_ref(), &pieces, &number));
     // A card's padding and half an avatar puts the dot under the byline
     // avatars; the text then starts where their logins do.
     let dot_left = theme::CARD_PADDING + theme::CARD_AVATAR / 2.0 - theme::EVENT_DOT / 2.0;
@@ -1900,42 +1909,13 @@ pub fn event_row(
                 .flex_shrink(0.0_f32)
                 .margin_right(text_gap)
         }),
-        match who {
-            Some(who) => name_label(
-                move || who.clone(),
-                |s| {
-                    s.font_size(theme::TEXT_META)
-                        .font_weight(theme::weight_emphasis())
-                        .color(theme::fg())
-                        .margin_right(4.0)
-                },
+        crate::review::linked_text::passage(
+            dyn_container(
+                move || parts.get(),
+                move |parts| event_line(state, refs, parts),
             )
-            .into_any(),
-            None => Empty::new().into_any(),
-        },
-        dyn_stack(
-            move || pieces.clone().into_iter().enumerate(),
-            |(i, piece)| format!("{i}:{}", piece.text()),
-            move |(_, piece)| event_piece(state, piece),
-        )
-        .style(|s| s.items_center().gap(4.0).min_width(0.0)),
-        match link {
-            Some((number, url)) => Label::derived(move || format!("#{number}"))
-                .debug_name("opened link")
-                .on_event_stop(el::Click, move |_, _| open_in_browser(&url))
-                // Underlined under the pointer, as a name is.
-                .style(|s| {
-                    underlined_link(
-                        s.font_size(theme::TEXT_META)
-                            .font_weight(theme::weight_emphasis())
-                            .color(theme::fg())
-                            .margin_left(4.0)
-                            .flex_shrink(0.0_f32),
-                    )
-                })
-                .into_any(),
-            None => Empty::new().into_any(),
-        },
+            .style(|s| s.min_width(0.0)),
+        ),
         Label::derived(move || ago.get()).style(|s| {
             s.font_size(theme::TEXT_META)
                 .color(theme::fg_muted())
@@ -1952,92 +1932,295 @@ pub fn event_row(
     })
 }
 
-/// One piece of an event's line.
-fn event_piece(state: ReviewState, piece: Piece) -> floem::AnyView {
-    if piece.text().is_empty() {
-        return Empty::new().into_any();
-    }
-    match piece {
-        Piece::Text(text) => event_words(text).into_any(),
-        Piece::Subject(subject) => event_subject(state, subject),
-        Piece::Commit(sha) => {
-            let short = short_sha(&sha);
-            let on_head = sha.clone();
-            Label::derived(move || short.clone())
-                .debug_name("event commit")
-                .on_event_stop(el::Click, move |_, _| open_commit(state, &sha))
-                .style(move |s| {
-                    let opens = pull_url(state).is_some() || has_commit(state, &on_head);
-                    let s = s
-                        .font_family(theme::CODE_FONT_STACK.to_string())
-                        .font_size(theme::CODE_FONT_SIZE)
-                        .color(theme::fg_muted())
-                        .flex_shrink(0.0_f32);
-                    if opens {
-                        underlined_link(s)
-                    } else {
-                        s
-                    }
-                })
-                .into_any()
-        }
-        Piece::Label(label) => crate::review::summary::label_chip(label.name, label.color)
-            .style(|s| s.flex_shrink(0.0_f32))
-            .into_any(),
-        Piece::Sha(sha) => {
-            let short = short_sha(&sha);
-            Label::derived(move || short.clone())
-                .style(|s| {
-                    s.font_family(theme::CODE_FONT_STACK.to_string())
-                        .font_size(theme::CODE_FONT_SIZE)
-                        .color(theme::fg_muted())
-                        .flex_shrink(0.0_f32)
-                })
-                .into_any()
-        }
-        Piece::Reference(reference) => {
-            let url = reference.html_url.clone();
-            // A reference GitHub sent without a link is still a line; it
-            // just does not promise to open.
-            let opens = !url.is_empty();
-            let slug = reference.slug();
-            let title = reference.title.clone();
-            Stack::horizontal((
-                Label::derived(move || slug.clone()).style(|s| {
-                    s.font_size(theme::TEXT_META)
-                        .color(theme::fg())
-                        .font_weight(theme::weight_emphasis())
-                        .flex_shrink(0.0_f32)
-                }),
-                Label::derived(move || title.clone()).style(|s| {
-                    s.font_size(theme::TEXT_META)
-                        .color(theme::fg_muted())
-                        .text_ellipsis()
-                        .min_width(0.0)
-                }),
-            ))
-            .on_event_stop(el::Click, move |_, _| follow_link(&url))
-            .style(move |s| {
-                let s = s.items_center().gap(4.0).min_width(0.0);
-                if opens {
-                    clickable(s)
-                } else {
-                    s
-                }
-            })
-            .into_any()
+/// How a run of an event's line is set.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Face {
+    /// The line's words.
+    Muted,
+    /// A file a subject names.
+    Plain,
+    /// A name, a reference's slug, the number Opened names.
+    Strong,
+    /// A sha.
+    Code,
+}
+
+/// Where a run of an event's line goes when it is clicked.
+#[derive(Debug, Clone, PartialEq)]
+enum Goes {
+    /// A page in the browser: a person's, or the pull request's.
+    Browser(String),
+    /// An address, which a pull request or an issue opens in Perch.
+    Url(String),
+    /// A commit on the head: on Files when the checkout has it, else on
+    /// GitHub.
+    Commit(String),
+    File(crate::review::code_refs::FileLink),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Run {
+    text: String,
+    face: Face,
+    goes: Option<Goes>,
+}
+
+impl Run {
+    fn new(text: impl Into<String>, face: Face, goes: Option<Goes>) -> Self {
+        Run {
+            text: text.into(),
+            face,
+            goes,
         }
     }
 }
 
-/// Words on an event's line, cut short when the line runs out.
-fn event_words(text: String) -> Label {
-    Label::derived(move || text.clone()).style(|s| {
-        s.font_size(theme::TEXT_META)
+/// An event's line between its labels' chips: runs of text, or a chip.
+#[derive(Debug, Clone, PartialEq)]
+enum Part {
+    Text(Vec<Run>),
+    Chip(perch_github::Label),
+}
+
+/// The line's parts: the name, the pieces a space apart, and the number
+/// Opened names. A commit is a link only where it opens, and a file only
+/// where the listing has it, so both are read here, tracked.
+fn event_parts(
+    state: ReviewState,
+    refs: Option<crate::review::code_refs::Refs>,
+    who: Option<&Name>,
+    pieces: &[Piece],
+    number: &Option<(u64, String)>,
+) -> Vec<Part> {
+    let mut parts = Vec::new();
+    let mut text: Vec<Run> = Vec::new();
+    let add = |text: &mut Vec<Run>, runs: Vec<Run>| {
+        if !text.is_empty() {
+            text.push(Run::new(" ", Face::Muted, None));
+        }
+        text.extend(runs);
+    };
+    match who {
+        Some(Name::Login(login)) => add(
+            &mut text,
+            vec![Run::new(
+                login.clone(),
+                Face::Strong,
+                crate::ui::widgets::profile_url(login).map(Goes::Browser),
+            )],
+        ),
+        Some(Name::Plain(name)) => add(&mut text, vec![Run::new(name.clone(), Face::Strong, None)]),
+        None => {}
+    }
+    for piece in pieces.iter().filter(|piece| !piece.text().is_empty()) {
+        let runs = match piece {
+            Piece::Text(words) => vec![Run::new(words.clone(), Face::Muted, None)],
+            Piece::Label(label) => {
+                if !text.is_empty() {
+                    parts.push(Part::Text(std::mem::take(&mut text)));
+                }
+                parts.push(Part::Chip(label.clone()));
+                continue;
+            }
+            Piece::Sha(sha) => vec![Run::new(short_sha(sha), Face::Code, None)],
+            Piece::Commit(sha) => {
+                let on_head = state
+                    .commits
+                    .with(|commits| commits.iter().any(|c| c.sha == *sha));
+                let opens = on_head || pull_url(state).is_some();
+                vec![Run::new(
+                    short_sha(sha),
+                    Face::Code,
+                    opens.then(|| Goes::Commit(sha.clone())),
+                )]
+            }
+            Piece::Subject(subject) => match refs {
+                Some(refs) => {
+                    refs.track_files();
+                    crate::review::timeline::subject_runs(subject, |word| {
+                        refs.file(&crate::review::code_refs::written_place(word)?)
+                    })
+                    .into_iter()
+                    .map(|(words, file)| match file {
+                        Some(file) => Run::new(words, Face::Plain, Some(Goes::File(file))),
+                        None => Run::new(words, Face::Muted, None),
+                    })
+                    .collect()
+                }
+                None => vec![Run::new(subject.clone(), Face::Muted, None)],
+            },
+            Piece::Reference(reference) => {
+                // A reference GitHub sent without a link is still a line;
+                // it just does not promise to open.
+                let goes = Some(reference.html_url.clone())
+                    .filter(|url| !url.is_empty())
+                    .map(Goes::Url);
+                let mut runs = vec![Run::new(reference.slug(), Face::Strong, goes.clone())];
+                if !reference.title.is_empty() {
+                    runs.push(Run::new(" ", Face::Muted, goes.clone()));
+                    runs.push(Run::new(reference.title.clone(), Face::Muted, goes));
+                }
+                runs
+            }
+        };
+        add(&mut text, runs);
+    }
+    if let Some((number, url)) = number {
+        add(
+            &mut text,
+            vec![Run::new(
+                format!("#{number}"),
+                Face::Strong,
+                Some(Goes::Browser(url.clone())),
+            )],
+        );
+    }
+    if !text.is_empty() {
+        parts.push(Part::Text(text));
+    }
+    parts
+}
+
+/// An event's parts, side by side, the text cut short before the chips.
+fn event_line(
+    state: ReviewState,
+    refs: Option<crate::review::code_refs::Refs>,
+    parts: Vec<Part>,
+) -> floem::AnyView {
+    Stack::horizontal_from_iter(parts.into_iter().map(|part| {
+        match part {
+            Part::Text(runs) => event_text(state, refs, runs),
+            Part::Chip(label) => crate::review::summary::label_chip(label.name, label.color)
+                .style(|s| s.flex_shrink(0.0_f32))
+                .into_any(),
+        }
+    }))
+    .style(|s| s.items_center().gap(4.0).min_width(0.0))
+    .into_any()
+}
+
+/// Runs of an event's line as one line of linked text. Runs side by side
+/// that go to the same place, a reference's slug and title, are one link.
+fn event_text(
+    state: ReviewState,
+    refs: Option<crate::review::code_refs::Refs>,
+    runs: Vec<Run>,
+) -> floem::AnyView {
+    let mut text = String::new();
+    let mut faces: Vec<(std::ops::Range<usize>, Face)> = Vec::new();
+    let mut links: Vec<(std::ops::Range<usize>, Goes)> = Vec::new();
+    for run in runs {
+        let range = text.len()..text.len() + run.text.len();
+        text.push_str(&run.text);
+        faces.push((range.clone(), run.face));
+        let Some(goes) = run.goes else { continue };
+        match links.last_mut() {
+            Some((last, to)) if last.end == range.start && *to == goes => last.end = range.end,
+            _ => links.push((range, goes)),
+        }
+    }
+    let links = links
+        .into_iter()
+        .map(|(range, goes)| (range, event_target(state, refs, goes)))
+        .collect();
+    crate::review::linked_text::linked_line(text, links, move || (event_attrs(&faces), Vec::new()))
+        .style(|s| s.min_width(0.0))
+        .into_any()
+}
+
+/// What a click on a run that `goes` somewhere does, and its tip.
+fn event_target(
+    state: ReviewState,
+    refs: Option<crate::review::code_refs::Refs>,
+    goes: Goes,
+) -> crate::review::linked_text::Target {
+    use crate::review::linked_text::Target;
+    match goes {
+        Goes::Browser(url) => Target::Local {
+            tip: url.clone(),
+            open: Rc::new(move || open_in_browser(&url)),
+        },
+        Goes::Url(url) => Target::Url(url),
+        Goes::Commit(sha) => {
+            let tip = match floem::reactive::Effect::untrack(|| pull_url(state)) {
+                Some(url) if !has_commit(state, &sha) => format!("{url}/commits/{sha}"),
+                _ => sha.clone(),
+            };
+            Target::Local {
+                tip,
+                open: Rc::new(move || open_commit(state, &sha)),
+            }
+        }
+        Goes::File(link) => match refs {
+            Some(refs) => refs.file_target(link),
+            // A file is only ever found through `refs`.
+            None => Target::Url(String::new()),
+        },
+    }
+}
+
+/// The attributes of an event's text: the line's words, muted, and each
+/// run's own face over them.
+fn event_attrs(faces: &[(std::ops::Range<usize>, Face)]) -> floem::text::AttrsList {
+    use floem::text::{Attrs, AttrsList, FamilyOwned};
+    let prose: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::FONT_STACK).collect();
+    let code: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect();
+    let words = || {
+        Attrs::new()
+            .family(&prose)
+            .font_size(theme::TEXT_META)
+            .weight(theme::weight_body())
             .color(theme::fg_muted())
-            .text_ellipsis()
-            .min_width(0.0)
-    })
+    };
+    let mut list = AttrsList::new(words());
+    for (range, face) in faces {
+        let attrs = match face {
+            Face::Muted => continue,
+            Face::Plain => words().color(theme::fg()),
+            Face::Strong => words().color(theme::fg()).weight(theme::weight_emphasis()),
+            Face::Code => Attrs::new()
+                .family(&code)
+                .font_size(theme::CODE_FONT_SIZE)
+                .weight(theme::weight_body())
+                .color(theme::fg_muted()),
+        };
+        list.add_span(range.clone(), attrs);
+    }
+    list
+}
+
+/// How far a press on a sha moves before it is a drag that selects and
+/// not a click that opens, in logical pixels: a label's own.
+const SHA_DRAG_SLOP: f64 = 2.0;
+
+/// A sha that opens its commit on a click and can still be dragged over
+/// to copy: a press that moves past the slop selects, and its release
+/// opens nothing. Its style has to say `selectable(true)` after
+/// `underlined_link`, which turns selection off.
+fn sha_link(label: Label, open: impl Fn() + 'static) -> Label {
+    let pressed_at = Rc::new(Cell::new(None));
+    let dragged = Rc::new(Cell::new(false));
+    let (down_at, moved_from, up_at) = (pressed_at.clone(), pressed_at.clone(), pressed_at);
+    let (down_dragged, moved) = (dragged.clone(), dragged.clone());
+    label
+        .on_event_cont(el::PointerDown, move |_, e: &PointerButtonEvent| {
+            down_at.set(Some(e.state.logical_point()));
+            down_dragged.set(false);
+        })
+        .on_event_cont(el::PointerMove, move |_, update| {
+            if moved_from
+                .get()
+                .is_some_and(|from| from.distance(update.current.logical_point()) > SHA_DRAG_SLOP)
+            {
+                moved.set(true);
+            }
+        })
+        .on_event_cont(el::PointerUp, move |_, _| up_at.set(None))
+        .on_event_stop(el::Click, move |_, _| {
+            if !dragged.replace(false) {
+                open();
+            }
+        })
 }
 
 /// Whether the checkout has a commit, so Files can show it by itself.
@@ -2065,47 +2248,6 @@ fn open_commit(state: ReviewState, sha: &str) {
     if let Some(url) = floem::reactive::Effect::untrack(|| pull_url(state)) {
         open_in_browser(&format!("{url}/commits/{sha}"));
     }
-}
-
-/// A commit's subject, with each file it names a link to the file on
-/// Files. Only a checkout has Files, and a subject in one is drawn again
-/// as its listing lands, since what a path names is looked up there.
-fn event_subject(state: ReviewState, subject: String) -> floem::AnyView {
-    let Some(refs) = crate::review::code_refs::Refs::of(state) else {
-        return event_words(subject).into_any();
-    };
-    let runs = Memo::new(move |_| {
-        refs.track_files();
-        crate::review::timeline::subject_runs(&subject, |word| {
-            refs.file(&crate::review::code_refs::written_place(word)?)
-        })
-    });
-    dyn_container(
-        move || runs.get(),
-        move |runs| {
-            Stack::horizontal_from_iter(runs.into_iter().map(|(text, link)| {
-                match link {
-                    None => event_words(text).into_any(),
-                    Some(link) => Label::derived(move || text.clone())
-                        .debug_name("event file")
-                        .on_event_stop(el::Click, move |_, _| refs.go(&link))
-                        .style(|s| {
-                            underlined_link(
-                                s.font_size(theme::TEXT_META)
-                                    .color(theme::fg())
-                                    .text_ellipsis()
-                                    .min_width(0.0),
-                            )
-                        })
-                        .into_any(),
-                }
-            }))
-            .style(|s| s.items_center().min_width(0.0))
-            .into_any()
-        },
-    )
-    .style(|s| s.min_width(0.0))
-    .into_any()
 }
 
 // ---------------------------------------------------------------------
@@ -2464,16 +2606,19 @@ pub(crate) fn finding_controls(
                             Label::derived(move || checked_word.to_string()).style(finding_meta),
                             {
                                 let open = sha.clone();
-                                Label::derived(move || short_sha(&sha).to_string())
-                                    .debug_name("finding-checked-sha")
-                                    .on_event_stop(el::Click, move |_, _| open_commit(state, &open))
-                                    .style(|s| {
-                                        underlined_link(
-                                            finding_meta(s)
-                                                .font_family(theme::CODE_FONT_STACK.to_string())
-                                                .color(theme::link()),
-                                        )
-                                    })
+                                sha_link(
+                                    Label::derived(move || short_sha(&sha).to_string())
+                                        .debug_name("finding-checked-sha"),
+                                    move || open_commit(state, &open),
+                                )
+                                .style(|s| {
+                                    underlined_link(
+                                        finding_meta(s)
+                                            .font_family(theme::CODE_FONT_STACK.to_string())
+                                            .color(theme::link()),
+                                    )
+                                    .selectable(true)
+                                })
                             },
                         ))
                         .style(|s| s.items_center().gap(4.0))

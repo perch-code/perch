@@ -41,6 +41,12 @@
 //! which is its prose, and each view tints what was found in it, under
 //! the selection, as the code's editor tints its matches.
 //!
+//! A [`linked_line`] is the same view kept to one line, as a label with
+//! an ellipsis is: what does not fit is cut short with "...". The shadow
+//! is then the line as it is drawn, cut, and a byte of it past the cut,
+//! the ellipsis, stands for the rest of the text, so a selection that
+//! runs into the ellipsis copies the whole rest of the line.
+//!
 //! A formula in the text is an [`Inline`]: an inline box in the
 //! attributes holds its place in the line, and this view draws it there
 //! from the shadow layout, before the glyphs as the rules are. It has no
@@ -58,7 +64,7 @@ use floem::event::{Event, EventPropagation, FocusEvent, Phase};
 use floem::kurbo::{Point, Rect};
 use floem::peniko::Color;
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate};
-use floem::style::{CursorStyle, Selectable};
+use floem::style::{CursorStyle, NoWrapOverflow, Selectable, TextOverflow};
 use floem::text::{
     AttrsList, Cursor, OverflowWrap, Selection, TextLayout, TextSelection, TextWrapMode,
 };
@@ -192,6 +198,11 @@ struct Leaf {
     found: RefCell<(Vec<Range<usize>>, Option<usize>)>,
     /// The formulas in the text.
     formulas: Vec<Inline>,
+    /// Whether the text keeps to one line, cut short with an ellipsis.
+    one_line: bool,
+    /// Where the shadow cut a line too long for its width: the bytes of
+    /// the text it keeps, before the ellipsis. `None` when it is whole.
+    cut: Cell<Option<usize>>,
 }
 
 thread_local! {
@@ -299,6 +310,7 @@ pub fn mark_found(id: ViewId, ranges: Vec<Range<usize>>, current: Option<usize>)
 pub fn range_rect(id: ViewId, range: Range<usize>) -> Option<Rect> {
     let leaf = leaf(id)?;
     leaf.with_shadow(|layout, origin| {
+        let range = leaf.shadow_range(range);
         let selection = layout.selection_from_byte_range(range.start, range.end);
         let mut bounds: Option<Rect> = None;
         layout.selection_geometry_with_line_metrics(&selection, |x0, y0, x1, y1| {
@@ -374,6 +386,26 @@ pub fn linked_text_with(
     formulas: Vec<Inline>,
     styled: impl Fn() -> (AttrsList, Vec<Strike>) + 'static,
 ) -> impl IntoView {
+    linked(text, links, formulas, false, styled)
+}
+
+/// [`linked_text`] on one line, cut short with an ellipsis where it runs
+/// out of room, as a label's text is: see the module.
+pub fn linked_line(
+    text: String,
+    links: Vec<(Range<usize>, Target)>,
+    styled: impl Fn() -> (AttrsList, Vec<Strike>) + 'static,
+) -> impl IntoView {
+    linked(text, links, Vec::new(), true, styled)
+}
+
+fn linked(
+    text: String,
+    links: Vec<(Range<usize>, Target)>,
+    formulas: Vec<Inline>,
+    one_line: bool,
+    styled: impl Fn() -> (AttrsList, Vec<Strike>) + 'static,
+) -> impl IntoView {
     let id = ViewId::new();
     let (attrs, strikes) = styled();
     let hovered = RwSignal::new(None);
@@ -388,6 +420,8 @@ pub fn linked_text_with(
         selectable: Cell::new(true),
         found: RefCell::new((Vec::new(), None)),
         formulas,
+        one_line,
+        cut: Cell::new(None),
     });
     LEAVES.with_borrow_mut(|leaves| {
         leaves.retain(|_, leaf| leaf.strong_count() > 0);
@@ -408,7 +442,13 @@ pub fn linked_text_with(
             (leaf.text.clone(), leaf.attrs.borrow().clone())
         }
     };
-    let child = rich_text(text, attrs, restyle).style(|s| s.width_full());
+    let child = rich_text(text, attrs, restyle);
+    let child = if one_line {
+        child.text_overflow(TextOverflow::NoWrap(NoWrapOverflow::Ellipsis))
+    } else {
+        child
+    }
+    .style(|s| s.width_full());
     id.set_children([child]);
     let view = LinkedText {
         id,
@@ -469,7 +509,9 @@ impl Leaf {
         let mut shadow = self.shadow.borrow_mut();
         let stale = shadow.as_ref().is_none_or(|(w, _)| *w != width);
         if stale {
-            *shadow = Some((width, self.layout_for(width)));
+            let (layout, cut) = self.layout_for(width);
+            self.cut.set(cut);
+            *shadow = Some((width, layout));
         }
         let (_, layout) = shadow.as_ref().expect("just built");
         // The wrapped view fills this one, so its text starts at the
@@ -478,9 +520,45 @@ impl Leaf {
         Some(with(layout, origin))
     }
 
-    /// The text laid out as the wrapped view lays it out at `width`.
-    fn layout_for(&self, width: f32) -> TextLayout {
-        layout_at(&self.text, self.attrs.borrow().clone(), width)
+    /// The text laid out as the wrapped view lays it out at `width`, and
+    /// where a line too long for it was cut.
+    fn layout_for(&self, width: f32) -> (TextLayout, Option<usize>) {
+        let attrs = self.attrs.borrow().clone();
+        if self.one_line {
+            line_at(&self.text, attrs, width)
+        } else {
+            (layout_at(&self.text, attrs, width), None)
+        }
+    }
+
+    /// The byte of the text a byte of the shadow stands for: the same
+    /// one, before a cut, and the end of the text, in the ellipsis.
+    fn text_byte(&self, byte: usize) -> usize {
+        match self.cut.get() {
+            Some(cut) if byte > cut => self.text.len(),
+            _ => byte,
+        }
+    }
+
+    /// The bytes of the text `range` of the shadow stands for.
+    fn text_range(&self, range: Range<usize>) -> Range<usize> {
+        self.text_byte(range.start)..self.text_byte(range.end)
+    }
+
+    /// Where `range` of the text is in the shadow: what of it is past a
+    /// cut is the ellipsis.
+    fn shadow_range(&self, range: Range<usize>) -> Range<usize> {
+        let Some(cut) = self.cut.get() else {
+            return range;
+        };
+        // A line cut before its first byte is drawn empty, without dots.
+        let dots = if cut == 0 { 0 } else { ELLIPSIS.len() };
+        let end = if range.end > cut {
+            cut + dots
+        } else {
+            range.end
+        };
+        range.start.min(cut)..end
     }
 
     /// Whether a selection of `range` of the text takes the formula at
@@ -560,12 +638,12 @@ impl Leaf {
             if at.y >= layout.size().height {
                 return Some(len);
             }
-            let index = byte_of(layout, layout.hit_test(at)?);
+            let index = self.text_byte(byte_of(layout, layout.hit_test(at)?));
             if unit == Unit::Glyph {
                 return Some(index);
             }
             let word = Selection::word_from_point(layout.parley_layout(), at.x as f32, at.y as f32);
-            let word = layout.selection_text_range(&wrap(layout, word));
+            let word = self.text_range(layout.selection_text_range(&wrap(layout, word)));
             Some(if forward {
                 word.end.max(index)
             } else {
@@ -590,8 +668,12 @@ impl LinkedText {
 
     /// The link under `point`, in this view's coordinates.
     fn link_at(&self, point: Point) -> Option<usize> {
-        self.with_shadow(|layout, origin| link_under(layout, &self.links, point - origin.to_vec2()))
-            .flatten()
+        self.with_shadow(|layout, origin| {
+            link_under(layout, &self.links, point - origin.to_vec2(), |range| {
+                self.leaf.shadow_range(range.clone())
+            })
+        })
+        .flatten()
     }
 }
 
@@ -620,12 +702,48 @@ fn layout_at(text: &str, attrs: AttrsList, width: f32) -> TextLayout {
     layout
 }
 
+/// What a line cut short ends with, as floem draws it.
+const ELLIPSIS: &str = "...";
+
+/// `text` on one line at `width` the way the rich text view lays it out
+/// with an ellipsis, and the bytes of it kept when it does not fit: the
+/// glyphs up to the width less the ellipsis's, then the ellipsis.
+fn line_at(text: &str, attrs: AttrsList, width: f32) -> (TextLayout, Option<usize>) {
+    let line = |text: &str| {
+        let mut layout = TextLayout::new();
+        layout.set_text_wrap_mode(TextWrapMode::NoWrap);
+        layout.set_text(text, attrs.clone(), None);
+        layout
+    };
+    let whole = line(text);
+    if whole.size().width as f32 <= width {
+        return (whole, None);
+    }
+    let room = width - line(ELLIPSIS).size().width as f32;
+    let cut = whole
+        .hit_test(Point::new(f64::from(room), 0.0))
+        .map_or(0, |cursor| byte_of(&whole, cursor));
+    let shown = if cut == 0 {
+        String::new()
+    } else {
+        format!("{}{ELLIPSIS}", &text[..cut])
+    };
+    (line(&shown), Some(cut))
+}
+
 /// Which of `links` is drawn under `point`, in the layout's coordinates.
 /// A link that wraps is several rectangles; the point must be inside one,
 /// not merely nearest to it.
-fn link_under(layout: &TextLayout, links: &[Link], point: Point) -> Option<usize> {
+/// `shadow` says where a link's bytes are in the layout.
+fn link_under(
+    layout: &TextLayout,
+    links: &[Link],
+    point: Point,
+    shadow: impl Fn(&Range<usize>) -> Range<usize>,
+) -> Option<usize> {
     links.iter().position(|link| {
-        let selection = layout.selection_from_byte_range(link.range.start, link.range.end);
+        let range = shadow(&link.range);
+        let selection = layout.selection_from_byte_range(range.start, range.end);
         let mut hit = false;
         layout.selection_geometry_with_line_metrics(&selection, |x0, y0, x1, y1| {
             hit |= Rect::new(x0, y0, x1, y1).contains(point);
@@ -713,7 +831,7 @@ impl LinkedText {
         }
         let selection = self.selection()?;
         let range = self.with_shadow(|layout, _| layout.selection_text_range(&selection))?;
-        Some(self.leaf.copied(range))
+        Some(self.leaf.copied(self.leaf.text_range(range)))
     }
 
     /// Tells [`selected_under`] what this view has selected now: its text,
@@ -822,12 +940,13 @@ impl LinkedText {
     /// reach here wherever they land.
     fn press(&mut self, point: Point, count: u8, pointer: Option<PointerId>) {
         let len = self.leaf.text.len();
+        let leaf = &self.leaf;
         let next = self
             .with_shadow(|layout, child| {
                 let at = point - child.to_vec2();
                 match count {
                     0 | 1 => layout.hit_test(at).map(|from| {
-                        let byte = byte_of(layout, from);
+                        let byte = leaf.text_byte(byte_of(layout, from));
                         let armed = Selecting::Armed {
                             origin: point,
                             from,
@@ -844,12 +963,13 @@ impl LinkedText {
                                 at.y as f32,
                             ),
                         );
-                        let bytes = layout.selection_text_range(&word);
+                        let bytes = leaf.text_range(layout.selection_text_range(&word));
                         Some((Selecting::Dragging(word), bytes, Unit::Word))
                     }
                     _ => {
                         TextLayout::clear_selection_geometry_cache();
-                        let all = layout.selection_from_byte_range(0, len);
+                        let shown = leaf.shadow_range(0..len);
+                        let all = layout.selection_from_byte_range(shown.start, shown.end);
                         Some((Selecting::Dragging(all), 0..len, Unit::Whole))
                     }
                 }
@@ -1059,6 +1179,7 @@ impl View for LinkedText {
                 let (ranges, current) = &*self.leaf.found.borrow();
                 let mut rects = Vec::new();
                 for (i, range) in ranges.iter().enumerate() {
+                    let range = self.leaf.shadow_range(range.clone());
                     let color = if Some(i) == *current {
                         theme::find_current_bg()
                     } else {
@@ -1082,8 +1203,10 @@ impl View for LinkedText {
             (!range.is_empty() && cx.window_state.is_focused(owner)).then_some(range)
         });
         let selection = match taken {
-            Some(range) => self
-                .with_shadow(|layout, _| layout.selection_from_byte_range(range.start, range.end)),
+            Some(range) => self.with_shadow(|layout, _| {
+                let range = self.leaf.shadow_range(range);
+                layout.selection_from_byte_range(range.start, range.end)
+            }),
             None => self
                 .selection()
                 .filter(|_| cx.window_state.is_focused(self.id)),
@@ -1096,7 +1219,11 @@ impl View for LinkedText {
                     layout.selection_geometry_with_line_metrics(&selection, |x0, y0, x1, y1| {
                         rects.push(Rect::new(x0, y0, x1, y1) + origin.to_vec2());
                     });
-                    (rects, layout.selection_text_range(&selection))
+                    (
+                        rects,
+                        self.leaf
+                            .text_range(layout.selection_text_range(&selection)),
+                    )
                 })
                 .unwrap_or_default();
             // A formula has no glyphs to be selected; it is shaded whole
@@ -1133,14 +1260,23 @@ impl View for LinkedText {
                     .borrow()
                     .get_span(link.range.start)
                     .get_color();
-                vec![(link.range.clone(), ink.unwrap_or(theme::link()))]
+                vec![(
+                    self.leaf.shadow_range(link.range.clone()),
+                    ink.unwrap_or(theme::link()),
+                )]
             })
             .unwrap_or_default();
-        let strikes = self.leaf.strikes.borrow();
+        let strikes: Vec<Strike> = self
+            .leaf
+            .strikes
+            .borrow()
+            .iter()
+            .map(|(range, color)| (self.leaf.shadow_range(range.clone()), *color))
+            .collect();
         if strikes.is_empty() && underline.is_empty() {
             return;
         }
-        let len = self.leaf.text.len();
+        let len = self.leaf.shadow_range(0..self.leaf.text.len()).end;
         let rules = self
             .with_shadow(|layout, origin| {
                 let mut out = rules(layout, len, &strikes, Rule::Strike);
@@ -1343,6 +1479,11 @@ mod tests {
     use super::*;
     use floem::text::{Attrs, FamilyOwned, LineHeightValue};
 
+    /// The link under `point` in a layout of the whole text.
+    fn link_under_whole(layout: &TextLayout, links: &[Link], point: Point) -> Option<usize> {
+        link_under(layout, links, point, Range::clone)
+    }
+
     fn links(text: &str, needle: &str, url: &str) -> Vec<Link> {
         let start = text.find(needle).unwrap();
         vec![Link {
@@ -1370,23 +1511,23 @@ mod tests {
         assert_eq!(rects.len(), 1, "{rects:?}");
         let rect = rects[0];
         assert!(rect.x0 > 0.0 && rect.width() > 0.0, "{rect:?}");
-        assert_eq!(link_under(&layout, &links, rect.center()), Some(0));
+        assert_eq!(link_under_whole(&layout, &links, rect.center()), Some(0));
         // Just left of the link is the word before it, and past the end
         // of the line is nothing, however near the link's last glyph.
         assert_eq!(
-            link_under(&layout, &links, Point::new(rect.x0 - 3.0, rect.center().y)),
+            link_under_whole(&layout, &links, Point::new(rect.x0 - 3.0, rect.center().y)),
             None
         );
         assert_eq!(
-            link_under(&layout, &links, Point::new(rect.x1 + 3.0, rect.center().y)),
+            link_under_whole(&layout, &links, Point::new(rect.x1 + 3.0, rect.center().y)),
             None
         );
         assert_eq!(
-            link_under(&layout, &links, Point::new(900.0, rect.center().y)),
+            link_under_whole(&layout, &links, Point::new(900.0, rect.center().y)),
             None
         );
         assert_eq!(
-            link_under(&layout, &links, Point::new(rect.center().x, rect.y1 + 40.0)),
+            link_under_whole(&layout, &links, Point::new(rect.center().x, rect.y1 + 40.0)),
             None
         );
     }
@@ -1406,7 +1547,7 @@ mod tests {
         assert!(rects.len() >= 2, "the link spans lines: {rects:?}");
         for rect in &rects {
             assert_eq!(
-                link_under(&narrow, &links, rect.center()),
+                link_under_whole(&narrow, &links, rect.center()),
                 Some(0),
                 "{rect:?}"
             );
@@ -1849,6 +1990,83 @@ mod tests {
             );
             assert_eq!(copy(&mut h), Vec::<String>::new());
         }
+
+        /// How wide a column `linked_line` gets: too narrow for `TEXT`.
+        const NARROW: f64 = 200.0;
+
+        /// `TEXT` as a `linked_line` in a column `NARROW` wide, with
+        /// `links` in it, and the view that carries it.
+        fn line_harness(links: Vec<(Range<usize>, Target)>) -> (HeadlessHarness, ViewId) {
+            let root = TestRoot::new();
+            let view = Container::new(
+                linked_line(TEXT.into(), links, || (prose(15.0), Vec::new()))
+                    .style(|s| s.min_width(0.0)),
+            )
+            .style(|s| s.width(NARROW).padding(0.0).flex_row().items_start());
+            let mut harness = HeadlessHarness::new_with_size(root, view, WIDTH, 400.0);
+            harness.rebuild();
+            harness.paint();
+            let id = find(harness.root_id(), "LinkedText").expect("no linked text");
+            copied();
+            opened();
+            (harness, id)
+        }
+
+        /// A line too long for its column keeps to one line, cut short,
+        /// and a drag into the ellipsis takes the rest of the text, as a
+        /// browser copies all of a line it drew with an ellipsis.
+        #[test]
+        fn a_line_cut_short_copies_its_whole_rest_from_the_ellipsis() {
+            let (mut h, id) = line_harness(Vec::new());
+            let rect = id.get_visual_rect();
+            let one = layout_at(TEXT, prose(15.0), WIDTH as f32).size().height;
+            assert!(rect.width() <= NARROW, "{rect:?}");
+            assert!(
+                (rect.height() - one).abs() < 0.5,
+                "{rect:?} for a line {one} high"
+            );
+            let cut = leaf(id).and_then(|leaf| leaf.cut.get());
+            assert!(
+                cut.is_some_and(|cut| cut > 0 && cut < TEXT.len()),
+                "{cut:?}"
+            );
+
+            let y = glyphs("quick").center().y;
+            drag(
+                &mut h,
+                Point::new(glyphs("quick").x0 + 2.0, y),
+                Point::new(rect.x1 - 2.0, y),
+            );
+            assert_eq!(copy(&mut h), vec![TEXT["The ".len()..].to_string()]);
+            // Up to a word before the cut is that word and no more.
+            drag(
+                &mut h,
+                Point::new(glyphs("quick").x0 + 2.0, y),
+                Point::new(glyphs("brown").x1 - 1.0, y),
+            );
+            assert_eq!(copy(&mut h), vec!["quick brown".to_string()]);
+        }
+
+        /// A link the cut hides is still under the ellipsis it ends with.
+        #[test]
+        fn a_link_cut_short_is_followed_from_its_ellipsis() {
+            let followed = Rc::new(Cell::new(false));
+            let went = followed.clone();
+            let dog = TEXT.find("lazy dog").unwrap();
+            let (mut h, id) = line_harness(vec![(
+                dog..TEXT.len(),
+                Target::Local {
+                    tip: "dog".into(),
+                    open: Rc::new(move || went.set(true)),
+                },
+            )]);
+            let rect = id.get_visual_rect();
+            let y = glyphs("quick").center().y;
+            h.click(glyphs("quick").center().x, y);
+            assert!(!followed.get());
+            h.click(rect.x1 - 4.0, y);
+            assert!(followed.get(), "the ellipsis is the link's");
+        }
     }
 
     mod formulas {
@@ -2000,6 +2218,8 @@ mod tests {
                     index: 5,
                     ..inline()
                 }],
+                one_line: false,
+                cut: Cell::new(None),
             };
             assert_eq!(leaf.copied(0..5), "x is $O(n)$");
             assert_eq!(leaf.copied(0..4), "x is");
