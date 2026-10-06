@@ -82,12 +82,17 @@ pub struct Anchor {
 }
 
 impl Anchor {
-    /// `src/x.rs:41–58`, or `src/x.rs:41`.
+    /// `src/x.rs:41–58`, or `src/x.rs:41`, with ` (base)` after lines of
+    /// the base's side, whose numbers are the old file's.
     pub fn label(&self) -> String {
-        if self.start_line == self.line {
+        let lines = if self.start_line == self.line {
             format!("{}:{}", self.path, self.line)
         } else {
             format!("{}:{}\u{2013}{}", self.path, self.start_line, self.line)
+        };
+        match self.side {
+            Side::Right => lines,
+            Side::Left => format!("{lines} (base)"),
         }
     }
 }
@@ -1108,6 +1113,11 @@ mod tests {
         assert_eq!(one.label(), "src/x.rs:41");
         let range = Anchor { line: 58, ..one };
         assert_eq!(range.label(), "src/x.rs:41–58");
+        let base = Anchor {
+            side: Side::Left,
+            ..range
+        };
+        assert_eq!(base.label(), "src/x.rs:41–58 (base)");
     }
 
     #[test]

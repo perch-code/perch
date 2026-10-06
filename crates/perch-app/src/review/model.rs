@@ -1756,6 +1756,11 @@ pub struct ReviewState {
     /// The display line the pointer is over in the gutter, for the `+`,
     /// or the first row of a divider, for its Fold again.
     pub hovered_line: RwSignal<Option<usize>>,
+    /// Whether `hovered_line` was recorded by a split's base gutter. The
+    /// two gutters of a split number their rows alike, so a row on one
+    /// side is the row beside it on the other, and only the gutter the
+    /// pointer is in shows its `+`.
+    pub hovered_base: RwSignal<bool>,
     /// The element that recorded `hovered_line`. A divider is several
     /// elements, its expanders in the gutter and the parts of the bar over
     /// the code, and floem delivers the enter to the next before the
@@ -2106,6 +2111,7 @@ impl ReviewState {
             last_destination: [RwSignal::new(None), RwSignal::new(None)],
             agent: RwSignal::new(perch_github::AgentConfig::default()),
             hovered_line: RwSignal::new(None),
+            hovered_base: RwSignal::new(false),
             hovered_by: RwSignal::new(None),
             composer_focused: RwSignal::new(false),
             composer_draft: RwSignal::new(String::new()),
@@ -2303,6 +2309,7 @@ impl ReviewState {
         // open is the reader's and stays, as `collapsed_cards` says.
         self.card_rows.set(HashMap::new());
         self.hovered_line.set(None);
+        self.hovered_base.set(false);
         self.hovered_by.set(None);
         self.composer_focused.set(false);
         self.composer_draft.set(String::new());
@@ -4509,8 +4516,20 @@ impl ReviewState {
 
     /// The pointer came onto `row`, on the element `by`.
     pub fn enter_row(&self, by: floem::ElementId, row: usize) {
-        self.hovered_line.set(Some(row));
-        self.hovered_by.set(Some(by));
+        self.enter_row_on(by, row, false);
+    }
+
+    /// The pointer came onto `row` of a split's base gutter.
+    pub fn enter_base_row(&self, by: floem::ElementId, row: usize) {
+        self.enter_row_on(by, row, true);
+    }
+
+    fn enter_row_on(&self, by: floem::ElementId, row: usize, base: bool) {
+        floem::reactive::Effect::batch(|| {
+            self.hovered_line.set(Some(row));
+            self.hovered_base.set(base);
+            self.hovered_by.set(Some(by));
+        });
     }
 
     /// The pointer left the element `by`. The row goes when `by` is the
@@ -4523,8 +4542,9 @@ impl ReviewState {
         }
     }
 
-    /// The head lines under the editor's selection, as an anchor. `None`
-    /// when nothing is selected or the selection is all removed lines.
+    /// The lines under the editor's selection, as an anchor: its head
+    /// lines, or the base lines when it is all removed lines. `None` when
+    /// nothing is selected.
     pub fn anchor_from_selection(&self) -> Option<Anchor> {
         let (first, last) = self.selection.get()?;
         let file = self.active_file()?;
@@ -4536,7 +4556,9 @@ impl ReviewState {
         self.anchor_for_display_range(&file, first, last)
     }
 
-    /// An anchor for a display range in a file.
+    /// An anchor for a display range in a file: on the head lines in it,
+    /// or, when it holds none, on the base lines of the removed lines it
+    /// is, as github.com anchors a comment on the left of its diff.
     pub fn anchor_for_display_range(
         &self,
         file: &LoadedFile,
@@ -4545,11 +4567,32 @@ impl ReviewState {
     ) -> Option<Anchor> {
         let (first, last) = (first.min(last), first.max(last));
         let mut heads = (first..=last).filter_map(|d| file.buffer.head_line(d));
-        let start = heads.next()?;
-        let end = heads.next_back().unwrap_or(start);
-        // The commit the lines are of. Under a commit scope that is the
-        // commit, not the branch head: the numbers are its, and the quote
-        // and the outdated check read from it.
+        if let Some(start) = heads.next() {
+            let end = heads.next_back().unwrap_or(start);
+            return self.anchor_on(file, perch_github::Side::Right, start, end);
+        }
+        let mut bases = (first..=last).filter_map(|d| match file.buffer.row(d)? {
+            Row::Deleted { base_line } => Some(base_line),
+            Row::Head { .. } => None,
+        });
+        let start = bases.next()?;
+        let end = bases.next_back().unwrap_or(start);
+        self.anchor_on(file, perch_github::Side::Left, start, end)
+    }
+
+    /// An anchor on zero-based lines `start` to `end` of one side of a
+    /// file, at the commit the lines are of. Under a commit scope that is
+    /// the commit, not the branch head: the numbers are its, and the quote
+    /// and the outdated check read from it. A base anchor carries the
+    /// same commit, as GitHub's left-side comments do: its lines are of
+    /// the base that commit is diffed against.
+    pub fn anchor_on(
+        &self,
+        file: &LoadedFile,
+        side: perch_github::Side,
+        start: usize,
+        end: usize,
+    ) -> Option<Anchor> {
         let head = self.item.with(|i| {
             i.as_ref()
                 .and_then(|i| i.checkout.as_ref())
@@ -4564,7 +4607,7 @@ impl ReviewState {
             path: file.path.clone(),
             start_line: start as u32 + 1,
             line: end as u32 + 1,
-            side: perch_github::Side::Right,
+            side,
             commit_sha,
         })
     }
@@ -5104,20 +5147,24 @@ pub fn cards_of(
                 id,
                 after_display_line,
                 rows,
+                side: t.anchor.as_ref()?.side,
             })
         })
         .collect();
 
-    if let Some(after_display_line) = composer.and_then(|a| card_line(file, a)) {
-        let rows = rows
-            .get(&CardId::Composer)
-            .copied()
-            .unwrap_or(doc::COMPOSER_ROWS);
-        out.push(Card {
-            id: CardId::Composer,
-            after_display_line,
-            rows,
-        });
+    if let Some(composer) = composer {
+        if let Some(after_display_line) = card_line(file, composer) {
+            let rows = rows
+                .get(&CardId::Composer)
+                .copied()
+                .unwrap_or(doc::COMPOSER_ROWS);
+            out.push(Card {
+                id: CardId::Composer,
+                after_display_line,
+                rows,
+                side: composer.side,
+            });
+        }
     }
     out
 }
@@ -5632,17 +5679,20 @@ mod tests {
                 Card {
                     id: CardId::Thread("first".into()),
                     after_display_line: 2,
-                    rows: estimate
+                    rows: estimate,
+                    side: perch_github::Side::Right
                 },
                 Card {
                     id: CardId::Thread("later".into()),
                     after_display_line: 4,
-                    rows: estimate
+                    rows: estimate,
+                    side: perch_github::Side::Right
                 },
                 Card {
                     id: CardId::Thread("last".into()),
                     after_display_line: 5,
-                    rows: estimate
+                    rows: estimate,
+                    side: perch_github::Side::Right
                 },
             ]
         );
@@ -6471,7 +6521,8 @@ mod tests {
             vec![Card {
                 id: CardId::Composer,
                 after_display_line: 2,
-                rows: doc::COMPOSER_ROWS
+                rows: doc::COMPOSER_ROWS,
+                side: perch_github::Side::Right
             }]
         );
 
@@ -6900,7 +6951,8 @@ mod tests {
             vec![Card {
                 id: CardId::Composer,
                 after_display_line: 4,
-                rows: 10
+                rows: 10,
+                side: perch_github::Side::Right
             }]
         );
         state.composer_sent();
@@ -6911,7 +6963,8 @@ mod tests {
             vec![Card {
                 id: CardId::Composer,
                 after_display_line: 4,
-                rows: 10
+                rows: 10,
+                side: perch_github::Side::Right
             }]
         );
 

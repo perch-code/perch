@@ -459,6 +459,7 @@ fn stacked_view(
                 doc,
                 viewport,
                 scroll_delta,
+                None,
                 scroll_to,
                 theme::CODE_GUTTER_GAP,
                 Some(theme::INLINE_THREAD_MAX_WIDTH),
@@ -1126,15 +1127,17 @@ impl CardItem {
 /// The cards of the open file, drawn over the rows the document reserves
 /// for them: the threads anchored in it, the reader's own and GitHub's,
 /// and the composer when it is open on lines of it, as the document has
-/// them. A layer over the editor, or over both panes of a split, that
-/// takes no pointer events itself; each card does, and is placed at its
-/// first spacer row from the live document and the viewport in its own
-/// style closure, as the divider bars are, because the cards are sparse
-/// and a card outlives the scroll. `left` is where a card's edge sits:
-/// the first code column, past the gutter in a split. `max_width` is how
-/// wide a card may be: in the stacked layout no wider than github.com
-/// draws a thread, and in a split, where a card spans both sides, as
-/// wide as they are.
+/// them. A layer over the editor, or over one pane of a split, whose
+/// document has rows for the cards on that side, that takes no pointer
+/// events itself; each card does, and is placed at its first spacer row
+/// from the live document and the viewport in its own style closure, as
+/// the divider bars are, because the cards are sparse and a card outlives
+/// the scroll. `left` is where a card's edge sits: the first code column,
+/// past the gutter in a split. `max_width` is how wide a card may be: in
+/// the stacked layout no wider than github.com draws a thread, and in a
+/// split as wide as its side. The wheel over a card goes down the file to
+/// `scroll_delta`, and across to `across` where that is another editor's,
+/// as over the base side of a split; see `passes_wheel`.
 #[allow(clippy::too_many_arguments)]
 fn card_layer(
     app: AppState,
@@ -1144,6 +1147,7 @@ fn card_layer(
     doc: RwSignal<Arc<Doc>>,
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
+    across: Option<RwSignal<Vec2>>,
     scroll_to: RwSignal<Option<Vec2>>,
     left: f64,
     max_width: Option<f64>,
@@ -1181,6 +1185,7 @@ fn card_layer(
             doc,
             viewport,
             scroll_delta,
+            across,
             scroll_to,
             item,
             left,
@@ -1203,7 +1208,8 @@ fn card_layer(
 /// margin, or `max_width` across where that is less. Collapsed, it sits
 /// further inside its rows. The wheel over it scrolls
 /// the code, as it does over the gutter, unless what is inside it takes
-/// the wheel first.
+/// the wheel first: down the file with `scroll_delta`, and across with
+/// `across` when there is one.
 ///
 /// A gutter marker click on the thread scrolls the editor so that the
 /// card is in view, with the line above it; the card flashes itself.
@@ -1224,6 +1230,7 @@ fn inline_card(
     doc: RwSignal<Arc<Doc>>,
     viewport: RwSignal<Rect>,
     scroll_delta: RwSignal<Vec2>,
+    across: Option<RwSignal<Vec2>>,
     scroll_to: RwSignal<Option<Vec2>>,
     item: CardItem,
     left: f64,
@@ -1259,44 +1266,37 @@ fn inline_card(
         }
     };
     let measured_id = card_id.clone();
-    view.debug_name(name)
-        .on_event_stop(
-            LayoutChanged::listener(),
-            move |_, LayoutChanged { new_box, .. }| {
-                if state.is_collapsed(&measured_id) {
-                    return;
-                }
-                let rows = rows_for_height(new_box.height(), line_height, theme::CARD_INSET);
-                let has = doc.with_untracked(|d| d.card_span(&measured_id).map(|span| span.len()));
-                if has.is_some_and(|has| has != rows) {
-                    state.set_card_rows(&measured_id, rows);
-                }
-            },
-        )
-        .on_event_stop(el::PointerWheel, move |_, wheel| {
-            let size = viewport.get_untracked().size();
-            let delta =
-                wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
-            scroll_delta.set(Vec2::new(-delta.x, -delta.y));
-        })
-        .style(move |s| {
-            // Read live, as the gutter reads its offset: the card outlives
-            // a scroll and an edit above it, and a position captured when
-            // it was built would not.
-            let row = doc.with(|d| d.first_spacer_row(&card_id)).unwrap_or(0);
-            let inset = if state.is_collapsed(&card_id) {
-                theme::COLLAPSED_CARD_INSET
-            } else {
-                theme::CARD_INSET
-            };
-            let top = row as f64 * line_height - viewport.get().y0 + inset;
-            s.absolute()
-                .inset_top(top)
-                .inset_left(left)
-                .inset_right(theme::CODE_GUTTER_GAP)
-                .apply_opt(max_width, |s, w| s.max_width(w))
-                .pointer_events_auto()
-        })
+    let view = view.debug_name(name).on_event_stop(
+        LayoutChanged::listener(),
+        move |_, LayoutChanged { new_box, .. }| {
+            if state.is_collapsed(&measured_id) {
+                return;
+            }
+            let rows = rows_for_height(new_box.height(), line_height, theme::CARD_INSET);
+            let has = doc.with_untracked(|d| d.card_span(&measured_id).map(|span| span.len()));
+            if has.is_some_and(|has| has != rows) {
+                state.set_card_rows(&measured_id, rows);
+            }
+        },
+    );
+    passes_wheel(view, viewport, scroll_delta, across).style(move |s| {
+        // Read live, as the gutter reads its offset: the card outlives
+        // a scroll and an edit above it, and a position captured when
+        // it was built would not.
+        let row = doc.with(|d| d.first_spacer_row(&card_id)).unwrap_or(0);
+        let inset = if state.is_collapsed(&card_id) {
+            theme::COLLAPSED_CARD_INSET
+        } else {
+            theme::CARD_INSET
+        };
+        let top = row as f64 * line_height - viewport.get().y0 + inset;
+        s.absolute()
+            .inset_top(top)
+            .inset_left(left)
+            .inset_right(theme::CODE_GUTTER_GAP)
+            .apply_opt(max_width, |s, w| s.max_width(w))
+            .pointer_events_auto()
+    })
 }
 
 /// How many rows a card laid out `height` tall takes: the height with the
@@ -1338,10 +1338,11 @@ fn scroll_for_card(vp: Rect, top: f64, bottom: f64, line_height: f64) -> Option<
 /// hidden, so there is one.
 ///
 /// The two documents are edited in the same pass, from the pair the
-/// builder returns, so the two stay the same height: the dividers and the
-/// cards' rows are on both sides at the same rows, and the layers over
-/// the outer stack draw the hunk headers over the base side, where the
-/// expanders are, and the cards across both sides from the one scroll.
+/// builder returns, so the two stay the same height: the dividers are on
+/// both sides at the same rows, and a card's rows are on its anchor's
+/// side with fillers beside them on the other. The layers over the outer
+/// stack draw the hunk headers over the base side, where the expanders
+/// are, and each side's cards over that side, from the one scroll.
 #[allow(clippy::too_many_arguments)]
 fn split_view(
     app: AppState,
@@ -1592,7 +1593,6 @@ fn split_view(
             .height_full()
     });
 
-    let path = file.path.clone();
     let gutter_width = gutter::width_of(&file);
     let right_pane = Stack::horizontal((
         side_gutter(
@@ -1613,25 +1613,52 @@ fn split_view(
             .height_full()
     });
 
+    let half = |s: floem::style::Style| s.flex_basis(0.0).flex_grow(1.0_f32).min_width(0.0);
+    let rule = || Empty::new().style(|s| s.width(1.0).height_full().flex_shrink(0.0_f32));
+
+    // Each side's cards over its half of the outer stack, from its first
+    // code column, past its gutter, to its edge. Both follow the right,
+    // which owns the scroll; a wheel across a card on the left moves the
+    // left, as one over its code does.
+    let cards = |doc, across| {
+        let layer = card_layer(
+            app,
+            state,
+            backend.clone(),
+            file.path.clone(),
+            doc,
+            right_viewport,
+            right_delta,
+            across,
+            right_scroll_to,
+            gutter_width + theme::CODE_GUTTER_GAP,
+            None,
+        );
+        Container::new(layer).style(move |s| half(s).height_full().position(Position::Relative))
+    };
+    let cards = Stack::horizontal((
+        cards(left_doc, Some(left_delta)),
+        rule(),
+        cards(right_doc, None),
+    ))
+    .style(|s| s.absolute().inset(0.0).size_full().pointer_events_none());
+
     // The pinned lines, over the dividers and the cards, over the half
     // of the outer stack whose lines they are: the right, past the left
     // and the rule, or the left for a deleted file.
-    let half = |s: floem::style::Style| s.flex_basis(0.0).flex_grow(1.0_f32).min_width(0.0);
     let pinned = Container::new(side_sticky)
         .style(move |s| half(s).height_full().position(Position::Relative));
     let other = Empty::new().style(half);
-    let rule = Empty::new().style(|s| s.width(1.0).height_full().flex_shrink(0.0_f32));
     let sticky = if pins_base {
-        Stack::horizontal((pinned.into_any(), rule, other.into_any()))
+        Stack::horizontal((pinned.into_any(), rule(), other.into_any()))
     } else {
-        Stack::horizontal((other.into_any(), rule, pinned.into_any()))
+        Stack::horizontal((other.into_any(), rule(), pinned.into_any()))
     }
     .style(|s| s.absolute().inset(0.0).size_full().pointer_events_none());
 
     // The layers are placed against the outer stack, so it takes the
     // relative position; a bar spans the whole row, its header past the
-    // base side's gutter, and a card spans both sides from the base side's
-    // first code column, past its gutter.
+    // base side's gutter, and a card is over its own side.
     Stack::horizontal((
         left_pane,
         Empty::new().style(|s| {
@@ -1651,18 +1678,7 @@ fn split_view(
                 base_delta: left_delta,
             },
         ),
-        card_layer(
-            app,
-            state,
-            backend,
-            path,
-            right_doc,
-            right_viewport,
-            right_delta,
-            right_scroll_to,
-            gutter_width + theme::CODE_GUTTER_GAP,
-            None,
-        ),
+        cards,
         sticky,
     ))
     .style(|s| s.size_full().min_height(0.0).position(Position::Relative))
@@ -5032,8 +5048,8 @@ mod window {
     }
 
     #[test]
-    fn a_split_reserves_the_cards_rows_on_both_sides_and_the_card_spans_them() {
-        use crate::review::doc::CardId;
+    fn a_split_draws_a_card_on_its_anchors_side_and_fills_the_other() {
+        use crate::review::doc::{CardId, DocRow};
         let (mut harness, state) = harness();
         let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
         let thread = thread_on("t1", 5, 7, false);
@@ -5043,31 +5059,77 @@ mod window {
         harness.paint();
         let (left, right) = sides(state);
         let card = CardId::Thread("t1".into());
-        // The card over the outer stack corrects both sides' rows.
+        // The card on the head side corrects both sides' rows: its own on
+        // the right, and fillers beside them on the left.
         let rows = laid_out_rows(&harness, "t1");
         let (left_doc, right_doc) = (left.doc.get(), right.doc.get());
         assert_eq!(left_doc.len(), right_doc.len());
         assert_eq!(right_doc.len(), 90 + rows);
         // The split pairs each ghost with its line, so display line 9,
         // the ghost, is on the next line's row: head line 7 is row 6, and
-        // the card follows it on both sides, before that row, as it is
-        // before the ghost in the stacked layout.
+        // the card follows it, before that row, as it is before the ghost
+        // in the stacked layout.
         assert_eq!(right_doc.row_of_head(6), Some(6));
         assert_eq!(right_doc.card_span(&card), Some(7..7 + rows));
-        assert_eq!(left_doc.card_span(&card), right_doc.card_span(&card));
+        assert_eq!(left_doc.card_span(&card), None);
+        assert!(left_doc.rows[7..7 + rows]
+            .iter()
+            .all(|r| *r == DocRow::Filler));
         assert_eq!(laid_out_text(&left), left_doc.text);
         assert_eq!(laid_out_text(&right), right_doc.text);
 
-        // The card is over the outer stack, from the base side's first
-        // code column, past its gutter.
+        // The card is over the head side, from its first code column,
+        // past its gutter, to the pane's edge less the margin.
         let rect = card_rect(&harness, "t1");
         assert_eq!(rect.y0, 7.0 * line_height + crate::theme::CARD_INSET);
         assert_eq!(rect.x0, gutter_width() + crate::theme::CODE_GUTTER_GAP);
         let (pane_left, _) = pane_origin();
+        let right_gutter = pane_left + (1400.0 - pane_left - 1.0) / 2.0 + 1.0;
+        let on_screen = |harness: &HeadlessHarness, id: &str| {
+            find(harness.root_id(), &format!("inline-card:{id}"))
+                .expect("the card is drawn")
+                .get_visual_rect_no_clip()
+        };
+        let window = on_screen(&harness, "t1");
         assert_eq!(
-            rect.x1,
-            1400.0 - pane_left - crate::theme::CODE_GUTTER_GAP,
-            "to the right edge, less the margin"
+            window.x0,
+            right_gutter + gutter_width() + crate::theme::CODE_GUTTER_GAP
+        );
+        assert_eq!(window.x1, 1400.0 - crate::theme::CODE_GUTTER_GAP);
+
+        // A thread on base line 2, which the change rewrote, is on the
+        // base side: under its row, the second, on the left, with fillers
+        // beside it on the right, and drawn over the base side.
+        let mut on_base = thread_on("t2", 2, 2, false);
+        on_base.anchor.as_mut().unwrap().side = perch_github::Side::Left;
+        state.set_comment_threads(Arc::new(vec![on_base]));
+        harness.rebuild();
+        harness.paint();
+        let card = CardId::Thread("t2".into());
+        let rows = laid_out_rows(&harness, "t2");
+        let (left_doc, right_doc) = (left.doc.get(), right.doc.get());
+        assert_eq!(left_doc.len(), 90 + rows);
+        assert_eq!(right_doc.len(), left_doc.len());
+        assert_eq!(left_doc.card_span(&card), Some(2..2 + rows));
+        assert_eq!(right_doc.card_span(&card), None);
+        assert!(right_doc.rows[2..2 + rows]
+            .iter()
+            .all(|r| *r == DocRow::Filler));
+        assert_eq!(laid_out_text(&left), left_doc.text);
+        assert_eq!(laid_out_text(&right), right_doc.text);
+        let window = on_screen(&harness, "t2");
+        assert_eq!(
+            window.y0,
+            pane_origin().1 + 2.0 * line_height + crate::theme::CARD_INSET
+        );
+        assert_eq!(
+            window.x0,
+            pane_left + gutter_width() + crate::theme::CODE_GUTTER_GAP
+        );
+        assert_eq!(
+            window.x1,
+            right_gutter - 1.0 - crate::theme::CODE_GUTTER_GAP,
+            "to the base side's edge, less the margin"
         );
 
         // Collapsing it shrinks both sides by the difference.
@@ -5079,6 +5141,117 @@ mod window {
         assert_eq!(left.doc.get().len(), 90 + folded);
         assert_eq!(laid_out_text(&left), left.doc.get().text);
         assert_eq!(laid_out_text(&right), right.doc.get().text);
+    }
+
+    #[test]
+    fn a_removed_line_on_the_base_side_of_a_split_takes_a_question_there() {
+        use crate::review::doc::CardId;
+        let (mut harness, state) = harness();
+        state.layout.set(Layout::Split);
+        harness.rebuild();
+        harness.paint();
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let (pane_left, top) = pane_origin();
+        let right_gutter = pane_left + (1400.0 - pane_left - 1.0) / 2.0 + 1.0;
+        let slot = crate::theme::GUTTER_SLOT_INSET + crate::theme::GUTTER_SLOT / 2.0;
+        let row = |n: f64| top + n * line_height + line_height / 2.0;
+        let hover = |harness: &mut HeadlessHarness, x: f64, y: f64| {
+            harness.pointer_move(x, y);
+            harness.rebuild();
+            harness.paint();
+        };
+
+        // The first row is a line the change kept: the base offers
+        // nothing on it, and the head does.
+        hover(&mut harness, pane_left + slot, row(0.0));
+        assert_eq!(count(harness.root_id(), "gutter-plus"), 0);
+        hover(&mut harness, right_gutter + slot, row(0.0));
+        assert_eq!(count(harness.root_id(), "gutter-plus"), 1);
+
+        // The second is base line 2, which the change rewrote. The base's
+        // row offers a question, and the head's beside it does not light.
+        hover(&mut harness, pane_left + slot, row(1.0));
+        assert_eq!(count(harness.root_id(), "gutter-plus"), 1);
+        let plus = find(harness.root_id(), "gutter-plus")
+            .expect("the base row offers a question")
+            .get_visual_rect_no_clip();
+        assert!(
+            plus.x1 <= pane_left + gutter_width(),
+            "in the base side's gutter: {plus:?}"
+        );
+        harness.click(plus.center().x, plus.center().y);
+        harness.rebuild();
+        harness.paint();
+        let composer = state.composer.get().expect("the composer opened");
+        assert_eq!(
+            composer.anchor,
+            Some(perch_github::Anchor {
+                path: "src/x.rs".into(),
+                start_line: 2,
+                line: 2,
+                side: perch_github::Side::Left,
+                commit_sha: "h".into(),
+            })
+        );
+
+        // Its card is under the row, on the base side.
+        let (left, right) = sides(state);
+        let span = left
+            .doc
+            .get()
+            .card_span(&CardId::Composer)
+            .expect("the composer is a card on the left");
+        assert_eq!(span.start, 2);
+        assert_eq!(right.doc.get().card_span(&CardId::Composer), None);
+        let card = find(harness.root_id(), "inline-card:composer")
+            .expect("the composer's card is drawn")
+            .get_visual_rect_no_clip();
+        assert!(card.x1 < right_gutter, "over the base side: {card:?}");
+    }
+
+    #[test]
+    fn a_ghost_in_the_stacked_layout_takes_a_question_on_the_base() {
+        let (mut harness, state) = harness();
+        let live = stacked(state);
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let (pane_left, top) = pane_origin();
+        // Display line 1 is the ghost of base line 2.
+        assert_eq!(live.doc.get().display_line(1), Some(1));
+        let (x, y) = (
+            pane_left + crate::theme::GUTTER_SLOT_INSET + crate::theme::GUTTER_SLOT / 2.0,
+            top + line_height * 1.5,
+        );
+        harness.pointer_move(x, y);
+        harness.rebuild();
+        harness.paint();
+        let plus = find(harness.root_id(), "gutter-plus")
+            .expect("a ghost offers a question")
+            .get_visual_rect_no_clip();
+        harness.click(plus.center().x, plus.center().y);
+        harness.rebuild();
+        harness.paint();
+        let composer = state.composer.get().expect("the composer opened");
+        let anchor = composer.anchor.expect("on the ghost's line");
+        assert_eq!(
+            (anchor.side, anchor.start_line, anchor.line),
+            (perch_github::Side::Left, 2, 2)
+        );
+        assert!(
+            state.composer_is_inline(),
+            "its card is under the ghost, in the code"
+        );
+
+        // The selection of nothing but ghosts is the base's lines too, and
+        // one that takes in a head line is the head's.
+        let file = state.active_file().expect("the file is open");
+        let on = |first, last| {
+            state
+                .anchor_for_display_range(&file, first, last)
+                .map(|a| (a.side, a.start_line, a.line))
+        };
+        assert_eq!(on(1, 1), Some((perch_github::Side::Left, 2, 2)));
+        assert_eq!(on(1, 2), Some((perch_github::Side::Right, 2, 2)));
+        assert_eq!(on(0, 2), Some((perch_github::Side::Right, 1, 2)));
     }
 
     // The height correction.

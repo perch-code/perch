@@ -17,7 +17,7 @@
 use std::collections::BTreeSet;
 
 use perch_git::{DisplayBuffer, LineStatus, Row};
-use perch_github::CommentThread;
+use perch_github::{CommentThread, Side};
 
 use crate::review::hover;
 
@@ -104,8 +104,8 @@ fn estimate_rows_of<'a>(bodies: impl Iterator<Item = &'a str>, collapsed: bool) 
     lines + CARD_CHROME_ROWS
 }
 
-/// A card's place in the document: the display line it sits under, and how
-/// many rows it takes there.
+/// A card's place in the document: the display line it sits under, how
+/// many rows it takes there, and which side of a split it is drawn on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Card {
     pub id: CardId,
@@ -114,6 +114,9 @@ pub struct Card {
     /// of those.
     pub after_display_line: usize,
     pub rows: usize,
+    /// The side its anchor is on. A split draws the card on that side
+    /// alone; the stacked layout has one side, and draws it across.
+    pub side: Side,
 }
 
 /// One of a divider's expanders, as github.com draws them in its hunk
@@ -375,7 +378,13 @@ impl Builder {
 
     /// The rows a card takes, under the line just pushed.
     fn push_cards(&mut self, cards: &[Card], display: usize) {
-        for card in cards.iter().filter(|c| c.after_display_line == display) {
+        self.push_spacers(cards.iter().filter(|c| c.after_display_line == display));
+    }
+
+    /// The rows each card takes, one card after another; how many in all.
+    fn push_spacers<'a>(&mut self, cards: impl Iterator<Item = &'a Card>) -> usize {
+        let mut pushed = 0;
+        for card in cards {
             for row in 0..card.rows {
                 self.push(
                     DocRow::Spacer {
@@ -386,6 +395,16 @@ impl Builder {
                     None,
                 );
             }
+            pushed += card.rows;
+        }
+        pushed
+    }
+
+    /// Fillers until the side has `rows` rows past `from`, its length
+    /// before the cards were pushed, so both sides end level.
+    fn fill_to(&mut self, from: usize, rows: usize) {
+        while self.rows.len() < from + rows {
+            self.push(DocRow::Filler, "", None);
         }
     }
 
@@ -510,8 +529,11 @@ pub fn build(buffer: &DisplayBuffer, folds: &[Run], cards: &[Card]) -> Doc {
 
 /// The two documents of a split, laid out row for row along `alignment`,
 /// whose rows are one-based base and head lines with `None` where a side
-/// has nothing. A divider or a spacer goes into both at the same row, so
-/// the two stay the same height.
+/// has nothing. A divider goes into both at the same row, so the two stay
+/// the same height. A card's rows go into the side its anchor is on, and
+/// the other side has fillers beside them, as it has beside a line it has
+/// not; cards under one row on both sides sit beside each other, and the
+/// shorter side is filled to the taller.
 ///
 /// The left is the old file, so a line of it that the head replaced or
 /// dropped is tinted as removed, whichever it was; the right carries the
@@ -612,14 +634,24 @@ pub fn build_split(
         }
 
         // A card under this row's head line, or under the ghost this row's
-        // base line is in the unified buffer, takes its rows on both sides.
-        // A rewritten line pairs its ghost with the line, so a row can have
-        // both; the ghost's cards come first, as the stacked layout has
-        // them, since the ghost is spliced above the line.
+        // base line is in the unified buffer, takes its rows on its own
+        // side. A rewritten line pairs its ghost with the line, so a row
+        // can have both; the ghost's cards come first, as the stacked
+        // layout has them, since the ghost is spliced above the line.
         let ghost = base_line.and_then(|b| display_of_ghost.get(&b).copied());
-        for under in ghost.into_iter().chain(display) {
-            left.push_cards(cards, under);
-            right.push_cards(cards, under);
+        let under: Vec<&Card> = ghost
+            .into_iter()
+            .chain(display)
+            .flat_map(|under| cards.iter().filter(move |c| c.after_display_line == under))
+            .collect();
+        if !under.is_empty() {
+            let (from_left, from_right) = (left.rows.len(), right.rows.len());
+            let on = |side| under.iter().copied().filter(move |c| c.side == side);
+            let rows = left
+                .push_spacers(on(Side::Left))
+                .max(right.push_spacers(on(Side::Right)));
+            left.fill_to(from_left, rows);
+            right.fill_to(from_right, rows);
         }
     }
 
@@ -1395,6 +1427,7 @@ mod tests {
             id: CardId::Thread("t1".into()),
             after_display_line: 2,
             rows: 3,
+            side: Side::Right,
         };
         let doc = build(&b, &[], std::slice::from_ref(&card));
         assert_eq!(doc.len(), b.len() + 3);
@@ -1426,11 +1459,13 @@ mod tests {
             id: CardId::Thread("t1".into()),
             after_display_line: 2,
             rows: 2,
+            side: Side::Right,
         };
         let second = Card {
             id: CardId::Thread("t2".into()),
             after_display_line: 2,
             rows: 1,
+            side: Side::Right,
         };
         let doc = build(&b, &[], &[first.clone(), second.clone()]);
         assert_eq!(doc.len(), b.len() + 3);
@@ -1470,6 +1505,7 @@ mod tests {
             id: CardId::Thread("t3".into()),
             after_display_line: 7,
             rows: 2,
+            side: Side::Right,
         };
         let doc = build(
             &two_changes(20),
@@ -1488,16 +1524,19 @@ mod tests {
                 id: CardId::Thread("t1".into()),
                 after_display_line: 2,
                 rows: 2,
+                side: Side::Right,
             },
             Card {
                 id: CardId::Thread("gh-7".into()),
                 after_display_line: 2,
                 rows: 3,
+                side: Side::Right,
             },
             Card {
                 id: CardId::Composer,
                 after_display_line: 2,
                 rows: 1,
+                side: Side::Right,
             },
         ];
         let doc = build(&b, &[], &cards);
@@ -1523,7 +1562,8 @@ mod tests {
         }
         assert_eq!(doc.rows[9], line(3, Tint::Plain));
         assert_eq!(doc.row_of_display(3), Some(9));
-        // The split has the same three, at the same rows on both sides.
+        // The split has the same three on the head side, whose lines they
+        // are on, and fillers beside them on the base side.
         let base = format!("old top\n{}old bottom\n", context(0, 4));
         let head = format!("new top\n{}new bottom\n", context(0, 4));
         let diff = file_diff(&base, &head);
@@ -1538,7 +1578,8 @@ mod tests {
                 (CardId::Composer, 7)
             ]
         );
-        assert_eq!(left.cards(), right.cards());
+        assert!(left.cards().is_empty());
+        assert!(left.rows[2..8].iter().all(|r| *r == DocRow::Filler));
     }
 
     // The estimate.
@@ -1667,7 +1708,7 @@ mod tests {
     }
 
     #[test]
-    fn the_split_puts_a_divider_and_a_spacer_on_both_sides_at_the_same_row() {
+    fn the_split_puts_a_divider_on_both_sides_and_a_card_on_its_own() {
         let base = "old\nl1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nold end\n";
         let head = "new\nl1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nnew end\n";
         let diff = file_diff(base, head);
@@ -1680,6 +1721,7 @@ mod tests {
             id: CardId::Thread("gh-7".into()),
             after_display_line: 3,
             rows: 2,
+            side: Side::Right,
         };
         let (left, right) = build_split(&alignment, base, &b, &[fold], &[card]);
         assert_eq!(left.len(), right.len());
@@ -1701,19 +1743,18 @@ mod tests {
             .position(|r| matches!(r, DocRow::Spacer { .. }))
             .unwrap();
         assert_eq!(
-            left.rows[spacer],
-            DocRow::Spacer {
-                card: CardId::Thread("gh-7".into()),
-                row: 0
-            }
-        );
-        assert_eq!(
-            left.rows[spacer + 1],
+            right.rows[spacer + 1],
             DocRow::Spacer {
                 card: CardId::Thread("gh-7".into()),
                 row: 1
             }
         );
+        assert_eq!(
+            left.rows[spacer..spacer + 2],
+            [DocRow::Filler, DocRow::Filler],
+            "the base side is filled beside a head card"
+        );
+        assert_eq!(left.card_span(&CardId::Thread("gh-7".into())), None);
         assert_eq!(
             right.rows[spacer - 1],
             line(3, Tint::Plain),
@@ -1728,7 +1769,7 @@ mod tests {
     }
 
     #[test]
-    fn a_card_under_a_ghost_goes_after_the_ghost_on_both_sides() {
+    fn a_card_under_a_ghost_goes_after_the_ghost_on_its_side() {
         // base a b c; head a: b and c removed under a. The card is under
         // the last ghost, display line 2.
         let base = "a\nb\nc\n";
@@ -1736,36 +1777,36 @@ mod tests {
         let diff = file_diff(base, head);
         let alignment = perch_git::alignment(&diff, base, head);
         let b = DisplayBuffer::unified(head, base, &diff);
-        let card = Card {
+        let card = |side| Card {
             id: CardId::Composer,
             after_display_line: 2,
             rows: 1,
+            side,
         };
-        let (left, right) = build_split(&alignment, base, &b, &[], &[card]);
-        assert_eq!(
-            left.rows,
-            vec![
-                line(0, Tint::Plain),
-                line(1, Tint::Deleted),
-                line(2, Tint::Deleted),
-                DocRow::Spacer {
-                    card: CardId::Composer,
-                    row: 0
-                }
-            ]
-        );
-        assert_eq!(
-            right.rows,
-            vec![
-                line(0, Tint::Plain),
-                DocRow::Filler,
-                DocRow::Filler,
-                DocRow::Spacer {
-                    card: CardId::Composer,
-                    row: 0
-                }
-            ]
-        );
+        let spacer = DocRow::Spacer {
+            card: CardId::Composer,
+            row: 0,
+        };
+        let lines = [
+            line(0, Tint::Plain),
+            line(1, Tint::Deleted),
+            line(2, Tint::Deleted),
+        ];
+        let fillers = [line(0, Tint::Plain), DocRow::Filler, DocRow::Filler];
+
+        // On a's lines, the head's: its rows are on the right.
+        let (left, right) = build_split(&alignment, base, &b, &[], &[card(Side::Right)]);
+        assert_eq!(left.rows[..3], lines);
+        assert_eq!(left.rows[3], DocRow::Filler);
+        assert_eq!(right.rows[..3], fillers);
+        assert_eq!(right.rows[3], spacer);
+
+        // On c, the base's: its rows are on the left.
+        let (left, right) = build_split(&alignment, base, &b, &[], &[card(Side::Left)]);
+        assert_eq!(left.rows[..3], lines);
+        assert_eq!(left.rows[3], spacer);
+        assert_eq!(right.rows[..3], fillers);
+        assert_eq!(right.rows[3], DocRow::Filler);
         let stacked = build(
             &b,
             &[],
@@ -1773,6 +1814,7 @@ mod tests {
                 id: CardId::Composer,
                 after_display_line: 2,
                 rows: 1,
+                side: Side::Right,
             }],
         );
         assert_eq!(
@@ -1785,11 +1827,12 @@ mod tests {
     }
 
     #[test]
-    fn a_card_under_the_ghost_of_a_rewritten_line_is_kept_on_both_sides() {
+    fn cards_under_both_sides_of_a_rewritten_line_sit_beside_each_other() {
         // base a b c; head a B c: the split pairs b with B on one row. A
-        // card under b's ghost, display line 1, and one under B, display
-        // line 2, are both under that row, the ghost's first, as the
-        // stacked layout has them.
+        // card on b, under its ghost, display line 1, and one on B, under
+        // display line 2, are both under that row, each on its own side,
+        // and the shorter side is filled to the taller. The stacked layout
+        // has the ghost's first.
         let base = "a\nb\nc\n";
         let head = "a\nB\nc\n";
         let diff = file_diff(base, head);
@@ -1799,11 +1842,13 @@ mod tests {
             id: CardId::Thread("t1".into()),
             after_display_line: 1,
             rows: 2,
+            side: Side::Left,
         };
         let under_line = Card {
             id: CardId::Thread("gh-9".into()),
             after_display_line: 2,
             rows: 1,
+            side: Side::Right,
         };
         let spacers = [
             DocRow::Spacer {
@@ -1830,15 +1875,17 @@ mod tests {
             left.rows[..2],
             [line(0, Tint::Plain), line(1, Tint::Deleted)]
         );
-        assert_eq!(left.rows[2..5], spacers[..]);
-        assert_eq!(left.rows[5], line(2, Tint::Plain));
+        assert_eq!(left.rows[2..4], spacers[..2]);
+        assert_eq!(left.rows[4], line(2, Tint::Plain));
         assert_eq!(
             right.rows[..2],
             [line(0, Tint::Plain), line(2, Tint::Modified)]
         );
-        assert_eq!(right.rows[2..5], spacers[..]);
-        assert_eq!(right.rows[5], line(3, Tint::Plain));
+        assert_eq!(right.rows[2..4], [spacers[2].clone(), DocRow::Filler]);
+        assert_eq!(right.rows[4], line(3, Tint::Plain));
         assert_eq!(left.len(), right.len());
+        assert_eq!(left.cards(), &[(CardId::Thread("t1".into()), 2)]);
+        assert_eq!(right.cards(), &[(CardId::Thread("gh-9".into()), 2)]);
         let stacked = build(&b, &[], &[under_ghost, under_line]);
         assert_eq!(stacked.rows[2..4], spacers[..2]);
         assert_eq!(stacked.rows[4], line(2, Tint::Modified));

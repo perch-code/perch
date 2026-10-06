@@ -7,7 +7,7 @@
 //! can see, the pull request, the lines, the question, is the user message.
 
 use perch_git::{DisplayBuffer, LineStatus, Row};
-use perch_github::{Anchor, Author, PullRequest};
+use perch_github::{Anchor, Author, PullRequest, Side};
 use perch_knowledge::sanitize::{clean, one_line, strip_format_chars};
 
 thread_local! {
@@ -921,20 +921,30 @@ fn user_message(input: &PromptInput<'_>, with_context: bool) -> String {
         }
 
         if let Some(anchor) = input.anchor {
-            let quoted = input.file.map(|f| quote(f, anchor));
+            // Lines of the base are the file before the change, and the
+            // ones of them it has are the ones it removed.
+            let base = anchor.side == Side::Left;
+            let quoted = input.file.map(|f| {
+                if base {
+                    quote_base(f, anchor)
+                } else {
+                    quote(f, anchor)
+                }
+            });
             let changed = quoted.as_ref().is_some_and(|q| q.changed);
             out.push_str(&format!(
-                "File: {}, lines {}{}\n",
+                "File: {}, lines {}{}{}\n",
                 one_line(&strip_format_chars(&anchor.path)),
                 if anchor.start_line == anchor.line {
                     anchor.line.to_string()
                 } else {
                     format!("{}\u{2013}{}", anchor.start_line, anchor.line)
                 },
-                if changed {
-                    " (changed in this pull request)"
-                } else {
-                    ""
+                if base { " of the base" } else { "" },
+                match (changed, base) {
+                    (false, _) => "",
+                    (true, false) => " (changed in this pull request)",
+                    (true, true) => " (removed in this pull request)",
                 }
             ));
             if input.outdated {
@@ -1075,6 +1085,42 @@ fn quote(file: &DisplayBuffer, anchor: &Anchor) -> Quoted {
     Quoted {
         selected: selected.join("\n"),
         removed: removed.join("\n"),
+        changed,
+    }
+}
+
+/// The selected base lines, for an anchor on the base's side, and whether
+/// the change removed any of them. The buffer has each removed line as a
+/// ghost, with its base line, and the base's other lines as the head's
+/// unchanged ones, in order, so counting on from the line before numbers
+/// them.
+fn quote_base(file: &DisplayBuffer, anchor: &Anchor) -> Quoted {
+    let first = anchor.start_line.saturating_sub(1) as usize;
+    let last = anchor.line.saturating_sub(1) as usize;
+    let lines: Vec<&str> = file.text.lines().collect();
+
+    let mut selected = Vec::new();
+    let mut changed = false;
+    let mut next = 0;
+    for (display, row) in file.rows.iter().enumerate() {
+        let base = match *row {
+            Row::Deleted { base_line } => base_line,
+            Row::Head {
+                status: LineStatus::Unchanged,
+                ..
+            } => next,
+            Row::Head { .. } => continue,
+        };
+        next = base + 1;
+        if (first..=last).contains(&base) {
+            selected.push(lines.get(display).copied().unwrap_or(""));
+            changed |= row.is_deleted();
+        }
+    }
+
+    Quoted {
+        selected: selected.join("\n"),
+        removed: String::new(),
         changed,
     }
 }
@@ -1228,6 +1274,51 @@ mod tests {
             p.user
         );
         assert!(p.user.ends_with("Question: why?"));
+    }
+
+    #[test]
+    fn a_question_on_removed_lines_quotes_the_base() {
+        let buf = buffer();
+        let a = Anchor {
+            side: Side::Left,
+            ..anchor(2, 2)
+        };
+        let p = first_prompt(&input(Some(&a), Some(&buf), "why go?"));
+        assert!(
+            p.user.contains(
+                "File: src/manifest.rs, lines 2 of the base (removed in this pull request)\n"
+            ),
+            "{}",
+            p.user
+        );
+        assert!(
+            p.user.contains(
+                "[BEGIN untrusted text: selected lines]\n```rs\nold b\n```\n[END untrusted text]\n"
+            ),
+            "{}",
+            p.user
+        );
+
+        // Base lines 3 and 4, c and d, are the head's unchanged lines 4
+        // and 5: numbered on from the ghost before them.
+        let a = Anchor {
+            side: Side::Left,
+            ..anchor(3, 4)
+        };
+        let p = first_prompt(&input(Some(&a), Some(&buf), "and these?"));
+        assert!(
+            p.user
+                .contains("File: src/manifest.rs, lines 3\u{2013}4 of the base\n"),
+            "{}",
+            p.user
+        );
+        assert!(
+            p.user.contains(
+                "[BEGIN untrusted text: selected lines]\n```rs\nc\nd\n```\n[END untrusted text]\n"
+            ),
+            "{}",
+            p.user
+        );
     }
 
     #[test]

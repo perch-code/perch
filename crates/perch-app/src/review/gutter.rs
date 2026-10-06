@@ -15,8 +15,9 @@
 //!
 //! A split has a gutter on each side, over that side's rows: base numbers
 //! on the left, head numbers on the right, and nothing on a filler. Thread
-//! markers follow their anchor's side; only the head carries the `+` for a
-//! new question and GitHub's head-side markers.
+//! markers follow their anchor's side, and so does the `+` for a new
+//! question: the head offers it on its lines, and the base on the lines
+//! the change removed, as the stacked layout offers it on their ghosts.
 //!
 //! The rows are the document's, not the buffer's: a row that is a line is
 //! numbered and barred from the buffer's row table, a divider's row holds
@@ -297,16 +298,30 @@ fn column<V: IntoView + 'static>(
 }
 
 /// Which line an anchor slot represents. A stacked row gets its side from
-/// the unified row; a split row names its side explicitly.
+/// the unified row; a split row names its side explicitly. A base row is
+/// `removed` when the change removed or rewrote its line, which is where
+/// the base side offers a question.
 #[derive(Clone, Copy)]
 enum AnchorRow {
     Stacked(usize),
-    Base(usize),
+    Base { base: usize, removed: bool },
     Head { display: usize, head: usize },
 }
 
-/// What a row's left slot can hold: a thread marker, a `+` on an eligible
-/// head row, or nothing at all.
+impl AnchorRow {
+    /// Whether the pointer on this row lights its `+`, and so whether the
+    /// row records it.
+    fn offers_plus(self, file: &LoadedFile) -> bool {
+        match self {
+            AnchorRow::Stacked(display) => file.buffer.row(display).is_some(),
+            AnchorRow::Base { removed, .. } => removed,
+            AnchorRow::Head { .. } => true,
+        }
+    }
+}
+
+/// What a row's left slot can hold: a thread marker, a `+` on a line a
+/// question can be anchored on, or nothing at all.
 #[derive(Clone, Copy)]
 enum Slot {
     Anchor(AnchorRow),
@@ -369,7 +384,13 @@ fn side_row(
     // is the head line displayed there. A marker follows its anchor's side;
     // only the head slot can offer the `+` for a new question.
     let (number, slot) = match side {
-        Side::Base => (Some(display + 1), Slot::Anchor(AnchorRow::Base(display))),
+        Side::Base => (
+            Some(display + 1),
+            Slot::Anchor(AnchorRow::Base {
+                base: display,
+                removed: tint == Tint::Deleted,
+            }),
+        ),
         Side::Head => match file.buffer.head_line(display) {
             Some(head) => (
                 Some(head + 1),
@@ -513,9 +534,11 @@ fn change_bar_color(tint: Tint) -> Option<fn() -> Color> {
 
 /// One row: the slot, the number, the change bar. `key` is what the
 /// pointer's row is recorded as while it is here, in this gutter's own
-/// numbering, and the slot shows its `+` when that matches. A row with a
-/// blank slot records nothing: the two gutters of a split share the
-/// signal, and a row on the left must not light a `+` on the right.
+/// numbering, and the slot shows its `+` when that matches. A row that
+/// offers no `+` records nothing. The two gutters of a split number
+/// their rows alike and share the signal, so a base row records itself
+/// as the base's, and a row on the left does not light a `+` on the
+/// right.
 #[allow(clippy::too_many_arguments)]
 fn row_view(
     state: ReviewState,
@@ -527,6 +550,12 @@ fn row_view(
     bar: Option<fn() -> Color>,
     slot: Slot,
 ) -> AnyView {
+    let records = match slot {
+        Slot::Anchor(anchor) if anchor.offers_plus(&file) => {
+            Some(matches!(anchor, AnchorRow::Base { .. }))
+        }
+        Slot::Anchor(_) | Slot::Blank => None,
+    };
     let slot_view = match slot {
         Slot::Anchor(anchor) => anchor_slot(state, app, file, key, anchor).into_any(),
         Slot::Blank => Empty::new().into_any(),
@@ -567,14 +596,18 @@ fn row_view(
             .items_center()
     });
 
-    match slot {
-        Slot::Anchor(AnchorRow::Stacked(_) | AnchorRow::Head { .. }) => row
+    match records {
+        Some(base) => row
             .on_event_cont(el::PointerEnter, move |cx, _| {
-                state.enter_row(cx.target, key)
+                if base {
+                    state.enter_base_row(cx.target, key)
+                } else {
+                    state.enter_row(cx.target, key)
+                }
             })
             .on_event_cont(el::PointerLeave, move |cx, _| state.leave_row(cx.target))
             .into_any(),
-        Slot::Anchor(AnchorRow::Base(_)) | Slot::Blank => row.into_any(),
+        None => row.into_any(),
     }
 }
 
@@ -596,7 +629,9 @@ pub(crate) fn thread_mark(
 }
 
 /// The marker for a thread starting on this row, or the `+` that starts one
-/// on a stacked/head row while the pointer is there. Base rows are marker-only.
+/// while the pointer is there, on a row that offers it: any line of the
+/// stacked layout, ghosts too, any head row, and a base row the change
+/// removed. A ghost's or a base row's question is on the base's lines.
 fn anchor_slot(
     state: ReviewState,
     app: AppState,
@@ -604,11 +639,8 @@ fn anchor_slot(
     key: usize,
     anchor: AnchorRow,
 ) -> impl IntoView {
-    let plus_display = match anchor {
-        AnchorRow::Stacked(display) if file.buffer.head_line(display).is_some() => Some(display),
-        AnchorRow::Head { display, .. } => Some(display),
-        AnchorRow::Stacked(_) | AnchorRow::Base(_) => None,
-    };
+    let offers_plus = anchor.offers_plus(&file);
+    let base_row = matches!(anchor, AnchorRow::Base { .. });
     let marker_file = file.clone();
     let plus_file = file;
 
@@ -616,7 +648,7 @@ fn anchor_slot(
         move || {
             let thread = match anchor {
                 AnchorRow::Stacked(display) => state.thread_starting_at(&marker_file, display),
-                AnchorRow::Base(base) => {
+                AnchorRow::Base { base, .. } => {
                     state.thread_starting_on(&marker_file, AnchorSide::Left, base)
                 }
                 AnchorRow::Head { head, .. } => {
@@ -627,10 +659,12 @@ fn anchor_slot(
                 let draft = t.messages.iter().any(|m| m.is_draft());
                 (t.id, t.origin, t.outdated, draft)
             });
-            let hovered = state.hovered_line.get() == Some(key);
+            let hovered = offers_plus
+                && state.hovered_line.get() == Some(key)
+                && state.hovered_base.get() == base_row;
             (thread, hovered)
         },
-        move |(thread, hovered)| match (thread, hovered.then_some(plus_display).flatten()) {
+        move |(thread, hovered)| match (thread, hovered) {
             // A thread on this line: solid in GitHub's blue when it holds
             // a draft on its way there, solid for the reader's own, hollow
             // and muted for one of GitHub's. Click scrolls the editor to
@@ -649,18 +683,28 @@ fn anchor_slot(
                     })
                     .into_any()
             }
-            (None, Some(display_line)) => {
+            (None, true) => {
                 let plus_file = plus_file.clone();
                 Container::new(
                     sidebar_glyph(SidebarIcon::Plus, theme::canvas).style(|s| s.size(11.0, 11.0)),
                 )
+                .debug_name("gutter-plus")
                 .on_event_stop(el::Click, move |_, _| {
-                    // The selection if this line is inside it, else this line.
-                    let (first, last) = match state.selection.get() {
-                        Some((a, b)) if (a.min(b)..=a.max(b)).contains(&display_line) => (a, b),
-                        _ => (display_line, display_line),
+                    let anchor = match anchor {
+                        // The base side takes no selection: the line.
+                        AnchorRow::Base { base, .. } => {
+                            state.anchor_on(&plus_file, AnchorSide::Left, base, base)
+                        }
+                        // The selection if this line is inside it, else
+                        // this line.
+                        AnchorRow::Stacked(display) | AnchorRow::Head { display, .. } => {
+                            let (first, last) = match state.selection.get() {
+                                Some((a, b)) if (a.min(b)..=a.max(b)).contains(&display) => (a, b),
+                                _ => (display, display),
+                            };
+                            state.anchor_for_display_range(&plus_file, first, last)
+                        }
                     };
-                    let anchor = state.anchor_for_display_range(&plus_file, first, last);
                     state.open_composer(
                         None,
                         anchor,
@@ -678,7 +722,7 @@ fn anchor_slot(
                 })
                 .into_any()
             }
-            (None, None) => Empty::new().into_any(),
+            (None, false) => Empty::new().into_any(),
         },
     )
 }
