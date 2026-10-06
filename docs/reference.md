@@ -266,7 +266,9 @@ both Code and Conversation, so one thread can hold a reviewer's comment, your
 reply to them, and an agent's private take on both. A thread looks as it does
 on github.com: on Conversation, a box headed by its file with the lines it is
 on under the header; in Code, a box under those lines headed "Comment on line
-R12". Each message sits under its author's face and name, with **Author** by
+R12", or L12 on a line of the old file. The split layout draws each box on its
+side: the old file's on the left, beside fillers on the right, and the new
+file's on the right. Each message sits under its author's face and name, with **Author** by
 whoever opened the pull request, and the thread ends in a **Follow up** box and
 a foot with **Resolve**. A reviewer's comment offers **Reply** and **Ask about
 this** under the pointer. In such a thread, what an agent said and what you
@@ -561,7 +563,10 @@ would be. Behind or diverged has no button, since that push would need force.
 ## Agents
 
 Questions about an item or selected lines in its Code view run through Claude
-Code or Codex in that item's worktree. Follow-ups remain attached to the local
+Code or Codex in that item's worktree. The `+` in the gutter starts one on a
+line, a removed line included, whose question is about the old file's lines;
+so is a selection of nothing but removed lines, or one on the left of the
+split layout. Follow-ups remain attached to the local
 conversation. A run is a question (**Ask**), which reads and answers, or, on
 your own work, **Work**, which changes the worktree (see [Work](#work)).
 Nothing an agent writes reaches GitHub unless you post it (see Posting).

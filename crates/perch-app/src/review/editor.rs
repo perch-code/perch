@@ -192,6 +192,7 @@ pub fn editor_pane(
                                         // otherwise anchor a question on the
                                         // lines the last editor had selected.
                                         state.selection.set(None);
+                                        state.selection_base.set(None);
                                         picture::pane(&file, &picture).into_any()
                                     }
                                     None => code_view(
@@ -1861,6 +1862,16 @@ fn wire_cursor(
             let first = (first_row..=last_row).find_map(display_line);
             let last = (first_row..=last_row).rev().find_map(display_line);
             state.selection.set(first.zip(last));
+            // On the base side the selection is of base lines too, which a
+            // question asked from there is anchored on.
+            let on_base = base.as_ref().and_then(|_| {
+                let first = (first_row..=last_row).find_map(|r| doc.display_line(r))?;
+                let last = (first_row..=last_row)
+                    .rev()
+                    .find_map(|r| doc.display_line(r))?;
+                Some((first, last))
+            });
+            state.selection_base.set(on_base);
         }
 
         if by_edit {
@@ -5207,6 +5218,76 @@ mod window {
             .expect("the composer's card is drawn")
             .get_visual_rect_no_clip();
         assert!(card.x1 < right_gutter, "over the base side: {card:?}");
+    }
+
+    /// A selection on the base side is of base lines, kept ones too: the
+    /// `+` on a removed line in it, and Ask, anchor a question on all of
+    /// them there. The head's `+` reads the head's selection, not the
+    /// base's, and a selection on the head is the head's again.
+    #[test]
+    fn a_selection_on_the_base_side_anchors_a_question_on_its_base_lines() {
+        use perch_github::Side::{Left, Right};
+        let (mut harness, state) = harness();
+        state.layout.set(Layout::Split);
+        harness.rebuild();
+        harness.paint();
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let (pane_left, top) = pane_origin();
+        let right_gutter = pane_left + (1400.0 - pane_left - 1.0) / 2.0 + 1.0;
+        let code = gutter_width() + crate::theme::CODE_GUTTER_GAP + 2.0;
+        let slot = crate::theme::GUTTER_SLOT_INSET + crate::theme::GUTTER_SLOT / 2.0;
+        let row = |n: f64| top + n * line_height + line_height / 2.0;
+        let lines = |a: Option<perch_github::Anchor>| a.map(|a| (a.side, a.start_line, a.line));
+        let plus = |harness: &mut HeadlessHarness, x: f64, y: f64| {
+            harness.pointer_move(x, y);
+            harness.rebuild();
+            harness.paint();
+            let at = find(harness.root_id(), "gutter-plus")
+                .expect("the row offers a question")
+                .get_visual_rect_no_clip()
+                .center();
+            harness.click(at.x, at.y);
+            harness.rebuild();
+            harness.paint();
+            state.composer.get().and_then(|c| c.anchor)
+        };
+
+        // fn old, which the change rewrote, and fn c, which it kept: base
+        // lines 2 and 3.
+        drag(
+            &mut harness,
+            (pane_left + code, row(1.0)),
+            (pane_left + code + 30.0, row(2.0)),
+        );
+        assert_eq!(state.selection_base.get(), Some((1, 2)));
+        assert_eq!(lines(state.anchor_from_selection()), Some((Left, 2, 3)));
+
+        // The head's `+` beside fn c is on fn c alone.
+        assert_eq!(
+            lines(plus(&mut harness, right_gutter + slot, row(2.0))),
+            Some((Right, 3, 3))
+        );
+        state.close_composer();
+        harness.rebuild();
+        harness.paint();
+
+        // The base's `+` on fn old takes the whole selection.
+        assert_eq!(
+            lines(plus(&mut harness, pane_left + slot, row(1.0))),
+            Some((Left, 2, 3))
+        );
+        state.close_composer();
+        harness.rebuild();
+        harness.paint();
+
+        // A selection on the head side is the head's.
+        drag(
+            &mut harness,
+            (right_gutter + code, row(0.0)),
+            (right_gutter + code + 30.0, row(1.0)),
+        );
+        assert_eq!(state.selection_base.get(), None);
+        assert_eq!(lines(state.anchor_from_selection()), Some((Right, 1, 2)));
     }
 
     #[test]

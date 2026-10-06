@@ -1686,6 +1686,11 @@ pub struct ReviewState {
     pub sent_composer: RwSignal<Option<Anchor>>,
     /// The editor's selection as display lines, first and last inclusive.
     pub selection: RwSignal<Option<(usize, usize)>>,
+    /// The selection's base lines, zero-based and inclusive, while it is
+    /// on the base side of a split: a question asked from there is about
+    /// the old file's lines, removed or not, as the reader chose that side.
+    /// `None` for a selection anywhere else, and with no selection.
+    pub selection_base: RwSignal<Option<(usize, usize)>>,
     /// A gutter marker was clicked: the inline card to scroll to and flash.
     /// Left as it was set rather than taken so a second click on the same
     /// marker is still a second flash, while a card built after the click
@@ -2091,6 +2096,7 @@ impl ReviewState {
             composer_opened: RwSignal::new(0),
             sent_composer: RwSignal::new(None),
             selection: RwSignal::new(None),
+            selection_base: RwSignal::new(None),
             focus_card: RwSignal::new(None),
             pending_focus_card: RwSignal::new(None),
             confirm_thread: RwSignal::new(None),
@@ -2301,6 +2307,7 @@ impl ReviewState {
         self.composer.set(None);
         self.sent_composer.set(None);
         self.selection.set(None);
+        self.selection_base.set(None);
         self.focus_card.set(None);
         self.pending_focus_card.set(None);
         self.confirm_thread.set(None);
@@ -4542,9 +4549,10 @@ impl ReviewState {
         }
     }
 
-    /// The lines under the editor's selection, as an anchor: its head
-    /// lines, or the base lines when it is all removed lines. `None` when
-    /// nothing is selected.
+    /// The lines under the editor's selection, as an anchor: the base
+    /// lines of one on the base side of a split; else its head lines, or
+    /// the base lines when it is all removed lines. `None` when nothing is
+    /// selected.
     pub fn anchor_from_selection(&self) -> Option<Anchor> {
         let (first, last) = self.selection.get()?;
         let file = self.active_file()?;
@@ -4552,6 +4560,9 @@ impl ReviewState {
         // review: nothing is anchored in it.
         if file.origin.is_outside() {
             return None;
+        }
+        if let Some((first, last)) = self.selection_base.get() {
+            return self.anchor_on(&file, perch_github::Side::Left, first, last);
         }
         self.anchor_for_display_range(&file, first, last)
     }

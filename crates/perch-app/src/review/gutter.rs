@@ -690,15 +690,22 @@ fn anchor_slot(
                 )
                 .debug_name("gutter-plus")
                 .on_event_stop(el::Click, move |_, _| {
+                    // The selection if this line is inside it, else this
+                    // line. Each side of a split reads its own selection.
                     let anchor = match anchor {
-                        // The base side takes no selection: the line.
                         AnchorRow::Base { base, .. } => {
-                            state.anchor_on(&plus_file, AnchorSide::Left, base, base)
+                            let (first, last) = match state.selection_base.get() {
+                                Some((a, b)) if (a..=b).contains(&base) => (a, b),
+                                _ => (base, base),
+                            };
+                            state.anchor_on(&plus_file, AnchorSide::Left, first, last)
                         }
-                        // The selection if this line is inside it, else
-                        // this line.
                         AnchorRow::Stacked(display) | AnchorRow::Head { display, .. } => {
-                            let (first, last) = match state.selection.get() {
+                            let selection = state
+                                .selection
+                                .get()
+                                .filter(|_| state.selection_base.get().is_none());
+                            let (first, last) = match selection {
                                 Some((a, b)) if (a.min(b)..=a.max(b)).contains(&display) => (a, b),
                                 _ => (display, display),
                             };
