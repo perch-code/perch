@@ -301,6 +301,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "needs macOS's codesign and plutil")]
     fn a_download_is_unpacked_and_checked() {
         let tmp = tempfile::tempdir().unwrap();
         let built = tmp.path().join("build/Perch.app");
@@ -314,6 +315,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "needs macOS's codesign and plutil")]
     fn a_download_of_another_version_is_refused_and_removed() {
         let tmp = tempfile::tempdir().unwrap();
         let built = tmp.path().join("build/Perch.app");
@@ -326,6 +328,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "needs macOS's codesign and plutil")]
     fn a_tampered_download_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let built = tmp.path().join("build/Perch.app");
@@ -338,6 +341,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "needs macOS's codesign and plutil")]
     fn install_swaps_the_app_in_place() {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("Applications/Perch.app");
@@ -362,6 +366,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "macos"), ignore = "needs macOS's codesign and plutil")]
     fn a_failed_install_leaves_the_app_as_it_was() {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("Applications/Perch.app");
