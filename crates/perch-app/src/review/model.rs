@@ -5156,23 +5156,27 @@ fn display_line_of_anchor_line(
     let line = line.checked_sub(1)? as usize;
     match side {
         perch_github::Side::Right => file.buffer.display_line(line),
-        perch_github::Side::Left => {
-            if let Some(display) = file
-                .buffer
-                .rows
-                .iter()
-                .position(|row| matches!(row, Row::Deleted { base_line } if *base_line == line))
-            {
-                return Some(display);
-            }
-            let base_line = line + 1;
-            let head_line = file
-                .alignment
-                .iter()
-                .find_map(|&(base, head)| (base == Some(base_line)).then_some(head).flatten())?;
-            file.buffer.display_line(head_line.checked_sub(1)?)
-        }
+        perch_github::Side::Left => display_line_of_base_line(file, line),
     }
+}
+
+/// Where a zero-based base line appears in the unified display, as
+/// `display_line_of_anchor_line` maps the left side.
+pub(crate) fn display_line_of_base_line(file: &LoadedFile, line: usize) -> Option<usize> {
+    if let Some(display) = file
+        .buffer
+        .rows
+        .iter()
+        .position(|row| matches!(row, Row::Deleted { base_line } if *base_line == line))
+    {
+        return Some(display);
+    }
+    let base_line = line + 1;
+    let head_line = file
+        .alignment
+        .iter()
+        .find_map(|&(base, head)| (base == Some(base_line)).then_some(head).flatten())?;
+    file.buffer.display_line(head_line.checked_sub(1)?)
 }
 
 /// The head ranges corresponding to a left-side anchor, for folds. Removed

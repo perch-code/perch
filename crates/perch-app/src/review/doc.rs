@@ -330,13 +330,15 @@ impl Doc {
     /// The display line nearest a row, looking down the file first, for a
     /// cursor that lands on a row that is no line.
     pub fn nearest_display_line(&self, row: usize) -> Option<usize> {
+        self.nearest(row, |r| self.display_line(r))
+    }
+
+    /// What `line` makes of the row nearest `row` that it makes anything
+    /// of, looking down the file first.
+    pub fn nearest<T>(&self, row: usize, line: impl Fn(usize) -> Option<T>) -> Option<T> {
         (row..self.len())
-            .find_map(|r| self.display_line(r))
-            .or_else(|| {
-                (0..row.min(self.len()))
-                    .rev()
-                    .find_map(|r| self.display_line(r))
-            })
+            .find_map(&line)
+            .or_else(|| (0..row.min(self.len())).rev().find_map(&line))
     }
 }
 

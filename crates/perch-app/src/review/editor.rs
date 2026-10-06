@@ -6,8 +6,9 @@
 //! editors, base on the left and head on the right, each over a document
 //! with one line per aligned row so the two are the same height and a row
 //! on one side is the row beside it on the other. The right editor owns the
-//! scroll position and the left follows it; everything that reads the
-//! cursor is wired to the right one.
+//! scroll position and the left follows it. Either side takes a selection,
+//! and the cursor the reader last moved is the one the pane reads; the
+//! jumps and the page keys move the right one.
 //!
 //! Every editor's document is held live on the review state, the handle
 //! the editor lays out from beside the row table over it, so that what the
@@ -60,8 +61,8 @@ use crate::review::gutter::{
 use crate::review::hierarchy;
 use crate::review::hover;
 use crate::review::model::{
-    Composer, FilePlace, Layout, LiveDoc, LiveDocs, LiveFile, LiveLayout, LoadedFile, Paging,
-    ReviewState,
+    display_line_of_base_line, Composer, FilePlace, Layout, LiveDoc, LiveDocs, LiveFile,
+    LiveLayout, LoadedFile, Paging, ReviewState,
 };
 use crate::review::navigation;
 use crate::review::picture;
@@ -401,7 +402,15 @@ fn stacked_view(
             )
         }
     });
-    wire_cursor(state, backend.clone(), file.clone(), doc, cursor, shifted);
+    wire_cursor(
+        state,
+        backend.clone(),
+        file.clone(),
+        doc,
+        cursor,
+        shifted,
+        CursorOf::Stacked,
+    );
     wire_place(
         state,
         file.path.clone(),
@@ -1325,8 +1334,8 @@ fn scroll_for_card(vp: Rect, top: f64, bottom: f64, line_height: f64) -> Option<
 ///
 /// Both editors keep a scroll of their own, so the two are tied together:
 /// the right one's viewport drives the left through `scroll_to`, and a
-/// wheel over the left, which takes no pointer events, is handed to the
-/// right. The left's scrollbar is hidden, so there is one.
+/// wheel over the left is handed to the right. The left's scrollbar is
+/// hidden, so there is one.
 ///
 /// The two documents are edited in the same pass, from the pair the
 /// builder returns, so the two stay the same height: the dividers and the
@@ -1364,10 +1373,7 @@ fn split_view(
             epoch.wrapping_mul(2),
         ),
     )
-    .style(|s| {
-        s.pointer_events_none()
-            .custom_style_class(|s: ScrollCustomStyle| s.hide_bars(true))
-    });
+    .style(|s| s.custom_style_class(|s: ScrollCustomStyle| s.hide_bars(true)));
     let right = code_editor(
         right_text,
         PerchStyling::side(
@@ -1402,9 +1408,24 @@ fn split_view(
         right.editor().scroll_delta,
         right.editor().cursor,
     );
-    // Where an edit last moved each cursor to; only the right's is read,
-    // since only the right's cursor is wired.
+    // Where an edit last moved each cursor to.
     let (left_shifted, right_shifted) = (RwSignal::new(None), RwSignal::new(None));
+    // The side whose cursor is the pane's, the one the reader last moved;
+    // see `wire_cursor`. The other side's selection goes, so that there is
+    // one, as on a page.
+    let active = RwSignal::new(Side::Head);
+    Effect::new(move |before: Option<Side>| {
+        let now = active.get();
+        if before.is_some_and(|before| before != now) {
+            match now {
+                Side::Head => deselect(left_cursor, left_shifted, left_viewport, left_scroll_to),
+                Side::Base => {
+                    deselect(right_cursor, right_shifted, right_viewport, right_scroll_to)
+                }
+            }
+        }
+        now
+    });
 
     // The folds are wired before the jump, as in the stacked layout. The
     // right is edited first: it owns the scroll, and the left follows.
@@ -1442,6 +1463,20 @@ fn split_view(
         right_doc,
         right_cursor,
         right_shifted,
+        CursorOf::Head { active },
+    );
+    wire_cursor(
+        state,
+        backend.clone(),
+        file.clone(),
+        left_doc,
+        left_cursor,
+        left_shifted,
+        CursorOf::Base {
+            active,
+            head: right_doc,
+            file: live_file,
+        },
     );
     wire_place(
         state,
@@ -1468,19 +1503,36 @@ fn split_view(
         right_cursor,
         epoch,
     );
+    // The base side has no symbols the server knows, so its menu is Copy
+    // alone. Made navigable first, so the head side's is the last editor
+    // a test reads.
+    let left = navigation::navigable(left, state, backend.clone(), file.clone(), left_doc);
     let right = navigation::navigable(right, state, backend.clone(), file.clone(), right_doc);
 
-    // The left follows the right down the file. Sideways it keeps its own
-    // place: the lines on the two sides are not the same length.
-    Effect::new(move |_| {
-        let y = right_viewport.get().y0;
-        let here = left_viewport.get_untracked();
-        if here.y0 != y {
-            left_scroll_to.set(Some(Vec2::new(here.x0, y)));
+    // The two sides scroll down the file as one. The right owns the
+    // scroll and the left follows it; the left moves on its own only to
+    // bring its caret into view, after a click by its edge, a drag past
+    // it or a key, and then the right follows the left. When both have
+    // moved since they were last together, the right's move stands.
+    // Sideways each keeps its own place: the lines on the two sides are
+    // not the same length.
+    Effect::new(move |together: Option<f64>| {
+        let (left, right) = (left_viewport.get(), right_viewport.get());
+        if left.y0 == right.y0 {
+            return right.y0;
         }
+        match together {
+            Some(y) if y == right.y0 => {
+                right_scroll_to.set(Some(Vec2::new(right.x0, left.y0)));
+            }
+            _ => left_scroll_to.set(Some(Vec2::new(left.x0, right.y0))),
+        }
+        together.unwrap_or(right.y0)
     });
     #[cfg(test)]
     SPLIT_VIEWPORTS.with(|v| v.set(Some((left_viewport, right_viewport))));
+    #[cfg(test)]
+    SPLIT_CURSORS.with(|c| c.set(Some((left_cursor, right_cursor))));
 
     // The head pins its blocks; the base is no file the server has,
     // except for a deleted file, which has no head and pins the base.
@@ -1514,15 +1566,23 @@ fn split_view(
             left_viewport,
             right_delta,
         ),
+        // Caught on the way down, before the left's own scroll takes it.
         Container::new(over_tints(left, left_doc, left_viewport))
-            .on_event_stop(el::PointerWheel, move |_, wheel| {
-                let size = left_viewport.get_untracked().size();
-                let delta =
-                    wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
-                // Down the file is the right's; across is the left's own.
-                right_delta.set(Vec2::new(0.0, -delta.y));
-                left_delta.set(Vec2::new(-delta.x, 0.0));
-            })
+            .on_event_with_config(
+                el::PointerWheel,
+                floem::context::EventCallbackConfig {
+                    phases: floem::context::Phases::CAPTURE,
+                },
+                move |_, wheel| {
+                    let size = left_viewport.get_untracked().size();
+                    let delta = wheel
+                        .resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
+                    // Down the file is the right's; across is the left's own.
+                    right_delta.set(Vec2::new(0.0, -delta.y));
+                    left_delta.set(Vec2::new(-delta.x, 0.0));
+                    floem::event::EventPropagation::Stop
+                },
+            )
             .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full()),
     ))
     .style(|s| {
@@ -1605,15 +1665,31 @@ fn split_view(
         ),
         sticky,
     ))
-    // The base side takes no pointer, so a click on it would focus
-    // nothing and a bare key would go nowhere: the split takes the focus,
-    // as Conversation's column does, so the key reaches the window.
-    .style(|s| {
-        s.size_full()
-            .min_height(0.0)
-            .position(Position::Relative)
-            .focusable()
-    })
+    .style(|s| s.size_full().min_height(0.0).position(Position::Relative))
+}
+
+/// Take a split side's selection away, leaving its caret where it is: the
+/// other side has the reader's. Marked as an edit's move, so the side's
+/// cursor effect does not take it for the reader's and take the pane
+/// back; and the scroll asked for after it, which the editor does last,
+/// keeps the editor from bringing the caret into view, as in `apply`.
+fn deselect(
+    cursor: RwSignal<Cursor>,
+    shifted: RwSignal<Option<usize>>,
+    viewport: RwSignal<Rect>,
+    scroll_to: RwSignal<Option<Vec2>>,
+) {
+    if !cursor.with_untracked(|c| c.regions_iter().any(|(a, b, _)| a != b)) {
+        return;
+    }
+    let offset = cursor.with_untracked(|c| c.offset());
+    shifted.set(Some(offset));
+    cursor.update(|c| {
+        let affinity = c.affinity();
+        c.set_offset(offset, affinity, false, false);
+    });
+    let vp = viewport.get_untracked();
+    scroll_to.set(Some(Vec2::new(vp.x0, vp.y0)));
 }
 
 #[cfg(test)]
@@ -1621,6 +1697,10 @@ thread_local! {
     /// The viewports of the last split built, left and right, so a test can
     /// watch the two scroll together.
     static SPLIT_VIEWPORTS: std::cell::Cell<Option<(RwSignal<Rect>, RwSignal<Rect>)>> =
+        const { std::cell::Cell::new(None) };
+    /// The cursors of the last split built, left and right, so a test can
+    /// see which side has a selection.
+    static SPLIT_CURSORS: std::cell::Cell<Option<(RwSignal<Cursor>, RwSignal<Cursor>)>> =
         const { std::cell::Cell::new(None) };
     /// The viewport of the last stacked editor built, so a test can see
     /// that an edit left it where it was.
@@ -1653,14 +1733,38 @@ fn code_editor(text: String, styling: PerchStyling) -> TextEditor {
         .style(|s| s.size_full().min_width(0.0))
 }
 
+/// Which editor's cursor `wire_cursor` reads.
+#[derive(Clone, Copy)]
+enum CursorOf {
+    /// The stacked layout's one editor.
+    Stacked,
+    /// A split's head side. `active` is the side whose cursor is the
+    /// pane's; see `wire_cursor`.
+    Head { active: RwSignal<Side> },
+    /// A split's base side, whose rows are base lines: a line is where
+    /// the stacked layout shows it, its ghost or the head line it is, and
+    /// a filler is the line the head added beside it, on `head`.
+    Base {
+        active: RwSignal<Side>,
+        head: RwSignal<Arc<Doc>>,
+        file: LiveFile,
+    },
+}
+
 /// The cursor's line is kept, the selection becomes the
 /// lines a thread would be anchored on, and the head position under the
 /// caret is kept for the keys that act on the symbol there. Reading the
 /// editor's own cursor rather than the pointer means floem's hit-testing
 /// does the coordinate work. The document is the one the editor that owns
-/// the cursor is laying out: the stacked one, or the head side of a split.
+/// the cursor is laying out: the stacked one, or either side of a split.
 /// It is read as it is when the cursor moves, not as it was when the
 /// editor was built, so a row is right after the document has been edited.
+///
+/// A split has a cursor on each side, and the one the reader last moved,
+/// by a click, a key or a jump, is the pane's: it takes `active` and is
+/// the one read, and the other side's waits until the reader moves it.
+/// The base side has no head position, as a ghost in the stacked layout
+/// has none, and its line and selection are the stacked layout's.
 ///
 /// The caret resting on an identifier tints its other uses in the file:
 /// after a moment still, the server is asked for them, and the caret
@@ -1678,20 +1782,51 @@ fn wire_cursor(
     doc: RwSignal<Arc<Doc>>,
     cursor: RwSignal<Cursor>,
     shifted: RwSignal<Option<usize>>,
+    of: CursorOf,
 ) {
     Effect::new(move |previous: Option<usize>| {
         let offset = cursor.with(|c| c.offset());
         // Taken whichever way this run goes, so that a later click landing
         // on the same offset is a click.
         let by_edit = shifted.try_update(|s| s.take()).flatten() == Some(offset);
-        if previous == Some(offset) {
+        let side = match of {
+            CursorOf::Stacked => None,
+            CursorOf::Head { active } => Some((Side::Head, active)),
+            CursorOf::Base { active, .. } => Some((Side::Base, active)),
+        };
+        let mut taken = false;
+        if let Some((side, active)) = side {
+            // The cursor placed as the editor is built is no reader's
+            // move, and nor is one an edit made.
+            if previous.is_some() && !by_edit && active.get_untracked() != side {
+                active.set(side);
+                taken = true;
+            }
+            if active.get_untracked() != side {
+                return offset;
+            }
+        }
+        // A side taking the pane says its line and selection, wherever
+        // its caret is.
+        if previous == Some(offset) && !taken {
             return offset;
         }
         let doc = doc.get_untracked();
+        let base = match of {
+            CursorOf::Base { head, file, .. } => Some((head.get_untracked(), file.get_untracked())),
+            CursorOf::Stacked | CursorOf::Head { .. } => None,
+        };
+        let display_line = |row: usize| match &base {
+            Some((head, file)) => match doc.display_line(row) {
+                Some(line) => display_line_of_base_line(file, line),
+                None => head.display_line(row),
+            },
+            None => doc.display_line(row),
+        };
 
         let (row, _) = hover::line_col_of_offset(doc.text(), offset);
-        if let Some(display_line) = doc.nearest_display_line(row) {
-            state.cursor_line.set(display_line);
+        if let Some(line) = doc.nearest(row, display_line) {
+            state.cursor_line.set(line);
         }
 
         // The selection, as display lines, for a thread's anchor. A caret
@@ -1707,10 +1842,8 @@ fn wire_cursor(
         if lo != usize::MAX {
             let (first_row, _) = hover::line_col_of_offset(doc.text(), lo);
             let (last_row, _) = hover::line_col_of_offset(doc.text(), hi);
-            let first = (first_row..=last_row).find_map(|r| doc.display_line(r));
-            let last = (first_row..=last_row)
-                .rev()
-                .find_map(|r| doc.display_line(r));
+            let first = (first_row..=last_row).find_map(display_line);
+            let last = (first_row..=last_row).rev().find_map(display_line);
             state.selection.set(first.zip(last));
         }
 
@@ -2195,8 +2328,8 @@ mod window {
 
     use floem::headless::{HeadlessHarness, TestRoot};
     use floem::peniko::Brush;
-    use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
-    use floem::views::editor::core::cursor::CursorAffinity;
+    use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
+    use floem::views::editor::core::cursor::{Cursor, CursorAffinity};
     use perch_github::{Item, ItemCheckout};
 
     use crate::review::model::{ItemTab, Layout, LiveDoc, LiveLayout, Phase, ReviewState};
@@ -2398,8 +2531,8 @@ mod window {
         assert!(right.get().y0 > 0.0, "the right did not scroll");
         assert_eq!(left.get().y0, right.get().y0, "the left did not follow");
 
-        // The wheel over the left, which takes no pointer events itself,
-        // is handed to the right, and the left follows that too.
+        // The wheel over the left is caught before the left's own scroll
+        // takes it and handed to the right, and the left follows that too.
         let before = right.get().y0;
         harness.scroll_down(x_left, y, 100.0);
         harness.rebuild();
@@ -2684,22 +2817,130 @@ mod window {
         assert!(pinned.x1 < middle + 1.0, "over the base side: {pinned:?}");
     }
 
-    /// The left takes no pointer events, so a click there moves no cursor
-    /// and changes no selection.
+    /// A press, a move and a release with the primary button.
+    fn drag(harness: &mut HeadlessHarness, from: (f64, f64), to: (f64, f64)) {
+        harness.dispatch_event(button(from.0, from.1, 1, true));
+        harness.pointer_move(to.0, to.1);
+        harness.dispatch_event(button(to.0, to.1, 1, false));
+        harness.rebuild();
+        harness.paint();
+    }
+
+    /// A drag on the left selects there, as one on the right does. The
+    /// selection is in the lines the stacked layout shows, the ghost of the
+    /// removed line among them, and the right lets its own go, so there is
+    /// one, without scrolling back to it. A click on the right takes the
+    /// pane back, and the left lets go the same way.
     #[test]
-    fn a_click_on_the_left_is_nothing() {
+    fn a_drag_on_the_left_selects_there_and_the_right_lets_go() {
         let (mut harness, state) = harness();
         state.layout.set(Layout::Split);
         harness.rebuild();
         harness.paint();
-        // The right's cursor starts on the first row, and says so.
-        let (selection, line) = (state.selection.get(), state.cursor_line.get());
-        let (x_left, _, y) = pane_centers();
-        harness.click(x_left, y);
+        let (left_cursor, right_cursor) = super::SPLIT_CURSORS
+            .with(|c| c.get())
+            .expect("a split was built");
+        let (left_viewport, right_viewport) = super::SPLIT_VIEWPORTS.with(|v| v.get()).unwrap();
+        let selects =
+            |cursor: RwSignal<Cursor>| cursor.with(|c| c.regions_iter().any(|(a, b, _)| a != b));
+        // Rows go fn a, fn old beside fn b, fn c, three at a time; the
+        // unified buffer has fn a, the ghost of fn old, fn b, fn c, so the
+        // rows of the k-th three are display lines 4k, 4k + 1 for fn old
+        // or 4k + 2 for fn b, and 4k + 3.
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let (left, top) = pane_origin();
+        let code = gutter_width() + crate::theme::CODE_GUTTER_GAP + 2.0;
+        let x_left = left + code;
+        let x_right = left + (1400.0 - left - 1.0) / 2.0 + 1.0 + code;
+        // Where a row is on the screen, as the pane is scrolled now.
+        let y =
+            |row: usize| top + (row as f64 + 0.5) * line_height - right_viewport.get_untracked().y0;
+        // The first three wholly in view.
+        let three = || (right_viewport.get_untracked().y0 / line_height).ceil() as usize / 3 + 1;
+        let scroll = |harness: &mut HeadlessHarness| {
+            harness.scroll_down(x_right, top + 100.0, 15.0 * line_height);
+            harness.rebuild();
+            harness.paint();
+            right_viewport.get()
+        };
+
+        drag(&mut harness, (x_right, y(4)), (x_right + 30.0, y(5)));
+        assert!(selects(right_cursor));
+        assert_eq!(state.selection.get(), Some((6, 7)));
+
+        // With the right's selection scrolled away, fn old and fn c on
+        // the left: the ghost and the line after fn b.
+        let scrolled = scroll(&mut harness);
+        assert!(scrolled.y0 > 6.0 * line_height);
+        let k = three();
+        drag(
+            &mut harness,
+            (x_left, y(3 * k + 1)),
+            (x_left + 30.0, y(3 * k + 2)),
+        );
+        assert!(selects(left_cursor), "the left took no selection");
+        assert!(!selects(right_cursor), "the right kept its selection");
+        assert_eq!(state.selection.get(), Some((4 * k + 1, 4 * k + 3)));
+        assert_eq!(state.cursor_line.get(), 4 * k + 3);
+        assert_eq!(right_viewport.get(), scrolled, "letting go scrolled");
+        assert_eq!(left_viewport.get().y0, scrolled.y0);
+
+        let scrolled = scroll(&mut harness);
+        let k = three();
+        harness.click(x_right, y(3 * k + 1));
         harness.rebuild();
         harness.paint();
-        assert_eq!(state.selection.get(), selection);
-        assert_eq!(state.cursor_line.get(), line);
+        assert!(!selects(left_cursor), "the left kept its selection");
+        assert_eq!(state.selection.get(), Some((4 * k + 2, 4 * k + 2)));
+        assert_eq!(state.cursor_line.get(), 4 * k + 2);
+        assert_eq!(right_viewport.get(), scrolled, "letting go scrolled");
+        assert_eq!(left_viewport.get().y0, scrolled.y0);
+    }
+
+    /// A filler on the left stands beside a line the head added, and a
+    /// click on it is on that line.
+    #[test]
+    fn a_click_on_a_filler_on_the_left_is_on_the_added_line_beside_it() {
+        // Display lines go fn a, fn new, fn c, three a time.
+        let (mut harness, state) = harness_with(
+            "fn a() {}\nfn new() {}\nfn c() {}\n".repeat(30),
+            "fn a() {}\nfn c() {}\n".repeat(30),
+        );
+        state.layout.set(Layout::Split);
+        harness.rebuild();
+        harness.paint();
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let (left, top) = pane_origin();
+        harness.click(left + 200.0, top + 4.5 * line_height);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.cursor_line.get(), 4);
+        assert_eq!(state.selection.get(), Some((4, 4)));
+    }
+
+    /// The left brings its caret into view as the right does, a key at a
+    /// time past the bottom of the pane, and the right follows it down.
+    #[test]
+    fn a_caret_brought_into_view_on_the_left_takes_the_right_with_it() {
+        use floem::prelude::{Code, Key, NamedKey};
+        let (mut harness, state) = harness();
+        state.layout.set(Layout::Split);
+        harness.rebuild();
+        harness.paint();
+        let (left_viewport, right_viewport) = super::SPLIT_VIEWPORTS.with(|v| v.get()).unwrap();
+        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let (left, top) = pane_origin();
+        harness.click(left + 200.0, top + line_height / 2.0);
+        harness.rebuild();
+        harness.paint();
+        let rows = (left_viewport.get().height() / line_height).ceil() as usize;
+        for _ in 0..rows + 5 {
+            harness.dispatch_event(key_press(Code::ArrowDown, Key::Named(NamedKey::ArrowDown)));
+            harness.rebuild();
+            harness.paint();
+        }
+        assert!(left_viewport.get().y0 > 0.0, "the left stayed at the top");
+        assert_eq!(right_viewport.get().y0, left_viewport.get().y0);
     }
 
     /// The primary button going down or up at a point, `count` clicks
@@ -4256,13 +4497,18 @@ mod window {
         let (_, right) = sides(state);
         let (left_viewport, right_viewport) = super::SPLIT_VIEWPORTS.with(|v| v.get()).unwrap();
         let rows = right.doc.get().len();
-        // A click on the base side, which takes no pointer itself.
+        // A click on the base side gives its editor the keyboard, and the
+        // window still has the key first.
         harness.click(left + 200.0, top + 3.0 * line_height + line_height / 2.0);
         harness.rebuild();
         harness.dispatch_event(paging_key(Paging::End));
         harness.rebuild();
         harness.paint();
-        assert_eq!(state.paging.get(), None, "the split took the key");
+        assert_eq!(
+            state.paging.get(),
+            None,
+            "the base side's editor took the key"
+        );
         assert_eq!(right_viewport.get().y1, (rows + 1) as f64 * line_height);
         assert_eq!(left_viewport.get().y0, right_viewport.get().y0);
     }
