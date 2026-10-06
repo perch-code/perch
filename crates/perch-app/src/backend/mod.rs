@@ -14905,33 +14905,40 @@ fn refetch_opened_pull_request<'a>(
             .await
         {
             Ok(fresh) if fresh.head_sha != shown.head_sha => {
-                let _lifecycle = ctx.item_lifecycle.lock().await;
-                if !ctx.is_open(item_id)
-                    || !ctx
-                        .navigation_requests
-                        .is_current_item(item_id, navigation_id)
-                {
-                    return;
-                }
-                let Some(item) = ctx.item(item_id) else {
-                    return;
+                let opened = {
+                    let _lifecycle = ctx.item_lifecycle.lock().await;
+                    if !ctx.is_open(item_id)
+                        || !ctx
+                            .navigation_requests
+                            .is_current_item(item_id, navigation_id)
+                    {
+                        return;
+                    }
+                    let Some(item) = ctx.item(item_id) else {
+                        return;
+                    };
+                    tracing::info!(
+                        item = item_id,
+                        kept = %shown.head_sha,
+                        head = %fresh.head_sha,
+                        "the pull request moved since it was kept; opening it again"
+                    );
+                    open_pull_request_at(
+                        ctx,
+                        Some(item),
+                        fresh,
+                        PullSource::Fetched,
+                        since,
+                        None,
+                        navigation_id,
+                    )
+                    .await
                 };
-                tracing::info!(
-                    item = item_id,
-                    kept = %shown.head_sha,
-                    head = %fresh.head_sha,
-                    "the pull request moved since it was kept; opening it again"
-                );
-                open_pull_request_at(
-                    ctx,
-                    Some(item),
-                    fresh,
-                    PullSource::Fetched,
-                    since,
-                    None,
-                    navigation_id,
-                )
-                .await;
+                // The window forgot the server's status with the ready
+                // above; this tells it again, as every other open does.
+                if opened {
+                    start_language_server(ctx, navigation_id).await;
+                }
                 return;
             }
             Ok(fresh) if fresh == *shown => shown,

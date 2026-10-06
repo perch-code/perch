@@ -3867,6 +3867,14 @@ impl ReviewState {
         })
     }
 
+    /// The open item came ready again on a checkout read anew, its head
+    /// moved say. A file on its way was asked of the last generation and
+    /// will be dropped, and one loaded may be the old head's: all are
+    /// asked for again, and stay on screen until their new sides arrive.
+    pub fn reload_all(&self) -> Vec<String> {
+        self.reload_loaded(|_| true)
+    }
+
     /// Every loaded file, not only the tabs: a thread card on
     /// Conversation shows lines from a file no tab has, and would go
     /// blank until something loaded it again. And every file on its way,

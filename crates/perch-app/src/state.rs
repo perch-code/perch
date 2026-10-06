@@ -1544,6 +1544,9 @@ impl AppState {
                     for path in review.restore_pane() {
                         self.reload.update(|reload| reload.push(path));
                     }
+                } else {
+                    let paths = review.reload_all();
+                    self.reload.update(|reload| reload.extend(paths));
                 }
                 review.ready.set(true);
                 review.set_phase(Phase::Ready);
@@ -4445,7 +4448,9 @@ mod tests {
     }
 
     /// A ready for the item already open, as agent navigation within it
-    /// sends, leaves its pane as it is on screen.
+    /// sends, or a pull request opened again at a head that moved, leaves
+    /// its pane as it is on screen and asks for its files again: a load
+    /// on its way was for the last generation, and is dropped.
     #[test]
     fn a_ready_for_the_item_already_open_keeps_its_pane() {
         use crate::review::model::ItemTab;
@@ -4459,7 +4464,8 @@ mod tests {
 
         assert_eq!(review.tab.get(), ItemTab::Code);
         assert_eq!(review.active.get().as_deref(), Some("src/x.rs"));
-        assert!(app.reload.get().is_empty());
+        assert_eq!(app.reload.get(), ["src/x.rs"]);
+        assert!(review.is_loading("src/x.rs"));
     }
 
     #[test]
