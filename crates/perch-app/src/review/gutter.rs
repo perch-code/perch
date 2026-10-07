@@ -103,7 +103,7 @@ fn digit_width() -> f64 {
             AttrsList::new(
                 Attrs::new()
                     .family(&family)
-                    .font_size(theme::CODE_FONT_SIZE),
+                    .font_size(theme::code_font_size()),
             ),
             None,
         );
@@ -234,7 +234,7 @@ fn column<V: IntoView + 'static>(
     file: LiveFile,
     row: impl Fn(Arc<LoadedFile>, usize, DocRow) -> V + 'static,
 ) -> impl IntoView {
-    let line_height = theme::CODE_LINE_HEIGHT as f64;
+    let line_height = theme::code_line_height() as f64;
     let width = file.with_untracked(|file| width_of(file));
 
     let visible = move || {
@@ -430,7 +430,7 @@ fn other_row(
         DocRow::Divider { .. } => Empty::new()
             .style(|s| {
                 s.width_full()
-                    .height(theme::CODE_LINE_HEIGHT as f64)
+                    .height(theme::code_line_height() as f64)
                     .flex_shrink(0.0_f32)
                     .background(theme::diff_divider_bg())
             })
@@ -508,7 +508,7 @@ fn expander(
         .style(move |s| {
             clickable(s)
                 .width_full()
-                .height(theme::CODE_LINE_HEIGHT as f64)
+                .height(theme::code_line_height() as f64)
                 .flex_shrink(0.0_f32)
                 .items_center()
                 .justify_center()
@@ -578,7 +578,7 @@ fn row_view(
                 .selectable(false)
                 // The code's own size, as Codex numbers its diffs.
                 .font_family(theme::CODE_FONT_STACK.to_string())
-                .font_size(theme::CODE_FONT_SIZE)
+                .font_size(theme::code_font_size())
                 .color(if dimmed {
                     theme::diff_deleted_bar()
                 } else {
@@ -591,7 +591,7 @@ fn row_view(
     ))
     .style(move |s| {
         s.width_full()
-            .height(theme::CODE_LINE_HEIGHT as f64)
+            .height(theme::code_line_height() as f64)
             .flex_shrink(0.0_f32)
             .items_center()
     });

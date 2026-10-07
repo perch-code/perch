@@ -1921,7 +1921,7 @@ fn space(size: f32) -> f64 {
 /// Codex's small size, for code and a table: seven eighths of the prose,
 /// but never under the code size, which is what a fenced block is set at.
 fn small_size(size: f32) -> f32 {
-    (size * 0.875).round().max(theme::CODE_FONT_SIZE)
+    (size * 0.875).round().max(theme::PROSE_CODE_FONT_SIZE)
 }
 
 /// The room over a block, in units of `space`, as Codex's margins settle

@@ -644,7 +644,7 @@ fn apply(
     // editor to scroll it into view, and this, asked for after that, is
     // what the editor does last. Setting it also clamps the offset to the
     // new height, which a document that shrank under the scroll needs.
-    let line_height = theme::CODE_LINE_HEIGHT as f64;
+    let line_height = theme::code_line_height() as f64;
     let vp = viewport.get_untracked();
     let first_visible = (vp.y0 / line_height).floor() as usize;
     let y = if reloaded {
@@ -726,7 +726,7 @@ pub(crate) fn row_tint(row: &DocRow) -> Option<Color> {
 /// as the text is. The tint runs from the gutter's edge, across the gap
 /// before the text, which a line style left bare.
 fn tint_layer(doc: RwSignal<Arc<Doc>>, viewport: RwSignal<Rect>) -> impl IntoView {
-    let line_height = theme::CODE_LINE_HEIGHT as f64;
+    let line_height = theme::code_line_height() as f64;
     let visible = move || {
         let vp = viewport.get();
         doc.with(|d| {
@@ -824,7 +824,7 @@ fn divider_layer(
     scroll_delta: RwSignal<Vec2>,
     bars: Bars,
 ) -> impl IntoView {
-    let line_height = theme::CODE_LINE_HEIGHT as f64;
+    let line_height = theme::code_line_height() as f64;
     let folds = Memo::new(move |_| doc.with(|d| d.folds.clone()));
     let labels = Memo::new(move |_| {
         file.with(|file| {
@@ -887,7 +887,7 @@ fn divider_bar(
     scroll_delta: RwSignal<Vec2>,
     bars: Bars,
 ) -> impl IntoView {
-    let line_height = theme::CODE_LINE_HEIGHT as f64;
+    let line_height = theme::code_line_height() as f64;
     let (start, height) = (span.start, span.len() as f64 * line_height);
     let gutter = file.with_untracked(|file| gutter::width_of(file));
     let header = divider_header(state, file, doc, labels, start);
@@ -951,7 +951,7 @@ pub(crate) fn passes_wheel(
     scroll_delta: RwSignal<Vec2>,
     across: Option<RwSignal<Vec2>>,
 ) -> impl IntoView {
-    let line_height = theme::CODE_LINE_HEIGHT as f64;
+    let line_height = theme::code_line_height() as f64;
     part.on_event_stop(el::PointerWheel, move |_, wheel| {
         let size = viewport.get_untracked().size();
         let delta = wheel.resolve_to_points(Some(Size::new(line_height, line_height)), Some(size));
@@ -992,7 +992,7 @@ fn divider_header(
         s.selectable(false)
             .min_width(0.0)
             .font_family(theme::CODE_FONT_STACK.to_string())
-            .font_size(theme::CODE_FONT_SIZE)
+            .font_size(theme::code_font_size())
             .color(theme::diff_divider_fg())
             .text_ellipsis()
     });
@@ -1237,7 +1237,7 @@ fn inline_card(
     left: f64,
     max_width: Option<f64>,
 ) -> impl IntoView {
-    let line_height = theme::CODE_LINE_HEIGHT as f64;
+    let line_height = theme::code_line_height() as f64;
     let card_id = item.id();
     let name = item.name();
 
@@ -1360,7 +1360,7 @@ fn split_view(
         RwSignal::new(Arc::new(split.0)),
         RwSignal::new(Arc::new(split.1)),
     );
-    let line_height = theme::CODE_LINE_HEIGHT as f64;
+    let line_height = theme::code_line_height() as f64;
 
     // Distinct cache keys, in case the two ever share a layout cache.
     let left = code_editor(
@@ -1970,7 +1970,7 @@ fn wire_place(
 
 /// Where the reader is in a document: see `FilePlace`.
 fn place_of(doc: &Doc, viewport: Rect, caret: usize) -> FilePlace {
-    let line_height = theme::CODE_LINE_HEIGHT as f64;
+    let line_height = theme::code_line_height() as f64;
     let top = (viewport.y0 / line_height).floor().max(0.0) as usize;
     let anchor = (top..doc.len()).find_map(|row| {
         let line = doc.display_line(row)?;
@@ -1996,7 +1996,7 @@ fn restore_place(
     scroll_to: RwSignal<Option<Vec2>>,
     cursor: RwSignal<Cursor>,
 ) {
-    let line_height = theme::CODE_LINE_HEIGHT as f64;
+    let line_height = theme::code_line_height() as f64;
     let caret = place.caret.and_then(|(line, column)| {
         let row = doc.row_of_display(line)?;
         // The line's text may have changed under the column since.
@@ -2058,7 +2058,7 @@ fn wire_jump(
         let target = row.saturating_sub(4) as f64;
         scroll_to.set(Some(Vec2::new(
             0.0,
-            target * theme::CODE_LINE_HEIGHT as f64,
+            target * theme::code_line_height() as f64,
         )));
         let caret = state
             .jump_caret
@@ -2101,7 +2101,7 @@ fn wire_page(
             return;
         }
         state.paging.set(None);
-        let line_height = theme::CODE_LINE_HEIGHT as f64;
+        let line_height = theme::code_line_height() as f64;
         let page = || {
             let lines = (viewport.get_untracked().height() / line_height).floor() - 1.0;
             lines.max(1.0) * line_height
@@ -2579,7 +2579,7 @@ mod window {
         assert_eq!(left.get().y0, right.get().y0);
         assert_eq!(
             right.get().y0,
-            (50.0 - 4.0) * crate::theme::CODE_LINE_HEIGHT as f64
+            (50.0 - 4.0) * crate::theme::code_line_height() as f64
         );
     }
 
@@ -2612,7 +2612,7 @@ mod window {
         let head = file("1");
         let (backend, mut commands) = crate::backend::Backend::recording();
         let (mut harness, state) = harness_on(head.clone(), file("2"), backend);
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let (left, top) = pane_origin();
 
         let mut asked = || {
@@ -2767,7 +2767,7 @@ mod window {
             perch_git::ChangeStatus::Deleted,
             backend,
         );
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let (left, top) = pane_origin();
 
         let mut asked = || {
@@ -2874,7 +2874,7 @@ mod window {
         // unified buffer has fn a, the ghost of fn old, fn b, fn c, so the
         // rows of the k-th three are display lines 4k, 4k + 1 for fn old
         // or 4k + 2 for fn b, and 4k + 3.
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let (left, top) = pane_origin();
         let code = gutter_width() + crate::theme::CODE_GUTTER_GAP + 2.0;
         let x_left = left + code;
@@ -2936,7 +2936,7 @@ mod window {
         state.layout.set(Layout::Split);
         harness.rebuild();
         harness.paint();
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let (left, top) = pane_origin();
         harness.click(left + 200.0, top + 4.5 * line_height);
         harness.rebuild();
@@ -2955,7 +2955,7 @@ mod window {
         harness.rebuild();
         harness.paint();
         let (left_viewport, right_viewport) = super::SPLIT_VIEWPORTS.with(|v| v.get()).unwrap();
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let (left, top) = pane_origin();
         harness.click(left + 200.0, top + line_height / 2.0);
         harness.rebuild();
@@ -3026,7 +3026,7 @@ mod window {
         // Forty points into the code is a few characters into the word.
         let (left, top) = pane_origin();
         let x = left + gutter_width() + crate::theme::CODE_GUTTER_GAP + 40.0;
-        let y = top + (row as f64 + 0.5) * crate::theme::CODE_LINE_HEIGHT as f64;
+        let y = top + (row as f64 + 0.5) * crate::theme::code_line_height() as f64;
         harness.dispatch_event(button(x, y, 2, true));
         harness.rebuild();
         harness.paint();
@@ -3077,12 +3077,12 @@ mod window {
     #[test]
     fn a_changed_lines_tint_is_under_the_editor_so_the_selection_shows_over_it() {
         use crate::review::doc::{DocRow, Tint};
-        use crate::theme::{diff_deleted_bg, diff_modified_bg, CODE_LINE_HEIGHT};
+        use crate::theme::{code_line_height, diff_deleted_bg, diff_modified_bg};
         let line = |display, tint| DocRow::Line { display, tint };
 
         let (mut harness, state) = harness();
         let live = stacked(state);
-        let line_height = CODE_LINE_HEIGHT as f64;
+        let line_height = code_line_height() as f64;
         // Rows: fn a, the ghost of fn old, fn b in its place, fn c, and
         // so on every three.
         let doc = live.doc.get();
@@ -3501,7 +3501,7 @@ mod window {
         use crate::review::doc::{DocRow, Expand};
         let (mut harness, state) = one_long_run();
         let live = stacked(state);
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         // Display: ghost, new top, line 0..59 at 2 to 61, ghost, new
         // bottom, then the twelve blocks of six. The run is display lines
         // 5 to 58, head lines 4 to 57, and its divider is two rows.
@@ -3596,7 +3596,7 @@ mod window {
     {
         use crate::theme::{diff_expander_bg, diff_expander_hover_bg, CODE_GUTTER_GAP};
         let (mut harness, state) = one_long_run();
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let root = harness.root_id();
         let (left, top) = pane_origin();
         assert!(
@@ -3740,7 +3740,7 @@ mod window {
     fn the_bracket_keys_go_between_the_changes() {
         let (mut harness, state) = one_long_run();
         let live = stacked(state);
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).unwrap();
         assert_eq!(state.cursor_line.get(), 0);
 
@@ -3824,7 +3824,7 @@ mod window {
         );
         let (mut harness, state) = harness_with(head, base);
         let live = stacked(state);
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let run = live
             .doc
             .get()
@@ -3868,7 +3868,7 @@ mod window {
     fn click_row(harness: &mut HeadlessHarness, row: usize) {
         let (left, top) = pane_origin();
         let x = left + gutter_width() + crate::theme::CODE_GUTTER_GAP + 20.0;
-        let y = top + (row as f64 + 0.5) * crate::theme::CODE_LINE_HEIGHT as f64;
+        let y = top + (row as f64 + 0.5) * crate::theme::code_line_height() as f64;
         harness.dispatch_event(button(x, y, 1, true));
         harness.dispatch_event(button(x, y, 1, false));
         harness.rebuild();
@@ -3878,7 +3878,7 @@ mod window {
     /// Scroll the stacked editor down by `rows`.
     fn scroll_rows(harness: &mut HeadlessHarness, rows: usize) {
         let (left, top) = pane_origin();
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         harness.scroll_down(left + 300.0, top + 300.0, rows as f64 * line_height);
         harness.rebuild();
         harness.paint();
@@ -3899,7 +3899,7 @@ mod window {
         let (mut harness, state) = harness();
         let live = stacked(state);
         let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).unwrap();
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         click_row(&mut harness, 10);
         scroll_rows(&mut harness, 20);
         let scrolled = viewport.get().y0;
@@ -3927,7 +3927,7 @@ mod window {
         let base = "fn a() {}\nfn old() {}\nfn c() {}\n".repeat(30);
         let head = "fn a() {}\nfn b() {}\nfn c() {}\n".repeat(30);
         let (mut harness, state) = harness_with(head.clone(), base.clone());
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let reload = |state: ReviewState, head: String| {
             state.finish_load(
                 "src/x.rs",
@@ -4013,7 +4013,7 @@ mod window {
     #[test]
     fn a_file_shows_where_it_was_left_when_its_tab_shows_again() {
         let (mut harness, state) = harness();
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let viewport = || super::STACKED_VIEWPORT.with(|v| v.get()).unwrap();
         let caret = || {
             super::STACKED_CURSOR
@@ -4114,7 +4114,7 @@ mod window {
     fn show_whole_with_dividers_above_and_below_the_viewport_keeps_the_same_line_in_view() {
         let (mut harness, state) = three_runs();
         let live = stacked(state);
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let viewport = super::STACKED_VIEWPORT
             .with(|v| v.get())
             .expect("a stacked editor was built");
@@ -4173,7 +4173,7 @@ mod window {
     fn all_takes_the_divider_with_it_and_reset_is_on_the_divider_above() {
         let (mut harness, state) = three_runs();
         let live = stacked(state);
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let doc = live.doc.get();
         let second = doc.run_of(15).expect("row 15 is the second divider");
         assert_eq!(second.len(), 44);
@@ -4297,7 +4297,7 @@ mod window {
         harness.rebuild();
         harness.paint();
         let (left, right) = sides(state);
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
 
         // The split pairs each rewritten line with its old one, so the
         // sides are the 213 aligned rows less the three runs, plus their
@@ -4489,7 +4489,7 @@ mod window {
         use crate::review::model::Paging;
         let (mut harness, state) = one_long_run();
         let live = stacked(state);
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).unwrap();
         let rows = live.doc.get().len();
         let last = (0..rows)
@@ -4547,7 +4547,7 @@ mod window {
     fn the_page_keys_scroll_by_a_page() {
         use crate::review::model::Paging;
         let (mut harness, state) = one_long_run();
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).unwrap();
         let (left, top) = pane_origin();
         harness.click(left + 200.0, top + 3.0 * line_height + line_height / 2.0);
@@ -4585,7 +4585,7 @@ mod window {
     fn a_jump_into_a_fold_reveals_around_the_target_before_scrolling() {
         let (mut harness, state) = one_long_run();
         let live = stacked(state);
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         assert_eq!(
             live.doc.get().row_of_head(30),
             None,
@@ -4803,7 +4803,7 @@ mod window {
         let rect = card_rect(harness, thread_id);
         super::rows_for_height(
             rect.height(),
-            crate::theme::CODE_LINE_HEIGHT as f64,
+            crate::theme::code_line_height() as f64,
             crate::theme::CARD_INSET,
         )
     }
@@ -4813,7 +4813,7 @@ mod window {
         use crate::review::doc::{CardId, DocRow};
         let (mut harness, state) = harness();
         let live = stacked(state);
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let viewport = super::STACKED_VIEWPORT
             .with(|v| v.get())
             .expect("a stacked editor was built");
@@ -5004,7 +5004,7 @@ mod window {
         use crate::review::doc::CardId;
         let (mut harness, state) = harness();
         let live = stacked(state);
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).unwrap();
         state.set_comment_threads(Arc::new(vec![thread_on("t1", 5, 7, false)]));
         harness.rebuild();
@@ -5062,7 +5062,7 @@ mod window {
     fn a_split_draws_a_card_on_its_anchors_side_and_fills_the_other() {
         use crate::review::doc::{CardId, DocRow};
         let (mut harness, state) = harness();
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let thread = thread_on("t1", 5, 7, false);
         state.set_comment_threads(Arc::new(vec![thread]));
         state.layout.set(Layout::Split);
@@ -5161,7 +5161,7 @@ mod window {
         state.layout.set(Layout::Split);
         harness.rebuild();
         harness.paint();
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let (pane_left, top) = pane_origin();
         let right_gutter = pane_left + (1400.0 - pane_left - 1.0) / 2.0 + 1.0;
         let slot = crate::theme::GUTTER_SLOT_INSET + crate::theme::GUTTER_SLOT / 2.0;
@@ -5231,7 +5231,7 @@ mod window {
         state.layout.set(Layout::Split);
         harness.rebuild();
         harness.paint();
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let (pane_left, top) = pane_origin();
         let right_gutter = pane_left + (1400.0 - pane_left - 1.0) / 2.0 + 1.0;
         let code = gutter_width() + crate::theme::CODE_GUTTER_GAP + 2.0;
@@ -5294,7 +5294,7 @@ mod window {
     fn a_ghost_in_the_stacked_layout_takes_a_question_on_the_base() {
         let (mut harness, state) = harness();
         let live = stacked(state);
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let (pane_left, top) = pane_origin();
         // Display line 1 is the ghost of base line 2.
         assert_eq!(live.doc.get().display_line(1), Some(1));
@@ -5348,7 +5348,7 @@ mod window {
         use crate::review::doc::CardId;
         let (mut harness, state) = harness();
         let live = stacked(state);
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let viewport = super::STACKED_VIEWPORT
             .with(|v| v.get())
             .expect("a stacked editor was built");
@@ -5434,7 +5434,7 @@ mod window {
         use crate::review::doc::CardId;
         let (mut harness, state) = harness();
         let live = stacked(state);
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let viewport = super::STACKED_VIEWPORT
             .with(|v| v.get())
             .expect("a stacked editor was built");
@@ -5640,7 +5640,7 @@ mod window {
         use crate::review::doc::CardId;
         let (mut harness, state) = one_long_run();
         let live = stacked(state);
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let run = live.doc.get().run_of(5).expect("row 5 is the divider");
 
         // Up on the divider shows the run's last twenty lines, as the
@@ -5782,7 +5782,7 @@ mod window {
         use crate::review::doc::{CardId, DocRow};
         let (mut harness, state) = harness();
         let live = stacked(state);
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let viewport = super::STACKED_VIEWPORT
             .with(|v| v.get())
             .expect("a stacked editor was built");
@@ -6018,7 +6018,7 @@ mod window {
         harness.paint();
         let folded = crate::review::doc::COLLAPSED_ROWS;
         assert_eq!(live.doc.get().card_span(&card), Some(9..9 + folded));
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let folded_height = folded as f64 * line_height - 2.0 * crate::theme::COLLAPSED_CARD_INSET;
         assert_eq!(card_rect(&harness, "gh-100").height(), folded_height);
 
@@ -6039,7 +6039,7 @@ mod window {
         use floem::prelude::{Code, Key, NamedKey};
         let (mut harness, state) = harness();
         let live = stacked(state);
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let cursor = super::STACKED_CURSOR
             .with(|c| c.get())
             .expect("a stacked editor was built");
@@ -6165,7 +6165,7 @@ mod window {
         use crate::review::doc::CardId;
         let (mut harness, state) = harness();
         let live = stacked(state);
-        let line_height = crate::theme::CODE_LINE_HEIGHT as f64;
+        let line_height = crate::theme::code_line_height() as f64;
         let viewport = super::STACKED_VIEWPORT
             .with(|v| v.get())
             .expect("a stacked editor was built");

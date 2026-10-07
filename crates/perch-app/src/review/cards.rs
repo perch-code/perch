@@ -2180,7 +2180,7 @@ fn event_attrs(faces: &[(std::ops::Range<usize>, Face)]) -> floem::text::AttrsLi
             Face::Strong => words().color(theme::fg()).weight(theme::weight_emphasis()),
             Face::Code => Attrs::new()
                 .family(&code)
-                .font_size(theme::CODE_FONT_SIZE)
+                .font_size(theme::PROSE_CODE_FONT_SIZE)
                 .weight(theme::weight_body())
                 .color(theme::fg_muted()),
         };

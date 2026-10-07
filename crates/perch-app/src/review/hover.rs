@@ -296,7 +296,7 @@ fn signature_view(blocks: Vec<String>, alone: bool) -> impl IntoView {
                             .color(theme::fg_subtle())
                             .margin_bottom(4.0)
                     } else {
-                        s.font_size(theme::CODE_FONT_SIZE)
+                        s.font_size(theme::code_font_size())
                             .font_weight(theme::weight_emphasis())
                             .color(theme::fg())
                             .line_height(theme::PROSE_LINE_HEIGHT)
@@ -576,7 +576,7 @@ mod tests {
         // Two signature lines, a rule, and a wrapped paragraph: taller than
         // one line of each.
         assert!(
-            rect.height() > 4.0 * theme::CODE_LINE_HEIGHT as f64,
+            rect.height() > 4.0 * theme::code_line_height() as f64,
             "{} tall",
             rect.height()
         );
@@ -593,7 +593,7 @@ mod tests {
         let rect = harness.get_layout_rect(id);
         assert!(rect.width() < 200.0, "{} wide", rect.width());
         assert!(
-            rect.height() < 3.0 * theme::CODE_LINE_HEIGHT as f64,
+            rect.height() < 3.0 * theme::code_line_height() as f64,
             "{} tall",
             rect.height()
         );

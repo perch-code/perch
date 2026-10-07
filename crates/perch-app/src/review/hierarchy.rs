@@ -337,7 +337,7 @@ fn item_row(
         chevron(state, at, expanded, pending),
         Label::derived(move || name.clone()).style(move |s| {
             s.font_family(theme::CODE_FONT_STACK.to_string())
-                .font_size(theme::CODE_FONT_SIZE)
+                .font_size(theme::code_font_size())
                 .font_weight(if is_root {
                     theme::weight_strong()
                 } else {

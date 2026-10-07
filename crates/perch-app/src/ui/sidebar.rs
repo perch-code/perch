@@ -83,7 +83,7 @@ fn lights_strip(state: AppState, backend: Rc<Backend>) -> impl IntoView {
 /// takes the pointer.
 pub fn lights_lane(state: AppState, inset: f64) -> impl IntoView {
     Stack::horizontal((
-        Empty::new().style(move |s| s.width(theme::ACTIVITY_RAIL_WIDTH - inset)),
+        Empty::new().style(move |s| s.width(theme::lights_lane_width() - inset)),
         toggle_button(state),
     ))
     .style(|s| s.items_center().flex_shrink(0.0_f32).pointer_events_none())

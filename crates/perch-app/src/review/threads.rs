@@ -1748,7 +1748,7 @@ pub fn thread_card(
         let base = s
             .apply_if(folded, |s| {
                 s.height(
-                    crate::review::doc::COLLAPSED_ROWS as f64 * theme::CODE_LINE_HEIGHT as f64
+                    crate::review::doc::COLLAPSED_ROWS as f64 * theme::code_line_height() as f64
                         - 2.0 * theme::COLLAPSED_CARD_INSET,
                 )
             })

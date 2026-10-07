@@ -244,7 +244,7 @@ pub(crate) fn layer(
     across: Option<RwSignal<Vec2>>,
     scroll_to: Rc<dyn Fn(f64)>,
 ) -> impl IntoView {
-    let line_height = theme::CODE_LINE_HEIGHT as f64;
+    let line_height = theme::code_line_height() as f64;
     let path = live_file.with_untracked(|f| f.path.clone());
     // Fixed for the editor's life: a reload that deletes the file, or
     // brings it back, builds another.
@@ -387,7 +387,7 @@ fn pinned_row(
     across: Option<RwSignal<Vec2>>,
     scroll_to: Rc<dyn Fn(f64)>,
 ) -> impl IntoView {
-    let line_height = theme::CODE_LINE_HEIGHT as f64;
+    let line_height = theme::code_line_height() as f64;
     let Pin { line, slot, .. } = pin;
     let (text, attrs) = line_layout(&file, line);
     let width = {
@@ -418,7 +418,7 @@ fn pinned_row(
             .items_center()
             .selectable(false)
             .font_family(theme::CODE_FONT_STACK.to_string())
-            .font_size(theme::CODE_FONT_SIZE)
+            .font_size(theme::code_font_size())
             .color(theme::gutter_fg())
             .text_align(floem::text::Alignment::End)
             .padding_right(theme::GUTTER_NUMBER_PADDING + theme::GUTTER_BAR)
@@ -487,12 +487,12 @@ fn line_layout(file: &LoadedFile, line: usize) -> (String, AttrsList) {
     let families: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect();
     let default = Attrs::new()
         .family(&families)
-        .font_size(theme::CODE_FONT_SIZE)
+        .font_size(theme::code_font_size())
         .weight(theme::weight_body())
         .color(theme::fg())
         // As the editor sets its lines, so the text sits in the row where
         // the same line sits in the code.
-        .line_height(LineHeightValue::Pt(theme::CODE_LINE_HEIGHT));
+        .line_height(LineHeightValue::Pt(theme::code_line_height()));
     let mut attrs = AttrsList::new(default.clone());
     for span in spans {
         let (start, end) = (map(span.start.min(raw.len())), map(span.end.min(raw.len())));

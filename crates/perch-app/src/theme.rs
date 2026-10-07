@@ -582,13 +582,54 @@ pub fn syntax_color(capture: usize) -> Color {
         .map_or_else(syntax_default, |color| color())
 }
 
+/// `[display]` from config.toml, set once at startup before any window.
+static DISPLAY: std::sync::OnceLock<perch_github::config::DisplayConfig> =
+    std::sync::OnceLock::new();
+
+pub fn set_display(display: perch_github::config::DisplayConfig) {
+    let _ = DISPLAY.set(display);
+}
+
+fn display() -> perch_github::config::DisplayConfig {
+    DISPLAY.get().cloned().unwrap_or_default()
+}
+
+/// What every window is scaled by.
+pub fn zoom() -> f64 {
+    display().zoom
+}
+
+/// Where floem puts the red traffic light's top-left corner, in the
+/// window's unscaled points. The lights are native and do not zoom, so
+/// they are placed to sit where the zoomed strip draws its lane: 16px in,
+/// centred on the title strip's height. They are 14pt tall.
+pub fn traffic_lights_offset() -> (f64, f64) {
+    let zoom = zoom();
+    (16.0 * zoom.max(1.0), TITLEBAR_HEIGHT / 2.0 * zoom - 7.0)
+}
+
+/// The lane the lights sit in. Under a zoom below 1 the lights stay their
+/// size and 16pt in while the lane shrinks, so it widens back to the
+/// points they need.
+pub fn lights_lane_width() -> f64 {
+    let zoom = zoom();
+    ACTIVITY_RAIL_WIDTH * zoom.max(1.0) / zoom
+}
+
 /// Code metrics, as Codex sets its diffs: 12px at 1.8, which is 21.6 and
 /// rounds up to a whole pixel here because the editor needs a fixed line
-/// height to place the gutter.
-pub const CODE_FONT_SIZE: f32 = 12.0;
-pub const CODE_LINE_HEIGHT: f32 = 22.0;
-/// A fenced block in prose: Codex gives its code content the greater of
-/// 1.5em and 20px, which at the code size is 20px.
+/// height to place the gutter. `[display] code_font_size` sets the size,
+/// always whole, and the line follows at 1.8.
+pub fn code_font_size() -> f32 {
+    display().code_font_size
+}
+pub fn code_line_height() -> f32 {
+    (code_font_size() * 9.0 / 5.0).ceil()
+}
+/// A fenced block in prose, or code inline in the UI's own text: Codex
+/// gives its code content the greater of 1.5em and 20px, which at this
+/// size is 20px. The UI's text, so `code_font_size` leaves it be.
+pub const PROSE_CODE_FONT_SIZE: f32 = 12.0;
 pub const PROSE_CODE_LINE_HEIGHT: f32 = 20.0 / 12.0;
 /// SF Mono, by the name the system's copy is installed under.
 ///

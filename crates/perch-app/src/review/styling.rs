@@ -189,12 +189,12 @@ impl Styling for PerchStyling {
     }
 
     fn font_size(&self, _edid: EditorId, _line: usize) -> usize {
-        theme::CODE_FONT_SIZE as usize
+        theme::code_font_size() as usize
     }
 
     fn line_height(&self, _edid: EditorId, _line: usize) -> f32 {
         // Fixed, because the gutter places its numbers by multiplying this.
-        theme::CODE_LINE_HEIGHT
+        theme::code_line_height()
     }
 
     fn font_family(&self, _edid: EditorId, _line: usize) -> Cow<'_, [FamilyOwned]> {
@@ -273,7 +273,7 @@ impl Styling for PerchStyling {
                 x: x0,
                 y: 0.0,
                 width: Some(x1 - x0),
-                height: theme::CODE_LINE_HEIGHT as f64,
+                height: theme::code_line_height() as f64,
                 bg_color: Some(color),
                 under_line: None,
                 wave_line: None,

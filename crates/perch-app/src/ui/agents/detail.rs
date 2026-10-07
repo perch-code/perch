@@ -811,7 +811,7 @@ mod tests {
         let content = harness.get_content_rect(block);
         let want = code_height(
             &code,
-            theme::CODE_FONT_SIZE,
+            theme::PROSE_CODE_FONT_SIZE,
             theme::PROSE_CODE_LINE_HEIGHT,
             OverflowWrap::Normal,
             content.width(),

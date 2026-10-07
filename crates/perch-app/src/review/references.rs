@@ -530,7 +530,7 @@ fn location_row(
     Stack::horizontal((
         Label::derived(move || line.to_string()).style(|s| {
             s.font_family(theme::CODE_FONT_STACK.to_string())
-                .font_size(theme::CODE_FONT_SIZE)
+                .font_size(theme::code_font_size())
                 .color(theme::fg_subtle())
                 .width(theme::REFERENCES_LINE_WIDTH)
                 .flex_shrink(0.0_f32)
@@ -576,7 +576,7 @@ fn layout(text: &str, symbol: &str) -> (String, AttrsList) {
     let base = || {
         Attrs::new()
             .color(theme::fg())
-            .font_size(theme::CODE_FONT_SIZE)
+            .font_size(theme::code_font_size())
             .family(&code)
             .line_height(LineHeightValue::Pt(theme::REFERENCES_ROW_HEIGHT as f32))
     };

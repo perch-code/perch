@@ -374,6 +374,20 @@ max_memory_mb = 8192           # the default
 Past it, the kept servers are stopped, oldest first. The ones on show never
 are, so their own total can go over.
 
+`[display]` sets how big Perch draws, read when Perch starts:
+
+```toml
+[display]
+zoom = 1.0                     # the default; 0.75 to 2.0
+code_font_size = 12            # the default; 8 to 32
+```
+
+`zoom` scales the whole window: text, code, icons and spacing. On a large
+monitor, 1.25 is the same layout a quarter bigger. `code_font_size` is the
+code in Code, sticky headers, hovers and references, before the zoom; the
+line height follows it. The UI's own text, and code inside a comment or an
+answer, change only with `zoom`.
+
 rust-analyzer and jdtls run a checkout's own code as they load it:
 rust-analyzer its build scripts and proc macros, following the checkout's
 `.cargo/config.toml` and `rust-toolchain.toml`, and jdtls its Gradle or Maven

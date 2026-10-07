@@ -1143,7 +1143,7 @@ fn token_help(state: AppState) -> impl IntoView {
 fn code_line(text: &'static str) -> impl IntoView {
     Label::derived(move || text.to_string()).style(|s| {
         s.font_family(theme::CODE_FONT_STACK.to_string())
-            .font_size(theme::CODE_FONT_SIZE)
+            .font_size(theme::PROSE_CODE_FONT_SIZE)
             .color(theme::fg())
             .background(theme::canvas_subtle())
             .border(1.0)

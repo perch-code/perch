@@ -28,6 +28,9 @@ pub struct Config {
     /// `[lsp]`: the language servers Perch runs.
     #[serde(default)]
     pub lsp: LspConfig,
+    /// `[display]`: how big Perch draws. Read at startup.
+    #[serde(default)]
+    pub display: DisplayConfig,
     /// The old `[[project]]` key. Read only so `load` can refuse the file
     /// by name: with no field for it, toml would drop the table without a
     /// word and the reader would see an empty sidebar and no reason.
@@ -238,6 +241,78 @@ impl Default for LspConfig {
         Self {
             max_memory_mb: default_max_memory_mb(),
         }
+    }
+}
+
+/// `[display]`: how big Perch draws, as an editor sets a window zoom and
+/// a code font size apart.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct DisplayConfig {
+    /// Everything in the window, text, code and spacing, times this.
+    #[serde(default = "default_zoom")]
+    pub zoom: f64,
+    /// The code font, in points before `zoom`. The UI's own text keeps
+    /// its sizes; only `zoom` moves those.
+    #[serde(default = "default_code_font_size")]
+    pub code_font_size: f32,
+}
+
+pub const ZOOM_RANGE: std::ops::RangeInclusive<f64> = 0.75..=2.0;
+pub const CODE_FONT_SIZE_RANGE: std::ops::RangeInclusive<f32> = 8.0..=32.0;
+
+fn default_zoom() -> f64 {
+    1.0
+}
+fn default_code_font_size() -> f32 {
+    12.0
+}
+
+impl Default for DisplayConfig {
+    fn default() -> Self {
+        Self {
+            zoom: default_zoom(),
+            code_font_size: default_code_font_size(),
+        }
+    }
+}
+
+impl DisplayConfig {
+    /// Hold each setting to what draws: a zoom in range, and a code size
+    /// in range and whole, since the editor lays code out at a whole
+    /// size. Says what it changed, one line each.
+    fn keep_in_range(&mut self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let zoom = if self.zoom.is_finite() {
+            self.zoom.clamp(*ZOOM_RANGE.start(), *ZOOM_RANGE.end())
+        } else {
+            default_zoom()
+        };
+        if zoom != self.zoom {
+            warnings.push(format!(
+                "config.toml: [display] zoom = {} was read as {zoom}; it goes from {} to {}",
+                self.zoom,
+                ZOOM_RANGE.start(),
+                ZOOM_RANGE.end()
+            ));
+            self.zoom = zoom;
+        }
+        let size = if self.code_font_size.is_finite() {
+            self.code_font_size
+                .round()
+                .clamp(*CODE_FONT_SIZE_RANGE.start(), *CODE_FONT_SIZE_RANGE.end())
+        } else {
+            default_code_font_size()
+        };
+        if size != self.code_font_size {
+            warnings.push(format!(
+                "config.toml: [display] code_font_size = {} was read as {size}; it is a whole size from {} to {}",
+                self.code_font_size,
+                CODE_FONT_SIZE_RANGE.start(),
+                CODE_FONT_SIZE_RANGE.end()
+            ));
+            self.code_font_size = size;
+        }
+        warnings
     }
 }
 
@@ -757,6 +832,8 @@ impl Config {
             return Ok(refused);
         }
         c.keep_well_formed_repos();
+        let display = c.display.keep_in_range();
+        c.warnings.extend(display);
         if c.work.approvals == Approvals::Never {
             c.work.approvals = Approvals::Auto;
             c.warnings.push(
@@ -865,6 +942,7 @@ impl Config {
             repo: Vec::new(),
             work: WorkDefaults::default(),
             lsp: LspConfig::default(),
+            display: DisplayConfig::default(),
             project: Vec::new(),
             warnings: Vec::new(),
         }
@@ -1108,6 +1186,31 @@ network = ["index.crates.io"]
         assert_eq!(Config::fallback().lsp.max_memory_mb, 8192);
         let c: Config = toml::from_str("[lsp]\nmax_memory_mb = 4096").unwrap();
         assert_eq!(c.lsp.max_memory_mb, 4096);
+    }
+
+    #[test]
+    fn display_defaults_and_overrides() {
+        let c = Config::parse("").unwrap();
+        assert_eq!(c.display, DisplayConfig::default());
+        assert_eq!((c.display.zoom, c.display.code_font_size), (1.0, 12.0));
+        let c = Config::parse("[display]\nzoom = 1.25\ncode_font_size = 14").unwrap();
+        assert_eq!((c.display.zoom, c.display.code_font_size), (1.25, 14.0));
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+    }
+
+    #[test]
+    fn display_settings_out_of_range_are_held_to_it_with_a_warning() {
+        let c = Config::parse("[display]\nzoom = 5.0\ncode_font_size = 13.4").unwrap();
+        assert_eq!((c.display.zoom, c.display.code_font_size), (2.0, 13.0));
+        assert_eq!(c.warnings.len(), 2, "{:?}", c.warnings);
+        assert!(
+            c.warnings[0].contains("zoom = 5 was read as 2"),
+            "{}",
+            c.warnings[0]
+        );
+        let c = Config::parse("[display]\ncode_font_size = 4").unwrap();
+        assert_eq!(c.display.code_font_size, 8.0);
+        assert_eq!(c.warnings.len(), 1, "{:?}", c.warnings);
     }
 
     #[test]

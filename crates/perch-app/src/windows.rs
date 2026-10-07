@@ -231,6 +231,7 @@ pub fn view(
         raise.style(|s| s.absolute()),
     ))
     .style(|s| s.size_full())
+    .window_scale(crate::theme::zoom)
     .on_event_cont(
         floem::event::listener::WindowResized,
         move |_, size: &Size| {
@@ -456,11 +457,11 @@ pub fn config() -> (WindowConfig, Rect) {
             // here and places each next one 6px after the previous, at
             // macOS's 14pt width, so the three span 54px. The Codex-shaped
             // navigation leaves 16px at the window edge and centres the
-            // lights in its 56px title strip.
+            // lights in its 56px title strip, both zoomed.
             mac.full_size_content_view(true)
                 .transparent_title_bar(true)
                 .hide_title(true)
-                .traffic_lights_offset((16.0, 21.0))
+                .traffic_lights_offset(crate::theme::traffic_lights_offset())
         });
     (config, frame)
 }

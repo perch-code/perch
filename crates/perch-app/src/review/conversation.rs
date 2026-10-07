@@ -182,7 +182,7 @@ pub fn view(
                 .conversation_page
                 .get_untracked()
                 .map_or(0.0, |id| id.get_content_rect_local().height());
-            (height - theme::CODE_LINE_HEIGHT as f64).max(0.0)
+            (height - theme::code_line_height() as f64).max(0.0)
         };
         let y = match paging {
             Paging::Up => -page(),
@@ -3197,7 +3197,8 @@ mod tests {
         harness.rebuild();
         harness.paint();
         let scroll = find(harness.root_id(), "conversation").unwrap();
-        let page = scroll.get_content_rect_local().height() - crate::theme::CODE_LINE_HEIGHT as f64;
+        let page =
+            scroll.get_content_rect_local().height() - crate::theme::code_line_height() as f64;
         let title = find(harness.root_id(), "conversation-title").unwrap();
         let top = title.get_visual_rect_no_clip().y0;
         harness.click(700.0, 300.0);
