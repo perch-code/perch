@@ -956,6 +956,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 .custom_style_class(|s: floem::views::scroll::ScrollCustomStyle| {
                     s.show_bars_when_idle(!crate::scrollers::overlaid())
                 })
+                .class(crate::scrollers::ToEdge, crate::scrollers::to_edge)
         })
 }
 

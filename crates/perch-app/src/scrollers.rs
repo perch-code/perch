@@ -56,3 +56,30 @@ pub fn watch(changed: ExtSendTrigger) {
 
 #[cfg(not(target_os = "macos"))]
 pub fn watch(_changed: ExtSendTrigger) {}
+
+floem::style_class!(
+    /// A scroll whose rows run to its right edge, as a list's highlight
+    /// does in a macOS sidebar. Its parent must stretch it, and nothing
+    /// may sit to its right: it reaches past its parent by the bar's
+    /// width.
+    pub ToEdge
+);
+
+/// A [`ToEdge`] scroll's style. floem keeps a gutter the bar's width at
+/// a scroll's right edge, which a selected row stops short of. While macOS
+/// overlays its bars there is no gutter to keep, so the scroll reaches
+/// past its parent by that width, which the edge then hides, and the bar
+/// is moved in by as much to stay where it was. Bars kept on screen keep
+/// their gutter, as they do in AppKit.
+pub fn to_edge(s: floem::style::Style) -> floem::style::Style {
+    use floem::style::{ScrollbarWidth, StyleProp};
+    use floem::views::scroll::VerticalInset;
+
+    // Nothing in the list is wider than the list.
+    let s = s.overflow_x(floem::taffy::Overflow::Hidden);
+    if !overlaid() {
+        return s;
+    }
+    let bar = ScrollbarWidth::default_value().0;
+    s.margin_right(-bar).set(VerticalInset, bar)
+}

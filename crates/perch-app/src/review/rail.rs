@@ -263,7 +263,10 @@ fn tree_list(
     )
     .style(|s| s.flex_col().width_full().padding_vert(4.0))
     .scroll()
-    .style(|s| s.size_full().min_height(0.0))
+    // Stretched across the rail rather than its full width, so a selected
+    // row can reach the window's edge under the bar.
+    .class(crate::scrollers::ToEdge)
+    .style(|s| s.flex_grow(1.0_f32).flex_basis(0.0).min_height(0.0))
 }
 
 fn tree_row(
@@ -904,6 +907,28 @@ mod tests {
         let top = find(harness.root_id(), "tree-row:src").unwrap();
         assert!(top.get_visual_rect_no_clip().y1 < viewport.y0);
         assert_eq!(state.scroll_to_row.get(), None);
+    }
+
+    /// The open file's highlight runs to the window's edge while macOS
+    /// overlays the bars, with no gutter kept for a bar that is not there;
+    /// kept bars keep theirs.
+    #[test]
+    fn the_open_files_row_reaches_the_window_edge() {
+        use floem::style::{ScrollbarWidth, StyleProp};
+
+        let (mut harness, state) = app_harness();
+        state.navigate_to("src/a.rs", 0, 0);
+        harness.rebuild();
+        harness.paint();
+        let row = find(harness.root_id(), "tree-row:src/a.rs").expect("the row is in the tree");
+        let right = row.get_visual_rect().x1;
+        let bar = ScrollbarWidth::default_value().0;
+        let edge = if crate::scrollers::overlaid() {
+            1400.0
+        } else {
+            1400.0 - bar
+        };
+        assert_eq!(right, edge);
     }
 
     /// A run of lone directories is one row, and that row opens and
