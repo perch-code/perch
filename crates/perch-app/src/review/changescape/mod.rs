@@ -9,7 +9,9 @@
 pub mod blocks;
 pub mod navigate;
 pub mod rail;
+pub mod strip;
 pub mod svg;
+pub mod threads;
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -331,6 +333,7 @@ fn base_popover(state: ReviewState, backend: Rc<Backend>, page: Arc<Page>) -> im
 /// The selected section: each of its views, title, caption and blocks, one
 /// under the other.
 fn section_body(state: ReviewState, backend: Rc<Backend>, page: Arc<Page>) -> impl IntoView {
+    let counts = threads::counts(state);
     let selected = {
         let page = page.clone();
         Memo::new(move |_| selected_section(state, &page))
@@ -360,6 +363,7 @@ fn section_body(state: ReviewState, backend: Rc<Backend>, page: Arc<Page>) -> im
                 state,
                 backend: backend.clone(),
                 page: page.clone(),
+                counts,
             };
             Stack::vertical((
                 heading,

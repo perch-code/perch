@@ -71,6 +71,7 @@ pub fn svg_block(cx: Ctx, svg: Svg) -> AnyView {
         zoom,
         painted: Size::ZERO,
     };
+    let marks = badges(&cx, &hot, zoom);
     let (move_hot, down_hot, click_hot) = (hot.clone(), hot.clone(), hot);
     let pressed: RwSignal<Option<usize>> = RwSignal::new(None);
     let picture = picture
@@ -102,34 +103,60 @@ pub fn svg_block(cx: Ctx, svg: Svg) -> AnyView {
                     s.cursor(floem::style::CursorStyle::Pointer)
                 })
         });
-    let scroller = Container::new(picture)
-        .style(|s| s.padding(12.0).background(CARD))
-        .scroll()
-        .on_event_stop(
-            LayoutChanged::listener(),
-            move |_,
-                  LayoutChanged {
-                      new_content_box, ..
-                  }| {
-                if zoom.get_untracked().is_none() && natural.width > 0.0 {
-                    let room = new_content_box.size().width - 24.0;
-                    if room > 0.0 {
-                        zoom.set(Some((room / natural.width).clamp(ZOOM_MIN, 1.5)));
-                    }
+    let scroller = Container::new(
+        Stack::vertical((picture, marks)).style(|s| s.position(floem::style::Position::Relative)),
+    )
+    .style(|s| s.padding(12.0).background(CARD))
+    .scroll()
+    .on_event_stop(
+        LayoutChanged::listener(),
+        move |_,
+              LayoutChanged {
+                  new_content_box, ..
+              }| {
+            if zoom.get_untracked().is_none() && natural.width > 0.0 {
+                let room = new_content_box.size().width - 24.0;
+                if room > 0.0 {
+                    zoom.set(Some((room / natural.width).clamp(ZOOM_MIN, 1.5)));
                 }
-            },
-        )
-        .style(|s| {
-            s.width_full()
-                .max_height(MAX_HEIGHT)
-                .background(CARD)
-                .border(1.0)
-                .border_color(theme::border_muted())
-                .border_radius(theme::RADIUS)
-        });
+            }
+        },
+    )
+    .style(|s| {
+        s.width_full()
+            .max_height(MAX_HEIGHT)
+            .background(CARD)
+            .border(1.0)
+            .border_color(theme::border_muted())
+            .border_radius(theme::RADIUS)
+    });
     Stack::vertical((zoom_bar(zoom, natural), scroller))
         .style(|s| s.flex_col().gap(4.0).width_full())
         .into_any()
+}
+
+/// Each hot node's badge of open threads, at the node's top right corner,
+/// moved with the zoom.
+fn badges(cx: &Ctx, hot: &[Hot], zoom: RwSignal<Option<f64>>) -> impl IntoView {
+    let marks: Vec<AnyView> = hot
+        .iter()
+        .map(|h| {
+            let rect = h.rect;
+            Container::new(cx.badge(&h.el))
+                .style(move |s| {
+                    let z = zoom.get().unwrap_or(1.0);
+                    s.position(floem::style::Position::Absolute)
+                        .inset_left(rect.x1 * z - 14.0)
+                        .inset_top(rect.y0 * z - 9.0)
+                })
+                .into_any()
+        })
+        .collect();
+    Stack::vertical_from_iter(marks).style(|s| {
+        s.position(floem::style::Position::Absolute)
+            .inset_left(0.0)
+            .inset_top(0.0)
+    })
 }
 
 /// Smaller, the block's width, larger.

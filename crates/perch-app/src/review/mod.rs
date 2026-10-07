@@ -279,7 +279,13 @@ fn item_view(
                     .debug_name("files failed")
                     .into_any()
                 } else if code {
-                    editor::editor_pane(app, state, backend.clone(), open_file.clone()).into_any()
+                    Stack::vertical((
+                        changescape::strip::code_strip(state, backend.clone()),
+                        editor::editor_pane(app, state, backend.clone(), open_file.clone())
+                            .style(|s| s.flex_grow(1.0_f32).min_height(0.0)),
+                    ))
+                    .style(|s| s.size_full().flex_col().min_height(0.0))
+                    .into_any()
                 } else if changescape {
                     changescape::view(app, state, backend.clone()).into_any()
                 } else {

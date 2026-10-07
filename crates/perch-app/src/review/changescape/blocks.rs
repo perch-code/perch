@@ -27,6 +27,20 @@ pub struct Ctx {
     pub state: ReviewState,
     pub backend: Rc<Backend>,
     pub page: Arc<Page>,
+    /// The open review threads on each element.
+    pub counts: floem::reactive::Memo<Arc<super::threads::Counts>>,
+}
+
+impl Ctx {
+    /// The badge of an element's open threads.
+    pub fn badge(&self, el: &str) -> impl IntoView {
+        super::threads::badge(
+            self.state,
+            self.backend.clone(),
+            self.counts,
+            el.to_string(),
+        )
+    }
 }
 
 impl Ctx {
@@ -326,19 +340,29 @@ fn table_block(cx: &Ctx, table: &Table) -> impl IntoView {
             })
             .collect(),
     );
-    let header = Stack::horizontal_from_iter(columns.iter().map(|column| {
-        let column = column.clone();
-        let right = column.kind == "num";
-        Label::new(column.label.clone())
-            .style(move |s| {
-                column_style(s, &column)
-                    .font_size(theme::TEXT_SECTION)
-                    .font_weight(theme::weight_emphasis())
-                    .color(theme::fg_muted())
-                    .apply_if(right, |s| s.justify_end())
+    let badges = table.rows.iter().any(|row| row.el.is_some());
+    let header = Stack::horizontal_from_iter(
+        columns
+            .iter()
+            .map(|column| {
+                let column = column.clone();
+                let right = column.kind == "num";
+                Label::new(column.label.clone())
+                    .style(move |s| {
+                        column_style(s, &column)
+                            .font_size(theme::TEXT_SECTION)
+                            .font_weight(theme::weight_emphasis())
+                            .color(theme::fg_muted())
+                            .apply_if(right, |s| s.justify_end())
+                    })
+                    .into_any()
             })
-            .into_any()
-    }))
+            .chain(badges.then(|| {
+                Empty::new()
+                    .style(|s| s.width(BADGE_SLOT).flex_shrink(0.0_f32))
+                    .into_any()
+            })),
+    )
     .style(|s| {
         s.width_full()
             .padding_vert(6.0)
@@ -348,7 +372,7 @@ fn table_block(cx: &Ctx, table: &Table) -> impl IntoView {
     let rows: Vec<AnyView> = table
         .rows
         .iter()
-        .map(|row| table_row(cx, &columns, &maxima, row).into_any())
+        .map(|row| table_row(cx, &columns, &maxima, row, badges).into_any())
         .collect();
     Stack::vertical((
         header,
@@ -357,14 +381,18 @@ fn table_block(cx: &Ctx, table: &Table) -> impl IntoView {
     .style(|s| s.flex_col().width_full())
 }
 
+/// Room at a row's end for the badge of its threads.
+const BADGE_SLOT: f64 = 36.0;
+
 fn table_row(
     cx: &Ctx,
     columns: &Rc<Vec<Column>>,
     maxima: &Rc<Vec<f64>>,
     row: &Row,
+    badges: bool,
 ) -> impl IntoView {
     let dim = row.dim;
-    let cells: Vec<AnyView> = columns
+    let mut cells: Vec<AnyView> = columns
         .iter()
         .enumerate()
         .map(|(i, column)| {
@@ -372,6 +400,17 @@ fn table_row(
             table_cell(cx, column, maxima[i], cell, dim).into_any()
         })
         .collect();
+    if badges {
+        let badge = match &row.el {
+            Some(el) => cx.badge(el).into_any(),
+            None => Empty::new().into_any(),
+        };
+        cells.push(
+            Container::new(badge)
+                .style(|s| s.width(BADGE_SLOT).flex_shrink(0.0_f32).justify_end())
+                .into_any(),
+        );
+    }
     let line = Stack::horizontal_from_iter(cells);
     let line = match row.el.clone() {
         Some(el) => {

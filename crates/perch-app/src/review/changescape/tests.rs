@@ -266,3 +266,122 @@ fn a_hot_node_in_a_diagram_opens_its_element() {
     );
     assert_eq!(state.jump_caret.get(), Some((1210, 0)));
 }
+
+/// A review thread's first comment on `line` of the detector, on `side`.
+fn comment(id: u64, line: u64, side: &str) -> perch_github::ReviewComment {
+    serde_json::from_value(serde_json::json!({
+        "id": id, "pull_request_review_id": 1, "in_reply_to_id": null,
+        "user": "u", "body": "why?", "path": "src/dblect/uniqueness/detector.py",
+        "line": line, "original_line": line, "diff_hunk": "", "side": side,
+        "created_at": "2026-10-07T12:00:00Z", "updated_at": null, "html_url": ""
+    }))
+    .unwrap()
+}
+
+fn with_threads(state: ReviewState, comments: Vec<perch_github::ReviewComment>) {
+    state
+        .discussion
+        .set(Some(Arc::new(perch_github::Discussion {
+            review_comments: comments,
+            ..Default::default()
+        })));
+}
+
+#[test]
+fn a_thread_in_an_elements_lines_shows_a_badge_of_one() {
+    let root = cache_with_fixture(HEAD);
+    let (mut harness, state) = harness_with_cache(Some(root.path()));
+    // In `_uncovered_order_keys`, and on a line no element holds.
+    with_threads(
+        state,
+        vec![comment(1, 1215, "right"), comment(2, 5, "right")],
+    );
+    click(&mut harness, "Changescape pill");
+    click(&mut harness, "Changescape rail behavior");
+    let mut badges = Vec::new();
+    all_named(harness.root_id(), "Changescape thread badge", &mut badges);
+    let shown: Vec<f64> = badges
+        .iter()
+        .map(|b| b.get_visual_rect_no_clip().width())
+        .collect();
+    assert_eq!(shown.len(), 4, "one slot per row with an element");
+    assert!(shown[0] > 0.0, "the first row's function holds the thread");
+    assert!(shown[1..].iter().all(|w| *w == 0.0), "the others hold none");
+
+    // The badge goes to the thread.
+    let first = badges[0].get_visual_rect_no_clip();
+    click_at(&mut harness, first);
+    assert_eq!(state.tab.get(), ItemTab::Code);
+    assert_eq!(state.jump_caret.get(), Some((1214, 0)));
+}
+
+#[test]
+fn a_resolved_thread_and_a_reply_do_not_count() {
+    let root = cache_with_fixture(HEAD);
+    let found = crate::backend::changescape::find(root.path(), REPO, 812, HEAD);
+    let page = found.page.clone().unwrap();
+    let index = perch_changescape::LineIndex::new(&page);
+    let mut reply = comment(3, 1215, "right");
+    reply.in_reply_to_id = Some(1);
+    let discussion = perch_github::Discussion {
+        review_comments: vec![comment(1, 1215, "right"), reply, comment(2, 1182, "left")],
+        review_threads: vec![perch_github::ReviewThreadState {
+            node_id: String::new(),
+            root_comment_id: 1,
+            resolved: true,
+            outdated: false,
+            can_resolve: false,
+        }],
+        ..Default::default()
+    };
+    let counts = crate::review::changescape::threads::count(&index, &discussion);
+    assert_eq!(counts.0.len(), 1);
+    let (n, anchor) = counts
+        .of("fn:dblect.uniqueness.detector._order_is_bare")
+        .unwrap();
+    assert_eq!(
+        (*n, anchor.line),
+        (1, 1182),
+        "a base-side thread on the removed function"
+    );
+}
+
+#[test]
+fn the_caret_in_an_element_shows_the_code_strip_which_leads_back() {
+    let root = cache_with_fixture(HEAD);
+    let (mut harness, state) = harness_with_cache(Some(root.path()));
+    let path = "src/dblect/uniqueness/detector.py";
+    let text: String = (1..=1300).map(|n| format!("line {n}\n")).collect();
+    let file = crate::backend::build_loaded_file(
+        path.into(),
+        text,
+        String::new(),
+        None,
+        false,
+        perch_git::Scope::Branch,
+        String::new(),
+    );
+    state.scope.set(perch_git::Scope::Branch);
+    state.files.update(|files| {
+        files.insert(path.to_string(), Arc::new(file));
+    });
+    state.active.set(Some(path.to_string()));
+    state.show_tab(ItemTab::Code);
+    // Outside every element: no strip.
+    state.cursor_line.set(10);
+    harness.rebuild();
+    harness.paint();
+    assert!(named(harness.root_id(), "Changescape strip link").is_none());
+    // Line 1215, in `_uncovered_order_keys`.
+    state.cursor_line.set(1214);
+    harness.rebuild();
+    harness.paint();
+    assert!(rect(&harness, "Changescape code strip").height() > 0.0);
+    click(&mut harness, "Changescape strip link");
+    assert_eq!(state.tab.get(), ItemTab::Changescape);
+    assert_eq!(
+        state.changescape_section.get().as_deref(),
+        Some("overview"),
+        "the first section that shows it: the overview's paragraph links it"
+    );
+}
