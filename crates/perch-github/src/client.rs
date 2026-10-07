@@ -13,9 +13,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http::header::{
-    HeaderMap, HeaderValue, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, LINK,
+    HeaderMap, HeaderValue, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, LINK, LOCATION,
 };
 use http::StatusCode;
+use http_body_util::combinators::BoxBody;
 use http_body_util::BodyExt;
 use jiff::Timestamp;
 use octocrab::Octocrab;
@@ -71,6 +72,17 @@ const JUST_READ: Duration = Duration::from_secs(5);
 /// Asked beside every GraphQL query while the spend log is on, so the
 /// answer says what the query cost.
 const COST_FIELD: &str = "perch_cost: rateLimit { cost }";
+/// How many moves a write follows before it gives GitHub's redirect back.
+const WRITE_REDIRECTS: usize = 5;
+
+/// A request that sends a body, for [`GitHub::write`].
+#[derive(Debug, Clone, Copy)]
+enum Write {
+    Post,
+    Patch,
+    Put,
+    Delete,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -321,11 +333,7 @@ impl GitHub {
         let path = notification_thread_path(thread_id, "")?;
         let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
-        let response = self
-            .octo
-            ._patch(&path, None::<&()>)
-            .await
-            .map_err(map_octocrab_error)?;
+        let response = self.write(Write::Patch, &path, None::<&()>).await?;
         self.finish_mutation(
             response,
             &[StatusCode::RESET_CONTENT, StatusCode::NOT_MODIFIED],
@@ -339,11 +347,7 @@ impl GitHub {
         let path = notification_thread_path(thread_id, "")?;
         let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
-        let response = self
-            .octo
-            ._delete(&path, None::<&()>)
-            .await
-            .map_err(map_octocrab_error)?;
+        let response = self.write(Write::Delete, &path, None::<&()>).await?;
         self.finish_mutation(
             response,
             &[StatusCode::NO_CONTENT],
@@ -359,11 +363,7 @@ impl GitHub {
         let body = serde_json::json!({ "ignored": true });
         let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
-        let response = self
-            .octo
-            ._put(&path, Some(&body))
-            .await
-            .map_err(map_octocrab_error)?;
+        let response = self.write(Write::Put, &path, Some(&body)).await?;
         self.finish_mutation(
             response,
             &[StatusCode::OK, StatusCode::NOT_MODIFIED],
@@ -498,11 +498,7 @@ impl GitHub {
         };
         let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
-        let response = self
-            .octo
-            ._put(&path, Some(&body))
-            .await
-            .map_err(map_octocrab_error)?;
+        let response = self.write(Write::Put, &path, Some(&body)).await?;
         let body = self
             .finish_response(response, &[StatusCode::OK], &format!("PUT {path}"))
             .await?;
@@ -531,10 +527,8 @@ impl GitHub {
         let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let response = self
-            .octo
-            ._patch(&path, Some(&Request { state: "closed" }))
-            .await
-            .map_err(map_octocrab_error)?;
+            .write(Write::Patch, &path, Some(&Request { state: "closed" }))
+            .await?;
         let body = self
             .finish_response(response, &[StatusCode::OK], &format!("PATCH {path}"))
             .await?;
@@ -693,11 +687,7 @@ impl GitHub {
         };
         let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
-        let response = self
-            .octo
-            ._post(&path, Some(&request))
-            .await
-            .map_err(map_octocrab_error)?;
+        let response = self.write(Write::Post, &path, Some(&request)).await?;
         let body = self
             .finish_response(response, &[StatusCode::OK], &format!("POST {path}"))
             .await?;
@@ -815,11 +805,7 @@ impl GitHub {
         let path = format!("/repos/{owner}/{name}/pulls/{number}/comments");
         let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
-        let response = self
-            .octo
-            ._post(&path, Some(request))
-            .await
-            .map_err(map_octocrab_error)?;
+        let response = self.write(Write::Post, &path, Some(request)).await?;
         let body = self
             .finish_response(response, &[StatusCode::CREATED], &format!("POST {path}"))
             .await?;
@@ -857,10 +843,8 @@ impl GitHub {
         let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let response = self
-            .octo
-            ._post(&path, Some(&Request { body }))
-            .await
-            .map_err(map_octocrab_error)?;
+            .write(Write::Post, &path, Some(&Request { body }))
+            .await?;
         let body = self
             .finish_response(response, &[StatusCode::CREATED], &format!("POST {path}"))
             .await?;
@@ -912,8 +896,8 @@ impl GitHub {
         let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let response = self
-            .octo
-            ._post(
+            .write(
+                Write::Post,
                 &path,
                 Some(&Request {
                     title,
@@ -921,8 +905,7 @@ impl GitHub {
                     labels,
                 }),
             )
-            .await
-            .map_err(map_octocrab_error)?;
+            .await?;
         let body = self
             .finish_response(response, &[StatusCode::CREATED], &format!("POST {path}"))
             .await?;
@@ -1651,11 +1634,7 @@ impl GitHub {
         };
         let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
-        let response = self
-            .octo
-            ._patch(&path, Some(&request))
-            .await
-            .map_err(map_octocrab_error)?;
+        let response = self.write(Write::Patch, &path, Some(&request)).await?;
         let body = self
             .finish_response(response, &[StatusCode::OK], &format!("PATCH {path}"))
             .await?;
@@ -1744,13 +1723,13 @@ impl GitHub {
         let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let (response, method, expected) = if assign {
-            let response = self.octo._post(&path, Some(&request)).await;
+            let response = self.write(Write::Post, &path, Some(&request)).await;
             (response, "POST", StatusCode::CREATED)
         } else {
-            let response = self.octo._delete(&path, Some(&request)).await;
+            let response = self.write(Write::Delete, &path, Some(&request)).await;
             (response, "DELETE", StatusCode::OK)
         };
-        let response = response.map_err(map_octocrab_error)?;
+        let response = response?;
         let body = self
             .finish_response(
                 response,
@@ -2110,11 +2089,7 @@ impl GitHub {
         };
         let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
-        let response = self
-            .octo
-            ._post(&path, Some(&request))
-            .await
-            .map_err(map_octocrab_error)?;
+        let response = self.write(Write::Post, &path, Some(&request)).await?;
         let body = self
             .finish_response(response, &[StatusCode::CREATED], &format!("POST {path}"))
             .await?;
@@ -2414,6 +2389,46 @@ impl GitHub {
         let error = classify(status, remaining, reset, retry_after, body);
         self.remember_rate_limit(&error);
         Err(error)
+    }
+
+    /// Send a write, following GitHub to a repository's new home. A
+    /// repository that moved or was renamed answers its old name with a
+    /// redirect, which octocrab follows for a read but not for a write,
+    /// as it keeps no copy of the body to send again: an issue filed on
+    /// the old name came back as GitHub's 307.
+    async fn write<B: serde::Serialize + ?Sized>(
+        &self,
+        verb: Write,
+        path: &str,
+        body: Option<&B>,
+    ) -> Result<http::Response<BoxBody<Bytes, octocrab::Error>>, Error> {
+        let mut uri = path.to_string();
+        let mut hops = 0;
+        loop {
+            let response = match verb {
+                Write::Post => self.octo._post(uri.as_str(), body).await,
+                Write::Patch => self.octo._patch(uri.as_str(), body).await,
+                Write::Put => self.octo._put(uri.as_str(), body).await,
+                Write::Delete => self.octo._delete(uri.as_str(), body).await,
+            }
+            .map_err(map_octocrab_error)?;
+            let moved = matches!(
+                response.status(),
+                StatusCode::TEMPORARY_REDIRECT | StatusCode::PERMANENT_REDIRECT
+            );
+            let location = response
+                .headers()
+                .get(LOCATION)
+                .and_then(|value| value.to_str().ok());
+            match location {
+                Some(location) if moved && hops < WRITE_REDIRECTS => {
+                    tracing::info!(from = %uri, to = %location, "GitHub moved a write");
+                    uri = location.to_string();
+                    hops += 1;
+                }
+                _ => return Ok(response),
+            }
+        }
     }
 
     /// A place among the requests in flight, held until the response is

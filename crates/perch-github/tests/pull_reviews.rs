@@ -15,6 +15,7 @@ struct Request {
 
 struct Response {
     status: &'static str,
+    location: Option<&'static str>,
     body: String,
 }
 
@@ -22,7 +23,19 @@ impl Response {
     fn new(status: &'static str, body: impl Into<String>) -> Self {
         Self {
             status,
+            location: None,
             body: body.into(),
+        }
+    }
+
+    /// GitHub's answer to a write on a repository's old name.
+    fn moved(location: &'static str) -> Self {
+        Self {
+            location: Some(location),
+            ..Self::new(
+                "307 Temporary Redirect",
+                r#"{"message":"Moved Permanently"}"#,
+            )
         }
     }
 }
@@ -60,8 +73,12 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
 }
 
 fn respond(stream: &mut TcpStream, response: Response) {
+    let location = response
+        .location
+        .map(|location| format!("Location: {location}\r\n"))
+        .unwrap_or_default();
     let wire = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\n{location}Content-Type: application/json\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{body}",
         status = response.status,
         length = response.body.len(),
         body = response.body,
@@ -491,6 +508,39 @@ async fn an_issue_opens_with_its_title_and_body_and_decodes_the_issue() {
         json,
         serde_json::json!({ "title": "The manifest races", "body": "Two writers." })
     );
+}
+
+#[tokio::test]
+async fn an_issue_on_a_moved_repository_follows_it_with_its_body() {
+    let issue = serde_json::json!({
+        "number": 19,
+        "node_id": "I_19",
+        "title": "Update the URL",
+        "body": "Moved.",
+        "state": "open",
+        "user": { "login": "reader", "avatar_url": "https://avatars/reader" },
+        "comments": 0,
+        "created_at": "2026-10-07T10:00:00Z",
+        "updated_at": "2026-10-07T10:00:00Z",
+    });
+    let (base, requests) = spawn(vec![
+        Response::moved("/repositories/1391403381/issues"),
+        Response::new("201 Created", issue.to_string()),
+    ]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let issue = github
+        .create_issue("old/perch", "Update the URL", "Moved.")
+        .await
+        .unwrap();
+    assert_eq!(issue.number, 19);
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].path, "/repos/old/perch/issues");
+    assert_eq!(requests[1].method, "POST");
+    assert_eq!(requests[1].path, "/repositories/1391403381/issues");
+    assert_eq!(requests[1].body, requests[0].body);
 }
 
 #[tokio::test]
