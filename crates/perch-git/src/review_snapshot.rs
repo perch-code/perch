@@ -94,7 +94,12 @@ pub struct SnapshotCapture {
     pub source_checkout: PathBuf,
     pub source_repository: String,
     pub branch_label: String,
+    /// The base as the reader picked it, which the review is labelled
+    /// with.
     pub requested_base: String,
+    /// The revision `requested_base` is read from. A pull request's base
+    /// in Perch's clone is a ref of Perch's own, not a branch of its name.
+    pub base_rev: String,
     /// Review the uncommitted work too, tracked and untracked, as a commit
     /// over `HEAD`. A clean worktree is reviewed at `HEAD` either way.
     pub include_worktree: bool,
@@ -630,7 +635,7 @@ impl ReviewSnapshotStore {
         source: &Path,
         request: &SnapshotCapture,
     ) -> Result<ResolvedReviewRange, SnapshotError> {
-        let base_spec = format!("{}^{{commit}}", request.requested_base);
+        let base_spec = format!("{}^{{commit}}", request.base_rev);
         let base_tip = self.resolve_commit(source, &base_spec).await?;
         let dirty = !self
             .git
@@ -1854,6 +1859,7 @@ mod tests {
             source_repository: "local/test".into(),
             branch_label: "feature".into(),
             requested_base: "main".into(),
+            base_rev: "main".into(),
             include_worktree: false,
         }
     }

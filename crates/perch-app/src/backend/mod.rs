@@ -28444,6 +28444,7 @@ read eof || true
                 source_repository: "a/b".into(),
                 branch_label: "feature".into(),
                 requested_base: "main".into(),
+                base_rev: "main".into(),
                 include_worktree: false,
             })
             .await
@@ -28532,6 +28533,91 @@ read eof || true
             !drafts(&ctx, &item.id, &snapshot).await,
             "a closed pull request takes no review"
         );
+    }
+
+    /// A stacked pull request's base is a branch Perch's clone may never
+    /// have had: the open fetched it into `refs/perch/base/<n>` only. The
+    /// review offers it under its own name and reads it from there, as the
+    /// diff does, even over a stale branch of that name.
+    #[tokio::test]
+    async fn a_review_reads_a_pull_requests_base_from_the_ref_its_open_fetched() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("main.rs"), "main\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "main"]);
+        git(&repo, &["checkout", "-q", "-b", "stack"]);
+        std::fs::write(repo.join("stack.rs"), "stack\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "stack"]);
+        git(&repo, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(repo.join("feature.rs"), "feature\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "feature"]);
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["update-ref", "refs/perch/base/7", "stack"]);
+        git(&repo, &["branch", "-q", "-D", "stack"]);
+
+        let mut pull = pull_request(7);
+        pull.base_ref = "stack".into();
+        let mut item = Item::new("a/b", Timestamp::now());
+        item.subject = Some(ItemSubject::PullRequest(pull));
+        item.checkout = Some(ItemCheckout {
+            branch: "feature".into(),
+            base_ref: "stack".into(),
+            head_sha: head,
+            path: repo.clone(),
+            owned: true,
+            ..root_checkout("feature")
+        });
+        ctx.with_cache(|c| c.insert_item(&item)).unwrap().unwrap();
+        let checkout = item.checkout.as_ref().unwrap();
+
+        let (bases, ..) = reviews::dashboard(&ctx, &item.id).await.unwrap();
+        assert_eq!(
+            bases.first().map(String::as_str),
+            Some("stack"),
+            "{bases:?}"
+        );
+        let rev = reviews::base_rev(&ctx, &item, checkout, "stack").await;
+        assert_eq!(rev.as_deref(), Some("refs/perch/base/7"));
+        let snapshot = match ctx
+            .review_snapshots
+            .capture(perch_git::SnapshotCapture {
+                snapshot_id: "s1".into(),
+                source_checkout: repo.clone(),
+                source_repository: "a/b".into(),
+                branch_label: "feature".into(),
+                requested_base: "stack".into(),
+                base_rev: rev.unwrap(),
+                include_worktree: false,
+            })
+            .await
+            .unwrap()
+        {
+            perch_git::CaptureOutcome::Captured(snapshot) => snapshot,
+            perch_git::CaptureOutcome::Empty(range) => panic!("nothing to review: {range:?}"),
+        };
+        let files: Vec<_> = snapshot
+            .manifest
+            .files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
+        assert_eq!(files, ["feature.rs"]);
+        assert_eq!(snapshot.manifest.range.requested_base, "stack");
+
+        // A branch of the base's name that the clone left behind is not
+        // the base the pull request has.
+        git(&repo, &["branch", "-q", "stack", "main"]);
+        let rev = reviews::base_rev(&ctx, &item, checkout, "stack").await;
+        assert_eq!(rev.as_deref(), Some("refs/perch/base/7"));
+        // Any other base is read as named.
+        let rev = reviews::base_rev(&ctx, &item, checkout, "main").await;
+        assert_eq!(rev.as_deref(), Some("main"));
     }
 
     /// A root on `main` with a bare `origin` that has `main`, and a

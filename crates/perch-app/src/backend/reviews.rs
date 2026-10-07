@@ -410,6 +410,12 @@ async fn start_inner(ctx: &Ctx, request: ReviewLaunchRequest) -> Result<(), Stri
         .filter(|checkout| checkout.on_disk && checkout.path.join(".git").exists())
         .ok_or_else(|| "That worktree is not available on disk".to_string())?;
 
+    // A base that resolves nowhere is passed on by name, for the capture
+    // to say so.
+    let base_rev = base_rev(ctx, &item, checkout, &request.base_ref)
+        .await
+        .unwrap_or_else(|| request.base_ref.clone());
+
     let group_id = perch_github::comments::new_id();
     let snapshot_id = perch_github::comments::new_id();
     let capturing = std::time::Instant::now();
@@ -421,6 +427,7 @@ async fn start_inner(ctx: &Ctx, request: ReviewLaunchRequest) -> Result<(), Stri
             source_repository: item.repo_full_name.clone(),
             branch_label: checkout.branch.clone(),
             requested_base: request.base_ref.clone(),
+            base_rev,
             include_worktree: request.include_uncommitted,
         })
         .await
@@ -1479,7 +1486,7 @@ async fn execute_attempt(
     }
 }
 
-async fn dashboard(
+pub(super) async fn dashboard(
     ctx: &Ctx,
     item_id: &str,
 ) -> Result<
@@ -1533,24 +1540,7 @@ async fn dashboard(
                 .into_iter()
                 .flatten()
                 {
-                    let commit = format!("{preferred}^{{commit}}");
-                    if ctx
-                        .preparer
-                        .git()
-                        .run(
-                            Some(&checkout.path),
-                            [
-                                "rev-parse",
-                                "--verify",
-                                "--quiet",
-                                "--end-of-options",
-                                &commit,
-                            ],
-                            GIT_QUERY_TIMEOUT,
-                        )
-                        .await
-                        .is_ok()
-                    {
+                    if base_rev(ctx, &item, checkout, preferred).await.is_some() {
                         refs.insert(preferred.to_string());
                     }
                 }
@@ -1594,6 +1584,49 @@ async fn dashboard(
         .map(|finding| finding_summary(ctx, finding))
         .collect::<Result<Vec<_>, _>>()?;
     Ok((base_refs, preferences, summaries, findings))
+}
+
+/// The revision a review of `item` against `base` reads its base from,
+/// or `None` when it resolves nowhere. The checkout's own base is found
+/// the way its diff finds it, so the two agree: in Perch's clone a pull
+/// request's base is the ref its open fetched, and a branch of that
+/// name, when the clone has one at all, is wherever the clone left it.
+/// Any other base is a ref the reader picked, read as named.
+pub(super) async fn base_rev(
+    ctx: &Ctx,
+    item: &perch_github::Item,
+    checkout: &perch_github::ItemCheckout,
+    base: &str,
+) -> Option<String> {
+    let mut revs = if base == checkout.base_ref {
+        super::base_revs_for(ctx, item).await
+    } else {
+        Vec::new()
+    };
+    revs.push(base.to_string());
+    for rev in revs {
+        let commit = format!("{rev}^{{commit}}");
+        let resolved = ctx
+            .preparer
+            .git()
+            .run(
+                Some(&checkout.path),
+                [
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "--end-of-options",
+                    &commit,
+                ],
+                GIT_QUERY_TIMEOUT,
+            )
+            .await
+            .is_ok();
+        if resolved {
+            return Some(rev);
+        }
+    }
+    None
 }
 
 fn validate_launch(ctx: &Ctx, request: &ReviewLaunchRequest) -> Result<(), String> {
