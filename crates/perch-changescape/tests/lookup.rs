@@ -161,9 +161,8 @@ fn unknown_blocks_and_fields_still_load() {
     let last = overview.blocks.last().unwrap();
     assert_eq!(last.kind, "hologram");
     assert!(matches!(last.body, BlockBody::Other));
-    // The view whose title is a number is dropped, and only it.
-    assert!(page.views.iter().all(|view| view.id != "broken"));
-    assert_eq!(page.views.len(), 4);
+    // A title that is a number reads as text.
+    assert_eq!(page.views.len(), 5);
 }
 
 #[test]

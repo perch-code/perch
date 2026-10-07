@@ -434,7 +434,7 @@ fn row_style(s: floem::style::Style) -> floem::style::Style {
         .border_color(theme::border_muted())
 }
 
-fn table_cell(cx: &Ctx, column: &Column, max: f64, cell: Cell, dim: bool) -> impl IntoView {
+fn table_cell(cx: &Ctx, column: &Column, max: f64, cell: Cell, dim: bool) -> AnyView {
     let column = column.clone();
     let kind = column.kind.clone();
     let ink = move |status: &str| {
@@ -450,6 +450,28 @@ fn table_cell(cx: &Ctx, column: &Column, max: f64, cell: Cell, dim: bool) -> imp
         }
     };
     let body: AnyView = match kind.as_str() {
+        _ if !cell.items.is_empty() => {
+            let links: Vec<AnyView> = cell
+                .items
+                .iter()
+                .map(|item| {
+                    let one = Column {
+                        kind: "mono".into(),
+                        ..column.clone()
+                    };
+                    Container::new(table_cell(cx, &one, max, item.clone(), dim))
+                        .style(|s| s.flex_shrink(0.0_f32))
+                        .into_any()
+                })
+                .collect();
+            Stack::horizontal_from_iter(links)
+                .style(|s| {
+                    s.gap(8.0)
+                        .flex_wrap(floem::style::FlexWrap::Wrap)
+                        .min_width(0.0)
+                })
+                .into_any()
+        }
         "bar" => {
             let share = match cell.value {
                 Some(value) if max > 0.0 => (value / max).clamp(0.0, 1.0),
@@ -525,11 +547,13 @@ fn table_cell(cx: &Ctx, column: &Column, max: f64, cell: Cell, dim: bool) -> imp
         }
     };
     let right = kind == "num";
-    Container::new(body).style(move |s| {
-        column_style(s, &column)
-            .items_center()
-            .apply_if(right, |s| s.justify_end())
-    })
+    Container::new(body)
+        .style(move |s| {
+            column_style(s, &column)
+                .items_center()
+                .apply_if(right, |s| s.justify_end())
+        })
+        .into_any()
 }
 
 /// A block Perch does not draw: one line, and the browser page.

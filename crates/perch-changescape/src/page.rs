@@ -17,6 +17,7 @@ use serde_json::Value;
 #[serde(default)]
 pub struct Page {
     pub schema: u32,
+    #[serde(deserialize_with = "text")]
     pub kind: String,
     pub meta: Meta,
     #[serde(deserialize_with = "lenient_vec")]
@@ -30,10 +31,14 @@ pub struct Page {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Meta {
+    #[serde(deserialize_with = "text")]
     pub key: String,
+    #[serde(deserialize_with = "text")]
     pub title: String,
+    #[serde(deserialize_with = "text")]
     pub repo: String,
     pub number: u64,
+    #[serde(deserialize_with = "text")]
     pub url: String,
     pub base: Side,
     pub head: Side,
@@ -44,7 +49,9 @@ pub struct Meta {
 #[serde(default)]
 pub struct Side {
     #[serde(rename = "ref")]
+    #[serde(deserialize_with = "text")]
     pub branch: String,
+    #[serde(deserialize_with = "text")]
     pub sha: String,
 }
 
@@ -53,12 +60,17 @@ pub struct Side {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Section {
+    #[serde(deserialize_with = "text")]
     pub id: String,
-    /// The label.
+    /// The label, `label` in the file.
+    #[serde(alias = "label", deserialize_with = "text")]
     pub t: String,
     /// The question the section answers.
+    #[serde(deserialize_with = "text")]
     pub q: String,
+    #[serde(deserialize_with = "text")]
     pub empty: String,
+    #[serde(deserialize_with = "text")]
     pub reason: String,
     /// The section's views, in order, when the file lists them. Without
     /// the list, the views are the ones whose `sec` is this section, in
@@ -69,13 +81,19 @@ pub struct Section {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct View {
+    #[serde(deserialize_with = "text")]
     pub id: String,
+    #[serde(deserialize_with = "text")]
     pub sec: String,
     /// The title.
+    #[serde(deserialize_with = "text")]
     pub t: String,
     /// The subtitle.
+    #[serde(deserialize_with = "text")]
     pub s: String,
+    #[serde(deserialize_with = "text")]
     pub q: String,
+    #[serde(deserialize_with = "text")]
     pub metric: String,
     /// The caption Changescape's narration wrote, if it ran.
     #[serde(deserialize_with = "lenient_option")]
@@ -89,12 +107,16 @@ pub struct View {
 #[serde(default)]
 pub struct Element {
     /// The title.
+    #[serde(deserialize_with = "text")]
     pub t: String,
     /// The kind, for example "function · dblect.sql.window_ties".
+    #[serde(deserialize_with = "text")]
     pub k: String,
     /// `added`, `removed`, `changed`, `moved` or `context`.
+    #[serde(deserialize_with = "text")]
     pub st: String,
     /// One line about what changed.
+    #[serde(deserialize_with = "text")]
     pub d: String,
     #[serde(deserialize_with = "lenient_vec")]
     pub refs: Vec<Ref>,
@@ -105,6 +127,7 @@ pub struct Element {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Ref {
+    #[serde(deserialize_with = "text")]
     pub f: String,
     #[serde(deserialize_with = "lenient_option")]
     pub base: Option<(u32, u32)>,
@@ -167,6 +190,7 @@ pub enum BlockBody {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Text {
+    #[serde(deserialize_with = "text")]
     pub text: String,
     pub el: Option<String>,
     #[serde(deserialize_with = "lenient_vec")]
@@ -176,6 +200,7 @@ pub struct Text {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Span {
+    #[serde(deserialize_with = "text")]
     pub text: String,
     pub el: Option<String>,
 }
@@ -193,8 +218,11 @@ pub struct Summary {
 pub struct SummaryItem {
     pub view: Option<String>,
     pub sec: Option<String>,
+    #[serde(deserialize_with = "text")]
     pub title: String,
+    #[serde(deserialize_with = "text")]
     pub metric: String,
+    #[serde(deserialize_with = "text")]
     pub text: String,
 }
 
@@ -210,9 +238,12 @@ pub struct Table {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Column {
+    #[serde(deserialize_with = "text")]
     pub key: String,
+    #[serde(deserialize_with = "text")]
     pub label: String,
     /// `text`, `mono`, `num`, `status`, `bar` or `refs`.
+    #[serde(deserialize_with = "text")]
     pub kind: String,
 }
 
@@ -238,6 +269,8 @@ pub struct Cell {
     pub side: Option<String>,
     pub file: Option<String>,
     pub line: Option<u32>,
+    /// A `refs` cell's entries, each its own cell.
+    pub items: Vec<Cell>,
 }
 
 impl<'de> Deserialize<'de> for Cell {
@@ -262,16 +295,20 @@ impl Cell {
                 text: b.to_string(),
                 ..Cell::default()
             },
-            // A `refs` cell: its entries' texts, joined.
-            Value::Array(items) => Cell {
-                text: items
-                    .iter()
-                    .map(|item| Cell::from_value(item).text)
-                    .filter(|text| !text.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                ..Cell::default()
-            },
+            // A `refs` cell: its entries, and their texts joined.
+            Value::Array(items) => {
+                let items: Vec<Cell> = items.iter().map(Cell::from_value).collect();
+                Cell {
+                    text: items
+                        .iter()
+                        .map(|item| item.text.as_str())
+                        .filter(|text| !text.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    items,
+                    ..Cell::default()
+                }
+            }
             Value::Object(map) => {
                 let str_of = |key: &str| map.get(key).and_then(Value::as_str).map(str::to_string);
                 let value = map
@@ -293,6 +330,7 @@ impl Cell {
                         .get("line")
                         .and_then(Value::as_u64)
                         .and_then(|n| u32::try_from(n).ok()),
+                    items: Vec::new(),
                 }
             }
             Value::Null => Cell::default(),
@@ -452,6 +490,15 @@ where
     })
 }
 
+/// Text, empty when the file has null, a number, or nothing there.
+fn text<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(match Value::deserialize(d)? {
+        Value::String(text) => text,
+        Value::Number(n) => n.to_string(),
+        _ => String::new(),
+    })
+}
+
 /// A value that reads as `None` when it is null or not what it should be.
 fn lenient_option<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
 where
@@ -506,9 +553,19 @@ mod tests {
     }
 
     #[test]
+    fn a_section_takes_its_label_and_a_null_reason() {
+        let section: Section = serde_json::from_str(
+            r#"{ "id": "overview", "label": "Overview", "reason": null, "views": ["overview"] }"#,
+        )
+        .unwrap();
+        assert_eq!(section.t, "Overview");
+        assert_eq!(section.reason, "");
+    }
+
+    #[test]
     fn a_bad_ref_drops_alone() {
         let element: Element = serde_json::from_str(
-            r#"{ "t": "f()", "refs": [ { "f": "a.py", "head": [1, 2] }, { "f": 7 } ] }"#,
+            r#"{ "t": "f()", "refs": [ { "f": "a.py", "head": [1, 2] }, 7 ] }"#,
         )
         .unwrap();
         assert_eq!(element.refs.len(), 1);
