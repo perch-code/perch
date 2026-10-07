@@ -73,6 +73,8 @@ fn entry(state: ReviewState, page: Arc<Page>, section: Section) -> impl IntoView
                 s.font_size(theme::TEXT_BADGE)
                     .color(theme::fg_subtle())
                     .selectable(false)
+                    .width_full()
+                    .min_width(0.0)
             }),
         ))
         .debug_name(debug)

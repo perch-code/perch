@@ -61,10 +61,10 @@ impl Shown {
 
     /// Whether the tab has anything to show: a page, a build running, or
     /// a failed build this Perch can try again.
+    /// Where this Perch can build one, every pull request has the tab,
+    /// which offers the build until there is a page.
     pub fn has_tab(&self) -> bool {
-        self.found.page.is_some()
-            || self.found.lookup.is_running()
-            || (matches!(self.found.lookup, Lookup::Failed(_)) && self.found.can_build)
+        self.found.page.is_some() || self.found.lookup.is_running() || self.found.can_build
     }
 
     /// The page is of an earlier head than the pull request's.
@@ -193,6 +193,8 @@ enum Body {
     Building,
     /// A failed build, and why.
     Failed(String),
+    /// No changescape yet: the build, offered.
+    Unbuilt,
     Nothing,
 }
 
@@ -215,6 +217,7 @@ fn body_of(state: ReviewState) -> Body {
         ),
         _ => match &shown.found.error {
             Some(error) => Body::Failed(error.clone()),
+            None if shown.found.can_build => Body::Unbuilt,
             None => Body::Nothing,
         },
     }
@@ -231,6 +234,7 @@ pub fn view(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
         move |body| match body {
             Body::Building => building(state).into_any(),
             Body::Failed(error) => failed(app, state, backend.clone(), error).into_any(),
+            Body::Unbuilt => unbuilt(app, state, backend.clone()).into_any(),
             Body::Nothing => Empty::new().into_any(),
             Body::Page(SamePage(page)) => Stack::vertical((
                 stale_banner(app, state, backend.clone()),
@@ -282,6 +286,65 @@ fn building(state: ReviewState) -> impl IntoView {
     .debug_name("Changescape building")
     .style(|s| {
         s.flex_col()
+            .gap(4.0)
+            .width(theme::CONVERSATION_WIDTH)
+            .max_width_full()
+            .padding(theme::CONVERSATION_PADDING)
+    })
+}
+
+/// A pull request with no changescape yet: what one is, and the button
+/// that builds it.
+fn unbuilt(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    Stack::vertical((
+        Label::new("No changescape yet").style(|s| {
+            s.font_size(theme::TEXT_SECTION_TITLE)
+                .font_weight(theme::weight_strong())
+                .color(theme::fg())
+        }),
+        Label::new(
+            "A changescape explains how this pull request changes the shape of the code: \
+             where it sits, what it moves, and what it does differently. Claude Code \
+             builds it with the Changescape skill in a few minutes.",
+        )
+        .style(|s| {
+            s.font_size(theme::TEXT_BODY)
+                .color(theme::fg_muted())
+                .line_height(theme::PROSE_LINE_HEIGHT)
+                .width_full()
+                .min_width(0.0)
+        }),
+        Container::new(Label::new("Build Changescape").style(|s| {
+            s.font_size(theme::TEXT_META)
+                .font_weight(theme::weight_emphasis())
+                .color(theme::canvas())
+                .selectable(false)
+        }))
+        .debug_name("Changescape build button")
+        .on_event_stop(el::Click, move |_, _| {
+            let item = state
+                .item
+                .with_untracked(|item| item.as_ref().map(|item| item.id.clone()));
+            if let Some(item) = item {
+                request_build(app, &backend, &item);
+            }
+        })
+        .style(|s| {
+            crate::ui::widgets::clickable(
+                s.margin_top(12.0)
+                    .padding_horiz(14.0)
+                    .height(32.0)
+                    .items_center()
+                    .border_radius(theme::RADIUS)
+                    .background(theme::fg()),
+            )
+            .hover(|s| s.background(theme::fg_muted()))
+        }),
+    ))
+    .debug_name("Changescape unbuilt")
+    .style(|s| {
+        s.flex_col()
+            .items_start()
             .gap(4.0)
             .width(theme::CONVERSATION_WIDTH)
             .max_width_full()
@@ -524,6 +587,7 @@ fn section_body(state: ReviewState, backend: Rc<Backend>, page: Arc<Page>) -> im
             else {
                 return Empty::new().into_any();
             };
+            let section_title = section.t.clone();
             let views: Vec<_> = page.section_views(section).into_iter().cloned().collect();
             let heading = Label::new(section.t.clone()).style(|s| {
                 s.font_size(theme::TEXT_PAGE_TITLE)
@@ -545,11 +609,10 @@ fn section_body(state: ReviewState, backend: Rc<Backend>, page: Arc<Page>) -> im
             Stack::vertical((
                 heading,
                 question,
-                Stack::vertical_from_iter(
-                    views
-                        .into_iter()
-                        .map(move |view| blocks::view(cx.clone(), view).into_any()),
-                )
+                Stack::vertical_from_iter(views.into_iter().map(move |view| {
+                    let titled = view.t != section_title;
+                    blocks::view(cx.clone(), view, titled).into_any()
+                }))
                 .style(|s| s.flex_col().gap(32.0).margin_top(24.0).width_full()),
             ))
             .debug_name(format!("Changescape section {}", section.id))

@@ -49,25 +49,27 @@ impl Ctx {
     }
 }
 
-pub fn view(cx: Ctx, view: View) -> impl IntoView {
+pub fn view(cx: Ctx, view: View, titled: bool) -> impl IntoView {
     let mut parts: Vec<AnyView> = Vec::new();
-    parts.push(
-        Stack::horizontal((
-            Label::new(view.t.clone()).style(|s| {
-                s.font_size(theme::TEXT_SECTION_TITLE)
-                    .font_weight(theme::weight_strong())
-                    .color(theme::fg())
-            }),
-            Label::new(view.metric.clone()).style(|s| {
-                s.font_size(theme::TEXT_META)
-                    .color(theme::fg_muted())
-                    .margin_left(10.0)
-            }),
-        ))
-        .style(|s| s.items_baseline())
-        .into_any(),
-    );
-    if !view.s.is_empty() {
+    if titled {
+        parts.push(
+            Stack::horizontal((
+                Label::new(view.t.clone()).style(|s| {
+                    s.font_size(theme::TEXT_SECTION_TITLE)
+                        .font_weight(theme::weight_strong())
+                        .color(theme::fg())
+                }),
+                Label::new(view.metric.clone()).style(|s| {
+                    s.font_size(theme::TEXT_META)
+                        .color(theme::fg_muted())
+                        .margin_left(10.0)
+                }),
+            ))
+            .style(|s| s.items_baseline())
+            .into_any(),
+        );
+    }
+    if titled && !view.s.is_empty() {
         parts.push(
             Label::new(view.s.clone())
                 .style(|s| s.font_size(theme::TEXT_META).color(theme::fg_muted()))
@@ -272,15 +274,25 @@ fn summary_block(cx: &Ctx, summary: &Summary) -> impl IntoView {
                         .width(160.0)
                         .flex_shrink(0.0_f32)
                 }),
-                Label::new(item.metric.clone()).style(|s| {
-                    s.font_size(theme::TEXT_META)
-                        .color(theme::fg_muted())
-                        .width(140.0)
-                        .flex_shrink(0.0_f32)
-                }),
-                Label::new(item.text.clone()).style(|s| {
-                    s.font_size(theme::TEXT_META)
-                        .color(theme::fg_muted())
+                Stack::vertical((
+                    Label::new(item.metric.clone()).style(|s| {
+                        s.font_size(theme::TEXT_META)
+                            .color(theme::fg_muted())
+                            .width_full()
+                            .min_width(0.0)
+                    }),
+                    Label::new(item.text.clone()).style(|s| {
+                        s.font_size(theme::TEXT_META)
+                            .color(theme::fg())
+                            .width_full()
+                            .min_width(0.0)
+                    }),
+                ))
+                .style(|s| {
+                    s.flex_col()
+                        .gap(2.0)
+                        .flex_grow(1.0_f32)
+                        .flex_basis(0.0)
                         .min_width(0.0)
                 }),
             ))
@@ -292,9 +304,9 @@ fn summary_block(cx: &Ctx, summary: &Summary) -> impl IntoView {
             })
             .style(|s| {
                 clickable(
-                    s.items_center()
+                    s.items_start()
                         .width_full()
-                        .height(theme::SUMMARY_ROW)
+                        .padding_vert(8.0)
                         .padding_horiz(8.0)
                         .border_radius(theme::RADIUS),
                 )
@@ -460,15 +472,17 @@ fn table_cell(cx: &Ctx, column: &Column, max: f64, cell: Cell, dim: bool) -> Any
                         ..column.clone()
                     };
                     Container::new(table_cell(cx, &one, max, item.clone(), dim))
-                        .style(|s| s.flex_shrink(0.0_f32))
+                        .style(|s| s.width_full().min_width(0.0))
                         .into_any()
                 })
                 .collect();
-            Stack::horizontal_from_iter(links)
+            Stack::vertical_from_iter(links)
                 .style(|s| {
-                    s.gap(8.0)
-                        .flex_wrap(floem::style::FlexWrap::Wrap)
+                    s.flex_col()
+                        .gap(2.0)
+                        .width_full()
                         .min_width(0.0)
+                        .padding_vert(4.0)
                 })
                 .into_any()
         }
@@ -530,7 +544,7 @@ fn table_cell(cx: &Ctx, column: &Column, max: f64, cell: Cell, dim: bool) -> Any
                     let cx = cx.clone();
                     Container::new(label)
                         .on_event_stop(el::Click, move |_, _| cx.open(&el))
-                        .style(|s| underlined_link(s).min_width(0.0))
+                        .style(|s| underlined_link(s).min_width(0.0).max_width_full())
                         .into_any()
                 }
                 (None, Some(file)) => {
@@ -539,7 +553,7 @@ fn table_cell(cx: &Ctx, column: &Column, max: f64, cell: Cell, dim: bool) -> Any
                         .on_event_stop(el::Click, move |_, _| {
                             navigate::open_file_line(state, &backend, &file, line)
                         })
-                        .style(|s| underlined_link(s).min_width(0.0))
+                        .style(|s| underlined_link(s).min_width(0.0).max_width_full())
                         .into_any()
                 }
                 (None, None) => label.into_any(),
