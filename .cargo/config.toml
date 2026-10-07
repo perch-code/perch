@@ -7,3 +7,7 @@
 # unwind: perch's __eh_frame went from over 16 MB to under 5 MB.
 [target.aarch64-apple-darwin]
 rustflags = ["-C", "force-unwind-tables=no"]
+
+# The same on an Intel Mac.
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "force-unwind-tables=no"]
