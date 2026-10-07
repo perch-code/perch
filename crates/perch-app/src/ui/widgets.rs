@@ -326,9 +326,18 @@ fn lay_out_every_line(editor: &floem::views::editor::Editor) {
 }
 
 /// An editor for prose, as a description or a review is typed: the
-/// placeholder while it is empty, no gutter, and every line laid out
-/// (`lay_out_every_line`). Given a token from `ReviewState::next_token`,
-/// it styles Markdown as it is typed.
+/// placeholder while it is empty, no gutter, every line laid out
+/// (`lay_out_every_line`), and lines as wide as the editor. Given a token
+/// from `ReviewState::next_token`, it styles Markdown as it is typed.
+///
+/// floem makes the lines as wide as the widest of them, and a wrapped
+/// line's width counts the space it breaks on, which hangs past the wrap
+/// edge. The lines came out a few points wider than the editor, which
+/// then scrolled sideways and drew a bar over the last line. They are
+/// held to the width of the scroll they sit in, as wide as they are
+/// when no line overhangs. A percentage would leave out the room taffy
+/// keeps there for a scrollbar, and with it the clicks along the right
+/// edge.
 pub(crate) fn prose_editor(
     text: impl Into<String>,
     placeholder: impl Into<String>,
@@ -347,7 +356,14 @@ pub(crate) fn prose_editor(
         None => editor,
     };
     lay_out_every_line(editor.editor());
-    editor
+    let parent = editor.editor().parent_size;
+    let room = floem::reactive::Memo::new(move |_| parent.with(|r| r.width()));
+    editor.style(move |s| {
+        let width = room.get();
+        s.class(floem::views::editor::view::EditorViewClass, move |s| {
+            s.width(width)
+        })
+    })
 }
 
 pub fn clickable(style: floem::style::Style) -> floem::style::Style {
@@ -1101,5 +1117,44 @@ mod tests {
             harness.rebuild();
             assert_eq!(shown(), picture);
         }
+    }
+
+    /// A box's wrapped lines are no wider than the box, so it never
+    /// scrolls sideways: a line's width counts the space it wraps on, and
+    /// a bar for a few points of it lay over the last line.
+    #[test]
+    fn a_box_of_wrapped_lines_does_not_scroll_sideways() {
+        use floem::headless::{HeadlessHarness, TestRoot};
+        use floem::views::Decorators;
+
+        let root = TestRoot::new();
+        let text = "Some benefits: It removes a dependency on the old loader, and it means \
+                    we wouldn't need to ingest one file at a time when the index is rebuilt \
+                    from scratch.\n\nOTOH it is slower to start, and the start is where \
+                    people notice it most of all.";
+        let editor = super::prose_editor(text, "", None)
+            .style(|s| s.size_full().font_size(crate::theme::TEXT_BODY));
+        let view = super::editor_box(editor, || (120.0, 120.0), true);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 300.0, 400.0);
+        for _ in 0..3 {
+            harness.rebuild();
+            harness.paint();
+        }
+
+        fn find(id: floem::ViewId, name: &str) -> Option<floem::ViewId> {
+            if id.debug_name() == name {
+                return Some(id);
+            }
+            id.children()
+                .into_iter()
+                .find_map(|child| find(child, name))
+        }
+        let lines = find(harness.root_id(), "Editor View").expect("the lines are drawn");
+        let scroll = lines.parent().expect("the lines scroll");
+        let (wide, room) = (
+            lines.get_layout_rect_local().width(),
+            scroll.get_content_rect_local().width(),
+        );
+        assert!(room > 0.0 && wide <= room, "lines {wide} wide in {room}");
     }
 }
