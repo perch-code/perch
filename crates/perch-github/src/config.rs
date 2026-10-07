@@ -31,6 +31,9 @@ pub struct Config {
     /// `[display]`: how big Perch draws. Read at startup.
     #[serde(default)]
     pub display: DisplayConfig,
+    /// `[changescape]`: the maps Changescape writes for pull requests.
+    #[serde(default)]
+    pub changescape: ChangescapeConfig,
     /// The old `[[project]]` key. Read only so `load` can refuse the file
     /// by name: with no field for it, toml would drop the table without a
     /// word and the reader would see an empty sidebar and no reason.
@@ -314,6 +317,46 @@ impl DisplayConfig {
         }
         warnings
     }
+}
+
+/// `[changescape]`: where Changescape keeps its maps, and whether Perch
+/// shows them at all.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ChangescapeConfig {
+    /// False hides every Changescape feature, even when maps exist.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// The cache root. `CHANGESCAPE_CACHE` comes ahead of it.
+    #[serde(default)]
+    pub cache: Option<String>,
+}
+
+impl Default for ChangescapeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cache: None,
+        }
+    }
+}
+
+impl ChangescapeConfig {
+    /// The cache root: `CHANGESCAPE_CACHE`, then `cache`, then
+    /// `~/.changescape/cache`.
+    pub fn cache_root(&self) -> PathBuf {
+        self.cache_root_with(std::env::var("CHANGESCAPE_CACHE").ok())
+    }
+
+    fn cache_root_with(&self, env: Option<String>) -> PathBuf {
+        let given = env
+            .filter(|path| !path.trim().is_empty())
+            .or_else(|| self.cache.clone().filter(|path| !path.trim().is_empty()));
+        expand_home(given.as_deref().unwrap_or("~/.changescape/cache"))
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// `[work]`: settings for new work in any repository.
@@ -943,6 +986,7 @@ impl Config {
             work: WorkDefaults::default(),
             lsp: LspConfig::default(),
             display: DisplayConfig::default(),
+            changescape: ChangescapeConfig::default(),
             project: Vec::new(),
             warnings: Vec::new(),
         }
@@ -984,6 +1028,26 @@ pub fn avatar_dir() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn changescape_defaults_on_and_orders_its_cache_root() {
+        let c = Config::parse("").unwrap();
+        assert!(c.changescape.enabled);
+        assert_eq!(
+            c.changescape.cache_root_with(None),
+            home_dir().join(".changescape/cache")
+        );
+        let c = Config::parse("[changescape]\nenabled = false\ncache = \"/srv/cs\"\n").unwrap();
+        assert!(!c.changescape.enabled);
+        assert_eq!(
+            c.changescape.cache_root_with(None),
+            PathBuf::from("/srv/cs")
+        );
+        assert_eq!(
+            c.changescape.cache_root_with(Some("/env/cs".into())),
+            PathBuf::from("/env/cs")
+        );
+    }
+
     use super::*;
 
     #[test]

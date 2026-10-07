@@ -30,6 +30,7 @@ mod windows;
 use floem::reactive::SignalWith;
 use floem::{Application, IntoView};
 
+mod changescape_cli;
 mod dump;
 mod scan_cli;
 mod scope_cli;
@@ -98,6 +99,12 @@ fn main() {
     // card, in the order the window shows them.
     if args.get(1).map(String::as_str) == Some("--timeline") {
         timeline_cli::run(&args[2..]);
+        return;
+    }
+    // What Perch finds of a pull request's Changescape: the build, its
+    // sections and their views, and the blocks by type.
+    if args.get(1).map(String::as_str) == Some("--changescape") {
+        changescape_cli::run(&args[2..]);
         return;
     }
     init_logging();
