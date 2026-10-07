@@ -3121,6 +3121,31 @@ impl AppState {
                     });
                 }
             }
+            Event::Changescape {
+                item_id,
+                head_sha,
+                found,
+            } => {
+                let Some(review) = self.review.get_untracked() else {
+                    return;
+                };
+                // A lookup for the item before, or for a head the pull
+                // request has since left, is dropped.
+                let current = review
+                    .item
+                    .with_untracked(|item| item.as_ref().is_some_and(|item| item.id == item_id))
+                    && review.pull_request.with_untracked(|pull| {
+                        pull.as_ref().is_some_and(|pull| pull.head_sha == head_sha)
+                    });
+                if !current {
+                    return;
+                }
+                review.changescape.set(found.map(|found| {
+                    Arc::new(crate::review::changescape::Shown::new(
+                        item_id, head_sha, found,
+                    ))
+                }));
+            }
             Event::AssignableUsers {
                 repo_full_name,
                 users,

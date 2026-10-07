@@ -2,6 +2,7 @@
 
 pub mod apply_suggestion;
 pub mod cards;
+pub mod changescape;
 pub mod close_as_issue;
 pub mod close_menu;
 pub mod code_refs;
@@ -99,6 +100,7 @@ pub fn review_view(
     open_item: crate::ui::items::OpenItem,
 ) -> impl IntoView {
     let open_file = open_file(state, backend.clone());
+    changescape::poll(state, backend.clone());
     let body_backend = backend.clone();
     let tabs_backend = backend.clone();
 
@@ -199,6 +201,15 @@ fn showing_code(state: ReviewState) -> bool {
         && state.has_files()
 }
 
+/// Whether the pane shows the Changescape tab: picked, and a changescape
+/// to show. A tab kept from when there was one shows Conversation.
+/// Tracked.
+fn showing_changescape(state: ReviewState) -> bool {
+    matches!(state.phase.get(), Phase::Issue | Phase::Ready)
+        && state.tab.get() == ItemTab::Changescape
+        && changescape::available(state)
+}
+
 /// The head the pull request moved to that the files on screen are not
 /// at, unless it is the one a dirty worktree was already left behind by,
 /// which opening again would not change. None while the files are still
@@ -229,6 +240,7 @@ fn item_view(
     // A memo, so the pane is built again when what it shows changes and
     // not on every write to the tab.
     let showing = floem::reactive::Memo::new(move |_| showing_code(state));
+    let changescape_shown = floem::reactive::Memo::new(move |_| showing_changescape(state));
     // Whether Code is waiting on the checkout, and whether that failed.
     let pending = floem::reactive::Memo::new(move |_| {
         state.files_pending.with(|pending| match pending {
@@ -240,8 +252,8 @@ fn item_view(
     let refresh_backend = backend.clone();
     Stack::vertical((
         dyn_container(
-            move || (showing.get(), pending.get()),
-            move |(code, pending)| {
+            move || (showing.get(), pending.get(), changescape_shown.get()),
+            move |(code, pending, changescape)| {
                 if code && pending == Some(false) {
                     header::preparing_card(
                         move || match state.files_pending.get() {
@@ -268,6 +280,8 @@ fn item_view(
                     .into_any()
                 } else if code {
                     editor::editor_pane(app, state, backend.clone(), open_file.clone()).into_any()
+                } else if changescape {
+                    changescape::view(app, state, backend.clone()).into_any()
                 } else {
                     conversation::view(
                         app,

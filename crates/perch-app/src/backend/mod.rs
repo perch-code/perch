@@ -31,6 +31,7 @@ use windows::{CommandSender, View, Views};
 pub use windows::{EventSender, WindowId, NO_WINDOW};
 
 mod avatar;
+pub mod changescape;
 mod check_watch;
 mod feedback;
 mod invite;
@@ -62,6 +63,13 @@ pub const UI_META_KEYS: [&str; 6] = [
 #[derive(Debug, Clone)]
 pub enum Command {
     Refresh,
+    /// Look for a pull request's Changescape in Changescape's cache.
+    LookupChangescape {
+        item_id: String,
+        repo: String,
+        number: u64,
+        head_sha: String,
+    },
     /// Open an item's view: the review for a pull request or a branch, the
     /// issue view for an issue. Prepares the checkout when there is one to
     /// prepare.
@@ -1284,6 +1292,13 @@ pub enum Event {
         thread_id: String,
     },
     /// The workflow runs' verdict for the item's head.
+    /// What Changescape's cache holds for a pull request at a head, or
+    /// `None` when Changescape is turned off.
+    Changescape {
+        item_id: String,
+        head_sha: String,
+        found: Option<Arc<changescape::Found>>,
+    },
     ChecksReady {
         item_id: String,
         repo_full_name: String,
@@ -3028,6 +3043,15 @@ impl Backend {
             request_id,
         });
         request_id
+    }
+
+    pub fn lookup_changescape(&self, item_id: &str, repo: &str, number: u64, head_sha: &str) {
+        let _ = self.commands.send(Command::LookupChangescape {
+            item_id: item_id.to_string(),
+            repo: repo.to_string(),
+            number,
+            head_sha: head_sha.to_string(),
+        });
     }
 
     pub fn open_file(&self, path: &str) {
@@ -5124,6 +5148,17 @@ async fn run(
                         )
                         .await;
                     }
+                });
+            }
+            Command::LookupChangescape {
+                item_id,
+                repo,
+                number,
+                head_sha,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    changescape::lookup(&ctx, item_id, repo, number, head_sha).await
                 });
             }
             Command::InstallLanguageServer { kind, install } => {
@@ -8693,6 +8728,14 @@ fn show_pull_request_early(
         return false;
     }
     tracing::info!(item = %item.id, number = pull_request.number, "pull request shown before its checkout");
+    {
+        let ctx = ctx.clone();
+        let (item_id, repo) = (item.id.clone(), item.repo_full_name.clone());
+        let (number, head_sha) = (pull_request.number, pull_request.head_sha.clone());
+        tokio::spawn(
+            async move { changescape::lookup(&ctx, item_id, repo, number, head_sha).await },
+        );
+    }
     show_kept_conversation(ctx, &item.id, &pull_request);
     ctx.send_threads(&item.id);
     true

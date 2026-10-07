@@ -530,6 +530,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 if let Some(paging) = paging {
                     let showing = match review.tab.get() {
                         crate::review::model::ItemTab::Conversation => true,
+                        // Its own scroll takes the keys.
+                        crate::review::model::ItemTab::Changescape => false,
                         crate::review::model::ItemTab::Code => {
                             review.active_file().is_some_and(|f| !f.truncated)
                                 && review.drawn_picture().is_none()
@@ -562,6 +564,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         crate::review::model::ItemTab::Conversation => {
                             Some(crate::review::find::Pane::Conversation)
                         }
+                        crate::review::model::ItemTab::Changescape => None,
                     }
                 };
                 let find_open = match finding {
@@ -1732,6 +1735,7 @@ mod tests {
         };
         let showing = |review: &ReviewState| match review.tab.get() {
             ItemTab::Conversation => "conversation".to_string(),
+            ItemTab::Changescape => "changescape".to_string(),
             ItemTab::Code => review.active.get().unwrap_or_default(),
         };
 

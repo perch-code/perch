@@ -141,13 +141,14 @@ pub enum Paging {
     End,
 }
 
-/// What the item view shows: Conversation, or Code, the open file and the
-/// tabs over it. The two are the switch in the bar; Conversation cannot
-/// be closed.
+/// What the item view shows: Conversation, Changescape's account of the
+/// pull request when there is one, or Code, the open file and the tabs
+/// over it. They are the switch in the bar; Conversation cannot be closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ItemTab {
     #[default]
     Conversation,
+    Changescape,
     Code,
 }
 
@@ -166,6 +167,7 @@ pub struct Pane {
     agents_unfolded: bool,
     agents_open_runs: HashSet<String>,
     code_seen: bool,
+    changescape_section: Option<String>,
 }
 
 impl Default for Pane {
@@ -180,6 +182,7 @@ impl Default for Pane {
             agents_unfolded: false,
             agents_open_runs: HashSet::new(),
             code_seen: false,
+            changescape_section: None,
         }
     }
 }
@@ -1477,8 +1480,14 @@ pub struct ReviewState {
     /// dashboard state remains in `AppState` and is restored on Back.
     pub historical_findings: RwSignal<Option<Arc<Vec<ReviewFindingSummary>>>>,
     historical_review_rollback: RwSignal<Option<HistoricalReviewRollback>>,
-    /// Conversation or the open file.
+    /// Conversation, Changescape, or the open file.
     pub tab: RwSignal<ItemTab>,
+    /// What Changescape's cache holds for the open pull request, as the
+    /// backend last found it. It names its item, so one left over from
+    /// the item before shows nothing.
+    pub changescape: RwSignal<Option<Arc<crate::review::changescape::Shown>>>,
+    /// The section the Changescape tab shows; `None` is the first.
+    pub changescape_section: RwSignal<Option<String>>,
     /// Each item's pane as it was last left, by item, for the life of the
     /// app.
     pub panes: RwSignal<HashMap<String, Pane>>,
@@ -2021,6 +2030,8 @@ impl ReviewState {
             historical_review_rollback: RwSignal::new(None),
             tab: RwSignal::new(ItemTab::Conversation),
             panes: RwSignal::new(HashMap::new()),
+            changescape: RwSignal::new(None),
+            changescape_section: RwSignal::new(None),
             code_seen: RwSignal::new(false),
             tree_wanted: RwSignal::new(false),
             agents_unfolded: RwSignal::new(false),
@@ -2475,6 +2486,7 @@ impl ReviewState {
             agents_open_runs: self.agents_open_runs.get_untracked(),
             file_places: self.file_places.get_untracked(),
             code_seen: self.code_seen.get_untracked(),
+            changescape_section: self.changescape_section.get_untracked(),
         };
         self.panes.update(|panes| {
             panes.insert(id, pane);
@@ -2516,6 +2528,7 @@ impl ReviewState {
             self.agents_open_runs.set(pane.agents_open_runs);
             self.file_places.set(pane.file_places);
             self.code_seen.set(pane.code_seen);
+            self.changescape_section.set(pane.changescape_section);
             self.tree_wanted.set(false);
             if !paths.is_empty() {
                 self.loading
