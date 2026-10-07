@@ -77,7 +77,7 @@ pub fn is_svg(path: &str) -> bool {
 }
 
 impl Drawing {
-    fn parse(markup: &str) -> Result<Drawing, String> {
+    pub(crate) fn parse(markup: &str) -> Result<Drawing, String> {
         let tree = Tree::from_str(markup, &options(markup)).map_err(|e| e.to_string())?;
         let mut hasher = std::hash::DefaultHasher::new();
         markup.hash(&mut hasher);
@@ -85,6 +85,11 @@ impl Drawing {
             tree: Arc::new(tree),
             hash: hasher.finish().to_le_bytes(),
         })
+    }
+
+    /// What the renderer keys its cached raster on.
+    pub(crate) fn hash(&self) -> &[u8] {
+        &self.hash
     }
 
     /// The size the SVG says it is, in its own units.

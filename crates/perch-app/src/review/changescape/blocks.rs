@@ -30,7 +30,7 @@ pub struct Ctx {
 }
 
 impl Ctx {
-    fn open(&self, el: &str) {
+    pub fn open(&self, el: &str) {
         navigate::open_element(self.state, &self.backend, &self.page, el);
     }
 }
@@ -77,7 +77,8 @@ fn block_view(cx: Ctx, block: Block) -> impl IntoView {
         BlockBody::Text(text) => text_block(&cx, text).into_any(),
         BlockBody::Summary(summary) => summary_block(&cx, summary).into_any(),
         BlockBody::Table(table) => table_block(&cx, table).into_any(),
-        BlockBody::Svg(_) | BlockBody::Other => fallback(cx.state).into_any(),
+        BlockBody::Svg(svg) => super::svg::svg_block(cx.clone(), svg.clone()),
+        BlockBody::Other => fallback(cx.state).into_any(),
     };
     let mut parts: Vec<AnyView> = Vec::new();
     if let Some(title) = block.title.clone() {

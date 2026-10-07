@@ -239,3 +239,30 @@ fn an_unknown_block_draws_the_browser_line() {
     assert!(named(harness.root_id(), "Changescape open page").is_some());
     assert!(named(harness.root_id(), "Changescape block narration").is_some());
 }
+
+#[test]
+fn a_hot_node_in_a_diagram_opens_its_element() {
+    let root = cache_with_fixture(HEAD);
+    let (mut harness, state) = harness_with_cache(Some(root.path()));
+    click(&mut harness, "Changescape pill");
+    click(&mut harness, "Changescape rail map");
+    // Laid out once more, now the block's width has set the zoom.
+    harness.rebuild();
+    harness.paint();
+    let diagram = nth(&harness, "Changescape diagram", 0);
+    // The fixture's picture is 620 wide; `_uncovered_order_keys` is the
+    // box at (40, 60), 120 by 40.
+    let z = diagram.width() / 620.0;
+    assert!(z > 0.5, "fitted to the block, not left tiny: {z}");
+    let (x, y) = (diagram.x0 + 100.0 * z, diagram.y0 + 80.0 * z);
+    harness.pointer_move(x, y);
+    harness.click(x, y);
+    harness.rebuild();
+    harness.paint();
+    assert_eq!(state.tab.get(), ItemTab::Code);
+    assert_eq!(
+        state.active.get().as_deref(),
+        Some("src/dblect/uniqueness/detector.py")
+    );
+    assert_eq!(state.jump_caret.get(), Some((1210, 0)));
+}

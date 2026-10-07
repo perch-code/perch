@@ -9,6 +9,7 @@
 pub mod blocks;
 pub mod navigate;
 pub mod rail;
+pub mod svg;
 
 use std::rc::Rc;
 use std::sync::Arc;
