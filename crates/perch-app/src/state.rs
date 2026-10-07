@@ -3356,6 +3356,27 @@ impl AppState {
         })
     }
 
+    /// The id of the notification about the given pull request or issue
+    /// that was put out of the inbox, Done or snoozed: what a Browse row's
+    /// Move to Inbox takes back. None while the inbox still has it.
+    pub fn put_away_thread(
+        &self,
+        repo_full_name: &str,
+        kind: perch_github::ItemKind,
+        number: u64,
+    ) -> Option<String> {
+        [self.done_notifications, self.snoozed_notifications]
+            .into_iter()
+            .find_map(|list| {
+                list.with_untracked(|threads| {
+                    threads
+                        .iter()
+                        .find(|thread| thread.is_about(repo_full_name, kind, number))
+                        .map(|thread| thread.id.clone())
+                })
+            })
+    }
+
     /// Whether the main pane has the notification's pull request or issue
     /// open: what marking it Done closes. One still opening has no item
     /// yet, so it is not.

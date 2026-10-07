@@ -255,6 +255,7 @@ fn search_row(state: AppState, backend: Rc<Backend>, hit: SearchHit) -> impl Int
             .pointer_events_none()
     });
     let open_repo = repo.clone();
+    let menu_backend = backend.clone();
     let row = Container::new(content)
         .debug_name(format!("browse row:{repo}#{number}"))
         .on_event_stop(el::Click, move |_, _| {
@@ -268,15 +269,39 @@ fn search_row(state: AppState, backend: Rc<Backend>, hit: SearchHit) -> impl Int
             );
         })
         .right_click_menu(move || {
-            let url = url.clone();
-            Menu::new().item("Open on GitHub", move |m| {
-                let url = url.clone();
-                m.icon(SidebarIcon::External)
-                    .action(move || open_in_browser(&url))
-            })
+            search_menu(state, menu_backend.clone(), &repo, kind, number, &url)
         })
         .style(|s| nav_row::row_style(s, false));
     Container::new(row).style(nav_row::row_gutter)
+}
+
+/// A result's menu: Move to Inbox while its notification is Done or
+/// snoozed, as that view's own row offers, and Open on GitHub.
+fn search_menu(
+    state: AppState,
+    backend: Rc<Backend>,
+    repo: &str,
+    kind: ItemKind,
+    number: u64,
+    url: &str,
+) -> Menu {
+    let mut menu = Menu::new();
+    if let Some(id) = state.put_away_thread(repo, kind, number) {
+        menu = menu
+            .item("Move to Inbox", move |item| {
+                let backend = backend.clone();
+                let id = id.clone();
+                item.icon(SidebarIcon::Inbox)
+                    .action(move || backend.restore_notification(&id))
+            })
+            .separator();
+    }
+    let url = url.to_string();
+    menu.item("Open on GitHub", move |m| {
+        let url = url.clone();
+        m.icon(SidebarIcon::External)
+            .action(move || open_in_browser(&url))
+    })
 }
 
 #[cfg(test)]
@@ -423,6 +448,64 @@ mod tests {
         repaint(&mut harness);
         assert!(searches(&mut commands).is_empty());
         assert!(find(harness.root_id(), "Not a repository on GitHub").is_some());
+    }
+
+    /// A result whose notification is Done, or snoozed, moves it back to
+    /// the inbox from its menu; one the inbox still has offers nothing.
+    #[test]
+    fn a_put_away_result_moves_back_to_the_inbox() {
+        use perch_github::{Reason, Repository, Subject, SubjectKind, Thread};
+        let thread = |id: &str, number: u64| Thread {
+            id: id.into(),
+            unread: false,
+            local_unread: false,
+            local_read: false,
+            reason: Reason::Mention,
+            updated_at: "2026-09-19T12:00:00Z".parse().unwrap(),
+            last_read_at: None,
+            subject: Subject {
+                title: "Fence".into(),
+                kind: SubjectKind::PullRequest,
+                url: Some(format!("https://api.github.com/repos/a/b/pulls/{number}")),
+                latest_comment_url: None,
+            },
+            repository: Repository {
+                full_name: "a/b".into(),
+                owner_avatar_url: String::new(),
+            },
+            subject_snapshot: None,
+            run_snapshot: None,
+            snoozed_until: None,
+        };
+        let state = AppState::new();
+        state.notifications.set(vec![thread("10", 1)]);
+        state.done_notifications.set(vec![thread("20", 2)]);
+        state.snoozed_notifications.set(vec![thread("30", 3)]);
+        let (backend, mut commands) = Backend::recording();
+        let backend = Rc::new(backend);
+        let menu = |number| {
+            search_menu(
+                state,
+                backend.clone(),
+                "a/b",
+                ItemKind::PullRequest,
+                number,
+                "",
+            )
+        };
+
+        assert_eq!(menu(1).outline(), ["Open on GitHub"], "still in the inbox");
+        assert_eq!(menu(4).outline(), ["Open on GitHub"], "no notification");
+        assert_eq!(menu(2).outline(), ["Move to Inbox", "—", "Open on GitHub"]);
+        menu(2).choose("Move to Inbox");
+        menu(3).choose("Move to Inbox");
+        let restored: Vec<String> = std::iter::from_fn(|| commands.try_recv().ok())
+            .filter_map(|c| match c {
+                Command::RestoreNotification { thread_id } => Some(thread_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(restored, ["20", "30"]);
     }
 
     /// A reference in the search box is the first row, and a click opens it
