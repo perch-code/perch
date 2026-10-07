@@ -183,17 +183,24 @@ incremental = true
 # no click from a mouse's back and forward buttons, as a browser makes
 # none. floem clicked for every button but the right one, so Back
 # pressed over a sidebar row or a button went back and pressed it too.
-# Last, one that paints a view's `opacity`, which floem defined and
+# Then one that paints a view's `opacity`, which floem defined and
 # never read, so a disabled icon button drew at full strength. A faded
 # view paints itself and its children into a layer of that alpha. vger
 # has no layers, so it multiplies the alpha into every paint instead,
 # and draws a faded image or full-colour SVG through its glyph path,
 # the one that takes a paint. Children that overlap inside a faded view
-# show through each other there.
-# Drop a patch from the branch once upstream merges it; `cargo update -p floem`
-# takes the branch's new head. `floem_renderer` is patched too so that
-# perch-app's own dependency on it resolves to the checkout floem's does,
-# and there is one `usvg::Tree` for a picture to be parsed into and drawn.
+# show through each other there. Last, one that paints a window when
+# the system asks it to redraw. floem painted only when it had asked
+# for a paint itself, and an X11 window with no compositor keeps no
+# copy of its pixels, so on Linux a window that another had covered
+# showed what had been on the screen there until something in it
+# changed. That one sits on FiV0/floem's `perch` branch, which is
+# criccomini/floem's with it on top; once criccomini's takes it, point
+# back there. Drop a patch from the branch once upstream merges it;
+# `cargo update -p floem` takes the branch's new head. `floem_renderer`
+# is patched too so that perch-app's own dependency on it resolves to
+# the checkout floem's does, and there is one `usvg::Tree` for a
+# picture to be parsed into and drawn.
 [patch."https://github.com/lapce/floem"]
-floem = { git = "https://github.com/criccomini/floem", branch = "perch" }
-floem_renderer = { git = "https://github.com/criccomini/floem", branch = "perch" }
+floem = { git = "https://github.com/FiV0/floem", branch = "perch" }
+floem_renderer = { git = "https://github.com/FiV0/floem", branch = "perch" }
