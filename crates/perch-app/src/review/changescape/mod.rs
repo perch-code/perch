@@ -7,6 +7,7 @@
 //! state.
 
 pub mod blocks;
+pub mod navigate;
 pub mod rail;
 
 use std::rc::Rc;
@@ -157,11 +158,16 @@ pub fn view(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
                 stale_banner(state),
                 Stack::horizontal((
                     rail::rail(state, page.clone()),
-                    section_body(state, backend.clone(), page),
+                    section_body(state, backend.clone(), page.clone()),
                 ))
                 .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0)),
+                base_popover(state, backend.clone(), page),
             ))
-            .style(|s| s.size_full().flex_col())
+            .style(|s| {
+                s.size_full()
+                    .flex_col()
+                    .position(floem::style::Position::Relative)
+            })
             .into_any(),
             None => Empty::new().into_any(),
         },
@@ -200,6 +206,127 @@ fn stale_banner(state: ReviewState) -> impl IntoView {
     })
 }
 
+/// The excerpt of an element only on the base side, over the tab: its
+/// own diff, and a way to its file in Code.
+fn base_popover(state: ReviewState, backend: Rc<Backend>, page: Arc<Page>) -> impl IntoView {
+    dyn_container(
+        move || state.changescape_popover.get(),
+        move |el| {
+            let Some((element, r)) = el.as_ref().and_then(|el| {
+                let element = page.elements.get(el)?;
+                Some((element.clone(), navigate::base_ref(element)?.clone()))
+            }) else {
+                return Empty::new().into_any();
+            };
+            let mono = || theme::CODE_FONT_STACK.to_string();
+            let rows = r.src.iter().map(|row| {
+                let number = row
+                    .base
+                    .or(row.head)
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+                let ink = match row.op.as_str() {
+                    "-" => theme::diff_deleted_fg(),
+                    _ => theme::fg(),
+                };
+                let fill = match row.op.as_str() {
+                    "-" => Some(theme::diff_deleted_bg()),
+                    "+" => Some(theme::diff_added_bg()),
+                    _ => None,
+                };
+                Stack::horizontal((
+                    Label::new(number).style(move |s| {
+                        s.font_family(mono())
+                            .font_size(theme::CODE_FONT_SIZE)
+                            .color(theme::gutter_fg())
+                            .width(theme::CODE_ROW_NUMBER_WIDTH)
+                            .justify_end()
+                            .padding_right(8.0)
+                    }),
+                    Label::new(format!("{} {}", row.op, row.text)).style(move |s| {
+                        s.font_family(mono())
+                            .font_size(theme::CODE_FONT_SIZE)
+                            .color(ink)
+                    }),
+                ))
+                .style(move |s| {
+                    s.height(theme::CODE_ROW_HEIGHT)
+                        .items_center()
+                        .width_full()
+                        .apply_opt(fill, |s, fill| s.background(fill))
+                })
+                .into_any()
+            });
+            let show_backend = backend.clone();
+            let show_ref = r.clone();
+            Stack::vertical((
+                Stack::horizontal((
+                    Label::new(element.t.clone()).style(|s| {
+                        s.font_size(theme::TEXT_BODY)
+                            .font_weight(theme::weight_emphasis())
+                            .color(theme::fg())
+                    }),
+                    Label::new(format!("{} · {}", element.k, r.f)).style(|s| {
+                        s.font_size(theme::TEXT_META)
+                            .color(theme::fg_muted())
+                            .margin_left(8.0)
+                            .flex_grow(1.0_f32)
+                            .min_width(0.0)
+                            .text_ellipsis()
+                    }),
+                    Container::new(Label::new("Show in diff"))
+                        .debug_name("Changescape show in diff")
+                        .on_event_stop(el::Click, move |_, _| {
+                            navigate::show_in_diff(state, &show_backend, &show_ref)
+                        })
+                        .style(|s| {
+                            crate::ui::widgets::clickable(s)
+                                .font_size(theme::TEXT_META)
+                                .color(theme::link())
+                                .margin_left(12.0)
+                        }),
+                    Container::new(Label::new("Close"))
+                        .on_event_stop(el::Click, move |_, _| state.changescape_popover.set(None))
+                        .style(|s| {
+                            crate::ui::widgets::clickable(s)
+                                .font_size(theme::TEXT_META)
+                                .color(theme::fg_muted())
+                                .margin_left(12.0)
+                        }),
+                ))
+                .style(|s| s.items_center().width_full().padding_bottom(8.0)),
+                Stack::vertical_from_iter(rows)
+                    .style(|s| s.flex_col().width_full())
+                    .scroll()
+                    .style(|s| s.max_height(320.0).width_full()),
+            ))
+            .debug_name("Changescape base popover")
+            .style(|s| {
+                s.flex_col()
+                    .width(640.0)
+                    .max_width_pct(90.0)
+                    .padding(theme::CARD_PADDING)
+                    .background(theme::menu_bg())
+                    .border(1.0)
+                    .border_color(theme::menu_ring())
+                    .border_radius(theme::CARD_RADIUS)
+                    .box_shadow_blur(16.0)
+                    .box_shadow_color(theme::menu_shadow())
+            })
+            .into_any()
+        },
+    )
+    .style(move |s| {
+        s.position(floem::style::Position::Absolute)
+            .inset_top(48.0)
+            .inset_left(240.0)
+            .z_index(2)
+            .apply_if(state.changescape_popover.with(Option::is_none), |s| {
+                s.hide()
+            })
+    })
+}
+
 /// The selected section: each of its views, title, caption and blocks, one
 /// under the other.
 fn section_body(state: ReviewState, backend: Rc<Backend>, page: Arc<Page>) -> impl IntoView {
@@ -228,14 +355,19 @@ fn section_body(state: ReviewState, backend: Rc<Backend>, page: Arc<Page>) -> im
                     .color(theme::fg_muted())
                     .margin_top(4.0)
             });
-            let page = page.clone();
-            let backend = backend.clone();
+            let cx = blocks::Ctx {
+                state,
+                backend: backend.clone(),
+                page: page.clone(),
+            };
             Stack::vertical((
                 heading,
                 question,
-                Stack::vertical_from_iter(views.into_iter().map(move |view| {
-                    blocks::view(state, backend.clone(), page.clone(), view).into_any()
-                }))
+                Stack::vertical_from_iter(
+                    views
+                        .into_iter()
+                        .map(move |view| blocks::view(cx.clone(), view).into_any()),
+                )
                 .style(|s| s.flex_col().gap(32.0).margin_top(24.0).width_full()),
             ))
             .debug_name(format!("Changescape section {}", section.id))

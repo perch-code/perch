@@ -1488,6 +1488,9 @@ pub struct ReviewState {
     pub changescape: RwSignal<Option<Arc<crate::review::changescape::Shown>>>,
     /// The section the Changescape tab shows; `None` is the first.
     pub changescape_section: RwSignal<Option<String>>,
+    /// The element whose base-side excerpt is shown over the Changescape
+    /// tab: one that is not on the head, so Code has no line to open.
+    pub changescape_popover: RwSignal<Option<String>>,
     /// Each item's pane as it was last left, by item, for the life of the
     /// app.
     pub panes: RwSignal<HashMap<String, Pane>>,
@@ -2032,6 +2035,7 @@ impl ReviewState {
             panes: RwSignal::new(HashMap::new()),
             changescape: RwSignal::new(None),
             changescape_section: RwSignal::new(None),
+            changescape_popover: RwSignal::new(None),
             code_seen: RwSignal::new(false),
             tree_wanted: RwSignal::new(false),
             agents_unfolded: RwSignal::new(false),
