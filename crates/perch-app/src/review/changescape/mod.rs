@@ -13,6 +13,7 @@ pub mod strip;
 pub mod svg;
 pub mod threads;
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -32,13 +33,12 @@ use crate::theme;
 #[derive(Debug)]
 pub struct Shown {
     pub item_id: String,
-    pub head_sha: String,
     pub found: Arc<Found>,
     pub index: LineIndex,
 }
 
 impl Shown {
-    pub fn new(item_id: String, head_sha: String, found: Arc<Found>) -> Shown {
+    pub fn new(item_id: String, found: Arc<Found>) -> Shown {
         let index = found
             .page
             .as_deref()
@@ -46,7 +46,6 @@ impl Shown {
             .unwrap_or_default();
         Shown {
             item_id,
-            head_sha,
             found,
             index,
         }
@@ -60,9 +59,12 @@ impl Shown {
         &self.found.lookup
     }
 
-    /// Whether the tab has anything to show: a page, or a build running.
+    /// Whether the tab has anything to show: a page, a build running, or
+    /// a failed build this Perch can try again.
     pub fn has_tab(&self) -> bool {
-        self.found.page.is_some() || self.found.lookup.is_running()
+        self.found.page.is_some()
+            || self.found.lookup.is_running()
+            || (matches!(self.found.lookup, Lookup::Failed(_)) && self.found.can_build)
     }
 
     /// The page is of an earlier head than the pull request's.
@@ -70,6 +72,42 @@ impl Shown {
         matches!(self.found.lookup, Lookup::Stale(_))
             || matches!(self.found.lookup, Lookup::Running(_, Some(_)))
     }
+}
+
+/// How many lines of a build's progress are kept.
+pub const LOG_LINES: usize = 300;
+
+thread_local! {
+    /// Whether this Perch can build a changescape, as the backend last
+    /// said. Nothing offers a build until it says so.
+    static CAN_BUILD: Cell<bool> = const { Cell::new(false) };
+}
+
+pub fn set_can_build(can: bool) {
+    CAN_BUILD.with(|cell| cell.set(can));
+}
+
+/// Whether to offer a build: the skill installed, Claude Code found, and
+/// Changescape on.
+pub fn can_build() -> bool {
+    CAN_BUILD.with(Cell::get)
+}
+
+/// Build the item's changescape, and show the tab, where its progress
+/// comes once the build starts. A build already running is the one shown.
+pub fn request_build(app: AppState, backend: &Backend, item_id: &str) {
+    if let Some(review) = app.review.get_untracked() {
+        let open = review
+            .item
+            .with_untracked(|item| item.as_ref().is_some_and(|item| item.id == item_id));
+        if open {
+            if !shown(review).is_some_and(|shown| shown.lookup().is_running()) {
+                review.changescape_log.set(Vec::new());
+            }
+            review.show_tab(crate::review::model::ItemTab::Changescape);
+        }
+    }
+    backend.build_changescape(item_id);
 }
 
 /// The open item's changescape, when it has one to show. Tracked.
@@ -147,18 +185,55 @@ impl PartialEq for SamePage {
     }
 }
 
+/// What the tab's body is.
+#[derive(Clone, PartialEq)]
+enum Body {
+    Page(SamePage),
+    /// A build running with no earlier page to show meanwhile.
+    Building,
+    /// A failed build, and why.
+    Failed(String),
+    Nothing,
+}
+
+fn body_of(state: ReviewState) -> Body {
+    let Some(shown) = shown(state) else {
+        return Body::Nothing;
+    };
+    if let Some(page) = shown.page() {
+        return Body::Page(SamePage(page.clone()));
+    }
+    match shown.lookup() {
+        Lookup::Running(..) => Body::Building,
+        Lookup::Failed(build) => Body::Failed(
+            build
+                .status
+                .error
+                .clone()
+                .or_else(|| shown.found.error.clone())
+                .unwrap_or_else(|| "The build wrote no page.".to_string()),
+        ),
+        _ => match &shown.found.error {
+            Some(error) => Body::Failed(error.clone()),
+            None => Body::Nothing,
+        },
+    }
+}
+
 /// The tab's body: the rail of sections on the left, the selected section
-/// on the right, and over both the banner of a stale page.
+/// on the right, and over both the banner of a stale page. While a first
+/// build runs, its progress; after one fails, why.
 pub fn view(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    let _ = app;
-    // Built again when the page changes, not on every write to the state.
-    let page =
-        Memo::new(move |_| shown(state).and_then(|shown| shown.page().cloned().map(SamePage)));
+    // Built again when the body changes, not on every write to the state.
+    let body = Memo::new(move |_| body_of(state));
     dyn_container(
-        move || page.get(),
-        move |page| match page.map(|page| page.0) {
-            Some(page) => Stack::vertical((
-                stale_banner(state),
+        move || body.get(),
+        move |body| match body {
+            Body::Building => building(state).into_any(),
+            Body::Failed(error) => failed(app, state, backend.clone(), error).into_any(),
+            Body::Nothing => Empty::new().into_any(),
+            Body::Page(SamePage(page)) => Stack::vertical((
+                stale_banner(app, state, backend.clone()),
                 Stack::horizontal((
                     rail::rail(state, page.clone()),
                     section_body(state, backend.clone(), page.clone()),
@@ -172,34 +247,136 @@ pub fn view(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
                     .position(floem::style::Position::Relative)
             })
             .into_any(),
-            None => Empty::new().into_any(),
         },
     )
     .debug_name("Changescape body")
     .style(|s| s.size_full().min_height(0.0))
 }
 
-/// One line over a page drawn for an earlier commit.
-fn stale_banner(state: ReviewState) -> impl IntoView {
+/// A build's progress, while there is no page to show: the steps it has
+/// taken, the last of them at the foot.
+fn building(state: ReviewState) -> impl IntoView {
+    let lines = move || {
+        state.changescape_log.with(|log| {
+            let from = log.len().saturating_sub(16);
+            log[from..].join("\n")
+        })
+    };
+    Stack::vertical((
+        Label::new("Building the changescape").style(|s| {
+            s.font_size(theme::TEXT_SECTION_TITLE)
+                .font_weight(theme::weight_strong())
+                .color(theme::fg())
+        }),
+        Label::new("Claude Code is running the Changescape skill. It takes a few minutes.")
+            .style(|s| s.font_size(theme::TEXT_META).color(theme::fg_muted())),
+        Label::derived(lines).style(|s| {
+            s.font_size(theme::CODE_FONT_SIZE)
+                .font_family(theme::CODE_FONT_STACK.to_string())
+                .color(theme::fg_muted())
+                .line_height(1.6)
+                .margin_top(12.0)
+                .width_full()
+        }),
+    ))
+    .debug_name("Changescape building")
+    .style(|s| {
+        s.flex_col()
+            .gap(4.0)
+            .width(theme::CONVERSATION_WIDTH)
+            .max_width_full()
+            .padding(theme::CONVERSATION_PADDING)
+    })
+}
+
+/// A failed build: why, and a way to try again.
+fn failed(app: AppState, state: ReviewState, backend: Rc<Backend>, error: String) -> impl IntoView {
+    Stack::vertical((
+        Label::new("The changescape could not be built").style(|s| {
+            s.font_size(theme::TEXT_SECTION_TITLE)
+                .font_weight(theme::weight_strong())
+                .color(theme::fg())
+        }),
+        Label::new(error).style(|s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::fg_muted())
+                .width_full()
+        }),
+        build_link(app, state, backend, "Retry").style(|s| s.margin_top(8.0)),
+    ))
+    .debug_name("Changescape failed")
+    .style(|s| {
+        s.flex_col()
+            .gap(4.0)
+            .width(theme::CONVERSATION_WIDTH)
+            .max_width_full()
+            .padding(theme::CONVERSATION_PADDING)
+    })
+}
+
+/// A link that builds the open item's changescape again. Absent when
+/// this Perch cannot build one.
+fn build_link(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    text: &'static str,
+) -> impl IntoView {
+    Container::new(Label::new(text).style(|s| {
+        s.font_size(theme::TEXT_META)
+            .color(theme::link())
+            .selectable(false)
+    }))
+    .debug_name(format!("Changescape {}", text.to_lowercase()))
+    .on_event_stop(el::Click, move |_, _| {
+        let item = state
+            .item
+            .with_untracked(|item| item.as_ref().map(|item| item.id.clone()));
+        if let Some(item) = item {
+            request_build(app, &backend, &item);
+        }
+    })
+    .style(move |s| {
+        let running = shown(state).is_some_and(|shown| shown.lookup().is_running());
+        crate::ui::widgets::clickable(crate::ui::widgets::underlined_link(s))
+            .apply_if(!can_build() || running, |s| s.hide())
+    })
+}
+
+/// One line over a page drawn for an earlier commit, with a way to build
+/// one of the current head.
+fn stale_banner(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let text = move || {
         shown(state)
             .and_then(|shown| {
                 let build = shown.lookup().drawable()?;
-                shown
-                    .stale()
-                    .then(|| format!("Changescape of an earlier commit, {}.", build.short_sha()))
+                let building = if shown.lookup().is_running() {
+                    " Building one of the current head."
+                } else {
+                    ""
+                };
+                shown.stale().then(|| {
+                    format!(
+                        "Changescape of an earlier commit, {}.{building}",
+                        build.short_sha()
+                    )
+                })
             })
             .unwrap_or_default()
     };
-    Container::new(Label::derived(text).style(|s| {
-        s.font_size(theme::TEXT_META)
-            .color(theme::notice_fg())
-            .selectable(false)
-    }))
+    Stack::horizontal((
+        Label::derived(text).style(|s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::notice_fg())
+                .selectable(false)
+        }),
+        build_link(app, state, backend, "Rebuild").style(|s| s.margin_left(8.0)),
+    ))
     .debug_name("Changescape stale banner")
     .style(move |s| {
         let stale = shown(state).is_some_and(|shown| shown.stale());
         s.width_full()
+            .items_center()
             .padding_horiz(16.0)
             .padding_vert(6.0)
             .background(theme::notice_bg())

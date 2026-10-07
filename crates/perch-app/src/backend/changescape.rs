@@ -1,7 +1,17 @@
 //! A pull request's Changescape, found in Changescape's cache off the UI
-//! thread. File reads only: Perch computes nothing of a changescape.
+//! thread, and built by Claude Code with the Changescape skill when the
+//! reader asks. File reads only: Perch computes nothing of a changescape.
+//!
+//! A build runs outside Perch's durable run queue for now. The queue's
+//! table knows only discussion and review owners, and a new owner is a
+//! schema change, which waits until the feature leaves its branch. So a
+//! build shows its progress on the Changescape tab alone, and a build
+//! cut short by quitting Perch leaves a `running` status behind until the
+//! next build of that head.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use perch_changescape::{Lookup, Page};
 
@@ -15,6 +25,9 @@ pub struct Found {
     pub page: Option<Arc<Page>>,
     /// Why the page that should be there could not be read.
     pub error: Option<String>,
+    /// Whether this Perch can build one: the skill is installed and
+    /// Claude Code is found.
+    pub can_build: bool,
 }
 
 /// Look the pull request up and send what was found, `None` when
@@ -31,9 +44,14 @@ pub(super) async fn lookup(
     let found = if config.changescape.enabled {
         let root = config.changescape.cache_root();
         let head = head_sha.clone();
-        tokio::task::spawn_blocking(move || find(&root, &repo, number, &head))
-            .await
-            .ok()
+        let binary = config.agent.binary.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut found = find(&root, &repo, number, &head);
+            found.can_build = can_build(&binary, false);
+            found
+        })
+        .await
+        .ok()
     } else {
         None
     };
@@ -44,7 +62,7 @@ pub(super) async fn lookup(
     });
 }
 
-pub(crate) fn find(root: &std::path::Path, repo: &str, number: u64, head_sha: &str) -> Found {
+pub(crate) fn find(root: &Path, repo: &str, number: u64, head_sha: &str) -> Found {
     let lookup = perch_changescape::lookup(root, repo, number, head_sha);
     let (page, error) = match lookup.drawable().map(perch_changescape::load) {
         Some(Ok(page)) => (Some(page), None),
@@ -58,5 +76,250 @@ pub(crate) fn find(root: &std::path::Path, repo: &str, number: u64, head_sha: &s
         lookup,
         page,
         error,
+        can_build: false,
+    }
+}
+
+/// Whether the skill and Claude Code are both there. Looked for once a
+/// session, and again on each request to build, so installing the skill
+/// takes effect at the next one.
+fn can_build(binary: &str, again: bool) -> bool {
+    static KNOWN: OnceLock<Mutex<Option<bool>>> = OnceLock::new();
+    let known = KNOWN.get_or_init(Default::default);
+    if !again {
+        if let Some(can) = *known.lock().unwrap() {
+            return can;
+        }
+    }
+    let can = claude_binary(binary).is_some() && perch_changescape::skill_available().is_some();
+    *known.lock().unwrap() = Some(can);
+    can
+}
+
+/// Claude Code: the configured path, or `claude` found as Perch finds it
+/// for any run.
+fn claude_binary(binary: &str) -> Option<PathBuf> {
+    let given = Path::new(binary);
+    if given.is_absolute() {
+        return given.is_file().then(|| given.to_path_buf());
+    }
+    perch_agent::find_binary(binary)
+}
+
+/// The pull requests with a build running, by repository and number:
+/// one at a time each.
+fn building() -> &'static Mutex<HashSet<(String, u64)>> {
+    static BUILDING: OnceLock<Mutex<HashSet<(String, u64)>>> = OnceLock::new();
+    BUILDING.get_or_init(Default::default)
+}
+
+/// Build an item's changescape at its pull request's head. A second
+/// request while one runs only looks again, which shows the running one.
+pub(super) async fn build(ctx: &Ctx, item_id: String) {
+    let config = ctx.config();
+    if !config.changescape.enabled {
+        return;
+    }
+    let item = match ctx.with_cache(|cache| cache.load_item(&item_id)) {
+        Some(Ok(Some(item))) => item,
+        _ => {
+            ctx.notice("Could not build the changescape: the item is not in the cache");
+            return;
+        }
+    };
+    let Some(pull) = item.pull_request().cloned() else {
+        return;
+    };
+    let repo = item.repo_full_name.clone();
+    let (number, head) = (pull.number, pull.head_sha.clone());
+    let key = (repo.clone(), number);
+    if !building().lock().unwrap().insert(key.clone()) {
+        lookup(ctx, item_id, repo, number, head).await;
+        return;
+    }
+    let result = run_build(ctx, &config, &item_id, &repo, number, &head).await;
+    building().lock().unwrap().remove(&key);
+    let root = config.changescape.cache_root();
+    let dir = perch_changescape::build_dir(&root, &repo, number, &head);
+    match result {
+        Err(message) => {
+            tracing::warn!(item = %item_id, error = %message, "changescape build failed");
+            settle_failed(&dir, &message);
+        }
+        Ok(()) if !dir.join("page.json").is_file() => {
+            settle_failed(&dir, "The build ended without writing page.json.")
+        }
+        Ok(()) => settle_running(&dir),
+    }
+    lookup(ctx, item_id, repo, number, head).await;
+}
+
+async fn run_build(
+    ctx: &Ctx,
+    config: &perch_github::Config,
+    item_id: &str,
+    repo: &str,
+    number: u64,
+    head: &str,
+) -> Result<(), String> {
+    let configured = config.agent.binary.clone();
+    let checked = configured.clone();
+    let can = tokio::task::spawn_blocking(move || can_build(&checked, true))
+        .await
+        .unwrap_or(false);
+    if !can {
+        return Err("The Changescape skill or Claude Code is not installed.".into());
+    }
+    let binary = claude_binary(&configured).ok_or("Claude Code is not installed.")?;
+    let id = perch_git::RepoId::parse(repo).ok_or("Not a GitHub repository.")?;
+    let store = ctx.preparer.store();
+    if !store.has_bare_clone(&id) {
+        return Err("Perch has no clone of this repository yet.".into());
+    }
+    let clone = store.bare_path(&id);
+    let root = config.changescape.cache_root();
+    let dir = perch_changescape::build_dir(&root, repo, number, head);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
+    write_status(&dir, "running", None)?;
+    // The pill comes now, with the build's progress under it.
+    lookup(ctx, item_id.into(), repo.into(), number, head.into()).await;
+
+    let prompt = format!(
+        "Use the changescape skill on pull request #{number} of {repo}, in this repository.\n\
+         Write the output to {}/.",
+        dir.display()
+    );
+    let spec = perch_agent::ChangescapeSpec {
+        binary,
+        model: config.agent.model.clone(),
+        cwd: clone,
+        cache_root: root,
+        build_dir: dir.clone(),
+        prompt,
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let run = perch_agent::Run::spawn_changescape(spec, tx)
+        .map_err(|e| format!("Could not start Claude Code: {e}"))?;
+    tracing::info!(item = %item_id, number, "changescape build started");
+    while let Some(event) = rx.recv().await {
+        if let Some(line) = progress_line(&event) {
+            let _ = ctx.events.send(Event::ChangescapeProgress {
+                item_id: item_id.to_string(),
+                head_sha: head.to_string(),
+                line,
+            });
+        }
+    }
+    match run.wait().await {
+        perch_agent::RunOutcome::Finished { .. } => Ok(()),
+        perch_agent::RunOutcome::Failed { message, .. } => Err(message),
+        perch_agent::RunOutcome::Stopped { .. } => Err("The build was stopped.".into()),
+    }
+}
+
+/// One line of progress for an event, as the tab lists them.
+fn progress_line(event: &perch_agent::RunEvent) -> Option<String> {
+    use perch_agent::RunEvent;
+    match event {
+        RunEvent::ToolCall { name, summary, .. } if summary.is_empty() => Some(name.clone()),
+        RunEvent::ToolCall { name, summary, .. } => Some(format!("{name}: {summary}")),
+        RunEvent::Text(text) => text
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .map(|line| line.trim().to_string()),
+        RunEvent::PermissionDenied { tool, message } => Some(format!(
+            "Refused{}: {message}",
+            tool.as_deref().map(|t| format!(" {t}")).unwrap_or_default()
+        )),
+        _ => None,
+    }
+}
+
+/// `status.json` as Perch writes it: when a build starts, and when one
+/// ends without the skill having said how.
+fn write_status(dir: &Path, state: &str, error: Option<&str>) -> Result<(), String> {
+    let now = jiff::Timestamp::now().to_string();
+    let mut status = serde_json::json!({
+        "schema": 2,
+        "state": state,
+        "started": now,
+        "stage": "facts",
+        "error": error,
+    });
+    if state != "running" {
+        status["finished"] = serde_json::Value::String(now);
+    }
+    let path = dir.join("status.json");
+    std::fs::write(&path, status.to_string())
+        .map_err(|e| format!("Could not write {}: {e}", path.display()))
+}
+
+fn read_status(dir: &Path) -> Option<perch_changescape::Status> {
+    let bytes = std::fs::read(dir.join("status.json")).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// A build that ended badly: failed, with why, unless the skill already
+/// wrote a failure of its own.
+fn settle_failed(dir: &Path, message: &str) {
+    let failed =
+        read_status(dir).is_some_and(|status| status.state == perch_changescape::State::Failed);
+    if !failed {
+        let _ = write_status(dir, "failed", Some(message));
+    }
+}
+
+/// A build with a page whose status still says running: done.
+fn settle_running(dir: &Path) {
+    let running =
+        read_status(dir).is_none_or(|status| status.state == perch_changescape::State::Running);
+    if running {
+        let _ = write_status(dir, "done", None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_build_with_no_page_fails_and_one_with_a_page_settles_done() {
+        let dir = tempfile::tempdir().unwrap();
+        write_status(dir.path(), "running", None).unwrap();
+        settle_failed(dir.path(), "no page");
+        let status = read_status(dir.path()).unwrap();
+        assert_eq!(status.state, perch_changescape::State::Failed);
+        assert_eq!(status.error.as_deref(), Some("no page"));
+
+        // The skill's own failure stands.
+        settle_failed(dir.path(), "something else");
+        assert_eq!(
+            read_status(dir.path()).unwrap().error.as_deref(),
+            Some("no page")
+        );
+
+        write_status(dir.path(), "running", None).unwrap();
+        settle_running(dir.path());
+        assert_eq!(
+            read_status(dir.path()).unwrap().state,
+            perch_changescape::State::Done
+        );
+    }
+
+    #[test]
+    fn progress_names_the_tool_and_the_first_line_said() {
+        let call = perch_agent::RunEvent::ToolCall {
+            id: "1".into(),
+            name: "Bash".into(),
+            summary: "uv run collect.py".into(),
+            parent_id: None,
+        };
+        assert_eq!(
+            progress_line(&call).as_deref(),
+            Some("Bash: uv run collect.py")
+        );
+        let text = perch_agent::RunEvent::Text("\nReading the diff.\nMore.".into());
+        assert_eq!(progress_line(&text).as_deref(), Some("Reading the diff."));
     }
 }

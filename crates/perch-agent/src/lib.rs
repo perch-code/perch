@@ -7,6 +7,7 @@
 //! works with whatever version of the CLI the user has, and the parsers
 //! are the whole contract with them.
 
+mod changescape;
 mod codex;
 mod discover;
 mod interactive;
@@ -29,6 +30,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
 use tokio::sync::Notify;
 
+pub use changescape::ChangescapeSpec;
 pub use codex::CodexParser;
 pub use discover::{
     codex_catalog, codex_default_model, find_binary, install_dirs, parse_codex_catalog,

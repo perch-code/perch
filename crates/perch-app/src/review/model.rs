@@ -1491,6 +1491,9 @@ pub struct ReviewState {
     /// The element whose base-side excerpt is shown over the Changescape
     /// tab: one that is not on the head, so Code has no line to open.
     pub changescape_popover: RwSignal<Option<String>>,
+    /// What the running Changescape build of the open item has done, a
+    /// line a step, oldest first.
+    pub changescape_log: RwSignal<Vec<String>>,
     /// Each item's pane as it was last left, by item, for the life of the
     /// app.
     pub panes: RwSignal<HashMap<String, Pane>>,
@@ -2036,6 +2039,7 @@ impl ReviewState {
             changescape: RwSignal::new(None),
             changescape_section: RwSignal::new(None),
             changescape_popover: RwSignal::new(None),
+            changescape_log: RwSignal::new(Vec::new()),
             code_seen: RwSignal::new(false),
             tree_wanted: RwSignal::new(false),
             agents_unfolded: RwSignal::new(false),

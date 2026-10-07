@@ -44,11 +44,9 @@ fn harness_with_cache(root: Option<&Path>) -> (HeadlessHarness, ReviewState) {
     let (mut harness, _, state) = pull_request_harness_with(pull);
     if let Some(root) = root {
         let found = crate::backend::changescape::find(root, REPO, 812, HEAD);
-        state.changescape.set(Some(Arc::new(Shown::new(
-            "pr".into(),
-            HEAD.into(),
-            Arc::new(found),
-        ))));
+        state
+            .changescape
+            .set(Some(Arc::new(Shown::new("pr".into(), Arc::new(found)))));
     }
     harness.rebuild();
     harness.paint();
@@ -154,7 +152,7 @@ fn a_changescape_of_another_item_shows_nothing() {
     let (mut harness, state) = harness_with_cache(Some(root.path()));
     state.changescape.update(|shown| {
         let found = shown.as_ref().unwrap().found.clone();
-        *shown = Some(Arc::new(Shown::new("other".into(), HEAD.into(), found)));
+        *shown = Some(Arc::new(Shown::new("other".into(), found)));
     });
     harness.rebuild();
     harness.paint();
@@ -384,4 +382,96 @@ fn the_caret_in_an_element_shows_the_code_strip_which_leads_back() {
         Some("overview"),
         "the first section that shows it: the overview's paragraph links it"
     );
+}
+
+/// What the backend sends for a build in `state`, with `can_build`.
+fn shown_build(state: ReviewState, json: &str, page: bool, can_build: bool) -> tempfile::TempDir {
+    let root = if page {
+        cache_with_fixture("aaaaaaa1111")
+    } else {
+        tempfile::tempdir().unwrap()
+    };
+    let dir = perch_changescape::build_dir(root.path(), REPO, 812, HEAD);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("status.json"), json).unwrap();
+    let mut found = crate::backend::changescape::find(root.path(), REPO, 812, HEAD);
+    found.can_build = can_build;
+    crate::review::changescape::set_can_build(can_build);
+    state
+        .changescape
+        .set(Some(Arc::new(Shown::new("pr".into(), Arc::new(found)))));
+    root
+}
+
+#[test]
+fn a_first_build_running_shows_the_pill_and_its_progress() {
+    let (mut harness, state) = harness_with_cache(None);
+    let _root = shown_build(state, r#"{ "state": "running" }"#, false, true);
+    state.changescape_log.set(vec![
+        "Skill: changescape".into(),
+        "Bash: uv run collect.py".into(),
+    ]);
+    harness.rebuild();
+    harness.paint();
+    click(&mut harness, "Changescape pill");
+    assert!(named(harness.root_id(), "Changescape building").is_some());
+    assert!(named(harness.root_id(), "Changescape rail").is_none());
+}
+
+#[test]
+fn a_build_over_an_earlier_page_keeps_the_page_and_says_so() {
+    let (mut harness, state) = harness_with_cache(None);
+    let _root = shown_build(state, r#"{ "state": "running" }"#, true, true);
+    harness.rebuild();
+    harness.paint();
+    click(&mut harness, "Changescape pill");
+    assert!(named(harness.root_id(), "Changescape rail").is_some());
+    assert!(rect(&harness, "Changescape stale banner").height() > 0.0);
+    assert_eq!(
+        rect(&harness, "Changescape rebuild").width(),
+        0.0,
+        "no second build while one runs"
+    );
+}
+
+#[test]
+fn a_failed_build_offers_retry_only_where_a_build_can_run() {
+    let failed = r#"{ "state": "failed", "error": "uv: command not found" }"#;
+    let (mut harness, state) = harness_with_cache(None);
+    let _root = shown_build(state, failed, false, true);
+    harness.rebuild();
+    harness.paint();
+    click(&mut harness, "Changescape pill");
+    assert!(named(harness.root_id(), "Changescape failed").is_some());
+    assert!(rect(&harness, "Changescape retry").width() > 0.0);
+
+    let (harness, state) = harness_with_cache(None);
+    let _root = shown_build(state, failed, false, false);
+    let mut harness = harness;
+    harness.rebuild();
+    harness.paint();
+    assert!(
+        named(harness.root_id(), "Changescape pill").is_none(),
+        "nothing to show, and nothing to do about it"
+    );
+}
+
+#[test]
+fn the_row_menu_offers_a_build_only_where_one_can_run() {
+    let (_, state) = harness_with_cache(None);
+    let item = (*state.item.get().unwrap()).clone();
+    let app = crate::state::AppState::new();
+    let backend = std::rc::Rc::new(crate::backend::Backend::detached());
+    crate::review::changescape::set_can_build(false);
+    let menu = crate::ui::items::item_menu(app, backend.clone(), item.clone());
+    assert!(!menu
+        .outline()
+        .iter()
+        .any(|line| line.contains("Build Changescape")));
+    crate::review::changescape::set_can_build(true);
+    let menu = crate::ui::items::item_menu(app, backend, item);
+    assert!(menu
+        .outline()
+        .iter()
+        .any(|line| line.contains("Build Changescape")));
 }

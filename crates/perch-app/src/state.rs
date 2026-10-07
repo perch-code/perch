@@ -3140,11 +3140,38 @@ impl AppState {
                 if !current {
                     return;
                 }
-                review.changescape.set(found.map(|found| {
-                    Arc::new(crate::review::changescape::Shown::new(
-                        item_id, head_sha, found,
-                    ))
-                }));
+                crate::review::changescape::set_can_build(
+                    found.as_ref().is_some_and(|found| found.can_build),
+                );
+                review.changescape.set(
+                    found.map(|found| {
+                        Arc::new(crate::review::changescape::Shown::new(item_id, found))
+                    }),
+                );
+            }
+            Event::ChangescapeProgress {
+                item_id,
+                head_sha,
+                line,
+            } => {
+                let Some(review) = self.review.get_untracked() else {
+                    return;
+                };
+                let current = review
+                    .item
+                    .with_untracked(|item| item.as_ref().is_some_and(|item| item.id == item_id))
+                    && review.pull_request.with_untracked(|pull| {
+                        pull.as_ref().is_some_and(|pull| pull.head_sha == head_sha)
+                    });
+                if current {
+                    review.changescape_log.update(|log| {
+                        log.push(line);
+                        let over = log
+                            .len()
+                            .saturating_sub(crate::review::changescape::LOG_LINES);
+                        log.drain(..over);
+                    });
+                }
             }
             Event::AssignableUsers {
                 repo_full_name,

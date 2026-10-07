@@ -63,6 +63,10 @@ pub const UI_META_KEYS: [&str; 6] = [
 #[derive(Debug, Clone)]
 pub enum Command {
     Refresh,
+    /// Build an item's Changescape with Claude Code and the skill.
+    BuildChangescape {
+        item_id: String,
+    },
     /// Look for a pull request's Changescape in Changescape's cache.
     LookupChangescape {
         item_id: String,
@@ -1298,6 +1302,12 @@ pub enum Event {
         item_id: String,
         head_sha: String,
         found: Option<Arc<changescape::Found>>,
+    },
+    /// A line of a running Changescape build's progress.
+    ChangescapeProgress {
+        item_id: String,
+        head_sha: String,
+        line: String,
     },
     ChecksReady {
         item_id: String,
@@ -3043,6 +3053,12 @@ impl Backend {
             request_id,
         });
         request_id
+    }
+
+    pub fn build_changescape(&self, item_id: &str) {
+        let _ = self.commands.send(Command::BuildChangescape {
+            item_id: item_id.to_string(),
+        });
     }
 
     pub fn lookup_changescape(&self, item_id: &str, repo: &str, number: u64, head_sha: &str) {
@@ -5149,6 +5165,10 @@ async fn run(
                         .await;
                     }
                 });
+            }
+            Command::BuildChangescape { item_id } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { changescape::build(&ctx, item_id).await });
             }
             Command::LookupChangescape {
                 item_id,

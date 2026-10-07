@@ -572,7 +572,7 @@ mod tests {
     fn backticks_become_code_spans_and_offsets_follow() {
         let (plain, code, map) = backticks("a `b` c");
         assert_eq!(plain, "a b c");
-        assert_eq!(code, [2..3]);
+        assert_eq!(code, vec![2..3_usize]);
         assert_eq!(map(6), 4, "the c");
         let (plain, code, _) = backticks("one ` alone");
         assert_eq!(plain, "one ` alone");
