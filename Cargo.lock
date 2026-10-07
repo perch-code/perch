@@ -3662,7 +3662,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "perch-agent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "jiff",
  "libc",
@@ -3677,7 +3677,7 @@ dependencies = [
 
 [[package]]
 name = "perch-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -3712,7 +3712,7 @@ dependencies = [
 
 [[package]]
 name = "perch-git"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ignore",
@@ -3729,7 +3729,7 @@ dependencies = [
 
 [[package]]
 name = "perch-github"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -3755,7 +3755,7 @@ dependencies = [
 
 [[package]]
 name = "perch-knowledge"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "jiff",
  "pulldown-cmark",
@@ -3769,7 +3769,7 @@ dependencies = [
 
 [[package]]
 name = "perch-lsp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "lsp-types",
  "serde",
@@ -3783,7 +3783,7 @@ dependencies = [
 
 [[package]]
 name = "perch-syntax"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tracing",
  "tree-sitter",
