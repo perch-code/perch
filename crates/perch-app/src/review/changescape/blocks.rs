@@ -8,13 +8,14 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use floem::prelude::*;
-use floem::text::{Attrs, AttrsList, FamilyOwned};
+use floem::text::{Attrs, AttrsList, FamilyOwned, TextLayout};
 use floem::views::{Container, Decorators, Empty, Label, Stack};
 use floem::AnyView;
 use perch_changescape::page::{Block, BlockBody, Cell, Column, Row, Summary, Table, Text, View};
 use perch_changescape::Page;
 
 use crate::backend::Backend;
+use crate::review::cards::tip_with;
 use crate::review::changescape::{navigate, show_section, show_view, shown};
 use crate::review::linked_text::{linked_text, Target};
 use crate::review::model::ReviewState;
@@ -318,8 +319,7 @@ fn summary_block(cx: &Ctx, summary: &Summary) -> impl IntoView {
     Stack::vertical_from_iter(rows).style(|s| s.flex_col().width_full())
 }
 
-/// How wide a column of each kind is: text runs take what the fixed ones
-/// leave.
+/// How wide a column of each kind is, where the kind fixes it.
 fn column_width(kind: &str) -> Option<f64> {
     match kind {
         "num" => Some(64.0),
@@ -329,16 +329,109 @@ fn column_width(kind: &str) -> Option<f64> {
     }
 }
 
-fn column_style(s: floem::style::Style, column: &Column) -> floem::style::Style {
-    let s = s.padding_horiz(6.0).min_width(0.0);
-    match column_width(&column.kind) {
-        Some(width) => s.width(width).flex_shrink(0.0_f32),
-        None => s.flex_grow(1.0_f32).flex_basis(0.0),
+/// How a column takes its room in a row.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Width {
+    /// As wide as this, given or shrinking.
+    Fixed(f64),
+    /// Its content's width as it starts, giving way in proportion to it
+    /// when the row runs short, but not below `MIN_TEXT`.
+    Content(f64),
+    /// The whole of what holds it: one entry of a refs cell.
+    Fill,
+}
+
+/// Room each side of a cell's text.
+const CELL_PAD: f64 = 6.0;
+/// A column whose widest text is this narrow keeps its width: a kind, a
+/// hash, a count.
+const SNUG: f64 = 140.0;
+/// The narrowest a text column gives way to.
+const MIN_TEXT: f64 = 96.0;
+/// The widest a text column asks for to start with, so one long message
+/// does not take the row from the others.
+const MAX_TEXT: f64 = 520.0;
+
+/// How wide each of a table's columns is: a fixed kind keeps its width; a
+/// text column starts at the width of its widest text, the header's
+/// among them.
+fn column_widths(table: &Table) -> Vec<Width> {
+    table
+        .columns
+        .iter()
+        .map(|column| {
+            if let Some(width) = column_width(&column.kind) {
+                return Width::Fixed(width);
+            }
+            let mono = column.kind == "mono" || column.kind == "refs";
+            let widest = table
+                .rows
+                .iter()
+                .filter_map(|row| row.cells.get(&column.key))
+                .flat_map(|cell| {
+                    if cell.items.is_empty() {
+                        vec![cell_text_width(&cell.text, mono)]
+                    } else {
+                        cell.items
+                            .iter()
+                            .map(|item| cell_text_width(&item.text, true))
+                            .collect()
+                    }
+                })
+                .fold(header_width(&column.label), f64::max);
+            // A little over, for the link's underline and rounding.
+            let width = widest.ceil() + 2.0 * CELL_PAD + 2.0;
+            if width <= SNUG {
+                Width::Fixed(width)
+            } else {
+                Width::Content(width.min(MAX_TEXT))
+            }
+        })
+        .collect()
+}
+
+fn header_width(label: &str) -> f64 {
+    measure(label, theme::FONT_STACK, theme::TEXT_SECTION, true)
+}
+
+fn cell_text_width(text: &str, mono: bool) -> f64 {
+    if mono {
+        measure(text, theme::CODE_FONT_STACK, theme::CODE_FONT_SIZE, false)
+    } else {
+        measure(text, theme::FONT_STACK, theme::TEXT_META, false)
+    }
+}
+
+/// How wide `text` is on one line in `stack` at `size`.
+fn measure(text: &str, stack: &str, size: f32, emphasis: bool) -> f64 {
+    let family: Vec<FamilyOwned> = FamilyOwned::parse_list(stack).collect();
+    let mut attrs = Attrs::new().font_size(size).family(&family);
+    if emphasis {
+        attrs = attrs.weight(theme::weight_emphasis());
+    }
+    TextLayout::new_with_text(text, AttrsList::new(attrs), None)
+        .size()
+        .width
+}
+
+fn column_style(s: floem::style::Style, width: Width) -> floem::style::Style {
+    let s = s.padding_horiz(CELL_PAD).min_width(0.0);
+    match width {
+        Width::Fixed(width) => s.width(width).flex_shrink(0.0_f32),
+        // Shrinking in proportion to its basis, as a flex item does, so
+        // each text column gives up room as it asked for it.
+        Width::Content(width) => s
+            .flex_basis(width)
+            .flex_grow(1.0_f32)
+            .flex_shrink(1.0_f32)
+            .min_width(MIN_TEXT),
+        Width::Fill => s.width_full(),
     }
 }
 
 fn table_block(cx: &Ctx, table: &Table) -> impl IntoView {
     let columns = Rc::new(table.columns.clone());
+    let widths = Rc::new(column_widths(table));
     // The longest bar in a column is full.
     let maxima: Rc<Vec<f64>> = Rc::new(
         columns
@@ -356,12 +449,12 @@ fn table_block(cx: &Ctx, table: &Table) -> impl IntoView {
     let header = Stack::horizontal_from_iter(
         columns
             .iter()
-            .map(|column| {
-                let column = column.clone();
+            .zip(widths.iter().copied())
+            .map(|(column, width)| {
                 let right = column.kind == "num";
                 Label::new(column.label.clone())
                     .style(move |s| {
-                        column_style(s, &column)
+                        column_style(s, width)
                             .font_size(theme::TEXT_SECTION)
                             .font_weight(theme::weight_emphasis())
                             .color(theme::fg_muted())
@@ -384,7 +477,7 @@ fn table_block(cx: &Ctx, table: &Table) -> impl IntoView {
     let rows: Vec<AnyView> = table
         .rows
         .iter()
-        .map(|row| table_row(cx, &columns, &maxima, row, badges).into_any())
+        .map(|row| table_row(cx, &columns, &widths, &maxima, row, badges).into_any())
         .collect();
     Stack::vertical((
         header,
@@ -399,6 +492,7 @@ const BADGE_SLOT: f64 = 36.0;
 fn table_row(
     cx: &Ctx,
     columns: &Rc<Vec<Column>>,
+    widths: &Rc<Vec<Width>>,
     maxima: &Rc<Vec<f64>>,
     row: &Row,
     badges: bool,
@@ -409,7 +503,7 @@ fn table_row(
         .enumerate()
         .map(|(i, column)| {
             let cell = row.cells.get(&column.key).cloned().unwrap_or_default();
-            table_cell(cx, column, maxima[i], cell, dim).into_any()
+            table_cell(cx, column, widths[i], maxima[i], cell, dim).into_any()
         })
         .collect();
     if badges {
@@ -446,8 +540,7 @@ fn row_style(s: floem::style::Style) -> floem::style::Style {
         .border_color(theme::border_muted())
 }
 
-fn table_cell(cx: &Ctx, column: &Column, max: f64, cell: Cell, dim: bool) -> AnyView {
-    let column = column.clone();
+fn table_cell(cx: &Ctx, column: &Column, width: Width, max: f64, cell: Cell, dim: bool) -> AnyView {
     let kind = column.kind.clone();
     let ink = move |status: &str| {
         if dim {
@@ -471,7 +564,7 @@ fn table_cell(cx: &Ctx, column: &Column, max: f64, cell: Cell, dim: bool) -> Any
                         kind: "mono".into(),
                         ..column.clone()
                     };
-                    Container::new(table_cell(cx, &one, max, item.clone(), dim))
+                    Container::new(table_cell(cx, &one, Width::Fill, max, item.clone(), dim))
                         .style(|s| s.width_full().min_width(0.0))
                         .into_any()
                 })
@@ -513,6 +606,10 @@ fn table_cell(cx: &Ctx, column: &Column, max: f64, cell: Cell, dim: bool) -> Any
             let text = cell.text.clone();
             let mono = kind == "mono" || kind == "refs";
             let status = kind == "status";
+            // Prose wraps in its column. A name or a path stays on its
+            // line, cut short where the column is narrower, with the whole
+            // of it in a tip.
+            let cut = mono || status;
             let linked = cell.el.is_some() || cell.file.is_some();
             let status_text = text.clone();
             let label = Label::new(text).style(move |s| {
@@ -522,8 +619,9 @@ fn table_cell(cx: &Ctx, column: &Column, max: f64, cell: Cell, dim: bool) -> Any
                     } else {
                         theme::TEXT_META
                     })
-                    .text_ellipsis()
                     .min_width(0.0)
+                    .apply_if(cut, |s| s.text_ellipsis())
+                    .apply_if(!cut, |s| s.text_wrap().width_full())
                     .color(if status {
                         ink(&status_text)
                     } else if linked && !dim {
@@ -539,12 +637,23 @@ fn table_cell(cx: &Ctx, column: &Column, max: f64, cell: Cell, dim: bool) -> Any
                     s
                 }
             });
+            let label: AnyView = if mono && !cell.text.is_empty() {
+                let whole = cell.text.clone();
+                tip_with(label, move || whole.clone()).into_any()
+            } else {
+                label.into_any()
+            };
             match (cell.el.clone(), cell.file.clone()) {
                 (Some(el), _) => {
                     let cx = cx.clone();
                     Container::new(label)
                         .on_event_stop(el::Click, move |_, _| cx.open(&el))
-                        .style(|s| underlined_link(s).min_width(0.0).max_width_full())
+                        .style(move |s| {
+                            underlined_link(s)
+                                .min_width(0.0)
+                                .max_width_full()
+                                .apply_if(!cut, |s| s.width_full())
+                        })
                         .into_any()
                 }
                 (None, Some(file)) => {
@@ -553,17 +662,22 @@ fn table_cell(cx: &Ctx, column: &Column, max: f64, cell: Cell, dim: bool) -> Any
                         .on_event_stop(el::Click, move |_, _| {
                             navigate::open_file_line(state, &backend, &file, line)
                         })
-                        .style(|s| underlined_link(s).min_width(0.0).max_width_full())
+                        .style(move |s| {
+                            underlined_link(s)
+                                .min_width(0.0)
+                                .max_width_full()
+                                .apply_if(!cut, |s| s.width_full())
+                        })
                         .into_any()
                 }
-                (None, None) => label.into_any(),
+                (None, None) => label,
             }
         }
     };
     let right = kind == "num";
     Container::new(body)
         .style(move |s| {
-            column_style(s, &column)
+            column_style(s, width)
                 .items_center()
                 .apply_if(right, |s| s.justify_end())
         })
@@ -615,5 +729,40 @@ mod tests {
         let (plain, code, _) = backticks("one ` alone");
         assert_eq!(plain, "one ` alone");
         assert!(code.is_empty());
+    }
+
+    #[test]
+    fn a_short_column_keeps_its_width_and_a_long_one_starts_wider() {
+        let table: Table = serde_json::from_value(serde_json::json!({
+            "columns": [
+                {"key": "sha", "label": "Commit", "kind": "mono"},
+                {"key": "msg", "label": "Message", "kind": "text"},
+                {"key": "files", "label": "Files", "kind": "num"},
+                {"key": "refs", "label": "Where", "kind": "refs"},
+            ],
+            "rows": [
+                {"cells": {
+                    "sha": "e71c42c",
+                    "msg": "feat(check): partial composite key findings for fanout groups",
+                    "files": 6,
+                    "refs": ["test_fanout_key_groups_by_owner.py", "run.py"],
+                }},
+            ],
+        }))
+        .unwrap();
+        let widths = column_widths(&table);
+        let Width::Fixed(sha) = widths[0] else {
+            panic!("a hash is snug: {:?}", widths[0]);
+        };
+        let Width::Content(msg) = widths[1] else {
+            panic!("a message takes what it needs: {:?}", widths[1]);
+        };
+        assert!(sha < SNUG && msg > 2.0 * sha, "{sha} {msg}");
+        assert_eq!(widths[2], Width::Fixed(64.0));
+        let Width::Content(refs) = widths[3] else {
+            panic!("a refs column sizes by its widest entry: {:?}", widths[3]);
+        };
+        let one = cell_text_width("test_fanout_key_groups_by_owner.py", true);
+        assert!(refs > one && refs < one + 40.0, "{refs} {one}");
     }
 }
