@@ -273,6 +273,37 @@ thread_local! {
     static DRAWN: std::cell::RefCell<Vec<(Size, floem::kurbo::Rect)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// The longest side, in device pixels, a picture is drawn at. vger
+/// rasters a picture whole and grows its atlas to twice the longest side
+/// it has seen, and the GPU refuses an atlas past 8192: a larger raster
+/// panics.
+pub(crate) const MAX_RASTER: f64 = 4096.0;
+
+/// The device scale a view assumes until its first paint: a Retina
+/// screen at the display zoom.
+pub(crate) fn assumed_scale() -> f64 {
+    2.0 * theme::zoom()
+}
+
+/// `size`, made smaller where it must be, keeping its shape, so that its
+/// raster at `scale` is within `MAX_RASTER`.
+pub(crate) fn within_raster(size: Size, scale: f64) -> Size {
+    let longest = size.width.max(size.height) * scale;
+    if longest <= MAX_RASTER || longest <= 0.0 {
+        return size;
+    }
+    let k = MAX_RASTER / longest;
+    Size::new(size.width * k, size.height * k)
+}
+
+/// Remember the device scale a view paints at, for its style to read.
+pub(crate) fn note_scale(cx: &PaintCx, scale: RwSignal<f64>) {
+    let now = cx.window_state.effective_scale();
+    if (scale.get_untracked() - now).abs() > f64::EPSILON {
+        scale.set(now);
+    }
+}
+
 /// One SVG, filling its view. Under it, the wash and the hairline of its
 /// canvas, so the file's extent shows, and so does a shape in the pane's
 /// own white.
@@ -284,6 +315,8 @@ struct Drawn {
     /// size the atlas cannot hold draws nothing; a paint at a new size
     /// asks for one more.
     painted: Size,
+    /// The device scale it last painted at.
+    scale: RwSignal<f64>,
 }
 
 /// A picture in the room its side gives it: a box that takes the room,
@@ -298,14 +331,17 @@ struct Drawn {
 fn drawn(drawing: Drawing, frame: Size) -> impl IntoView {
     let natural = drawing.size();
     let bounds = RwSignal::new(Size::ZERO);
+    let scale = RwSignal::new(assumed_scale());
     Container::new(
         Drawn {
             id: ViewId::new(),
             drawing,
             painted: Size::ZERO,
+            scale,
         }
         .style(move |s| {
             let size = fitted(natural, frame, bounds.get()).unwrap_or(Size::ZERO);
+            let size = within_raster(size, scale.get());
             // Whole pixels, so the hairline is one pixel and not two half
             // ones, and never past the box; the shape drifts by less
             // than a pixel for it.
@@ -347,6 +383,7 @@ impl View for Drawn {
     }
 
     fn paint(&mut self, cx: &mut PaintCx) {
+        note_scale(cx, self.scale);
         let Some(layout) = self.id.get_layout() else {
             return;
         };
@@ -380,6 +417,16 @@ impl View for Drawn {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_picture_too_large_to_raster_is_made_smaller_in_its_shape() {
+        let small = Size::new(800.0, 400.0);
+        assert_eq!(within_raster(small, 2.0), small);
+        // 3000 points at 2 pixels a point is 6000 pixels, and 4096 is the
+        // most: the longer side comes to 2048 points, the shorter in step.
+        let big = within_raster(Size::new(3000.0, 1500.0), 2.0);
+        assert!((big.width - 2048.0).abs() < 1e-9 && (big.height - 1024.0).abs() < 1e-9);
+    }
 
     const CIRCLE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><circle cx="12" cy="12" r="10" fill="#c00"/></svg>"##;
     const SQUARE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 16"><rect width="32" height="16" fill="#0c0"/></svg>"##;

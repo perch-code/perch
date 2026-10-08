@@ -21,7 +21,7 @@ use floem::{AnyView, RendererSvg, View, ViewId};
 use perch_changescape::page::Svg;
 
 use crate::review::changescape::blocks::Ctx;
-use crate::review::picture::Drawing;
+use crate::review::picture::{assumed_scale, note_scale, Drawing, MAX_RASTER};
 use crate::theme;
 use crate::ui::widgets::clickable;
 
@@ -33,6 +33,28 @@ const ZOOM_MIN: f64 = 0.25;
 const ZOOM_MAX: f64 = 4.0;
 /// The most a picture is scaled up to fit its block when it opens.
 const FIT_MAX: f64 = 1.5;
+/// The most a picture of `natural` size zooms to at `scale`, so that its
+/// raster stays within `MAX_RASTER`.
+fn zoom_cap(natural: Size, scale: f64) -> f64 {
+    let longest = natural.width.max(natural.height) * scale;
+    if longest > 0.0 {
+        ZOOM_MAX.min(MAX_RASTER / longest)
+    } else {
+        ZOOM_MAX
+    }
+}
+
+/// The zoom a picture draws at: `zoom`, or one until the fit is known,
+/// never past the cap.
+fn drawn_zoom(zoom: Option<f64>, cap: f64) -> f64 {
+    zoom.unwrap_or(1.0).min(cap)
+}
+
+/// `z` held to the zoom range and to the cap.
+fn clamp_zoom(z: f64, cap: f64) -> f64 {
+    z.clamp(ZOOM_MIN, ZOOM_MAX).min(cap)
+}
+
 /// The tallest a diagram's box gets before it scrolls down too.
 const MAX_HEIGHT: f64 = 560.0;
 
@@ -58,6 +80,15 @@ pub fn svg_block(cx: Ctx, svg: Svg) -> AnyView {
     // `None` until the block's width is known; then the width's fit.
     let zoom: RwSignal<Option<f64>> = RwSignal::new(None);
     let hovered: RwSignal<Option<usize>> = RwSignal::new(None);
+    let scale = RwSignal::new(assumed_scale());
+    let cap = move || zoom_cap(natural, scale.get());
+    // A screen or display zoom with more pixels a point lowers the cap.
+    floem::reactive::Effect::new(move |_| {
+        let cap = cap();
+        if zoom.get_untracked().is_some_and(|z| z > cap) {
+            zoom.set(Some(cap));
+        }
+    });
     let id = ViewId::new();
     // The ring is painted from the hovered node, which no style reads.
     floem::reactive::Effect::new(move |_| {
@@ -72,8 +103,9 @@ pub fn svg_block(cx: Ctx, svg: Svg) -> AnyView {
         hovered,
         zoom,
         painted: Size::ZERO,
+        scale,
     };
-    let marks = badges(&cx, &hot, zoom);
+    let marks = badges(&cx, &hot, zoom, cap);
     let (move_hot, down_hot, click_hot) = (hot.clone(), hot.clone(), hot);
     let pressed: RwSignal<Option<usize>> = RwSignal::new(None);
     let picture = picture
@@ -81,7 +113,10 @@ pub fn svg_block(cx: Ctx, svg: Svg) -> AnyView {
         // Points arrive in the view's own coordinates.
         .on_event_cont(el::PointerMove, move |_, update| {
             let at = update.current.logical_point();
-            let under = hit(&move_hot, scaled(at, zoom.get_untracked()));
+            let under = hit(
+                &move_hot,
+                scaled(at, drawn_zoom(zoom.get_untracked(), cap())),
+            );
             if hovered.get_untracked() != under {
                 hovered.set(under);
             }
@@ -89,7 +124,10 @@ pub fn svg_block(cx: Ctx, svg: Svg) -> AnyView {
         .on_event_cont(el::PointerLeave, move |_, _| hovered.set(None))
         .on_event_cont(el::PointerDown, move |_, e: &PointerButtonEvent| {
             let at = e.state.logical_point();
-            pressed.set(hit(&down_hot, scaled(at, zoom.get_untracked())));
+            pressed.set(hit(
+                &down_hot,
+                scaled(at, drawn_zoom(zoom.get_untracked(), cap())),
+            ));
         })
         .on_event_stop(el::Click, move |_, _| {
             if let Some(i) = pressed.get_untracked() {
@@ -97,7 +135,7 @@ pub fn svg_block(cx: Ctx, svg: Svg) -> AnyView {
             }
         })
         .style(move |s| {
-            let z = zoom.get().unwrap_or(1.0);
+            let z = drawn_zoom(zoom.get(), cap());
             s.width((natural.width * z).floor())
                 .height((natural.height * z).floor())
                 .flex_shrink(0.0_f32)
@@ -119,7 +157,8 @@ pub fn svg_block(cx: Ctx, svg: Svg) -> AnyView {
             if zoom.get_untracked().is_none() && natural.width > 0.0 {
                 let room = new_content_box.size().width - 24.0;
                 if room > 0.0 {
-                    zoom.set(Some((room / natural.width).clamp(ZOOM_MIN, FIT_MAX)));
+                    let fit = (room / natural.width).min(FIT_MAX);
+                    zoom.set(Some(clamp_zoom(fit, cap())));
                 }
             }
         },
@@ -132,21 +171,26 @@ pub fn svg_block(cx: Ctx, svg: Svg) -> AnyView {
             .border_color(theme::border_muted())
             .border_radius(theme::RADIUS)
     });
-    Stack::vertical((zoom_bar(zoom), scroller))
+    Stack::vertical((zoom_bar(zoom, cap), scroller))
         .style(|s| s.flex_col().gap(4.0).width_full())
         .into_any()
 }
 
 /// Each hot node's badge of open threads, at the node's top right corner,
 /// moved with the zoom.
-fn badges(cx: &Ctx, hot: &[Hot], zoom: RwSignal<Option<f64>>) -> impl IntoView {
+fn badges(
+    cx: &Ctx,
+    hot: &[Hot],
+    zoom: RwSignal<Option<f64>>,
+    cap: impl Fn() -> f64 + Copy + 'static,
+) -> impl IntoView {
     let marks: Vec<AnyView> = hot
         .iter()
         .map(|h| {
             let rect = h.rect;
             Container::new(cx.badge(&h.el))
                 .style(move |s| {
-                    let z = zoom.get().unwrap_or(1.0);
+                    let z = drawn_zoom(zoom.get(), cap());
                     s.position(floem::style::Position::Absolute)
                         .inset_left(rect.x1 * z - 14.0)
                         .inset_top(rect.y0 * z - 9.0)
@@ -162,10 +206,10 @@ fn badges(cx: &Ctx, hot: &[Hot], zoom: RwSignal<Option<f64>>) -> impl IntoView {
 }
 
 /// Smaller, the block's width, larger.
-fn zoom_bar(zoom: RwSignal<Option<f64>>) -> impl IntoView {
+fn zoom_bar(zoom: RwSignal<Option<f64>>, cap: impl Fn() -> f64 + Copy + 'static) -> impl IntoView {
     let step = move |by: f64| {
         let z = zoom.get_untracked().unwrap_or(1.0) * by;
-        zoom.set(Some(z.clamp(ZOOM_MIN, ZOOM_MAX)));
+        zoom.set(Some(clamp_zoom(z, cap())));
     };
     let button = |text: &'static str, name: &'static str, act: Box<dyn Fn()>| {
         Container::new(Label::new(text).style(|s| {
@@ -207,8 +251,7 @@ fn zoom_bar(zoom: RwSignal<Option<f64>>) -> impl IntoView {
 }
 
 /// A point in the view, in the picture's own units.
-fn scaled(at: Point, zoom: Option<f64>) -> Point {
-    let z = zoom.unwrap_or(1.0);
+fn scaled(at: Point, z: f64) -> Point {
     Point::new(at.x / z, at.y / z)
 }
 
@@ -252,6 +295,8 @@ struct Diagram {
     hovered: RwSignal<Option<usize>>,
     zoom: RwSignal<Option<f64>>,
     painted: Size,
+    /// The device scale it last painted at.
+    scale: RwSignal<f64>,
 }
 
 impl View for Diagram {
@@ -264,6 +309,7 @@ impl View for Diagram {
     }
 
     fn paint(&mut self, cx: &mut PaintCx) {
+        note_scale(cx, self.scale);
         let Some(layout) = self.id.get_layout() else {
             return;
         };
@@ -282,7 +328,8 @@ impl View for Diagram {
             None::<&Brush>,
         );
         if let Some(hot) = self.hovered.get_untracked().and_then(|i| self.hot.get(i)) {
-            let z = self.zoom.get_untracked().unwrap_or(1.0);
+            let cap = zoom_cap(self.drawing.size(), self.scale.get_untracked());
+            let z = drawn_zoom(self.zoom.get_untracked(), cap);
             let ring = Rect::new(
                 hot.rect.x0 * z,
                 hot.rect.y0 * z,
@@ -303,6 +350,22 @@ impl View for Diagram {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_zoom_stops_where_the_raster_would_pass_the_most() {
+        // 620 wide at 2 pixels a point: 4096 / 1240 is 3.3, under 4.
+        let cap = zoom_cap(Size::new(620.0, 194.0), 2.0);
+        assert!((cap - MAX_RASTER / 1240.0).abs() < 1e-9);
+        assert_eq!(clamp_zoom(ZOOM_MAX, cap), cap);
+        assert_eq!(clamp_zoom(1.0, cap), 1.0);
+        // A small picture keeps the whole range.
+        assert_eq!(zoom_cap(Size::new(100.0, 50.0), 2.0), ZOOM_MAX);
+        // Before the fit, a picture wider than the cap at one draws at
+        // the cap.
+        let wide = zoom_cap(Size::new(3000.0, 400.0), 2.0);
+        assert!(wide < 1.0);
+        assert_eq!(drawn_zoom(None, wide), wide);
+    }
 
     const TWO: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><g id="outer"><rect x="0" y="0" width="200" height="100" fill="#eee"/><g id="inner"><rect x="20" y="20" width="40" height="30" fill="#ccc"/></g></g></svg>"##;
 
