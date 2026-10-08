@@ -15,13 +15,26 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{real_path, Backend, Error, Run, RunEvent};
 
-/// The commands the skill runs.
+/// The commands the skill runs. Its steps run from its own folder, so
+/// Claude often starts them with a `cd` there; each part of a compound
+/// command needs a rule.
 const SKILL_COMMANDS: &[&str] = &[
+    "Bash(cd *)",
     "Bash(uv run *)",
     "Bash(gh pr *)",
-    "Bash(gh api *)",
     "Bash(gh issue *)",
     "Bash(git *)",
+    // What Claude pipes a step's output through. The sandbox, not this
+    // list, is what keeps the build to its folders.
+    "Bash(tail *)",
+    "Bash(head *)",
+    "Bash(cat *)",
+    "Bash(ls *)",
+    "Bash(wc *)",
+    "Bash(grep *)",
+    "Bash(sort *)",
+    "Bash(jq *)",
+    "Bash(echo *)",
 ];
 
 /// What `gh`, `git fetch` and `uv` reach.
@@ -36,12 +49,23 @@ const DOMAINS: &[&str] = &[
 pub struct ChangescapeSpec {
     pub binary: PathBuf,
     pub model: String,
-    /// Perch's clone of the repository.
-    pub cwd: PathBuf,
-    /// Changescape's cache, which the shell may write.
+    /// Perch's clone of the repository, which the skill fetches the pull
+    /// request's head into.
+    pub repo: PathBuf,
+    /// Changescape's cache, which the shell may write, and where the run
+    /// runs. Not the clone: the sandbox refuses every write to the git
+    /// internals of the folder a run runs in, and a bare clone is all
+    /// internals, so the skill's fetch could not store a thing.
     pub cache_root: PathBuf,
     /// The one folder the run's own Write and Edit may touch.
     pub build_dir: PathBuf,
+    /// The skill's folder, which its steps `cd` into.
+    pub skill_dir: Option<PathBuf>,
+    /// Perch's GitHub token, as `GH_TOKEN`: `gh` in the sandbox cannot
+    /// reach the keychain its own login is in. Every other run is denied
+    /// tokens; this one reads pull requests with `gh pr` and `gh issue`,
+    /// and is not given `gh api`.
+    pub github_token: Option<String>,
     pub prompt: String,
 }
 
@@ -57,9 +81,16 @@ impl ChangescapeSpec {
             "--strict-mcp-config".into(),
             "--no-session-persistence".into(),
             "--settings".into(),
-            settings(&self.cwd, &self.cache_root),
+            settings(&self.repo, &self.cache_root),
             "--add-dir".into(),
-            real_path(&self.cache_root).to_string_lossy().into_owned(),
+            real_path(&self.repo).to_string_lossy().into_owned(),
+        ];
+        // `--add-dir` takes every value up to the next option, so the
+        // skill's folder goes before one.
+        if let Some(skill) = &self.skill_dir {
+            args.push(real_path(skill).to_string_lossy().into_owned());
+        }
+        args.extend([
             "--output-format".into(),
             "stream-json".into(),
             "--verbose".into(),
@@ -77,7 +108,7 @@ impl ChangescapeSpec {
             "Glob".into(),
             format!("Write({under_build})"),
             format!("Edit({under_build})"),
-        ];
+        ]);
         args.extend(SKILL_COMMANDS.iter().map(|c| (*c).to_string()));
         // Everything not allowed is refused under `dontAsk`; the network
         // tools are named too, as every run names them.
@@ -89,21 +120,35 @@ impl ChangescapeSpec {
     }
 }
 
-/// The sandbox: writes to the cache, the clone and the temporary
-/// directory; GitHub and the package index on the network. `uv` keeps its
-/// cache and the skill's environment under the cache root, the only
-/// place it can write.
-pub fn settings(cwd: &Path, cache_root: &Path) -> String {
+/// The sandbox: writes to the cache, the clone, the temporary directory
+/// and `uv`'s cache; GitHub and the package index on the network.
+///
+/// `uv` runs offline, from the packages the reader's own runs of the skill
+/// left in its cache. Online, it panics in the sandbox: reading the
+/// system's proxy configuration is denied ("Attempted to create a NULL
+/// object", uv 0.8.19), so a package not in the cache cannot be fetched.
+pub fn settings(repo: &Path, cache_root: &Path) -> String {
     let cache = real_path(cache_root);
-    let uv = cache.join(".uv");
+    let uv_cache = std::env::var_os("UV_CACHE_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache/uv")))
+        .map(|dir| real_path(&dir));
+    let allow_write: Vec<PathBuf> = [cache, real_path(repo), real_path(&std::env::temp_dir())]
+        .into_iter()
+        .chain(uv_cache)
+        .collect();
     serde_json::json!({
         "sandbox": {
             "enabled": true,
             "autoAllowBashIfSandboxed": false,
             "allowUnsandboxedCommands": false,
             "failIfUnavailable": true,
+            // Go's TLS on macOS, `gh`'s and `git`'s helpers among it,
+            // checks certificates with the system's trust service, which
+            // the sandbox otherwise denies.
+            "enableWeakerNetworkIsolation": true,
             "filesystem": {
-                "allowWrite": [cache, real_path(cwd), real_path(&std::env::temp_dir())],
+                "allowWrite": allow_write,
             },
             "network": {
                 "allowedDomains": DOMAINS,
@@ -111,11 +156,32 @@ pub fn settings(cwd: &Path, cache_root: &Path) -> String {
             },
         },
         "env": {
-            "UV_CACHE_DIR": uv.join("cache"),
-            "UV_PROJECT_ENVIRONMENT": uv.join("venv"),
+            "UV_OFFLINE": "1",
         },
     })
     .to_string()
+}
+
+/// The token for `gh`, and for the skill's `git fetch` over HTTPS the
+/// credential helper Perch's own fetches use, read from the same
+/// variable and scoped to github.com. The empty value first clears any
+/// helper the reader's configuration has for it.
+fn token_env(token: String) -> Vec<(String, String)> {
+    let helper = "credential.https://github.com.helper";
+    [
+        ("GH_TOKEN", token),
+        ("GIT_CONFIG_COUNT", "2".into()),
+        ("GIT_CONFIG_KEY_0", helper.into()),
+        ("GIT_CONFIG_VALUE_0", String::new()),
+        ("GIT_CONFIG_KEY_1", helper.into()),
+        (
+            "GIT_CONFIG_VALUE_1",
+            "!f() { echo username=x-access-token; echo password=$GH_TOKEN; }; f".into(),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_string(), value))
+    .collect()
 }
 
 impl Run {
@@ -125,14 +191,16 @@ impl Run {
         events: UnboundedSender<RunEvent>,
     ) -> Result<Run, Error> {
         let args = spec.args();
+        let env = spec.github_token.map(token_env).unwrap_or_default();
         Self::spawn_process(
             Backend::ClaudeCode,
             spec.binary,
-            spec.cwd,
+            spec.cache_root,
             args,
             None,
             None,
             events,
+            env,
         )
     }
 }
@@ -145,9 +213,11 @@ mod tests {
         ChangescapeSpec {
             binary: "claude".into(),
             model: "opus".into(),
-            cwd: "/tmp/repos/a.git".into(),
+            repo: "/tmp/repos/a.git".into(),
             cache_root: "/tmp/cs".into(),
             build_dir: "/tmp/cs/o/r/pr-1/abc".into(),
+            skill_dir: Some("/tmp/skills/changescape".into()),
+            github_token: None,
             prompt: "Use the changescape skill".into(),
         }
     }

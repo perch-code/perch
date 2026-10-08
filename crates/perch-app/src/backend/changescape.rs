@@ -185,24 +185,42 @@ async fn run_build(
     // The pill comes now, with the build's progress under it.
     lookup(ctx, item_id.into(), repo.into(), number, head.into()).await;
 
+    let token_config = config.clone();
+    let github_token =
+        tokio::task::spawn_blocking(move || perch_github::resolve_token(&token_config))
+            .await
+            .ok()
+            .flatten()
+            .map(|token| token.value);
     let prompt = format!(
-        "Use the changescape skill on pull request #{number} of {repo}, in this repository.\n\
+        "Use the changescape skill on pull request #{number} of {repo}.\n\
+         The repository is at {}.\n\
          Write the output to {}/.",
+        clone.display(),
         dir.display()
     );
     let spec = perch_agent::ChangescapeSpec {
         binary,
         model: config.agent.model.clone(),
-        cwd: clone,
+        repo: clone,
         cache_root: root,
         build_dir: dir.clone(),
+        skill_dir: perch_changescape::skill_available(),
+        github_token,
         prompt,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let run = perch_agent::Run::spawn_changescape(spec, tx)
         .map_err(|e| format!("Could not start Claude Code: {e}"))?;
     tracing::info!(item = %item_id, number, "changescape build started");
+    // The steps go to a file in the build's folder too, so a failed build
+    // can be read after the tab is gone.
+    let mut log = std::fs::File::create(dir.join(BUILD_LOG)).ok();
     while let Some(event) = rx.recv().await {
+        if let Some(file) = log.as_mut() {
+            use std::io::Write as _;
+            let _ = writeln!(file, "{}", full_line(&event).unwrap_or_default());
+        }
         if let Some(line) = progress_line(&event) {
             let _ = ctx.events.send(Event::ChangescapeProgress {
                 item_id: item_id.to_string(),
@@ -215,6 +233,24 @@ async fn run_build(
         perch_agent::RunOutcome::Finished { .. } => Ok(()),
         perch_agent::RunOutcome::Failed { message, .. } => Err(message),
         perch_agent::RunOutcome::Stopped { .. } => Err("The build was stopped.".into()),
+    }
+}
+
+/// The file in a build's folder that keeps what the run did.
+const BUILD_LOG: &str = "perch-build.log";
+
+/// An event as the build's log keeps it: whole, where the tab shows one
+/// line.
+fn full_line(event: &perch_agent::RunEvent) -> Option<String> {
+    use perch_agent::RunEvent;
+    match event {
+        RunEvent::Text(text) => Some(text.clone()),
+        RunEvent::ToolResult { ok, summary, .. } => Some(format!(
+            "  -> {}{summary}",
+            if *ok { "" } else { "failed: " }
+        )),
+        RunEvent::Failed { message } => Some(format!("Failed: {message}")),
+        other => progress_line(other),
     }
 }
 
