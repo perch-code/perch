@@ -1100,12 +1100,16 @@ pub fn kinds_at_root(root: &Path) -> Vec<ServerKind> {
 /// which looks up a name written in a comment, stops at the first 128
 /// fuzzy matches in name order, which can leave out the one match that is
 /// the name for a short one; and it lists every `pub use` of an item as an
-/// item of its own, so a name re-exported twice would be three.
+/// item of its own, so a name re-exported twice would be three. As it
+/// starts, it indexes every crate the workspace reads, on a thread for
+/// each core by default, which ran a large workspace's fans for most of
+/// a minute; two threads take longer and stay quiet.
 pub(crate) fn rust_analyzer_options() -> serde_json::Value {
     serde_json::json!({
         "workspace": {
             "symbol": { "search": { "limit": 1024, "excludeImports": true } }
-        }
+        },
+        "cachePriming": { "numThreads": 2 }
     })
 }
 
