@@ -1513,6 +1513,9 @@ pub struct ReviewState {
     /// The element whose base-side excerpt is shown over the Changescape
     /// tab: one that is not on the head, so Code has no line to open.
     pub changescape_popover: RwSignal<Option<String>>,
+    /// The diagram shown expanded over the Changescape section, as its
+    /// view id and its block's index there. Not kept with the pane.
+    pub changescape_expanded: RwSignal<Option<(String, usize)>>,
     /// What the running Changescape build of the open item has done, a
     /// line a step, oldest first.
     pub changescape_log: RwSignal<Vec<String>>,
@@ -2065,6 +2068,7 @@ impl ReviewState {
             changescape_open: RwSignal::new(HashMap::new()),
             changescape_unfolded: RwSignal::new(HashSet::new()),
             changescape_popover: RwSignal::new(None),
+            changescape_expanded: RwSignal::new(None),
             changescape_log: RwSignal::new(Vec::new()),
             code_seen: RwSignal::new(false),
             tree_wanted: RwSignal::new(false),
@@ -2571,6 +2575,7 @@ impl ReviewState {
             self.changescape_facet_hide.set(pane.changescape_facet_hide);
             self.changescape_open.set(pane.changescape_open);
             self.changescape_unfolded.set(pane.changescape_unfolded);
+            self.changescape_expanded.set(None);
             self.tree_wanted.set(false);
             if !paths.is_empty() {
                 self.loading

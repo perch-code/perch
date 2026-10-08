@@ -286,6 +286,95 @@ fn a_hot_node_in_a_diagram_opens_its_element() {
     assert_eq!(state.jump_caret.get(), Some((0, 0)));
 }
 
+/// The window on `cache_with_more`'s Map, laid out once more so that
+/// the diagram fits its block.
+fn on_map() -> (HeadlessHarness, ReviewState, tempfile::TempDir) {
+    let root = cache_with_more(HEAD);
+    let (mut harness, state) = harness_with_cache(Some(root.path()));
+    click(&mut harness, "Changescape pill");
+    click(&mut harness, "Changescape rail map");
+    redraw(&mut harness);
+    (harness, state, root)
+}
+
+/// The diagram in the overlay.
+fn expanded_diagram(harness: &HeadlessHarness) -> floem::kurbo::Rect {
+    let overlay = named(harness.root_id(), "Changescape expanded diagram").expect("no overlay");
+    let mut found = Vec::new();
+    all_named(overlay, "Changescape diagram", &mut found);
+    found
+        .first()
+        .expect("no diagram in the overlay")
+        .get_visual_rect_no_clip()
+}
+
+#[test]
+fn expand_draws_the_diagram_larger_beside_the_rail() {
+    let (mut harness, state, _root) = on_map();
+    let small = nth(&harness, "Changescape diagram", 0);
+    click(&mut harness, "Changescape expand");
+    redraw(&mut harness);
+    assert_eq!(
+        state.changescape_expanded.get(),
+        Some(("diagram".to_string(), 0))
+    );
+    let overlay = rect(&harness, "Changescape expanded diagram");
+    let rail = rect(&harness, "Changescape rail");
+    let bar = rect(&harness, "Changescape commit bar");
+    assert!(overlay.x0 >= rail.x1 - 0.5, "the rail stays in sight");
+    assert!(overlay.y0 >= bar.y1 - 0.5, "the commit bar stays in sight");
+    let large = expanded_diagram(&harness);
+    assert!(
+        large.width() > small.width(),
+        "{} is not larger than {}",
+        large.width(),
+        small.width()
+    );
+    // Fitted to the height as well as the width.
+    assert!(large.height() <= overlay.height());
+    assert!(overlay.contains(large.center()));
+}
+
+#[test]
+fn escape_and_collapse_put_an_expanded_diagram_away() {
+    use floem::prelude::{Code, Key, KeyState, KeyboardEvent, Modifiers, NamedKey};
+    let (mut harness, state, _root) = on_map();
+    click(&mut harness, "Changescape expand");
+    harness.dispatch_event(floem::event::Event::Key(KeyboardEvent {
+        state: KeyState::Down,
+        key: Key::Named(NamedKey::Escape),
+        code: Code::Escape,
+        location: Default::default(),
+        modifiers: Modifiers::empty(),
+        repeat: false,
+        is_composing: false,
+    }));
+    redraw(&mut harness);
+    assert_eq!(state.changescape_expanded.get(), None);
+    assert_eq!(state.tab.get(), ItemTab::Changescape);
+
+    click(&mut harness, "Changescape expand");
+    assert!(state.changescape_expanded.get().is_some());
+    click(&mut harness, "Changescape collapse");
+    assert_eq!(state.changescape_expanded.get(), None);
+}
+
+#[test]
+fn a_hot_node_in_an_expanded_diagram_opens_code_and_closes_it() {
+    let (mut harness, state, _root) = on_map();
+    click(&mut harness, "Changescape expand");
+    redraw(&mut harness);
+    let diagram = expanded_diagram(&harness);
+    let z = diagram.width() / 200.0;
+    let (x, y) = (diagram.x0 + 40.0 * z, diagram.y0 + 20.0 * z);
+    harness.pointer_move(x, y);
+    harness.click(x, y);
+    redraw(&mut harness);
+    assert_eq!(state.tab.get(), ItemTab::Code);
+    assert_eq!(state.active.get().as_deref(), Some(OPS));
+    assert_eq!(state.changescape_expanded.get(), None);
+}
+
 /// A review thread's first comment on `line` of `calc/ops.py`, on `side`.
 fn comment(id: u64, line: u64, side: &str) -> perch_github::ReviewComment {
     serde_json::from_value(serde_json::json!({

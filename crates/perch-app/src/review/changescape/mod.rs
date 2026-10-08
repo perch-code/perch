@@ -329,7 +329,7 @@ pub fn view(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
                 commit_bar(app, state, backend.clone(), page.clone()),
                 Stack::horizontal((
                     rail::rail(state, page.clone()),
-                    section_body(state, backend.clone(), page.clone()),
+                    section_side(state, backend.clone(), page.clone()),
                 ))
                 .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0)),
                 base_popover(state, backend.clone(), page),
@@ -807,11 +807,81 @@ fn base_popover(state: ReviewState, backend: Rc<Backend>, page: Arc<LoadedPage>)
     })
 }
 
+/// Right of the rail: the selected section, and over it an expanded
+/// diagram.
+fn section_side(state: ReviewState, backend: Rc<Backend>, page: Arc<LoadedPage>) -> impl IntoView {
+    let cx = blocks::Ctx {
+        state,
+        backend,
+        page,
+        counts: threads::counts(state),
+        pinned: pinned(state),
+    };
+    Stack::vertical((section_body(cx.clone()), expanded(cx))).style(|s| {
+        s.flex_grow(1.0_f32)
+            .flex_basis(0.0)
+            .min_width(0.0)
+            .height_full()
+            .position(floem::style::Position::Relative)
+    })
+}
+
+/// The diagram Expand opened, over the whole section and fitted to it,
+/// with its own zoom and scroll. The rail and the commit bar stay.
+fn expanded(cx: blocks::Ctx) -> impl IntoView {
+    let state = cx.state;
+    dyn_container(
+        move || state.changescape_expanded.get(),
+        move |at| {
+            let Some((view, i)) = at else {
+                return Empty::new().into_any();
+            };
+            let Some(block) = cx.page.blocks(&view).get(i) else {
+                return Empty::new().into_any();
+            };
+            let title = block
+                .title()
+                .map(str::to_string)
+                .or_else(|| cx.page.view(&view).map(|view| view.t.clone()))
+                .unwrap_or_default();
+            Stack::vertical((
+                Label::new(title).style(|s| {
+                    s.font_size(theme::TEXT_SECTION_TITLE)
+                        .font_weight(theme::weight_strong())
+                        .color(theme::fg())
+                }),
+                Container::new(svg::svg_block(
+                    cx.clone(),
+                    block.svg().unwrap_or_default(),
+                    svg::Frame::Expanded,
+                ))
+                .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0)),
+            ))
+            .debug_name("Changescape expanded diagram")
+            .style(|s| {
+                s.flex_col()
+                    .gap(8.0)
+                    .size_full()
+                    .padding(16.0)
+                    .background(theme::canvas())
+            })
+            .into_any()
+        },
+    )
+    .style(move |s| {
+        s.position(floem::style::Position::Absolute)
+            .inset(0.0)
+            .z_index(1)
+            .apply_if(state.changescape_expanded.with(Option::is_none), |s| {
+                s.hide()
+            })
+    })
+}
+
 /// The selected section: each of its views, title, caption and blocks, one
 /// under the other.
-fn section_body(state: ReviewState, backend: Rc<Backend>, page: Arc<LoadedPage>) -> impl IntoView {
-    let counts = threads::counts(state);
-    let pinned = pinned(state);
+fn section_body(cx: blocks::Ctx) -> impl IntoView {
+    let (state, page) = (cx.state, cx.page.clone());
     let selected = {
         let page = page.clone();
         Memo::new(move |_| selected_section(state, &page))
@@ -838,13 +908,7 @@ fn section_body(state: ReviewState, backend: Rc<Backend>, page: Arc<LoadedPage>)
                     .color(theme::fg_muted())
                     .margin_top(4.0)
             });
-            let cx = blocks::Ctx {
-                state,
-                backend: backend.clone(),
-                page: page.clone(),
-                counts,
-                pinned,
-            };
+            let cx = cx.clone();
             Stack::vertical((
                 heading,
                 question,
@@ -872,12 +936,7 @@ fn section_body(state: ReviewState, backend: Rc<Backend>, page: Arc<LoadedPage>)
             .padding(theme::CONVERSATION_PADDING)
     })
     .scroll()
-    .style(|s| {
-        s.flex_grow(1.0_f32)
-            .flex_basis(0.0)
-            .min_width(0.0)
-            .height_full()
-    })
+    .style(|s| s.size_full())
 }
 
 /// While a facet option is on: its note, muted, and the way back to the
@@ -927,6 +986,7 @@ fn facet_note(state: ReviewState, page: Arc<LoadedPage>) -> impl IntoView {
 
 /// Select a section on the tab, and show the tab.
 pub fn show_section(state: ReviewState, id: &str) {
+    state.changescape_expanded.set(None);
     state.changescape_section.set(Some(id.to_string()));
     state.show_tab(crate::review::model::ItemTab::Changescape);
 }
@@ -944,6 +1004,7 @@ pub fn select(state: ReviewState, id: &str) {
         .changescape_section
         .with_untracked(|picked| picked.as_deref() != Some(id))
     {
+        state.changescape_expanded.set(None);
         state
             .changescape_section
             .update(|picked| *picked = Some(id.to_string()));

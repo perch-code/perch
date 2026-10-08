@@ -122,9 +122,11 @@ fn block_view(cx: Ctx, block: PageBlock, at: (String, usize)) -> impl IntoView {
             let table = block.table().unwrap_or_default();
             table_block(&cx, &table, at).into_any()
         }
-        PageBlock::Known(Block::Svg { .. }) => {
-            super::svg::svg_block(cx.clone(), block.svg().unwrap_or_default())
-        }
+        PageBlock::Known(Block::Svg { .. }) => super::svg::svg_block(
+            cx.clone(),
+            block.svg().unwrap_or_default(),
+            super::svg::Frame::Block(at),
+        ),
         // Lanes, Mermaid graphs, the code view and the discussion are in
         // the browser page, as is any block this Perch could not read.
         PageBlock::Known(_) | PageBlock::Unknown { .. } => fallback(cx.state).into_any(),
