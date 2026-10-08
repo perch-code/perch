@@ -234,7 +234,7 @@ fn prose_attrs(len: usize, code: &[Range<usize>], links: &[Range<usize>]) -> Att
             range.clone(),
             Attrs::new()
                 .family(&mono)
-                .font_size(theme::CODE_FONT_SIZE)
+                .font_size(theme::PROSE_CODE_FONT_SIZE)
                 .weight(theme::weight_body())
                 .color(if linked { theme::link() } else { theme::fg() }),
         );
@@ -399,7 +399,12 @@ fn header_width(label: &str) -> f64 {
 
 fn cell_text_width(text: &str, mono: bool) -> f64 {
     if mono {
-        measure(text, theme::CODE_FONT_STACK, theme::CODE_FONT_SIZE, false)
+        measure(
+            text,
+            theme::CODE_FONT_STACK,
+            theme::PROSE_CODE_FONT_SIZE,
+            false,
+        )
     } else {
         measure(text, theme::FONT_STACK, theme::TEXT_META, false)
     }
@@ -611,7 +616,7 @@ fn table_cell(cx: &Ctx, column: &Column, width: Width, max: f64, cell: Cell, dim
             let label = Label::new(text).style(move |s| {
                 let s = s
                     .font_size(if mono {
-                        theme::CODE_FONT_SIZE
+                        theme::PROSE_CODE_FONT_SIZE
                     } else {
                         theme::TEXT_META
                     })

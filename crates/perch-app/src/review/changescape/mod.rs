@@ -290,7 +290,7 @@ fn building(state: ReviewState) -> impl IntoView {
         Label::new("Claude Code is running the Changescape skill. It takes a few minutes.")
             .style(|s| s.font_size(theme::TEXT_META).color(theme::fg_muted())),
         Label::derived(lines).style(|s| {
-            s.font_size(theme::CODE_FONT_SIZE)
+            s.font_size(theme::PROSE_CODE_FONT_SIZE)
                 .font_family(theme::CODE_FONT_STACK.to_string())
                 .color(theme::fg_muted())
                 .line_height(1.6)
@@ -502,7 +502,7 @@ fn base_popover(state: ReviewState, backend: Rc<Backend>, page: Arc<Page>) -> im
                 Stack::horizontal((
                     Label::new(number).style(move |s| {
                         s.font_family(mono())
-                            .font_size(theme::CODE_FONT_SIZE)
+                            .font_size(theme::code_font_size())
                             .color(theme::gutter_fg())
                             .width(theme::CODE_ROW_NUMBER_WIDTH)
                             .justify_end()
@@ -510,7 +510,7 @@ fn base_popover(state: ReviewState, backend: Rc<Backend>, page: Arc<Page>) -> im
                     }),
                     Label::new(format!("{} {}", row.op, row.text)).style(move |s| {
                         s.font_family(mono())
-                            .font_size(theme::CODE_FONT_SIZE)
+                            .font_size(theme::code_font_size())
                             .color(ink)
                     }),
                 ))
