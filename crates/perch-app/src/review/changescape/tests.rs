@@ -636,7 +636,8 @@ fn a_page_whose_status_misstates_its_version_is_refused_by_the_page() {
 fn a_page_that_does_not_read_shows_why_and_the_browser_page() {
     crate::review::changescape::set_can_build(false);
     let root = cache_patched("01-minimal", HEAD, |page| {
-        page["elements"]["fn:calc.ops.add"]["st"] = "vanished".into();
+        // A status must be a string, though its set is open.
+        page["elements"]["fn:calc.ops.add"]["st"] = 5.into();
     });
     let (mut harness, _state) = harness_with_cache(Some(root.path()));
     click(&mut harness, "Changescape pill");
@@ -823,6 +824,24 @@ fn case_09_a_facet_dims_rows_outside_it_and_hides_them_on_request() {
     assert_eq!(state.changescape_facet.get(), None);
     assert!(named(harness.root_id(), "Changescape facet note").is_none());
     assert_eq!(table_lines(&harness).len(), 3);
+}
+
+#[test]
+fn a_cell_with_a_facet_applies_it_on_a_click() {
+    let root = cache_patched("09-facet-rows-without-el", HEAD, |page| {
+        let views = page["views"].as_array_mut().unwrap();
+        let placement = views.iter_mut().find(|v| v["id"] == "placement").unwrap();
+        placement["blocks"][0]["rows"][0]["cells"]["st"] =
+            serde_json::json!({ "text": "New core", "facet": "focus.core" });
+    });
+    let (mut harness, state) = harness_with_cache(Some(root.path()));
+    click(&mut harness, "Changescape pill");
+    click(&mut harness, "Changescape rail map");
+    click(&mut harness, "Changescape facet link");
+    assert_eq!(
+        state.changescape_facet.get(),
+        Some(("focus".to_string(), "core".to_string()))
+    );
 }
 
 #[test]

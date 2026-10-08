@@ -155,12 +155,15 @@ impl ::std::convert::From<::std::vec::Vec<CellListItem>> for Cell {
         Self::Array(value)
     }
 }
-#[doc = "A cell or a list entry as an object. With el, it opens that element. With file, it opens that file in the code view, at line when given. With href, it is a link. With none of these, it is plain text."]
+#[doc = "A cell or a list entry as an object. With el, it opens that element. With file, it opens that file in the code view, at line when given. With href, it is a link. With facet, it applies that facet option. With none of these, it is plain text."]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
 pub struct CellLink {
     #[doc = "The element it opens."]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub el: ::std::option::Option<::std::string::String>,
+    #[doc = "A facet option to apply, as <facet id>.<option id>, such as part.existing."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub facet: ::std::option::Option<::std::string::String>,
     #[doc = "A repo path to open in the code view."]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub file: ::std::option::Option<::std::string::String>,
@@ -248,12 +251,11 @@ pub struct Column {
     #[doc = "The header."]
     pub label: ::std::string::String,
 }
-#[doc = "How a column draws its cells. A column without kind draws plain text. text: plain text with `code` spans. mono: monospace. num: a number. status: a status word. bar: a number with a bar. refs: a list of links."]
+#[doc = "How a column draws its cells. A column without kind draws plain text. text: plain text with `code` spans. mono: monospace. num: a number. status: a status word. bar: a number with a bar. refs: a list of links. This set can grow without a version bump. Readers draw a column of a kind they do not know as \"text\"."]
 #[derive(
     :: serde :: Deserialize,
     :: serde :: Serialize,
     Clone,
-    Copy,
     Debug,
     Eq,
     Hash,
@@ -261,58 +263,33 @@ pub struct Column {
     PartialEq,
     PartialOrd,
 )]
-pub enum ColumnKind {
-    #[serde(rename = "text")]
-    Text,
-    #[serde(rename = "mono")]
-    Mono,
-    #[serde(rename = "num")]
-    Num,
-    #[serde(rename = "status")]
-    Status,
-    #[serde(rename = "bar")]
-    Bar,
-    #[serde(rename = "refs")]
-    Refs,
+#[serde(transparent)]
+pub struct ColumnKind(pub ::std::string::String);
+impl ::std::ops::Deref for ColumnKind {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<ColumnKind> for ::std::string::String {
+    fn from(value: ColumnKind) -> Self {
+        value.0
+    }
+}
+impl ::std::convert::From<::std::string::String> for ColumnKind {
+    fn from(value: ::std::string::String) -> Self {
+        Self(value)
+    }
 }
 impl ::std::fmt::Display for ColumnKind {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        match *self {
-            Self::Text => f.write_str("text"),
-            Self::Mono => f.write_str("mono"),
-            Self::Num => f.write_str("num"),
-            Self::Status => f.write_str("status"),
-            Self::Bar => f.write_str("bar"),
-            Self::Refs => f.write_str("refs"),
-        }
+        self.0.fmt(f)
     }
 }
 impl ::std::str::FromStr for ColumnKind {
-    type Err = self::error::ConversionError;
-    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-        match value {
-            "text" => Ok(Self::Text),
-            "mono" => Ok(Self::Mono),
-            "num" => Ok(Self::Num),
-            "status" => Ok(Self::Status),
-            "bar" => Ok(Self::Bar),
-            "refs" => Ok(Self::Refs),
-            _ => Err("invalid value".into()),
-        }
-    }
-}
-impl ::std::convert::TryFrom<&str> for ColumnKind {
-    type Error = self::error::ConversionError;
-    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-        value.parse()
-    }
-}
-impl ::std::convert::TryFrom<::std::string::String> for ColumnKind {
-    type Error = self::error::ConversionError;
-    fn try_from(
-        value: ::std::string::String,
-    ) -> ::std::result::Result<Self, self::error::ConversionError> {
-        value.parse()
+    type Err = ::std::convert::Infallible;
+    fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+        Ok(Self(value.to_string()))
     }
 }
 #[doc = "One comment from GitHub."]
@@ -350,12 +327,11 @@ pub struct Comment {
     #[doc = "The comment's page on GitHub."]
     pub url: ::std::string::String,
 }
-#[doc = "Where on GitHub a comment was left."]
+#[doc = "Where on GitHub a comment was left. This set can grow without a version bump. Readers treat a kind they do not know as \"issue\"."]
 #[derive(
     :: serde :: Deserialize,
     :: serde :: Serialize,
     Clone,
-    Copy,
     Debug,
     Eq,
     Hash,
@@ -363,46 +339,33 @@ pub struct Comment {
     PartialEq,
     PartialOrd,
 )]
-pub enum CommentKind {
-    #[serde(rename = "inline")]
-    Inline,
-    #[serde(rename = "review")]
-    Review,
-    #[serde(rename = "issue")]
-    Issue,
+#[serde(transparent)]
+pub struct CommentKind(pub ::std::string::String);
+impl ::std::ops::Deref for CommentKind {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<CommentKind> for ::std::string::String {
+    fn from(value: CommentKind) -> Self {
+        value.0
+    }
+}
+impl ::std::convert::From<::std::string::String> for CommentKind {
+    fn from(value: ::std::string::String) -> Self {
+        Self(value)
+    }
 }
 impl ::std::fmt::Display for CommentKind {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        match *self {
-            Self::Inline => f.write_str("inline"),
-            Self::Review => f.write_str("review"),
-            Self::Issue => f.write_str("issue"),
-        }
+        self.0.fmt(f)
     }
 }
 impl ::std::str::FromStr for CommentKind {
-    type Err = self::error::ConversionError;
-    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-        match value {
-            "inline" => Ok(Self::Inline),
-            "review" => Ok(Self::Review),
-            "issue" => Ok(Self::Issue),
-            _ => Err("invalid value".into()),
-        }
-    }
-}
-impl ::std::convert::TryFrom<&str> for CommentKind {
-    type Error = self::error::ConversionError;
-    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-        value.parse()
-    }
-}
-impl ::std::convert::TryFrom<::std::string::String> for CommentKind {
-    type Error = self::error::ConversionError;
-    fn try_from(
-        value: ::std::string::String,
-    ) -> ::std::result::Result<Self, self::error::ConversionError> {
-        value.parse()
+    type Err = ::std::convert::Infallible;
+    fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+        Ok(Self(value.to_string()))
     }
 }
 #[doc = "One diff line: [base line or null, head line or null, op, text without the op character]. Code generators that do not read prefixItems see an array of four values."]
@@ -553,6 +516,12 @@ pub struct File {
     #[doc = "The file's diff hunks."]
     pub hunks: ::std::vec::Vec<Hunk>,
     pub kind: FileKind,
+    #[doc = "Changed lines of this file that count under another kind, such as the test code inside a source file (Rust's #[cfg(test)] mod). Maps a kind to its added and deleted lines. The rest of add and del count under the file's own kind. Absent when every line counts under it."]
+    #[serde(
+        default,
+        skip_serializing_if = ":: std :: collections :: HashMap::is_empty"
+    )]
+    pub lines_by_kind: ::std::collections::HashMap<FileKind, FileLinesByKindValue>,
     #[doc = "The repo path at the base. It differs from path for a rename."]
     pub old: ::std::string::String,
     #[doc = "The repo path at the head."]
@@ -561,14 +530,18 @@ pub struct File {
     pub status: ::std::option::Option<FileStatus>,
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub text: ::std::option::Option<FileText>,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub vendored_by: ::std::option::Option<VendoredBy>,
+    #[doc = "The agent's reason, when it marked the file copied."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub vendored_note: ::std::option::Option<::std::string::String>,
     pub whole: Whole,
 }
-#[doc = "The line-accounting kind of a path."]
+#[doc = "The line-accounting kind of a path. This set can grow without a version bump. Readers treat a kind they do not know as \"other\"."]
 #[derive(
     :: serde :: Deserialize,
     :: serde :: Serialize,
     Clone,
-    Copy,
     Debug,
     Eq,
     Hash,
@@ -576,59 +549,40 @@ pub struct File {
     PartialEq,
     PartialOrd,
 )]
-pub enum FileKind {
-    #[serde(rename = "source")]
-    Source,
-    #[serde(rename = "test")]
-    Test,
-    #[serde(rename = "docs")]
-    Docs,
-    #[serde(rename = "config")]
-    Config,
-    #[serde(rename = "generated")]
-    Generated,
-    #[serde(rename = "other")]
-    Other,
+#[serde(transparent)]
+pub struct FileKind(pub ::std::string::String);
+impl ::std::ops::Deref for FileKind {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<FileKind> for ::std::string::String {
+    fn from(value: FileKind) -> Self {
+        value.0
+    }
+}
+impl ::std::convert::From<::std::string::String> for FileKind {
+    fn from(value: ::std::string::String) -> Self {
+        Self(value)
+    }
 }
 impl ::std::fmt::Display for FileKind {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        match *self {
-            Self::Source => f.write_str("source"),
-            Self::Test => f.write_str("test"),
-            Self::Docs => f.write_str("docs"),
-            Self::Config => f.write_str("config"),
-            Self::Generated => f.write_str("generated"),
-            Self::Other => f.write_str("other"),
-        }
+        self.0.fmt(f)
     }
 }
 impl ::std::str::FromStr for FileKind {
-    type Err = self::error::ConversionError;
-    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-        match value {
-            "source" => Ok(Self::Source),
-            "test" => Ok(Self::Test),
-            "docs" => Ok(Self::Docs),
-            "config" => Ok(Self::Config),
-            "generated" => Ok(Self::Generated),
-            "other" => Ok(Self::Other),
-            _ => Err("invalid value".into()),
-        }
+    type Err = ::std::convert::Infallible;
+    fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+        Ok(Self(value.to_string()))
     }
 }
-impl ::std::convert::TryFrom<&str> for FileKind {
-    type Error = self::error::ConversionError;
-    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-        value.parse()
-    }
-}
-impl ::std::convert::TryFrom<::std::string::String> for FileKind {
-    type Error = self::error::ConversionError;
-    fn try_from(
-        value: ::std::string::String,
-    ) -> ::std::result::Result<Self, self::error::ConversionError> {
-        value.parse()
-    }
+#[doc = "`FileLinesByKindValue`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct FileLinesByKindValue {
+    pub add: i64,
+    pub del: i64,
 }
 #[doc = "Set for a new or a deleted file. A modified or renamed file has no status."]
 #[derive(
@@ -936,6 +890,9 @@ pub struct Page {
     pub meta: Meta,
     #[doc = "Reader notes the page seeds. Producers write an empty array. Readers keep notes elsewhere, under meta.key."]
     pub notes: ::std::vec::Vec<::serde_json::Value>,
+    #[doc = "Where the changed lines go: the parts of the change in display order. Every changed line is in exactly one part, so the parts sum to meta.adds plus meta.dels. Absent on pages from before parts."]
+    #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+    pub parts: ::std::vec::Vec<Part>,
     #[doc = "The page format version. This file describes version 3 only."]
     pub schema: i64,
     #[doc = "The fixed sections, in display order."]
@@ -989,6 +946,79 @@ impl ::std::convert::TryFrom<::std::string::String> for PageKind {
     ) -> ::std::result::Result<Self, self::error::ConversionError> {
         value.parse()
     }
+}
+#[doc = "One part of the change, for the overview's line table."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct Part {
+    #[doc = "Sorted element ids whose code lies in this part. The part facet uses them."]
+    pub els: ::std::vec::Vec<::std::string::String>,
+    #[doc = "The files with lines in this part, and how many. A file can be in two parts, such as a source file with inline tests."]
+    pub files: ::std::vec::Vec<PartFilesItem>,
+    #[doc = "Unique on the page. A new part is new:<package or module>. The others are existing, test, generated, vendored, and docs."]
+    pub id: ::std::string::String,
+    pub kind: PartKind,
+    #[doc = "The part's name: the agent's, else the package or module names."]
+    pub label: ::std::string::String,
+    pub lines: PartLines,
+    #[doc = "The modules of a new part."]
+    #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+    pub modules: ::std::vec::Vec<::std::string::String>,
+    #[doc = "How much review it needs: read, skim, or skip. Open set."]
+    pub verdict: ::std::string::String,
+}
+#[doc = "`PartFilesItem`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct PartFilesItem {
+    pub add: i64,
+    pub del: i64,
+    pub path: ::std::string::String,
+}
+#[doc = "What a part holds. new: new code. existing: changes to files that existed at the merge base. test, generated, vendored, docs (docs and build files). Open set."]
+#[derive(
+    :: serde :: Deserialize,
+    :: serde :: Serialize,
+    Clone,
+    Debug,
+    Eq,
+    Hash,
+    Ord,
+    PartialEq,
+    PartialOrd,
+)]
+#[serde(transparent)]
+pub struct PartKind(pub ::std::string::String);
+impl ::std::ops::Deref for PartKind {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<PartKind> for ::std::string::String {
+    fn from(value: PartKind) -> Self {
+        value.0
+    }
+}
+impl ::std::convert::From<::std::string::String> for PartKind {
+    fn from(value: ::std::string::String) -> Self {
+        Self(value)
+    }
+}
+impl ::std::fmt::Display for PartKind {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl ::std::str::FromStr for PartKind {
+    type Err = ::std::convert::Infallible;
+    fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+        Ok(Self(value.to_string()))
+    }
+}
+#[doc = "The changed lines that count in this part."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct PartLines {
+    pub add: i64,
+    pub del: i64,
 }
 #[doc = "The PR's state on GitHub, in lower case."]
 #[derive(
@@ -1142,12 +1172,11 @@ impl ::std::convert::TryFrom<::std::string::String> for Side {
         value.parse()
     }
 }
-#[doc = "What the change does to an element."]
+#[doc = "What the change does to an element. This set can grow without a version bump. Readers treat a status they do not know as \"changed\"."]
 #[derive(
     :: serde :: Deserialize,
     :: serde :: Serialize,
     Clone,
-    Copy,
     Debug,
     Eq,
     Hash,
@@ -1155,54 +1184,33 @@ impl ::std::convert::TryFrom<::std::string::String> for Side {
     PartialEq,
     PartialOrd,
 )]
-pub enum Status {
-    #[serde(rename = "added")]
-    Added,
-    #[serde(rename = "removed")]
-    Removed,
-    #[serde(rename = "changed")]
-    Changed,
-    #[serde(rename = "moved")]
-    Moved,
-    #[serde(rename = "context")]
-    Context,
+#[serde(transparent)]
+pub struct Status(pub ::std::string::String);
+impl ::std::ops::Deref for Status {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<Status> for ::std::string::String {
+    fn from(value: Status) -> Self {
+        value.0
+    }
+}
+impl ::std::convert::From<::std::string::String> for Status {
+    fn from(value: ::std::string::String) -> Self {
+        Self(value)
+    }
 }
 impl ::std::fmt::Display for Status {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        match *self {
-            Self::Added => f.write_str("added"),
-            Self::Removed => f.write_str("removed"),
-            Self::Changed => f.write_str("changed"),
-            Self::Moved => f.write_str("moved"),
-            Self::Context => f.write_str("context"),
-        }
+        self.0.fmt(f)
     }
 }
 impl ::std::str::FromStr for Status {
-    type Err = self::error::ConversionError;
-    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-        match value {
-            "added" => Ok(Self::Added),
-            "removed" => Ok(Self::Removed),
-            "changed" => Ok(Self::Changed),
-            "moved" => Ok(Self::Moved),
-            "context" => Ok(Self::Context),
-            _ => Err("invalid value".into()),
-        }
-    }
-}
-impl ::std::convert::TryFrom<&str> for Status {
-    type Error = self::error::ConversionError;
-    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-        value.parse()
-    }
-}
-impl ::std::convert::TryFrom<::std::string::String> for Status {
-    type Error = self::error::ConversionError;
-    fn try_from(
-        value: ::std::string::String,
-    ) -> ::std::result::Result<Self, self::error::ConversionError> {
-        value.parse()
+    type Err = ::std::convert::Infallible;
+    fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+        Ok(Self(value.to_string()))
     }
 }
 #[doc = "One tile of the overview summary. It opens its view."]
@@ -1229,6 +1237,47 @@ pub struct TableGroup {
     #[doc = "One line of plain text with `code` spans for the header."]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub summary: ::std::option::Option<::std::string::String>,
+}
+#[doc = "Why a file of kind vendored is vendored: \"gitattributes\" (.gitattributes marks it linguist-vendored), \"path\" (under vendor/, third_party/, or node_modules/), \"testdata\" (not code, under fixtures/, testdata/, or __snapshots__/), or \"narration\" (the agent marked it copied). A plain string, so a reader shows a reason it does not know as it is."]
+#[derive(
+    :: serde :: Deserialize,
+    :: serde :: Serialize,
+    Clone,
+    Debug,
+    Eq,
+    Hash,
+    Ord,
+    PartialEq,
+    PartialOrd,
+)]
+#[serde(transparent)]
+pub struct VendoredBy(pub ::std::string::String);
+impl ::std::ops::Deref for VendoredBy {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<VendoredBy> for ::std::string::String {
+    fn from(value: VendoredBy) -> Self {
+        value.0
+    }
+}
+impl ::std::convert::From<::std::string::String> for VendoredBy {
+    fn from(value: ::std::string::String) -> Self {
+        Self(value)
+    }
+}
+impl ::std::fmt::Display for VendoredBy {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl ::std::str::FromStr for VendoredBy {
+    type Err = ::std::convert::Infallible;
+    fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+        Ok(Self(value.to_string()))
+    }
 }
 #[doc = "One view of the change, drawn as a list of blocks."]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
@@ -1257,12 +1306,11 @@ pub struct View {
     #[doc = "The view's title."]
     pub t: ::std::string::String,
 }
-#[doc = "Whether a view found something. assemble keeps only views that apply."]
+#[doc = "Whether a view found something. assemble keeps only views that apply. This set can grow without a version bump. Readers treat a state they do not know as \"na\"."]
 #[derive(
     :: serde :: Deserialize,
     :: serde :: Serialize,
     Clone,
-    Copy,
     Debug,
     Eq,
     Hash,
@@ -1270,46 +1318,33 @@ pub struct View {
     PartialEq,
     PartialOrd,
 )]
-pub enum ViewState {
-    #[serde(rename = "applies")]
-    Applies,
-    #[serde(rename = "nochange")]
-    Nochange,
-    #[serde(rename = "na")]
-    Na,
+#[serde(transparent)]
+pub struct ViewState(pub ::std::string::String);
+impl ::std::ops::Deref for ViewState {
+    type Target = ::std::string::String;
+    fn deref(&self) -> &::std::string::String {
+        &self.0
+    }
+}
+impl ::std::convert::From<ViewState> for ::std::string::String {
+    fn from(value: ViewState) -> Self {
+        value.0
+    }
+}
+impl ::std::convert::From<::std::string::String> for ViewState {
+    fn from(value: ::std::string::String) -> Self {
+        Self(value)
+    }
 }
 impl ::std::fmt::Display for ViewState {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        match *self {
-            Self::Applies => f.write_str("applies"),
-            Self::Nochange => f.write_str("nochange"),
-            Self::Na => f.write_str("na"),
-        }
+        self.0.fmt(f)
     }
 }
 impl ::std::str::FromStr for ViewState {
-    type Err = self::error::ConversionError;
-    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-        match value {
-            "applies" => Ok(Self::Applies),
-            "nochange" => Ok(Self::Nochange),
-            "na" => Ok(Self::Na),
-            _ => Err("invalid value".into()),
-        }
-    }
-}
-impl ::std::convert::TryFrom<&str> for ViewState {
-    type Error = self::error::ConversionError;
-    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-        value.parse()
-    }
-}
-impl ::std::convert::TryFrom<::std::string::String> for ViewState {
-    type Error = self::error::ConversionError;
-    fn try_from(
-        value: ::std::string::String,
-    ) -> ::std::result::Result<Self, self::error::ConversionError> {
-        value.parse()
+    type Err = ::std::convert::Infallible;
+    fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+        Ok(Self(value.to_string()))
     }
 }
 #[doc = "Whether the file ships its whole text."]

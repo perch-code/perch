@@ -30,6 +30,11 @@
       "type": "array",
       "items": { "$ref": "#/$defs/Facet" },
       "description": "Named ways to look at part of the change. Absent when the change has none."
+    },
+    "parts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Part" },
+      "description": "Where the changed lines go: the parts of the change in display order. Every changed line is in exactly one part, so the parts sum to meta.adds plus meta.dels. Absent on pages from before parts."
     }
   },
   "$defs": {
@@ -42,9 +47,9 @@
     },
     "Status": {
       "title": "Status",
-      "description": "What the change does to an element.",
+      "description": "What the change does to an element. This set can grow without a version bump. Readers treat a status they do not know as \"changed\".",
       "type": "string",
-      "enum": ["added", "removed", "changed", "moved", "context"]
+      "examples": ["added", "removed", "changed", "moved", "context"]
     },
     "LineRange": {
       "title": "LineRange",
@@ -127,9 +132,9 @@
     },
     "ViewState": {
       "title": "ViewState",
-      "description": "Whether a view found something. assemble keeps only views that apply.",
+      "description": "Whether a view found something. assemble keeps only views that apply. This set can grow without a version bump. Readers treat a state they do not know as \"na\".",
       "type": "string",
-      "enum": ["applies", "nochange", "na"]
+      "examples": ["applies", "nochange", "na"]
     },
     "Oneliner": {
       "title": "Oneliner",
@@ -160,7 +165,11 @@
         "metric": { "type": "string", "description": "A short count line, such as \"2 functions · 6 sites changed\". May be empty." },
         "narration": { "type": ["string", "null"], "description": "The agent's caption, plain text with `code` spans, or null." },
         "blocks": { "type": "array", "items": { "$ref": "#/$defs/Block" }, "description": "What the view draws, in order." },
-        "oneliners": { "type": "array", "items": { "$ref": "#/$defs/Oneliner" }, "description": "Small facts that the overview lists under \"Smaller changes\"." }
+        "oneliners": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Oneliner" },
+          "description": "Small facts that the overview lists under \"Smaller changes\"."
+        }
       }
     },
     "ElementRef": {
@@ -202,15 +211,63 @@
     },
     "FileKind": {
       "title": "FileKind",
-      "description": "The line-accounting kind of a path.",
+      "description": "The line-accounting kind of a path. This set can grow without a version bump. Readers treat a kind they do not know as \"other\".",
       "type": "string",
-      "enum": ["source", "test", "docs", "config", "generated", "other"]
+      "examples": ["source", "test", "docs", "config", "generated", "vendored", "other"]
     },
     "GeneratedBy": {
       "title": "GeneratedBy",
       "description": "Why a file of kind generated is generated: \"gitattributes\" (.gitattributes marks it linguist-generated), \"header\" (its header says so), or \"path\" (its path matches a generated pattern). A plain string, so a reader shows a reason it does not know as it is.",
       "type": "string",
       "examples": ["gitattributes", "header", "path"]
+    },
+    "VendoredBy": {
+      "title": "VendoredBy",
+      "description": "Why a file of kind vendored is vendored: \"gitattributes\" (.gitattributes marks it linguist-vendored), \"path\" (under vendor/, third_party/, or node_modules/), \"testdata\" (not code, under fixtures/, testdata/, or __snapshots__/), or \"narration\" (the agent marked it copied). A plain string, so a reader shows a reason it does not know as it is.",
+      "type": "string",
+      "examples": ["gitattributes", "path", "testdata", "narration"]
+    },
+    "PartKind": {
+      "title": "PartKind",
+      "description": "What a part holds. new: new code. existing: changes to files that existed at the merge base. test, generated, vendored, docs (docs and build files). Open set.",
+      "type": "string",
+      "examples": ["new", "existing", "test", "generated", "vendored", "docs"]
+    },
+    "Part": {
+      "title": "Part",
+      "description": "One part of the change, for the overview's line table.",
+      "type": "object",
+      "required": ["id", "label", "kind", "verdict", "lines", "files", "els"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique on the page. A new part is new:<package or module>. The others are existing, test, generated, vendored, and docs."
+        },
+        "label": { "type": "string", "description": "The part's name: the agent's, else the package or module names." },
+        "kind": { "$ref": "#/$defs/PartKind" },
+        "verdict": { "type": "string", "description": "How much review it needs: read, skim, or skip. Open set.", "examples": ["read", "skim", "skip"] },
+        "lines": {
+          "type": "object",
+          "required": ["add", "del"],
+          "properties": { "add": { "type": "integer" }, "del": { "type": "integer" } },
+          "description": "The changed lines that count in this part."
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "add", "del"],
+            "properties": { "path": { "type": "string" }, "add": { "type": "integer" }, "del": { "type": "integer" } }
+          },
+          "description": "The files with lines in this part, and how many. A file can be in two parts, such as a source file with inline tests."
+        },
+        "modules": { "type": "array", "items": { "type": "string" }, "description": "The modules of a new part." },
+        "els": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Sorted element ids whose code lies in this part. The part facet uses them."
+        }
+      }
     },
     "FileStatus": {
       "title": "FileStatus",
@@ -262,12 +319,29 @@
         "del": { "type": "integer", "description": "Lines removed." },
         "kind": { "$ref": "#/$defs/FileKind" },
         "generated_by": { "$ref": "#/$defs/GeneratedBy" },
+        "vendored_by": { "$ref": "#/$defs/VendoredBy" },
+        "vendored_note": { "type": "string", "description": "The agent's reason, when it marked the file copied." },
+        "lines_by_kind": {
+          "type": "object",
+          "description": "Changed lines of this file that count under another kind, such as the test code inside a source file (Rust's #[cfg(test)] mod). Maps a kind to its added and deleted lines. The rest of add and del count under the file's own kind. Absent when every line counts under it.",
+          "propertyNames": { "$ref": "#/$defs/FileKind" },
+          "additionalProperties": {
+            "type": "object",
+            "required": ["add", "del"],
+            "properties": { "add": { "type": "integer" }, "del": { "type": "integer" } }
+          }
+        },
         "hunks": { "type": "array", "items": { "$ref": "#/$defs/Hunk" }, "description": "The file's diff hunks." },
         "text": { "$ref": "#/$defs/FileText" },
         "whole": { "$ref": "#/$defs/Whole" }
       }
     },
-    "CommentKind": { "title": "CommentKind", "description": "Where on GitHub a comment was left.", "type": "string", "enum": ["inline", "review", "issue"] },
+    "CommentKind": {
+      "title": "CommentKind",
+      "description": "Where on GitHub a comment was left. This set can grow without a version bump. Readers treat a kind they do not know as \"issue\".",
+      "type": "string",
+      "examples": ["inline", "review", "issue"]
+    },
     "Comment": {
       "title": "Comment",
       "description": "One comment from GitHub.",
@@ -444,9 +518,9 @@
     },
     "ColumnKind": {
       "title": "ColumnKind",
-      "description": "How a column draws its cells. A column without kind draws plain text. text: plain text with `code` spans. mono: monospace. num: a number. status: a status word. bar: a number with a bar. refs: a list of links.",
+      "description": "How a column draws its cells. A column without kind draws plain text. text: plain text with `code` spans. mono: monospace. num: a number. status: a status word. bar: a number with a bar. refs: a list of links. This set can grow without a version bump. Readers draw a column of a kind they do not know as \"text\".",
       "type": "string",
-      "enum": ["text", "mono", "num", "status", "bar", "refs"]
+      "examples": ["text", "mono", "num", "status", "bar", "refs"]
     },
     "Column": {
       "title": "Column",
@@ -461,7 +535,7 @@
     },
     "CellLink": {
       "title": "CellLink",
-      "description": "A cell or a list entry as an object. With el, it opens that element. With file, it opens that file in the code view, at line when given. With href, it is a link. With none of these, it is plain text.",
+      "description": "A cell or a list entry as an object. With el, it opens that element. With file, it opens that file in the code view, at line when given. With href, it is a link. With facet, it applies that facet option. With none of these, it is plain text.",
       "type": "object",
       "required": ["text"],
       "properties": {
@@ -470,7 +544,8 @@
         "side": { "$ref": "#/$defs/Side" },
         "file": { "type": "string", "description": "A repo path to open in the code view." },
         "line": { "type": "integer", "description": "The line to open the file at." },
-        "href": { "type": "string", "description": "A web link." }
+        "href": { "type": "string", "description": "A web link." },
+        "facet": { "type": "string", "description": "A facet option to apply, as <facet id>.<option id>, such as part.existing." }
       }
     },
     "CellListItem": { "title": "CellListItem", "description": "One entry of a list cell.", "oneOf": [{ "type": "string" }, { "$ref": "#/$defs/CellLink" }] },

@@ -865,7 +865,7 @@ fn table_cell(cx: &Ctx, column: &Column, width: Width, max: f64, cell: Cell, dim
                 .iter()
                 .map(|item| {
                     let one = Column {
-                        kind: Some(perch_changescape::v3::ColumnKind::Mono),
+                        kind: Some(perch_changescape::v3::ColumnKind("mono".into())),
                         ..column.clone()
                     };
                     Container::new(table_cell(cx, &one, Width::Fill, max, item.clone(), dim))
@@ -914,7 +914,7 @@ fn table_cell(cx: &Ctx, column: &Column, width: Width, max: f64, cell: Cell, dim
             // line, cut short where the column is narrower, with the whole
             // of it in a tip.
             let cut = mono || status;
-            let linked = cell.el.is_some() || cell.file.is_some();
+            let linked = cell.el.is_some() || cell.file.is_some() || cell.facet.is_some();
             let status_text = text.clone();
             let label = Label::new(text).style(move |s| {
                 let s = s
@@ -948,6 +948,16 @@ fn table_cell(cx: &Ctx, column: &Column, width: Width, max: f64, cell: Cell, dim
                 label.into_any()
             };
             match (cell.el.clone(), cell.file.clone()) {
+                (None, None) if cell.facet.is_some() => {
+                    let (state, pick) = (cx.state, cell.facet.clone());
+                    Container::new(label)
+                        .debug_name("Changescape facet link")
+                        .on_event_stop(el::Click, move |_, _| {
+                            state.changescape_facet.set(pick.clone())
+                        })
+                        .style(move |s| link_style(s, cut))
+                        .into_any()
+                }
                 (Some(el), _) => {
                     let cx = cx.clone();
                     Container::new(label)

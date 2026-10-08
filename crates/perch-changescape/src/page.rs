@@ -273,17 +273,59 @@ pub struct Table {
     pub fold: Option<v3::Fold>,
 }
 
+/// `value` if it is one of `known`, else `fallback`. The schema leaves
+/// these sets open, and names the value an unknown one reads as.
+fn known(value: &str, known: &[&'static str], fallback: &'static str) -> &'static str {
+    known
+        .iter()
+        .find(|k| **k == value)
+        .copied()
+        .unwrap_or(fallback)
+}
+
 /// How a column draws its cells: `text`, `mono`, `num`, `status`, `bar`
-/// or `refs`. A column without a kind draws plain text.
+/// or `refs`. A column without a kind, or of a kind this Perch does not
+/// know, draws plain text.
 pub fn column_kind(column: &v3::Column) -> &'static str {
-    match column.kind {
-        None | Some(v3::ColumnKind::Text) => "text",
-        Some(v3::ColumnKind::Mono) => "mono",
-        Some(v3::ColumnKind::Num) => "num",
-        Some(v3::ColumnKind::Status) => "status",
-        Some(v3::ColumnKind::Bar) => "bar",
-        Some(v3::ColumnKind::Refs) => "refs",
-    }
+    let kinds = ["text", "mono", "num", "status", "bar", "refs"];
+    known(
+        column.kind.as_deref().map_or("text", |k| k.as_str()),
+        &kinds,
+        "text",
+    )
+}
+
+/// What the change does to an element; one this Perch does not know is
+/// `changed`.
+pub fn status(st: &v3::Status) -> &'static str {
+    let statuses = ["added", "removed", "changed", "moved", "context"];
+    known(st, &statuses, "changed")
+}
+
+/// Whether a view found something; a state this Perch does not know is
+/// `na`.
+pub fn view_state(state: &v3::ViewState) -> &'static str {
+    known(state, &["applies", "nochange", "na"], "na")
+}
+
+/// A path's line-accounting kind; one this Perch does not know is `other`.
+pub fn file_kind(kind: &v3::FileKind) -> &'static str {
+    let kinds = [
+        "source",
+        "test",
+        "docs",
+        "config",
+        "generated",
+        "vendored",
+        "other",
+    ];
+    known(kind, &kinds, "other")
+}
+
+/// Where on GitHub a comment was left; a kind this Perch does not know is
+/// `issue`.
+pub fn comment_kind(kind: &v3::CommentKind) -> &'static str {
+    known(kind, &["inline", "review", "issue"], "issue")
 }
 
 /// How much a row matters: a key row is one to read first, a minor one
@@ -315,6 +357,8 @@ pub struct CellText {
     pub el: Option<String>,
     pub file: Option<String>,
     pub line: Option<u32>,
+    /// The facet option a click applies, as (facet id, option id).
+    pub facet: Option<(String, String)>,
     /// A list cell's entries, each its own cell.
     pub items: Vec<CellText>,
 }
@@ -367,6 +411,10 @@ impl From<&v3::CellLink> for CellText {
             el: link.el.clone(),
             file: link.file.clone(),
             line: link.line.and_then(|n| u32::try_from(n).ok()),
+            facet: link.facet.as_deref().and_then(|facet| {
+                let (facet, option) = facet.split_once('.')?;
+                Some((facet.to_string(), option.to_string()))
+            }),
             items: Vec::new(),
         }
     }
@@ -449,6 +497,37 @@ mod tests {
         assert_eq!(cell(&r, "e").text, "a.py, b.py");
         assert_eq!(cell(&r, "e").items[1].el.as_deref(), Some("mod:b"));
         assert_eq!(cell(&r, "missing"), CellText::default());
+    }
+
+    #[test]
+    fn a_facet_cell_names_its_facet_and_option() {
+        let r = row(serde_json::json!({ "cells": {
+            "a": { "text": "Existing", "facet": "part.existing" },
+            "b": { "text": "x", "facet": "nodot" } } }));
+        assert_eq!(
+            cell(&r, "a").facet,
+            Some(("part".to_string(), "existing".to_string()))
+        );
+        assert_eq!(cell(&r, "b").facet, None);
+    }
+
+    #[test]
+    fn an_unknown_value_in_an_open_set_reads_as_the_schema_says() {
+        let column = |kind: Option<&str>| v3::Column {
+            kind: kind.map(|k| v3::ColumnKind(k.into())),
+            ..serde_json::from_value(serde_json::json!({ "key": "k", "label": "K" })).unwrap()
+        };
+        assert_eq!(column_kind(&column(None)), "text");
+        assert_eq!(column_kind(&column(Some("bar"))), "bar");
+        assert_eq!(column_kind(&column(Some("sparkline"))), "text");
+        assert_eq!(status(&v3::Status("moved".into())), "moved");
+        assert_eq!(status(&v3::Status("split".into())), "changed");
+        assert_eq!(view_state(&v3::ViewState("applies".into())), "applies");
+        assert_eq!(view_state(&v3::ViewState("partial".into())), "na");
+        assert_eq!(file_kind(&v3::FileKind("vendored".into())), "vendored");
+        assert_eq!(file_kind(&v3::FileKind("lockfile".into())), "other");
+        assert_eq!(comment_kind(&v3::CommentKind("inline".into())), "inline");
+        assert_eq!(comment_kind(&v3::CommentKind("commit".into())), "issue");
     }
 
     #[test]
