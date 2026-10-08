@@ -5001,47 +5001,67 @@ mod window {
     }
 
     #[test]
-    fn a_marker_click_focuses_the_card_and_scrolls_it_into_view() {
+    fn a_line_with_a_thread_offers_a_plus_that_stacks_a_second_thread_under_it() {
         use crate::review::doc::CardId;
         let (mut harness, state) = harness();
         let live = stacked(state);
+        let line_height = crate::theme::code_line_height() as f64;
+        state.set_comment_threads(Arc::new(vec![thread_on("t1", 5, 7, false)]));
+        harness.rebuild();
+        harness.paint();
+        // Head line 7, the thread's last, is on row 8 of a document with
+        // nothing folded above it, and its card under that.
+        let (left, top) = pane_origin();
+        assert_eq!(live.doc.get().row_of_head(6), Some(8));
+        let (x, y) = (
+            left + crate::theme::GUTTER_SLOT_INSET + crate::theme::GUTTER_SLOT / 2.0,
+            top + 8.0 * line_height + line_height / 2.0,
+        );
+        harness.pointer_move(x, y);
+        harness.rebuild();
+        harness.paint();
+        let plus = find(harness.root_id(), "gutter-plus")
+            .expect("a line with a thread still offers a question")
+            .get_visual_rect_no_clip();
+        harness.click(plus.center().x, plus.center().y);
+        harness.rebuild();
+        harness.paint();
+        let composer = state.composer.get().expect("the composer opened");
+        assert_eq!(composer.thread_id, None, "a new thread, not a follow-up");
+        let anchor = composer.anchor.expect("on the line");
+        assert_eq!(
+            (anchor.side, anchor.start_line, anchor.line),
+            (perch_github::Side::Right, 7, 7)
+        );
+        assert_eq!(state.focus_card.get(), None, "nothing was focused");
+
+        // The composer's card stacks under the thread's, under the line.
+        let doc = live.doc.get();
+        let thread = doc
+            .card_span(&CardId::Thread("t1".into()))
+            .expect("the thread's card");
+        let composer = doc
+            .card_span(&CardId::Composer)
+            .expect("the composer's card");
+        assert_eq!(thread.start, 9);
+        assert_eq!(composer.start, thread.end);
+    }
+
+    #[test]
+    fn a_focused_card_scrolls_into_view() {
+        use crate::review::doc::CardId;
+        let (mut harness, state) = harness();
+        stacked(state);
         let line_height = crate::theme::code_line_height() as f64;
         let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).unwrap();
         state.set_comment_threads(Arc::new(vec![thread_on("t1", 5, 7, false)]));
         harness.rebuild();
         harness.paint();
         let card = CardId::Thread("t1".into());
-        // The marker sits in the gutter's slot on the anchor's first line,
-        // head line 5, display line 6, on row 6 of a document with nothing
-        // folded above it.
         let (left, top) = pane_origin();
-        assert_eq!(live.doc.get().row_of_head(4), Some(6));
-        let (x, y) = (
-            left + 3.0 + 8.0,
-            top + 6.0 * line_height + line_height / 2.0,
-        );
-        // The slot is rebuilt when the pointer arrives on its row, so the
-        // pointer settles there before the click, as it would in a hand.
-        harness.pointer_move(x, y);
-        harness.rebuild();
-        harness.paint();
-        let under = harness.element_id_at(x, y);
-        harness.click(x, y);
-        harness.rebuild();
-        harness.paint();
-        assert_eq!(
-            state.focus_card.get(),
-            Some(card.clone()),
-            "click at ({x}, {y}) over {under:?} did not focus the card"
-        );
-        assert_eq!(
-            viewport.get().y0,
-            0.0,
-            "the card is in view, so nothing scrolled"
-        );
 
-        // Scrolled past the card, a click on its marker brings it back
-        // into view with the line above it.
+        // Scrolled past the card, focusing it brings it back into view
+        // with the line above it.
         harness.scroll_down(left + 300.0, top + 300.0, 40.0 * line_height);
         harness.rebuild();
         harness.paint();
@@ -5779,7 +5799,7 @@ mod window {
     }
 
     #[test]
-    fn a_github_thread_is_a_card_under_its_line_that_the_hollow_marker_focuses() {
+    fn a_github_thread_is_a_card_under_its_line_marked_by_a_hollow_marker() {
         use crate::review::doc::{CardId, DocRow};
         let (mut harness, state) = harness();
         let live = stacked(state);
@@ -5842,24 +5862,18 @@ mod window {
             "the reply is under the comment"
         );
 
-        // The hollow marker on the comment's line focuses the card.
+        // The pointer on the comment's line trades its hollow marker for
+        // the `+`, which asks another question there rather than focusing
+        // the card.
         let (left, top) = pane_origin();
-        let (x, y) = (
-            left + 3.0 + 8.0,
+        harness.pointer_move(
+            left + crate::theme::GUTTER_SLOT_INSET + crate::theme::GUTTER_SLOT / 2.0,
             top + 8.0 * line_height + line_height / 2.0,
         );
-        harness.pointer_move(x, y);
         harness.rebuild();
         harness.paint();
-        let under = harness.element_id_at(x, y);
-        harness.click(x, y);
-        harness.rebuild();
-        harness.paint();
-        assert_eq!(
-            state.focus_card.get(),
-            Some(card.clone()),
-            "click at ({x}, {y}) over {under:?} did not focus the card"
-        );
+        assert_eq!(count(harness.root_id(), "gutter-plus"), 1);
+        assert_eq!(state.focus_card.get(), None);
         assert_eq!(
             viewport.get().y0,
             0.0,

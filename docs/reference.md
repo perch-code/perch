@@ -589,7 +589,9 @@ Questions about an item or selected lines in its Code view run through Claude
 Code or Codex in that item's worktree. The `+` in the gutter starts one on a
 line, a removed line included, whose question is about the old file's lines;
 so is a selection of nothing but removed lines, or one on the left of the
-split layout. Follow-ups remain attached to the local
+split layout. A line that already has a thread still offers the `+` under
+the pointer, and the new thread's card stacks under the others. Follow-ups
+remain attached to the local
 conversation. A run is a question (**Ask**), which reads and answers, or, on
 your own work, **Work**, which changes the worktree (see [Work](#work)).
 Nothing an agent writes reaches GitHub unless you post it (see Posting).
