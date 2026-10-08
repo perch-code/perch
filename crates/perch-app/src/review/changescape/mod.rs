@@ -8,6 +8,7 @@
 
 pub mod blocks;
 pub mod navigate;
+mod order;
 pub mod rail;
 pub mod strip;
 pub mod svg;

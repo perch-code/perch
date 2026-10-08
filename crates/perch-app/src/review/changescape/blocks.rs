@@ -8,14 +8,16 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use floem::prelude::*;
+use floem::reactive::{Memo, RwSignal};
 use floem::text::{Attrs, AttrsList, FamilyOwned};
-use floem::views::{Container, Decorators, Empty, Label, Stack};
+use floem::views::{dyn_stack, Container, Decorators, Empty, Label, Stack, TextInput};
 use floem::AnyView;
 use perch_changescape::page::{Block, BlockBody, Cell, Column, Row, Summary, Table, Text, View};
 use perch_changescape::Page;
 
 use crate::backend::Backend;
 use crate::review::cards::tip_with;
+use crate::review::changescape::order::{self, Sort};
 use crate::review::changescape::{navigate, show_section, show_view, shown};
 use crate::review::linked_text::{linked_text, Target};
 use crate::review::model::ReviewState;
@@ -393,8 +395,14 @@ fn is_mono(kind: &str) -> bool {
     kind == "mono" || kind == "refs"
 }
 
+/// With room for the arrow a sort puts after it.
 fn header_width(label: &str) -> f64 {
-    measure(label, theme::FONT_STACK, theme::TEXT_SECTION, true)
+    measure(
+        &format!("{label} ↓"),
+        theme::FONT_STACK,
+        theme::TEXT_SECTION,
+        true,
+    )
 }
 
 fn cell_text_width(text: &str, mono: bool) -> f64 {
@@ -430,9 +438,15 @@ fn column_style(s: floem::style::Style, width: Width) -> floem::style::Style {
     }
 }
 
+/// A table this long or longer has a filter over it.
+const FILTER_FROM: usize = 15;
+
+/// A table: its header, which sorts it by a column on a click, and its
+/// rows, under a filter when there are many.
 fn table_block(cx: &Ctx, table: &Table) -> impl IntoView {
+    let table = Rc::new(table.clone());
     let columns = Rc::new(table.columns.clone());
-    let widths = Rc::new(column_widths(table));
+    let widths = Rc::new(column_widths(&table));
     // The longest bar in a column is full.
     let maxima: Rc<Vec<f64>> = Rc::new(
         columns
@@ -447,21 +461,43 @@ fn table_block(cx: &Ctx, table: &Table) -> impl IntoView {
             .collect(),
     );
     let badges = table.rows.iter().any(|row| row.el.is_some());
+    let sort: RwSignal<Option<Sort>> = RwSignal::new(None);
+    let query = RwSignal::new(String::new());
+    let visible = {
+        let table = table.clone();
+        Memo::new(move |_| order::order(&table, sort.get(), &query.get()))
+    };
     let header = Stack::horizontal_from_iter(
         columns
             .iter()
+            .enumerate()
             .zip(widths.iter().copied())
-            .map(|(column, width)| {
+            .map(|((i, column), width)| {
                 let right = column.kind == "num";
-                Label::new(column.label.clone())
-                    .style(move |s| {
-                        column_style(s, width)
-                            .font_size(theme::TEXT_SECTION)
-                            .font_weight(theme::weight_emphasis())
-                            .color(theme::fg_muted())
-                            .apply_if(right, |s| s.justify_end())
-                    })
-                    .into_any()
+                let numeric = order::numeric(&table, &column.key);
+                let label = column.label.clone();
+                let text = move || match sort.get() {
+                    Some(s) if s.column == i => {
+                        format!("{label} {}", if s.descending { "↓" } else { "↑" })
+                    }
+                    _ => label.clone(),
+                };
+                Container::new(Label::derived(text).style(|s| {
+                    s.font_size(theme::TEXT_SECTION)
+                        .font_weight(theme::weight_emphasis())
+                        .color(theme::fg_muted())
+                        .selectable(false)
+                }))
+                .debug_name(format!("Changescape sort {}", column.label))
+                .on_event_stop(el::Click, move |_, _| {
+                    sort.update(|sort| *sort = order::next(*sort, i, numeric))
+                })
+                .style(move |s| {
+                    clickable(column_style(s, width))
+                        .apply_if(right, |s| s.justify_end())
+                        .hover(|s| s.color(theme::fg()))
+                })
+                .into_any()
             })
             .chain(badges.then(|| {
                 Empty::new()
@@ -475,16 +511,63 @@ fn table_block(cx: &Ctx, table: &Table) -> impl IntoView {
             .border_bottom(1.0)
             .border_color(theme::border_muted())
     });
-    let rows: Vec<AnyView> = table
-        .rows
-        .iter()
-        .map(|row| table_row(cx, &columns, &widths, &maxima, row, badges).into_any())
-        .collect();
-    Stack::vertical((
-        header,
-        Stack::vertical_from_iter(rows).style(|s| s.flex_col().width_full()),
-    ))
+    let rows = {
+        let (cx, table) = (cx.clone(), table.clone());
+        dyn_stack(
+            move || visible.get(),
+            |i: &usize| *i,
+            move |i| table_row(&cx, &columns, &widths, &maxima, &table.rows[i], badges),
+        )
+        .style(|s| s.flex_col().width_full())
+    };
+    let total = table.rows.len();
+    let filter = (total >= FILTER_FROM).then(|| filter_box(query, visible, total).into_any());
+    let none = Label::new("No rows match the filter.").style(move |s| {
+        s.font_size(theme::TEXT_META)
+            .color(theme::fg_subtle())
+            .padding_vert(8.0)
+            .padding_horiz(CELL_PAD)
+            .apply_if(!visible.with(Vec::is_empty), |s| s.hide())
+    });
+    Stack::vertical_from_iter(filter.into_iter().chain([
+        header.into_any(),
+        rows.into_any(),
+        none.into_any(),
+    ]))
     .style(|s| s.flex_col().width_full())
+}
+
+/// The box that keeps a long table to the rows with what is typed, and
+/// how many those are.
+fn filter_box(query: RwSignal<String>, visible: Memo<Vec<usize>>, total: usize) -> impl IntoView {
+    let count = move || {
+        if query.with(|q| q.trim().is_empty()) {
+            String::new()
+        } else {
+            format!("{} of {total}", visible.with(Vec::len))
+        }
+    };
+    Stack::horizontal((
+        TextInput::new(query)
+            .placeholder(format!("Filter {total} rows"))
+            .debug_name("Changescape filter")
+            .style(|s| {
+                s.width(240.0)
+                    .min_width(0.0)
+                    .font_size(theme::TEXT_META)
+                    .padding_horiz(8.0)
+                    .padding_vert(4.0)
+                    .border(1.0)
+                    .border_color(theme::border_muted())
+                    .border_radius(theme::RADIUS)
+            }),
+        Label::derived(count).style(|s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::fg_muted())
+                .margin_left(8.0)
+        }),
+    ))
+    .style(|s| s.items_center().margin_bottom(4.0))
 }
 
 /// Room at a row's end for the badge of its threads.
