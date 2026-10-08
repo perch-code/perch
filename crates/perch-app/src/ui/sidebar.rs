@@ -766,8 +766,8 @@ fn worktree_menu(state: AppState) -> Menu {
     pr_status_toggle(menu, &f, set)
 }
 
-/// Browse's menu. Its Repository offers the declared repositories on
-/// GitHub, which is what it can search.
+/// Browse's menu. Its Repository offers every repository on GitHub
+/// Perch knows of; All searches the declared ones.
 fn browse_menu(state: AppState) -> Menu {
     let f = state.item_filters.get_untracked();
     let set = setter(state);
@@ -780,9 +780,19 @@ fn browse_menu(state: AppState) -> Menu {
         |f, view| f.browse.view = view,
     );
     menu = menu.separator();
-    let repositories = state
-        .repos
-        .with_untracked(|repos| crate::items::github_repositories(repos));
+    let inbox: Vec<String> = InboxView::ALL
+        .iter()
+        .flat_map(|&view| {
+            state
+                .inbox_source(view)
+                .with_untracked(|threads| crate::inbox::repository_options(threads))
+        })
+        .collect();
+    let repositories = state.repos.with_untracked(|repos| {
+        state
+            .items
+            .with_untracked(|items| crate::items::browse_repository_options(repos, items, &inbox))
+    });
     menu = repository_submenu(menu, f.repository.clone(), repositories, set.clone());
     menu = state_submenu(menu, f.browse.state, set.clone(), |f, value| {
         f.browse.state = value

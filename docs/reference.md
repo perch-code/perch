@@ -86,8 +86,9 @@ it searches.
   view keeps its own), Unread Only, Show PR Status.
 - **Browse**: View (Review requested, Yours, Assigned, Mentioned, All),
   Repository, State, Sort By (Last activity or Created, sorted by GitHub's
-  search), Show PR Status. All searches the repository picked, or every
-  declared repository on GitHub.
+  search), Show PR Status. Repository offers every repository on GitHub
+  that config, Worktrees or Inbox knows of. All searches the repository
+  picked, or every declared repository on GitHub.
 
 Repository and Show PR Status are shared by all three tabs. State is Any,
 Open, or Merged or Closed everywhere; it defaults to Any on Inbox and

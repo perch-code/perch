@@ -1057,8 +1057,31 @@ pub fn repository_options(declared: &[DeclaredRepo], items: &[Item]) -> Vec<Stri
     repositories
 }
 
-/// The declared repositories on GitHub, in the file's order: what
-/// Browse's Repository offers, and what All searches with none picked.
+/// What Browse's Repository offers: every repository on GitHub Perch
+/// knows of, from config, the cache and the inbox's threads, so a
+/// reader with nothing declared still has their inbox's repositories to
+/// pick. A declared spelling wins, as on Worktrees.
+pub fn browse_repository_options(
+    declared: &[DeclaredRepo],
+    items: &[Item],
+    inbox: &[String],
+) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut repositories: Vec<String> = declared
+        .iter()
+        .map(|repo| &repo.identity)
+        .chain(items.iter().map(|item| &item.repo_full_name))
+        .chain(inbox)
+        .filter(|identity| !perch_github::is_local(identity))
+        .filter(|identity| seen.insert(identity.to_lowercase()))
+        .cloned()
+        .collect();
+    repositories.sort_by_key(|identity| identity.to_lowercase());
+    repositories
+}
+
+/// The declared repositories on GitHub, in the file's order: what All
+/// searches with none picked. Only these, since a search holds few.
 pub fn github_repositories(declared: &[DeclaredRepo]) -> Vec<String> {
     declared
         .iter()
@@ -1752,6 +1775,35 @@ mod tests {
                 "slatedb/slatedb",
                 "x/empty",
             ]
+        );
+    }
+
+    /// Issue 25: with nothing declared, Browse offered no repositories
+    /// while the inbox showed many.
+    #[test]
+    fn browse_offers_the_inbox_and_cache_repositories_on_github() {
+        let (mut declared, mut items) = fixture();
+        declared[0].identity = "Criccomini/Perch".into();
+        declared.push(DeclaredRepo {
+            identity: "local/notes".into(),
+            name: "notes".into(),
+        });
+        items.push(item("extra", "Aardvark/first", "2026-09-13T10:00:00Z"));
+        let inbox = ["apache/datafusion".to_string(), "criccomini/perch".into()];
+        assert_eq!(
+            browse_repository_options(&declared, &items, &inbox),
+            [
+                "Aardvark/first",
+                "apache/datafusion",
+                "Criccomini/Perch",
+                "slatedb/slatedb",
+                "x/empty",
+            ]
+        );
+        assert_eq!(
+            browse_repository_options(&[], &[], &inbox),
+            ["apache/datafusion", "criccomini/perch"],
+            "nothing declared"
         );
     }
 
