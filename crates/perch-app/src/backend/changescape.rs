@@ -91,7 +91,10 @@ fn can_build(binary: &str, again: bool) -> bool {
             return can;
         }
     }
-    let can = claude_binary(binary).is_some() && perch_changescape::skill_available().is_some();
+    let claude = claude_binary(binary);
+    let skill = perch_changescape::skill_available();
+    let can = claude.is_some() && skill.is_some();
+    tracing::info!(?claude, ?skill, can, "changescape build available");
     *known.lock().unwrap() = Some(can);
     can
 }

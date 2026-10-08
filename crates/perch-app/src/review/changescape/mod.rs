@@ -149,6 +149,26 @@ const POLL: std::time::Duration = std::time::Duration::from_secs(2);
 /// are not polled. Each answer schedules the next look, so there is never
 /// more than one waiting.
 pub fn poll(state: ReviewState, backend: Rc<Backend>) {
+    // Look the pull request up whenever the open item or its head
+    // changes, whichever way the item opened: with its conversation
+    // first, or straight onto a checkout it already had.
+    let opened = Memo::new(move |_| {
+        let item = state
+            .item
+            .with(|item| item.as_ref().map(|item| item.id.clone()))?;
+        let head = state
+            .pull_request
+            .with(|pull| pull.as_ref().map(|pull| pull.head_sha.clone()))?;
+        Some((item, head))
+    });
+    {
+        let backend = backend.clone();
+        floem::reactive::Effect::new(move |_| {
+            if opened.get().is_some() {
+                refresh(state, &backend);
+            }
+        });
+    }
     floem::reactive::Effect::new(move |_| {
         let Some(running) = shown(state).filter(|shown| shown.lookup().is_running()) else {
             return;
@@ -418,34 +438,48 @@ fn stale_banner(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl
                 } else {
                     ""
                 };
-                shown.stale().then(|| {
+                Some(if shown.stale() {
                     format!(
                         "Changescape of an earlier commit, {}.{building}",
                         build.short_sha()
                     )
+                } else {
+                    format!("Changescape of {}.{building}", build.short_sha())
                 })
             })
             .unwrap_or_default()
     };
     Stack::horizontal((
-        Label::derived(text).style(|s| {
+        Label::derived(text).style(move |s| {
+            let stale = shown(state).is_some_and(|shown| shown.stale());
             s.font_size(theme::TEXT_META)
-                .color(theme::notice_fg())
+                .color(if stale {
+                    theme::notice_fg()
+                } else {
+                    theme::fg_muted()
+                })
                 .selectable(false)
         }),
         build_link(app, state, backend, "Rebuild").style(|s| s.margin_left(8.0)),
     ))
     .debug_name("Changescape stale banner")
+    // Over every page, so a page can always be built again: a notice when
+    // the page is of an earlier commit, a quiet line when it is current.
     .style(move |s| {
         let stale = shown(state).is_some_and(|shown| shown.stale());
-        s.width_full()
+        let s = s
+            .width_full()
             .items_center()
             .padding_horiz(16.0)
             .padding_vert(6.0)
-            .background(theme::notice_bg())
-            .border_bottom(1.0)
-            .border_color(theme::notice_border())
-            .apply_if(!stale, |s| s.hide())
+            .border_bottom(1.0);
+        if stale {
+            s.background(theme::notice_bg())
+                .border_color(theme::notice_border())
+        } else {
+            s.background(theme::canvas())
+                .border_color(theme::border_muted())
+        }
     })
 }
 
