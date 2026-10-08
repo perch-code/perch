@@ -463,8 +463,7 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
                 .action(move || ask(state, Pending::Item(i.clone())))
         });
     }
-    // Only where it can run: a pull request, with the Changescape skill
-    // and Claude Code installed. Without them the menu is as it was.
+    // Only for a pull request, where a build can run.
     if item.pull_request().is_some() && crate::review::changescape::can_build() {
         let (b, i) = (backend.clone(), id.clone());
         menu = menu.item("Build Changescape", move |m| {

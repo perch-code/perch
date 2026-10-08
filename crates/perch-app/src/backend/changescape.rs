@@ -2,12 +2,8 @@
 //! thread, and built by Claude Code with the Changescape skill when the
 //! reader asks. File reads only: Perch computes nothing of a changescape.
 //!
-//! A build runs outside Perch's durable run queue for now. The queue's
-//! table knows only discussion and review owners, and a new owner is a
-//! schema change, which waits until the feature leaves its branch. So a
-//! build shows its progress on the Changescape tab alone, and a build
-//! cut short by quitting Perch leaves a `running` status behind until the
-//! next build of that head.
+//! Builds run outside the durable run queue, so one cut short by quitting
+//! leaves `running` until the next build.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -31,8 +27,7 @@ pub struct Found {
 }
 
 /// Look the pull request up and send what was found, `None` when
-/// Changescape is turned off. Nothing is logged when there is no map, so a
-/// reader without Changescape sees no trace of it.
+/// Changescape is turned off. Logs nothing when there is none.
 pub(super) async fn lookup(
     ctx: &Ctx,
     item_id: String,
@@ -144,16 +139,10 @@ pub(super) async fn build(ctx: &Ctx, item_id: String) {
     building().lock().unwrap().remove(&key);
     let root = config.changescape.cache_root();
     let dir = perch_changescape::build_dir(&root, &repo, number, &head);
-    match result {
-        Err(message) => {
-            tracing::warn!(item = %item_id, error = %message, "changescape build failed");
-            settle_failed(&dir, &message);
-        }
-        Ok(()) if !dir.join("page.json").is_file() => {
-            settle_failed(&dir, "The build ended without writing page.json.")
-        }
-        Ok(()) => settle_running(&dir),
+    if let Err(message) = &result {
+        tracing::warn!(item = %item_id, error = %message, "changescape build failed");
     }
+    settle(&dir, result);
     lookup(ctx, item_id, repo, number, head).await;
 }
 
@@ -299,6 +288,18 @@ fn read_status(dir: &Path) -> Option<perch_changescape::Status> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// The status a finished run leaves: failed where it failed or wrote no
+/// page, else done.
+fn settle(dir: &Path, result: Result<(), String>) {
+    match result {
+        Err(message) => settle_failed(dir, &message),
+        Ok(()) if !dir.join("page.json").is_file() => {
+            settle_failed(dir, "The build ended without writing page.json.")
+        }
+        Ok(()) => settle_running(dir),
+    }
+}
+
 /// A build that ended badly: failed, with why, unless the skill already
 /// wrote a failure of its own.
 fn settle_failed(dir: &Path, message: &str) {
@@ -340,6 +341,27 @@ mod tests {
 
         write_status(dir.path(), "running", None).unwrap();
         settle_running(dir.path());
+        assert_eq!(
+            read_status(dir.path()).unwrap().state,
+            perch_changescape::State::Done
+        );
+    }
+
+    #[test]
+    fn a_run_that_ends_well_without_a_page_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        write_status(dir.path(), "running", None).unwrap();
+        settle(dir.path(), Ok(()));
+        let status = read_status(dir.path()).unwrap();
+        assert_eq!(status.state, perch_changescape::State::Failed);
+        assert_eq!(
+            status.error.as_deref(),
+            Some("The build ended without writing page.json.")
+        );
+
+        write_status(dir.path(), "running", None).unwrap();
+        std::fs::write(dir.path().join("page.json"), "{}").unwrap();
+        settle(dir.path(), Ok(()));
         assert_eq!(
             read_status(dir.path()).unwrap().state,
             perch_changescape::State::Done

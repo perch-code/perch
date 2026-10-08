@@ -59,10 +59,8 @@ impl Shown {
         &self.found.lookup
     }
 
-    /// Whether the tab has anything to show: a page, a build running, or
-    /// a failed build this Perch can try again.
-    /// Where this Perch can build one, every pull request has the tab,
-    /// which offers the build until there is a page.
+    /// Whether the tab shows: a page, a running build, or a build this
+    /// Perch can start.
     pub fn has_tab(&self) -> bool {
         self.found.page.is_some() || self.found.lookup.is_running() || self.found.can_build
     }
@@ -144,14 +142,11 @@ pub fn refresh(state: ReviewState, backend: &Backend) {
 /// How often a running build's status is read again.
 const POLL: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// While a build of the open item runs, look it up again every two
-/// seconds. Perch has no watcher on the cache; items that are not open
-/// are not polled. Each answer schedules the next look, so there is never
-/// more than one waiting.
+/// While a build of the open item runs, look it up again every `POLL`.
+/// Each answer schedules the next look, so there is never more than one
+/// waiting.
 pub fn poll(state: ReviewState, backend: Rc<Backend>) {
-    // Look the pull request up whenever the open item or its head
-    // changes, whichever way the item opened: with its conversation
-    // first, or straight onto a checkout it already had.
+    // Look the pull request up when the open item or its head changes.
     let opened = Memo::new(move |_| {
         let item = state
             .item
@@ -257,7 +252,7 @@ pub fn view(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
             Body::Unbuilt => unbuilt(app, state, backend.clone()).into_any(),
             Body::Nothing => Empty::new().into_any(),
             Body::Page(SamePage(page)) => Stack::vertical((
-                stale_banner(app, state, backend.clone()),
+                commit_bar(app, state, backend.clone()),
                 Stack::horizontal((
                     rail::rail(state, page.clone()),
                     section_body(state, backend.clone(), page.clone()),
@@ -341,14 +336,7 @@ fn unbuilt(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Into
                 .selectable(false)
         }))
         .debug_name("Changescape build button")
-        .on_event_stop(el::Click, move |_, _| {
-            let item = state
-                .item
-                .with_untracked(|item| item.as_ref().map(|item| item.id.clone()));
-            if let Some(item) = item {
-                request_build(app, &backend, &item);
-            }
-        })
+        .on_event_stop(el::Click, move |_, _| build_open_item(app, state, &backend))
         .style(|s| {
             crate::ui::widgets::clickable(
                 s.margin_top(12.0)
@@ -370,6 +358,15 @@ fn unbuilt(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Into
             .max_width_full()
             .padding(theme::CONVERSATION_PADDING)
     })
+}
+
+fn build_open_item(app: AppState, state: ReviewState, backend: &Backend) {
+    let item = state
+        .item
+        .with_untracked(|item| item.as_ref().map(|item| item.id.clone()));
+    if let Some(item) = item {
+        request_build(app, backend, &item);
+    }
 }
 
 /// A failed build: why, and a way to try again.
@@ -411,14 +408,7 @@ fn build_link(
             .selectable(false)
     }))
     .debug_name(format!("Changescape {}", text.to_lowercase()))
-    .on_event_stop(el::Click, move |_, _| {
-        let item = state
-            .item
-            .with_untracked(|item| item.as_ref().map(|item| item.id.clone()));
-        if let Some(item) = item {
-            request_build(app, &backend, &item);
-        }
-    })
+    .on_event_stop(el::Click, move |_, _| build_open_item(app, state, &backend))
     .style(move |s| {
         let running = shown(state).is_some_and(|shown| shown.lookup().is_running());
         crate::ui::widgets::clickable(crate::ui::widgets::underlined_link(s))
@@ -426,9 +416,9 @@ fn build_link(
     })
 }
 
-/// One line over a page drawn for an earlier commit, with a way to build
-/// one of the current head.
-fn stale_banner(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+/// One line over every page: the commit it is of, as a notice when that
+/// is an earlier one, and Rebuild.
+fn commit_bar(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let text = move || {
         shown(state)
             .and_then(|shown| {
@@ -462,9 +452,7 @@ fn stale_banner(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl
         }),
         build_link(app, state, backend, "Rebuild").style(|s| s.margin_left(8.0)),
     ))
-    .debug_name("Changescape stale banner")
-    // Over every page, so a page can always be built again: a notice when
-    // the page is of an earlier commit, a quiet line when it is current.
+    .debug_name("Changescape commit bar")
     .style(move |s| {
         let stale = shown(state).is_some_and(|shown| shown.stale());
         let s = s
@@ -686,7 +674,7 @@ pub fn show_view(state: ReviewState, page: &Page, view: &str) {
     }
 }
 
-/// Write the section without a rebuild when it is already the one shown.
+/// Select a section, writing nothing when it is already selected.
 pub fn select(state: ReviewState, id: &str) {
     if state
         .changescape_section

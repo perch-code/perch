@@ -115,7 +115,6 @@ fn a_current_changescape_adds_the_pill_and_opens_on_overview() {
             "Changescape rail code",
         ]
     );
-    assert_eq!(rect(&harness, "Changescape stale banner").height(), 0.0);
 
     // A section with views opens; one with none does not; Code is Code.
     click(&mut harness, "Changescape rail behavior");
@@ -127,23 +126,13 @@ fn a_current_changescape_adds_the_pill_and_opens_on_overview() {
 }
 
 #[test]
-fn a_changescape_of_an_earlier_head_shows_the_banner() {
+fn a_changescape_of_an_earlier_head_is_shown_as_stale() {
     let root = cache_with_fixture("aaaaaaa1111");
-    let (mut harness, _) = harness_with_cache(Some(root.path()));
+    let (mut harness, state) = harness_with_cache(Some(root.path()));
     click(&mut harness, "Changescape pill");
-    assert!(rect(&harness, "Changescape stale banner").height() > 0.0);
-}
-
-#[test]
-fn turned_off_there_is_no_pill() {
-    let root = cache_with_fixture(HEAD);
-    let (harness, state) = harness_with_cache(Some(root.path()));
-    // What the backend sends when `enabled = false`.
-    state.changescape.set(None);
-    let mut harness = harness;
-    harness.rebuild();
-    harness.paint();
-    assert!(named(harness.root_id(), "Changescape pill").is_none());
+    assert!(named(harness.root_id(), "Changescape rail").is_some());
+    assert!(rect(&harness, "Changescape commit bar").height() > 0.0);
+    assert!(state.changescape.get().unwrap().stale());
 }
 
 #[test]
@@ -404,13 +393,9 @@ fn shown_build(state: ReviewState, json: &str, page: bool, can_build: bool) -> t
 }
 
 #[test]
-fn a_first_build_running_shows_the_pill_and_its_progress() {
+fn a_first_build_running_shows_the_pill_and_the_building_view() {
     let (mut harness, state) = harness_with_cache(None);
     let _root = shown_build(state, r#"{ "state": "running" }"#, false, true);
-    state.changescape_log.set(vec![
-        "Skill: changescape".into(),
-        "Bash: uv run collect.py".into(),
-    ]);
     harness.rebuild();
     harness.paint();
     click(&mut harness, "Changescape pill");
@@ -426,7 +411,8 @@ fn a_build_over_an_earlier_page_keeps_the_page_and_says_so() {
     harness.paint();
     click(&mut harness, "Changescape pill");
     assert!(named(harness.root_id(), "Changescape rail").is_some());
-    assert!(rect(&harness, "Changescape stale banner").height() > 0.0);
+    assert!(rect(&harness, "Changescape commit bar").height() > 0.0);
+    assert!(state.changescape.get().unwrap().stale());
     assert_eq!(
         rect(&harness, "Changescape rebuild").width(),
         0.0,

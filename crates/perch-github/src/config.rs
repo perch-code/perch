@@ -1028,6 +1028,8 @@ pub fn avatar_dir() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn changescape_defaults_on_and_orders_its_cache_root() {
         let c = Config::parse("").unwrap();
@@ -1046,9 +1048,17 @@ mod tests {
             c.changescape.cache_root_with(Some("/env/cs".into())),
             PathBuf::from("/env/cs")
         );
+        // An empty variable or setting counts as none.
+        assert_eq!(
+            c.changescape.cache_root_with(Some("  ".into())),
+            PathBuf::from("/srv/cs")
+        );
+        let c = Config::parse("[changescape]\ncache = \"\"\n").unwrap();
+        assert_eq!(
+            c.changescape.cache_root_with(Some(String::new())),
+            home_dir().join(".changescape/cache")
+        );
     }
-
-    use super::*;
 
     #[test]
     fn a_repository_is_appended_and_the_file_before_it_kept() {

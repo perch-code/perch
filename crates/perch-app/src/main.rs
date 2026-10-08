@@ -101,8 +101,6 @@ fn main() {
         timeline_cli::run(&args[2..]);
         return;
     }
-    // What Perch finds of a pull request's Changescape: the build, its
-    // sections and their views, and the blocks by type.
     if args.get(1).map(String::as_str) == Some("--changescape") {
         changescape_cli::run(&args[2..]);
         return;

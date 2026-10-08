@@ -41,8 +41,7 @@ pub fn open_file_line(state: ReviewState, backend: &Backend, path: &str, line: O
 
 /// "Show in diff" on a base-only element: its file, split, at the head
 /// line its own diff comes nearest to, or at the line its base range
-/// starts on when its diff names none. Opening a base line is a later
-/// milestone.
+/// starts on when its diff names none.
 pub fn show_in_diff(state: ReviewState, backend: &Backend, r: &Ref) {
     state.changescape_popover.set(None);
     state.layout.set(Layout::Split);
@@ -61,9 +60,8 @@ enum Target {
 }
 
 fn target(element: &Element) -> Option<Target> {
-    if let Some(r) = element.refs.iter().find(|r| r.head.is_some()) {
-        let (start, _) = r.head?;
-        return Some(Target::Head(r.f.clone(), start));
+    if let Some((f, (start, _))) = element.refs.iter().find_map(|r| Some((&r.f, r.head?))) {
+        return Some(Target::Head(f.clone(), start));
     }
     if let Some(r) = element.refs.iter().find(|r| r.file) {
         return Some(Target::Whole(r.f.clone()));

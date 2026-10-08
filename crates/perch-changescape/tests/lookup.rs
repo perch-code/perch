@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use perch_changescape::page::BlockBody;
-use perch_changescape::{count_by_element, load, lookup, DiffSide, LineIndex, Lookup, State};
+use perch_changescape::{load, lookup, DiffSide, LineIndex, Lookup, State};
 
 const REPO: &str = "dvryaboy/dblect";
 const HEAD: &str = "3e81042d07e4d404b84526777e768a456a6a4fa9";
@@ -161,12 +161,13 @@ fn unknown_blocks_and_fields_still_load() {
     let last = overview.blocks.last().unwrap();
     assert_eq!(last.kind, "hologram");
     assert!(matches!(last.body, BlockBody::Other));
+    assert!(matches!(page.views[1].blocks[0].body, BlockBody::Table(_)));
     // A title that is a number reads as text.
-    assert_eq!(page.views.len(), 5);
+    assert_eq!(page.views[2].t, "7");
 }
 
 #[test]
-fn the_line_index_finds_the_narrowest_element_and_counts_threads() {
+fn the_line_index_finds_the_narrowest_element() {
     let root = tempfile::tempdir().unwrap();
     install(root.path(), &fixture("dblect-356").join(HEAD), HEAD);
     let lookup = lookup(root.path(), REPO, 356, HEAD);
@@ -184,16 +185,9 @@ fn the_line_index_finds_the_narrowest_element_and_counts_threads() {
         index.innermost(DiffSide::Base, detector, 1182),
         Some("fn:dblect.uniqueness.detector._order_is_bare")
     );
-    let counts = count_by_element(
-        &index,
-        [
-            (DiffSide::Head, detector, 1215),
-            (DiffSide::Head, detector, 5),
-        ],
-    );
     assert_eq!(
-        counts.get("fn:dblect.uniqueness.detector._uncovered_order_keys"),
-        Some(&1)
+        index.at(DiffSide::Head, detector, 1215),
+        ["fn:dblect.uniqueness.detector._uncovered_order_keys"]
     );
-    assert_eq!(counts.len(), 1);
+    assert!(index.at(DiffSide::Head, detector, 5).is_empty());
 }

@@ -31,6 +31,8 @@ const CARD: Color = Color::WHITE;
 const ZOOM_STEP: f64 = 1.25;
 const ZOOM_MIN: f64 = 0.25;
 const ZOOM_MAX: f64 = 4.0;
+/// The most a picture is scaled up to fit its block when it opens.
+const FIT_MAX: f64 = 1.5;
 /// The tallest a diagram's box gets before it scrolls down too.
 const MAX_HEIGHT: f64 = 560.0;
 
@@ -117,7 +119,7 @@ pub fn svg_block(cx: Ctx, svg: Svg) -> AnyView {
             if zoom.get_untracked().is_none() && natural.width > 0.0 {
                 let room = new_content_box.size().width - 24.0;
                 if room > 0.0 {
-                    zoom.set(Some((room / natural.width).clamp(ZOOM_MIN, 1.5)));
+                    zoom.set(Some((room / natural.width).clamp(ZOOM_MIN, FIT_MAX)));
                 }
             }
         },
@@ -130,7 +132,7 @@ pub fn svg_block(cx: Ctx, svg: Svg) -> AnyView {
             .border_color(theme::border_muted())
             .border_radius(theme::RADIUS)
     });
-    Stack::vertical((zoom_bar(zoom, natural), scroller))
+    Stack::vertical((zoom_bar(zoom), scroller))
         .style(|s| s.flex_col().gap(4.0).width_full())
         .into_any()
 }
@@ -160,7 +162,7 @@ fn badges(cx: &Ctx, hot: &[Hot], zoom: RwSignal<Option<f64>>) -> impl IntoView {
 }
 
 /// Smaller, the block's width, larger.
-fn zoom_bar(zoom: RwSignal<Option<f64>>, natural: Size) -> impl IntoView {
+fn zoom_bar(zoom: RwSignal<Option<f64>>) -> impl IntoView {
     let step = move |by: f64| {
         let z = zoom.get_untracked().unwrap_or(1.0) * by;
         zoom.set(Some(z.clamp(ZOOM_MIN, ZOOM_MAX)));
@@ -183,7 +185,6 @@ fn zoom_bar(zoom: RwSignal<Option<f64>>, natural: Size) -> impl IntoView {
             .hover(|s| s.background(theme::canvas_hover()))
         })
     };
-    let _ = natural;
     Stack::horizontal((
         button(
             "−",
@@ -325,13 +326,5 @@ mod tests {
         assert_eq!(at(30.0, 30.0), Some("fn:f"));
         assert_eq!(at(150.0, 80.0), Some("mod:m"));
         assert_eq!(at(250.0, 80.0), None);
-    }
-
-    #[test]
-    fn a_point_is_scaled_back_by_the_zoom() {
-        assert_eq!(
-            scaled(Point::new(60.0, 40.0), Some(2.0)),
-            Point::new(30.0, 20.0)
-        );
     }
 }

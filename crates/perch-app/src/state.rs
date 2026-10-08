@@ -3129,15 +3129,7 @@ impl AppState {
                 let Some(review) = self.review.get_untracked() else {
                     return;
                 };
-                // A lookup for the item before, or for a head the pull
-                // request has since left, is dropped.
-                let current = review
-                    .item
-                    .with_untracked(|item| item.as_ref().is_some_and(|item| item.id == item_id))
-                    && review.pull_request.with_untracked(|pull| {
-                        pull.as_ref().is_some_and(|pull| pull.head_sha == head_sha)
-                    });
-                if !current {
+                if !shows_head(&review, &item_id, &head_sha) {
                     return;
                 }
                 crate::review::changescape::set_can_build(
@@ -3157,13 +3149,7 @@ impl AppState {
                 let Some(review) = self.review.get_untracked() else {
                     return;
                 };
-                let current = review
-                    .item
-                    .with_untracked(|item| item.as_ref().is_some_and(|item| item.id == item_id))
-                    && review.pull_request.with_untracked(|pull| {
-                        pull.as_ref().is_some_and(|pull| pull.head_sha == head_sha)
-                    });
-                if current {
+                if shows_head(&review, &item_id, &head_sha) {
                     review.changescape_log.update(|log| {
                         log.push(line);
                         let over = log
@@ -3738,6 +3724,18 @@ fn hit_key(hit: &perch_github::SearchHit) -> (String, u64) {
     (hit.repo_full_name.to_lowercase(), hit.number)
 }
 
+/// Whether the review shows `item_id` at `head_sha`. A Changescape answer
+/// for the item before, or for a head the pull request has left, is
+/// dropped.
+fn shows_head(review: &crate::review::model::ReviewState, item_id: &str, head_sha: &str) -> bool {
+    review
+        .item
+        .with_untracked(|item| item.as_ref().is_some_and(|item| item.id == item_id))
+        && review
+            .pull_request
+            .with_untracked(|pull| pull.as_ref().is_some_and(|pull| pull.head_sha == head_sha))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3747,6 +3745,55 @@ mod tests {
         PullRequestOverview, PullReviewEvent, Reason, Repository, RepositoryPermission, Review,
         Subject, SubjectKind,
     };
+
+    /// Changescape's answers and progress for another item, or for a head
+    /// the pull request has left, are dropped; the log keeps its last
+    /// `LOG_LINES`.
+    #[test]
+    fn changescape_answers_for_another_item_or_head_are_dropped() {
+        let app = AppState::new();
+        let review = review_of("pr");
+        let mut pull = crate::review::header::tests::pull_request(812);
+        pull.head_sha = "head".into();
+        review.pull_request.set(Some(Arc::new(pull)));
+        app.review.set(Some(review));
+
+        let found = || {
+            Some(Arc::new(crate::backend::changescape::Found {
+                lookup: perch_changescape::Lookup::None,
+                page: None,
+                error: None,
+                can_build: false,
+            }))
+        };
+        for (item_id, head_sha) in [("other", "head"), ("pr", "old")] {
+            app.apply(Event::Changescape {
+                item_id: item_id.into(),
+                head_sha: head_sha.into(),
+                found: found(),
+            });
+            app.apply(Event::ChangescapeProgress {
+                item_id: item_id.into(),
+                head_sha: head_sha.into(),
+                line: "dropped".into(),
+            });
+        }
+        assert!(review.changescape.get_untracked().is_none());
+        assert!(review.changescape_log.get_untracked().is_empty());
+
+        let lines = crate::review::changescape::LOG_LINES + 2;
+        for n in 0..lines {
+            app.apply(Event::ChangescapeProgress {
+                item_id: "pr".into(),
+                head_sha: "head".into(),
+                line: n.to_string(),
+            });
+        }
+        let log = review.changescape_log.get_untracked();
+        assert_eq!(log.len(), crate::review::changescape::LOG_LINES);
+        assert_eq!(log.first().map(String::as_str), Some("2"));
+        assert_eq!(log.last(), Some(&(lines - 1).to_string()));
+    }
 
     /// A review with an item open, by id.
     fn review_of(id: &str) -> ReviewState {

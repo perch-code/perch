@@ -18,14 +18,14 @@
 pub mod page;
 mod skill;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Deserialize;
 
 pub use page::Page;
-pub use skill::{skill_available, skill_available_in};
+pub use skill::skill_available;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -41,25 +41,15 @@ pub enum Error {
     },
 }
 
-/// Where Changescape keeps its maps when nothing says otherwise.
-pub const DEFAULT_CACHE: &str = "~/.changescape/cache";
-
-/// The environment variable that names the cache root, ahead of Perch's
-/// configuration.
-pub const CACHE_ENV: &str = "CHANGESCAPE_CACHE";
-
 /// `status.json`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct Status {
-    pub schema: u32,
     pub state: State,
-    pub started: Option<String>,
     pub finished: Option<String>,
     /// `facts` (no captions yet) or `narrated`.
     pub stage: Option<String>,
     pub error: Option<String>,
-    pub skill_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -91,10 +81,6 @@ impl Build {
         self.dir.join("page.html")
     }
 
-    pub fn status_path(&self) -> PathBuf {
-        self.dir.join("status.json")
-    }
-
     /// A finished build with a page: one the Map can draw.
     pub fn drawable(&self) -> bool {
         self.status.state == State::Done && self.page_path().is_file()
@@ -103,11 +89,6 @@ impl Build {
     /// The first seven characters of the head it maps.
     pub fn short_sha(&self) -> &str {
         self.head_sha.get(..7).unwrap_or(&self.head_sha)
-    }
-
-    /// Read the status again, for a build that was running.
-    pub fn refresh(&self) -> Build {
-        read_build(&self.dir).unwrap_or_else(|| self.clone())
     }
 }
 
@@ -140,14 +121,10 @@ impl Lookup {
     pub fn is_running(&self) -> bool {
         matches!(self, Lookup::Running(..))
     }
-
-    pub fn is_none(&self) -> bool {
-        matches!(self, Lookup::None)
-    }
 }
 
 /// The folder that holds every build of one pull request.
-pub fn pull_dir(root: &Path, repo: &str, number: u64) -> PathBuf {
+fn pull_dir(root: &Path, repo: &str, number: u64) -> PathBuf {
     root.join(repo).join(format!("pr-{number}"))
 }
 
@@ -310,24 +287,4 @@ impl LineIndex {
     pub fn innermost(&self, side: DiffSide, path: &str, line: u32) -> Option<&str> {
         self.at(side, path, line).into_iter().next()
     }
-
-    /// Whether any element is in `path` on `side`.
-    pub fn has_path(&self, side: DiffSide, path: &str) -> bool {
-        self.ranges.contains_key(&(side, path.to_string()))
-    }
-}
-
-/// How many of `anchors` (side, path, 1-based line) fall in each element's
-/// ranges. An anchor in nested elements counts for each of them.
-pub fn count_by_element<'a>(
-    index: &LineIndex,
-    anchors: impl IntoIterator<Item = (DiffSide, &'a str, u32)>,
-) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    for (side, path, line) in anchors {
-        for id in index.at(side, path, line) {
-            *counts.entry(id.to_string()).or_insert(0) += 1;
-        }
-    }
-    counts
 }

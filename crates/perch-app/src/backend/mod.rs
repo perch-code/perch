@@ -1295,7 +1295,6 @@ pub enum Event {
         item_id: String,
         thread_id: String,
     },
-    /// The workflow runs' verdict for the item's head.
     /// What Changescape's cache holds for a pull request at a head, or
     /// `None` when Changescape is turned off.
     Changescape {
@@ -1309,6 +1308,7 @@ pub enum Event {
         head_sha: String,
         line: String,
     },
+    /// The workflow runs' verdict for the item's head.
     ChecksReady {
         item_id: String,
         repo_full_name: String,
@@ -8748,14 +8748,6 @@ fn show_pull_request_early(
         return false;
     }
     tracing::info!(item = %item.id, number = pull_request.number, "pull request shown before its checkout");
-    {
-        let ctx = ctx.clone();
-        let (item_id, repo) = (item.id.clone(), item.repo_full_name.clone());
-        let (number, head_sha) = (pull_request.number, pull_request.head_sha.clone());
-        tokio::spawn(
-            async move { changescape::lookup(&ctx, item_id, repo, number, head_sha).await },
-        );
-    }
     show_kept_conversation(ctx, &item.id, &pull_request);
     ctx.send_threads(&item.id);
     true

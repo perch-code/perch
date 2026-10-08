@@ -1,6 +1,6 @@
 # Perch: Milestone 25, the Changescape tab
 
-Handoff for an agent that works in the Perch repository (`~/workspace/perch`). It follows the skeleton of `design/MILESTONE_24.md`. If the number is still free, copy it to `design/MILESTONE_25.md` in Perch. All Perch paths below are relative to the Perch root, and they were correct on Oct 7, 2026. Make sure that each one is still correct before you edit it.
+The design of the Changescape tab. It follows the skeleton of `design/MILESTONE_24.md`. Paths are relative to the Perch root. The line numbers were correct on Oct 7, 2026, before the work, and they drift.
 
 ## Goal
 
@@ -120,7 +120,7 @@ A click on anything that carries an element id does this:
 3. If no ref has a `head` range, the element exists only on the base side, for example a removed function. Perch has no API to open a base line. Show the ref's `src` excerpt in a popover over the Changescape tab instead. `src` rows are `[base_line, head_line, op, text]`. Add a "Show in diff" button. It opens the file in Code with `Layout::Split` (`review/model.rs:213`). It jumps to the first head line of the nearest hunk. A base-line jump is a later milestone.
 4. If the changescape is stale, line numbers can be wrong. Open the file at the line anyway, and keep the stale banner.
 
-Code points back to the Changescape tab. If the caret in Code is inside the head range of a Changescape element, show a strip over the editor. The strip is one line with the title and kind of the element. The strip has a link, "On the changescape", that switches to Map and selects the first section that shows the element. After the changescape loads, build an index from path to head ranges. Do not scan `page.json` on every caret move.
+Code points back to the Changescape tab. If the caret in Code is inside the head range of a Changescape element, show a strip over the editor. The strip is one line with the title and kind of the element. The strip has a link, "On the changescape", that switches to the Changescape tab and selects the first section that shows the element. After the changescape loads, build an index from path to head ranges. Do not scan `page.json` on every caret move.
 
 ### Review threads on the Changescape tab
 
@@ -139,24 +139,25 @@ If either one is missing, Perch shows no build action anywhere.
 
 If both are present, add "Build Changescape" to the item's existing action menu, in the place that holds actions like asking an agent. Pick the least visible fitting place. Do not add a pill or a button to the item header for it. After a build starts, the Changescape pill appears, as described above. On a stale changescape, the banner's Rebuild link starts the same build.
 
-A build is a Claude Code run with a new purpose, `RunPurpose::Changescape` (`crates/perch-github/src/comments.rs:512`). It differs from review runs in three ways:
+A build is a Claude Code run, started by `Run::spawn_changescape` (`crates/perch-agent/src/changescape.rs`). It runs outside the durable run queue and has no `RunPurpose`, so it is not in the item's run list. A build that quitting cuts short stays `running` until the next build. It differs from review runs in three ways:
 
 1. It must not use `--safe-mode`, because safe mode turns off skills (`crates/perch-agent/src/review.rs:553`, `claude_isolation_args`). Write a new argument builder next to that one. Keep `--print`, `--strict-mcp-config`, `--no-session-persistence`, `--output-format stream-json --verbose`, `--permission-mode dontAsk`, and `--permission-prompts none`.
-2. Allowed tools: `Read`, `Grep`, `Glob`, `Write` and `Edit` under the build folder only, `Bash(uv run *)`, `Bash(gh pr *)`, `Bash(gh api *)`, `Bash(gh issue *)`, and `Bash(git *)`. Disallow everything else.
+2. Allowed tools: `Read`, `Grep`, `Glob`, `Write` and `Edit` under the build folder only, `Bash(uv run *)`, `Bash(gh pr *)`, `Bash(gh issue *)`, `Bash(git *)`, `cd`, and the read-only tools Claude pipes output through. There is no `gh api`. Disallow everything else.
 3. Sandbox configuration: start from `claude_settings` (`crates/perch-agent/src/lib.rs:185`). Allow writes to the cache root. Allow network to `api.github.com` and `github.com`, which `gh` and `git fetch` need. Allow the package index that `uv` uses (`pypi.org` and `files.pythonhosted.org`). Keep everything else denied.
 
-Run it in the clone that Perch keeps under `~/.perch/repos/`, not in the user's worktree. The skill fetches the PR head into `refs/changescape/pr/<n>`. It never touches the work tree. A run in the clone also keeps new refs out of the user's worktree.
+The run runs in the cache root, and the clone that Perch keeps under `~/.perch/repos/` is an added directory. The sandbox refuses writes to the git internals of the folder a run runs in, and a bare clone is all internals. The skill fetches the PR head into the clone as `refs/changescape/pr/<n>`, so new refs stay out of the user's worktree.
 
 The prompt is:
 
 ```
-Use the changescape skill on pull request #<number> of <owner>/<repo>, in this repository.
+Use the changescape skill on pull request #<number> of <owner>/<repo>.
+The repository is at <clone>.
 Write the output to <cache root>/<owner>/<repo>/pr-<number>/<head_sha>/.
 ```
 
-Show the run's events in the Changescape body while it runs, and in the item's existing run list. When the run ends, read `status.json` again. Two results count as a failed build: the state `failed`, and a run that exits with no `page.json`. Show the error of a failed build in the Changescape body, with a Retry link.
+Show the run's progress in the Changescape body while it runs, and write its steps to `perch-build.log` in the build folder. When the run ends, read `status.json` again. Two results count as a failed build: the state `failed`, and a run that exits with no `page.json`. Show the error of a failed build in the Changescape body, with a Retry link.
 
-Only one build per PR runs at a time. A second "Build Changescape" while one is running selects the Changescape pill.
+Only one build per PR runs at a time. A second "Build Changescape" while one is running looks the PR up again and starts nothing.
 
 ### Configuration
 
@@ -175,7 +176,7 @@ The order for the cache root is `CHANGESCAPE_CACHE`, then `changescape.cache`, t
 Put file types and lookup in a new crate, `crates/perch-changescape`. It has no UI dependencies.
 
 - `Page`, `Section`, `View`, `Block`, `Element`, `Ref`, and `Status` are serde types. `Block` is an enum tagged by `type`, with an `Other` variant for unknown types (`#[serde(other)]` or a custom deserializer). Every struct ignores unknown fields.
-- `fn lookup(root: &Path, repo: &str, number: u64, head_sha: &str) -> Lookup`, where `Lookup` is `Current(Build)`, `Stale(Build)`, `Running(Build)`, or `None`. `Build` holds the folder, the head SHA, and the status.
+- `fn lookup(root: &Path, repo: &str, number: u64, head_sha: &str) -> Lookup`, where `Lookup` is `Current(Build)`, `Stale(Build)`, `Running(Build, Option<Build>)` (with the last drawable earlier build), `Failed(Build)`, or `None`. `Build` holds the folder, the head SHA, and the status.
 - `fn load(build: &Build) -> Result<Page>`. Parse once per build and per `finished` time. Cache the result.
 - `fn skill_available() -> Option<PathBuf>` returns the skill folder.
 - `struct LineIndex` maps a path to sorted head ranges with element ids, for the Code strip.
@@ -190,7 +191,7 @@ In `perch-app`:
 
 - Look up changescapes on item open, with the existing backend request pattern. Send the result to the UI as a signal update.
 - Poll `status.json` every two seconds only while a build of the open item is `running`.
-- The build run goes through `perch-agent` like other runs, so it appears in `AppState.agent_runs` (`state.rs:288-329`).
+- The build run goes through `perch-agent`, but not through the run queue, so it is not in `AppState.agent_runs`.
 
 ## Harness
 

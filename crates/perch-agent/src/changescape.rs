@@ -1,13 +1,6 @@
 //! A Changescape build: Claude Code running the Changescape skill on one
-//! pull request, in Perch's own clone of the repository, writing its pages
-//! into Changescape's cache.
-//!
-//! It differs from a question in three ways. Safe mode is off, since safe
-//! mode turns skills off. The tools are the skill's: reading, writing in
-//! the build's folder alone, and the commands the skill runs. And the
-//! sandbox lets the shell write to the cache and to the clone, which the
-//! skill fetches the pull request's head into, and reach GitHub and the
-//! Python package index that `uv` installs the skill's tools from.
+//! pull request, writing its pages into Changescape's cache. Safe mode is
+//! off, since it turns skills off.
 
 use std::path::{Path, PathBuf};
 
@@ -52,19 +45,16 @@ pub struct ChangescapeSpec {
     /// Perch's clone of the repository, which the skill fetches the pull
     /// request's head into.
     pub repo: PathBuf,
-    /// Changescape's cache, which the shell may write, and where the run
-    /// runs. Not the clone: the sandbox refuses every write to the git
-    /// internals of the folder a run runs in, and a bare clone is all
-    /// internals, so the skill's fetch could not store a thing.
+    /// Changescape's cache: the shell may write here, and the run runs
+    /// here, not in the bare clone, whose git internals the sandbox will
+    /// not let a run write.
     pub cache_root: PathBuf,
     /// The one folder the run's own Write and Edit may touch.
     pub build_dir: PathBuf,
     /// The skill's folder, which its steps `cd` into.
     pub skill_dir: Option<PathBuf>,
-    /// Perch's GitHub token, as `GH_TOKEN`: `gh` in the sandbox cannot
-    /// reach the keychain its own login is in. Every other run is denied
-    /// tokens; this one reads pull requests with `gh pr` and `gh issue`,
-    /// and is not given `gh api`.
+    /// Perch's GitHub token, as `GH_TOKEN`, since the sandbox hides `gh`'s
+    /// keychain login.
     pub github_token: Option<String>,
     pub prompt: String,
 }
@@ -110,8 +100,6 @@ impl ChangescapeSpec {
             format!("Edit({under_build})"),
         ]);
         args.extend(SKILL_COMMANDS.iter().map(|c| (*c).to_string()));
-        // Everything not allowed is refused under `dontAsk`; the network
-        // tools are named too, as every run names them.
         args.push("--disallowedTools".into());
         args.extend(["WebFetch".to_string(), "WebSearch".to_string()]);
         args.push("--".into());
@@ -122,11 +110,8 @@ impl ChangescapeSpec {
 
 /// The sandbox: writes to the cache, the clone, the temporary directory
 /// and `uv`'s cache; GitHub and the package index on the network.
-///
-/// `uv` runs offline, from the packages the reader's own runs of the skill
-/// left in its cache. Online, it panics in the sandbox: reading the
-/// system's proxy configuration is denied ("Attempted to create a NULL
-/// object", uv 0.8.19), so a package not in the cache cannot be fetched.
+/// `uv` runs offline from the reader's own cache: online, it panics in
+/// the sandbox reading the proxy configuration.
 pub fn settings(repo: &Path, cache_root: &Path) -> String {
     let cache = real_path(cache_root);
     let uv_cache = std::env::var_os("UV_CACHE_DIR")
@@ -162,10 +147,8 @@ pub fn settings(repo: &Path, cache_root: &Path) -> String {
     .to_string()
 }
 
-/// The token for `gh`, and for the skill's `git fetch` over HTTPS the
-/// credential helper Perch's own fetches use, read from the same
-/// variable and scoped to github.com. The empty value first clears any
-/// helper the reader's configuration has for it.
+/// `GH_TOKEN`, and a github.com credential helper for `git` that reads
+/// it, after an empty helper that clears the reader's own.
 fn token_env(token: String) -> Vec<(String, String)> {
     let helper = "credential.https://github.com.helper";
     [
@@ -258,11 +241,75 @@ mod tests {
     }
 
     #[test]
-    fn the_sandbox_reaches_github_and_the_package_index_only() {
+    fn the_sandbox_writes_the_cache_and_the_clone_and_reaches_github_and_pypi() {
+        let (repo, cache) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let settings: serde_json::Value =
-            serde_json::from_str(&settings(Path::new("/tmp"), Path::new("/tmp"))).unwrap();
-        let domains = &settings["sandbox"]["network"]["allowedDomains"];
-        assert_eq!(domains.as_array().unwrap().len(), 4);
-        assert_eq!(settings["sandbox"]["allowUnsandboxedCommands"], false);
+            serde_json::from_str(&settings(repo.path(), cache.path())).unwrap();
+        let sandbox = &settings["sandbox"];
+        assert_eq!(
+            sandbox["network"]["allowedDomains"],
+            serde_json::json!([
+                "api.github.com",
+                "github.com",
+                "pypi.org",
+                "files.pythonhosted.org"
+            ])
+        );
+        assert_eq!(sandbox["network"]["strictAllowlist"], true);
+        let writes: Vec<PathBuf> =
+            serde_json::from_value(sandbox["filesystem"]["allowWrite"].clone()).unwrap();
+        for dir in [cache.path(), repo.path(), std::env::temp_dir().as_path()] {
+            assert!(writes.contains(&real_path(dir)), "{dir:?} in {writes:?}");
+        }
+        assert_eq!(settings["env"]["UV_OFFLINE"], "1");
+    }
+
+    #[test]
+    fn the_shell_runs_the_skills_commands_and_no_web_tools() {
+        let args = spec().args();
+        let allowed = args.iter().position(|a| a == "--allowedTools").unwrap();
+        let disallowed = args.iter().position(|a| a == "--disallowedTools").unwrap();
+        let bash: Vec<&str> = args[allowed..disallowed]
+            .iter()
+            .filter(|a| a.starts_with("Bash("))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(bash, SKILL_COMMANDS);
+        assert_eq!(
+            args[disallowed + 1..disallowed + 3],
+            ["WebFetch", "WebSearch"]
+        );
+    }
+
+    #[test]
+    fn the_skill_folder_is_an_added_dir_before_the_next_option() {
+        let args = spec().args();
+        let at = args.iter().position(|a| a == "--add-dir").unwrap();
+        assert_eq!(
+            args[at + 2],
+            real_path(Path::new("/tmp/skills/changescape")).to_string_lossy()
+        );
+        assert!(args[at + 3].starts_with("--"));
+    }
+
+    #[test]
+    fn the_token_helper_clears_the_readers_own_first() {
+        let env: std::collections::HashMap<String, String> =
+            token_env("t0ken".into()).into_iter().collect();
+        assert_eq!(env["GH_TOKEN"], "t0ken");
+        assert_eq!(env["GIT_CONFIG_COUNT"], "2");
+        let helper = "credential.https://github.com.helper";
+        assert_eq!(
+            (
+                env["GIT_CONFIG_KEY_0"].as_str(),
+                env["GIT_CONFIG_VALUE_0"].as_str()
+            ),
+            (helper, "")
+        );
+        assert_eq!(env["GIT_CONFIG_KEY_1"], helper);
+        // The helper reads the variable; the token itself is not in git's
+        // configuration.
+        assert!(env["GIT_CONFIG_VALUE_1"].contains("password=$GH_TOKEN"));
+        assert!(!env["GIT_CONFIG_VALUE_1"].contains("t0ken"));
     }
 }

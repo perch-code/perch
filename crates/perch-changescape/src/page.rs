@@ -16,9 +16,6 @@ use serde_json::Value;
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Page {
-    pub schema: u32,
-    #[serde(deserialize_with = "text")]
-    pub kind: String,
     pub meta: Meta,
     #[serde(deserialize_with = "lenient_vec")]
     pub sections: Vec<Section>,
@@ -32,27 +29,7 @@ pub struct Page {
 #[serde(default)]
 pub struct Meta {
     #[serde(deserialize_with = "text")]
-    pub key: String,
-    #[serde(deserialize_with = "text")]
     pub title: String,
-    #[serde(deserialize_with = "text")]
-    pub repo: String,
-    pub number: u64,
-    #[serde(deserialize_with = "text")]
-    pub url: String,
-    pub base: Side,
-    pub head: Side,
-}
-
-/// One end of the pull request. `base.sha` is the merge base.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct Side {
-    #[serde(rename = "ref")]
-    #[serde(deserialize_with = "text")]
-    pub branch: String,
-    #[serde(deserialize_with = "text")]
-    pub sha: String,
 }
 
 /// One entry of the rail. A section with no views carries the `reason` it
@@ -112,9 +89,6 @@ pub struct Element {
     /// The kind, for example "function · dblect.sql.window_ties".
     #[serde(deserialize_with = "text")]
     pub k: String,
-    /// `added`, `removed`, `changed`, `moved` or `context`.
-    #[serde(deserialize_with = "text")]
-    pub st: String,
     /// One line about what changed.
     #[serde(deserialize_with = "text")]
     pub d: String,
@@ -251,9 +225,7 @@ pub struct Column {
 #[serde(default)]
 pub struct Row {
     pub el: Option<String>,
-    pub side: Option<String>,
     pub dim: bool,
-    pub view: Option<String>,
     #[serde(deserialize_with = "lenient_map")]
     pub cells: BTreeMap<String, Cell>,
 }
@@ -266,7 +238,6 @@ pub struct Cell {
     /// The number, for `num` and `bar` columns.
     pub value: Option<f64>,
     pub el: Option<String>,
-    pub side: Option<String>,
     pub file: Option<String>,
     pub line: Option<u32>,
     /// A `refs` cell's entries, each its own cell.
@@ -324,7 +295,6 @@ impl Cell {
                     text,
                     value,
                     el: str_of("el"),
-                    side: str_of("side"),
                     file: str_of("file"),
                     line: map
                         .get("line")

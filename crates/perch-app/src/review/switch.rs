@@ -28,20 +28,16 @@ pub fn switch(state: ReviewState) -> impl IntoView {
 }
 
 fn segments(state: ReviewState, changescape: bool) -> AnyView {
-    let pills = if changescape {
-        Stack::horizontal((
-            segment(state, ItemTab::Conversation, "Conversation"),
-            segment(state, ItemTab::Changescape, "Changescape"),
-            segment(state, ItemTab::Code, "Code"),
-        ))
-        .into_any()
-    } else {
-        Stack::horizontal((
-            segment(state, ItemTab::Conversation, "Conversation"),
-            segment(state, ItemTab::Code, "Code"),
-        ))
-        .into_any()
-    };
+    let tabs = [
+        Some((ItemTab::Conversation, "Conversation")),
+        changescape.then_some((ItemTab::Changescape, "Changescape")),
+        Some((ItemTab::Code, "Code")),
+    ];
+    let pills = Stack::horizontal_from_iter(
+        tabs.into_iter()
+            .flatten()
+            .map(|(tab, name)| segment(state, tab, name).into_any()),
+    );
     pills
         .debug_name("item switch")
         // The bar it sits in is the window's title bar, and lets the pointer

@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use floem::prelude::*;
-use floem::text::{Attrs, AttrsList, FamilyOwned, TextLayout};
+use floem::text::{Attrs, AttrsList, FamilyOwned};
 use floem::views::{Container, Decorators, Empty, Label, Stack};
 use floem::AnyView;
 use perch_changescape::page::{Block, BlockBody, Cell, Column, Row, Summary, Table, Text, View};
@@ -42,9 +42,7 @@ impl Ctx {
             el.to_string(),
         )
     }
-}
 
-impl Ctx {
     pub fn open(&self, el: &str) {
         navigate::open_element(self.state, &self.backend, &self.page, el);
     }
@@ -181,15 +179,16 @@ fn backticks(text: &str) -> (String, Vec<Range<usize>>, impl Fn(usize) -> usize)
     let mut plain = String::with_capacity(text.len());
     let mut code = Vec::new();
     let mut offsets = Vec::with_capacity(text.len() + 1);
-    let mut open: Option<usize> = None;
+    // Where the open backtick goes in the result, and where it is in `text`.
+    let mut open: Option<(usize, usize)> = None;
     for (i, ch) in text.char_indices() {
         while offsets.len() <= i {
             offsets.push(plain.len());
         }
         if ch == '`' {
             match open.take() {
-                Some(start) => code.push(start..plain.len()),
-                None => open = Some(plain.len()),
+                Some((start, _)) => code.push(start..plain.len()),
+                None => open = Some((plain.len(), i)),
             }
             continue;
         }
@@ -198,10 +197,10 @@ fn backticks(text: &str) -> (String, Vec<Range<usize>>, impl Fn(usize) -> usize)
     while offsets.len() <= text.len() {
         offsets.push(plain.len());
     }
-    // An unclosed backtick is a backtick.
-    if let Some(start) = open {
+    // An unclosed backtick is a backtick: what follows it moves over one.
+    if let Some((start, tick)) = open {
         plain.insert(start, '`');
-        for offset in offsets.iter_mut().filter(|o| **o > start) {
+        for offset in offsets.iter_mut().skip(tick + 1) {
             *offset += 1;
         }
     }
@@ -332,10 +331,10 @@ fn column_width(kind: &str) -> Option<f64> {
 /// How a column takes its room in a row.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Width {
-    /// As wide as this, given or shrinking.
+    /// Exactly this wide.
     Fixed(f64),
-    /// Its content's width as it starts, giving way in proportion to it
-    /// when the row runs short, but not below `MIN_TEXT`.
+    /// Starts at its content's width, and gives way in proportion to it
+    /// when the row runs short, down to `MIN_TEXT`.
     Content(f64),
     /// The whole of what holds it: one entry of a refs cell.
     Fill,
@@ -352,9 +351,8 @@ const MIN_TEXT: f64 = 96.0;
 /// does not take the row from the others.
 const MAX_TEXT: f64 = 520.0;
 
-/// How wide each of a table's columns is: a fixed kind keeps its width; a
-/// text column starts at the width of its widest text, the header's
-/// among them.
+/// Each column's width: a fixed kind's, or its widest text's, the
+/// header's among them.
 fn column_widths(table: &Table) -> Vec<Width> {
     table
         .columns
@@ -363,7 +361,7 @@ fn column_widths(table: &Table) -> Vec<Width> {
             if let Some(width) = column_width(&column.kind) {
                 return Width::Fixed(width);
             }
-            let mono = column.kind == "mono" || column.kind == "refs";
+            let mono = is_mono(&column.kind);
             let widest = table
                 .rows
                 .iter()
@@ -390,6 +388,11 @@ fn column_widths(table: &Table) -> Vec<Width> {
         .collect()
 }
 
+/// A column of names or paths, set in the code font.
+fn is_mono(kind: &str) -> bool {
+    kind == "mono" || kind == "refs"
+}
+
 fn header_width(label: &str) -> f64 {
     measure(label, theme::FONT_STACK, theme::TEXT_SECTION, true)
 }
@@ -402,16 +405,9 @@ fn cell_text_width(text: &str, mono: bool) -> f64 {
     }
 }
 
-/// How wide `text` is on one line in `stack` at `size`.
 fn measure(text: &str, stack: &str, size: f32, emphasis: bool) -> f64 {
-    let family: Vec<FamilyOwned> = FamilyOwned::parse_list(stack).collect();
-    let mut attrs = Attrs::new().font_size(size).family(&family);
-    if emphasis {
-        attrs = attrs.weight(theme::weight_emphasis());
-    }
-    TextLayout::new_with_text(text, AttrsList::new(attrs), None)
-        .size()
-        .width
+    let weight = emphasis.then(theme::weight_emphasis);
+    crate::review::markdown::text_width_in(text, stack, size, weight)
 }
 
 fn column_style(s: floem::style::Style, width: Width) -> floem::style::Style {
@@ -604,7 +600,7 @@ fn table_cell(cx: &Ctx, column: &Column, width: Width, max: f64, cell: Cell, dim
         }
         _ => {
             let text = cell.text.clone();
-            let mono = kind == "mono" || kind == "refs";
+            let mono = is_mono(&kind);
             let status = kind == "status";
             // Prose wraps in its column. A name or a path stays on its
             // line, cut short where the column is narrower, with the whole
@@ -648,12 +644,7 @@ fn table_cell(cx: &Ctx, column: &Column, width: Width, max: f64, cell: Cell, dim
                     let cx = cx.clone();
                     Container::new(label)
                         .on_event_stop(el::Click, move |_, _| cx.open(&el))
-                        .style(move |s| {
-                            underlined_link(s)
-                                .min_width(0.0)
-                                .max_width_full()
-                                .apply_if(!cut, |s| s.width_full())
-                        })
+                        .style(move |s| link_style(s, cut))
                         .into_any()
                 }
                 (None, Some(file)) => {
@@ -662,12 +653,7 @@ fn table_cell(cx: &Ctx, column: &Column, width: Width, max: f64, cell: Cell, dim
                         .on_event_stop(el::Click, move |_, _| {
                             navigate::open_file_line(state, &backend, &file, line)
                         })
-                        .style(move |s| {
-                            underlined_link(s)
-                                .min_width(0.0)
-                                .max_width_full()
-                                .apply_if(!cut, |s| s.width_full())
-                        })
+                        .style(move |s| link_style(s, cut))
                         .into_any()
                 }
                 (None, None) => label,
@@ -682,6 +668,13 @@ fn table_cell(cx: &Ctx, column: &Column, width: Width, max: f64, cell: Cell, dim
                 .apply_if(right, |s| s.justify_end())
         })
         .into_any()
+}
+
+fn link_style(s: floem::style::Style, cut: bool) -> floem::style::Style {
+    underlined_link(s)
+        .min_width(0.0)
+        .max_width_full()
+        .apply_if(!cut, |s| s.width_full())
 }
 
 /// A block Perch does not draw: one line, and the browser page.
@@ -726,43 +719,67 @@ mod tests {
         assert_eq!(plain, "a b c");
         assert_eq!(code, vec![2..3_usize]);
         assert_eq!(map(6), 4, "the c");
-        let (plain, code, _) = backticks("one ` alone");
+        let (plain, code, map) = backticks("one ` alone");
         assert_eq!(plain, "one ` alone");
         assert!(code.is_empty());
+        assert_eq!(map(4), 4, "the backtick");
+        assert_eq!(map(6), 6, "the a after it");
+    }
+
+    fn table(columns: serde_json::Value, cells: serde_json::Value) -> Table {
+        serde_json::from_value(serde_json::json!({
+            "columns": columns,
+            "rows": [{"cells": cells}],
+        }))
+        .unwrap()
+    }
+
+    /// The width a text column asks for: its text and the room each side.
+    fn padded(width: f64) -> f64 {
+        width.ceil() + 2.0 * CELL_PAD + 2.0
     }
 
     #[test]
-    fn a_short_column_keeps_its_width_and_a_long_one_starts_wider() {
-        let table: Table = serde_json::from_value(serde_json::json!({
-            "columns": [
+    fn a_column_is_as_wide_as_its_widest_text_up_to_a_cap() {
+        let message = "feat(check): partial composite key findings";
+        let path = "test_fanout_key_groups_by_owner.py";
+        let widths = column_widths(&table(
+            serde_json::json!([
                 {"key": "sha", "label": "Commit", "kind": "mono"},
                 {"key": "msg", "label": "Message", "kind": "text"},
-                {"key": "files", "label": "Files", "kind": "num"},
                 {"key": "refs", "label": "Where", "kind": "refs"},
-            ],
-            "rows": [
-                {"cells": {
-                    "sha": "e71c42c",
-                    "msg": "feat(check): partial composite key findings for fanout groups",
-                    "files": 6,
-                    "refs": ["test_fanout_key_groups_by_owner.py", "run.py"],
-                }},
-            ],
-        }))
-        .unwrap();
-        let widths = column_widths(&table);
-        let Width::Fixed(sha) = widths[0] else {
-            panic!("a hash is snug: {:?}", widths[0]);
-        };
-        let Width::Content(msg) = widths[1] else {
-            panic!("a message takes what it needs: {:?}", widths[1]);
-        };
-        assert!(sha < SNUG && msg > 2.0 * sha, "{sha} {msg}");
-        assert_eq!(widths[2], Width::Fixed(64.0));
-        let Width::Content(refs) = widths[3] else {
-            panic!("a refs column sizes by its widest entry: {:?}", widths[3]);
-        };
-        let one = cell_text_width("test_fanout_key_groups_by_owner.py", true);
-        assert!(refs > one && refs < one + 40.0, "{refs} {one}");
+                {"key": "long", "label": "Long", "kind": "text"},
+            ]),
+            serde_json::json!({
+                "sha": "e71c42c",
+                "msg": message,
+                "refs": [path, "run.py"],
+                "long": message.repeat(4),
+            }),
+        ));
+        assert_eq!(
+            widths[0],
+            Width::Fixed(padded(cell_text_width("e71c42c", true)))
+        );
+        assert_eq!(
+            widths[1],
+            Width::Content(padded(cell_text_width(message, false)))
+        );
+        // A refs column is as wide as its widest entry, not their join.
+        assert_eq!(
+            widths[2],
+            Width::Content(padded(cell_text_width(path, true)))
+        );
+        assert_eq!(widths[3], Width::Content(MAX_TEXT));
+    }
+
+    #[test]
+    fn a_header_wider_than_its_cells_sets_the_width() {
+        let label = "Reached through, with its callers";
+        let widths = column_widths(&table(
+            serde_json::json!([{"key": "a", "label": label, "kind": "text"}]),
+            serde_json::json!({"a": "x"}),
+        ));
+        assert_eq!(widths[0], Width::Content(padded(header_width(label))));
     }
 }

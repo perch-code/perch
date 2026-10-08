@@ -15,7 +15,7 @@ pub fn skill_available() -> Option<PathBuf> {
 
 /// The installed skill's folder under `home`: `.claude/skills/*/`, or
 /// `.claude/plugins/**/skills/*/` with `**` at most four folders deep.
-pub fn skill_available_in(home: &Path) -> Option<PathBuf> {
+fn skill_available_in(home: &Path) -> Option<PathBuf> {
     let claude = home.join(".claude");
     find_in_skills(&claude.join("skills")).or_else(|| find_in_plugins(&claude.join("plugins"), 0))
 }
