@@ -12,15 +12,17 @@ use floem::reactive::{Memo, RwSignal};
 use floem::text::{Attrs, AttrsList, FamilyOwned};
 use floem::views::{dyn_stack, Container, Decorators, Empty, Label, Stack, TextInput};
 use floem::AnyView;
-use perch_changescape::page::{Block, BlockBody, Cell, Column, Row, Summary, Table, Text, View};
-use perch_changescape::Page;
+use perch_changescape::fold;
+use perch_changescape::page::{cell, column_kind, rank, CellText as Cell, PageBlock, Rank, Table};
+use perch_changescape::v3::{Block, Column, Row, SummaryItem, TableGroup as Group, View};
+use perch_changescape::LoadedPage;
 
 use crate::backend::Backend;
 use crate::review::cards::tip_with;
 use crate::review::changescape::order::{self, Sort};
-use crate::review::changescape::{navigate, show_section, show_view, shown};
-use crate::review::linked_text::{linked_text, Target};
-use crate::review::model::ReviewState;
+use crate::review::changescape::{navigate, show_view, shown};
+use crate::review::linked_text::linked_text;
+use crate::review::model::{ChangescapeFoldKey, ReviewState};
 use crate::theme;
 use crate::ui::widgets::{clickable, underlined_link};
 
@@ -29,9 +31,12 @@ use crate::ui::widgets::{clickable, underlined_link};
 pub struct Ctx {
     pub state: ReviewState,
     pub backend: Rc<Backend>,
-    pub page: Arc<Page>,
+    pub page: Arc<LoadedPage>,
     /// The open review threads on each element.
     pub counts: floem::reactive::Memo<Arc<super::threads::Counts>>,
+    /// The elements whose rows never fold: the one the reader selected,
+    /// and the one the Code strip names.
+    pub pinned: Memo<Vec<String>>,
 }
 
 impl Ctx {
@@ -50,7 +55,8 @@ impl Ctx {
     }
 }
 
-pub fn view(cx: Ctx, view: View, titled: bool) -> impl IntoView {
+/// A view, with its blocks as the page read them.
+pub fn view(cx: Ctx, view: View, blocks: Vec<PageBlock>, titled: bool) -> impl IntoView {
     let mut parts: Vec<AnyView> = Vec::new();
     if titled {
         parts.push(
@@ -77,28 +83,54 @@ pub fn view(cx: Ctx, view: View, titled: bool) -> impl IntoView {
                 .into_any(),
         );
     }
-    if let Some(caption) = view.narration.clone().filter(|c| !c.is_empty()) {
-        parts.push(paragraph(&cx, &caption, &[], None).into_any());
+    match view.narration.clone().filter(|c| !c.is_empty()) {
+        Some(caption) => parts.push(paragraph(&caption).into_any()),
+        // Where the caption goes, while the build is still writing it.
+        None => {
+            let state = cx.state;
+            parts.push(
+                Label::new("Caption coming…")
+                    .debug_name("Changescape caption pending")
+                    .style(move |s| {
+                        let pending = shown(state).is_some_and(|shown| shown.captions_pending());
+                        s.font_size(theme::TEXT_BODY)
+                            .color(theme::fg_subtle())
+                            .apply_if(!pending, |s| s.hide())
+                    })
+                    .into_any(),
+            );
+        }
     }
-    for block in view.blocks {
-        parts.push(block_view(cx.clone(), block).into_any());
+    for (i, block) in blocks.into_iter().enumerate() {
+        parts.push(block_view(cx.clone(), block, (view.id.clone(), i)).into_any());
     }
     Stack::vertical_from_iter(parts)
         .debug_name(format!("Changescape view {}", view.id))
         .style(|s| s.flex_col().gap(8.0).width_full())
 }
 
-fn block_view(cx: Ctx, block: Block) -> impl IntoView {
-    let kind = block.kind.clone();
-    let body = match &block.body {
-        BlockBody::Text(text) => text_block(&cx, text).into_any(),
-        BlockBody::Summary(summary) => summary_block(&cx, summary).into_any(),
-        BlockBody::Table(table) => table_block(&cx, table).into_any(),
-        BlockBody::Svg(svg) => super::svg::svg_block(cx.clone(), svg.clone()),
-        BlockBody::Other => fallback(cx.state).into_any(),
+/// `at` is the block's view id and its index there, which key the state
+/// of a table's sections.
+fn block_view(cx: Ctx, block: PageBlock, at: (String, usize)) -> impl IntoView {
+    let kind = block.kind().to_string();
+    let body = match &block {
+        PageBlock::Known(Block::Narration { text } | Block::Text { text, .. }) => {
+            paragraph(text).into_any()
+        }
+        PageBlock::Known(Block::Summary { items, .. }) => summary_block(&cx, items).into_any(),
+        PageBlock::Known(Block::Table { .. }) => {
+            let table = block.table().unwrap_or_default();
+            table_block(&cx, &table, at).into_any()
+        }
+        PageBlock::Known(Block::Svg { .. }) => {
+            super::svg::svg_block(cx.clone(), block.svg().unwrap_or_default())
+        }
+        // Lanes, Mermaid graphs, the code view and the discussion are in
+        // the browser page, as is any block this Perch could not read.
+        PageBlock::Known(_) | PageBlock::Unknown { .. } => fallback(cx.state).into_any(),
     };
     let mut parts: Vec<AnyView> = Vec::new();
-    if let Some(title) = block.title.clone() {
+    if let Some(title) = block.title().map(str::to_string) {
         parts.push(
             Label::new(title)
                 .style(|s| {
@@ -110,7 +142,7 @@ fn block_view(cx: Ctx, block: Block) -> impl IntoView {
         );
     }
     parts.push(body);
-    if let Some(note) = block.note.clone() {
+    if let Some(note) = block.note().map(str::to_string) {
         parts.push(
             Label::new(note)
                 .style(|s| s.font_size(theme::TEXT_META).color(theme::fg_subtle()))
@@ -122,55 +154,26 @@ fn block_view(cx: Ctx, block: Block) -> impl IntoView {
         .style(|s| s.flex_col().gap(6.0).width_full().margin_top(8.0))
 }
 
-/// A paragraph: its spans when the file splits it into them, else its
-/// text; linked whole by the block's `el`.
-fn text_block(cx: &Ctx, text: &Text) -> impl IntoView {
-    let pieces: Vec<(String, Option<String>)> = if text.spans.is_empty() {
-        vec![(text.text.clone(), None)]
-    } else {
-        text.spans
-            .iter()
-            .map(|span| (span.text.clone(), span.el.clone()))
-            .collect()
-    };
-    let joined: String = pieces.iter().map(|(text, _)| text.as_str()).collect();
-    let mut links = Vec::new();
-    let mut at = 0;
-    for (piece, el) in &pieces {
-        if let Some(el) = el {
-            links.push((at..at + piece.len(), el.clone()));
-        }
-        at += piece.len();
-    }
-    paragraph(cx, &joined, &links, text.el.as_deref())
+/// Whether Perch draws a block itself, not the browser page's line.
+pub fn drawn(block: &PageBlock) -> bool {
+    matches!(
+        block,
+        PageBlock::Known(
+            Block::Narration { .. }
+                | Block::Text { .. }
+                | Block::Summary { .. }
+                | Block::Table { .. }
+                | Block::Svg { .. }
+        )
+    )
 }
 
-/// Prose with `code` spans in backticks. `links` are byte ranges of `text`
-/// with the element each opens; `whole` links all of it.
-fn paragraph(
-    cx: &Ctx,
-    text: &str,
-    links: &[(Range<usize>, String)],
-    whole: Option<&str>,
-) -> impl IntoView {
-    let (plain, code, map) = backticks(text);
-    let moved = |range: &Range<usize>| map(range.start)..map(range.end);
-    let mut targets: Vec<(Range<usize>, Target)> = Vec::new();
-    match whole {
-        Some(el) => targets.push((0..plain.len(), element_target(cx, el))),
-        None => {
-            for (range, el) in links {
-                let range = moved(range);
-                if !range.is_empty() {
-                    targets.push((range, element_target(cx, el)));
-                }
-            }
-        }
-    }
-    let link_ranges: Vec<Range<usize>> = targets.iter().map(|(range, _)| range.clone()).collect();
+/// Prose with `code` spans in backticks.
+fn paragraph(text: &str) -> impl IntoView {
+    let (plain, code, _) = backticks(text);
     let len = plain.len();
-    linked_text(plain, targets, move || {
-        (prose_attrs(len, &code, &link_ranges), Vec::new())
+    linked_text(plain, Vec::new(), move || {
+        (prose_attrs(len, &code, &[]), Vec::new())
     })
     .style(|s| s.width_full())
 }
@@ -244,30 +247,14 @@ fn prose_attrs(len: usize, code: &[Range<usize>], links: &[Range<usize>]) -> Att
     list
 }
 
-fn element_target(cx: &Ctx, el: &str) -> Target {
-    let tip = cx
-        .page
-        .elements
-        .get(el)
-        .map(|element| element.t.clone())
-        .unwrap_or_else(|| el.to_string());
-    let cx = cx.clone();
-    let el = el.to_string();
-    Target::Local {
-        tip,
-        open: Rc::new(move || cx.open(&el)),
-    }
-}
-
 /// The overview's rows: a title, a metric, and a line, each opening its
 /// view's section.
-fn summary_block(cx: &Ctx, summary: &Summary) -> impl IntoView {
-    let rows: Vec<AnyView> = summary
-        .items
+fn summary_block(cx: &Ctx, items: &[SummaryItem]) -> impl IntoView {
+    let rows: Vec<AnyView> = items
         .iter()
         .map(|item| {
             let (state, page) = (cx.state, cx.page.clone());
-            let (view, sec) = (item.view.clone(), item.sec.clone());
+            let view = item.view.clone();
             Stack::horizontal((
                 Label::new(item.title.clone()).style(|s| {
                     s.font_size(theme::TEXT_BODY)
@@ -299,11 +286,7 @@ fn summary_block(cx: &Ctx, summary: &Summary) -> impl IntoView {
                 }),
             ))
             .debug_name("Changescape summary row")
-            .on_event_stop(el::Click, move |_, _| match (&sec, &view) {
-                (Some(sec), _) => show_section(state, sec),
-                (None, Some(view)) => show_view(state, &page, view),
-                (None, None) => {}
-            })
+            .on_event_stop(el::Click, move |_, _| show_view(state, &page, &view))
             .style(|s| {
                 clickable(
                     s.items_start()
@@ -360,14 +343,15 @@ fn column_widths(table: &Table) -> Vec<Width> {
         .columns
         .iter()
         .map(|column| {
-            if let Some(width) = column_width(&column.kind) {
+            let kind = column_kind(column);
+            if let Some(width) = column_width(kind) {
                 return Width::Fixed(width);
             }
-            let mono = is_mono(&column.kind);
+            let mono = is_mono(kind);
             let widest = table
                 .rows
                 .iter()
-                .filter_map(|row| row.cells.get(&column.key))
+                .map(|row| cell(row, &column.key))
                 .flat_map(|cell| {
                     if cell.items.is_empty() {
                         vec![cell_text_width(&cell.text, mono)]
@@ -441,11 +425,108 @@ fn column_style(s: floem::style::Style, width: Width) -> floem::style::Style {
 /// A table this long or longer has a filter over it.
 const FILTER_FROM: usize = 15;
 
+/// One line of a table under its header.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Line {
+    /// A section's header: its group, and whether it is open.
+    Header { group: usize, open: bool },
+    /// A row by index, dimmed or not.
+    Row { row: usize, dim: bool },
+    /// A part's control for its folded rows: what it says, and the part.
+    More { group: Option<usize>, text: String },
+}
+
+/// The key of a part's state in `ReviewState`.
+fn fold_key(at: &(String, usize), table: &Table, group: Option<usize>) -> ChangescapeFoldKey {
+    let id = group
+        .and_then(|g| table.groups.get(g))
+        .map(|g| g.id.clone())
+        .unwrap_or_default();
+    (at.0.clone(), at.1, id)
+}
+
+/// The lines of a table as the page groups and folds it, or, sorted or
+/// filtered, the matching rows alone. Tracked: the facet, the pinned
+/// elements, and the state of the table's parts.
+fn lines(
+    cx: &Ctx,
+    table: &Table,
+    at: &(String, usize),
+    visible: &[usize],
+    arranged: bool,
+) -> Vec<Line> {
+    let state = cx.state;
+    let hide = state.changescape_facet_hide.get();
+    let pinned = cx.pinned.get();
+    super::with_facet(state, &cx.page, |option| {
+        let outside = |row: &Row| fold::outside(option, row);
+        let keep = |row: &Row| !(hide && outside(row));
+        let line = |row: usize| Line::Row {
+            row,
+            dim: outside(&table.rows[row]),
+        };
+        if arranged {
+            return visible
+                .iter()
+                .copied()
+                .filter(|&i| keep(&table.rows[i]))
+                .map(line)
+                .collect();
+        }
+        let pin = |row: &Row| {
+            row.el.as_ref().is_some_and(|el| {
+                pinned.contains(el) || option.is_some_and(|option| option.els.contains(el))
+            })
+        };
+        let opened = state.changescape_open.get();
+        let unfolded = state.changescape_unfolded.get();
+        let mut lines = Vec::new();
+        for part in fold::parts(table, keep, pin) {
+            let key = fold_key(at, table, part.group);
+            if let Some(group) = part.group {
+                let open = part.pinned
+                    || opened
+                        .get(&key)
+                        .copied()
+                        .unwrap_or(table.groups[group].open);
+                lines.push(Line::Header { group, open });
+                if !open {
+                    continue;
+                }
+            }
+            if unfolded.contains(&key) {
+                let mut rows: Vec<usize> = part.shown.iter().chain(&part.folded).copied().collect();
+                rows.sort_unstable();
+                lines.extend(rows.into_iter().map(line));
+                if !part.folded.is_empty() {
+                    lines.push(Line::More {
+                        group: part.group,
+                        text: "Show fewer".into(),
+                    });
+                }
+            } else {
+                lines.extend(part.shown.iter().copied().map(line));
+                if !part.folded.is_empty() {
+                    lines.push(Line::More {
+                        group: part.group,
+                        text: fold::more_label(&part, table.fold.as_ref()),
+                    });
+                }
+            }
+        }
+        lines
+    })
+}
+
 /// A table: its header, which sorts it by a column on a click, and its
-/// rows, under a filter when there are many.
-fn table_block(cx: &Ctx, table: &Table) -> impl IntoView {
+/// rows, under a filter when there are many. Unsorted and unfiltered, the
+/// rows are in the page's sections and folds; sorted or filtered, every
+/// matching row shows in one list.
+fn table_block(cx: &Ctx, table: &Table, at: (String, usize)) -> impl IntoView {
     let table = Rc::new(table.clone());
     let columns = Rc::new(table.columns.clone());
+    // Over every row, folded ones too, so a part that opens moves no
+    // column.
     let widths = Rc::new(column_widths(&table));
     // The longest bar in a column is full.
     let maxima: Rc<Vec<f64>> = Rc::new(
@@ -455,7 +536,7 @@ fn table_block(cx: &Ctx, table: &Table) -> impl IntoView {
                 table
                     .rows
                     .iter()
-                    .filter_map(|row| row.cells.get(&column.key)?.value)
+                    .filter_map(|row| cell(row, &column.key).value)
                     .fold(0.0_f64, f64::max)
             })
             .collect(),
@@ -467,13 +548,20 @@ fn table_block(cx: &Ctx, table: &Table) -> impl IntoView {
         let table = table.clone();
         Memo::new(move |_| order::order(&table, sort.get(), &query.get()))
     };
+    let shown_lines = {
+        let (cx, table, at) = (cx.clone(), table.clone(), at.clone());
+        Memo::new(move |_| {
+            let arranged = sort.get().is_some() || query.with(|q| !q.trim().is_empty());
+            visible.with(|visible| lines(&cx, &table, &at, visible, arranged))
+        })
+    };
     let header = Stack::horizontal_from_iter(
         columns
             .iter()
             .enumerate()
             .zip(widths.iter().copied())
             .map(|((i, column), width)| {
-                let right = column.kind == "num";
+                let right = column_kind(column) == "num";
                 let numeric = order::numeric(&table, &column.key);
                 let label = column.label.clone();
                 let text = move || match sort.get() {
@@ -506,7 +594,9 @@ fn table_block(cx: &Ctx, table: &Table) -> impl IntoView {
             })),
     )
     .style(|s| {
+        // Past the 2 a row keeps at its left for the bar of a key row.
         s.width_full()
+            .padding_left(2.0)
             .padding_vert(6.0)
             .border_bottom(1.0)
             .border_color(theme::border_muted())
@@ -514,9 +604,28 @@ fn table_block(cx: &Ctx, table: &Table) -> impl IntoView {
     let rows = {
         let (cx, table) = (cx.clone(), table.clone());
         dyn_stack(
-            move || visible.get(),
-            |i: &usize| *i,
-            move |i| table_row(&cx, &columns, &widths, &maxima, &table.rows[i], badges),
+            move || shown_lines.get(),
+            |line: &Line| line.clone(),
+            move |line| match line {
+                Line::Row { row, dim } => table_row(
+                    &cx,
+                    &columns,
+                    &widths,
+                    &maxima,
+                    &table.rows[row],
+                    badges,
+                    dim,
+                )
+                .into_any(),
+                Line::Header { group, open } => {
+                    let key = fold_key(&at, &table, Some(group));
+                    section_header(cx.state, &table.groups[group], key, open).into_any()
+                }
+                Line::More { group, text } => {
+                    let key = fold_key(&at, &table, group);
+                    more_control(cx.state, key, text).into_any()
+                }
+            },
         )
         .style(|s| s.flex_col().width_full())
     };
@@ -570,6 +679,90 @@ fn filter_box(query: RwSignal<String>, visible: Memo<Vec<usize>>, total: usize) 
     .style(|s| s.items_center().margin_bottom(4.0))
 }
 
+/// A section's header: a chevron, its label and its summary. A click
+/// opens or closes it.
+fn section_header(
+    state: ReviewState,
+    group: &Group,
+    key: ChangescapeFoldKey,
+    open: bool,
+) -> impl IntoView {
+    let summary = group
+        .summary
+        .as_deref()
+        .map(|summary| backticks(summary).0)
+        .unwrap_or_default();
+    Stack::horizontal((
+        Label::new(if open { "▾" } else { "▸" }).style(|s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::fg_muted())
+                .width(14.0)
+                .flex_shrink(0.0_f32)
+        }),
+        Label::new(group.label.clone()).style(|s| {
+            s.font_size(theme::TEXT_META)
+                .font_weight(theme::weight_strong())
+                .color(theme::fg())
+                .flex_shrink(0.0_f32)
+        }),
+        Label::new(summary).style(|s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::fg_muted())
+                .margin_left(10.0)
+                .min_width(0.0)
+                .text_ellipsis()
+        }),
+    ))
+    .debug_name(format!("Changescape group {}", group.id))
+    .on_event_stop(el::Click, move |_, _| {
+        state.changescape_open.update(|opened| {
+            opened.insert(key.clone(), !open);
+        })
+    })
+    .style(|s| {
+        clickable(
+            s.width_full()
+                .items_center()
+                .padding_horiz(CELL_PAD)
+                .padding_top(12.0)
+                .padding_bottom(6.0)
+                .border_bottom(1.0)
+                .border_color(theme::border_muted())
+                .selectable(false),
+        )
+        .hover(|s| s.background(theme::canvas_hover()))
+    })
+}
+
+/// A part's control for its folded rows: it shows them in place, and then
+/// folds them again.
+fn more_control(state: ReviewState, key: ChangescapeFoldKey, text: String) -> impl IntoView {
+    let name = format!("Changescape fold: {text}");
+    Container::new(Label::new(text).style(|s| {
+        s.font_size(theme::TEXT_META)
+            .color(theme::link())
+            .selectable(false)
+    }))
+    .debug_name(name)
+    .on_event_stop(el::Click, move |_, _| {
+        state.changescape_unfolded.update(|unfolded| {
+            if !unfolded.remove(&key) {
+                unfolded.insert(key.clone());
+            }
+        })
+    })
+    .style(|s| {
+        clickable(
+            s.width_full()
+                .padding_horiz(CELL_PAD)
+                .padding_vert(6.0)
+                .border_bottom(1.0)
+                .border_color(theme::border_muted()),
+        )
+        .hover(|s| s.background(theme::canvas_hover()))
+    })
+}
+
 /// Room at a row's end for the badge of its threads.
 const BADGE_SLOT: f64 = 36.0;
 
@@ -580,13 +773,16 @@ fn table_row(
     maxima: &Rc<Vec<f64>>,
     row: &Row,
     badges: bool,
+    outside: bool,
 ) -> impl IntoView {
-    let dim = row.dim;
+    // Dimmed by the page, or outside the facet option the tab applies.
+    let dim = row.dim == Some(true) || outside;
+    let key = rank(row) == Rank::Key;
     let mut cells: Vec<AnyView> = columns
         .iter()
         .enumerate()
         .map(|(i, column)| {
-            let cell = row.cells.get(&column.key).cloned().unwrap_or_default();
+            let cell = cell(row, &column.key);
             table_cell(cx, column, widths[i], maxima[i], cell, dim).into_any()
         })
         .collect();
@@ -606,26 +802,48 @@ fn table_row(
         Some(el) => {
             let cx = cx.clone();
             line.on_event_stop(el::Click, move |_, _| cx.open(&el))
-                .style(|s| clickable(row_style(s)).hover(|s| s.background(theme::canvas_hover())))
+                .style(move |s| {
+                    clickable(row_style(s, key)).hover(|s| s.background(theme::canvas_hover()))
+                })
                 .into_any()
         }
-        None => line.style(row_style).into_any(),
+        None => line.style(move |s| row_style(s, key)).into_any(),
+    };
+    let line: AnyView = match row.why.clone() {
+        Some(why) => tip_with(line, move || why.clone()).into_any(),
+        None => line,
     };
     Container::new(line)
-        .debug_name("Changescape row")
+        .debug_name(format!(
+            "Changescape row{}{} {}",
+            if key { " key" } else { "" },
+            if dim { " dim" } else { "" },
+            row.el.as_deref().unwrap_or("")
+        ))
         .style(|s| s.width_full())
 }
 
-fn row_style(s: floem::style::Style) -> floem::style::Style {
-    s.width_full()
+/// A row, with a bar in the accent at its left edge when it is a key row.
+fn row_style(s: floem::style::Style, key: bool) -> floem::style::Style {
+    let s = s
+        .width_full()
         .items_center()
         .min_height(theme::SUMMARY_ROW)
         .border_bottom(1.0)
-        .border_color(theme::border_muted())
+        .border_color(theme::border_muted());
+    if key {
+        s.border_left(2.0)
+            .set(floem::style::BorderLeftColor, Some(theme::accent().into()))
+    } else {
+        s.border_left(2.0).set(
+            floem::style::BorderLeftColor,
+            Some(floem::peniko::Color::TRANSPARENT.into()),
+        )
+    }
 }
 
 fn table_cell(cx: &Ctx, column: &Column, width: Width, max: f64, cell: Cell, dim: bool) -> AnyView {
-    let kind = column.kind.clone();
+    let kind = column_kind(column);
     let ink = move |status: &str| {
         if dim {
             return theme::fg_subtle();
@@ -638,14 +856,14 @@ fn table_cell(cx: &Ctx, column: &Column, width: Width, max: f64, cell: Cell, dim
             _ => theme::fg_muted(),
         }
     };
-    let body: AnyView = match kind.as_str() {
+    let body: AnyView = match kind {
         _ if !cell.items.is_empty() => {
             let links: Vec<AnyView> = cell
                 .items
                 .iter()
                 .map(|item| {
                     let one = Column {
-                        kind: "mono".into(),
+                        kind: Some(perch_changescape::v3::ColumnKind::Mono),
                         ..column.clone()
                     };
                     Container::new(table_cell(cx, &one, Width::Fill, max, item.clone(), dim))
@@ -688,7 +906,7 @@ fn table_cell(cx: &Ctx, column: &Column, width: Width, max: f64, cell: Cell, dim
         }
         _ => {
             let text = cell.text.clone();
-            let mono = is_mono(&kind);
+            let mono = is_mono(kind);
             let status = kind == "status";
             // Prose wraps in its column. A name or a path stays on its
             // line, cut short where the column is narrower, with the whole
@@ -773,23 +991,33 @@ fn fallback(state: ReviewState) -> impl IntoView {
                 .color(theme::fg_subtle())
                 .selectable(false)
         }),
-        Container::new(Label::new("Open it").style(|s| {
-            s.font_size(theme::TEXT_META)
-                .color(theme::link())
-                .selectable(false)
-        }))
-        .debug_name("Changescape open page")
-        .on_event_stop(el::Click, move |_, _| open_html(state))
-        .style(|s| clickable(underlined_link(s))),
+        browser_link(state, "Open it"),
     ))
     .style(|s| s.items_center().gap(8.0))
 }
 
-/// Open the page Changescape wrote for a browser.
+/// A link that opens the page Changescape wrote for a browser.
+pub fn browser_link(state: ReviewState, text: &'static str) -> Container {
+    Container::new(Label::new(text).style(|s| {
+        s.font_size(theme::TEXT_META)
+            .color(theme::link())
+            .selectable(false)
+    }))
+    .debug_name("Changescape open page")
+    .on_event_stop(el::Click, move |_, _| open_html(state))
+    .style(|s| clickable(underlined_link(s)))
+}
+
+/// Open the page Changescape wrote for a browser: the drawn page's, or
+/// the one of a version this Perch refuses.
 fn open_html(state: ReviewState) {
-    let Some(path) =
-        shown(state).and_then(|shown| shown.lookup().drawable().map(|build| build.html_path()))
-    else {
+    let Some(path) = shown(state).and_then(|shown| {
+        let lookup = shown.lookup();
+        lookup
+            .drawable()
+            .or_else(|| lookup.refused())
+            .map(|build| build.html_path())
+    }) else {
         return;
     };
     if let Err(e) = std::process::Command::new("open").arg(&path).spawn() {
@@ -815,11 +1043,11 @@ mod tests {
     }
 
     fn table(columns: serde_json::Value, cells: serde_json::Value) -> Table {
-        serde_json::from_value(serde_json::json!({
-            "columns": columns,
-            "rows": [{"cells": cells}],
-        }))
-        .unwrap()
+        Table {
+            columns: serde_json::from_value(columns).unwrap(),
+            rows: serde_json::from_value(serde_json::json!([{"cells": cells}])).unwrap(),
+            ..Table::default()
+        }
     }
 
     /// The width a text column asks for: its text and the room each side.

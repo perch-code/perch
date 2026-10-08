@@ -1,0 +1,592 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Page",
+  "description": "page.json at page format version 3: one pull request as the data a reader draws. docs/page-data.md gives the meaning and the rendering rules. Readers ignore fields they do not know.",
+  "type": "object",
+  "required": ["schema", "kind", "meta", "sections", "elements", "views", "files", "comments", "notes"],
+  "properties": {
+    "schema": { "type": "integer", "const": 3, "description": "The page format version. This file describes version 3 only." },
+    "kind": { "$ref": "#/$defs/PageKind" },
+    "meta": { "$ref": "#/$defs/Meta" },
+    "sections": { "type": "array", "items": { "$ref": "#/$defs/Section" }, "description": "The fixed sections, in display order." },
+    "elements": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/Element" },
+      "description": "Every element a view draws, by element id, such as fn:pkg.mod.name or mod:pkg.mod."
+    },
+    "views": { "type": "array", "items": { "$ref": "#/$defs/View" }, "description": "The views that apply, in section order, then lens order." },
+    "files": { "type": "array", "items": { "$ref": "#/$defs/File" }, "description": "Every changed file, with its hunks." },
+    "comments": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Comment" },
+      "description": "Comments from GitHub: inline review comments, review bodies, and issue comments."
+    },
+    "notes": {
+      "type": "array",
+      "items": true,
+      "description": "Reader notes the page seeds. Producers write an empty array. Readers keep notes elsewhere, under meta.key."
+    },
+    "facets": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Facet" },
+      "description": "Named ways to look at part of the change. Absent when the change has none."
+    }
+  },
+  "$defs": {
+    "PageKind": { "title": "PageKind", "description": "What the page shows. Only pull requests exist.", "type": "string", "enum": ["pr"] },
+    "Side": {
+      "title": "Side",
+      "description": "One side of the change: base is the merge base, head is the PR's head commit.",
+      "type": "string",
+      "enum": ["base", "head"]
+    },
+    "Status": {
+      "title": "Status",
+      "description": "What the change does to an element.",
+      "type": "string",
+      "enum": ["added", "removed", "changed", "moved", "context"]
+    },
+    "LineRange": {
+      "title": "LineRange",
+      "description": "First and last line, 1-based and inclusive.",
+      "type": "array",
+      "items": { "type": "integer" },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "DiffOp": {
+      "title": "DiffOp",
+      "description": "A diff line's operation, one character: a space for an unchanged line, + for an added line, - for a removed line. A pattern rather than an enum, because code generators cannot name these values.",
+      "type": "string",
+      "pattern": "^[ +-]$"
+    },
+    "DiffLine": {
+      "title": "DiffLine",
+      "description": "One diff line: [base line or null, head line or null, op, text without the op character]. Code generators that do not read prefixItems see an array of four values.",
+      "type": "array",
+      "prefixItems": [
+        { "type": ["integer", "null"], "description": "Line number at the base, or null for an added line." },
+        { "type": ["integer", "null"], "description": "Line number at the head, or null for a removed line." },
+        { "$ref": "#/$defs/DiffOp" },
+        { "type": "string", "description": "The line's text." }
+      ],
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "GitRef": {
+      "title": "GitRef",
+      "description": "A branch name and a commit.",
+      "type": "object",
+      "required": ["ref", "sha"],
+      "properties": {
+        "ref": { "type": "string", "description": "The branch name." },
+        "sha": { "type": "string", "description": "The full commit id. For the base, the merge base." }
+      }
+    },
+    "PrState": { "title": "PrState", "description": "The PR's state on GitHub, in lower case.", "type": "string", "enum": ["open", "closed", "merged"] },
+    "Meta": {
+      "title": "Meta",
+      "description": "The pull request the page shows.",
+      "type": "object",
+      "required": ["key", "title", "repo", "number", "url", "author", "state", "language", "base", "head", "adds", "dels", "nfiles", "issues", "generated"],
+      "properties": {
+        "key": { "type": "string", "description": "The key under which a reader keeps its notes on this page." },
+        "title": { "type": "string", "description": "The PR's title." },
+        "repo": { "type": "string", "description": "owner/repo on GitHub." },
+        "number": { "type": "integer", "description": "The PR number." },
+        "url": { "type": "string", "description": "The PR's page on GitHub." },
+        "author": { "type": "string", "description": "The PR author's login." },
+        "state": { "$ref": "#/$defs/PrState" },
+        "language": { "type": "string", "description": "The language provider that read the repo, such as python or rust, or none. Open set." },
+        "base": { "$ref": "#/$defs/GitRef" },
+        "head": { "$ref": "#/$defs/GitRef" },
+        "adds": { "type": "integer", "description": "Lines added over all files." },
+        "dels": { "type": "integer", "description": "Lines removed over all files." },
+        "nfiles": { "type": "integer", "description": "The number of changed files." },
+        "issues": { "type": "array", "items": { "type": "integer" }, "description": "Numbers of the issues the PR closes." },
+        "generated": { "type": "string", "description": "When collect built the page, as an ISO 8601 time." }
+      }
+    },
+    "Section": {
+      "title": "Section",
+      "description": "One fixed section of the page, such as overview or behavior.",
+      "type": "object",
+      "required": ["id", "label", "ic", "q", "empty", "views", "reason"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The section id: overview, context, map, behavior, responsibilities, contracts, surroundings, or code. Treat it as an open set."
+        },
+        "label": { "type": "string", "description": "The section's name." },
+        "ic": { "type": "string", "description": "An icon name from the shell. Open set." },
+        "q": { "type": "string", "description": "The question the section answers." },
+        "empty": { "type": "string", "description": "The default line for a section with no view." },
+        "views": { "type": "array", "items": { "type": "string" }, "description": "Ids of the section's views, in order. Empty when the section collapses." },
+        "reason": { "type": ["string", "null"], "description": "Why the section has no view, or null when it has views." }
+      }
+    },
+    "ViewState": {
+      "title": "ViewState",
+      "description": "Whether a view found something. assemble keeps only views that apply.",
+      "type": "string",
+      "enum": ["applies", "nochange", "na"]
+    },
+    "Oneliner": {
+      "title": "Oneliner",
+      "description": "A fact too small for a view, listed in the overview. It opens an element, or a file at a line.",
+      "type": "object",
+      "required": ["text"],
+      "properties": {
+        "text": { "type": "string", "description": "Plain text with `code` spans." },
+        "el": { "type": ["string", "null"], "description": "The element it opens." },
+        "file": { "type": "string", "description": "A repo path to open in the code view." },
+        "line": { "type": ["integer", "null"], "description": "The line to open the file at." },
+        "side": { "$ref": "#/$defs/Side" }
+      }
+    },
+    "View": {
+      "title": "View",
+      "description": "One view of the change, drawn as a list of blocks.",
+      "type": "object",
+      "required": ["id", "sec", "t", "s", "ic", "q", "state", "metric", "narration", "blocks"],
+      "properties": {
+        "id": { "type": "string", "description": "The view id, unique on the page." },
+        "sec": { "type": "string", "description": "The id of the section the view belongs to." },
+        "t": { "type": "string", "description": "The view's title." },
+        "s": { "type": "string", "description": "A short subtitle." },
+        "ic": { "type": "string", "description": "An icon name from the shell. Open set." },
+        "q": { "type": "string", "description": "The question the view answers." },
+        "state": { "$ref": "#/$defs/ViewState" },
+        "metric": { "type": "string", "description": "A short count line, such as \"2 functions · 6 sites changed\". May be empty." },
+        "narration": { "type": ["string", "null"], "description": "The agent's caption, plain text with `code` spans, or null." },
+        "blocks": { "type": "array", "items": { "$ref": "#/$defs/Block" }, "description": "What the view draws, in order." },
+        "oneliners": { "type": "array", "items": { "$ref": "#/$defs/Oneliner" }, "description": "Small facts that the overview lists under \"Smaller changes\"." }
+      }
+    },
+    "ElementRef": {
+      "title": "ElementRef",
+      "description": "Where an element lives in one file, on each side.",
+      "type": "object",
+      "required": ["f", "base", "head"],
+      "properties": {
+        "f": { "type": "string", "description": "The repo path." },
+        "base": {
+          "oneOf": [{ "$ref": "#/$defs/LineRange" }, { "type": "null" }],
+          "description": "Lines at the base, or null when the base lacks the element."
+        },
+        "head": {
+          "oneOf": [{ "$ref": "#/$defs/LineRange" }, { "type": "null" }],
+          "description": "Lines at the head, or null when the head lacks the element."
+        },
+        "file": { "type": "boolean", "description": "True when the element is the whole file, such as a module. Such a ref has no src." },
+        "src": { "type": "array", "items": { "$ref": "#/$defs/DiffLine" }, "description": "The element's own unified diff, never cut short." }
+      }
+    },
+    "Element": {
+      "title": "Element",
+      "description": "Anything a view draws that maps to code or to a fact.",
+      "type": "object",
+      "required": ["t", "k", "st", "refs"],
+      "properties": {
+        "t": { "type": "string", "description": "The element's short name." },
+        "k": { "type": "string", "description": "Its kind and home, such as \"function · dblect.sql.window_ties\"." },
+        "st": { "$ref": "#/$defs/Status" },
+        "d": { "type": "string", "description": "One line about what changed." },
+        "refs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ElementRef" },
+          "description": "Where the element lives. Empty for elements that are not code."
+        },
+        "url": { "type": ["string", "null"], "description": "The element's page on GitHub, for PRs, issues, docs, people, and commits." }
+      }
+    },
+    "FileKind": {
+      "title": "FileKind",
+      "description": "The line-accounting kind of a path.",
+      "type": "string",
+      "enum": ["source", "test", "docs", "config", "generated", "other"]
+    },
+    "GeneratedBy": {
+      "title": "GeneratedBy",
+      "description": "Why a file of kind generated is generated: \"gitattributes\" (.gitattributes marks it linguist-generated), \"header\" (its header says so), or \"path\" (its path matches a generated pattern). A plain string, so a reader shows a reason it does not know as it is.",
+      "type": "string",
+      "examples": ["gitattributes", "header", "path"]
+    },
+    "FileStatus": {
+      "title": "FileStatus",
+      "description": "Set for a new or a deleted file. A modified or renamed file has no status.",
+      "type": "string",
+      "enum": ["added", "removed"]
+    },
+    "Hunk": {
+      "title": "Hunk",
+      "description": "One hunk of a file's diff.",
+      "type": "object",
+      "required": ["head", "lines"],
+      "properties": {
+        "head": { "type": "string", "description": "The hunk header, such as \"@@ -0,0 +1,172 @@\"." },
+        "lines": { "type": "array", "items": { "$ref": "#/$defs/DiffLine" }, "description": "The hunk's lines." }
+      }
+    },
+    "FileText": {
+      "title": "FileText",
+      "description": "The whole text of a file on each side.",
+      "type": "object",
+      "required": ["base", "head"],
+      "properties": {
+        "base": { "type": ["string", "null"], "description": "The text at the base, or null when the file is new." },
+        "head": { "type": ["string", "null"], "description": "The text at the head, or null when the file is deleted." }
+      }
+    },
+    "Whole": {
+      "title": "Whole",
+      "description": "Whether the file ships its whole text.",
+      "type": "object",
+      "required": ["ok"],
+      "properties": {
+        "ok": { "type": "boolean", "description": "True when text holds the whole file." },
+        "why": { "type": "string", "description": "Why the whole file is not there, when ok is false." }
+      }
+    },
+    "File": {
+      "title": "File",
+      "description": "One changed file.",
+      "type": "object",
+      "required": ["path", "old", "add", "del", "kind", "hunks", "whole"],
+      "properties": {
+        "path": { "type": "string", "description": "The repo path at the head." },
+        "old": { "type": "string", "description": "The repo path at the base. It differs from path for a rename." },
+        "status": { "$ref": "#/$defs/FileStatus" },
+        "binary": { "type": "boolean", "description": "True for a binary file. It has no hunks." },
+        "add": { "type": "integer", "description": "Lines added." },
+        "del": { "type": "integer", "description": "Lines removed." },
+        "kind": { "$ref": "#/$defs/FileKind" },
+        "generated_by": { "$ref": "#/$defs/GeneratedBy" },
+        "hunks": { "type": "array", "items": { "$ref": "#/$defs/Hunk" }, "description": "The file's diff hunks." },
+        "text": { "$ref": "#/$defs/FileText" },
+        "whole": { "$ref": "#/$defs/Whole" }
+      }
+    },
+    "CommentKind": { "title": "CommentKind", "description": "Where on GitHub a comment was left.", "type": "string", "enum": ["inline", "review", "issue"] },
+    "Comment": {
+      "title": "Comment",
+      "description": "One comment from GitHub.",
+      "type": "object",
+      "required": ["id", "kind", "by", "at", "body", "url", "reply_to", "path", "side", "line", "start", "outdated", "state"],
+      "properties": {
+        "id": { "type": "integer", "description": "GitHub's comment id." },
+        "kind": { "$ref": "#/$defs/CommentKind" },
+        "by": { "type": "string", "description": "The author's login." },
+        "at": { "type": "string", "description": "When it was left, as an ISO 8601 time." },
+        "body": { "type": "string", "description": "The Markdown body, cut to a few thousand characters." },
+        "url": { "type": "string", "description": "The comment's page on GitHub." },
+        "reply_to": { "type": ["integer", "null"], "description": "The id of the comment it answers, or null." },
+        "path": { "type": ["string", "null"], "description": "The file it anchors to, or null." },
+        "side": { "oneOf": [{ "$ref": "#/$defs/Side" }, { "type": "null" }], "description": "The side of its line, or null." },
+        "line": { "type": ["integer", "null"], "description": "The line it anchors to, carried to the head when outdated, or null." },
+        "start": { "type": ["integer", "null"], "description": "The first line of a multi-line comment, or null." },
+        "outdated": { "type": "boolean", "description": "True when it was left on code that later changed." },
+        "state": { "type": ["string", "null"], "description": "A review's state from GitHub, such as APPROVED or COMMENTED, or null. Open set." }
+      }
+    },
+    "FacetOption": {
+      "title": "FacetOption",
+      "description": "One option of a facet: a set of element ids.",
+      "type": "object",
+      "required": ["id", "label", "els"],
+      "properties": {
+        "id": { "type": "string", "description": "Unique in its facet." },
+        "label": { "type": "string", "description": "The option's name." },
+        "note": { "type": "string", "description": "One line that says what the set holds." },
+        "els": { "type": "array", "items": { "type": "string" }, "description": "Sorted element ids. An id may name an element that no view draws." }
+      }
+    },
+    "Facet": {
+      "title": "Facet",
+      "description": "A named way to look at part of the change across the whole page.",
+      "type": "object",
+      "required": ["id", "label", "options"],
+      "properties": {
+        "id": { "type": "string", "description": "Unique on the page, such as story or focus. Open set." },
+        "label": { "type": "string", "description": "The facet's name." },
+        "note": { "type": "string", "description": "One line about the facet." },
+        "options": { "type": "array", "items": { "$ref": "#/$defs/FacetOption" }, "description": "The facet's options, in display order." }
+      }
+    },
+    "Block": {
+      "title": "Block",
+      "description": "One block of a view, tagged by type. A reader that meets a type it does not know should say the block is in the browser page, and draw the rest. The variants sit inline, so that code generators such as typify make an internally tagged enum.",
+      "oneOf": [
+        {
+          "title": "NarrationBlock",
+          "description": "The agent's overview text. assemble puts it first in the overview.",
+          "type": "object",
+          "required": ["type", "text"],
+          "properties": { "type": { "const": "narration" }, "text": { "type": "string", "description": "Plain text with `code` spans." } }
+        },
+        {
+          "title": "TextBlock",
+          "description": "A paragraph of text.",
+          "type": "object",
+          "required": ["type", "text"],
+          "properties": {
+            "type": { "const": "text" },
+            "text": { "type": "string", "description": "Plain text with `code` spans." },
+            "title": { "type": ["string", "null"], "description": "A heading over the block." },
+            "note": { "type": ["string", "null"], "description": "A muted line under the block." }
+          }
+        },
+        {
+          "title": "SummaryBlock",
+          "description": "One tile per section that shows. assemble builds it for the overview.",
+          "type": "object",
+          "required": ["type", "items"],
+          "properties": {
+            "type": { "const": "summary" },
+            "items": { "type": "array", "items": { "$ref": "#/$defs/SummaryItem" }, "description": "The tiles, in section order." },
+            "title": { "type": ["string", "null"], "description": "A heading over the block." }
+          }
+        },
+        {
+          "title": "TableBlock",
+          "description": "A table. It can rank, group, and fold its rows.",
+          "type": "object",
+          "required": ["type", "columns", "rows"],
+          "properties": {
+            "type": { "const": "table" },
+            "columns": { "type": "array", "items": { "$ref": "#/$defs/Column" }, "description": "The columns, in display order." },
+            "rows": { "type": "array", "items": { "$ref": "#/$defs/Row" }, "description": "The rows, in display order: key, then normal, then minor." },
+            "title": { "type": ["string", "null"], "description": "A heading over the block." },
+            "note": { "type": ["string", "null"], "description": "A muted line under the block." },
+            "src": { "type": "string", "description": "Where the facts come from, shown next to the title." },
+            "el": { "type": "string", "description": "The element the whole table is about." },
+            "docs": { "type": "boolean", "description": "True for the context view's table of documents." },
+            "groups": { "type": "array", "items": { "$ref": "#/$defs/TableGroup" }, "description": "The row groups, in display order." },
+            "fold": { "$ref": "#/$defs/Fold" }
+          }
+        },
+        {
+          "title": "SvgBlock",
+          "description": "A diagram laid out at build time. The jobs canvas is an svg block whose root has data-jobs.",
+          "type": "object",
+          "required": ["type", "svg", "hot"],
+          "properties": {
+            "type": { "const": "svg" },
+            "svg": { "type": "string", "description": "The SVG markup." },
+            "hot": {
+              "type": "object",
+              "additionalProperties": { "type": "string" },
+              "description": "SVG node id to element id. A click on that node opens the element."
+            },
+            "title": { "type": ["string", "null"], "description": "A heading over the block." },
+            "note": { "type": ["string", "null"], "description": "A muted line under the block." },
+            "brief": { "type": "array", "items": { "type": "string" }, "description": "Lines that describe the diagram in brief.md. Readers ignore them." }
+          }
+        },
+        {
+          "title": "LanesBlock",
+          "description": "Lanes of cards before and after the change. No lens writes it now. The shell still draws it.",
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": { "const": "lanes" },
+            "before": { "type": "array", "items": { "$ref": "#/$defs/Lane" }, "description": "The lanes at the base." },
+            "after": { "type": "array", "items": { "$ref": "#/$defs/Lane" }, "description": "The lanes at the head." },
+            "title": { "type": ["string", "null"], "description": "A heading over the block." },
+            "note": { "type": ["string", "null"], "description": "A muted line under the block." }
+          }
+        },
+        {
+          "title": "GraphBlock",
+          "description": "A Mermaid diagram that the browser lays out. No lens writes it now. The shell still draws it.",
+          "type": "object",
+          "required": ["type", "mermaid"],
+          "properties": {
+            "type": { "const": "graph" },
+            "mermaid": { "$ref": "#/$defs/Mermaid" },
+            "hot": { "type": "object", "additionalProperties": { "$ref": "#/$defs/HotLabel" }, "description": "Node label to [element id, status]." },
+            "title": { "type": ["string", "null"], "description": "A heading over the block." },
+            "note": { "type": ["string", "null"], "description": "A muted line under the block." },
+            "src": { "type": "string", "description": "Where the facts come from, shown next to the title." }
+          }
+        },
+        {
+          "title": "CodeBlock",
+          "description": "Every file in the page's files: hunks open, unchanged runs folded.",
+          "type": "object",
+          "required": ["type"],
+          "properties": { "type": { "const": "code" } }
+        },
+        {
+          "title": "DiscussionBlock",
+          "description": "Comments with no file, such as review bodies and issue comments.",
+          "type": "object",
+          "required": ["type", "items"],
+          "properties": {
+            "type": { "const": "discussion" },
+            "items": { "type": "array", "items": { "$ref": "#/$defs/Comment" }, "description": "The comments." },
+            "title": { "type": ["string", "null"], "description": "A heading over the block." }
+          }
+        }
+      ]
+    },
+    "SummaryItem": {
+      "title": "SummaryItem",
+      "description": "One tile of the overview summary. It opens its view.",
+      "type": "object",
+      "required": ["view", "title", "metric", "text"],
+      "properties": {
+        "view": { "type": "string", "description": "The id of the view it opens." },
+        "title": { "type": "string", "description": "The section's name." },
+        "metric": { "type": "string", "description": "The count lines of the section's views. May be empty." },
+        "text": { "type": "string", "description": "One sentence, plain text with `code` spans." }
+      }
+    },
+    "ColumnKind": {
+      "title": "ColumnKind",
+      "description": "How a column draws its cells. A column without kind draws plain text. text: plain text with `code` spans. mono: monospace. num: a number. status: a status word. bar: a number with a bar. refs: a list of links.",
+      "type": "string",
+      "enum": ["text", "mono", "num", "status", "bar", "refs"]
+    },
+    "Column": {
+      "title": "Column",
+      "description": "One table column.",
+      "type": "object",
+      "required": ["key", "label"],
+      "properties": {
+        "key": { "type": "string", "description": "The key of this column's cell in each row's cells." },
+        "label": { "type": "string", "description": "The header." },
+        "kind": { "$ref": "#/$defs/ColumnKind" }
+      }
+    },
+    "CellLink": {
+      "title": "CellLink",
+      "description": "A cell or a list entry as an object. With el, it opens that element. With file, it opens that file in the code view, at line when given. With href, it is a link. With none of these, it is plain text.",
+      "type": "object",
+      "required": ["text"],
+      "properties": {
+        "text": { "type": "string", "description": "What the cell shows." },
+        "el": { "type": "string", "description": "The element it opens." },
+        "side": { "$ref": "#/$defs/Side" },
+        "file": { "type": "string", "description": "A repo path to open in the code view." },
+        "line": { "type": "integer", "description": "The line to open the file at." },
+        "href": { "type": "string", "description": "A web link." }
+      }
+    },
+    "CellListItem": { "title": "CellListItem", "description": "One entry of a list cell.", "oneOf": [{ "type": "string" }, { "$ref": "#/$defs/CellLink" }] },
+    "Cell": {
+      "title": "Cell",
+      "description": "One table cell: a string, a number, an object, or a list of entries (for refs columns).",
+      "oneOf": [{ "type": "string" }, { "type": "number" }, { "$ref": "#/$defs/CellLink" }, { "type": "array", "items": { "$ref": "#/$defs/CellListItem" } }]
+    },
+    "Row": {
+      "title": "Row",
+      "description": "One table row. Producers write rows in display order.",
+      "type": "object",
+      "required": ["cells"],
+      "properties": {
+        "cells": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/Cell" },
+          "description": "Cells by column key. A missing key is an empty cell."
+        },
+        "el": { "type": ["string", "null"], "description": "The element the row opens, or null." },
+        "side": { "oneOf": [{ "$ref": "#/$defs/Side" }, { "type": "null" }], "description": "Narrows el to one side, or null." },
+        "view": { "type": "string", "description": "A view the row opens when it has no el." },
+        "dim": { "type": "boolean", "description": "True to draw the row muted." },
+        "rank": {
+          "type": "string",
+          "description": "key: a row to read first. minor: noise that folds. Absent, or any other value, means a normal row. Open set."
+        },
+        "why": { "type": "string", "description": "The reason for the rank, in a few plain words. A reader may show it as a tooltip." },
+        "group": { "type": "string", "description": "The id of a group in the table's groups. An id that groups does not list means no group." }
+      }
+    },
+    "TableGroup": {
+      "title": "TableGroup",
+      "description": "A section of a table's rows, with a header the reader can open and close.",
+      "type": "object",
+      "required": ["id", "label", "open"],
+      "properties": {
+        "id": { "type": "string", "description": "Unique in the table." },
+        "label": { "type": "string", "description": "The group's name." },
+        "summary": { "type": "string", "description": "One line of plain text with `code` spans for the header." },
+        "open": { "type": "boolean", "description": "Whether the group starts open. Producers set false for a group of minor rows only." }
+      }
+    },
+    "Fold": {
+      "title": "Fold",
+      "description": "How a table folds. Minor rows fold with or without it.",
+      "type": "object",
+      "properties": {
+        "show": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "How many rows that are not minor each group shows before it folds the rest. Absent: all of them."
+        },
+        "label": { "type": "string", "description": "A name for the minor rows, for the control that unfolds them." }
+      }
+    },
+    "ChipMove": { "title": "ChipMove", "description": "Whether a job moves out of its card or into it.", "type": "string", "enum": ["in", "out"] },
+    "LaneChip": {
+      "title": "LaneChip",
+      "description": "A job on a lane card.",
+      "type": "object",
+      "required": ["label"],
+      "properties": {
+        "el": { "type": ["string", "null"], "description": "The element it opens." },
+        "label": { "type": "string", "description": "The job's name." },
+        "move": { "$ref": "#/$defs/ChipMove" },
+        "to": { "type": ["string", "null"], "description": "Where the job moves to." }
+      }
+    },
+    "LaneCard": {
+      "title": "LaneCard",
+      "description": "A card on a lane, such as a class or a module.",
+      "type": "object",
+      "required": ["label"],
+      "properties": {
+        "el": { "type": ["string", "null"], "description": "The element it opens." },
+        "label": { "type": "string", "description": "The card's name." },
+        "sub": { "type": ["string", "null"], "description": "A muted second line." },
+        "st": { "$ref": "#/$defs/Status" },
+        "note": { "type": ["string", "null"], "description": "Plain text with `code` spans under the label." },
+        "chips": { "type": "array", "items": { "$ref": "#/$defs/LaneChip" }, "description": "The card's jobs." }
+      }
+    },
+    "Lane": {
+      "title": "Lane",
+      "description": "One lane, such as a package, with its cards.",
+      "type": "object",
+      "required": ["label"],
+      "properties": {
+        "el": { "type": ["string", "null"], "description": "The element it opens." },
+        "label": { "type": "string", "description": "The lane's name." },
+        "st": { "$ref": "#/$defs/Status" },
+        "cards": { "type": "array", "items": { "$ref": "#/$defs/LaneCard" }, "description": "The lane's cards." }
+      }
+    },
+    "MermaidPair": {
+      "title": "MermaidPair",
+      "description": "Mermaid source for each side.",
+      "type": "object",
+      "properties": {
+        "before": { "type": ["string", "null"], "description": "The diagram at the base." },
+        "after": { "type": ["string", "null"], "description": "The diagram at the head." }
+      }
+    },
+    "Mermaid": {
+      "title": "Mermaid",
+      "description": "Mermaid source: one diagram, or one per side.",
+      "oneOf": [{ "type": "string" }, { "$ref": "#/$defs/MermaidPair" }]
+    },
+    "HotLabel": {
+      "title": "HotLabel",
+      "description": "[element id, status] for a node label.",
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 2,
+      "maxItems": 2
+    }
+  }
+}

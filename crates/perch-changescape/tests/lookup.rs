@@ -1,47 +1,57 @@
-//! Lookup and load on the fixtures, copied into a cache root of their own.
+//! Lookup and load on the conformance fixtures, copied into a cache root
+//! of their own.
 
 use std::path::{Path, PathBuf};
 
-use perch_changescape::page::BlockBody;
 use perch_changescape::{load, lookup, DiffSide, LineIndex, Lookup, State};
 
-const REPO: &str = "dvryaboy/dblect";
+const REPO: &str = "calc/calc";
 const HEAD: &str = "3e81042d07e4d404b84526777e768a456a6a4fa9";
-const UNKNOWN: &str = "1111111111111111111111111111111111111111";
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
+        .join("tests/fixtures/conformance")
         .join(name)
 }
 
-/// Copy a fixture's build folder into `root` as pull request 356 at `sha`.
-fn install(root: &Path, fixture_dir: &Path, sha: &str) -> PathBuf {
-    let to = perch_changescape::build_dir(root, REPO, 356, sha);
+/// Copy a fixture's build into `root` as pull request 7 at `sha`.
+fn install(root: &Path, name: &str, sha: &str) -> PathBuf {
+    let to = perch_changescape::build_dir(root, REPO, 7, sha);
     std::fs::create_dir_all(&to).unwrap();
-    for entry in std::fs::read_dir(fixture_dir).unwrap() {
-        let entry = entry.unwrap();
-        std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+    for file in ["page.json", "status.json"] {
+        std::fs::copy(fixture(name).join(file), to.join(file)).unwrap();
     }
     to
 }
 
-fn status(dir: &Path, json: &str) {
-    std::fs::write(dir.join("status.json"), json).unwrap();
+/// Write a status of `state`, finished at `finished`, of page format
+/// `page_schema`.
+fn status(dir: &Path, state: &str, finished: Option<&str>, page_schema: Option<u32>) {
+    let mut json = serde_json::json!({
+        "schema": 2, "state": state, "started": "2026-10-08T12:00:00Z",
+        "finished": finished, "stage": "narrated", "error": null, "skill_version": "3.0.0",
+    });
+    if let Some(n) = page_schema {
+        json["page_schema"] = n.into();
+    }
+    if state == "failed" {
+        json["error"] = "boom".into();
+    }
+    std::fs::write(dir.join("status.json"), json.to_string()).unwrap();
 }
 
 #[test]
 fn no_cache_root_is_no_map() {
     let root = tempfile::tempdir().unwrap();
     let missing = root.path().join("absent");
-    assert_eq!(lookup(&missing, REPO, 356, HEAD), Lookup::None);
+    assert_eq!(lookup(&missing, REPO, 7, HEAD), Lookup::None);
 }
 
 #[test]
 fn a_build_of_the_head_is_current() {
     let root = tempfile::tempdir().unwrap();
-    install(root.path(), &fixture("dblect-356").join(HEAD), HEAD);
-    let Lookup::Current(build) = lookup(root.path(), REPO, 356, HEAD) else {
+    install(root.path(), "01-minimal", HEAD);
+    let Lookup::Current(build) = lookup(root.path(), REPO, 7, HEAD) else {
         panic!("expected a current map");
     };
     assert_eq!(build.status.state, State::Done);
@@ -51,22 +61,13 @@ fn a_build_of_the_head_is_current() {
 #[test]
 fn a_build_of_another_head_is_stale_and_the_newest_wins() {
     let root = tempfile::tempdir().unwrap();
-    let older = install(root.path(), &fixture("dblect-356").join(HEAD), "aaaaaaa1");
-    status(
-        &older,
-        r#"{ "state": "done", "finished": "2026-10-01T00:00:00Z" }"#,
-    );
-    let newer = install(root.path(), &fixture("dblect-356").join(HEAD), "bbbbbbb2");
-    status(
-        &newer,
-        r#"{ "state": "done", "finished": "2026-10-05T00:00:00Z" }"#,
-    );
-    let failed = install(root.path(), &fixture("dblect-356").join(HEAD), "ccccccc3");
-    status(
-        &failed,
-        r#"{ "state": "failed", "finished": "2026-10-06T00:00:00Z", "error": "boom" }"#,
-    );
-    let Lookup::Stale(build) = lookup(root.path(), REPO, 356, HEAD) else {
+    let older = install(root.path(), "01-minimal", "aaaaaaa1");
+    status(&older, "done", Some("2026-10-01T00:00:00Z"), Some(3));
+    let newer = install(root.path(), "01-minimal", "bbbbbbb2");
+    status(&newer, "done", Some("2026-10-05T00:00:00Z"), Some(3));
+    let failed = install(root.path(), "01-minimal", "ccccccc3");
+    status(&failed, "failed", Some("2026-10-06T00:00:00Z"), Some(3));
+    let Lookup::Stale(build) = lookup(root.path(), REPO, 7, HEAD) else {
         panic!("expected a stale map");
     };
     assert_eq!(build.head_sha, "bbbbbbb2");
@@ -75,14 +76,11 @@ fn a_build_of_another_head_is_stale_and_the_newest_wins() {
 #[test]
 fn a_running_build_keeps_the_earlier_map() {
     let root = tempfile::tempdir().unwrap();
-    install(root.path(), &fixture("dblect-356").join(HEAD), "aaaaaaa1");
-    let running = perch_changescape::build_dir(root.path(), REPO, 356, HEAD);
+    install(root.path(), "01-minimal", "aaaaaaa1");
+    let running = perch_changescape::build_dir(root.path(), REPO, 7, HEAD);
     std::fs::create_dir_all(&running).unwrap();
-    status(
-        &running,
-        r#"{ "schema": 2, "state": "running", "stage": "facts" }"#,
-    );
-    let lookup = lookup(root.path(), REPO, 356, HEAD);
+    status(&running, "running", None, None);
+    let lookup = lookup(root.path(), REPO, 7, HEAD);
     let Lookup::Running(build, Some(previous)) = &lookup else {
         panic!("expected a running build over an earlier map, got {lookup:?}");
     };
@@ -97,97 +95,98 @@ fn a_running_build_keeps_the_earlier_map() {
 #[test]
 fn a_failed_build_with_nothing_earlier_is_failed() {
     let root = tempfile::tempdir().unwrap();
-    let dir = perch_changescape::build_dir(root.path(), REPO, 356, HEAD);
+    let dir = perch_changescape::build_dir(root.path(), REPO, 7, HEAD);
     std::fs::create_dir_all(&dir).unwrap();
-    status(&dir, r#"{ "state": "failed", "error": "uv not found" }"#);
-    let Lookup::Failed(build) = lookup(root.path(), REPO, 356, HEAD) else {
+    status(&dir, "failed", None, None);
+    let Lookup::Failed(build) = lookup(root.path(), REPO, 7, HEAD) else {
         panic!("expected a failed build");
     };
-    assert_eq!(build.status.error.as_deref(), Some("uv not found"));
+    assert_eq!(build.status.error.as_deref(), Some("boom"));
 }
 
 #[test]
-fn a_page_with_no_status_is_done() {
+fn a_status_that_does_not_match_its_schema_is_a_failed_build() {
     let root = tempfile::tempdir().unwrap();
-    let dir = install(root.path(), &fixture("dblect-356").join(HEAD), HEAD);
+    let dir = install(root.path(), "01-minimal", HEAD);
+    std::fs::write(dir.join("status.json"), r#"{ "state": "done" }"#).unwrap();
+    let Lookup::Failed(build) = lookup(root.path(), REPO, 7, HEAD) else {
+        panic!("expected a failed build");
+    };
+    assert!(build
+        .status
+        .error
+        .unwrap()
+        .starts_with("status.json could not be read"));
+}
+
+#[test]
+fn a_page_with_no_status_is_of_an_older_version() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = install(root.path(), "01-minimal", HEAD);
     std::fs::remove_file(dir.join("status.json")).unwrap();
     assert!(matches!(
-        lookup(root.path(), REPO, 356, HEAD),
-        Lookup::Current(_)
+        lookup(root.path(), REPO, 7, HEAD),
+        Lookup::Outdated(_)
     ));
 }
 
 #[test]
-fn the_fixture_loads_with_every_section_in_order() {
+fn an_earlier_head_of_an_older_version_stands_in_for_nothing() {
     let root = tempfile::tempdir().unwrap();
-    install(root.path(), &fixture("dblect-356").join(HEAD), HEAD);
-    let lookup = lookup(root.path(), REPO, 356, HEAD);
-    let page = load(lookup.drawable().unwrap()).unwrap();
-    let ids: Vec<&str> = page.sections.iter().map(|s| s.id.as_str()).collect();
-    assert_eq!(
-        ids,
-        [
-            "overview",
-            "context",
-            "map",
-            "behavior",
-            "responsibilities",
-            "contracts",
-            "surroundings",
-            "code"
-        ]
+    install(root.path(), "02-status-without-page-schema", "aaaaaaa1");
+    let found = lookup(root.path(), REPO, 7, HEAD);
+    assert!(
+        matches!(&found, Lookup::Outdated(b) if b.head_sha == "aaaaaaa1"),
+        "{found:?}"
     );
-    let surroundings = &page.sections[6];
-    assert!(page.section_views(surroundings).is_empty());
-    assert_eq!(surroundings.reason, "No CI or packaging changes.");
-    let behavior = &page.sections[3];
-    assert_eq!(page.section_views(behavior)[0].id, "decisions");
-    assert_eq!(
-        page.first_section_showing("cls:dblect.uniqueness.detector._UncoveredOrder")
-            .map(|s| s.id.as_str()),
-        Some("map")
+    // A drawable one is the stand-in.
+    let drawn = install(root.path(), "01-minimal", "bbbbbbb2");
+    let found = lookup(root.path(), REPO, 7, HEAD);
+    assert!(
+        matches!(&found, Lookup::Stale(b) if b.head_sha == "bbbbbbb2"),
+        "{found:?}"
     );
+    // A running build does not show the outdated one meanwhile.
+    std::fs::remove_dir_all(drawn).unwrap();
+    let running = perch_changescape::build_dir(root.path(), REPO, 7, HEAD);
+    std::fs::create_dir_all(&running).unwrap();
+    status(&running, "running", None, None);
+    assert!(matches!(
+        lookup(root.path(), REPO, 7, HEAD),
+        Lookup::Running(_, None)
+    ));
 }
 
 #[test]
-fn unknown_blocks_and_fields_still_load() {
+fn a_page_whose_status_misstates_its_version_is_refused_when_read() {
     let root = tempfile::tempdir().unwrap();
-    install(root.path(), &fixture("unknown").join(UNKNOWN), UNKNOWN);
-    let lookup = lookup(root.path(), REPO, 356, UNKNOWN);
-    let build = lookup.drawable().unwrap();
-    assert_eq!(build.status.stage.as_deref(), Some("facts"));
-    let page = load(build).unwrap();
-    let overview = &page.views[0];
-    let last = overview.blocks.last().unwrap();
-    assert_eq!(last.kind, "hologram");
-    assert!(matches!(last.body, BlockBody::Other));
-    assert!(matches!(page.views[1].blocks[0].body, BlockBody::Table(_)));
-    // A title that is a number reads as text.
-    assert_eq!(page.views[2].t, "7");
+    let dir = install(root.path(), "03-page-schema-4", HEAD);
+    status(&dir, "done", Some("2026-10-08T12:01:00Z"), Some(3));
+    let found = lookup(root.path(), REPO, 7, HEAD);
+    let error = load(found.drawable().unwrap()).unwrap_err();
+    assert!(matches!(
+        error,
+        perch_changescape::Error::Version { schema: 4, .. }
+    ));
+    assert!(matches!(found.with_page_schema(4), Lookup::TooNew(_)));
 }
 
 #[test]
 fn the_line_index_finds_the_narrowest_element() {
     let root = tempfile::tempdir().unwrap();
-    install(root.path(), &fixture("dblect-356").join(HEAD), HEAD);
-    let lookup = lookup(root.path(), REPO, 356, HEAD);
+    install(root.path(), "01-minimal", HEAD);
+    let lookup = lookup(root.path(), REPO, 7, HEAD);
     let page = load(lookup.drawable().unwrap()).unwrap();
     let index = LineIndex::new(&page);
-    let detector = "src/dblect/uniqueness/detector.py";
+    // The module is the whole file, and adds no range.
     assert_eq!(
-        index.innermost(DiffSide::Head, detector, 1220),
-        Some("fn:dblect.uniqueness.detector._uncovered_order_keys")
-    );
-    // A whole-file ref adds no range.
-    assert_eq!(index.innermost(DiffSide::Head, detector, 10), None);
-    // A removed function is on the base side only.
-    assert_eq!(
-        index.innermost(DiffSide::Base, detector, 1182),
-        Some("fn:dblect.uniqueness.detector._order_is_bare")
+        index.at(DiffSide::Head, "calc/ops.py", 1),
+        ["fn:calc.ops.add"]
     );
     assert_eq!(
-        index.at(DiffSide::Head, detector, 1215),
-        ["fn:dblect.uniqueness.detector._uncovered_order_keys"]
+        index.innermost(DiffSide::Head, "calc/ops.py", 2),
+        Some("fn:calc.ops.add")
     );
-    assert!(index.at(DiffSide::Head, detector, 5).is_empty());
+    assert!(index.at(DiffSide::Head, "calc/ops.py", 3).is_empty());
+    assert!(index.at(DiffSide::Base, "calc/ops.py", 1).is_empty());
 }

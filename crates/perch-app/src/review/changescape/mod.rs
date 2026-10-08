@@ -21,13 +21,16 @@ use std::sync::Arc;
 use floem::prelude::*;
 use floem::reactive::{Memo, SignalGet, SignalUpdate, SignalWith};
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
-use perch_changescape::{LineIndex, Lookup, Page};
+use floem::AnyView;
+use perch_changescape::v3::FacetOption;
+use perch_changescape::{LineIndex, LoadedPage, Lookup};
 
 use crate::backend::changescape::Found;
 use crate::backend::Backend;
 use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
+use crate::ui::menu::MenuExt;
 
 /// What the backend found for one pull request at one head, with the
 /// line index built once for it.
@@ -43,7 +46,7 @@ impl Shown {
         let index = found
             .page
             .as_deref()
-            .map(LineIndex::new)
+            .map(|page| LineIndex::new(page))
             .unwrap_or_default();
         Shown {
             item_id,
@@ -52,7 +55,7 @@ impl Shown {
         }
     }
 
-    pub fn page(&self) -> Option<&Arc<Page>> {
+    pub fn page(&self) -> Option<&Arc<LoadedPage>> {
         self.found.page.as_ref()
     }
 
@@ -60,10 +63,28 @@ impl Shown {
         &self.found.lookup
     }
 
-    /// Whether the tab shows: a page, a running build, or a build this
-    /// Perch can start.
+    /// Whether the tab shows: a page, a running build, a page this Perch
+    /// refuses or could not read, or a build this Perch can start.
     pub fn has_tab(&self) -> bool {
-        self.found.page.is_some() || self.found.lookup.is_running() || self.found.can_build
+        self.found.page.is_some()
+            || self.found.lookup.is_running()
+            || self.found.lookup.refused().is_some()
+            || self.unreadable()
+            || self.found.can_build
+    }
+
+    /// A finished page that did not read: a bug in the page's producer,
+    /// which the browser page may still draw.
+    pub fn unreadable(&self) -> bool {
+        self.found.page.is_none() && self.found.lookup.drawable().is_some()
+    }
+
+    /// The page is the current head's facts, and the build this Perch
+    /// runs is still writing its captions.
+    pub fn captions_pending(&self) -> bool {
+        self.found.building
+            && matches!(&self.found.lookup, Lookup::Current(build)
+                if build.status.stage == perch_changescape::Stage::Facts)
     }
 
     /// The page is of an earlier head than the pull request's.
@@ -143,9 +164,10 @@ pub fn refresh(state: ReviewState, backend: &Backend) {
 /// How often a running build's status is read again.
 const POLL: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// While a build of the open item runs, look it up again every `POLL`.
-/// Each answer schedules the next look, so there is never more than one
-/// waiting.
+/// While a build of the open item runs, or this Perch's build is still
+/// writing the captions of a page it drew, look it up again every
+/// `POLL`. Each answer schedules the next look, so there is never more
+/// than one waiting.
 pub fn poll(state: ReviewState, backend: Rc<Backend>) {
     // Look the pull request up when the open item or its head changes.
     let opened = Memo::new(move |_| {
@@ -166,7 +188,9 @@ pub fn poll(state: ReviewState, backend: Rc<Backend>) {
         });
     }
     floem::reactive::Effect::new(move |_| {
-        let Some(running) = shown(state).filter(|shown| shown.lookup().is_running()) else {
+        let Some(running) =
+            shown(state).filter(|shown| shown.lookup().is_running() || shown.captions_pending())
+        else {
             return;
         };
         let backend = backend.clone();
@@ -183,17 +207,44 @@ pub fn poll(state: ReviewState, backend: Rc<Backend>) {
 
 /// The selected section's id: the one the reader picked, if the page
 /// still has it, else the first. Tracked.
-pub fn selected_section(state: ReviewState, page: &Page) -> Option<String> {
+pub fn selected_section(state: ReviewState, page: &LoadedPage) -> Option<String> {
     let picked = state.changescape_section.get();
     picked
         .filter(|id| page.sections.iter().any(|section| &section.id == id))
         .or_else(|| page.sections.first().map(|section| section.id.clone()))
 }
 
+/// Call `f` with the facet option the tab applies, if the page has it.
+/// Tracked.
+pub fn with_facet<R>(
+    state: ReviewState,
+    page: &LoadedPage,
+    f: impl FnOnce(Option<&FacetOption>) -> R,
+) -> R {
+    state.changescape_facet.with(|picked| {
+        f(picked
+            .as_ref()
+            .and_then(|(facet, option)| page.facet_option(facet, option)))
+    })
+}
+
+/// The elements whose table rows never fold: the one whose base excerpt
+/// is open, and the one the Code strip names.
+fn pinned(state: ReviewState) -> Memo<Vec<String>> {
+    Memo::new(move |_| {
+        state
+            .changescape_popover
+            .get()
+            .into_iter()
+            .chain(strip::under_caret(state).map(|(el, _, _)| el))
+            .collect()
+    })
+}
+
 /// A page, equal to another only when it is the same page: one read of
 /// one build.
 #[derive(Clone)]
-struct SamePage(Arc<Page>);
+struct SamePage(Arc<LoadedPage>);
 
 impl PartialEq for SamePage {
     fn eq(&self, other: &Self) -> bool {
@@ -211,6 +262,10 @@ enum Body {
     Failed(String),
     /// No changescape yet: the build, offered.
     Unbuilt,
+    /// A page an older Changescape wrote: a rebuild, offered.
+    Outdated,
+    /// A page that needs a newer Perch: the browser page, offered.
+    TooNew,
     Nothing,
 }
 
@@ -223,6 +278,8 @@ fn body_of(state: ReviewState) -> Body {
     }
     match shown.lookup() {
         Lookup::Running(..) => Body::Building,
+        Lookup::Outdated(_) => Body::Outdated,
+        Lookup::TooNew(_) => Body::TooNew,
         Lookup::Failed(build) => Body::Failed(
             build
                 .status
@@ -251,9 +308,25 @@ pub fn view(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
             Body::Building => building(state).into_any(),
             Body::Failed(error) => failed(app, state, backend.clone(), error).into_any(),
             Body::Unbuilt => unbuilt(app, state, backend.clone()).into_any(),
+            Body::Outdated => refused(
+                app,
+                state,
+                backend.clone(),
+                "This Changescape was built by an older version. Rebuild it to see this PR.",
+                can_build(),
+            )
+            .into_any(),
+            Body::TooNew => refused(
+                app,
+                state,
+                backend.clone(),
+                "This Changescape needs a newer Perch.",
+                false,
+            )
+            .into_any(),
             Body::Nothing => Empty::new().into_any(),
             Body::Page(SamePage(page)) => Stack::vertical((
-                commit_bar(app, state, backend.clone()),
+                commit_bar(app, state, backend.clone(), page.clone()),
                 Stack::horizontal((
                     rail::rail(state, page.clone()),
                     section_body(state, backend.clone(), page.clone()),
@@ -383,9 +456,48 @@ fn failed(app: AppState, state: ReviewState, backend: Rc<Backend>, error: String
                 .color(theme::fg_muted())
                 .width_full()
         }),
-        build_link(app, state, backend, "Retry").style(|s| s.margin_top(8.0)),
+        Stack::horizontal((
+            build_link(app, state, backend, "Retry"),
+            blocks::browser_link(state, "Open the browser page").style(move |s| {
+                let unreadable = shown(state).is_some_and(|shown| shown.unreadable());
+                s.margin_left(12.0).apply_if(!unreadable, |s| s.hide())
+            }),
+        ))
+        .style(|s| s.margin_top(8.0)),
     ))
     .debug_name("Changescape failed")
+    .style(|s| {
+        s.flex_col()
+            .gap(4.0)
+            .width(theme::CONVERSATION_WIDTH)
+            .max_width_full()
+            .padding(theme::CONVERSATION_PADDING)
+    })
+}
+
+/// A page this Perch does not draw: why, and Rebuild where a build can
+/// run, else the browser page, which draws every version.
+fn refused(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    message: &'static str,
+    rebuild: bool,
+) -> impl IntoView {
+    let action = if rebuild {
+        build_link(app, state, backend, "Rebuild").into_any()
+    } else {
+        blocks::browser_link(state, "Open the browser page").into_any()
+    };
+    Stack::vertical((
+        Label::new(message).style(|s| {
+            s.font_size(theme::TEXT_BODY)
+                .color(theme::fg())
+                .width_full()
+        }),
+        Container::new(action).style(|s| s.margin_top(8.0)),
+    ))
+    .debug_name("Changescape refused")
     .style(|s| {
         s.flex_col()
             .gap(4.0)
@@ -417,15 +529,113 @@ fn build_link(
     })
 }
 
+/// The picker's menu: the whole change, then each facet's options under
+/// the facet's label.
+pub(crate) fn facet_menu(state: ReviewState, page: &LoadedPage) -> crate::ui::menu::Menu {
+    let picked = state.changescape_facet.get_untracked();
+    let mut menu = crate::ui::menu::Menu::new().item("Whole change", |m| {
+        m.checked(picked.is_none())
+            .action(move || state.changescape_facet.set(None))
+    });
+    for facet in &page.facets {
+        let options: Vec<(String, String, bool)> = facet
+            .options
+            .iter()
+            .map(|option| {
+                let on = picked.as_ref() == Some(&(facet.id.clone(), option.id.clone()));
+                (option.id.clone(), option.label.clone(), on)
+            })
+            .collect();
+        let facet_id = facet.id.clone();
+        menu = menu.submenu(facet.label.clone(), move |mut sub| {
+            for (id, label, on) in options {
+                let pick = (facet_id.clone(), id);
+                sub = sub.item(label, move |m| {
+                    m.checked(on)
+                        .action(move || state.changescape_facet.set(Some(pick.clone())))
+                });
+            }
+            sub
+        });
+    }
+    menu
+}
+
+/// The facet picker, and the toggle that hides table rows outside the
+/// option instead of dimming them. Nothing for a page with no facets.
+fn facet_picker(state: ReviewState, page: Arc<LoadedPage>) -> AnyView {
+    if page.facets.is_empty() {
+        return Empty::new().into_any();
+    }
+    let label = {
+        let page = page.clone();
+        move || {
+            with_facet(state, &page, |option| {
+                let name = option.map_or("Whole change", |option| option.label.as_str());
+                format!("{name} ▾")
+            })
+        }
+    };
+    let active = {
+        let page = page.clone();
+        move || with_facet(state, &page, |option| option.is_some())
+    };
+    let picker = Container::new(Label::derived(label).style(|s| {
+        s.font_size(theme::TEXT_META)
+            .color(theme::fg())
+            .selectable(false)
+            .text_ellipsis()
+            .min_width(0.0)
+    }))
+    .debug_name("Changescape facet picker")
+    .dropdown(move || facet_menu(state, &page))
+    .style(|s| {
+        crate::ui::widgets::clickable(
+            s.padding_horiz(8.0)
+                .height(24.0)
+                .max_width(320.0)
+                .items_center()
+                .border(1.0)
+                .border_color(theme::border_muted())
+                .border_radius(theme::RADIUS),
+        )
+        .hover(|s| s.background(theme::canvas_hover()))
+    });
+    let hide = state.changescape_facet_hide;
+    let toggle = Container::new(
+        Label::derived(move || format!("{} Hide the rest", if hide.get() { "☑" } else { "☐" }))
+            .style(|s| {
+                s.font_size(theme::TEXT_META)
+                    .color(theme::fg_muted())
+                    .selectable(false)
+            }),
+    )
+    .debug_name("Changescape facet hide")
+    .on_event_stop(el::Click, move |_, _| hide.update(|on| *on = !*on))
+    .style(move |s| {
+        crate::ui::widgets::clickable(s.margin_left(10.0)).apply_if(!active(), |s| s.hide())
+    });
+    Stack::horizontal((picker, toggle))
+        .style(|s| s.items_center().margin_left(16.0).min_width(0.0))
+        .into_any()
+}
+
 /// One line over every page: the commit it is of, as a notice when that
-/// is an earlier one, and Rebuild.
-fn commit_bar(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+/// is an earlier one, Rebuild, and the facet picker.
+fn commit_bar(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    page: Arc<LoadedPage>,
+) -> impl IntoView {
     let text = move || {
         shown(state)
             .and_then(|shown| {
                 let build = shown.lookup().drawable()?;
                 let building = if shown.lookup().is_running() {
                     " Building one of the current head."
+                } else if shown.captions_pending() {
+                    " Writing the captions…"
                 } else {
                     ""
                 };
@@ -452,6 +662,8 @@ fn commit_bar(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl I
                 .selectable(false)
         }),
         build_link(app, state, backend, "Rebuild").style(|s| s.margin_left(8.0)),
+        Empty::new().style(|s| s.flex_grow(1.0_f32)),
+        facet_picker(state, page),
     ))
     .debug_name("Changescape commit bar")
     .style(move |s| {
@@ -474,7 +686,7 @@ fn commit_bar(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl I
 
 /// The excerpt of an element only on the base side, over the tab: its
 /// own diff, and a way to its file in Code.
-fn base_popover(state: ReviewState, backend: Rc<Backend>, page: Arc<Page>) -> impl IntoView {
+fn base_popover(state: ReviewState, backend: Rc<Backend>, page: Arc<LoadedPage>) -> impl IntoView {
     dyn_container(
         move || state.changescape_popover.get(),
         move |el| {
@@ -485,44 +697,46 @@ fn base_popover(state: ReviewState, backend: Rc<Backend>, page: Arc<Page>) -> im
                 return Empty::new().into_any();
             };
             let mono = || theme::CODE_FONT_STACK.to_string();
-            let rows = r.src.iter().map(|row| {
-                let number = row
-                    .base
-                    .or(row.head)
-                    .map(|n| n.to_string())
-                    .unwrap_or_default();
-                let ink = match row.op.as_str() {
-                    "-" => theme::diff_deleted_fg(),
-                    _ => theme::fg(),
-                };
-                let fill = match row.op.as_str() {
-                    "-" => Some(theme::diff_deleted_bg()),
-                    "+" => Some(theme::diff_added_bg()),
-                    _ => None,
-                };
-                Stack::horizontal((
-                    Label::new(number).style(move |s| {
-                        s.font_family(mono())
-                            .font_size(theme::code_font_size())
-                            .color(theme::gutter_fg())
-                            .width(theme::CODE_ROW_NUMBER_WIDTH)
-                            .justify_end()
-                            .padding_right(8.0)
-                    }),
-                    Label::new(format!("{} {}", row.op, row.text)).style(move |s| {
-                        s.font_family(mono())
-                            .font_size(theme::code_font_size())
-                            .color(ink)
-                    }),
-                ))
-                .style(move |s| {
-                    s.height(theme::CODE_ROW_HEIGHT)
-                        .items_center()
-                        .width_full()
-                        .apply_opt(fill, |s, fill| s.background(fill))
-                })
-                .into_any()
-            });
+            let rows = perch_changescape::page::src_rows(&r)
+                .into_iter()
+                .map(|row| {
+                    let number = row
+                        .base
+                        .or(row.head)
+                        .map(|n| n.to_string())
+                        .unwrap_or_default();
+                    let ink = match row.op.as_str() {
+                        "-" => theme::diff_deleted_fg(),
+                        _ => theme::fg(),
+                    };
+                    let fill = match row.op.as_str() {
+                        "-" => Some(theme::diff_deleted_bg()),
+                        "+" => Some(theme::diff_added_bg()),
+                        _ => None,
+                    };
+                    Stack::horizontal((
+                        Label::new(number).style(move |s| {
+                            s.font_family(mono())
+                                .font_size(theme::code_font_size())
+                                .color(theme::gutter_fg())
+                                .width(theme::CODE_ROW_NUMBER_WIDTH)
+                                .justify_end()
+                                .padding_right(8.0)
+                        }),
+                        Label::new(format!("{} {}", row.op, row.text)).style(move |s| {
+                            s.font_family(mono())
+                                .font_size(theme::code_font_size())
+                                .color(ink)
+                        }),
+                    ))
+                    .style(move |s| {
+                        s.height(theme::CODE_ROW_HEIGHT)
+                            .items_center()
+                            .width_full()
+                            .apply_opt(fill, |s, fill| s.background(fill))
+                    })
+                    .into_any()
+                });
             let show_backend = backend.clone();
             let show_ref = r.clone();
             Stack::vertical((
@@ -595,8 +809,9 @@ fn base_popover(state: ReviewState, backend: Rc<Backend>, page: Arc<Page>) -> im
 
 /// The selected section: each of its views, title, caption and blocks, one
 /// under the other.
-fn section_body(state: ReviewState, backend: Rc<Backend>, page: Arc<Page>) -> impl IntoView {
+fn section_body(state: ReviewState, backend: Rc<Backend>, page: Arc<LoadedPage>) -> impl IntoView {
     let counts = threads::counts(state);
+    let pinned = pinned(state);
     let selected = {
         let page = page.clone();
         Memo::new(move |_| selected_section(state, &page))
@@ -610,9 +825,9 @@ fn section_body(state: ReviewState, backend: Rc<Backend>, page: Arc<Page>) -> im
             else {
                 return Empty::new().into_any();
             };
-            let section_title = section.t.clone();
+            let section_title = section.label.clone();
             let views: Vec<_> = page.section_views(section).into_iter().cloned().collect();
-            let heading = Label::new(section.t.clone()).style(|s| {
+            let heading = Label::new(section.label.clone()).style(|s| {
                 s.font_size(theme::TEXT_PAGE_TITLE)
                     .font_weight(theme::weight_strong())
                     .color(theme::fg())
@@ -628,13 +843,16 @@ fn section_body(state: ReviewState, backend: Rc<Backend>, page: Arc<Page>) -> im
                 backend: backend.clone(),
                 page: page.clone(),
                 counts,
+                pinned,
             };
             Stack::vertical((
                 heading,
                 question,
+                facet_note(state, page.clone()),
                 Stack::vertical_from_iter(views.into_iter().map(move |view| {
                     let titled = view.t != section_title;
-                    blocks::view(cx.clone(), view, titled).into_any()
+                    let shown = cx.page.blocks(&view.id).to_vec();
+                    blocks::view(cx.clone(), view, shown, titled).into_any()
                 }))
                 .style(|s| s.flex_col().gap(32.0).margin_top(24.0).width_full()),
             ))
@@ -662,6 +880,51 @@ fn section_body(state: ReviewState, backend: Rc<Backend>, page: Arc<Page>) -> im
     })
 }
 
+/// While a facet option is on: its note, muted, and the way back to the
+/// whole change.
+fn facet_note(state: ReviewState, page: Arc<LoadedPage>) -> impl IntoView {
+    let shown = {
+        let page = page.clone();
+        Memo::new(move |_| {
+            with_facet(state, &page, |option| {
+                option.map(|option| option.note.clone().unwrap_or_else(|| option.label.clone()))
+            })
+        })
+    };
+    dyn_container(
+        move || shown.get(),
+        move |note| {
+            let Some(note) = note else {
+                return Empty::new().into_any();
+            };
+            Stack::horizontal((
+                Label::new(note).style(|s| {
+                    s.font_size(theme::TEXT_META)
+                        .color(theme::fg_muted())
+                        .min_width(0.0)
+                        .flex_shrink(1.0_f32)
+                }),
+                Container::new(Label::new("Whole change").style(|s| {
+                    s.font_size(theme::TEXT_META)
+                        .color(theme::link())
+                        .selectable(false)
+                }))
+                .debug_name("Changescape whole change")
+                .on_event_stop(el::Click, move |_, _| state.changescape_facet.set(None))
+                .style(|s| {
+                    crate::ui::widgets::clickable(crate::ui::widgets::underlined_link(s))
+                        .margin_left(10.0)
+                        .flex_shrink(0.0_f32)
+                }),
+            ))
+            .debug_name("Changescape facet note")
+            .style(|s| s.items_baseline().width_full().margin_top(12.0))
+            .into_any()
+        },
+    )
+    .style(|s| s.width_full())
+}
+
 /// Select a section on the tab, and show the tab.
 pub fn show_section(state: ReviewState, id: &str) {
     state.changescape_section.set(Some(id.to_string()));
@@ -669,7 +932,7 @@ pub fn show_section(state: ReviewState, id: &str) {
 }
 
 /// Select the section that holds a view.
-pub fn show_view(state: ReviewState, page: &Page, view: &str) {
+pub fn show_view(state: ReviewState, page: &LoadedPage, view: &str) {
     if let Some(section) = page.section_of_view(view) {
         show_section(state, &section.id);
     }

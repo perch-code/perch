@@ -14,7 +14,7 @@ use floem::context::{LayoutChanged, PaintCx};
 use floem::kurbo::{Point, Rect, Size, Stroke};
 use floem::peniko::{Brush, Color};
 use floem::prelude::*;
-use floem::reactive::{RwSignal, SignalGet, SignalTrack, SignalUpdate};
+use floem::reactive::{Memo, RwSignal, SignalGet, SignalTrack, SignalUpdate, SignalWith};
 use floem::ui_events::pointer::PointerButtonEvent;
 use floem::views::{Container, Decorators, Label, Stack};
 use floem::{AnyView, RendererSvg, View, ViewId};
@@ -27,6 +27,8 @@ use crate::ui::widgets::clickable;
 
 /// The card under every diagram, whatever the theme.
 const CARD: Color = Color::WHITE;
+/// How much of a node outside the facet option the card covers.
+const DIM_COVER: f32 = 0.7;
 /// How much each zoom step scales by.
 const ZOOM_STEP: f64 = 1.25;
 const ZOOM_MIN: f64 = 0.25;
@@ -77,6 +79,18 @@ pub fn svg_block(cx: Ctx, svg: Svg) -> AnyView {
     };
     let hot = Arc::new(hot_nodes(&drawing, &svg));
     let natural = drawing.size();
+    // The hot nodes outside the facet option the tab applies, by index.
+    let outside = {
+        let (hot, state, page) = (hot.clone(), cx.state, cx.page.clone());
+        Memo::new(move |_| {
+            super::with_facet(state, &page, |option| match option {
+                Some(option) => (0..hot.len())
+                    .filter(|&i| !option.els.contains(&hot[i].el))
+                    .collect(),
+                None => Vec::new(),
+            })
+        })
+    };
     // `None` until the block's width is known; then the width's fit.
     let zoom: RwSignal<Option<f64>> = RwSignal::new(None);
     let hovered: RwSignal<Option<usize>> = RwSignal::new(None);
@@ -94,6 +108,7 @@ pub fn svg_block(cx: Ctx, svg: Svg) -> AnyView {
     floem::reactive::Effect::new(move |_| {
         hovered.track();
         zoom.track();
+        outside.track();
         id.request_paint();
     });
     let picture = Diagram {
@@ -101,6 +116,7 @@ pub fn svg_block(cx: Ctx, svg: Svg) -> AnyView {
         drawing,
         hot: hot.clone(),
         hovered,
+        outside,
         zoom,
         painted: Size::ZERO,
         scale,
@@ -293,6 +309,8 @@ struct Diagram {
     drawing: Drawing,
     hot: Arc<Vec<Hot>>,
     hovered: RwSignal<Option<usize>>,
+    /// The hot nodes a facet dims, by index.
+    outside: Memo<Vec<usize>>,
     zoom: RwSignal<Option<f64>>,
     painted: Size,
     /// The device scale it last painted at.
@@ -327,9 +345,22 @@ impl View for Diagram {
             rect,
             None::<&Brush>,
         );
+        let cap = zoom_cap(self.drawing.size(), self.scale.get_untracked());
+        let z = drawn_zoom(self.zoom.get_untracked(), cap);
+        // A node outside the facet option under a veil of the card, over
+        // the box the pointer finds it by.
+        self.outside.with_untracked(|outside| {
+            for hot in outside.iter().filter_map(|&i| self.hot.get(i)) {
+                let cover = Rect::new(
+                    hot.rect.x0 * z,
+                    hot.rect.y0 * z,
+                    hot.rect.x1 * z,
+                    hot.rect.y1 * z,
+                );
+                cx.fill(&cover, CARD.multiply_alpha(DIM_COVER), 0.0);
+            }
+        });
         if let Some(hot) = self.hovered.get_untracked().and_then(|i| self.hot.get(i)) {
-            let cap = zoom_cap(self.drawing.size(), self.scale.get_untracked());
-            let z = drawn_zoom(self.zoom.get_untracked(), cap);
             let ring = Rect::new(
                 hot.rect.x0 * z,
                 hot.rect.y0 * z,

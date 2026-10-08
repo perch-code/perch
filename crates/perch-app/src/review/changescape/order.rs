@@ -4,7 +4,7 @@
 
 use std::cmp::Ordering;
 
-use perch_changescape::page::{Cell, Table};
+use perch_changescape::page::{cell, CellText as Cell, Table};
 
 /// The column a table is sorted by, and which way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,13 +35,11 @@ pub fn next(sort: Option<Sort>, column: usize, numeric: bool) -> Option<Sort> {
 pub fn numeric(table: &Table, key: &str) -> bool {
     let mut any = false;
     for row in &table.rows {
-        let Some(cell) = row.cells.get(key) else {
-            continue;
-        };
+        let cell = cell(row, key);
         if cell.text.trim().is_empty() && cell.value.is_none() {
             continue;
         }
-        if number(cell).is_none() {
+        if number(&cell).is_none() {
             return false;
         }
         any = true;
@@ -85,18 +83,22 @@ pub fn order(table: &Table, sort: Option<Sort>, query: &str) -> Vec<usize> {
         return rows;
     };
     let as_numbers = numeric(table, &column.key);
-    let cell = |i: usize| table.rows[i].cells.get(&column.key);
+    let cells: Vec<Cell> = table
+        .rows
+        .iter()
+        .map(|row| cell(row, &column.key))
+        .collect();
+    let dim = |i: usize| table.rows[i].dim == Some(true);
     rows.sort_by(|&a, &b| {
-        let (dim_a, dim_b) = (table.rows[a].dim, table.rows[b].dim);
+        let (dim_a, dim_b) = (dim(a), dim(b));
         if dim_a != dim_b {
             return dim_a.cmp(&dim_b);
         }
-        let (ca, cb) = (cell(a), cell(b));
+        let (ca, cb) = (&cells[a], &cells[b]);
         let (empty_a, empty_b) = (is_empty(ca), is_empty(cb));
         if empty_a || empty_b {
             return empty_a.cmp(&empty_b);
         }
-        let (ca, cb) = (ca.unwrap(), cb.unwrap());
         let by = if as_numbers {
             number(ca)
                 .unwrap_or(0.0)
@@ -113,15 +115,15 @@ pub fn order(table: &Table, sort: Option<Sort>, query: &str) -> Vec<usize> {
     rows
 }
 
-fn is_empty(cell: Option<&Cell>) -> bool {
-    cell.is_none_or(|cell| cell.text.trim().is_empty() && cell.value.is_none())
+fn is_empty(cell: &Cell) -> bool {
+    cell.text.trim().is_empty() && cell.value.is_none()
 }
 
 fn matches(table: &Table, row: usize, words: &[String]) -> bool {
     let text: String = table.rows[row]
         .cells
         .values()
-        .map(|cell| cell.text.to_lowercase())
+        .map(|cell| Cell::from(cell).text.to_lowercase())
         .collect::<Vec<_>>()
         .join("\n");
     words.iter().all(|word| text.contains(word.as_str()))
@@ -169,19 +171,20 @@ mod tests {
     use super::*;
 
     fn table(rows: serde_json::Value) -> Table {
-        serde_json::from_value(serde_json::json!({
-            "columns": [
+        Table {
+            columns: serde_json::from_value(serde_json::json!([
                 {"key": "name", "label": "Module", "kind": "mono"},
                 {"key": "lines", "label": "+/−", "kind": "mono"},
-            ],
-            "rows": rows,
-        }))
-        .unwrap()
+            ]))
+            .unwrap(),
+            rows: serde_json::from_value(rows).unwrap(),
+            ..Table::default()
+        }
     }
 
     fn names(table: &Table, rows: &[usize]) -> Vec<String> {
         rows.iter()
-            .map(|&i| table.rows[i].cells["name"].text.clone())
+            .map(|&i| cell(&table.rows[i], "name").text)
             .collect()
     }
 

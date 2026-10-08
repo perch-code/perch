@@ -5,8 +5,9 @@
 //! excerpt shows over the tab instead.
 
 use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
-use perch_changescape::page::{Element, Ref};
-use perch_changescape::Page;
+use perch_changescape::page::{lines, src_rows};
+use perch_changescape::v3::{Element, ElementRef as Ref};
+use perch_changescape::LoadedPage;
 use perch_git::Scope;
 
 use crate::backend::Backend;
@@ -14,7 +15,7 @@ use crate::review::model::{Layout, ReviewState};
 
 /// Open what an element id names. A stale page's lines may be off; the
 /// file opens at them anyway, under the tab's banner.
-pub fn open_element(state: ReviewState, backend: &Backend, page: &Page, el: &str) {
+pub fn open_element(state: ReviewState, backend: &Backend, page: &LoadedPage, el: &str) {
     let Some(element) = page.elements.get(el) else {
         return;
     };
@@ -60,10 +61,14 @@ enum Target {
 }
 
 fn target(element: &Element) -> Option<Target> {
-    if let Some((f, (start, _))) = element.refs.iter().find_map(|r| Some((&r.f, r.head?))) {
+    if let Some((f, (start, _))) = element
+        .refs
+        .iter()
+        .find_map(|r| Some((&r.f, lines(&r.head)?)))
+    {
         return Some(Target::Head(f.clone(), start));
     }
-    if let Some(r) = element.refs.iter().find(|r| r.file) {
+    if let Some(r) = element.refs.iter().find(|r| r.file == Some(true)) {
         return Some(Target::Whole(r.f.clone()));
     }
     element
@@ -79,10 +84,10 @@ pub fn base_ref(element: &Element) -> Option<&Ref> {
 }
 
 fn nearest_head_line(r: &Ref) -> Option<u32> {
-    r.src
+    src_rows(r)
         .iter()
         .find_map(|row| row.head)
-        .or(r.base.map(|(start, _)| start))
+        .or(lines(&r.base).map(|(start, _)| start))
 }
 
 /// Line numbers on the page are of the whole branch.
@@ -103,28 +108,31 @@ fn branch_scope(state: ReviewState, backend: &Backend) {
 mod tests {
     use super::*;
 
-    fn element(json: &str) -> Element {
-        serde_json::from_str(json).unwrap()
+    fn element(refs: &str) -> Element {
+        serde_json::from_str(&format!(
+            r#"{{ "t": "f()", "k": "function", "st": "changed", "refs": {refs} }}"#
+        ))
+        .unwrap()
     }
 
     #[test]
     fn the_first_head_range_wins() {
         let e = element(
-            r#"{ "refs": [ { "f": "a.py", "base": [1, 2] }, { "f": "b.py", "head": [40, 71] } ] }"#,
+            r#"[ { "f": "a.py", "base": [1, 2], "head": null }, { "f": "b.py", "base": null, "head": [40, 71] } ]"#,
         );
         assert_eq!(target(&e), Some(Target::Head("b.py".into(), 40)));
     }
 
     #[test]
     fn a_module_opens_its_file() {
-        let e = element(r#"{ "refs": [ { "f": "a.py", "file": true } ] }"#);
+        let e = element(r#"[ { "f": "a.py", "base": null, "head": null, "file": true } ]"#);
         assert_eq!(target(&e), Some(Target::Whole("a.py".into())));
     }
 
     #[test]
     fn a_removed_function_is_base_only() {
         let e = element(
-            r#"{ "refs": [ { "f": "a.py", "base": [10, 12], "src": [[10, null, "-", "def f():"]] } ] }"#,
+            r#"[ { "f": "a.py", "base": [10, 12], "head": null, "src": [[10, null, "-", "def f():"]] } ]"#,
         );
         assert_eq!(target(&e), Some(Target::BaseOnly));
         assert_eq!(nearest_head_line(base_ref(&e).unwrap()), Some(10));

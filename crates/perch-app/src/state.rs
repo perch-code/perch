@@ -3764,6 +3764,7 @@ mod tests {
                 page: None,
                 error: None,
                 can_build: false,
+                building: false,
             }))
         };
         for (item_id, head_sha) in [("other", "head"), ("pr", "old")] {

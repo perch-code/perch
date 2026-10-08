@@ -19,7 +19,7 @@ use crate::theme;
 use crate::ui::widgets::{clickable, underlined_link};
 
 /// The element under the caret: its id, title and kind. Tracked.
-fn under_caret(state: ReviewState) -> Option<(String, String, String)> {
+pub(super) fn under_caret(state: ReviewState) -> Option<(String, String, String)> {
     let shown = shown(state)?;
     if state.scope.get() != Scope::Branch {
         return None;

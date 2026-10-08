@@ -1,0 +1,135 @@
+{
+  "schema": 3,
+  "kind": "pr",
+  "meta": {
+    "key": "changescape-acme-calc-7",
+    "title": "Add add()",
+    "repo": "acme/calc",
+    "number": 7,
+    "url": "https://github.com/acme/calc/pull/7",
+    "author": "ada",
+    "state": "open",
+    "language": "python",
+    "base": { "ref": "main", "sha": "1111111111111111111111111111111111111111" },
+    "head": { "ref": "add", "sha": "2222222222222222222222222222222222222222" },
+    "adds": 2,
+    "dels": 0,
+    "nfiles": 1,
+    "issues": [],
+    "generated": "2026-10-08T12:00:00Z"
+  },
+  "sections": [
+    { "id": "overview", "label": "Overview", "ic": "overview", "q": "What does this change do?", "empty": "", "views": ["overview"], "reason": null },
+    {
+      "id": "map",
+      "label": "Map",
+      "ic": "graph",
+      "q": "Where in the system does it happen?",
+      "empty": "No module is added, removed, or rewired.",
+      "views": ["placement"],
+      "reason": null
+    },
+    {
+      "id": "behavior",
+      "label": "Behavior",
+      "ic": "sequence",
+      "q": "What does the code do differently?",
+      "empty": "No change to what the code decides or calls.",
+      "views": [],
+      "reason": "No change to what the code decides or calls."
+    },
+    { "id": "code", "label": "Code", "ic": "lines", "q": "What are the exact lines?", "empty": "", "views": ["lines"], "reason": null }
+  ],
+  "elements": {
+    "mod:calc.ops": { "t": "calc.ops", "k": "module · calc", "st": "added", "refs": [{ "f": "calc/ops.py", "base": null, "head": [1, 2], "file": true }] },
+    "fn:calc.ops.add": {
+      "t": "add()",
+      "k": "function · calc.ops",
+      "st": "added",
+      "d": "New: adds two numbers.",
+      "refs": [{ "f": "calc/ops.py", "base": null, "head": [1, 2], "src": [[null, 1, "+", "def add(a, b):"], [null, 2, "+", "    return a + b"]] }]
+    },
+    "fn:calc.ops.fixture": { "t": "fixture()", "k": "function · calc.ops", "st": "added", "refs": [{ "f": "calc/ops.py", "base": null, "head": [1, 2] }] },
+    "fn:calc.ops.setup": { "t": "setup()", "k": "function · calc.ops", "st": "added", "refs": [{ "f": "calc/ops.py", "base": null, "head": [1, 2] }] }
+  },
+  "views": [
+    {
+      "id": "overview",
+      "sec": "overview",
+      "t": "Overview",
+      "s": "the change at a glance",
+      "ic": "overview",
+      "q": "What does this change do?",
+      "state": "applies",
+      "metric": "",
+      "narration": null,
+      "blocks": [{ "type": "narration", "text": "Adds `add()` to `calc.ops`." }]
+    },
+    {
+      "id": "placement",
+      "sec": "map",
+      "t": "Placement",
+      "s": "where the new code lives",
+      "ic": "layers",
+      "q": "Where does the new code sit?",
+      "state": "applies",
+      "metric": "1 function",
+      "narration": null,
+      "blocks": [
+        {
+          "type": "table",
+          "title": "New functions",
+          "columns": [{ "key": "fn", "label": "Function", "kind": "mono" }, { "key": "st", "label": "Status", "kind": "status" }],
+          "groups": [
+            { "id": "calc.ops", "label": "calc.ops", "summary": "1 function", "open": true },
+            { "id": "calc.tests", "label": "calc.tests", "summary": "2 test helpers, all folded", "open": false }
+          ],
+          "rows": [
+            { "el": "fn:calc.ops.add", "group": "calc.ops", "cells": { "fn": { "text": "add()", "el": "fn:calc.ops.add" }, "st": "added" } },
+            {
+              "el": "fn:calc.ops.fixture",
+              "group": "calc.tests",
+              "rank": "minor",
+              "why": "a test helper",
+              "cells": { "fn": { "text": "fixture()", "el": "fn:calc.ops.fixture" }, "st": "added" }
+            },
+            {
+              "el": "fn:calc.ops.setup",
+              "group": "calc.tests",
+              "rank": "minor",
+              "why": "a test helper",
+              "cells": { "fn": { "text": "setup()", "el": "fn:calc.ops.setup" }, "st": "added" }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "lines",
+      "sec": "code",
+      "t": "Code",
+      "s": "the exact lines",
+      "ic": "lines",
+      "q": "What are the exact lines?",
+      "state": "applies",
+      "metric": "+2 −0",
+      "narration": null,
+      "blocks": [{ "type": "code" }]
+    }
+  ],
+  "files": [
+    {
+      "path": "calc/ops.py",
+      "old": "calc/ops.py",
+      "status": "added",
+      "add": 2,
+      "del": 0,
+      "kind": "source",
+      "hunks": [{ "head": "@@ -0,0 +1,2 @@", "lines": [[null, 1, "+", "def add(a, b):"], [null, 2, "+", "    return a + b"]] }],
+      "text": { "base": null, "head": "def add(a, b):\n    return a + b\n" },
+      "whole": { "ok": true }
+    }
+  ],
+  "comments": [],
+  "notes": []
+}

@@ -168,7 +168,15 @@ pub struct Pane {
     agents_open_runs: HashSet<String>,
     code_seen: bool,
     changescape_section: Option<String>,
+    changescape_facet: Option<(String, String)>,
+    changescape_facet_hide: bool,
+    changescape_open: HashMap<ChangescapeFoldKey, bool>,
+    changescape_unfolded: HashSet<ChangescapeFoldKey>,
 }
+
+/// A part of a Changescape table: its view's id, the block's index in the
+/// view, and its group's id, empty for the rows with no group.
+pub type ChangescapeFoldKey = (String, usize, String);
 
 impl Default for Pane {
     fn default() -> Self {
@@ -183,6 +191,10 @@ impl Default for Pane {
             agents_open_runs: HashSet::new(),
             code_seen: false,
             changescape_section: None,
+            changescape_facet: None,
+            changescape_facet_hide: false,
+            changescape_open: HashMap::new(),
+            changescape_unfolded: HashSet::new(),
         }
     }
 }
@@ -1488,6 +1500,16 @@ pub struct ReviewState {
     pub changescape: RwSignal<Option<Arc<crate::review::changescape::Shown>>>,
     /// The section the Changescape tab shows; `None` is the first.
     pub changescape_section: RwSignal<Option<String>>,
+    /// The facet option the Changescape tab applies, as (facet id, option
+    /// id); `None` is the whole change.
+    pub changescape_facet: RwSignal<Option<(String, String)>>,
+    /// Whether table rows outside the facet option hide, not dim.
+    pub changescape_facet_hide: RwSignal<bool>,
+    /// The Changescape table sections the reader opened or closed, by
+    /// part. A part not here takes the page's `open`.
+    pub changescape_open: RwSignal<HashMap<ChangescapeFoldKey, bool>>,
+    /// The Changescape table parts whose folded rows the reader showed.
+    pub changescape_unfolded: RwSignal<HashSet<ChangescapeFoldKey>>,
     /// The element whose base-side excerpt is shown over the Changescape
     /// tab: one that is not on the head, so Code has no line to open.
     pub changescape_popover: RwSignal<Option<String>>,
@@ -2038,6 +2060,10 @@ impl ReviewState {
             panes: RwSignal::new(HashMap::new()),
             changescape: RwSignal::new(None),
             changescape_section: RwSignal::new(None),
+            changescape_facet: RwSignal::new(None),
+            changescape_facet_hide: RwSignal::new(false),
+            changescape_open: RwSignal::new(HashMap::new()),
+            changescape_unfolded: RwSignal::new(HashSet::new()),
             changescape_popover: RwSignal::new(None),
             changescape_log: RwSignal::new(Vec::new()),
             code_seen: RwSignal::new(false),
@@ -2495,6 +2521,10 @@ impl ReviewState {
             file_places: self.file_places.get_untracked(),
             code_seen: self.code_seen.get_untracked(),
             changescape_section: self.changescape_section.get_untracked(),
+            changescape_facet: self.changescape_facet.get_untracked(),
+            changescape_facet_hide: self.changescape_facet_hide.get_untracked(),
+            changescape_open: self.changescape_open.get_untracked(),
+            changescape_unfolded: self.changescape_unfolded.get_untracked(),
         };
         self.panes.update(|panes| {
             panes.insert(id, pane);
@@ -2537,6 +2567,10 @@ impl ReviewState {
             self.file_places.set(pane.file_places);
             self.code_seen.set(pane.code_seen);
             self.changescape_section.set(pane.changescape_section);
+            self.changescape_facet.set(pane.changescape_facet);
+            self.changescape_facet_hide.set(pane.changescape_facet_hide);
+            self.changescape_open.set(pane.changescape_open);
+            self.changescape_unfolded.set(pane.changescape_unfolded);
             self.tree_wanted.set(false);
             if !paths.is_empty() {
                 self.loading

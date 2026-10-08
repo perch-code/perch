@@ -8,8 +8,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use perch_changescape::page::BlockBody;
-use perch_changescape::{Lookup, Page};
+use perch_changescape::{LoadedPage, Lookup};
 use perch_github::{Cache, ItemKind};
 
 pub fn run(args: &[String]) {
@@ -77,7 +76,7 @@ fn cached_head(repo: &str, number: u64) -> Result<String, String> {
 
 fn describe(lookup: &Lookup) -> String {
     let at = |build: &perch_changescape::Build| {
-        let stage = build.status.stage.as_deref().unwrap_or("-");
+        let stage = build.status.stage;
         format!(
             "{} (stage {stage}) in {}",
             build.short_sha(),
@@ -96,12 +95,25 @@ fn describe(lookup: &Lookup) -> String {
             at(build),
             build.status.error.as_deref().unwrap_or("no page.json")
         ),
+        Lookup::Outdated(build) => format!(
+            "outdated {}: page format {}, Perch draws {}",
+            at(build),
+            build.page_schema(),
+            perch_changescape::MIN_PAGE_SCHEMA
+        ),
+        Lookup::TooNew(build) => format!(
+            "too new {}: page format {}, Perch draws up to {}",
+            at(build),
+            build.page_schema(),
+            perch_changescape::MAX_PAGE_SCHEMA
+        ),
         Lookup::None => "none".to_string(),
     }
 }
 
-fn render(out: &mut String, page: &Page) {
+fn render(out: &mut String, page: &LoadedPage) {
     let _ = writeln!(out, "title: {}", page.meta.title);
+    let _ = writeln!(out, "page format: {}", page.schema);
     let _ = writeln!(out, "sections:");
     for section in &page.sections {
         let views = page.section_views(section);
@@ -109,23 +121,25 @@ fn render(out: &mut String, page: &Page) {
             let _ = writeln!(
                 out,
                 "  {} ({}): no views. {}",
-                section.id, section.t, section.reason
+                section.id,
+                section.label,
+                section.reason.as_deref().unwrap_or(&section.empty)
             );
         } else {
             let _ = writeln!(
                 out,
                 "  {} ({}): {} views",
                 section.id,
-                section.t,
+                section.label,
                 views.len()
             );
         }
     }
     let mut kinds: BTreeMap<String, (usize, bool)> = BTreeMap::new();
-    for block in page.views.iter().flat_map(|view| &view.blocks) {
-        let entry = kinds.entry(block.kind.clone()).or_default();
+    for block in page.views.iter().flat_map(|view| page.blocks(&view.id)) {
+        let entry = kinds.entry(block.kind().to_string()).or_default();
         entry.0 += 1;
-        entry.1 |= matches!(block.body, BlockBody::Other);
+        entry.1 |= !crate::review::changescape::blocks::drawn(block);
     }
     let _ = writeln!(out, "blocks:");
     for (kind, (count, fallback)) in kinds {
@@ -133,4 +147,13 @@ fn render(out: &mut String, page: &Page) {
         let _ = writeln!(out, "  {kind}: {count}{note}");
     }
     let _ = writeln!(out, "elements: {}", page.elements.len());
+    for facet in &page.facets {
+        let _ = writeln!(
+            out,
+            "facet {} ({}): {} options",
+            facet.id,
+            facet.label,
+            facet.options.len()
+        );
+    }
 }

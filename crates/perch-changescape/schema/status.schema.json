@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BuildStatus",
+  "description": "status.json in a build folder: the state of one build, and the format version of its page.json. A reader can decide from this file whether it can draw the page, without parsing page.json.",
+  "type": "object",
+  "required": ["schema", "state", "started", "finished", "stage", "error", "skill_version"],
+  "properties": {
+    "schema": { "type": "integer", "const": 2, "description": "The format version of status.json itself. It is separate from page_schema." },
+    "state": { "$ref": "#/$defs/BuildState" },
+    "started": { "type": ["string", "null"], "description": "When collect started, as an ISO 8601 time, or null." },
+    "finished": { "type": ["string", "null"], "description": "When the last stage finished, as an ISO 8601 time, or null while running." },
+    "stage": { "$ref": "#/$defs/BuildStage" },
+    "error": { "type": ["string", "null"], "description": "A short message when state is failed, else null." },
+    "skill_version": { "type": "string", "description": "The version of the Changescape skill that wrote the build." },
+    "page_schema": { "type": "integer", "minimum": 2, "description": "The format version of page.json in the folder. Absent means 2." }
+  },
+  "$defs": {
+    "BuildState": {
+      "title": "BuildState",
+      "description": "Whether the build is running, done, or failed.",
+      "type": "string",
+      "enum": ["running", "done", "failed"]
+    },
+    "BuildStage": {
+      "title": "BuildStage",
+      "description": "How far the build got. facts: collect wrote the page without captions. narrated: assemble merged the agent's narration.",
+      "type": "string",
+      "enum": ["facts", "narrated"]
+    }
+  }
+}

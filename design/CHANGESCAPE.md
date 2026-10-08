@@ -40,13 +40,14 @@ One build of one PR at one head commit has its own folder:
 
 ```json
 { "schema": 2, "state": "done", "started": "2026-10-07T18:02:11Z", "finished": "2026-10-07T18:04:40Z",
-  "stage": "narrated", "error": null, "skill_version": "2.0.0" }
+  "stage": "narrated", "error": null, "skill_version": "2.0.0", "page_schema": 3 }
 ```
 
 - `state` is `running`, `done`, or `failed`.
 - `stage` is `facts` (tools ran, no captions yet) or `narrated` (captions written). A `done` build at stage `facts` is drawable. It shows facts with no captions.
 - If `state` is `failed`, `error` holds a short message.
 - If `status.json` is missing but `page.json` exists, treat the build as `done`.
+- `page_schema` is the format version of the folder's `page.json`. If it is absent, the version is 2.
 
 ### Lookup
 
@@ -59,6 +60,16 @@ For the open PR item, Perch looks up its changescape with this rule:
 Perch still draws a stale changescape, under a one-line banner that names the older commit. The banner text is `Changescape of an earlier commit, <sha7>.`
 
 If the skill is available, the banner ends with a Rebuild link. "Building a changescape" below describes the build.
+
+### Page format versions
+
+Perch draws page format versions from `MIN_PAGE_SCHEMA` to `MAX_PAGE_SCHEMA` (`crates/perch-changescape/src/lib.rs`). Both are 3 now. Perch reads the version from `page_schema` in `status.json`. A folder with a page but no `status.json` counts as version 2. Perch does not keep a reader for older versions: an older page is refused, and the reader rebuilds it.
+
+- A finished build below the lowest version is `Lookup::Outdated`. The tab says "This Changescape was built by an older version. Rebuild it to see this PR." If Perch can build, the tab shows Rebuild. Otherwise it offers the browser page.
+- A finished build above the highest version is `Lookup::TooNew`. The tab says "This Changescape needs a newer Perch." and offers the browser page.
+- In both cases the pill stays, so the reader finds the link.
+- The gate applies to every build that the lookup considers. An earlier head's build of another version is never a `Stale` stand-in. A running build does not show it meanwhile.
+- When the page loads, Perch reads `schema` from `page.json` before it parses the rest, and applies the same gate (`Error::Version`, then `Lookup::with_page_schema`). This catches a status that misstates the version.
 
 Lookups are file system reads only. Do them on the backend, never on the UI thread. Perch has no file watcher, so poll. When an item opens, look up its changescape once. While a build of the open item is `running`, read `status.json` every two seconds. Do not poll items that are not open.
 
@@ -92,10 +103,36 @@ Each view holds a list of blocks. The exact shapes are in `skill/docs/page-data.
 | --- | --- |
 | `narration`, `text` | A paragraph. Backtick spans are code spans. An `el` on the block or a span makes it a link. |
 | `summary` | A short list of rows. Each row has a title, a metric, and a line of text, and opens the named section or view. |
-| `table` | A table. Column kinds are `text`, `mono`, `num`, `status`, `bar`, and `refs`. A cell or row with `el` is a link. A row with `dim` is muted. |
+| `table` | A table. Column kinds are `text`, `mono`, `num`, `status`, `bar`, and `refs`. A cell or row with `el` is a link. A row with `dim` is muted. Rows can have ranks and groups. See "Grouped and folded tables". |
 | `svg` | An SVG picture with clickable shapes. See below. |
 
 Any other block type is drawn as one muted line: "This view is in the browser page." The line has a button that opens `page.html` in the default browser, with `open` from `std::process::Command`. Unknown fields in known blocks are ignored. Parsing must never fail on a new field or a new block type.
+
+### Grouped and folded tables
+
+A table can have `groups` and `fold`, and its rows can have `rank`, `why`, and `group`. The contract is "Rank, groups, and folds" in page-data.md. The fold logic is in `crates/perch-changescape/src/fold.rs`, and the drawing is in `review/changescape/blocks.rs`.
+
+1. Perch draws rows in the page's order. It never ranks rows itself.
+2. The rows without a group come first. Then each group is a section, in the order of `groups`. A row whose `group` is not in `groups` has no group.
+3. A section header shows a chevron, the label, and the summary. A click opens or closes the section. The section starts as `open` says.
+4. Each part shows its rows that are not minor, up to `fold.show` of them. The other rows wait behind one control. If all of them are minor, the control names them with `fold.label`, for example "Show 13 more · layout numbers". If only some are minor, it counts them, for example "Show 4 more (2 minor: small helpers)". A click shows them in place, and the control then reads "Show fewer".
+5. The row of the element in the base popover, and the row of the element that the Code strip names, never fold. A row in the active facet option never folds. The section that holds such a row opens.
+6. A key row has a 2-pixel bar in the accent color at its left edge. A row's `why` is its tooltip.
+7. Column widths come from all the rows, folded rows too, so a section that opens does not move the columns.
+8. `ReviewState` keeps the open state of each section and each fold control, keyed by view id, block index, and group id. The pane remembers them per item for the life of the app.
+
+A sort by a column, or a filter, shows all matching rows in one list, without sections or folds. A table without groups, folds, and ranks draws as it did before.
+
+### Facets
+
+A facet is a named way to look at part of the change. Each option is a set of element ids. The contract is "facets" in page-data.md.
+
+- If the page has facets, the commit bar has a picker. Its first entry is "Whole change". Each facet is a submenu of its options.
+- While an option is on, a "Hide the rest" toggle shows next to the picker. The section shows the option's note as a muted line, with a "Whole change" link.
+- Table rows whose `el` is not in the option dim. With "Hide the rest" on, they hide. A row without `el` stays as it is.
+- Diagram nodes whose element is not in the option get a translucent cover of the card color.
+- Rail entries of sections that have no table row or diagram node in the option dim.
+- A facet never changes ranks or order. The pane remembers the option and the toggle per item.
 
 ### SVG blocks
 
@@ -157,6 +194,8 @@ Write the output to <cache root>/<owner>/<repo>/pr-<number>/<head_sha>/.
 
 Show the run's progress in the Changescape body while it runs, and write its steps to `perch-build.log` in the build folder. When the run ends, read `status.json` again. Two results count as a failed build: the state `failed`, and a run that exits with no `page.json`. Show the error of a failed build in the Changescape body, with a Retry link.
 
+The skill marks the build `done` at stage `facts` before the agent writes the captions, so the facts page draws about a minute before the captions arrive. While a build that Perch started is still running and the page is at stage `facts`, the commit bar adds "Writing the captions…". Each view without a caption shows "Caption coming…" where the caption goes. Perch keeps polling until the stage is `narrated` or the run ends. Perch cannot tell this for a build started outside Perch, because the status does not say whether captions are still coming.
+
 Only one build per PR runs at a time. A second "Build Changescape" while one is running looks the PR up again and starts nothing.
 
 ### Configuration
@@ -171,13 +210,37 @@ cache = "~/.changescape/cache"
 
 The order for the cache root is `CHANGESCAPE_CACHE`, then `changescape.cache`, then the default.
 
+## The page schema
+
+The page format has a JSON Schema for each version. Perch keeps copies in `crates/perch-changescape/schema/`: `page.v3.schema.json` and `status.schema.json`. They come from `skill/schema/` in the Changescape repo. Do not edit the copies. When the format changes, copy them again.
+
+The schema defines the page. The Rust types for it are generated, not written by hand:
+
+- `crates/perch-changescape/src/generated/v3.rs` comes from `page.v3.schema.json`. The crate exposes it as `perch_changescape::v3`.
+- `crates/perch-changescape/src/generated/status.rs` comes from `status.schema.json`.
+
+To generate both files again after a format change, install cargo-typify 0.8.0 and run the script:
+
+```sh
+cargo install cargo-typify --version 0.8.0
+crates/perch-changescape/schema/generate.sh
+```
+
+Each generated file starts with a `// @generated` line and the command that made it. Do not edit generated code by hand. `.gitattributes` marks `src/generated/` as `linguist-generated`, so GitHub folds the files in pull request diffs. Changescape treats any path under a `generated/` folder as generated.
+
+When version 4 comes, generate `v4` and remove `v3` in the same change.
+
+The generated types are strict, so Perch reads a page in two steps (`LoadedPage::read` in `src/page.rs`). It parses each view's blocks one by one. A block that does not parse becomes `PageBlock::Unknown`, which draws as "This view is in the browser page." Then it parses the rest of the page. If the rest does not parse, the tab shows the error and offers the browser page.
+
+The shared conformance fixtures are in `crates/perch-changescape/tests/fixtures/conformance/`, copied from `skill/schema/fixtures/` in the Changescape repo. `tests/conformance.rs` checks each case against its `expect.md`. The window tests in `review/changescape/tests.rs` draw them.
+
 ## Model
 
 Put file types and lookup in a new crate, `crates/perch-changescape`. It has no UI dependencies.
 
-- `Page`, `Section`, `View`, `Block`, `Element`, `Ref`, and `Status` are serde types. `Block` is an enum tagged by `type`, with an `Other` variant for unknown types (`#[serde(other)]` or a custom deserializer). Every struct ignores unknown fields.
-- `fn lookup(root: &Path, repo: &str, number: u64, head_sha: &str) -> Lookup`, where `Lookup` is `Current(Build)`, `Stale(Build)`, `Running(Build, Option<Build>)` (with the last drawable earlier build), `Failed(Build)`, or `None`. `Build` holds the folder, the head SHA, and the status.
-- `fn load(build: &Build) -> Result<Page>`. Parse once per build and per `finished` time. Cache the result.
+- The page and status types are generated from the schema. See "The page schema" above. `LoadedPage` holds a `v3::Page` and its views' blocks, each a `PageBlock`.
+- `fn lookup(root: &Path, repo: &str, number: u64, head_sha: &str) -> Lookup`, where `Lookup` is `Current(Build)`, `Stale(Build)`, `Running(Build, Option<Build>)` (with the last drawable earlier build), `Failed(Build)`, `Outdated(Build)`, `TooNew(Build)`, or `None`. `Build` holds the folder, the head SHA, and the status.
+- `fn load(build: &Build) -> Result<Arc<LoadedPage>>`. Parse once per build and per `finished` time. Cache the result.
 - `fn skill_available() -> Option<PathBuf>` returns the skill folder.
 - `struct LineIndex` maps a path to sorted head ranges with element ids, for the Code strip.
 
@@ -196,7 +259,7 @@ In `perch-app`:
 ## Harness
 
 - `--changescape owner/repo#N` prints what Perch finds for that PR: the lookup result, the sections with their view counts, and the block types with counts. Add it next to `--dump-file` in `main.rs:66-99`. Use it in the acceptance steps.
-- Fixtures: run the skill once on `dvryaboy/dblect` PR 356, and copy the build folder into `crates/perch-changescape/tests/fixtures/`. Add a second fixture that has an unknown block type and unknown fields.
+- Fixtures: the conformance fixtures from the Changescape repo, in `crates/perch-changescape/tests/fixtures/conformance/`.
 - UI tests use `floem::headless::{HeadlessHarness, TestRoot}` (`ui/mod.rs:1145`). Give every new view a `.debug_name(...)`: `"Changescape pill"`, `"Changescape rail"`, `"Changescape section <id>"`, `"Changescape block <type>"`, `"Changescape stale banner"`, `"Changescape code strip"`.
 
 ## Build order
