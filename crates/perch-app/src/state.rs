@@ -3356,6 +3356,23 @@ impl AppState {
         })
     }
 
+    /// The unread notification about the given pull request or issue,
+    /// whose activity opening the subject goes to. None when every
+    /// notification about it is read.
+    pub fn unread_thread(
+        &self,
+        repo_full_name: &str,
+        kind: perch_github::ItemKind,
+        number: u64,
+    ) -> Option<Thread> {
+        self.notifications.with_untracked(|threads| {
+            threads
+                .iter()
+                .find(|thread| thread.unread && thread.is_about(repo_full_name, kind, number))
+                .cloned()
+        })
+    }
+
     /// The id of the notification about the given pull request or issue
     /// that was put out of the inbox, Done or snoozed: what a Browse row's
     /// Move to Inbox takes back. None while the inbox still has it.

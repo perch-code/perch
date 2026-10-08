@@ -101,6 +101,20 @@ pub fn key(card: &Card) -> String {
     }
 }
 
+/// What a card is asked to come into view by. Unlike its key it stays
+/// the same through an edit, so an ask made before GitHub's answer
+/// lands still finds the card after.
+pub fn card_id(card: &Card) -> crate::review::doc::CardId {
+    use crate::review::doc::CardId;
+    match card {
+        Card::Thread(t) => CardId::Thread(t.id.clone()),
+        Card::Description { .. } => CardId::Entry("description".into()),
+        Card::Comment(c) => CardId::Entry(format!("comment:{}", c.id)),
+        Card::Review { review } => CardId::Entry(format!("review:{}", review.id)),
+        Card::Event(e) => CardId::Entry(format!("event:{}:{}", event_name(e), e.at)),
+    }
+}
+
 /// The part of a thread's key that both faces share: the anchor, the
 /// message count, the last message's id and the first's body.
 pub(crate) fn thread_key_tail(t: &CommentThread) -> String {

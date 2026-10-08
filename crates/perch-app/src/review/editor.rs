@@ -1174,6 +1174,7 @@ fn card_layer(
                         .cloned()
                         .map(CardItem::Thread),
                     CardId::Composer => composer.clone().map(CardItem::Composer),
+                    CardId::Entry(_) => None,
                 })
                 .collect::<Vec<_>>()
         })

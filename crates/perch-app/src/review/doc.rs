@@ -68,13 +68,17 @@ pub enum Tint {
     Deleted,
 }
 
-/// Which thread a card is for.
+/// Which card is meant: a thread's, the composer, or one only
+/// Conversation has.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CardId {
     /// A thread, the reader's own or one of GitHub's, by thread id.
     Thread(String),
     /// The one being written.
     Composer,
+    /// Another card on Conversation, a comment, a review or an event,
+    /// by `cards::card_id`. It has no place in the code.
+    Entry(String),
 }
 
 /// How many rows a thread's card is given before it has been laid out:

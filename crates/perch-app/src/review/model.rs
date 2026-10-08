@@ -1701,6 +1701,10 @@ pub struct ReviewState {
     /// for it. The card takes it into `focus_card` then, since one built
     /// after `focus_card` was set ignores it.
     pub pending_focus_card: RwSignal<Option<CardId>>,
+    /// An unread notification being opened: Conversation goes to the
+    /// card it is about once the discussion has it. See
+    /// `review::notified`.
+    pub notified: RwSignal<Option<crate::review::notified::Notified>>,
     /// A thread whose Delete is waiting for a yes, under its byline.
     pub confirm_thread: RwSignal<Option<String>>,
     /// A comment on GitHub whose Delete is waiting for a yes, under its
@@ -2099,6 +2103,7 @@ impl ReviewState {
             selection_base: RwSignal::new(None),
             focus_card: RwSignal::new(None),
             pending_focus_card: RwSignal::new(None),
+            notified: RwSignal::new(None),
             confirm_thread: RwSignal::new(None),
             confirm_comment: RwSignal::new(None),
             expanded_runs: RwSignal::new(std::collections::HashSet::new()),
@@ -2310,6 +2315,7 @@ impl ReviewState {
         self.selection_base.set(None);
         self.focus_card.set(None);
         self.pending_focus_card.set(None);
+        self.notified.set(None);
         self.confirm_thread.set(None);
         self.confirm_comment.set(None);
         // The rows are the next item's cards' to fill; whether a card is

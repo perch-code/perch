@@ -66,6 +66,14 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 backend.open_item(&item.id)
             };
             state.begin_item_review(review, message, &item.id, navigation_id);
+            if let Some(subject) = &item.subject {
+                crate::review::notified::follow_subject(
+                    state,
+                    subject.repo_full_name(),
+                    subject.kind(),
+                    subject.number(),
+                );
+            }
         }
     });
     let panel_backend = backend.clone();
@@ -175,6 +183,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             });
         });
     }
+    // An unread notification opened goes to what it is about.
+    crate::review::notified::wire(review);
     // And the runs the reader opened out of a fold, or folded again, go
     // to the store from here too. The item is read as the write is sent:
     // the effect runs on the write, before anything else can open another.

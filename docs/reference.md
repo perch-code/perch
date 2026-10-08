@@ -36,6 +36,14 @@ still GitHub's.
   taken the request, so a read made in Perch holds for that revision of the
   thread until newer activity arrives or it is marked unread; a thread marked
   unread on github.com for the same revision is not seen.
+- Opening an unread notification, from its row or from the item's in
+  Worktrees or Browse, goes to what it is about: Conversation
+  scrolls to the newest comment, review, reply or event no later than the
+  notification, and the card flashes. A resolved thread with the reply is
+  opened. The cached discussion paints first, so the page waits up to a
+  few seconds for GitHub's answer to bring the new activity, then settles
+  for the newest card it has. Scrolling first leaves the page where it
+  is, and a read notification opens where the page was left.
 - **Mark Unread**, on the notification's row or the item's, restores the
   unread reminder in Perch for the current update. Viewing it clears the
   reminder; later GitHub state takes precedence. GitHub's public API has no
