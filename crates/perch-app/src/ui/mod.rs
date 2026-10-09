@@ -4,6 +4,7 @@ pub mod agents;
 pub mod browse;
 pub mod drawer;
 pub mod feedback;
+pub mod history;
 pub mod invite;
 pub mod items;
 pub mod menu;
@@ -39,48 +40,57 @@ pub(crate) const OS_MOD: Modifiers = if cfg!(target_os = "macos") {
     Modifiers::CONTROL
 };
 
+/// Open an item as a click on its row does. An archived row is restored
+/// on the way, which the backend treats as the same act.
+pub(crate) fn open_item(
+    state: AppState,
+    review: ReviewState,
+    backend: &Rc<Backend>,
+    item: &perch_github::Item,
+) {
+    // An item open in another window is looked at there.
+    if crate::windows::raise_holding(&item.id, backend.window()) {
+        return;
+    }
+    state.pending_agent_navigation.set(None);
+    state.agent_archived_owner.set(None);
+    let message = match &item.subject {
+        _ if item.is_archived() => "Checking out the files",
+        Some(perch_github::ItemSubject::Issue(_)) => "Reading the issue",
+        Some(perch_github::ItemSubject::PullRequest(_)) => "Reading the pull request",
+        None => "Reading the worktree",
+    };
+    let navigation_id = if item.is_archived() {
+        backend.restore_item(&item.id)
+    } else {
+        backend.open_item(&item.id)
+    };
+    state.begin_item_review(review, message, &item.id, navigation_id);
+    if let Some(subject) = &item.subject {
+        crate::review::notified::follow_subject(
+            state,
+            subject.repo_full_name(),
+            subject.kind(),
+            subject.number(),
+        );
+    }
+}
+
 pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     state.review.set(Some(review));
 
     let review_backend = backend.clone();
-    // Opening from the sidebar. An archived row is restored on the way,
-    // which the backend treats as the same act.
+    // Opening from the sidebar.
     let open_item: items::OpenItem = Rc::new({
         let backend = backend.clone();
-        move |item: &perch_github::Item| {
-            // An item open in another window is looked at there.
-            if crate::windows::raise_holding(&item.id, backend.window()) {
-                return;
-            }
-            state.pending_agent_navigation.set(None);
-            state.agent_archived_owner.set(None);
-            let message = match &item.subject {
-                _ if item.is_archived() => "Checking out the files",
-                Some(perch_github::ItemSubject::Issue(_)) => "Reading the issue",
-                Some(perch_github::ItemSubject::PullRequest(_)) => "Reading the pull request",
-                None => "Reading the worktree",
-            };
-            let navigation_id = if item.is_archived() {
-                backend.restore_item(&item.id)
-            } else {
-                backend.open_item(&item.id)
-            };
-            state.begin_item_review(review, message, &item.id, navigation_id);
-            if let Some(subject) = &item.subject {
-                crate::review::notified::follow_subject(
-                    state,
-                    subject.repo_full_name(),
-                    subject.kind(),
-                    subject.number(),
-                );
-            }
-        }
+        move |item: &perch_github::Item| open_item(state, review, &backend, item)
     });
     let panel_backend = backend.clone();
     let panel_open = open_item.clone();
     let review_open_item = open_item.clone();
     let key_backend = backend.clone();
     let capture_backend = backend.clone();
+    let pointer_backend = backend.clone();
     let references_backend = backend.clone();
 
     // Settings the sidebar asks to be remembered go through here, which is
@@ -392,7 +402,18 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             floem::context::EventCallbackConfig {
                 phases: floem::context::Phases::CAPTURE,
             },
-            move |cx, _: &PointerButtonEvent| {
+            move |cx, press: &PointerButtonEvent| {
+                // The mouse's back and forward buttons, from anywhere in
+                // the window.
+                use floem::ui_events::pointer::PointerButton;
+                if let Some(back) = match press.button {
+                    Some(PointerButton::X1) => Some(true),
+                    Some(PointerButton::X2) => Some(false),
+                    _ => None,
+                } {
+                    history::travel(state, review, &pointer_backend, back);
+                    return EventPropagation::Stop;
+                }
                 dismiss_popovers(review, cx.hit_path.as_deref());
                 EventPropagation::Continue
             },
@@ -612,6 +633,17 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         _ => {}
                     }
                 }
+                // Ctrl-- goes back and Ctrl-Shift-- forward, as in VS Code:
+                // from anywhere, a box being typed in or the empty pane too,
+                // since neither key types anything.
+                if key.code == Code::Minus
+                    && (key.modifiers == Modifiers::CONTROL
+                        || key.modifiers == Modifiers::CONTROL | Modifiers::SHIFT)
+                {
+                    let back = !key.modifiers.shift();
+                    history::travel(state, review, key_backend, back);
+                    return EventPropagation::Stop;
+                }
                 // Any box that takes typing keeps the keys below: `a` typed
                 // in the close-as-issue title is an `a`, not a composer.
                 let typing = typing || review.find_focused.get() || text_box_focused(cx, root_id);
@@ -657,8 +689,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 // The navigation keys, VS Code's: F12 goes to the definition
                 // of the caret's symbol, Cmd-F12 to its implementations,
                 // Shift-F12 asks for its references and Shift-Alt-H for its
-                // call hierarchy; Ctrl-- and Ctrl-Shift-- walk the jumps
-                // back and forward.
+                // call hierarchy.
                 if key.code == Code::F12 && key.modifiers.is_empty() {
                     crate::review::navigation::definition_at_cursor(review, &references_backend);
                     return EventPropagation::Stop;
@@ -676,15 +707,6 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 }
                 if key.code == Code::KeyH && key.modifiers == Modifiers::SHIFT | Modifiers::ALT {
                     crate::review::hierarchy::show_at_cursor(review, &references_backend);
-                    return EventPropagation::Stop;
-                }
-                if key.code == Code::Minus && key.modifiers == Modifiers::CONTROL {
-                    review.go_back();
-                    return EventPropagation::Stop;
-                }
-                if key.code == Code::Minus && key.modifiers == Modifiers::CONTROL | Modifiers::SHIFT
-                {
-                    review.go_forward();
                     return EventPropagation::Stop;
                 }
                 // Escape backs out of a thread's Delete first.
@@ -1003,6 +1025,7 @@ fn pane_with_bar(
                 Stack::horizontal((
                     sidebar::lights_lane(state, theme::REVIEW_HEADER_PADDING)
                         .style(move |s| s.apply_if(state.sidebar_open.get(), |s| s.hide())),
+                    history::buttons(state, review, backend.clone()),
                     title,
                 ))
                 .style(|s| {
@@ -1287,6 +1310,84 @@ mod tests {
         harness.dispatch_event(key(Code::BracketLeft, Key::Character("[".into()), OS_MOD));
         harness.rebuild();
         assert!(!state.new_work.open.get(), "Cmd-[ shuts it too");
+    }
+
+    /// The mouse's back button and Ctrl-- go back from anywhere, the empty
+    /// pane too, opening the item the place was on; its forward button
+    /// goes forward again.
+    #[test]
+    fn the_mouse_back_button_and_ctrl_minus_go_back_across_items() {
+        use crate::review::model::{Place, Spot};
+        use floem::ui_events::pointer::{
+            PointerButton, PointerButtonEvent, PointerEvent, PointerId, PointerInfo, PointerType,
+        };
+        let state = AppState::new();
+        let review = ReviewState::new();
+        let item = |id: &str| {
+            let mut item =
+                perch_github::Item::new("slatedb/slatedb", "2026-09-18T10:00:00Z".parse().unwrap());
+            item.id = id.into();
+            item
+        };
+        state.items.set(vec![item("a"), item("b")]);
+        let place = |id: &str| Place {
+            item: Some(id.into()),
+            spot: Spot::Conversation,
+        };
+        review.history.update(|h| {
+            h.push(place("a"));
+            h.push(place("b"));
+        });
+        let root = TestRoot::new();
+        let view = app_view(state, review, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+        let press = |button: PointerButton, at: floem::kurbo::Point, down: bool| {
+            let mut pointer_state = floem::ui_events::pointer::PointerState::default();
+            pointer_state.position.x = at.x;
+            pointer_state.position.y = at.y;
+            pointer_state.count = 1;
+            let event = PointerButtonEvent {
+                state: pointer_state,
+                button: Some(button),
+                pointer: PointerInfo {
+                    pointer_id: Some(PointerId::PRIMARY),
+                    persistent_device_id: None,
+                    pointer_type: PointerType::Mouse,
+                },
+            };
+            floem::event::Event::Pointer(if down {
+                PointerEvent::Down(event)
+            } else {
+                PointerEvent::Up(event)
+            })
+        };
+
+        // Pressed over the drawer control, Back goes back and does not
+        // also press the control.
+        let toggle = named(harness.root_id(), "drawer toggle")
+            .unwrap()
+            .get_visual_rect_no_clip()
+            .center();
+        harness.dispatch_event(press(PointerButton::X1, toggle, true));
+        harness.dispatch_event(press(PointerButton::X1, toggle, false));
+        harness.rebuild();
+        assert!(state.sidebar_open.get(), "the drawer control was pressed");
+        assert_eq!(state.open_item.get().as_deref(), Some("b"));
+        assert!(review.opening.get());
+
+        harness.dispatch_event(key(
+            Code::Minus,
+            Key::Character("-".into()),
+            Modifiers::CONTROL,
+        ));
+        assert_eq!(state.open_item.get().as_deref(), Some("a"));
+        assert!(!review.history.with(|h| h.can_go_back()));
+
+        // Nothing was open to come back to: Forward has nowhere to go.
+        harness.dispatch_event(press(PointerButton::X2, toggle, true));
+        assert_eq!(state.open_item.get().as_deref(), Some("a"));
     }
 
     /// A label anywhere in the window selects in the editor's blue, not

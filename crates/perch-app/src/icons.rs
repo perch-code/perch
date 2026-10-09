@@ -490,6 +490,14 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                      stroke="{c}" stroke-width="1.4"/>
                <path d="M6.3 2.7 V13.3" stroke="{c}" stroke-width="1.4"/>"#
         ),
+        SidebarIcon::Back => format!(
+            r#"<path d="M13 8 H3.4 M7.2 4.2 L3.4 8 L7.2 11.8" fill="none" stroke="{c}"
+                     stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#
+        ),
+        SidebarIcon::Forward => format!(
+            r#"<path d="M3 8 H12.6 M8.8 4.2 L12.6 8 L8.8 11.8" fill="none" stroke="{c}"
+                     stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#
+        ),
         // A box with an arrow leaving its top right corner: open elsewhere.
         SidebarIcon::External => format!(
             r#"<path d="M7 3.5 H4.2 a1.5 1.5 0 0 0 -1.5 1.5 V11.8 a1.5 1.5 0 0 0 1.5 1.5 H10.5
@@ -604,6 +612,9 @@ pub enum SidebarIcon {
     ExpandAll,
     /// A frame with a rule down its left third: the drawer toggle.
     Drawer,
+    /// Arrows left and right: Back and Forward.
+    Back,
+    Forward,
     /// A box with an arrow leaving it: open on GitHub.
     External,
     /// A head and shoulders: the reviewers and the assignees.
@@ -683,7 +694,7 @@ impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 71] = [
+    pub const ALL: [SidebarIcon; 73] = [
         SidebarIcon::Invite,
         SidebarIcon::Bug,
         SidebarIcon::Waiting,
@@ -725,6 +736,8 @@ impl SidebarIcon {
         SidebarIcon::Important,
         SidebarIcon::Caution,
         SidebarIcon::Drawer,
+        SidebarIcon::Back,
+        SidebarIcon::Forward,
         SidebarIcon::External,
         SidebarIcon::Link,
         SidebarIcon::ThreadHollow,

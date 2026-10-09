@@ -1578,8 +1578,10 @@ fn path_link(state: ReviewState, open_file: OpenFile, anchor: Anchor) -> impl In
     let line = anchor.start_line.min(anchor.line) as usize;
     Label::derived(move || anchor.path.clone())
         .on_event_stop(el::Click, move |_, _| {
-            state.show_tab(ItemTab::Code);
-            open_file(&path);
+            state.one_move(|| {
+                state.show_tab(ItemTab::Code);
+                open_file(&path);
+            });
             state.jump_to_line.set(Some(line.saturating_sub(1)));
         })
         .debug_name("thread-path")

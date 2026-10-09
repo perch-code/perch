@@ -203,8 +203,10 @@ fn show_file(state: ReviewState, backend: &Backend, path: &str) {
         return;
     }
     let load = floem::reactive::Effect::batch(|| {
-        state.show_tab(ItemTab::Code);
-        state.open_for_jump(|| state.open_tab(path))
+        state.one_move(|| {
+            state.show_tab(ItemTab::Code);
+            state.open_for_jump(|| state.open_tab(path))
+        })
     });
     if load {
         crate::review::load_file(backend, path);

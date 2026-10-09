@@ -33,7 +33,7 @@ pub fn header(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl I
     // through, and each control in them takes it back.
     title_bar(
         Stack::horizontal((
-            leading(app, state),
+            leading(app, state, backend.clone()),
             crate::review::switch::switch(state),
             trailing(app, state, backend),
         ))
@@ -72,11 +72,13 @@ fn side(s: floem::style::Style) -> floem::style::Style {
 }
 
 /// What is open: the lights and the drawer control while the drawer is
-/// shut, then the item's state as a glyph, and its title.
-fn leading(app: AppState, state: ReviewState) -> impl IntoView {
+/// shut, Back and Forward, then the item's state as a glyph, and its
+/// title.
+fn leading(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     Stack::horizontal((
         crate::ui::sidebar::lights_lane(app, theme::REVIEW_HEADER_PADDING)
             .style(move |s| s.apply_if(app.sidebar_open.get(), |s| s.hide())),
+        crate::ui::history::buttons(app, state, backend),
         state_glyph(state),
         Label::derived(move || title(state))
             .debug_name("item title")
@@ -427,8 +429,9 @@ pub(crate) mod tests {
         );
         assert_eq!(bar.y0, 0.0, "and at the window's top: it is the title bar");
 
-        // Left to right: the title, the switch, then GitHub, Agents,
-        // Start work, Review, and close against the right edge.
+        // Left to right: Back and Forward, the title, the switch, then
+        // GitHub, Agents, Start work, Review, and close against the right
+        // edge.
         let title = rect(&harness, "item title");
         let switch = rect(&harness, "item switch");
         let github = rect(&harness, "github button");
@@ -459,9 +462,12 @@ pub(crate) mod tests {
             bar.x1 - theme::REVIEW_HEADER_PADDING,
             "close sits against the bar's padding"
         );
-        // With the drawer open there is no lane before the title: the
-        // state glyph and its gap are all that is.
-        assert_eq!(title.x0, bar.x0 + theme::REVIEW_HEADER_PADDING + 16.0 + 8.0);
+        // With the drawer open there is no lane before the title: Back
+        // and Forward, the state glyph and their gaps are all that is.
+        let arrows = rect(&harness, "history arrows");
+        assert_eq!(arrows.x0, bar.x0 + theme::REVIEW_HEADER_PADDING);
+        assert_eq!(arrows.width(), 2.0 * 26.0);
+        assert_eq!(title.x0, arrows.x1 + 8.0 + 16.0 + 8.0);
         // The switch is at the bar's centre, with the drawer open and
         // with it shut.
         for open in [true, false] {

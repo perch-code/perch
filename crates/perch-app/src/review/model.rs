@@ -710,20 +710,32 @@ pub struct GotoAsk {
     pub noun: &'static str,
 }
 
-/// Somewhere the reader was: a file and a head line, for the jump keys.
+/// Somewhere the reader was, for Back and Forward: an item, and where on
+/// it. The item is `None` only for a review with no item, as in tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Place {
-    pub path: String,
-    pub line: usize,
+    pub item: Option<String>,
+    pub spot: Spot,
 }
 
-/// How many places the jump keys remember.
+/// Where on an item: Conversation, Code with no file open, or a head line
+/// of a file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Spot {
+    Conversation,
+    Code,
+    Line { path: String, line: usize },
+}
+
+/// How many places Back remembers.
 pub const HISTORY_CAP: usize = 50;
 
-/// Where the jumps came from and went. A jump pushes the place it left
-/// onto `back` and clears `forward`; back pops one and pushes the current
-/// place onto `forward`, and forward the other way. The oldest of `back`
-/// goes when there are more than the cap.
+/// Where the reader came from and went, as VS Code's Back and Forward
+/// keep it. Leaving a place pushes it onto `back` and clears `forward`;
+/// Back pops one and pushes the current place onto `forward`, and Forward
+/// the other way. The oldest of `back` goes when there are more than the
+/// cap. A place that is where the reader already is goes by without a
+/// step, so Back always moves.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct History {
     back: Vec<Place>,
@@ -731,9 +743,9 @@ pub struct History {
 }
 
 impl History {
-    /// A jump is about to leave `from`.
+    /// The reader is about to leave `from`.
     pub fn push(&mut self, from: Place) {
-        // Jumping from where the last jump left is one place, not two.
+        // Leaving where the last move left is one place, not two.
         if self.back.last() != Some(&from) {
             self.back.push(from);
         }
@@ -743,17 +755,35 @@ impl History {
         self.forward.clear();
     }
 
-    /// The place before this one, with `current` kept for forward.
-    pub fn back(&mut self, current: Place) -> Option<Place> {
-        let place = self.back.pop()?;
-        self.forward.push(current);
-        Some(place)
+    /// The place before this one, with `current` kept for Forward. No
+    /// current place, the empty pane, keeps nothing.
+    pub fn back(&mut self, current: Option<Place>) -> Option<Place> {
+        Self::step(&mut self.back, &mut self.forward, current)
     }
 
-    /// The place after this one, with `current` kept for back.
-    pub fn forward(&mut self, current: Place) -> Option<Place> {
-        let place = self.forward.pop()?;
-        self.back.push(current);
+    /// The place after this one, with `current` kept for Back.
+    pub fn forward(&mut self, current: Option<Place>) -> Option<Place> {
+        Self::step(&mut self.forward, &mut self.back, current)
+    }
+
+    pub fn can_go_back(&self) -> bool {
+        !self.back.is_empty()
+    }
+
+    pub fn can_go_forward(&self) -> bool {
+        !self.forward.is_empty()
+    }
+
+    fn step(from: &mut Vec<Place>, to: &mut Vec<Place>, current: Option<Place>) -> Option<Place> {
+        while from.last().is_some_and(|p| Some(p) == current.as_ref()) {
+            from.pop();
+        }
+        let place = from.pop()?;
+        if let Some(current) = current {
+            if to.last() != Some(&current) {
+                to.push(current);
+            }
+        }
         Some(place)
     }
 }
@@ -1644,9 +1674,16 @@ pub struct ReviewState {
     /// which holds the backend handle: the event that opens the panel has
     /// none, and asks for the root's calls this way.
     pub pending_calls: RwSignal<Vec<(u64, perch_lsp::lsp_types::CallHierarchyItem, Direction)>>,
-    /// Where the jumps came from, for `Ctrl--` and `Ctrl-Shift--`. Lives
-    /// as long as the item is open.
+    /// Where the reader has been, for Back and Forward: across the items
+    /// the window has shown, so it lives as long as the window.
     pub history: RwSignal<History>,
+    /// Set while a move is under way that has remembered where it left,
+    /// or needs nothing remembered: Back or Forward opening another item,
+    /// or a click that shows Code and then a file. See `one_move`.
+    quiet: RwSignal<bool>,
+    /// The place Back or Forward is opening another item for, gone to once
+    /// the item is ready and its pane is back.
+    arrival: RwSignal<Option<Place>>,
     /// The panel's height. Dragged.
     pub references_height: RwSignal<f64>,
     pub changed_files: RwSignal<Arc<Vec<ChangedFile>>>,
@@ -2089,6 +2126,8 @@ impl ReviewState {
             hierarchy_ask: RwSignal::new(None),
             pending_calls: RwSignal::new(Vec::new()),
             history: RwSignal::new(History::default()),
+            quiet: RwSignal::new(false),
+            arrival: RwSignal::new(None),
             references_height: RwSignal::new(crate::theme::REFERENCES_HEIGHT),
             changed_files: RwSignal::new(Arc::new(Vec::new())),
             tree: RwSignal::new(Arc::new(Vec::new())),
@@ -2204,6 +2243,11 @@ impl ReviewState {
     /// to the last checkout goes, so the next one's files are not shown
     /// under its name.
     pub fn begin(&self, message: &str) {
+        // Opened any way but Back or Forward, the item opens as it was
+        // left, not at the place a travel that never landed was after.
+        if !self.quiet.get_untracked() {
+            self.arrival.set(None);
+        }
         self.reset_checkout();
         // Whatever the last item still has on its way, a discussion or a
         // list of commits, must not land on the one being opened. Until
@@ -2221,6 +2265,7 @@ impl ReviewState {
     /// The item and `opening` are the caller's to set. Its pane is kept,
     /// for the next time it opens.
     fn reset_checkout(&self) {
+        self.remember_here();
         self.remember_pane();
         self.files_pending.set(None);
         self.files_reload.set(Vec::new());
@@ -2305,7 +2350,6 @@ impl ReviewState {
         self.hierarchy.set(None);
         self.hierarchy_ask.set(None);
         self.pending_calls.set(Vec::new());
-        self.history.set(History::default());
         self.pending_jump.set(None);
         self.changed_files.set(Arc::new(Vec::new()));
         self.tree.set(Arc::new(Vec::new()));
@@ -2459,6 +2503,7 @@ impl ReviewState {
         }
         // A write of the same value would still rebuild the pane.
         if self.tab.get_untracked() != tab {
+            self.remember_here();
             self.tab.set(tab);
         }
     }
@@ -2537,6 +2582,15 @@ impl ReviewState {
                     .update(|loading| loading.extend(paths.iter().cloned()));
             }
         });
+        // Back or Forward opened the item for a place on it: there, over
+        // the pane as it was left.
+        let id = self
+            .item
+            .with_untracked(|i| i.as_ref().map(|i| i.id.clone()));
+        if let Some(place) = self.arrival.get_untracked().filter(|p| p.item == id) {
+            self.arrival.set(None);
+            self.go_to_spot(place.spot);
+        }
         paths
     }
 
@@ -3108,51 +3162,131 @@ impl ReviewState {
         })
     }
 
-    /// Where the reader is: the active file and the caret's head line,
-    /// which the jump keys remember. `None` with no file open.
+    /// Where the reader is: the open item, and on it Conversation, or
+    /// Code at the caret's head line in the active file. `None` with no
+    /// item open.
     pub fn current_place(&self) -> Option<Place> {
-        let file = self.active_file()?;
-        let line = self
-            .last_position
-            .get_untracked()
-            .map(|(line, _)| line)
-            .or_else(|| file.buffer.head_line(self.cursor_line.get_untracked()))
-            .unwrap_or(0);
-        Some(Place {
-            path: file.path.clone(),
-            line,
+        floem::reactive::Effect::untrack(|| {
+            let item = self.item.with(|i| i.as_ref().map(|i| i.id.clone()));
+            let spot = match self.tab.get() {
+                ItemTab::Conversation => Spot::Conversation,
+                ItemTab::Code => match self.active.get() {
+                    Some(path) => {
+                        // The file's own caret first: `last_position` can
+                        // still be the last file's while this one opens.
+                        // A file still loading is at its top.
+                        let line = self.file(&path).and_then(|file| {
+                            self.file_places
+                                .with(|places| places.get(&path).and_then(|p| p.caret))
+                                .and_then(|(line, _)| file.buffer.head_line(line))
+                                .or_else(|| self.last_position.get().map(|(line, _)| line))
+                                .or_else(|| file.buffer.head_line(self.cursor_line.get()))
+                        });
+                        Spot::Line {
+                            path,
+                            line: line.unwrap_or(0),
+                        }
+                    }
+                    None => Spot::Code,
+                },
+            };
+            // Conversation or an empty Code of no item is nowhere.
+            if item.is_none() && !matches!(spot, Spot::Line { .. }) {
+                return None;
+            }
+            Some(Place { item, spot })
         })
+    }
+
+    /// Remember the place the reader is about to leave, for Back.
+    pub fn remember_here(&self) {
+        if self.quiet.get_untracked() {
+            return;
+        }
+        if let Some(from) = self.current_place() {
+            self.history.update(|h| h.push(from));
+        }
+    }
+
+    /// Take `steps` as one move: the place they leave is remembered once,
+    /// not again for each tab or file they show on the way. Code then a
+    /// file, from Conversation, is one step back to Conversation.
+    pub fn one_move<R>(&self, steps: impl FnOnce() -> R) -> R {
+        if self.quiet.get_untracked() {
+            return steps();
+        }
+        self.remember_here();
+        self.quiet.set(true);
+        let done = steps();
+        self.quiet.set(false);
+        done
     }
 
     /// Jump to a head line of a file, remembering where the jump left. The
     /// caret lands at `column` on the line.
     pub fn navigate_to(&self, path: &str, line: usize, column: usize) {
-        if let Some(from) = self.current_place() {
-            self.history.update(|h| h.push(from));
-        }
+        self.remember_here();
         self.pending_jump
             .set(Some((path.to_string(), line, column)));
     }
 
-    /// `Ctrl--`: back to where the last jump left.
-    pub fn go_back(&self) {
-        let Some(current) = self.current_place() else {
-            return;
-        };
-        let place = self.history.try_update(|h| h.back(current)).flatten();
-        if let Some(place) = place {
-            self.pending_jump.set(Some((place.path, place.line, 0)));
+    /// Back, `Ctrl--`, or Forward, `Ctrl-Shift--`. A place on the open
+    /// item is gone to here. One on another item is answered, for the
+    /// caller to open with `travel_to`, which has the means to.
+    pub fn travel(&self, back: bool) -> Option<Place> {
+        let current = self.current_place();
+        let place = self
+            .history
+            .try_update(|h| {
+                if back {
+                    h.back(current)
+                } else {
+                    h.forward(current)
+                }
+            })
+            .flatten()?;
+        let open = self
+            .item
+            .with_untracked(|i| i.as_ref().map(|i| i.id.clone()));
+        if place.item == open {
+            self.go_to_spot(place.spot);
+            return None;
         }
+        Some(place)
     }
 
-    /// `Ctrl-Shift--`: forward again.
-    pub fn go_forward(&self) {
-        let Some(current) = self.current_place() else {
+    /// Open the item a travel answered, through `open`, and go to its
+    /// place once it is ready. Leaving the item open now is not a step:
+    /// the travel kept it already.
+    pub fn travel_to(&self, place: Place, open: impl FnOnce(&str)) {
+        let Some(item) = place.item.clone() else {
             return;
         };
-        let place = self.history.try_update(|h| h.forward(current)).flatten();
-        if let Some(place) = place {
-            self.pending_jump.set(Some((place.path, place.line, 0)));
+        self.arrival.set(Some(place));
+        self.quiet.set(true);
+        open(&item);
+        self.quiet.set(false);
+    }
+
+    /// Show a spot on the open item, remembering nothing.
+    fn go_to_spot(&self, spot: Spot) {
+        match spot {
+            Spot::Conversation => {
+                if self.tab.get_untracked() != ItemTab::Conversation {
+                    self.tab.set(ItemTab::Conversation);
+                }
+            }
+            Spot::Code => {
+                if self.tab.get_untracked() != ItemTab::Code {
+                    self.tab.set(ItemTab::Code);
+                }
+            }
+            Spot::Line { path, line } => {
+                self.pending_jump.set(Some((path, line, 0)));
+                if self.tab.get_untracked() != ItemTab::Code {
+                    self.tab.set(ItemTab::Code);
+                }
+            }
         }
     }
 
@@ -3181,12 +3315,15 @@ impl ReviewState {
                 }
             }
             None => {
+                let here = matches!(
+                    self.current_place(),
+                    Some(Place { spot: Spot::Line { path: open, .. }, .. }) if open == path
+                );
+                if !here {
+                    self.remember_here();
+                }
                 if self.tab.get_untracked() != ItemTab::Code {
                     self.show_tab(ItemTab::Code);
-                }
-                let from = self.current_place().filter(|from| from.path != path);
-                if let Some(from) = from {
-                    self.history.update(|h| h.push(from));
                 }
                 self.pending_open.set(Some(path.to_string()));
             }
@@ -3602,6 +3739,13 @@ impl ReviewState {
     ///
     /// Returns true when the caller should ask the backend to load the file.
     pub fn open_tab(&self, path: &str) -> bool {
+        // A jump or a link remembered where it left before it opened the
+        // file; Back and Forward remember nothing.
+        if !self.opening_for_jump.get_untracked()
+            && self.active.with_untracked(|a| a.as_deref() != Some(path))
+        {
+            self.remember_here();
+        }
         let composer_was_in_code = self.composer_in_code_untracked();
         let already_open = self.tabs.with(|t| t.iter().any(|x| x.path == path));
         if !already_open {
@@ -3707,6 +3851,10 @@ impl ReviewState {
 
     pub fn close_tab(&self, path: &str) {
         let was_active = self.active.with(|a| a.as_deref() == Some(path));
+        // Back opens it again, as in VS Code.
+        if was_active {
+            self.remember_here();
+        }
         let composer_was_in_code = self.composer_in_code_untracked();
         let mut neighbour = None;
 
@@ -7369,40 +7517,47 @@ mod tests {
     #[test]
     fn the_history_goes_back_and_forward_and_drops_the_oldest() {
         let place = |line: usize| Place {
-            path: "src/a.rs".into(),
-            line,
+            item: None,
+            spot: Spot::Line {
+                path: "src/a.rs".into(),
+                line,
+            },
         };
         let mut history = History::default();
-        assert_eq!(history.back(place(0)), None);
-        assert_eq!(history.forward(place(0)), None);
+        assert_eq!(history.back(Some(place(0))), None);
+        assert_eq!(history.forward(Some(place(0))), None);
 
         // Two jumps: from 1 to 5, then from 5 to 9.
         history.push(place(1));
         history.push(place(5));
 
         // Back lands on 5 with 9 kept ahead, then on 1 with 5 ahead.
-        assert_eq!(history.back(place(9)), Some(place(5)));
-        assert_eq!(history.back(place(5)), Some(place(1)));
-        assert_eq!(history.back(place(1)), None, "nothing before the first");
-        assert_eq!(history.forward(place(1)), Some(place(5)));
-        assert_eq!(history.forward(place(5)), Some(place(9)));
-        assert_eq!(history.forward(place(9)), None);
+        assert_eq!(history.back(Some(place(9))), Some(place(5)));
+        assert_eq!(history.back(Some(place(5))), Some(place(1)));
+        assert_eq!(
+            history.back(Some(place(1))),
+            None,
+            "nothing before the first"
+        );
+        assert_eq!(history.forward(Some(place(1))), Some(place(5)));
+        assert_eq!(history.forward(Some(place(5))), Some(place(9)));
+        assert_eq!(history.forward(Some(place(9))), None);
 
         // A jump from the middle of the history clears what was ahead.
-        assert_eq!(history.back(place(9)), Some(place(5)));
+        assert_eq!(history.back(Some(place(9))), Some(place(5)));
         history.push(place(5));
-        assert_eq!(history.forward(place(20)), None);
+        assert_eq!(history.forward(Some(place(20))), None);
         // And jumping twice from one place is one place, not two.
         history.push(place(5));
-        assert_eq!(history.back(place(20)), Some(place(5)));
-        assert_eq!(history.back(place(5)), Some(place(1)));
+        assert_eq!(history.back(Some(place(20))), Some(place(5)));
+        assert_eq!(history.back(Some(place(5))), Some(place(1)));
 
         let mut long = History::default();
         for line in 0..(HISTORY_CAP + 10) {
             long.push(place(line));
         }
         let mut back = 0;
-        while long.back(place(999)).is_some() {
+        while long.back(Some(place(999))).is_some() {
             back += 1;
         }
         assert_eq!(back, HISTORY_CAP, "the oldest were dropped");
@@ -7411,6 +7566,7 @@ mod tests {
     #[test]
     fn a_jump_remembers_where_it_left_and_the_keys_walk_the_history() {
         let state = ReviewState::new();
+        state.tab.set(ItemTab::Code);
         let file = |path: &str| {
             Arc::new(crate::backend::build_loaded_file(
                 path.into(),
@@ -7432,20 +7588,20 @@ mod tests {
 
         // The view opened b.rs and the caret landed on line 2.
         state.pending_jump.set(None);
-        state.open_tab("src/b.rs");
+        state.open_for_jump(|| state.open_tab("src/b.rs"));
         state.finish_load("src/b.rs", file("src/b.rs"));
         state.last_position.set(Some((2, 3)));
 
-        state.go_back();
+        state.travel(true);
         assert_eq!(state.pending_jump.get(), Some(("src/a.rs".into(), 1, 0)));
         state.pending_jump.set(None);
-        state.open_tab("src/a.rs");
+        state.open_for_jump(|| state.open_tab("src/a.rs"));
         state.last_position.set(Some((1, 0)));
 
-        state.go_forward();
+        state.travel(false);
         assert_eq!(state.pending_jump.get(), Some(("src/b.rs".into(), 2, 0)));
         state.pending_jump.set(None);
-        state.go_forward();
+        state.travel(false);
         assert_eq!(state.pending_jump.get(), None, "nothing ahead");
     }
 
