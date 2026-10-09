@@ -525,6 +525,46 @@ async fn closing_patches_the_pull_request_closed_and_reads_back_its_state() {
 }
 
 #[tokio::test]
+async fn reopening_patches_the_pull_request_open() {
+    let (base, requests) = spawn(vec![Response::new(
+        "200 OK",
+        r#"{"number":42,"state":"open","merged":false,
+            "head":{"sha":"abc123","ref":"feature","repo":{"full_name":"a/b"}},
+            "base":{"sha":"base","ref":"main","repo":{"full_name":"a/b"}}}"#,
+    )]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let reopened = github.reopen_pull_request("a/b", 42).await.unwrap();
+    assert!(reopened.is_open());
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests[0].method, "PATCH");
+    assert_eq!(requests[0].path, "/repos/a/b/pulls/42");
+    let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(body, serde_json::json!({ "state": "open" }));
+}
+
+#[tokio::test]
+async fn reopening_an_issue_patches_it_open() {
+    let (base, requests) = spawn(vec![Response::new(
+        "200 OK",
+        r#"{"number":7,"title":"Fence","state":"open","state_reason":"reopened",
+            "user":{"login":"rohan"},"updated_at":"2026-09-25T10:00:00Z"}"#,
+    )]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let reopened = github.reopen_issue("a/b", 7).await.unwrap();
+    assert!(reopened.is_open());
+    assert_eq!(reopened.repo_full_name, "a/b");
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests[0].method, "PATCH");
+    assert_eq!(requests[0].path, "/repos/a/b/issues/7");
+    let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(body, serde_json::json!({ "state": "open" }));
+}
+
+#[tokio::test]
 async fn marking_ready_asks_for_the_id_then_names_it_in_the_mutation() {
     let (base, requests) = spawn(vec![
         Response::new(
@@ -704,19 +744,26 @@ async fn whether_the_reader_may_close_an_issue_is_asked_of_graphql() {
     let (base, requests) = spawn(vec![
         Response::new(
             "200 OK",
-            r#"{"data":{"repository":{"issue":{"viewer_can_close":true}}}}"#,
+            r#"{"data":{"repository":{"issue":{"viewer_can_close":true,"viewer_can_reopen":false}}}}"#,
         ),
         Response::new("200 OK", r#"{"data":{"repository":{"issue":null}}}"#),
     ]);
     let github = GitHub::with_base_uri("token", &base).unwrap();
 
-    assert!(github.viewer_can_close_issue("a/b", 7).await.unwrap());
+    assert_eq!(
+        github.viewer_can_close_issue("a/b", 7).await.unwrap(),
+        perch_github::IssueRights {
+            close: true,
+            reopen: false
+        }
+    );
     assert!(github.viewer_can_close_issue("a/b", 8).await.is_err());
 
     let requests = requests.lock().unwrap();
     assert_eq!(requests[0].path, "/graphql");
     let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
     assert!(body["query"].as_str().unwrap().contains("viewerCanClose"));
+    assert!(body["query"].as_str().unwrap().contains("viewerCanReopen"));
     assert_eq!(
         body["variables"],
         serde_json::json!({ "owner": "a", "name": "b", "number": 7 })

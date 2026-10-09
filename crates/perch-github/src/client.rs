@@ -31,7 +31,7 @@ use crate::discussion::{
     ReviewCommentPayload, ReviewPayload, ReviewThreadState, ReviewThreadsData,
     REVIEW_THREADS_MAX_PAGES, REVIEW_THREADS_QUERY,
 };
-use crate::items::{Issue, IssueCloseReason, IssuePayload};
+use crate::items::{Issue, IssueCloseReason, IssuePayload, IssueRights};
 use crate::model::{SubjectSnapshot, SubjectState, Thread};
 use crate::pulls::{
     check_sighting, rest_check_sighting, CheckSighting, CommitMessage, MergeMethod, MergeRequest,
@@ -516,6 +516,27 @@ impl GitHub {
         repo_full_name: &str,
         number: u64,
     ) -> Result<PullRequest, Error> {
+        self.set_pull_request_state(repo_full_name, number, "closed")
+            .await
+    }
+
+    /// Reopen a closed pull request, as `close_pull_request` closes one.
+    /// GitHub refuses one whose head branch is gone.
+    pub async fn reopen_pull_request(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+    ) -> Result<PullRequest, Error> {
+        self.set_pull_request_state(repo_full_name, number, "open")
+            .await
+    }
+
+    async fn set_pull_request_state(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+        state: &'static str,
+    ) -> Result<PullRequest, Error> {
         let (owner, name) = repo_parts(repo_full_name)?;
 
         #[derive(serde::Serialize)]
@@ -527,7 +548,7 @@ impl GitHub {
         let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
         let response = self
-            .write(Write::Patch, &path, Some(&Request { state: "closed" }))
+            .write(Write::Patch, &path, Some(&Request { state }))
             .await?;
         let body = self
             .finish_response(response, &[StatusCode::OK], &format!("PATCH {path}"))
@@ -1643,14 +1664,40 @@ impl GitHub {
         Ok(payload.into_issue(repo_full_name))
     }
 
-    /// Whether the reader may close an issue: its author may, and so may
-    /// anyone with triage access to its repository. GitHub works it out,
-    /// as `viewerCanClose`.
+    /// Reopen a closed issue: `PATCH /issues/{number}` with `state:
+    /// open`, which answers with the issue as it now stands.
+    pub async fn reopen_issue(&self, repo_full_name: &str, number: u64) -> Result<Issue, Error> {
+        let (owner, name) = repo_parts(repo_full_name)?;
+
+        #[derive(serde::Serialize)]
+        struct Request {
+            state: &'static str,
+        }
+
+        let path = format!("/repos/{owner}/{name}/issues/{number}");
+        let _request_guard = self.api_permit().await;
+        self.check_rate_limit()?;
+        let response = self
+            .write(Write::Patch, &path, Some(&Request { state: "open" }))
+            .await?;
+        let body = self
+            .finish_response(response, &[StatusCode::OK], &format!("PATCH {path}"))
+            .await?;
+        let payload: IssuePayload =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        Ok(payload.into_issue(repo_full_name))
+    }
+
+    /// Whether the reader may close an issue, and whether they may reopen
+    /// it: its author may close it, and so may anyone with triage access
+    /// to its repository, who may also reopen it. GitHub works both out,
+    /// as `viewerCanClose` and `viewerCanReopen`, each false while the
+    /// issue is already that way.
     pub async fn viewer_can_close_issue(
         &self,
         repo_full_name: &str,
         number: u64,
-    ) -> Result<bool, Error> {
+    ) -> Result<IssueRights, Error> {
         let (owner, name) = repo_parts(repo_full_name)?;
 
         #[derive(serde::Deserialize)]
@@ -1664,12 +1711,17 @@ impl GitHub {
         #[derive(serde::Deserialize)]
         struct IssueNode {
             viewer_can_close: bool,
+            #[serde(default)]
+            viewer_can_reopen: bool,
         }
 
         let payload = serde_json::json!({
             "query": "query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
-    issue(number: $number) { viewer_can_close: viewerCanClose }
+    issue(number: $number) {
+      viewer_can_close: viewerCanClose
+      viewer_can_reopen: viewerCanReopen
+    }
   }
 }",
             "variables": { "owner": owner, "name": name, "number": number },
@@ -1677,7 +1729,10 @@ impl GitHub {
         let data: Data = self.graphql(&payload, "viewer can close").await?;
         data.repository
             .and_then(|repository| repository.issue)
-            .map(|issue| issue.viewer_can_close)
+            .map(|issue| IssueRights {
+                close: issue.viewer_can_close,
+                reopen: issue.viewer_can_reopen,
+            })
             .ok_or_else(|| Error::Decode(format!("GitHub has no issue {repo_full_name}#{number}")))
     }
 

@@ -83,6 +83,13 @@ impl Issue {
     }
 }
 
+/// What GitHub lets the reader do to an issue's state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IssueRights {
+    pub close: bool,
+    pub reopen: bool,
+}
+
 /// Why an issue is closed, as GitHub's Close issue menu offers it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum IssueCloseReason {

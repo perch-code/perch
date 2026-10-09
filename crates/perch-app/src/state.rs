@@ -1652,6 +1652,7 @@ impl AppState {
                 review.install_issue_reactions(&issue, &comments);
                 if fresh {
                     review.issue_closable.set(None);
+                    review.issue_reopenable.set(None);
                 }
                 review.issue.set(Some(issue));
                 review.issue_comments.set(comments);
@@ -2687,7 +2688,7 @@ impl AppState {
                 item_id,
                 repo_full_name,
                 number,
-                closable,
+                rights,
             } => {
                 let same_issue = review.issue.with_untracked(|current| {
                     current.as_ref().is_some_and(|current| {
@@ -2695,7 +2696,8 @@ impl AppState {
                     })
                 });
                 if review.is_item(&item_id) && same_issue {
-                    review.issue_closable.set(Some(closable));
+                    review.issue_closable.set(Some(rights.close));
+                    review.issue_reopenable.set(Some(rights.reopen));
                 }
             }
             Event::CommitsReady {
@@ -2805,6 +2807,11 @@ impl AppState {
             Event::DraftSet { item_id } => {
                 if review.is_item(&item_id) {
                     review.draft_pending.set(None);
+                }
+            }
+            Event::StateChanged { item_id } => {
+                if review.is_item(&item_id) {
+                    review.state_pending.set(None);
                 }
             }
             Event::BranchPushed { item_id } => {
@@ -3004,7 +3011,8 @@ impl AppState {
             | Event::OpenPullRequestFailed { .. }
             | Event::BranchPushed { .. }
             | Event::BranchPushFailed { .. }
-            | Event::DraftSet { .. } => {}
+            | Event::DraftSet { .. }
+            | Event::StateChanged { .. } => {}
             // What the reader did sends the whole list, so whatever a poll
             // was holding back is in it.
             Event::Items(items) => {
@@ -5885,13 +5893,17 @@ mod tests {
             item_id: item_id.into(),
             repo_full_name: "slatedb/slatedb".into(),
             number,
-            closable: true,
+            rights: perch_github::IssueRights {
+                close: true,
+                reopen: false,
+            },
         };
         app.apply_with_review(closable("other", 42), review);
         app.apply_with_review(closable("wt", 43), review);
         assert_eq!(review.issue_closable.get(), None);
         app.apply_with_review(closable("wt", 42), review);
         assert_eq!(review.issue_closable.get(), Some(true));
+        assert_eq!(review.issue_reopenable.get(), Some(false));
 
         let item = review.item.get_untracked().unwrap();
         app.apply_with_review(
