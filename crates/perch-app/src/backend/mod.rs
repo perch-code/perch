@@ -707,6 +707,13 @@ pub enum Command {
         item_id: String,
         draft: bool,
     },
+    /// Close or reopen the item's pull request or issue, as its state
+    /// pill's menu does. `StateChanged` answers either way; a refusal is
+    /// a notice.
+    ChangeState {
+        item_id: String,
+        change: StateChange,
+    },
     /// Close the item's pull request without merging it, posting `body`
     /// as an issue comment first when it says anything. `token` is the
     /// same kind as `PostIssueComment`'s.
@@ -1110,6 +1117,10 @@ pub enum Event {
     DraftSet {
         item_id: String,
     },
+    /// A `ChangeState` is over, whether GitHub took it or not.
+    StateChanged {
+        item_id: String,
+    },
     BranchPushed {
         item_id: String,
     },
@@ -1453,12 +1464,13 @@ pub enum Event {
         item: Arc<Item>,
         issue: Arc<perch_github::Issue>,
     },
-    /// Whether the reader may close the open issue, as GitHub says.
+    /// Whether the reader may close the open issue, and reopen it, as
+    /// GitHub says.
     IssueClosable {
         item_id: String,
         repo_full_name: String,
         number: u64,
-        closable: bool,
+        rights: perch_github::IssueRights,
     },
     /// The issue's number once it is open, whatever came after it, or why
     /// nothing happened. A comment or close GitHub refused after the issue
@@ -2823,6 +2835,15 @@ impl Backend {
         let _ = self.commands.send(Command::SetDraft {
             item_id: item_id.to_string(),
             draft,
+        });
+    }
+
+    /// Close or reopen the item's pull request or issue. The item comes
+    /// back with GitHub's answer, then `StateChanged`.
+    pub fn change_state(&self, item_id: &str, change: StateChange) {
+        let _ = self.commands.send(Command::ChangeState {
+            item_id: item_id.to_string(),
+            change,
         });
     }
 
@@ -5009,6 +5030,12 @@ async fn run(
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     commit_suggestion(&ctx, &item_id, token, commit).await;
+                });
+            }
+            Command::ChangeState { item_id, change } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    change_state(&ctx, &item_id, change).await;
                 });
             }
             Command::SetDraft { item_id, draft } => {
@@ -11361,19 +11388,111 @@ async fn learn_issue_closable(ctx: &Ctx, item_id: &str, repo_full_name: &str, nu
         return;
     };
     match github.viewer_can_close_issue(repo_full_name, number).await {
-        Ok(closable) => {
+        Ok(rights) => {
             if ctx.is_open(item_id) {
                 let _ = ctx.events.send(Event::IssueClosable {
                     item_id: item_id.to_string(),
                     repo_full_name: repo_full_name.to_string(),
                     number,
-                    closable,
+                    rights,
                 });
             }
         }
         Err(error) => {
             tracing::info!(repo = repo_full_name, number, %error, "could not ask whether the issue may be closed");
         }
+    }
+}
+
+/// A close or a reopen from the state pill's menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateChange {
+    CloseIssue(perch_github::IssueCloseReason),
+    ClosePullRequest,
+    Reopen,
+}
+
+/// Close or reopen the item's pull request or issue, put GitHub's answer
+/// in the item, and read its conversation again for the change in its
+/// timeline. A refusal is a notice. An issue's rights are asked again,
+/// since whether the reader may reopen it is only known once it is
+/// closed.
+async fn change_state(ctx: &Ctx, item_id: &str, change: StateChange) {
+    match change_state_on_github(ctx, item_id, change).await {
+        Ok(done) => ctx.done(done),
+        Err(message) => {
+            tracing::info!(item = item_id, ?change, %message, "state not changed");
+            ctx.notice(message);
+        }
+    }
+    if ctx.is_open(item_id) {
+        let _ = ctx.events.send(Event::StateChanged {
+            item_id: item_id.to_string(),
+        });
+    }
+}
+
+/// `change_state` up to GitHub's answer: what was done, or why not.
+async fn change_state_on_github(
+    ctx: &Ctx,
+    item_id: &str,
+    change: StateChange,
+) -> Result<String, String> {
+    let item = ctx.item(item_id).ok_or("This item is no longer here")?;
+    let github = ctx
+        .github()
+        .ok_or("GitHub is unavailable while Perch is offline")?;
+    match (&item.subject, change) {
+        (Some(ItemSubject::PullRequest(_)), StateChange::ClosePullRequest) => {
+            let pull = closable_pull_request(ctx, item_id)?;
+            let installed = comment_and_close(ctx, item_id, &pull, "").await.map_err(
+                |(CloseFailure::Comment(message) | CloseFailure::Close(message))| message,
+            )?;
+            refetch_closed_discussion(ctx, item_id, installed).await;
+            Ok(format!("Closed {}#{}", pull.repo_full_name, pull.number))
+        }
+        (Some(ItemSubject::PullRequest(pull)), StateChange::Reopen) => {
+            if pull.is_open() || pull.merged {
+                return Err("This pull request is not closed".into());
+            }
+            let reopened = github
+                .reopen_pull_request(&pull.repo_full_name, pull.number)
+                .await
+                .map_err(|error| format!("GitHub could not reopen the pull request: {error}"))?;
+            let installed = install_pull_request_snapshot(ctx, item_id, reopened, None);
+            refetch_closed_discussion(ctx, item_id, installed).await;
+            Ok(format!("Reopened {}#{}", pull.repo_full_name, pull.number))
+        }
+        (Some(ItemSubject::Issue(issue)), StateChange::CloseIssue(reason)) => {
+            if !issue.is_open() {
+                return Err("This issue is no longer open".into());
+            }
+            let closed = github
+                .close_issue(&issue.repo_full_name, issue.number, reason)
+                .await
+                .map_err(|error| format!("GitHub could not close the issue: {error}"))?;
+            install_issue_snapshot(ctx, item_id, closed);
+            refresh_open_item(ctx, item_id).await;
+            learn_issue_closable(ctx, item_id, &issue.repo_full_name, issue.number).await;
+            Ok(format!("Closed {}#{}", issue.repo_full_name, issue.number))
+        }
+        (Some(ItemSubject::Issue(issue)), StateChange::Reopen) => {
+            if issue.is_open() {
+                return Err("This issue is already open".into());
+            }
+            let reopened = github
+                .reopen_issue(&issue.repo_full_name, issue.number)
+                .await
+                .map_err(|error| format!("GitHub could not reopen the issue: {error}"))?;
+            install_issue_snapshot(ctx, item_id, reopened);
+            refresh_open_item(ctx, item_id).await;
+            learn_issue_closable(ctx, item_id, &issue.repo_full_name, issue.number).await;
+            Ok(format!(
+                "Reopened {}#{}",
+                issue.repo_full_name, issue.number
+            ))
+        }
+        _ => Err("This item cannot be changed that way".into()),
     }
 }
 
@@ -14428,7 +14547,7 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
             .chain(comments.iter().map(|c| c.user_avatar_url.clone())),
     );
     ctx.send_threads(&item.id);
-    if !offline && issue.is_open() {
+    if !offline {
         let ctx = ctx.clone();
         let item_id = item.id.clone();
         let repo_full_name = issue.repo_full_name.clone();
@@ -26234,6 +26353,98 @@ read eof || true
             ),
             "{events:?}"
         );
+    }
+
+    /// The state pill closes an issue and reopens it, each time keeping
+    /// GitHub's answer, asking again whether the reader may close or
+    /// reopen it, and ending with `StateChanged`. A change that does not
+    /// apply is a notice and asks GitHub nothing.
+    #[tokio::test]
+    async fn the_state_pill_closes_and_reopens_an_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let sent: Arc<Mutex<Vec<String>>> = Arc::default();
+        let seen = sent.clone();
+        let (base, _) = serve_by_body(move |method, path, _, body| {
+            let path = path.split('?').next().unwrap_or(path);
+            seen.lock().unwrap().push(format!("{method} {path} {body}"));
+            match (method, path) {
+                ("PATCH", "/repos/a/b/issues/8") => {
+                    let open = body.contains(r#""state":"open""#);
+                    (
+                        "200 OK",
+                        serde_json::json!({
+                            "number": 8,
+                            "title": "t",
+                            "state": if open { "open" } else { "closed" },
+                            "state_reason": if open { "reopened" } else { "completed" },
+                            "user": { "login": "rohan" },
+                            "updated_at": "2026-09-25T10:00:00Z",
+                        })
+                        .to_string(),
+                    )
+                }
+                ("POST", "/graphql") => (
+                    "200 OK",
+                    r#"{"data":{"repository":{"issue":{"viewer_can_close":false,"viewer_can_reopen":true}}}}"#
+                        .to_string(),
+                ),
+                ("GET", _) => ("200 OK", "[]".to_string()),
+                _ => ("404 Not Found", "{}".to_string()),
+            }
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let issue = store_issue(&ctx, 8);
+        open_in_slot(&ctx, &issue);
+        let snapshot = issue.issue().cloned().unwrap();
+        ctx.slot.lock().unwrap().as_mut().unwrap().issue = Some(Arc::new((snapshot, Vec::new())));
+
+        change_state(
+            &ctx,
+            &issue.id,
+            StateChange::CloseIssue(perch_github::IssueCloseReason::Completed),
+        )
+        .await;
+        assert!(!ctx.item(&issue.id).unwrap().issue().unwrap().is_open());
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, Event::Done(m) if m == "Closed a/b#8")));
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Event::IssueClosable { rights, .. } if rights.reopen && !rights.close
+            )),
+            "{events:?}"
+        );
+        assert!(matches!(events.last(), Some(Event::StateChanged { .. })));
+        assert!(sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.starts_with("PATCH /repos/a/b/issues/8 ")
+                && r.contains(r#""state_reason":"completed""#)));
+
+        // Closed, it reopens, and is not closed by a reopen again.
+        change_state(&ctx, &issue.id, StateChange::Reopen).await;
+        assert!(ctx.item(&issue.id).unwrap().issue().unwrap().is_open());
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, Event::Done(m) if m == "Reopened a/b#8")));
+        let patches = |sent: &[String]| sent.iter().filter(|r| r.starts_with("PATCH")).count();
+        assert_eq!(patches(&sent.lock().unwrap()), 2);
+
+        change_state(&ctx, &issue.id, StateChange::Reopen).await;
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            matches!(
+                &events[..],
+                [Event::Notice(m), Event::StateChanged { .. }] if m.contains("already open")
+            ),
+            "{events:?}"
+        );
+        change_state(&ctx, &issue.id, StateChange::ClosePullRequest).await;
+        assert_eq!(patches(&sent.lock().unwrap()), 2);
     }
 
     /// With no discussion kept, the comment has nowhere to be appended,

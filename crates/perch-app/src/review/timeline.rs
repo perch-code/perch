@@ -96,6 +96,24 @@ impl Card {
         }
     }
 
+    /// When the card last changed on GitHub: a comment or a review when it
+    /// was said, an event when it happened, and a thread by its newest
+    /// message from GitHub. `None` for the description, where the page
+    /// starts anyway, and for Perch's own threads, which no notification
+    /// is about.
+    pub fn github_activity(&self) -> Option<Timestamp> {
+        match self {
+            Card::Description { .. } => None,
+            Card::Thread(t) => t
+                .messages
+                .iter()
+                .filter(|m| m.from_github())
+                .map(|m| m.created_at)
+                .max(),
+            _ => self.at(),
+        }
+    }
+
     /// Where two cards share a time: what the pull request did, then what
     /// people said about it, then what the reader asked.
     fn rank(&self) -> u8 {
@@ -383,6 +401,31 @@ pub fn timeline<'a>(
     // The sort is stable, so cards a list already had in order keep it.
     cards.sort_by_key(|c| (!matches!(c, Card::Description { .. }), c.at(), c.rank()));
     cards
+}
+
+/// How much later than what woke it a notification can be dated. GitHub
+/// dates the thread a few seconds after the comment, and the clocks of a
+/// review's comments and its submission differ by as much.
+pub const NOTIFIED_SLACK: jiff::SignedDuration = jiff::SignedDuration::from_secs(120);
+
+/// The card an unread notification dated `updated_at` is most likely
+/// about, with when it last changed: the newest GitHub activity no later
+/// than the notification. Anything after it, such as the reader's own
+/// reply, is not what woke them. Of two at the same time the first wins,
+/// so a review's summary comes before its line comments. `None` when
+/// nothing but the description is old enough.
+pub fn notified_card(cards: &[Card], updated_at: Timestamp) -> Option<(&Card, Timestamp)> {
+    let latest = updated_at.checked_add(NOTIFIED_SLACK).unwrap_or(updated_at);
+    let mut found: Option<(&Card, Timestamp)> = None;
+    for card in cards {
+        let Some(at) = card.github_activity().filter(|at| *at <= latest) else {
+            continue;
+        };
+        if found.is_none_or(|(_, best)| at > best) {
+            found = Some((card, at));
+        }
+    }
+    found
 }
 
 /// The review cards. A pending review is the reader's own draft on
@@ -1057,5 +1100,110 @@ pub(crate) mod tests {
             "requested changes"
         );
         assert_eq!(verdict(&review(1, "SOMETHING_NEW", "", None)), "commented");
+    }
+
+    /// A GitHub thread whose root was left at `root` and whose last reply
+    /// at `reply`, with a question of the reader's to Perch after both.
+    fn github_thread(root: &str, reply: &str) -> CommentThread {
+        let mut t = thread("gh-31", root, root, "epoch");
+        t.origin = ThreadOrigin::GitHub;
+        t.github_id = Some(31);
+        let mut first = t.messages.remove(0);
+        first.origin = ThreadOrigin::GitHub;
+        first.author = Author::GitHubUser("rohan".into());
+        first.github_id = Some(31);
+        let mut answer = first.clone();
+        answer.id = "gh-32".into();
+        answer.github_id = Some(32);
+        answer.created_at = at(reply);
+        let mut asked = first.clone();
+        asked.id = "local".into();
+        asked.origin = ThreadOrigin::Local;
+        asked.github_id = None;
+        asked.created_at = at("2026-09-18T09:00:00Z");
+        t.messages = vec![first, answer, asked];
+        t
+    }
+
+    #[test]
+    fn a_notification_is_about_the_newest_github_activity_no_later_than_it() {
+        let mut d = discussion(vec![], vec![]);
+        d.comments.push(comment(1, "2026-09-15T10:00:00Z", "first"));
+        d.comments
+            .push(comment(2, "2026-09-16T10:00:00Z", "second"));
+        let cards = timeline(Some(&pull()), Some(&d), None, &[], &[]);
+
+        let (card, when) = notified_card(&cards, at("2026-09-16T10:00:20Z")).unwrap();
+        assert_eq!(card.first_line(), "second");
+        assert_eq!(when, at("2026-09-16T10:00:00Z"));
+        assert_eq!(
+            notified_card(&cards, at("2026-09-15T10:00:20Z"))
+                .unwrap()
+                .0
+                .first_line(),
+            "first",
+            "the reply after the notification is not what it is about"
+        );
+        assert_eq!(
+            notified_card(&cards, at("2026-09-16T09:59:00Z"))
+                .unwrap()
+                .0
+                .first_line(),
+            "second",
+            "a comment dated a little after the notification still is"
+        );
+        assert_eq!(
+            notified_card(&cards, at("2026-09-14T00:00:00Z")),
+            None,
+            "the description is never a card to go to"
+        );
+    }
+
+    #[test]
+    fn a_reply_on_an_old_thread_makes_the_thread_the_newest() {
+        let mut d = discussion(vec![], vec![]);
+        d.comments.push(comment(1, "2026-09-16T10:00:00Z", "later"));
+        let t = github_thread("2026-09-15T10:00:00Z", "2026-09-17T10:00:00Z");
+        let cards = timeline(Some(&pull()), Some(&d), None, &[], &[t]);
+        assert_eq!(kinds(&cards), ["description", "thread", "comment"]);
+
+        let (card, when) = notified_card(&cards, at("2026-09-17T10:00:10Z")).unwrap();
+        assert_eq!(card.kind(), "thread");
+        assert_eq!(
+            when,
+            at("2026-09-17T10:00:00Z"),
+            "the reply, not the question to Perch"
+        );
+    }
+
+    #[test]
+    fn a_review_comes_before_its_line_comments_of_the_same_moment() {
+        let d = discussion(
+            vec![review(
+                9,
+                "APPROVED",
+                "Looks right.",
+                Some("2026-09-16T11:40:00Z"),
+            )],
+            vec![],
+        );
+        let t = github_thread("2026-09-16T11:40:00Z", "2026-09-16T11:40:00Z");
+        let cards = timeline(Some(&pull()), Some(&d), None, &[], &[t]);
+        assert_eq!(kinds(&cards), ["description", "review", "thread"]);
+        let (card, _) = notified_card(&cards, at("2026-09-16T11:40:05Z")).unwrap();
+        assert_eq!(card.kind(), "review");
+    }
+
+    #[test]
+    fn perchs_own_threads_and_events_since_are_not_what_a_notification_is_about() {
+        let mut d = discussion(vec![], vec![]);
+        d.comments.push(comment(1, "2026-09-15T10:00:00Z", "said"));
+        d.events = vec![event(PullEventKind::Merged, "2026-09-16T10:00:00Z")];
+        let asked = thread("t1", "2026-09-15T11:00:00Z", "2026-09-15T11:00:00Z", "why?");
+        let cards = timeline(Some(&pull()), Some(&d), None, &[], &[asked]);
+        let (card, _) = notified_card(&cards, at("2026-09-15T12:00:00Z")).unwrap();
+        assert_eq!(card.first_line(), "said");
+        let (card, _) = notified_card(&cards, at("2026-09-16T10:00:00Z")).unwrap();
+        assert_eq!(card.first_line(), "merged");
     }
 }

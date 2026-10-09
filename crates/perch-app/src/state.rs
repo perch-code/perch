@@ -1652,6 +1652,7 @@ impl AppState {
                 review.install_issue_reactions(&issue, &comments);
                 if fresh {
                     review.issue_closable.set(None);
+                    review.issue_reopenable.set(None);
                 }
                 review.issue.set(Some(issue));
                 review.issue_comments.set(comments);
@@ -2687,7 +2688,7 @@ impl AppState {
                 item_id,
                 repo_full_name,
                 number,
-                closable,
+                rights,
             } => {
                 let same_issue = review.issue.with_untracked(|current| {
                     current.as_ref().is_some_and(|current| {
@@ -2695,7 +2696,8 @@ impl AppState {
                     })
                 });
                 if review.is_item(&item_id) && same_issue {
-                    review.issue_closable.set(Some(closable));
+                    review.issue_closable.set(Some(rights.close));
+                    review.issue_reopenable.set(Some(rights.reopen));
                 }
             }
             Event::CommitsReady {
@@ -2805,6 +2807,11 @@ impl AppState {
             Event::DraftSet { item_id } => {
                 if review.is_item(&item_id) {
                     review.draft_pending.set(None);
+                }
+            }
+            Event::StateChanged { item_id } => {
+                if review.is_item(&item_id) {
+                    review.state_pending.set(None);
                 }
             }
             Event::BranchPushed { item_id } => {
@@ -3004,7 +3011,8 @@ impl AppState {
             | Event::OpenPullRequestFailed { .. }
             | Event::BranchPushed { .. }
             | Event::BranchPushFailed { .. }
-            | Event::DraftSet { .. } => {}
+            | Event::DraftSet { .. }
+            | Event::StateChanged { .. } => {}
             // What the reader did sends the whole list, so whatever a poll
             // was holding back is in it.
             Event::Items(items) => {
@@ -3391,6 +3399,23 @@ impl AppState {
             threads
                 .iter()
                 .any(|thread| thread.unread && thread.is_about(repo_full_name, kind, number))
+        })
+    }
+
+    /// The unread notification about the given pull request or issue,
+    /// whose activity opening the subject goes to. None when every
+    /// notification about it is read.
+    pub fn unread_thread(
+        &self,
+        repo_full_name: &str,
+        kind: perch_github::ItemKind,
+        number: u64,
+    ) -> Option<Thread> {
+        self.notifications.with_untracked(|threads| {
+            threads
+                .iter()
+                .find(|thread| thread.unread && thread.is_about(repo_full_name, kind, number))
+                .cloned()
         })
     }
 
@@ -4566,6 +4591,91 @@ mod tests {
         assert_eq!(review.tabs.with(Vec::len), 2);
         assert_eq!(review.active.get().as_deref(), Some("src/y.rs"));
         assert_eq!(app.reload.get(), ["src/y.rs", "src/x.rs"]);
+    }
+
+    /// Back and Forward walk across items: leaving one is a step, Back
+    /// opens it again at the place it was left, and Forward comes back.
+    /// Steps on the item open are taken there and then.
+    #[test]
+    fn back_and_forward_cross_items_and_land_where_they_left() {
+        use crate::review::model::{ItemTab, Spot};
+        let app = AppState::new();
+        let review = ReviewState::new();
+        app.begin_item_review(review, "Open", "a", 81);
+        app.apply_with_review(review_ready("a", 81), review);
+        review.open_tab("src/x.rs");
+        review.show_tab(ItemTab::Code);
+        app.begin_item_review(review, "Open", "b", 82);
+        app.apply_with_review(review_ready("b", 82), review);
+
+        // Back: a, on the file it was left on.
+        let place = review.travel(true).expect("a step to another item");
+        assert_eq!(place.item.as_deref(), Some("a"));
+        review.travel_to(place, |id| app.begin_item_review(review, "Open", id, 83));
+        app.apply_with_review(review_ready("a", 83), review);
+        assert!(review.is_item("a"));
+        assert_eq!(review.tab.get(), ItemTab::Code);
+        assert_eq!(review.pending_jump.get(), Some(("src/x.rs".into(), 0, 0)));
+        review.pending_jump.set(None);
+
+        // Back on a itself: Conversation, where it started.
+        assert_eq!(review.travel(true), None);
+        assert_eq!(review.tab.get(), ItemTab::Conversation);
+        assert!(!review.history.with(|h| h.can_go_back()));
+
+        // Forward twice: the file on a, then b.
+        assert_eq!(review.travel(false), None);
+        assert_eq!(review.tab.get(), ItemTab::Code);
+        let place = review.travel(false).expect("a step to b");
+        assert_eq!(place.item.as_deref(), Some("b"));
+        assert_eq!(place.spot, Spot::Conversation);
+        review.travel_to(place, |id| app.begin_item_review(review, "Open", id, 84));
+        app.apply_with_review(review_ready("b", 84), review);
+        assert!(review.is_item("b"));
+        assert!(
+            !review.history.with(|h| h.can_go_forward()),
+            "nothing ahead"
+        );
+        assert!(review.history.with(|h| h.can_go_back()));
+
+        // Opened any other way, an item is a new step and Forward goes.
+        review.travel(true).expect("a step to a");
+        app.begin_item_review(review, "Open", "c", 85);
+        app.apply_with_review(review_ready("c", 85), review);
+        assert!(!review.history.with(|h| h.can_go_forward()));
+        assert_eq!(review.tab.get(), ItemTab::Conversation, "c's own pane");
+    }
+
+    /// A click that shows Code and then a file is one step back to where
+    /// it was made; closing the file showing is a step, which Back undoes.
+    #[test]
+    fn a_move_of_several_steps_is_one_place_back() {
+        use crate::review::model::{ItemTab, Place, Spot};
+        let review = review_of("a");
+        let line = |path: &str| Place {
+            item: Some("a".into()),
+            spot: Spot::Line {
+                path: path.into(),
+                line: 0,
+            },
+        };
+        review.one_move(|| {
+            review.show_tab(ItemTab::Code);
+            review.open_tab("src/x.rs");
+        });
+        review.open_tab("src/y.rs");
+        review.close_tab("src/y.rs");
+        let mut history = review.history.get();
+        assert_eq!(history.back(None), Some(line("src/y.rs")));
+        assert_eq!(history.back(None), Some(line("src/x.rs")));
+        assert_eq!(
+            history.back(None),
+            Some(Place {
+                item: Some("a".into()),
+                spot: Spot::Conversation,
+            })
+        );
+        assert_eq!(history.back(None), None);
     }
 
     /// A ready for the item already open, as agent navigation within it
@@ -5968,13 +6078,17 @@ mod tests {
             item_id: item_id.into(),
             repo_full_name: "slatedb/slatedb".into(),
             number,
-            closable: true,
+            rights: perch_github::IssueRights {
+                close: true,
+                reopen: false,
+            },
         };
         app.apply_with_review(closable("other", 42), review);
         app.apply_with_review(closable("wt", 43), review);
         assert_eq!(review.issue_closable.get(), None);
         app.apply_with_review(closable("wt", 42), review);
         assert_eq!(review.issue_closable.get(), Some(true));
+        assert_eq!(review.issue_reopenable.get(), Some(false));
 
         let item = review.item.get_untracked().unwrap();
         app.apply_with_review(

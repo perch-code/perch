@@ -1090,14 +1090,18 @@ pub fn accept(state: ReviewState, open_file: &OpenFile, index: usize) {
         .active
         .with_untracked(|a| a.as_deref() == Some(path.as_str()));
     close(state, on_files && on_screen);
-    if !on_files {
-        state.show_tab(ItemTab::Code);
-    }
-    match line {
-        Some(line) => state.navigate_to(&path, line.max(1) - 1, column.map_or(0, |c| c.max(1) - 1)),
-        None if on_screen => {}
-        None => open_file(&path),
-    }
+    state.one_move(|| {
+        if !on_files {
+            state.show_tab(ItemTab::Code);
+        }
+        match line {
+            Some(line) => {
+                state.navigate_to(&path, line.max(1) - 1, column.map_or(0, |c| c.max(1) - 1))
+            }
+            None if on_screen => {}
+            None => open_file(&path),
+        }
+    });
 }
 
 /// The palette's keys, from the window while it is up: Escape, Enter,
@@ -2336,12 +2340,15 @@ mod window {
             harness.is_focused(editor),
             "the same editor, with the keyboard"
         );
-        // A jump the history remembers leaving from.
-        let here = crate::review::model::Place {
-            path: "src/x.rs".into(),
-            line: 2,
-        };
-        assert!(state.history.with(|h| h.clone()).back(here).is_some());
+        // A jump the history remembers leaving from: the top of the file.
+        let left = state.history.with(|h| h.clone()).back(None).map(|p| p.spot);
+        assert_eq!(
+            left,
+            Some(crate::review::model::Spot::Line {
+                path: "src/x.rs".into(),
+                line: 0,
+            })
+        );
     }
 
     #[test]

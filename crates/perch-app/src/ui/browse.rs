@@ -267,6 +267,7 @@ fn search_row(state: AppState, backend: Rc<Backend>, hit: SearchHit) -> impl Int
                 },
                 navigation_id,
             );
+            crate::review::notified::follow_subject(state, &open_repo, kind, number);
         })
         .right_click_menu(move || {
             search_menu(state, menu_backend.clone(), &repo, kind, number, &url)

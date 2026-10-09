@@ -18,6 +18,8 @@
 //! markers follow their anchor's side, and so does the `+` for a new
 //! question: the head offers it on its lines, and the base on the lines
 //! the change removed, as the stacked layout offers it on their ghosts.
+//! The `+` shows under the pointer on a line with a thread too, in place
+//! of its marker, so one line can hold several threads.
 //!
 //! The rows are the document's, not the buffer's: a row that is a line is
 //! numbered and barred from the buffer's row table, a divider's row holds
@@ -628,10 +630,13 @@ pub(crate) fn thread_mark(
     }
 }
 
-/// The marker for a thread starting on this row, or the `+` that starts one
-/// while the pointer is there, on a row that offers it: any line of the
-/// stacked layout, ghosts too, any head row, and a base row the change
-/// removed. A ghost's or a base row's question is on the base's lines.
+/// The `+` that starts a thread while the pointer is on a row that offers
+/// it: any line of the stacked layout, ghosts too, any head row, and a base
+/// row the change removed. A ghost's or a base row's question is on the
+/// base's lines. Otherwise the marker for a thread starting on the row, if
+/// there is one. The `+` stands in for the marker under the pointer, as
+/// github.com offers it on a line that already has comments, so a line can
+/// take a second thread, whose card stacks under the first's.
 fn anchor_slot(
     state: ReviewState,
     app: AppState,
@@ -665,11 +670,12 @@ fn anchor_slot(
             (thread, hovered)
         },
         move |(thread, hovered)| match (thread, hovered) {
-            // A thread on this line: solid in GitHub's blue when it holds
-            // a draft on its way there, solid for the reader's own, hollow
+            // A thread on this line and the pointer elsewhere, or on a row
+            // that offers no `+`: solid in GitHub's blue when it holds a
+            // draft on its way there, solid for the reader's own, hollow
             // and muted for one of GitHub's. Click scrolls the editor to
             // its card and flashes it.
-            (Some((id, origin, outdated, draft)), _) => {
+            (Some((id, origin, outdated, draft)), false) => {
                 let (icon, color) = thread_mark(origin, outdated, draft);
                 Container::new(sidebar_glyph(icon, color).style(|s| s.size(12.0, 12.0)))
                     .on_event_stop(el::Click, move |_, _| {
@@ -683,7 +689,7 @@ fn anchor_slot(
                     })
                     .into_any()
             }
-            (None, true) => {
+            (_, true) => {
                 let plus_file = plus_file.clone();
                 Container::new(
                     sidebar_glyph(SidebarIcon::Plus, theme::canvas).style(|s| s.size(11.0, 11.0)),

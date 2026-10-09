@@ -129,6 +129,9 @@ fn notification_row(
             if opens_inside {
                 if let Some(navigation_id) = navigation_id {
                     state.begin_open("Reading the notification", navigation_id);
+                    if let Some(review) = state.review.get_untracked() {
+                        crate::review::notified::follow(review, &open_thread);
+                    }
                 }
             } else {
                 if let Some(url) = &url {

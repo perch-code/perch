@@ -16,7 +16,7 @@ use floem::style::CursorStyle;
 use floem::views::{dyn_container, dyn_stack, Container, Decorators, Empty, Label, Stack};
 use perch_github::{CheckState, Item, ItemKind, ItemSubject, MentionableUser, SubjectState};
 
-use crate::backend::Backend;
+use crate::backend::{Backend, StateChange};
 use crate::icons::{self, SidebarIcon};
 use crate::review::cards::{avatar_url_for, tip, tip_with, verdict_glyph};
 use crate::review::model::ReviewState;
@@ -468,6 +468,56 @@ pub(crate) fn may_set_draft(app: AppState, state: ReviewState) -> bool {
     })
 }
 
+/// Whether the reader may close the pull request or the issue, or reopen
+/// it: GitHub lets a pull request's author, and anyone with triage access
+/// to its repository. For an issue it says, and until it does only an
+/// open issue's author is offered the close. Not offline, and not from
+/// an old review's snapshot.
+pub(crate) fn may_change_state(app: AppState, state: ReviewState) -> bool {
+    use perch_github::RepositoryPermission;
+
+    if state.offline.get() || state.historical_review.with(Option::is_some) {
+        return false;
+    }
+    let viewer = app
+        .viewer
+        .with(|v| v.as_ref().map(|(login, _)| login.clone()));
+    let authored = |login: &str| {
+        viewer
+            .as_deref()
+            .is_some_and(|v| v.eq_ignore_ascii_case(login))
+    };
+    if state.pull_request.with(Option::is_some) {
+        let triages = state.pull_request_overview.with(|overview| {
+            overview.as_ref().is_some_and(|overview| {
+                matches!(
+                    overview.viewer_permission,
+                    Some(
+                        RepositoryPermission::Admin
+                            | RepositoryPermission::Maintain
+                            | RepositoryPermission::Write
+                            | RepositoryPermission::Triage
+                    )
+                )
+            })
+        });
+        return state.pull_request.with(|pull| {
+            pull.as_ref()
+                .is_some_and(|pull| !pull.merged && (triages || authored(&pull.author_login)))
+        });
+    }
+    let (closable, reopenable) = (state.issue_closable.get(), state.issue_reopenable.get());
+    state.issue.with(|issue| {
+        issue.as_ref().is_some_and(|issue| {
+            if issue.is_open() {
+                closable.unwrap_or_else(|| authored(&issue.author_login))
+            } else {
+                reopenable.unwrap_or(false)
+            }
+        })
+    })
+}
+
 /// Convert the pull request to a draft, or mark it ready for review, as
 /// the state pill's menu and the merge box do.
 pub(crate) fn set_draft(state: ReviewState, backend: &Backend, draft: bool) {
@@ -481,51 +531,141 @@ pub(crate) fn set_draft(state: ReviewState, backend: &Backend, draft: bool) {
     backend.set_draft(&item_id, draft);
 }
 
-/// The state pill's menu: Ready for review on a draft, Convert to draft
-/// on an open pull request, greyed while either is under way.
-fn draft_menu(state: ReviewState, backend: Rc<Backend>, subject: SubjectState) -> Menu {
-    let pending = state.draft_pending.get_untracked();
-    let (label, draft) = match (subject, pending) {
-        (_, Some(false)) => ("Marking ready for review…", false),
-        (_, Some(true)) => ("Converting to draft…", true),
-        (SubjectState::PrDraft, None) => ("Ready for review", false),
-        (SubjectState::PrOpen, None) => ("Convert to draft", true),
-        _ => return Menu::new(),
+/// Close or reopen the pull request or the issue, as the state pill's
+/// menu and the duplicate search under it do.
+pub(crate) fn change_state(state: ReviewState, backend: &Backend, change: StateChange) {
+    let Some(item_id) = state
+        .item
+        .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+    else {
+        return;
     };
-    Menu::new().item(label, move |item| {
-        item.enabled(pending.is_none())
-            .action(move || set_draft(state, &backend, draft))
-    })
+    state.state_pending.set(Some(change));
+    backend.change_state(&item_id, change);
+}
+
+/// The state pill's menu: what the state can become. An open pull
+/// request converts to a draft and a draft is marked ready, when the
+/// reader may; either closes, and a closed one reopens. An open issue
+/// closes in GitHub's three ways, the last by a search for the issue it
+/// repeats, and a closed one reopens. A change under way is the one row,
+/// greyed.
+fn state_menu(
+    state: ReviewState,
+    backend: Rc<Backend>,
+    subject: SubjectState,
+    may: (bool, bool),
+    pill: floem::ViewId,
+) -> Menu {
+    let (may_draft, may_state) = may;
+    let pending = match (
+        state.draft_pending.get_untracked(),
+        state.state_pending.get_untracked(),
+    ) {
+        (Some(false), _) => Some("Marking ready for review\u{2026}"),
+        (Some(true), _) => Some("Converting to draft\u{2026}"),
+        (_, Some(StateChange::Reopen)) => Some("Reopening\u{2026}"),
+        (_, Some(_)) => Some("Closing\u{2026}"),
+        (None, None) => None,
+    };
+    if let Some(label) = pending {
+        return Menu::new().item(label, |item| item.enabled(false));
+    }
+    let change = |label: &'static str, change: StateChange| {
+        let backend = backend.clone();
+        move |menu: Menu| {
+            menu.item(label, move |item| {
+                item.action(move || change_state(state, &backend, change))
+            })
+        }
+    };
+    let mut menu = Menu::new();
+    match subject {
+        SubjectState::PrOpen | SubjectState::PrDraft => {
+            if may_draft {
+                let draft = subject == SubjectState::PrOpen;
+                let label = if draft {
+                    "Convert to draft"
+                } else {
+                    "Ready for review"
+                };
+                let backend = backend.clone();
+                menu = menu.item(label, move |item| {
+                    item.action(move || set_draft(state, &backend, draft))
+                });
+            }
+            if may_state {
+                if may_draft {
+                    menu = menu.separator();
+                }
+                menu = change("Close pull request", StateChange::ClosePullRequest)(menu);
+            }
+        }
+        SubjectState::PrClosed if may_state => {
+            menu = change("Reopen pull request", StateChange::Reopen)(menu);
+        }
+        SubjectState::IssueOpen if may_state => {
+            use perch_github::IssueCloseReason;
+            menu = change(
+                "Close as completed",
+                StateChange::CloseIssue(IssueCloseReason::Completed),
+            )(menu);
+            menu = change(
+                "Close as not planned",
+                StateChange::CloseIssue(IssueCloseReason::NotPlanned),
+            )(menu);
+            menu = menu.item("Close as duplicate\u{2026}", move |item| {
+                item.action(move || {
+                    crate::review::close_menu::search_duplicate(
+                        state,
+                        pill.get_visual_rect_no_clip(),
+                    )
+                })
+            });
+        }
+        SubjectState::IssueClosed | SubjectState::IssueNotPlanned if may_state => {
+            menu = change("Reopen issue", StateChange::Reopen)(menu);
+        }
+        _ => {}
+    }
+    menu
 }
 
 /// Open, Draft, Merged, Closed: the state's icon and its word, in the
 /// state's colour on a wash of it. A branch has no state, and no pill.
-/// An open pull request's or a draft's opens a menu to change between
-/// the two, when the reader may.
+/// It opens a menu of what the state can become, when the reader may
+/// change it: see `state_menu`.
 fn state_pill(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     // The overview, and the write access it says the reader has, is read
     // again on each refresh. What it said is kept meanwhile, so the menu
     // does not go for the moment of each one.
-    let changeable = Memo::new(move |prev: Option<&(Option<(String, u64)>, bool)>| {
+    type Changeable = (Option<(String, u64)>, (bool, bool));
+    let changeable = Memo::new(move |prev: Option<&Changeable>| {
         let pull = state
             .pull_request
             .with(|p| p.as_ref().map(|p| (p.repo_full_name.clone(), p.number)));
         let reading = state.pull_request_overview_loading.get()
             && state.pull_request_overview.with(Option::is_none);
-        let kept = prev.is_some_and(|(was, may)| *may && reading && *was == pull);
-        let may = kept || may_set_draft(app, state);
-        (pull, may)
+        let kept = |pick: fn(&(bool, bool)) -> bool| {
+            prev.is_some_and(|(was, may)| pick(may) && reading && *was == pull)
+        };
+        let may_draft = kept(|may| may.0) || may_set_draft(app, state);
+        let may_state = kept(|may| may.1) || may_change_state(app, state);
+        (pull, (may_draft, may_state))
     });
     let key = Memo::new(move |_| {
         let subject = subject_state(state);
-        let changes = changeable.with(|(_, may)| *may)
-            && matches!(subject, Some(SubjectState::PrOpen | SubjectState::PrDraft));
-        (subject, changes)
+        let (may_draft, may_state) = changeable.with(|(_, may)| *may);
+        let may_draft =
+            may_draft && matches!(subject, Some(SubjectState::PrOpen | SubjectState::PrDraft));
+        let may_state = may_state && !matches!(subject, Some(SubjectState::PrMerged) | None);
+        (subject, (may_draft, may_state))
     });
     dyn_container(
         move || key.get(),
-        move |(s, changes)| match s {
+        move |(s, may)| match s {
             Some(subject) => {
+                let changes = may.0 || may.1;
                 let color = move || icons::state_color(subject);
                 let pill = Stack::horizontal((
                     floem::views::svg(move || icons::state_icon(subject)).style(move |s| {
@@ -567,7 +707,8 @@ fn state_pill(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl I
                 });
                 if changes {
                     let backend = backend.clone();
-                    pill.dropdown(move || draft_menu(state, backend.clone(), subject))
+                    let id = pill.view_id();
+                    pill.dropdown(move || state_menu(state, backend.clone(), subject, may, id))
                         .into_any()
                 } else {
                     pill.into_any()
@@ -2576,10 +2717,11 @@ mod tests {
         state.item.set(Some(Arc::new(item)));
         let (backend, mut commands) = Backend::recording();
         let backend = Rc::new(backend);
+        let pill = floem::ViewId::new();
+        let menu = |subject| state_menu(state, backend.clone(), subject, (true, false), pill);
 
-        let menu = draft_menu(state, backend.clone(), SubjectState::PrDraft);
-        assert_eq!(menu.outline(), ["Ready for review"]);
-        menu.choose("Ready for review");
+        assert_eq!(menu(SubjectState::PrDraft).outline(), ["Ready for review"]);
+        menu(SubjectState::PrDraft).choose("Ready for review");
         assert!(matches!(
             commands.try_recv(),
             Ok(Command::SetDraft { item_id, draft: false }) if item_id == "pr"
@@ -2587,21 +2729,146 @@ mod tests {
         assert_eq!(state.draft_pending.get_untracked(), Some(false));
         // Under way: said, and not to be pressed again.
         assert_eq!(
-            draft_menu(state, backend.clone(), SubjectState::PrDraft).outline(),
+            menu(SubjectState::PrDraft).outline(),
             ["(Marking ready for review…)"]
         );
 
         state.draft_pending.set(None);
-        let menu = draft_menu(state, backend.clone(), SubjectState::PrOpen);
-        assert_eq!(menu.outline(), ["Convert to draft"]);
-        menu.choose("Convert to draft");
+        assert_eq!(menu(SubjectState::PrOpen).outline(), ["Convert to draft"]);
+        menu(SubjectState::PrOpen).choose("Convert to draft");
         assert!(matches!(
             commands.try_recv(),
             Ok(Command::SetDraft { item_id, draft: true }) if item_id == "pr"
         ));
 
         state.draft_pending.set(None);
-        assert!(draft_menu(state, backend, SubjectState::PrMerged).is_empty());
+        assert!(menu(SubjectState::PrMerged).is_empty());
+    }
+
+    #[test]
+    fn the_state_pill_s_menu_closes_and_reopens_a_pull_request_or_an_issue() {
+        use crate::backend::Command;
+        use perch_github::IssueCloseReason;
+
+        let _root = floem::headless::TestRoot::new();
+        let state = ReviewState::new();
+        let mut item = Item::new("slatedb/slatedb", "2026-09-20T09:00:00Z".parse().unwrap());
+        item.id = "it".into();
+        state.item.set(Some(Arc::new(item)));
+        let (backend, mut commands) = Backend::recording();
+        let backend = Rc::new(backend);
+        let pill = floem::ViewId::new();
+        let menu = |subject, may| state_menu(state, backend.clone(), subject, may, pill);
+        let mut sent = move || match commands.try_recv() {
+            Ok(Command::ChangeState { item_id, change }) if item_id == "it" => change,
+            other => panic!("{other:?}"),
+        };
+
+        assert_eq!(
+            menu(SubjectState::PrOpen, (true, true)).outline(),
+            ["Convert to draft", "—", "Close pull request"]
+        );
+        assert_eq!(
+            menu(SubjectState::PrDraft, (false, true)).outline(),
+            ["Close pull request"]
+        );
+        menu(SubjectState::PrOpen, (false, true)).choose("Close pull request");
+        assert_eq!(sent(), StateChange::ClosePullRequest);
+        assert_eq!(
+            menu(SubjectState::PrOpen, (true, true)).outline(),
+            ["(Closing…)"]
+        );
+
+        state.state_pending.set(None);
+        assert_eq!(
+            menu(SubjectState::PrClosed, (false, true)).outline(),
+            ["Reopen pull request"]
+        );
+        menu(SubjectState::PrClosed, (false, true)).choose("Reopen pull request");
+        assert_eq!(sent(), StateChange::Reopen);
+        assert_eq!(
+            menu(SubjectState::PrClosed, (false, true)).outline(),
+            ["(Reopening…)"]
+        );
+
+        state.state_pending.set(None);
+        assert_eq!(
+            menu(SubjectState::IssueOpen, (false, true)).outline(),
+            [
+                "Close as completed",
+                "Close as not planned",
+                "Close as duplicate…"
+            ]
+        );
+        menu(SubjectState::IssueOpen, (false, true)).choose("Close as not planned");
+        assert_eq!(
+            sent(),
+            StateChange::CloseIssue(IssueCloseReason::NotPlanned)
+        );
+
+        // A duplicate is searched for first, under the pill, and closes at
+        // a pick; Escape there leaves the search rather than going to the
+        // composer's ways.
+        state.state_pending.set(None);
+        menu(SubjectState::IssueOpen, (false, true)).choose("Close as duplicate…");
+        assert!(state
+            .close_menu
+            .get_untracked()
+            .is_some_and(|m| m.duplicate && m.direct));
+        crate::review::close_menu::back(state);
+        assert_eq!(state.close_menu.get_untracked(), None);
+
+        for closed in [SubjectState::IssueClosed, SubjectState::IssueNotPlanned] {
+            assert_eq!(menu(closed, (false, true)).outline(), ["Reopen issue"]);
+        }
+        menu(SubjectState::IssueClosed, (false, true)).choose("Reopen issue");
+        assert_eq!(sent(), StateChange::Reopen);
+
+        state.state_pending.set(None);
+        assert!(menu(SubjectState::IssueOpen, (false, false)).is_empty());
+        assert!(menu(SubjectState::PrClosed, (true, false)).is_empty());
+    }
+
+    #[test]
+    fn who_may_close_or_reopen_is_the_author_a_triager_or_whom_github_says() {
+        let (_harness, app, state) = issue_harness();
+        app.viewer.set(Some(("U".into(), String::new())));
+        assert!(
+            may_change_state(app, state),
+            "the issue's author, until GitHub says"
+        );
+        state.issue_closable.set(Some(false));
+        assert!(!may_change_state(app, state));
+        state.issue_closable.set(Some(true));
+        assert!(may_change_state(app, state));
+        state.offline.set(true);
+        assert!(!may_change_state(app, state));
+        state.offline.set(false);
+
+        let mut closed = (*state.issue.get_untracked().unwrap()).clone();
+        closed.state = "closed".into();
+        state.issue.set(Some(Arc::new(closed)));
+        assert!(
+            !may_change_state(app, state),
+            "a closed issue waits for GitHub"
+        );
+        state.issue_reopenable.set(Some(true));
+        assert!(may_change_state(app, state));
+
+        state.issue.set(None);
+        let mut pr = pull_request(7);
+        pr.author_login = "someone".into();
+        state.pull_request.set(Some(Arc::new(pr.clone())));
+        assert!(!may_change_state(app, state));
+        pr.author_login = "u".into();
+        state.pull_request.set(Some(Arc::new(pr.clone())));
+        assert!(may_change_state(app, state));
+        pr.state = "closed".into();
+        state.pull_request.set(Some(Arc::new(pr.clone())));
+        assert!(may_change_state(app, state), "to reopen it");
+        pr.merged = true;
+        state.pull_request.set(Some(Arc::new(pr)));
+        assert!(!may_change_state(app, state));
     }
 
     #[test]

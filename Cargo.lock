@@ -1110,7 +1110,7 @@ checksum = "98de4bbd547a563b716d8dfa9aad1cb19bfab00f4fa09a6a4ed21dbcf44ce9c4"
 [[package]]
 name = "floem"
 version = "0.2.0"
-source = "git+https://github.com/criccomini/floem?branch=perch#93012eab8eeb1bf4f9af739ad892defd63413f55"
+source = "git+https://github.com/criccomini/floem?branch=perch#b8eefb693f76e47ea0bd96fb7185cbe7cb4ef1c4"
 dependencies = [
  "bitflags 2.13.2",
  "clipboard-win",
@@ -1164,7 +1164,7 @@ dependencies = [
 [[package]]
 name = "floem-editor-core"
 version = "0.2.0"
-source = "git+https://github.com/criccomini/floem?branch=perch#93012eab8eeb1bf4f9af739ad892defd63413f55"
+source = "git+https://github.com/criccomini/floem?branch=perch#b8eefb693f76e47ea0bd96fb7185cbe7cb4ef1c4"
 dependencies = [
  "bitflags 2.13.2",
  "itertools",
@@ -1408,7 +1408,7 @@ dependencies = [
 [[package]]
 name = "floem_reactive"
 version = "0.2.0"
-source = "git+https://github.com/criccomini/floem?branch=perch#93012eab8eeb1bf4f9af739ad892defd63413f55"
+source = "git+https://github.com/criccomini/floem?branch=perch#b8eefb693f76e47ea0bd96fb7185cbe7cb4ef1c4"
 dependencies = [
  "parking_lot",
  "smallvec",
@@ -1417,7 +1417,7 @@ dependencies = [
 [[package]]
 name = "floem_renderer"
 version = "0.2.0"
-source = "git+https://github.com/criccomini/floem?branch=perch#93012eab8eeb1bf4f9af739ad892defd63413f55"
+source = "git+https://github.com/criccomini/floem?branch=perch#b8eefb693f76e47ea0bd96fb7185cbe7cb4ef1c4"
 dependencies = [
  "floem-winit",
  "fontique",
@@ -1433,7 +1433,7 @@ dependencies = [
 [[package]]
 name = "floem_tiny_skia_renderer"
 version = "0.2.0"
-source = "git+https://github.com/criccomini/floem?branch=perch#93012eab8eeb1bf4f9af739ad892defd63413f55"
+source = "git+https://github.com/criccomini/floem?branch=perch#b8eefb693f76e47ea0bd96fb7185cbe7cb4ef1c4"
 dependencies = [
  "anyhow",
  "floem_renderer",
@@ -1449,7 +1449,7 @@ dependencies = [
 [[package]]
 name = "floem_vger_renderer"
 version = "0.2.0"
-source = "git+https://github.com/criccomini/floem?branch=perch#93012eab8eeb1bf4f9af739ad892defd63413f55"
+source = "git+https://github.com/criccomini/floem?branch=perch#b8eefb693f76e47ea0bd96fb7185cbe7cb4ef1c4"
 dependencies = [
  "anyhow",
  "floem-vger",
@@ -3662,7 +3662,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "perch-agent"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "jiff",
  "libc",
@@ -3677,7 +3677,7 @@ dependencies = [
 
 [[package]]
 name = "perch-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -3725,7 +3725,7 @@ dependencies = [
 
 [[package]]
 name = "perch-git"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "ignore",
@@ -3742,7 +3742,7 @@ dependencies = [
 
 [[package]]
 name = "perch-github"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -3768,7 +3768,7 @@ dependencies = [
 
 [[package]]
 name = "perch-knowledge"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "jiff",
  "pulldown-cmark",
@@ -3782,7 +3782,7 @@ dependencies = [
 
 [[package]]
 name = "perch-lsp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "lsp-types",
  "serde",
@@ -3796,7 +3796,7 @@ dependencies = [
 
 [[package]]
 name = "perch-syntax"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "tracing",
  "tree-sitter",
@@ -5935,7 +5935,7 @@ dependencies = [
 [[package]]
 name = "ui-events-floem-winit"
 version = "0.2.0"
-source = "git+https://github.com/criccomini/floem?branch=perch#93012eab8eeb1bf4f9af739ad892defd63413f55"
+source = "git+https://github.com/criccomini/floem?branch=perch#b8eefb693f76e47ea0bd96fb7185cbe7cb4ef1c4"
 dependencies = [
  "dpi 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "floem-winit",

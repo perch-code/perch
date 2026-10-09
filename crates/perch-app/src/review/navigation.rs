@@ -1435,7 +1435,7 @@ mod tests {
         assert_eq!(state.last_position.get(), Some((2, 0)));
         assert_eq!(state.composer_draft.get(), "why?");
 
-        state.go_back();
+        state.travel(true);
         harness.rebuild();
         assert_eq!(state.active.get().as_deref(), Some("src/x.rs"));
         assert!(state.composer_in_code());

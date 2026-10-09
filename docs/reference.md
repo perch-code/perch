@@ -36,6 +36,14 @@ still GitHub's.
   taken the request, so a read made in Perch holds for that revision of the
   thread until newer activity arrives or it is marked unread; a thread marked
   unread on github.com for the same revision is not seen.
+- Opening an unread notification, from its row or from the item's in
+  Worktrees or Browse, goes to what it is about: Conversation
+  scrolls to the newest comment, review, reply or event no later than the
+  notification, and the card flashes. A resolved thread with the reply is
+  opened. The cached discussion paints first, so the page waits up to a
+  few seconds for GitHub's answer to bring the new activity, then settles
+  for the newest card it has. Scrolling first leaves the page where it
+  is, and a read notification opens where the page was left.
 - **Mark Unread**, on the notification's row or the item's, restores the
   unread reminder in Perch for the current update. Viewing it clears the
   reminder; later GitHub state takes precedence. GitHub's public API has no
@@ -86,8 +94,9 @@ it searches.
   view keeps its own), Unread Only, Show PR Status.
 - **Browse**: View (Review requested, Yours, Assigned, Mentioned, All),
   Repository, State, Sort By (Last activity or Created, sorted by GitHub's
-  search), Show PR Status. All searches the repository picked, or every
-  declared repository on GitHub.
+  search), Show PR Status. Repository offers every repository on GitHub
+  that config, Worktrees or Inbox knows of. All searches the repository
+  picked, or every declared repository on GitHub.
 
 Repository and Show PR Status are shared by all three tabs. State is Any,
 Open, or Merged or Closed everywhere; it defaults to Any on Inbox and
@@ -580,7 +589,9 @@ Questions about an item or selected lines in its Code view run through Claude
 Code or Codex in that item's worktree. The `+` in the gutter starts one on a
 line, a removed line included, whose question is about the old file's lines;
 so is a selection of nothing but removed lines, or one on the left of the
-split layout. Follow-ups remain attached to the local
+split layout. A line that already has a thread still offers the `+` under
+the pointer, and the new thread's card stacks under the others. Follow-ups
+remain attached to the local
 conversation. A run is a question (**Ask**), which reads and answers, or, on
 your own work, **Work**, which changes the worktree (see [Work](#work)).
 Nothing an agent writes reaches GitHub unless you post it (see Posting).

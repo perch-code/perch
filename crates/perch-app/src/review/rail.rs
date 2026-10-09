@@ -33,10 +33,12 @@ type ChangedByPath = Memo<Arc<HashMap<String, ChangedFile>>>;
 pub fn drawer_view(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let open_file = crate::review::open_file(state, backend.clone());
     let on_open: OpenFile = Rc::new(move |path: &str| {
-        if state.tab.get_untracked() != ItemTab::Code {
-            state.show_tab(ItemTab::Code);
-        }
-        open_file(path);
+        state.one_move(|| {
+            if state.tab.get_untracked() != ItemTab::Code {
+                state.show_tab(ItemTab::Code);
+            }
+            open_file(path);
+        });
     });
     Stack::vertical((
         drawer::header_bar(

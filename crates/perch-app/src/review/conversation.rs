@@ -43,33 +43,8 @@ pub fn view(
     // and an event line, which has no box, a little closer to whatever is
     // on either side of it. The gap is in the key, so a card whose neighbour changes kind
     // is laid out again.
-    let cards = move || {
-        let pull = state.pull_request.get();
-        let discussion = state.discussion.get();
-        let issue = state.issue.get();
-        let comments = state.issue_comments.get();
-        let issue_events = state.issue_events.get();
-        // Only a bare branch's own commits: an item about a pull request
-        // or an issue has GitHub's timeline, which may not have landed yet.
-        let bare = state
-            .item
-            .with(|item| item.as_ref().is_some_and(|item| item.subject.is_none()));
-        let commits = if bare {
-            state.commits.get()
-        } else {
-            Default::default()
-        };
-        let cards = state.comment_threads.with(|threads| {
-            timeline(
-                pull.as_deref(),
-                discussion.as_deref(),
-                issue
-                    .as_deref()
-                    .map(|i| (i, comments.as_slice(), issue_events.as_slice())),
-                &commits,
-                threads.iter().filter(|thread| state.thread_visible(thread)),
-            )
-        });
+    let rows = move || {
+        let cards = cards(state);
         let mut rows = Vec::with_capacity(cards.len());
         // Whether the card before was an event line; `None` for the first.
         let mut after_event = None;
@@ -104,7 +79,7 @@ pub fn view(
             crate::review::summary::summary(app, state, summary_backend.clone(), open_item),
             finding_filters(app, state),
             dyn_stack(
-                cards,
+                rows,
                 |(card, gap)| format!("{}:{gap}", cards::key(card)),
                 move |(card, gap)| {
                     card_view(
@@ -177,6 +152,7 @@ pub fn view(
             return floem::kurbo::Vec2::ZERO;
         };
         state.paging.set(None);
+        crate::review::notified::cancel(state);
         let page = || {
             let height = state
                 .conversation_page
@@ -198,6 +174,9 @@ pub fn view(
             state.conversation_scroll.set(event.offset.y);
         },
     )
+    .on_event_cont(el::PointerWheel, move |_, _| {
+        crate::review::notified::cancel(state)
+    })
     .debug_name("conversation")
     // A bare key goes to the focused view and bubbles up from there, and
     // a click on the page would otherwise focus nothing: the column takes
@@ -248,6 +227,36 @@ pub fn view(
             }
         })
         .style(|s| s.size_full().min_height(0.0).position(Position::Relative))
+}
+
+/// The page's cards in order, as `review::timeline` sorts them. Tracked.
+pub(crate) fn cards(state: ReviewState) -> Vec<Card> {
+    let pull = state.pull_request.get();
+    let discussion = state.discussion.get();
+    let issue = state.issue.get();
+    let comments = state.issue_comments.get();
+    let issue_events = state.issue_events.get();
+    // Only a bare branch's own commits: an item about a pull request
+    // or an issue has GitHub's timeline, which may not have landed yet.
+    let bare = state
+        .item
+        .with(|item| item.as_ref().is_some_and(|item| item.subject.is_none()));
+    let commits = if bare {
+        state.commits.get()
+    } else {
+        Default::default()
+    };
+    state.comment_threads.with(|threads| {
+        timeline(
+            pull.as_deref(),
+            discussion.as_deref(),
+            issue
+                .as_deref()
+                .map(|i| (i, comments.as_slice(), issue_events.as_slice())),
+            &commits,
+            threads.iter().filter(|thread| state.thread_visible(thread)),
+        )
+    })
 }
 
 fn finding_filters(app: AppState, state: ReviewState) -> impl IntoView {
@@ -365,6 +374,7 @@ fn card_view(
 ) -> floem::AnyView {
     let pull = state.pull_request.get_untracked();
     let debug = card.kind();
+    let card_id = cards::card_id(&card);
     let view: floem::AnyView = match card {
         // What Perch started from an issue is the summary's In Perch row,
         // not repeated under the description.
@@ -394,35 +404,42 @@ fn card_view(
             .into_any()
         }
         Card::Thread(thread) => {
-            let card_id = crate::review::doc::CardId::Thread(thread.id.clone());
-            let view = cards::thread_card(app, state, backend, open_file, thread).into_any();
-            // Asked for from elsewhere on the page, the Agents section's Show
-            // in thread say, the card comes into view as it flashes. The
-            // first run only subscribes, as the flash's does.
-            let id = view.view_id();
-            let pending_id = card_id.clone();
-            floem::reactive::Effect::new(move |first: Option<()>| {
-                let focused = state.focus_card.with(|f| f.as_ref() == Some(&card_id));
-                if first.is_some() && focused {
-                    id.scroll_to(None);
-                }
-            });
-            // Built for the asking, as a finding's thread the filter hid
-            // is, it takes the focus once it has somewhere to scroll to.
-            view.on_event_cont(el::UpdatePhaseLayout, move |_, _| {
-                if state
-                    .pending_focus_card
-                    .with_untracked(|p| p.as_ref() == Some(&pending_id))
-                {
-                    state.pending_focus_card.set(None);
-                    state.focus_card.set(Some(pending_id.clone()));
-                }
-            })
-            .into_any()
+            cards::thread_card(app, state, backend, open_file, thread).into_any()
         }
     };
+    // Asked for from elsewhere, the Agents section's Show in thread or an
+    // unread notification's open, the card comes into view as it
+    // flashes. The first run only subscribes, as the flash's does.
+    let id = view.view_id();
+    let focus_id = card_id.clone();
+    floem::reactive::Effect::new(move |first: Option<()>| {
+        let focused = state.focus_card.with(|f| f.as_ref() == Some(&focus_id));
+        if first.is_some() && focused {
+            id.scroll_to(None);
+        }
+    });
+    let flashing = RwSignal::new(false);
+    threads::wire_flash(state, card_id.clone(), flashing);
+    // Built for the asking, as a finding's thread the filter hid is, or
+    // asked for before it was laid out, it takes the focus once it has
+    // somewhere to scroll to.
+    let view = view
+        .on_event_cont(el::UpdatePhaseLayout, move |_, _| {
+            if state
+                .pending_focus_card
+                .with_untracked(|p| p.as_ref() == Some(&card_id))
+            {
+                state.pending_focus_card.set(None);
+                state.focus_card.set(Some(card_id.clone()));
+            }
+        })
+        .into_any();
     view.debug_name(format!("card:{debug}"))
-        .style(move |s| s.width_full().margin_top(gap))
+        .style(move |s| {
+            s.width_full()
+                .margin_top(gap)
+                .apply_if(flashing.get(), |s| s.border_color(theme::accent()))
+        })
         .into_any()
 }
 
@@ -3255,6 +3272,197 @@ mod tests {
         assert!(
             title().get_visual_rect_no_clip().y0 < top,
             "the page back from Code did not move"
+        );
+    }
+
+    /// The notification about pull request 57, dated `updated_at`.
+    fn notification(updated_at: &str, unread: bool) -> perch_github::Thread {
+        use perch_github::{Reason, Repository, Subject, SubjectKind, Thread};
+        Thread {
+            id: "n57".into(),
+            unread,
+            local_unread: false,
+            local_read: false,
+            reason: Reason::Comment,
+            updated_at: at(updated_at),
+            last_read_at: Some(at("2026-09-16T00:00:00Z")),
+            subject: Subject {
+                title: "Fence the manifest".into(),
+                kind: SubjectKind::PullRequest,
+                url: Some("https://api.github.com/repos/criccomini/perch/pulls/57".into()),
+                latest_comment_url: None,
+            },
+            repository: Repository {
+                full_name: "criccomini/perch".into(),
+                owner_avatar_url: String::new(),
+            },
+            subject_snapshot: None,
+            run_snapshot: None,
+            snoozed_until: None,
+        }
+    }
+
+    /// The fixture's discussion, with the comment the notification is
+    /// about said after the merge.
+    fn with_new_comment() -> Discussion {
+        let mut discussion = discussion();
+        discussion.comments.push(IssueComment {
+            id: 2,
+            node_id: String::new(),
+            user: "rohan".into(),
+            user_avatar_url: String::new(),
+            body: "One more thing.".into(),
+            created_at: at("2026-09-18T09:00:00Z"),
+            updated_at: None,
+            html_url: "https://github.com/criccomini/perch/pull/57#issuecomment-2".into(),
+            reactions: Default::default(),
+            viewer_can_delete: false,
+            viewer_can_update: false,
+        });
+        discussion
+    }
+
+    /// The window, short enough that the page is longer than it, with an
+    /// open of `thread` followed from its first paint.
+    fn opened_from(thread: perch_github::Thread) -> (HeadlessHarness, AppState, ReviewState) {
+        let (mut harness, app, state) = app_harness_prepared(
+            crate::backend::Backend::detached(),
+            discussion(),
+            move |state| crate::review::notified::follow(state, &thread),
+        );
+        harness.set_size(1400.0, 500.0);
+        harness.rebuild();
+        harness.paint();
+        (harness, app, state)
+    }
+
+    fn settle(harness: &mut HeadlessHarness) {
+        for _ in 0..3 {
+            harness.rebuild();
+            harness.paint();
+        }
+    }
+
+    /// The last card of `kind` on the page, and whether all of it is
+    /// inside the scroll's box.
+    fn last_card_shown(harness: &HeadlessHarness, kind: &str) -> bool {
+        fn under(id: floem::ViewId, kind: &str, out: &mut Vec<floem::ViewId>) {
+            if id.debug_name().contains(kind) {
+                out.push(id);
+            }
+            for child in id.children() {
+                under(child, kind, out);
+            }
+        }
+        let mut found = Vec::new();
+        under(harness.root_id(), kind, &mut found);
+        let card = found
+            .last()
+            .expect("no such card")
+            .get_visual_rect_no_clip();
+        let viewport = find(harness.root_id(), "conversation")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        viewport.contains(card.origin()) && card.y1 <= viewport.y1 + 0.5
+    }
+
+    fn deliver(app: AppState, state: ReviewState, discussion: Discussion) {
+        app.apply_with_review(
+            crate::backend::Event::DiscussionReady {
+                item_id: "wt".into(),
+                discussion: Arc::new(discussion),
+            },
+            state,
+        );
+    }
+
+    /// The page painted from the cache waits; GitHub's answer brings the
+    /// comment that woke the reader, and the page goes to it.
+    #[test]
+    fn an_unread_notification_opens_on_the_comment_that_woke_the_reader() {
+        let (mut harness, app, state) = opened_from(notification("2026-09-18T09:00:20Z", true));
+        let title = find(harness.root_id(), "conversation-title").unwrap();
+        let top = title.get_visual_rect_no_clip().y0;
+        assert_eq!(state.focus_card.get(), None, "the cached page is older");
+
+        deliver(app, state, with_new_comment());
+        settle(&mut harness);
+
+        assert_eq!(
+            state.focus_card.get(),
+            Some(crate::review::doc::CardId::Entry("comment:2".into()))
+        );
+        assert!(
+            title.get_visual_rect_no_clip().y0 < top,
+            "the page did not move"
+        );
+        assert!(
+            last_card_shown(&harness, "card:comment"),
+            "the new comment is not in view"
+        );
+        assert!(state.notified.get().is_none(), "the open is done");
+    }
+
+    /// What woke the reader is not always on the page: after the wait,
+    /// the newest card there is.
+    #[test]
+    fn a_wait_out_goes_to_the_newest_card_the_page_has() {
+        let (mut harness, _, state) = opened_from(notification("2026-09-18T09:00:20Z", true));
+        crate::review::notified::settle(state, &super::cards(state), true);
+        settle(&mut harness);
+        assert!(
+            matches!(
+                state.focus_card.get(),
+                Some(crate::review::doc::CardId::Entry(id)) if id.starts_with("event:merged")
+            ),
+            "{:?}",
+            state.focus_card.get()
+        );
+        assert!(last_card_shown(&harness, "card:event"));
+    }
+
+    /// A read notification opens where the reader left the page, and so
+    /// does one the reader scrolled before GitHub answered.
+    #[test]
+    fn a_read_notification_or_a_scroll_first_leaves_the_page_alone() {
+        let (mut harness, app, state) = opened_from(notification("2026-09-18T09:00:20Z", false));
+        deliver(app, state, with_new_comment());
+        settle(&mut harness);
+        assert_eq!(state.focus_card.get(), None);
+
+        let (mut harness, app, state) = opened_from(notification("2026-09-18T09:00:20Z", true));
+        let viewport = find(harness.root_id(), "conversation")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        harness.scroll_down(viewport.center().x, viewport.center().y, 40.0);
+        deliver(app, state, with_new_comment());
+        settle(&mut harness);
+        assert_eq!(state.focus_card.get(), None);
+        assert!(state.notified.get().is_none());
+    }
+
+    /// An item last left on Code opens on Conversation for the update.
+    #[test]
+    fn an_unread_notification_opens_on_conversation_from_code() {
+        let thread = notification("2026-09-18T09:00:20Z", true);
+        let (mut harness, app, state) = app_harness_prepared(
+            crate::backend::Backend::detached(),
+            discussion(),
+            move |state| {
+                state.show_tab(crate::review::model::ItemTab::Code);
+                crate::review::notified::follow(state, &thread);
+            },
+        );
+        harness.set_size(1400.0, 500.0);
+        settle(&mut harness);
+        assert!(find(harness.root_id(), "conversation").is_none());
+
+        deliver(app, state, with_new_comment());
+        settle(&mut harness);
+        assert_eq!(state.tab.get(), crate::review::model::ItemTab::Conversation);
+        assert!(
+            last_card_shown(&harness, "card:comment"),
+            "the new comment is not in view"
         );
     }
 }

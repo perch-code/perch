@@ -37,12 +37,26 @@ use crate::theme;
 use crate::ui::widgets::{clickable, sidebar_glyph, state_glyph};
 
 /// The menu while it is up: the button's box in the window, which it
-/// hangs from, and whether it shows the search for the issue a
-/// duplicate repeats.
+/// hangs from, whether it shows the search for the issue a duplicate
+/// repeats, and whether that search was opened from the state pill,
+/// which closes at a pick rather than asking on the composer's line.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CloseMenu {
     pub anchor: Rect,
     pub duplicate: bool,
+    pub direct: bool,
+}
+
+/// The search for the issue a duplicate repeats, hung from `anchor`,
+/// as the state pill's Close as duplicate opens it. A pick closes the
+/// issue at once.
+pub fn search_duplicate(state: ReviewState, anchor: Rect) {
+    state.close_duplicate_query.set(String::new());
+    state.close_menu.set(Some(CloseMenu {
+        anchor,
+        duplicate: true,
+        direct: true,
+    }));
 }
 
 const WIDTH: f64 = 300.0;
@@ -157,6 +171,7 @@ pub fn split_button(app: AppState, state: ReviewState) -> impl IntoView {
             state.close_menu.set(Some(CloseMenu {
                 anchor: id.get_visual_rect_no_clip(),
                 duplicate: false,
+                direct: false,
             }));
         }
     })
@@ -305,10 +320,10 @@ pub fn popup(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl In
 }
 
 /// Escape: from the duplicate search back to the ways, and from them
-/// out of the menu.
+/// out of the menu. The state pill's search has no ways to go back to.
 pub fn back(state: ReviewState) {
     match state.close_menu.get_untracked() {
-        Some(menu) if menu.duplicate => state.close_menu.set(Some(CloseMenu {
+        Some(menu) if menu.duplicate && !menu.direct => state.close_menu.set(Some(CloseMenu {
             duplicate: false,
             ..menu
         })),
@@ -477,23 +492,37 @@ fn row(
 fn duplicate(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let selected = RwSignal::new(0usize);
     let hits = Memo::new(move |_| Arc::new(duplicate_hits(state)));
+    let asks = backend.clone();
     Effect::new(move |_| {
         let query = duplicate_query(state);
         selected.set(0);
-        mention::ask_references(state, backend.clone(), &query);
+        mention::ask_references(state, asks.clone(), &query);
     });
-    let pick = move |index: usize| {
-        let Some(original) = hits.with_untracked(|h| h.get(index).map(|h| h.reference.number))
-        else {
-            return;
-        };
-        state
-            .composer_close_reason
-            .set(IssueCloseReason::Duplicate(original));
-        close(state);
-        ask(state);
+    let direct = state
+        .close_menu
+        .with_untracked(|m| m.is_some_and(|m| m.direct));
+    let pick: Rc<dyn Fn(usize)> = {
+        Rc::new(move |index: usize| {
+            let Some(original) = hits.with_untracked(|h| h.get(index).map(|h| h.reference.number))
+            else {
+                return;
+            };
+            let reason = IssueCloseReason::Duplicate(original);
+            close(state);
+            if direct {
+                crate::review::summary::change_state(
+                    state,
+                    &backend,
+                    crate::backend::StateChange::CloseIssue(reason),
+                );
+            } else {
+                state.composer_close_reason.set(reason);
+                ask(state);
+            }
+        })
     };
 
+    let on_enter = pick.clone();
     let input = TextInput::new(state.close_duplicate_query)
         .placeholder("Search for the issue it duplicates")
         .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
@@ -508,7 +537,7 @@ fn duplicate(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
                 Code::ArrowDown if key.modifiers.is_empty() => step(1),
                 Code::ArrowUp if key.modifiers.is_empty() => step(-1),
                 Code::Enter | Code::NumpadEnter if key.modifiers.is_empty() => {
-                    pick(selected.get_untracked())
+                    on_enter(selected.get_untracked())
                 }
                 _ => return EventPropagation::Continue,
             }
@@ -555,7 +584,7 @@ fn duplicate(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
             Stack::vertical_from_iter(
                 hits.iter()
                     .enumerate()
-                    .map(|(index, hit)| duplicate_row(index, hit, selected, pick)),
+                    .map(|(index, hit)| duplicate_row(index, hit, selected, pick.clone())),
             )
             .style(|s| s.flex_col().width_full())
             .into_any()
@@ -598,7 +627,7 @@ fn duplicate_row(
     index: usize,
     hit: &ReferenceHit,
     selected: RwSignal<usize>,
-    pick: impl Fn(usize) + Copy + 'static,
+    pick: Rc<dyn Fn(usize)>,
 ) -> impl IntoView {
     let number = hit.reference.number;
     Container::new(Container::new(mention::reference_row(hit)).style(move |s| {
