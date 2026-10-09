@@ -2881,8 +2881,20 @@ fn anchor_block(
     // or when the file is where the hunk's numbers count.
     let has_hunk = hunk.is_some();
     let from_file = move || !has_hunk || (!outdated && at_head.get());
-    if from_file() && state.begin_load(&anchor.path) {
-        backend.open_file(&anchor.path);
+    // Asked for once there are files to ask of: a pull request shown
+    // before its checkout has none, and a read of the checkout that is
+    // not there yet fails.
+    {
+        let path = anchor.path.clone();
+        floem::reactive::Effect::new(move |asked: Option<bool>| {
+            if asked == Some(true) || state.files_pending.with(Option::is_some) {
+                return asked.unwrap_or(false);
+            }
+            if from_file() && state.begin_load(&path) {
+                backend.open_file(&path);
+            }
+            true
+        });
     }
     // A comment from GitHub on one line is shown with the few above it,
     // as its hunk would show them, so the line is not alone.
@@ -3102,6 +3114,32 @@ mod tests {
             .map(|e| e.owning_id())
             .filter(|id| *id == page);
         (rect(&harness, "tip"), hit)
+    }
+
+    /// A card drawn while its pull request waits for a checkout asks for
+    /// its file once the checkout is here, not of the one that is not.
+    #[test]
+    fn a_card_waits_for_the_checkout_to_ask_for_its_file() {
+        let _root = TestRoot::new();
+        let state = ReviewState::new();
+        state
+            .files_pending
+            .set(Some(crate::review::model::Preparing::Working {
+                message: String::new(),
+                percent: None,
+            }));
+        let anchor = Anchor {
+            path: "src/x.rs".into(),
+            start_line: 1,
+            line: 1,
+            side: perch_github::Side::Right,
+            commit_sha: String::new(),
+        };
+        let _card = anchor_block(state, Rc::new(Backend::detached()), anchor, false, None);
+        assert!(!state.is_loading("src/x.rs"), "no checkout to ask of");
+
+        state.files_pending.set(None);
+        assert!(state.is_loading("src/x.rs"), "asked once it is here");
     }
 
     #[test]
