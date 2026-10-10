@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 use perch_github::{GitHub, Label, PullEvent, PullEventKind, ReactionKind, Side};
 
+use crate::support::{group, page};
+
 /// The request's path, and its body: the reactions query names its ids
 /// there.
 fn read_request(stream: &mut TcpStream) -> Option<(String, String)> {
@@ -62,13 +64,6 @@ fn comment(id: usize) -> String {
     )
 }
 
-/// One reaction group as GraphQL writes it.
-fn group(content: &str, count: u32, mine: bool) -> String {
-    format!(
-        r#"{{"content":"{content}","viewerHasReacted":{mine},"reactors":{{"totalCount":{count}}}}}"#
-    )
-}
-
 /// The reactions answer for the ids a query named: the description has a
 /// thumbs up of the reader's own, comment 1 has two hearts, and nothing
 /// else has any.
@@ -99,10 +94,6 @@ fn review_threads() -> String {
         "nodes":[{"id":"PRRT_1","is_resolved":true,"is_outdated":false,
                   "comments":{"nodes":[{"database_id":3}]}}]}}}}}"#
         .into()
-}
-
-fn page(items: Vec<String>) -> String {
-    format!("[{}]", items.join(","))
 }
 
 /// A pull request with 150 conversation comments, one review, and two line

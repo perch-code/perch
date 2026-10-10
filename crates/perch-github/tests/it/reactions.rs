@@ -1,95 +1,10 @@
 //! Reactions against a scripted local server: what the client asks
 //! GraphQL, and what it makes of the answer.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
-
 use perch_github::{Error, GitHub, ReactionKind};
 
-#[derive(Debug)]
-struct Request {
-    path: String,
-    body: serde_json::Value,
-}
-
-struct Response {
-    status: &'static str,
-    body: String,
-}
-
-impl Response {
-    fn ok(body: impl Into<String>) -> Self {
-        Self {
-            status: "200 OK",
-            body: body.into(),
-        }
-    }
-}
-
-fn read_request(stream: &mut TcpStream) -> Option<Request> {
-    let mut reader = BufReader::new(stream.try_clone().ok()?);
-    let mut start = String::new();
-    reader.read_line(&mut start).ok()?;
-    let path = start.split_whitespace().nth(1)?.to_string();
-    let mut content_length = 0usize;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).ok()? == 0 {
-            break;
-        }
-        let trimmed = line.trim_end();
-        if trimmed.is_empty() {
-            break;
-        }
-        if let Some((name, value)) = trimmed.split_once(':') {
-            if name.eq_ignore_ascii_case("content-length") {
-                content_length = value.trim().parse().unwrap_or(0);
-            }
-        }
-    }
-    let mut body = vec![0u8; content_length];
-    reader.read_exact(&mut body).ok()?;
-    Some(Request {
-        path,
-        body: serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
-    })
-}
-
-fn respond(stream: &mut TcpStream, response: Response) {
-    let wire = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{body}",
-        status = response.status,
-        length = response.body.len(),
-        body = response.body,
-    );
-    stream.write_all(wire.as_bytes()).unwrap();
-    stream.flush().unwrap();
-}
-
-fn spawn(responses: Vec<Response>) -> (String, Arc<Mutex<Vec<Request>>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let seen = requests.clone();
-    std::thread::spawn(move || {
-        for (stream, response) in listener.incoming().zip(responses) {
-            let Ok(mut stream) = stream else { continue };
-            let Some(request) = read_request(&mut stream) else {
-                continue;
-            };
-            seen.lock().unwrap().push(request);
-            respond(&mut stream, response);
-        }
-    });
-    (format!("http://{address}"), requests)
-}
-
-fn group(content: &str, count: u32, mine: bool) -> String {
-    format!(
-        r#"{{"content":"{content}","viewerHasReacted":{mine},"reactors":{{"totalCount":{count}}}}}"#
-    )
-}
+use crate::support::graphql::{spawn, Response};
+use crate::support::group;
 
 #[tokio::test]
 async fn adding_a_reaction_names_the_subject_and_reads_it_back() {

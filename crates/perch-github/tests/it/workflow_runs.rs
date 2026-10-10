@@ -1,24 +1,12 @@
 //! The workflow run listings against a local server, to pin the requests.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 
 use perch_github::GitHub;
 
-fn read_path(stream: &mut TcpStream) -> Option<String> {
-    let mut reader = BufReader::new(stream.try_clone().ok()?);
-    let mut start = String::new();
-    reader.read_line(&mut start).ok()?;
-    let path = start.split_whitespace().nth(1)?.to_string();
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).ok()? == 0 || line.trim_end().is_empty() {
-            break;
-        }
-    }
-    Some(path)
-}
+use crate::support::read_path;
 
 fn respond(stream: &mut TcpStream, body: &str) {
     let response = format!(
