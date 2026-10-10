@@ -337,6 +337,14 @@ pub enum Command {
         blob: String,
         viewed: bool,
     },
+    /// Mark a stop of a pull request's Changescape tour, or clear its mark
+    /// with `None`.
+    SetTourMark {
+        repo: String,
+        number: u64,
+        stop: String,
+        mark: Option<perch_github::StoredMark>,
+    },
     /// Remember that head lines `first` to `last` of a file's content were
     /// opened out of a fold, and forget every reveal overlapping a range:
     /// a divider's Reset. Both keyed as Viewed is.
@@ -556,7 +564,8 @@ pub enum Command {
     },
 
     /// Ask the agent a question in an item's checkout. `thread_id` of `None`
-    /// starts a thread; the anchor is ignored on a follow-up.
+    /// starts a thread; the anchor is ignored on a follow-up. `context` is
+    /// what the reader was looking at, for a new thread's first prompt.
     Ask {
         mode: RunMode,
         item_id: String,
@@ -566,6 +575,7 @@ pub enum Command {
         backend: perch_agent::Backend,
         model: String,
         effort: perch_agent::Effort,
+        context: Option<String>,
     },
     CancelRun {
         run_id: String,
@@ -3138,6 +3148,23 @@ impl Backend {
         });
     }
 
+    /// Mark a stop of a pull request's Changescape tour, or clear its mark
+    /// with `None`. Nothing is sent back: the window applied it already.
+    pub fn set_tour_mark(
+        &self,
+        repo: &str,
+        number: u64,
+        stop: &str,
+        mark: Option<perch_github::StoredMark>,
+    ) {
+        let _ = self.commands.send(Command::SetTourMark {
+            repo: repo.to_string(),
+            number,
+            stop: stop.to_string(),
+            mark,
+        });
+    }
+
     pub fn reveal(&self, item_id: &str, path: &str, blob: &str, first: u32, last: u32) {
         let _ = self.commands.send(Command::Reveal {
             item_id: item_id.to_string(),
@@ -3367,6 +3394,10 @@ impl Backend {
         });
     }
 
+    /// Ask the agent a question, starting a thread when `thread_id` is
+    /// `None`. `context`, text Perch assembled about what the reader is
+    /// looking at, goes with a new thread's first question and is
+    /// ignored on a follow-up, whose session already has it.
     #[allow(clippy::too_many_arguments)]
     pub fn ask(
         &self,
@@ -3378,6 +3409,7 @@ impl Backend {
         model: &str,
         effort: perch_agent::Effort,
         mode: RunMode,
+        context: Option<String>,
     ) {
         let _ = self.commands.send(Command::Ask {
             mode,
@@ -3388,6 +3420,7 @@ impl Backend {
             backend,
             model: model.to_string(),
             effort,
+            context,
         });
     }
 
@@ -4863,11 +4896,13 @@ async fn run(
                 backend,
                 model,
                 effort,
+                context,
             } => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    ask(
+                    ask_with(
                         &ctx, item_id, thread_id, anchor, question, backend, model, effort, mode,
+                        context,
                     )
                     .await;
                 });
@@ -5298,6 +5333,20 @@ async fn run(
                     tracing::warn!(error = %e, "could not record viewed");
                 }
                 send_viewed(&ctx, &item_id, false);
+            }
+            // The window applied it as it was clicked; nothing is sent
+            // back.
+            Command::SetTourMark {
+                repo,
+                number,
+                stop,
+                mark,
+            } => {
+                if let Some(Err(e)) =
+                    ctx.with_cache(|c| c.set_tour_mark(&repo, number, &stop, mark))
+                {
+                    tracing::warn!(error = %e, "could not record a tour mark");
+                }
             }
             // The window applied these as they were clicked; nothing is
             // sent back.
@@ -15822,7 +15871,8 @@ fn finding_excerpt(bytes: &[u8], anchor: &perch_github::ReviewAnchor) -> Option<
 }
 
 /// Start a thread or continue one, run the agent, and keep the record
-/// current as events arrive.
+/// current as events arrive. With no context beyond the item's own; see
+/// `ask_with`.
 #[allow(clippy::too_many_arguments)]
 async fn ask(
     ctx: &Ctx,
@@ -15835,6 +15885,30 @@ async fn ask(
     effort: perch_agent::Effort,
     mode: RunMode,
 ) {
+    ask_with(
+        ctx, item_id, thread_id, anchor, question, backend, model, effort, mode, None,
+    )
+    .await
+}
+
+/// `ask`, with `context`: text Perch assembled about what the reader is
+/// looking at, such as a Changescape tour stop. It goes into a new
+/// thread's first prompt when there is no finding to repeat; a
+/// follow-up resumes a session that already has it, so it is dropped.
+#[allow(clippy::too_many_arguments)]
+async fn ask_with(
+    ctx: &Ctx,
+    item_id: String,
+    thread_id: Option<String>,
+    anchor: Option<Anchor>,
+    question: String,
+    backend: perch_agent::Backend,
+    model: String,
+    effort: perch_agent::Effort,
+    mode: RunMode,
+    context: Option<String>,
+) {
+    let viewing = context.filter(|_| thread_id.is_none());
     let open = ctx.slot.lock().ok().and_then(|g| {
         g.as_ref().filter(|c| c.item_id == item_id).map(|c| {
             (
@@ -15955,9 +16029,16 @@ async fn ask(
         Some(context) => (
             context.anchor.as_ref(),
             context.outdated,
-            Some(context.context.as_str()),
+            Some(crate::ask::PromptContext::Finding(context.context.as_str())),
         ),
-        None => (thread.anchor.as_ref(), thread.outdated, None),
+        None => (
+            thread.anchor.as_ref(),
+            thread.outdated,
+            viewing
+                .as_deref()
+                .filter(|c| !c.trim().is_empty())
+                .map(crate::ask::PromptContext::Viewing),
+        ),
     };
 
     let request_id = perch_github::comments::new_id();

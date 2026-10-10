@@ -83,7 +83,7 @@ pub enum Block {
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         title: ::std::option::Option<::std::string::String>,
     },
-    #[doc = "LanesBlock\n\nLanes of cards before and after the change. No lens writes it now. The shell still draws it."]
+    #[doc = "LanesBlock\n\nLanes of cards before and after the change. No lens writes it now. The viewer still draws it."]
     #[serde(rename = "lanes")]
     Lanes {
         #[doc = "The lanes at the head."]
@@ -99,7 +99,7 @@ pub enum Block {
         #[serde(skip_serializing_if = "::std::option::Option::is_none")]
         title: ::std::option::Option<::std::string::String>,
     },
-    #[doc = "GraphBlock\n\nA Mermaid diagram that the browser lays out. No lens writes it now. The shell still draws it."]
+    #[doc = "GraphBlock\n\nA Mermaid diagram that the browser lays out. No lens writes it now. The viewer still draws it."]
     #[serde(rename = "graph")]
     Graph {
         #[doc = "Node label to [element id, status]."]
@@ -446,6 +446,9 @@ pub struct Element {
     #[doc = "One line about what changed."]
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub d: ::std::option::Option<::std::string::String>,
+    #[doc = "A hash of the element's own changed lines, without line numbers, so that it survives a push that only shifts the code. Absent for unchanged elements."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub h: ::std::option::Option<::std::string::String>,
     #[doc = "Its kind and home, such as \"function · dblect.sql.window_ties\"."]
     pub k: ::std::string::String,
     #[doc = "Where the element lives. Empty for elements that are not code."]
@@ -897,6 +900,8 @@ pub struct Page {
     pub schema: i64,
     #[doc = "The fixed sections, in display order."]
     pub sections: ::std::vec::Vec<Section>,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub tour: ::std::option::Option<Tour>,
     #[doc = "The views that apply, in section order, then lens order."]
     pub views: ::std::vec::Vec<View>,
 }
@@ -1107,7 +1112,7 @@ pub struct Row {
 pub struct Section {
     #[doc = "The default line for a section with no view."]
     pub empty: ::std::string::String,
-    #[doc = "An icon name from the shell. Open set."]
+    #[doc = "An icon name, a presentation hint that each reader maps to its own icons. Open set."]
     pub ic: ::std::string::String,
     #[doc = "The section id: overview, context, map, behavior, responsibilities, contracts, surroundings, or code. Treat it as an open set."]
     pub id: ::std::string::String,
@@ -1238,6 +1243,294 @@ pub struct TableGroup {
     #[serde(skip_serializing_if = "::std::option::Option::is_none")]
     pub summary: ::std::option::Option<::std::string::String>,
 }
+#[doc = "The walk through the change: chapters of stops, each stop one idea with the code that carries it. A reader that draws it makes it the main view, and keeps the sections as the reference. Absent on pages from before the tour."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct Tour {
+    #[doc = "The changed lines in no stop, by part: tests that join no stop, docs, generated and vendored files."]
+    #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+    pub below: ::std::vec::Vec<TourBand>,
+    #[doc = "The chapters in reading order."]
+    pub chapters: ::std::vec::Vec<TourChapter>,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub ending: ::std::option::Option<TourEnding>,
+    #[doc = "At most three facts that change how to read the PR."]
+    #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+    pub flags: ::std::vec::Vec<TourFlag>,
+    #[doc = "The changed files by package, for a code map beside the tour."]
+    #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+    pub map: ::std::vec::Vec<TourMapPackage>,
+    #[doc = "True when the agent wrote the tour's text. False: titles are defaults made from element names, and Before, Now, and Watch are absent."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub narrated: ::std::option::Option<bool>,
+    #[doc = "What the change does, in at most 40 words. Plain text with `code` spans."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub summary: ::std::option::Option<::std::string::String>,
+}
+#[doc = "Something to do after the tour."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct TourAction {
+    #[doc = "One sentence."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub detail: ::std::option::Option<::std::string::String>,
+    #[doc = "A short imperative."]
+    pub label: ::std::string::String,
+}
+#[doc = "Context that matters at one stop, such as an open PR on the same files."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct TourAside {
+    #[doc = "The answer, in one line."]
+    pub a: ::std::string::String,
+    #[doc = "The question."]
+    pub q: ::std::string::String,
+    #[doc = "Element ids of the rows of that view."]
+    #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+    pub rows: ::std::vec::Vec<::std::string::String>,
+    #[doc = "The view the context comes from."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub view: ::std::option::Option<::std::string::String>,
+}
+#[doc = "Changed lines of one part that are in no stop."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct TourBand {
+    #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+    pub files: ::std::vec::Vec<TourFileLines>,
+    #[doc = "The part's name."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub label: ::std::option::Option<::std::string::String>,
+    pub lines: i64,
+    #[doc = "The part id."]
+    pub part: ::std::string::String,
+    #[doc = "skim or skip. Open set."]
+    pub verdict: ::std::string::String,
+}
+#[doc = "One chapter: a read part of the change, or the whole change when it fits in one."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct TourChapter {
+    #[doc = "A hash of the hashes of its stops. The element chapter:<id> carries the same hash."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub h: ::std::option::Option<::std::string::String>,
+    #[doc = "Unique on the page, a slug such as perch-changescape."]
+    pub id: ::std::string::String,
+    #[doc = "Two or three sentences: what the part is for, what it gives the parts above it, and the terms its first stop uses."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub intro: ::std::option::Option<::std::string::String>,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub lines: ::std::option::Option<TourLines>,
+    #[doc = "The ids of the parts in `parts` that the chapter covers."]
+    #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+    pub parts: ::std::vec::Vec<::std::string::String>,
+    #[doc = "Optional. Named groups of consecutive stops, for a long chapter. Each stop id is in at most one section. A reader that ignores sections draws the stops as one list."]
+    #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+    pub sections: ::std::vec::Vec<TourSection>,
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub spine: ::std::option::Option<TourSpine>,
+    #[doc = "The stops in reading order."]
+    pub stops: ::std::vec::Vec<TourStop>,
+    #[doc = "At most 12 words."]
+    pub title: ::std::string::String,
+    #[doc = "read or skim. Open set."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub verdict: ::std::option::Option<::std::string::String>,
+}
+#[doc = "A question to settle before deciding, with a one-line answer. The narration writes some, and the tools add context that attached to no stop."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct TourCheck {
+    pub a: ::std::string::String,
+    pub q: ::std::string::String,
+    #[doc = "Element ids of the rows of that view."]
+    #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+    pub rows: ::std::vec::Vec<::std::string::String>,
+    #[doc = "The view the context comes from. Present on the checks that the tools add."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub view: ::std::option::Option<::std::string::String>,
+}
+#[doc = "Where you stand: what to check before deciding, and what to do next."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, Default)]
+pub struct TourEnding {
+    #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+    pub actions: ::std::vec::Vec<TourAction>,
+    #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+    pub checks: ::std::vec::Vec<TourCheck>,
+}
+#[doc = "Changed lines of one file, in one part."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct TourFileLines {
+    pub add: i64,
+    pub del: i64,
+    #[doc = "The id of the part the lines count in."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub part: ::std::option::Option<::std::string::String>,
+    #[doc = "The repo path at the head, as in files."]
+    pub path: ::std::string::String,
+}
+#[doc = "A fact that changes how to read the PR."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct TourFlag {
+    #[doc = "warn or info. Open set: a reader draws a kind it does not know as info."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub kind: ::std::option::Option<::std::string::String>,
+    #[doc = "What the flag points at: comment:<kind>:<id>, an element id, or view:<id>."]
+    #[serde(rename = "ref", skip_serializing_if = "::std::option::Option::is_none")]
+    pub ref_: ::std::option::Option<::std::string::String>,
+    #[doc = "At most two sentences, plain text with `code` spans."]
+    pub text: ::std::string::String,
+    #[doc = "A few words."]
+    pub title: ::std::string::String,
+}
+#[doc = "Changed lines to read and to skim."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct TourLines {
+    pub read: i64,
+    pub skim: i64,
+}
+#[doc = "One package and its changed files."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct TourMapPackage {
+    pub files: ::std::vec::Vec<::std::string::String>,
+    pub pkg: ::std::string::String,
+}
+#[doc = "One picture of a stop. kind hunk: windows of one file in files. kind seq: a call diagram laid out at build time, drawn like an svg block (svg, hot, title, note). Open set: a reader skips a kind it does not know."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct TourPicture {
+    #[doc = "One sentence over the picture, from the narration. A reader shows it in place of title."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub caption: ::std::option::Option<::std::string::String>,
+    #[doc = "For hunk: the repo path at the head, as in files."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub file: ::std::option::Option<::std::string::String>,
+    #[doc = "For seq: SVG node id to element id, as in an svg block. A click on that node opens the element."]
+    #[serde(
+        default,
+        skip_serializing_if = ":: std :: collections :: HashMap::is_empty"
+    )]
+    pub hot: ::std::collections::HashMap<::std::string::String, ::std::string::String>,
+    #[doc = "hunk or seq. Open set."]
+    pub kind: ::std::string::String,
+    #[doc = "For seq: a muted line under the diagram, its legend."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub note: ::std::option::Option<::std::string::String>,
+    #[doc = "For seq: the SVG markup of a sequence diagram, as in an svg block."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub svg: ::std::option::Option<::std::string::String>,
+    #[doc = "For seq: a default heading, from the names where the path starts and ends."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub title: ::std::option::Option<::std::string::String>,
+    #[doc = "For hunk: the parts of the file to show, in file order."]
+    #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+    pub windows: ::std::vec::Vec<TourWindow>,
+}
+#[doc = "Unchanged code that a stop's lines call, extend, or match on."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct TourRely {
+    pub code: TourRelyCode,
+    #[doc = "The doc comment, or an empty string."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub doc: ::std::option::Option<::std::string::String>,
+    #[doc = "The element id."]
+    pub el: ::std::string::String,
+    #[doc = "The signature line, or an empty string."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub sig: ::std::option::Option<::std::string::String>,
+    #[doc = "One sentence: the contract the new lines rely on. Absent until the narration writes it."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub what: ::std::option::Option<::std::string::String>,
+    #[doc = "Why the stop relies on it: matches, implements, or calls. An open set. A reader shows an unknown value as calls."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub why: ::std::option::Option<::std::string::String>,
+}
+#[doc = "Where the code is at the head."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct TourRelyCode {
+    pub file: ::std::string::String,
+    pub head: LineRange,
+}
+#[doc = "A named group of consecutive stops inside one chapter."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct TourSection {
+    #[doc = "One sentence."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub intro: ::std::option::Option<::std::string::String>,
+    #[doc = "Stop ids, in reading order."]
+    pub stops: ::std::vec::Vec<::std::string::String>,
+    #[doc = "At most 12 words."]
+    pub title: ::std::string::String,
+}
+#[doc = "The one picture that orients a chapter, before its first stop: a call diagram (a picture of kind seq) of the chapter's main paths, from where a run starts to its changed functions, with only the path steps and the changed calls."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct TourSpine {
+    #[doc = "One sentence over the picture, from the narration. A reader shows it in place of title."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub caption: ::std::option::Option<::std::string::String>,
+    #[doc = "For hunk: the repo path at the head, as in files."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub file: ::std::option::Option<::std::string::String>,
+    #[doc = "For seq: SVG node id to element id, as in an svg block. A click on that node opens the element."]
+    pub hot: ::std::collections::HashMap<::std::string::String, ::std::string::String>,
+    #[doc = "hunk or seq. Open set."]
+    pub kind: ::std::string::String,
+    #[doc = "For seq: a muted line under the diagram, its legend."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub note: ::std::option::Option<::std::string::String>,
+    #[doc = "For seq: the SVG markup of a sequence diagram, as in an svg block."]
+    pub svg: ::std::string::String,
+    #[doc = "For seq: a default heading, from the names where the path starts and ends."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub title: ::std::option::Option<::std::string::String>,
+    #[doc = "For hunk: the parts of the file to show, in file order."]
+    #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+    pub windows: ::std::vec::Vec<TourWindow>,
+}
+#[doc = "One stop: one idea with the code that carries it."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct TourStop {
+    #[doc = "Context that matters at this stop."]
+    #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+    pub asides: ::std::vec::Vec<TourAside>,
+    #[doc = "One sentence: what the code did at the base. Absent for new code."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub before: ::std::option::Option<::std::string::String>,
+    #[doc = "The elements whose code the stop holds, in file order."]
+    pub els: ::std::vec::Vec<::std::string::String>,
+    #[doc = "The changed lines the stop holds, by file and part."]
+    #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+    pub files: ::std::vec::Vec<TourFileLines>,
+    #[doc = "A hash of the changed lines in its hunk pictures, without line numbers. The element stop:<id> carries the same hash."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub h: ::std::option::Option<::std::string::String>,
+    #[doc = "Unique on the page, a slug made from element or file names."]
+    pub id: ::std::string::String,
+    #[doc = "The changed lines the stop holds."]
+    pub lines: i64,
+    #[doc = "One sentence: what the code does now."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub now: ::std::option::Option<::std::string::String>,
+    #[doc = "What the stop shows, in order. At least one."]
+    pub pictures: ::std::vec::Vec<TourPicture>,
+    #[doc = "Unchanged code that the stop's lines depend on."]
+    #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+    pub relies: ::std::vec::Vec<TourRely>,
+    #[doc = "A claim of at most 12 words, plain text with `code` spans."]
+    pub title: ::std::string::String,
+    #[doc = "read or skim. Open set. Absent: use the verdict of the stop's part."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub verdict: ::std::option::Option<::std::string::String>,
+    #[doc = "One sentence that points at a fact or a review comment. Always with watch_ref."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub watch: ::std::option::Option<::std::string::String>,
+    #[doc = "What watch points at: comment:<kind>:<id> (kind inline, review, or issue), an element id, or view:<id>."]
+    #[serde(skip_serializing_if = "::std::option::Option::is_none")]
+    pub watch_ref: ::std::option::Option<::std::string::String>,
+}
+#[doc = "Lines of one file, like a diff hunk header: a base range and a head range. A window holds every diff row inside its ranges, so a head window holds the lines removed inside it. The reader folds long unchanged runs."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug)]
+pub struct TourWindow {
+    #[doc = "Lines at the base, or null when the window only adds lines."]
+    #[serde(deserialize_with = "::std::option::Option::deserialize")]
+    pub base: ::std::option::Option<LineRange>,
+    #[doc = "Lines at the head, or null when the window only removes lines."]
+    #[serde(deserialize_with = "::std::option::Option::deserialize")]
+    pub head: ::std::option::Option<LineRange>,
+}
 #[doc = "Why a file of kind vendored is vendored: \"gitattributes\" (.gitattributes marks it linguist-vendored), \"path\" (under vendor/, third_party/, or node_modules/), \"testdata\" (not code, under fixtures/, testdata/, or __snapshots__/), or \"narration\" (the agent marked it copied). A plain string, so a reader shows a reason it does not know as it is."]
 #[derive(
     :: serde :: Deserialize,
@@ -1284,7 +1577,7 @@ impl ::std::str::FromStr for VendoredBy {
 pub struct View {
     #[doc = "What the view draws, in order."]
     pub blocks: ::std::vec::Vec<Block>,
-    #[doc = "An icon name from the shell. Open set."]
+    #[doc = "An icon name, a presentation hint that each reader maps to its own icons. Open set."]
     pub ic: ::std::string::String,
     #[doc = "The view id, unique on the page."]
     pub id: ::std::string::String,

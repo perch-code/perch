@@ -1,14 +1,15 @@
 //! `perch --changescape <owner/repo#N> [--head <sha>]`
 //!
 //! Prints what Perch finds of a pull request's Changescape: the lookup's
-//! result, each section with its view count, and the blocks by type. The
+//! result, and the tour's chapters with their stops, verdicts and
+//! pictures. The
 //! head comes from the cached pull request, or from `--head` for one Perch
 //! has not opened. Nothing is fetched and nothing is written.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use perch_changescape::{LoadedPage, Lookup};
+use perch_changescape::{page, LoadedPage, Lookup};
 use perch_github::{Cache, ItemKind};
 
 pub fn run(args: &[String]) {
@@ -49,10 +50,14 @@ fn print(repo: &str, number: u64, head: Option<String>) -> Result<String, String
             "note: changescape.enabled is false; Perch shows nothing"
         );
     }
-    let lookup = perch_changescape::lookup(&root, repo, number, &head);
-    let _ = writeln!(out, "lookup: {}", describe(&lookup));
-    if let Some(build) = lookup.drawable() {
-        let page = perch_changescape::load(build).map_err(|e| e.to_string())?;
+    // As the tab finds it, so a page whose status misstates its version
+    // shows as the tab shows it.
+    let found = crate::backend::changescape::find(&root, repo, number, &head);
+    let _ = writeln!(out, "lookup: {}", describe(&found.lookup));
+    if let Some(error) = found.error {
+        return Err(error);
+    }
+    if let Some(page) = found.page {
         render(&mut out, &page);
     }
     Ok(out)
@@ -114,46 +119,57 @@ fn describe(lookup: &Lookup) -> String {
 fn render(out: &mut String, page: &LoadedPage) {
     let _ = writeln!(out, "title: {}", page.meta.title);
     let _ = writeln!(out, "page format: {}", page.schema);
-    let _ = writeln!(out, "sections:");
-    for section in &page.sections {
-        let views = page.section_views(section);
-        if views.is_empty() {
-            let _ = writeln!(
-                out,
-                "  {} ({}): no views. {}",
-                section.id,
-                section.label,
-                section.reason.as_deref().unwrap_or(&section.empty)
-            );
+    let _ = writeln!(out, "elements: {}", page.elements.len());
+    let Some(tour) = page.tour() else {
+        match page.tour_error() {
+            Some(e) => {
+                let _ = writeln!(out, "tour: could not be read: {e}");
+            }
+            None => {
+                let _ = writeln!(out, "tour: none");
+            }
+        }
+        return;
+    };
+    let _ = writeln!(
+        out,
+        "tour: {} chapters, {} stops, narrated: {}",
+        tour.chapters.len(),
+        page::stops(tour).count(),
+        tour.narrated.unwrap_or(false)
+    );
+    for chapter in &tour.chapters {
+        let spine = if chapter.spine.is_some() {
+            ", spine"
         } else {
+            ""
+        };
+        let _ = writeln!(out, "  chapter {}: {}{spine}", chapter.id, chapter.title);
+        for stop in &chapter.stops {
+            let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
+            for picture in &stop.pictures {
+                *kinds.entry(picture.kind.as_str()).or_default() += 1;
+            }
+            let kinds: Vec<String> = kinds.iter().map(|(k, n)| format!("{k} {n}")).collect();
+            let verdict = match page::verdict(chapter, stop) {
+                page::Verdict::Read => "read",
+                page::Verdict::Skim => "skim",
+            };
             let _ = writeln!(
                 out,
-                "  {} ({}): {} views",
-                section.id,
-                section.label,
-                views.len()
+                "    {} [{verdict}, {} lines, {}]: {}",
+                stop.id,
+                stop.lines,
+                kinds.join(", "),
+                stop.title
             );
         }
     }
-    let mut kinds: BTreeMap<String, (usize, bool)> = BTreeMap::new();
-    for block in page.views.iter().flat_map(|view| page.blocks(&view.id)) {
-        let entry = kinds.entry(block.kind().to_string()).or_default();
-        entry.0 += 1;
-        entry.1 |= !crate::review::changescape::blocks::drawn(block);
-    }
-    let _ = writeln!(out, "blocks:");
-    for (kind, (count, fallback)) in kinds {
-        let note = if fallback { " (browser only)" } else { "" };
-        let _ = writeln!(out, "  {kind}: {count}{note}");
-    }
-    let _ = writeln!(out, "elements: {}", page.elements.len());
-    for facet in &page.facets {
+    for band in &tour.below {
         let _ = writeln!(
             out,
-            "facet {} ({}): {} options",
-            facet.id,
-            facet.label,
-            facet.options.len()
+            "  below {} ({}): {} lines",
+            band.part, band.verdict, band.lines
         );
     }
 }

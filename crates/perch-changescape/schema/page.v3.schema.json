@@ -35,7 +35,8 @@
       "type": "array",
       "items": { "$ref": "#/$defs/Part" },
       "description": "Where the changed lines go: the parts of the change in display order. Every changed line is in exactly one part, so the parts sum to meta.adds plus meta.dels. Absent on pages from before parts."
-    }
+    },
+    "tour": { "$ref": "#/$defs/Tour" }
   },
   "$defs": {
     "PageKind": { "title": "PageKind", "description": "What the page shows. Only pull requests exist.", "type": "string", "enum": ["pr"] },
@@ -123,7 +124,7 @@
           "description": "The section id: overview, context, map, behavior, responsibilities, contracts, surroundings, or code. Treat it as an open set."
         },
         "label": { "type": "string", "description": "The section's name." },
-        "ic": { "type": "string", "description": "An icon name from the shell. Open set." },
+        "ic": { "type": "string", "description": "An icon name, a presentation hint that each reader maps to its own icons. Open set." },
         "q": { "type": "string", "description": "The question the section answers." },
         "empty": { "type": "string", "description": "The default line for a section with no view." },
         "views": { "type": "array", "items": { "type": "string" }, "description": "Ids of the section's views, in order. Empty when the section collapses." },
@@ -159,7 +160,7 @@
         "sec": { "type": "string", "description": "The id of the section the view belongs to." },
         "t": { "type": "string", "description": "The view's title." },
         "s": { "type": "string", "description": "A short subtitle." },
-        "ic": { "type": "string", "description": "An icon name from the shell. Open set." },
+        "ic": { "type": "string", "description": "An icon name, a presentation hint that each reader maps to its own icons. Open set." },
         "q": { "type": "string", "description": "The question the view answers." },
         "state": { "$ref": "#/$defs/ViewState" },
         "metric": { "type": "string", "description": "A short count line, such as \"2 functions · 6 sites changed\". May be empty." },
@@ -206,7 +207,8 @@
           "items": { "$ref": "#/$defs/ElementRef" },
           "description": "Where the element lives. Empty for elements that are not code."
         },
-        "url": { "type": ["string", "null"], "description": "The element's page on GitHub, for PRs, issues, docs, people, and commits." }
+        "url": { "type": ["string", "null"], "description": "The element's page on GitHub, for PRs, issues, docs, people, and commits." },
+        "h": { "type": "string", "description": "A hash of the element's own changed lines, without line numbers, so that it survives a push that only shifts the code. Absent for unchanged elements." }
       }
     },
     "FileKind": {
@@ -459,7 +461,7 @@
         },
         {
           "title": "LanesBlock",
-          "description": "Lanes of cards before and after the change. No lens writes it now. The shell still draws it.",
+          "description": "Lanes of cards before and after the change. No lens writes it now. The viewer still draws it.",
           "type": "object",
           "required": ["type"],
           "properties": {
@@ -472,7 +474,7 @@
         },
         {
           "title": "GraphBlock",
-          "description": "A Mermaid diagram that the browser lays out. No lens writes it now. The shell still draws it.",
+          "description": "A Mermaid diagram that the browser lays out. No lens writes it now. The viewer still draws it.",
           "type": "object",
           "required": ["type", "mermaid"],
           "properties": {
@@ -654,6 +656,606 @@
       "title": "Mermaid",
       "description": "Mermaid source: one diagram, or one per side.",
       "oneOf": [{ "type": "string" }, { "$ref": "#/$defs/MermaidPair" }]
+    },
+    "Tour": {
+      "title": "Tour",
+      "description": "The walk through the change: chapters of stops, each stop one idea with the code that carries it. A reader that draws it makes it the main view, and keeps the sections as the reference. Absent on pages from before the tour.",
+      "type": "object",
+      "required": [
+        "chapters"
+      ],
+      "properties": {
+        "narrated": {
+          "type": "boolean",
+          "description": "True when the agent wrote the tour's text. False: titles are defaults made from element names, and Before, Now, and Watch are absent."
+        },
+        "summary": {
+          "type": "string",
+          "description": "What the change does, in at most 40 words. Plain text with `code` spans."
+        },
+        "flags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TourFlag"
+          },
+          "description": "At most three facts that change how to read the PR."
+        },
+        "chapters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TourChapter"
+          },
+          "description": "The chapters in reading order."
+        },
+        "below": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TourBand"
+          },
+          "description": "The changed lines in no stop, by part: tests that join no stop, docs, generated and vendored files."
+        },
+        "ending": {
+          "$ref": "#/$defs/TourEnding"
+        },
+        "map": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TourMapPackage"
+          },
+          "description": "The changed files by package, for a code map beside the tour."
+        }
+      }
+    },
+    "TourFlag": {
+      "title": "TourFlag",
+      "description": "A fact that changes how to read the PR.",
+      "type": "object",
+      "required": [
+        "title",
+        "text"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "description": "warn or info. Open set: a reader draws a kind it does not know as info.",
+          "examples": [
+            "warn",
+            "info"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "description": "A few words."
+        },
+        "text": {
+          "type": "string",
+          "description": "At most two sentences, plain text with `code` spans."
+        },
+        "ref": {
+          "type": "string",
+          "description": "What the flag points at: comment:<kind>:<id>, an element id, or view:<id>."
+        }
+      }
+    },
+    "TourChapter": {
+      "title": "TourChapter",
+      "description": "One chapter: a read part of the change, or the whole change when it fits in one.",
+      "type": "object",
+      "required": [
+        "id",
+        "title",
+        "stops"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique on the page, a slug such as perch-changescape."
+        },
+        "h": {
+          "type": "string",
+          "description": "A hash of the hashes of its stops. The element chapter:<id> carries the same hash."
+        },
+        "title": {
+          "type": "string",
+          "description": "At most 12 words."
+        },
+        "intro": {
+          "type": "string",
+          "description": "Two or three sentences: what the part is for, what it gives the parts above it, and the terms its first stop uses."
+        },
+        "verdict": {
+          "type": "string",
+          "description": "read or skim. Open set.",
+          "examples": [
+            "read",
+            "skim"
+          ]
+        },
+        "lines": {
+          "$ref": "#/$defs/TourLines"
+        },
+        "parts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The ids of the parts in `parts` that the chapter covers."
+        },
+        "spine": {
+          "$ref": "#/$defs/TourSpine"
+        },
+        "stops": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TourStop"
+          },
+          "description": "The stops in reading order."
+        },
+        "sections": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TourSection"
+          },
+          "description": "Optional. Named groups of consecutive stops, for a long chapter. Each stop id is in at most one section. A reader that ignores sections draws the stops as one list."
+        }
+      }
+    },
+    "TourSection": {
+      "title": "TourSection",
+      "description": "A named group of consecutive stops inside one chapter.",
+      "type": "object",
+      "required": [
+        "title",
+        "stops"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "At most 12 words."
+        },
+        "intro": {
+          "type": "string",
+          "description": "One sentence."
+        },
+        "stops": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Stop ids, in reading order."
+        }
+      }
+    },
+    "TourLines": {
+      "title": "TourLines",
+      "description": "Changed lines to read and to skim.",
+      "type": "object",
+      "required": [
+        "read",
+        "skim"
+      ],
+      "properties": {
+        "read": {
+          "type": "integer"
+        },
+        "skim": {
+          "type": "integer"
+        }
+      }
+    },
+    "TourSpine": {
+      "title": "TourSpine",
+      "description": "The one picture that orients a chapter, before its first stop: a call diagram (a picture of kind seq) of the chapter's main paths, from where a run starts to its changed functions, with only the path steps and the changed calls.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/TourPicture"
+        }
+      ],
+      "required": [
+        "kind",
+        "svg",
+        "hot"
+      ]
+    },
+    "TourStop": {
+      "title": "TourStop",
+      "description": "One stop: one idea with the code that carries it.",
+      "type": "object",
+      "required": [
+        "id",
+        "title",
+        "els",
+        "pictures",
+        "lines"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique on the page, a slug made from element or file names."
+        },
+        "h": {
+          "type": "string",
+          "description": "A hash of the changed lines in its hunk pictures, without line numbers. The element stop:<id> carries the same hash."
+        },
+        "title": {
+          "type": "string",
+          "description": "A claim of at most 12 words, plain text with `code` spans."
+        },
+        "before": {
+          "type": "string",
+          "description": "One sentence: what the code did at the base. Absent for new code."
+        },
+        "now": {
+          "type": "string",
+          "description": "One sentence: what the code does now."
+        },
+        "watch": {
+          "type": "string",
+          "description": "One sentence that points at a fact or a review comment. Always with watch_ref."
+        },
+        "watch_ref": {
+          "type": "string",
+          "description": "What watch points at: comment:<kind>:<id> (kind inline, review, or issue), an element id, or view:<id>."
+        },
+        "verdict": {
+          "type": "string",
+          "description": "read or skim. Open set. Absent: use the verdict of the stop's part.",
+          "examples": [
+            "read",
+            "skim"
+          ]
+        },
+        "els": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The elements whose code the stop holds, in file order."
+        },
+        "pictures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TourPicture"
+          },
+          "description": "What the stop shows, in order. At least one."
+        },
+        "relies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TourRely"
+          },
+          "description": "Unchanged code that the stop's lines depend on."
+        },
+        "asides": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TourAside"
+          },
+          "description": "Context that matters at this stop."
+        },
+        "lines": {
+          "type": "integer",
+          "description": "The changed lines the stop holds."
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TourFileLines"
+          },
+          "description": "The changed lines the stop holds, by file and part."
+        }
+      }
+    },
+    "TourFileLines": {
+      "title": "TourFileLines",
+      "description": "Changed lines of one file, in one part.",
+      "type": "object",
+      "required": [
+        "path",
+        "add",
+        "del"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The repo path at the head, as in files."
+        },
+        "part": {
+          "type": "string",
+          "description": "The id of the part the lines count in."
+        },
+        "add": {
+          "type": "integer"
+        },
+        "del": {
+          "type": "integer"
+        }
+      }
+    },
+    "TourPicture": {
+      "title": "TourPicture",
+      "description": "One picture of a stop. kind hunk: windows of one file in files. kind seq: a call diagram laid out at build time, drawn like an svg block (svg, hot, title, note). Open set: a reader skips a kind it does not know.",
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "description": "hunk or seq. Open set.",
+          "examples": [
+            "hunk",
+            "seq"
+          ]
+        },
+        "file": {
+          "type": "string",
+          "description": "For hunk: the repo path at the head, as in files."
+        },
+        "windows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TourWindow"
+          },
+          "description": "For hunk: the parts of the file to show, in file order."
+        },
+        "svg": {
+          "type": "string",
+          "description": "For seq: the SVG markup of a sequence diagram, as in an svg block."
+        },
+        "hot": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "For seq: SVG node id to element id, as in an svg block. A click on that node opens the element."
+        },
+        "title": {
+          "type": "string",
+          "description": "For seq: a default heading, from the names where the path starts and ends."
+        },
+        "note": {
+          "type": "string",
+          "description": "For seq: a muted line under the diagram, its legend."
+        },
+        "caption": {
+          "type": "string",
+          "description": "One sentence over the picture, from the narration. A reader shows it in place of title."
+        }
+      }
+    },
+    "TourWindow": {
+      "title": "TourWindow",
+      "description": "Lines of one file, like a diff hunk header: a base range and a head range. A window holds every diff row inside its ranges, so a head window holds the lines removed inside it. The reader folds long unchanged runs.",
+      "type": "object",
+      "required": [
+        "base",
+        "head"
+      ],
+      "properties": {
+        "base": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/LineRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Lines at the base, or null when the window only adds lines."
+        },
+        "head": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/LineRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Lines at the head, or null when the window only removes lines."
+        }
+      }
+    },
+    "TourRely": {
+      "title": "TourRely",
+      "description": "Unchanged code that a stop's lines call, extend, or match on.",
+      "type": "object",
+      "required": [
+        "el",
+        "code"
+      ],
+      "properties": {
+        "el": {
+          "type": "string",
+          "description": "The element id."
+        },
+        "why": {
+          "type": "string",
+          "description": "Why the stop relies on it: matches, implements, or calls. An open set. A reader shows an unknown value as calls."
+        },
+        "sig": {
+          "type": "string",
+          "description": "The signature line, or an empty string."
+        },
+        "doc": {
+          "type": "string",
+          "description": "The doc comment, or an empty string."
+        },
+        "what": {
+          "type": "string",
+          "description": "One sentence: the contract the new lines rely on. Absent until the narration writes it."
+        },
+        "code": {
+          "title": "TourRelyCode",
+          "type": "object",
+          "required": [
+            "file",
+            "head"
+          ],
+          "properties": {
+            "file": {
+              "type": "string"
+            },
+            "head": {
+              "$ref": "#/$defs/LineRange"
+            }
+          },
+          "description": "Where the code is at the head."
+        }
+      }
+    },
+    "TourAside": {
+      "title": "TourAside",
+      "description": "Context that matters at one stop, such as an open PR on the same files.",
+      "type": "object",
+      "required": [
+        "q",
+        "a"
+      ],
+      "properties": {
+        "view": {
+          "type": "string",
+          "description": "The view the context comes from."
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Element ids of the rows of that view."
+        },
+        "q": {
+          "type": "string",
+          "description": "The question."
+        },
+        "a": {
+          "type": "string",
+          "description": "The answer, in one line."
+        }
+      }
+    },
+    "TourBand": {
+      "title": "TourBand",
+      "description": "Changed lines of one part that are in no stop.",
+      "type": "object",
+      "required": [
+        "part",
+        "verdict",
+        "lines"
+      ],
+      "properties": {
+        "part": {
+          "type": "string",
+          "description": "The part id."
+        },
+        "verdict": {
+          "type": "string",
+          "description": "skim or skip. Open set.",
+          "examples": [
+            "skim",
+            "skip"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "description": "The part's name."
+        },
+        "lines": {
+          "type": "integer"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TourFileLines"
+          }
+        }
+      }
+    },
+    "TourEnding": {
+      "title": "TourEnding",
+      "description": "Where you stand: what to check before deciding, and what to do next.",
+      "type": "object",
+      "properties": {
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TourCheck"
+          }
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TourAction"
+          }
+        }
+      }
+    },
+    "TourCheck": {
+      "title": "TourCheck",
+      "description": "A question to settle before deciding, with a one-line answer. The narration writes some, and the tools add context that attached to no stop.",
+      "type": "object",
+      "required": [
+        "q",
+        "a"
+      ],
+      "properties": {
+        "q": {
+          "type": "string"
+        },
+        "a": {
+          "type": "string"
+        },
+        "view": {
+          "type": "string",
+          "description": "The view the context comes from. Present on the checks that the tools add."
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Element ids of the rows of that view."
+        }
+      }
+    },
+    "TourAction": {
+      "title": "TourAction",
+      "description": "Something to do after the tour.",
+      "type": "object",
+      "required": [
+        "label"
+      ],
+      "properties": {
+        "label": {
+          "type": "string",
+          "description": "A short imperative."
+        },
+        "detail": {
+          "type": "string",
+          "description": "One sentence."
+        }
+      }
+    },
+    "TourMapPackage": {
+      "title": "TourMapPackage",
+      "description": "One package and its changed files.",
+      "type": "object",
+      "required": [
+        "pkg",
+        "files"
+      ],
+      "properties": {
+        "pkg": {
+          "type": "string"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
     },
     "HotLabel": {
       "title": "HotLabel",

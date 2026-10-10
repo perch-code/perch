@@ -4,7 +4,7 @@ The design of the Changescape tab. It follows the skeleton of `design/MILESTONE_
 
 ## Goal
 
-Changescape is a separate tool. It explains how a pull request changes the shape of a codebase. Today it is a Claude Code skill. The skill writes one JSON file per PR, `page.json`, and a static HTML page. This milestone lets Perch show that JSON as a third mode of an item, Changescape, next to Conversation and Code. The tab is named Changescape and not Map, because one section inside the page is already called Map.
+Changescape is a separate tool. It explains how a pull request changes the shape of a codebase. Today it is a Claude Code skill. The skill writes one JSON file per PR, `page.json`. A separate viewer draws the same file as HTML. This milestone lets Perch show that JSON as a third mode of an item, Changescape, next to Conversation and Code. The tab is named Changescape and not Map, because one section inside the page is already called Map.
 
 The Changescape tab is a way into Perch. It is not a second code viewer. Every element on the Changescape tab opens its lines in Perch's own Code mode, with Perch's editor, scopes, and language servers. Every review thread on the Changescape tab opens in Perch's thread UI.
 
@@ -31,7 +31,6 @@ One build of one PR at one head commit has its own folder:
 ~/.changescape/cache/<owner>/<repo>/pr-<number>/<head_sha>/
   status.json     state of the build
   page.json       facts and captions, the only file that Perch draws
-  page.html       the same page for a browser
 ```
 
 `<owner>/<repo>` is `Item.repo_full_name`. `<number>` and `<head_sha>` come from `PullRequest` (`crates/perch-github/src/pulls.rs:32`). Other folders under `<owner>/<repo>/`, for example the repo atlas, belong to Changescape. Perch ignores them.
@@ -65,8 +64,8 @@ If the skill is available, the banner ends with a Rebuild link. "Building a chan
 
 Perch draws page format versions from `MIN_PAGE_SCHEMA` to `MAX_PAGE_SCHEMA` (`crates/perch-changescape/src/lib.rs`). Both are 3 now. Perch reads the version from `page_schema` in `status.json`. A folder with a page but no `status.json` counts as version 2. Perch does not keep a reader for older versions: an older page is refused, and the reader rebuilds it.
 
-- A finished build below the lowest version is `Lookup::Outdated`. The tab says "This Changescape was built by an older version. Rebuild it to see this PR." If Perch can build, the tab shows Rebuild. Otherwise it offers the browser page.
-- A finished build above the highest version is `Lookup::TooNew`. The tab says "This Changescape needs a newer Perch." and offers the browser page.
+- A finished build below the lowest version is `Lookup::Outdated`. The tab says "This Changescape was built by an older version. Rebuild it to see this PR." If Perch can build, the tab shows Rebuild.
+- A finished build above the highest version is `Lookup::TooNew`. The tab says "This Changescape needs a newer Perch."
 - In both cases the pill stays, so the reader finds the link.
 - The gate applies to every build that the lookup considers. An earlier head's build of another version is never a `Stale` stand-in. A running build does not show it meanwhile.
 - When the page loads, Perch reads `schema` from `page.json` before it parses the rest, and applies the same gate (`Error::Version`, then `Lookup::with_page_schema`). This catches a status that misstates the version.
@@ -84,86 +83,67 @@ In every other case the switch must be identical to today, including its width a
 
 With a running build and no earlier changescape, the Changescape body shows the run's progress. Reuse `review/run_view.rs` (`run_header`, `doing_now`, `step_line`).
 
-### The Changescape body
+### The tour
 
-The Changescape body has two parts: a rail of sections on the left and the selected section on the right.
+The Changescape body is the page's tour: the optional top-level `tour` in `page.json` (the `tour` section of `skill/docs/page-data.md`, and `docs/design/tour.md` in the Changescape repo). Perch draws only the tour. It still parses the page's `sections` and `views`, because the schema requires them, but it draws no view as a section. The skill writes no `page.html`: the HTML viewer is a separate tool. A page without a tour, or with a tour that does not read, shows one line and Rebuild.
 
-`page.json` has a fixed list of sections, in a fixed order. Their working ids are `overview`, `context`, `map`, `behavior`, `responsibilities`, `contracts`, `surroundings`, and `code`. Draw them in the order of the file, and do not hard-code the names. Labels come from the file.
+The tour is one scrolling column with three parts:
 
-- A section with no views is one muted line in the rail. The line shows its `reason`, for example "No CI or packaging changes." It is not clickable.
-- The `code` section is not drawn. Its rail entry is a link that switches to the Code pill.
-- A section with several views shows them one under the other, each with its title, its caption, and its blocks.
-- On open, the Changescape tab selects Overview. Remember the selected section per item, the same way `Pane.tab` remembers the tab (`review/model.rs:159`).
+1. The cover: the PR title, the summary, the bar of lines to read, skim, and skip, at most three flags, and the contents. The contents list the chapters, or the stops when there is one chapter. A click scrolls to the chapter or the stop.
+2. The chapters. A chapter has a title, an intro, and its spine, a call diagram, before its stops. A long chapter can have `sections`, named groups of consecutive stops. A section header, with its place among the sections, its title, and its intro, comes before the section's first stop. A run of skim stops never crosses a header. Stops in no section come after the last section, with no header.
+3. The ending, "Where you stand": the stops that changed since their marks, the stops to come back to, the read stops with no mark, the bands of lines in no stop, and the page's checks and actions. A check that the tools add has `view` and `rows`, and it lists the first three of its row elements as links, then how many more.
 
-### Blocks
+A read stop shows open, as a card: its claim, Before, Now, and Watch with a link to what `watch_ref` names, its pictures, what it relies on, its asides, the review threads on its lines, and four buttons.
 
-Each view holds a list of blocks. The exact shapes are in `skill/docs/page-data.md` in the Changescape repo (`~/workspace/changescape`). That file is the source of truth. If this document and that file disagree, follow that file and note the difference in your report. Draw these block types natively:
+A relies entry is unchanged code that the stop's new lines depend on. It shows the element's title as a link, how the stop uses it (calls, implements, or matches), and what it promises: the narration's `what`, else the first sentence of its doc comment. Code opens the symbol's head lines in place, cut from the checkout at `code.file` as a hunk window is. The file loads only when Code opens. An aside is context from another view: its question, its one-line answer, and the first three elements of its view's rows as links. Done and Come back to this are toggles. Chat about this opens the composer in the stop. Next scrolls to the next read stop, or to the ending after the last one, and records nothing. Each run of skim stops folds into one group. In the group, each stop is a row with its title, its Now sentence in muted text, and its line count. A click opens the stop in place.
 
-| Type | How to draw it |
-| --- | --- |
-| `narration`, `text` | A paragraph. Backtick spans are code spans. An `el` on the block or a span makes it a link. |
-| `summary` | A short list of rows. Each row has a title, a metric, and a line of text, and opens the named section or view. |
-| `table` | A table. Column kinds are `text`, `mono`, `num`, `status`, `bar`, and `refs`. A cell or row with `el` is a link. A row with `dim` is muted. Rows can have ranks and groups. See "Grouped and folded tables". |
-| `svg` | An SVG picture with clickable shapes. See below. |
+A picture of kind `hunk` draws its windows from the file as Code has it, with `cards::code_row`. The file loads under the Branch scope, because page lines count from the merge base, so the tour sets the item's scope to Branch when it opens. A window holds every display row from the first to the last whose head line is in its head range or whose base line is in its base range. A run of more than eight unchanged lines folds to three lines at each end. A click on a line opens Code at that head line, and a removed line opens the head line after it. A picture of kind `seq` draws as a diagram (see "Diagrams"). A picture of another kind is skipped.
 
-Any other block type is drawn as one muted line: "This view is in the browser page." The line has a button that opens `page.html` in the default browser, with `open` from `std::process::Command`. Unknown fields in known blocks are ignored. Parsing must never fail on a new field or a new block type.
+Until `tour.narrated` is true, the cover says that the narration comes later.
 
-### Grouped and folded tables
+Two sides frame the column. The outline on the left lists the start, each chapter with its stops, and the end. A section's title is a muted label over its first stop. A stop shows its number, or a check when it is done, a return arrow when the reader will come back to it, and a delta when it changed since its mark. A skim stop says skim. The code map on the right lists the files of `tour.map` by package, each with bars for its added and removed lines. A package opens on a click, and all packages are open when there are at most three, or at most 24 files. A file whose stops are all done has a check. A file in no stop is in italics.
 
-A table can have `groups` and `fold`, and its rows can have `rank`, `why`, and `group`. The contract is "Rank, groups, and folds" in page-data.md. The fold logic is in `crates/perch-changescape/src/fold.rs`, and the drawing is in `review/changescape/blocks.rs`.
+Both sides light up the stop in view: the last stop whose top passed a third of the column. The outline lights up its row. The code map lights up the files the stop holds, and opens their packages. A click on the outline goes to that place. A click on a file goes to its first stop, and a file in no stop opens in Code. The code map hides when the tab is narrower than 900 pixels, and the outline hides when it is narrower than 640.
 
-1. Perch draws rows in the page's order. It never ranks rows itself.
-2. The rows without a group come first. Then each group is a section, in the order of `groups`. A row whose `group` is not in `groups` has no group.
-3. A section header shows a chevron, the label, and the summary. A click opens or closes the section. The section starts as `open` says.
-4. Each part shows its rows that are not minor, up to `fold.show` of them. The other rows wait behind one control. If all of them are minor, the control names them with `fold.label`, for example "Show 13 more · layout numbers". If only some are minor, it counts them, for example "Show 4 more (2 minor: small helpers)". A click shows them in place, and the control then reads "Show fewer".
-5. The row of the element in the base popover, and the row of the element that the Code strip names, never fold. A row in the active facet option never folds. The section that holds such a row opens.
-6. A key row has a 2-pixel bar in the accent color at its left edge. A row's `why` is its tooltip.
-7. Column widths come from all the rows, folded rows too, so a section that opens does not move the columns.
-8. `ReviewState` keeps the open state of each section and each fold control, keyed by view id, block index, and group id. The pane remembers them per item for the life of the app.
+### Progress
 
-A sort by a column, or a filter, shows all matching rows in one list, without sections or folds. A table without groups, folds, and ranks draws as it did before.
+The reader's marks are in `~/.perch/perch.db`, table `tour_progress`, keyed by (repo, number, stop id). Each mark keeps the stop's `h`, a hash of its changed lines without line numbers. A stop is Done, Come back to this, or unmarked. Scrolling past a stop records nothing. The commit bar shows how many read stops are done. The table is created with `CREATE TABLE IF NOT EXISTS` when the cache opens, and a table from before the hashes gets its `h` column then. The schema version does not change, so a released Perch at the same version can still open the database. The backend sends the marks with the lookup (`Found.marks`).
 
-### Facets
+If a push changes a stop's lines, the stop's `h` on the new page differs from the stored one. The stop then shows as changed since you marked it: a line over its text says which mark it had, the outline shows a delta, and the stop does not count as done. A mark or a stop with no `h` holds as it is. A new mark on the stop stores the new `h` and clears the change.
 
-A facet is a named way to look at part of the change. Each option is a set of element ids. The contract is "facets" in page-data.md.
+### Chat about a stop
 
-- If the page has facets, the commit bar has a picker. Its first entry is "Whole change". Each facet is a submenu of its options.
-- While an option is on, a "Hide the rest" toggle shows next to the picker. The section shows the option's note as a muted line, with a "Whole change" link.
-- Table rows whose `el` is not in the option dim. With "Hide the rest" on, they hide. A row without `el` stays as it is.
-- Diagram nodes whose element is not in the option get a translucent cover of the card color.
-- Rail entries of sections that have no table row or diagram node in the option dim.
-- A facet never changes ranks or order. The pane remembers the option and the toggle per item.
+Chat about this opens a composer for a new thread with `about` set to `tour:<stop id>`, so only that stop draws it. The thread anchors to the stop's first head window. The composer's `context` holds the chapter, the stop's text, and its windows. The first prompt carries it in a block labeled "what the reader is looking at".
 
-### SVG blocks
+### Diagrams
 
-Changescape lays out diagrams (the city map, import graphs, sequence diagrams, class and schema diagrams) and ships each as one SVG string:
-
-```json
-{ "type": "svg", "svg": "<svg ...>...</svg>", "hot": { "n12": "mod:dblect.sql.patterns", "n13": "fn:dblect.sql.patterns.window" } }
-```
-
-`hot` maps an SVG node `id` to an element id. Draw the SVG the way `review/picture.rs:289-370` draws pictures: `usvg::Tree::from_str`, then `cx.draw_svg`. For clicks, map the pointer into SVG coordinates, then find the topmost node in `hot` whose bounding box holds the point. usvg 0.46 has `Tree::node_by_id` and `Node::abs_bounding_box`. Highlight the hovered hot node with a rectangle drawn over the picture. Do not edit the SVG tree.
-
-Large diagrams must scroll and zoom. Fit the width on open. Changescape colors the SVG for a light background. If Perch is in a dark theme, draw the picture on a light card. Do not recolor it.
+A `seq` picture or a spine ships its own SVG and `hot` map. Draw it the way `review/picture.rs` draws pictures: `usvg::Tree::from_str`, then `cx.draw_svg`. For clicks, map the pointer into SVG coordinates, then find the smallest hot node whose bounding box holds the point, and open its element. Highlight the hovered node with a ring. A diagram up to 1.6 times wider than the column fits it. A wider one keeps its size and scrolls. Expand shows a diagram over the tour, fitted to the room, and Escape or Close puts it away. Changescape colors the SVG for a light background, so it sits on a white card in every theme.
 
 ### Elements and navigation
 
-`page.json` has a top-level `elements` map from element id to element. An element has a title `t`, a kind `k`, a status `st`, and `refs`. Each ref is a file path `f` with an inclusive line range on the base side, the head side, or both. Lines are 1-based. Base is the PR's merge base, and head is `meta.head.sha`.
+`page.json` has a top-level `elements` map. A click on a hot node opens its element:
 
-A click on anything that carries an element id does this:
+1. If the scope is not `Scope::Branch`, set it to `Branch` with `backend.set_scope`.
+2. Take the first ref with a `head` range, and open its file at its first head line.
+3. A module opens its whole file.
+4. An element only on the base side opens its file split, at the head line its own diff comes nearest to.
 
-1. If Perch's scope for the item is not `Scope::Branch` (`crates/perch-git/src/scope.rs:39`), set it to `Branch` with `backend.set_scope`. Line numbers in `page.json` are relative to the whole branch.
-2. Take the first ref with a `head` range. Call `ReviewState::go_to_file(path, Some((head_start - 1, 0)))` (`review/model.rs:3089`). This also switches to Code.
-3. If no ref has a `head` range, the element exists only on the base side, for example a removed function. Perch has no API to open a base line. Show the ref's `src` excerpt in a popover over the Changescape tab instead. `src` rows are `[base_line, head_line, op, text]`. Add a "Show in diff" button. It opens the file in Code with `Layout::Split` (`review/model.rs:213`). It jumps to the first head line of the nearest hunk. A base-line jump is a later milestone.
-4. If the changescape is stale, line numbers can be wrong. Open the file at the line anyway, and keep the stale banner.
+Code points back to the tour. If the caret in Code is on a head line that a stop's window holds, a strip over the editor names the stop and its chapter. Its link, "On the tour", switches to the Changescape tab and scrolls to the stop. `StopIndex` maps each path to the stops' head windows.
 
-Code points back to the Changescape tab. If the caret in Code is inside the head range of a Changescape element, show a strip over the editor. The strip is one line with the title and kind of the element. The strip has a link, "On the changescape", that switches to the Changescape tab and selects the first section that shows the element. After the changescape loads, build an index from path to head ranges. Do not scan `page.json` on every caret move.
+### Review threads on the tour
 
-### Review threads on the Changescape tab
+A stop shows the threads whose anchor lines a window of the stop holds, on the same side: a head anchor in a head range, a base anchor in a base range. They are Perch's comment threads, GitHub's and the reader's own, drawn as Conversation draws them. `page.json` can also carry GitHub's review comments. Perch does not draw them, except to link a `comment:<kind>:<id>` ref to the comment's page on GitHub.
 
-`Discussion.review_comments` (`crates/perch-github/src/discussion.rs:45`) has each comment's `path`, `line`, and `side`. For each element, count the open threads whose path matches a ref and whose line is in the ref's range on the same side. `Side::Right` is head, and `Side::Left` is base. Show the count as a small badge on table rows, on hot SVG nodes, and in the Code strip. A click on a badge opens the first thread with the existing thread navigation (`review/cards.rs:1461`, `path_link`).
+### Views a ref names
 
-Perch's thread data is the truth. `page.json` can also carry review comments for the browser page. Perch ignores them.
+A flag's `ref` or a stop's `watch_ref` can name a view, `view:<id>`, for example `view:related`. Its link opens a popover over the tour with the view's title and metric, and a row for each element that the view's table rows name. Each row shows the element's title and the first line of its description. Perch draws no table, fold, or facet: when the page loads, it keeps only the `el` of each row of each block, in row order and each once, and it drops a row whose element the page does not hold. A click outside, Close, or Escape puts the popover away.
+
+A click on a row opens the element by its kind:
+
+- `pr:<n>` and `issue:<n>` open that item in Perch, as Open does, in the page's repository.
+- `commit:<sha>` opens on Code as the commit's own changes when the checkout has it, and else the element's page on GitHub.
+- An element with lines opens in Code, as "Elements and navigation" says.
+- Anything else with a `url`, such as a person, opens its page on GitHub.
 
 ### Building a changescape
 
@@ -173,6 +153,8 @@ If both of these conditions are true, Perch offers to build a changescape:
 - The Changescape skill is installed. Look for `SKILL.md` with `name: changescape` in its front matter, in `~/.claude/skills/*/` or in `~/.claude/plugins/**/skills/*/`, at most four folders deep. Cache the answer for the session. After each request to build, look again.
 
 If either one is missing, Perch shows no build action anywhere.
+
+The skill must also write a tour. A skill from before the tour still reports page format 3 and skill version 2.0.0, so Perch reads its `schema/page.v3.schema.json`: a schema with no `tour` property means an old skill. A build with it writes a page with no tour over the one in the cache, so Perch does not start one. The tab shows "The installed Changescape skill writes no tour. Update the skill to build one." where Build, Rebuild, or Retry would be. A build that does not start leaves the build folder as it is.
 
 If both are present, add "Build Changescape" to the item's existing action menu, in the place that holds actions like asking an agent. Pick the least visible fitting place. Do not add a pill or a button to the item header for it. After a build starts, the Changescape pill appears, as described above. On a stale changescape, the banner's Rebuild link starts the same build.
 
@@ -194,7 +176,9 @@ Write the output to <cache root>/<owner>/<repo>/pr-<number>/<head_sha>/.
 
 Show the run's progress in the Changescape body while it runs, and write its steps to `perch-build.log` in the build folder. When the run ends, read `status.json` again. Two results count as a failed build: the state `failed`, and a run that exits with no `page.json`. Show the error of a failed build in the Changescape body, with a Retry link.
 
-The skill marks the build `done` at stage `facts` before the agent writes the captions, so the facts page draws about a minute before the captions arrive. While a build that Perch started is still running and the page is at stage `facts`, the commit bar adds "Writing the captions…". Each view without a caption shows "Caption coming…" where the caption goes. Perch keeps polling until the stage is `narrated` or the run ends. Perch cannot tell this for a build started outside Perch, because the status does not say whether captions are still coming.
+The skill marks the build `done` at stage `facts` before the agent writes the narration, so the facts page draws about a minute before the narration arrives. The narration is the tour's text: the summary, the chapter intros, the stop titles and their Before, Now, and Watch, and the diagram captions. While a build that Perch started is still running and the page is at stage `facts`, the commit bar adds "Writing the narration…". Perch keeps polling until the stage is `narrated` or the run ends.
+
+A step of the skill can mark the build `failed` in the middle of a run. For example, `assemble.py` does this when the narration breaks a rule of the tour, such as a title of more than 12 words. The agent then fixes `narration.json` and runs the step again. So while a build that Perch started still runs, a `failed` status is not the end (`lookup_during_run`). If the build folder has a page, the tab keeps drawing it. If it has no page, the tab shows the build's progress. Only the status that the run leaves when it ends counts as a failure. Perch cannot tell this for a build started outside Perch, because the status does not say whether the narration is still coming.
 
 Only one build per PR runs at a time. A second "Build Changescape" while one is running looks the PR up again and starts nothing.
 
@@ -230,7 +214,7 @@ Each generated file starts with a `// @generated` line and the command that made
 
 When version 4 comes, generate `v4` and remove `v3` in the same change.
 
-The generated types are strict, so Perch reads a page in two steps (`LoadedPage::read` in `src/page.rs`). It parses each view's blocks one by one. A block that does not parse becomes `PageBlock::Unknown`, which draws as "This view is in the browser page." Then it parses the rest of the page. If the rest does not parse, the tab shows the error and offers the browser page.
+The generated types are strict, so Perch reads a page in two steps (`LoadedPage::read` in `src/page.rs`). It does not parse the views' blocks. It keeps only the element each table row names, for "Views a ref names". It parses `tour` on its own: one bad stop drops the tour, not the page, and `LoadedPage::tour_error` says why. Then it parses the rest of the page. If the rest does not parse, the tab shows the error.
 
 The shared conformance fixtures are in `crates/perch-changescape/tests/fixtures/conformance/`, copied from `skill/schema/fixtures/` in the Changescape repo. `tests/conformance.rs` checks each case against its `expect.md`. The window tests in `review/changescape/tests.rs` draw them.
 
@@ -238,17 +222,17 @@ The shared conformance fixtures are in `crates/perch-changescape/tests/fixtures/
 
 Put file types and lookup in a new crate, `crates/perch-changescape`. It has no UI dependencies.
 
-- The page and status types are generated from the schema. See "The page schema" above. `LoadedPage` holds a `v3::Page` and its views' blocks, each a `PageBlock`.
+- The page and status types are generated from the schema. See "The page schema" above. `LoadedPage` holds a `v3::Page` with the tour read on its own. `page.rs` has the tour's helpers: verdicts, runs of skim stops, reading order, windows, and diagrams.
 - `fn lookup(root: &Path, repo: &str, number: u64, head_sha: &str) -> Lookup`, where `Lookup` is `Current(Build)`, `Stale(Build)`, `Running(Build, Option<Build>)` (with the last drawable earlier build), `Failed(Build)`, `Outdated(Build)`, `TooNew(Build)`, or `None`. `Build` holds the folder, the head SHA, and the status.
 - `fn load(build: &Build) -> Result<Arc<LoadedPage>>`. Parse once per build and per `finished` time. Cache the result.
 - `fn skill_available() -> Option<PathBuf>` returns the skill folder.
-- `struct LineIndex` maps a path to sorted head ranges with element ids, for the Code strip.
+- `struct StopIndex` maps a path to the stops' sorted head windows, for the Code strip.
 
 In `perch-app`:
 
 - Add `ItemTab::Changescape` (`review/model.rs:148`). Add an arm to each `match` on `ItemTab`: `ui/mod.rs:527`, `:552`, `:1632`, and `review/tabs.rs:226`. Search for others.
-- Add `ReviewState.changescape: RwSignal<Option<ChangescapeState>>`, which holds the `Lookup`, the loaded `Page`, the selected section, and the line index.
-- Add the Changescape body in `review/mod.rs:196`, next to `showing_code()` and `item_view()`. Put the views in a new module, `review/changescape/`, with one file for the rail, one for blocks, and one for SVG.
+- `ReviewState.changescape` holds what the backend found and the stop index. `changescape_marks`, `changescape_opened`, `changescape_focus`, and `changescape_expanded` hold the marks, the skim stops opened in place, the stop to scroll to, and the expanded diagram.
+- The views are in `review/changescape/`: `tour.rs` (the cover, the chapters, the ending), `stop.rs` (stops, skim groups, marks, threads, chat), `side.rs` (the outline and the code map), `view.rs` (the popover of a view's elements), `hunk.rs` (code windows), `svg.rs` (diagrams), `navigate.rs` (from the tour into Code), `prose.rs` (text with code spans, and the small parts every view shares), and `strip.rs` (the Code strip).
 
 ## Backend
 
@@ -258,44 +242,21 @@ In `perch-app`:
 
 ## Harness
 
-- `--changescape owner/repo#N` prints what Perch finds for that PR: the lookup result, the sections with their view counts, and the block types with counts. Add it next to `--dump-file` in `main.rs:66-99`. Use it in the acceptance steps.
+- `--changescape owner/repo#N` prints what Perch finds for that PR: the lookup result, and the tour's chapters and stops with their verdicts, line counts, and picture kinds. Add it next to `--dump-file` in `main.rs:66-99`. Use it in the acceptance steps.
 - Fixtures: the conformance fixtures from the Changescape repo, in `crates/perch-changescape/tests/fixtures/conformance/`.
-- UI tests use `floem::headless::{HeadlessHarness, TestRoot}` (`ui/mod.rs:1145`). Give every new view a `.debug_name(...)`: `"Changescape pill"`, `"Changescape rail"`, `"Changescape section <id>"`, `"Changescape block <type>"`, `"Changescape stale banner"`, `"Changescape code strip"`.
-
-## Build order
-
-1. `perch-changescape`: types, lookup, load, and tests on the fixtures.
-2. Configuration and the `--changescape` command.
-3. `ItemTab::Changescape`, the pill, and the rail with empty sections. The pill shows only with a fixture changescape in a temporary cache root.
-4. The `narration`, `text`, `summary`, and `table` blocks, and the fallback line.
-5. Element clicks into Code, with the scope switch and the base-only popover.
-6. The `svg` block with hit testing, hover, scroll, and zoom.
-7. Thread badges and the Code strip.
-8. Skill detection, the build run, progress, and errors.
-
-Each step must build and pass tests before the next one starts.
+- UI tests use `floem::headless::{HeadlessHarness, TestRoot}` (`ui/mod.rs:1145`). Give every new view a `.debug_name(...)`: `"Changescape pill"`, `"Changescape tour"`, `"Changescape chapter <id>"`, `"Changescape stop <id>"`, `"Changescape skim row <id>"`, `"Changescape code line"`, `"Changescape commit bar"`, `"Changescape code strip"`.
 
 ## Acceptance
 
 1. With no cache root and no skill, a headless test finds no view named `Changescape pill`. The children of the switch have the same debug names as before this milestone.
-2. With a fixture changescape for the open PR at its current head SHA, the Changescape pill shows. Overview is selected, and every section in the file appears in the rail in file order.
-3. With the fixture at a different head SHA, the stale banner shows.
-4. A click on a table row with a function element opens Code at the first line of the function, at head.
-5. A click on a removed function shows the popover with its base excerpt.
-6. A click on a hot node in an SVG block opens Code at that element.
-7. An unknown block type draws the fallback line, and the page still loads.
-8. A review comment on a line inside an element's head range shows a badge with count 1 on that element.
-9. With the skill installed, "Build Changescape" on a real PR creates `status.json` with `state: running`. The Changescape pill appears at once. When the run ends, the Changescape tab draws the new page.
-10. `enabled = false` hides the pill and the build action, even with a changescape in the cache.
-
-## Requests to Changescape
-
-The Changescape side will provide these. If one is missing when you start, use the fixtures, and list what you missed in your report.
-
-- A default output folder at the cache path above, with `status.json` and `page.html` next to `page.json`.
-- `schema: 2` at the top of `page.json` and in `status.json`.
-- `sections` in `page.json` in display order. Each section has its label and its view ids. An empty section also has a `reason`.
-- `svg` blocks with `hot` maps for every diagram.
+2. With case 12 for the open PR at its current head SHA, the Changescape pill shows. The tab opens on the tour: the cover, the chapter, and the ending. The read stop is open, and the skim stop is a row.
+3. With case 12 at a different head SHA, the commit bar says that the tour is of an earlier commit.
+4. A click on a line of a stop's code opens Code at that head line, under the Branch scope.
+5. A click on a hot node in a diagram opens Code at that element.
+6. A page with no tour, or with a tour that does not read, shows one line and Rebuild. A view block of an unknown shape does not stop the page from loading.
+7. A review thread on a line inside a stop's window shows on that stop.
+8. With the skill installed, "Build Changescape" on a real PR creates `status.json` with `state: running`. The Changescape pill appears at once. When the run ends, the Changescape tab draws the new page.
+9. `enabled = false` hides the pill and the build action, even with a changescape in the cache.
 
 ## Things the implementer should not do
 

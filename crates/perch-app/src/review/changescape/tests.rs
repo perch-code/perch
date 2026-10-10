@@ -1,12 +1,16 @@
-//! The Changescape tab in the whole window, on the conformance fixtures
-//! of `perch-changescape` (`tests/fixtures/conformance/`).
+//! The Changescape tour in the whole window, on the conformance fixtures
+//! of `perch-changescape` (`tests/fixtures/conformance/`). Case 12 is a
+//! tour of one chapter: a read stop, `multiply`, on head lines 1-3 of
+//! `calc/ops.py`, and a skim stop, `multiply-helper`, on lines 4-5.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use floem::headless::HeadlessHarness;
 use floem::reactive::{SignalGet, SignalUpdate};
+use perch_github::{Side, StoredMark, TourMark};
 
+use crate::backend::changescape::Found;
 use crate::review::changescape::Shown;
 use crate::review::header::tests::{named, pull_request, pull_request_harness_with, rect};
 use crate::review::model::{ItemTab, ReviewState};
@@ -14,6 +18,10 @@ use crate::review::model::{ItemTab, ReviewState};
 const REPO: &str = "calc/calc";
 const HEAD: &str = "3e81042d07e4d404b84526777e768a456a6a4fa9";
 const OPS: &str = "calc/ops.py";
+const TOUR: &str = "12-tour";
+
+/// A picture 200 by 100 whose box at (0, 0), 80 by 40, is `multiply()`.
+const DIAGRAM: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><g id="k"><rect x="0" y="0" width="80" height="40" fill="#ccc"/></g></svg>"##;
 
 fn cases() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../perch-changescape/tests/fixtures/conformance")
@@ -47,43 +55,40 @@ fn cache_patched(
     root
 }
 
-/// The minimal case with two things it lacks: `old()`, a function only on
-/// the base side, as a second Placement row, and a Diagram view in Map
-/// whose box at (0, 0), 80 by 40, is `add()`.
+/// Case 12 with what it lacks: a spine on the chapter, a flag on the
+/// cover, text on the read stop, and a second read stop after the skim
+/// one.
 fn cache_with_more(sha: &str) -> tempfile::TempDir {
-    cache_patched("01-minimal", sha, |page| {
-        page["elements"]["fn:calc.ops.old"] = serde_json::json!({
-            "t": "old()", "k": "function · calc.ops", "st": "removed",
-            "refs": [{ "f": OPS, "base": [5, 6], "head": null,
-                       "src": [[5, null, "-", "def old():"], [6, null, "-", "    pass"]] }],
-        });
-        let placement = page["views"]
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .find(|view| view["id"] == "placement")
-            .unwrap();
-        placement["blocks"][0]["rows"]
-            .as_array_mut()
-            .unwrap()
-            .push(serde_json::json!({
-                "el": "fn:calc.ops.old",
-                "cells": { "fn": { "text": "old()", "el": "fn:calc.ops.old" }, "st": "removed" },
-            }));
-        page["views"].as_array_mut().unwrap().push(serde_json::json!({
-            "id": "diagram", "sec": "map", "t": "Diagram", "s": "", "ic": "map", "q": "",
-            "state": "applies", "metric": "", "narration": null,
-            "blocks": [{ "type": "svg", "hot": { "k": "fn:calc.ops.add" },
-                "svg": r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><g id="k"><rect x="0" y="0" width="80" height="40" fill="#ccc"/></g></svg>"## }],
+    cache_patched(TOUR, sha, |page| {
+        let tour = &mut page["tour"];
+        tour["flags"] = serde_json::json!([{ "kind": "warn", "title": "A flag",
+            "text": "It changes how to read this.", "ref": "fn:calc.ops.multiply" }]);
+        tour["ending"] = serde_json::json!({ "checks": [{ "q": "Does it match?", "a": "Yes." }],
+            "actions": [{ "label": "Draft the review" }] });
+        let chapter = &mut tour["chapters"][0];
+        chapter["intro"] = "Where `multiply` comes from.".into();
+        chapter["spine"] = serde_json::json!({ "kind": "seq", "svg": DIAGRAM,
+            "hot": { "k": "fn:calc.ops.multiply" }, "title": "From the caller" });
+        let stops = chapter["stops"].as_array_mut().unwrap();
+        stops[0]["now"] = "It multiplies `a` by `b`.".into();
+        stops[0]["watch"] = "The helper calls it.".into();
+        stops[0]["watch_ref"] = "fn:calc.ops._multiply_helper".into();
+        stops.push(serde_json::json!({
+            "id": "again", "title": "Multiply again", "verdict": "read",
+            "els": ["fn:calc.ops.multiply"], "lines": 1,
+            "pictures": [{ "kind": "hunk", "file": OPS,
+                "windows": [{ "base": null, "head": [2, 2] }] }],
         }));
-        let map = page["sections"]
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .find(|section| section["id"] == "map")
-            .unwrap();
-        map["views"].as_array_mut().unwrap().push("diagram".into());
     })
+}
+
+/// Show what the backend would find in `root`, changed by `edit`.
+fn show(state: ReviewState, root: &Path, edit: impl FnOnce(&mut Found)) {
+    let mut found = crate::backend::changescape::find(root, REPO, 812, HEAD);
+    edit(&mut found);
+    state
+        .changescape
+        .set(Some(Arc::new(Shown::new("pr".into(), Arc::new(found)))));
 }
 
 /// The window on pull request 812 at `HEAD`, with what the backend would
@@ -93,21 +98,72 @@ fn harness_with_cache(root: Option<&Path>) -> (HeadlessHarness, ReviewState) {
     pull.head_sha = HEAD.into();
     let (mut harness, _, state) = pull_request_harness_with(pull);
     if let Some(root) = root {
-        let found = crate::backend::changescape::find(root, REPO, 812, HEAD);
-        state
-            .changescape
-            .set(Some(Arc::new(Shown::new("pr".into(), Arc::new(found)))));
+        show(state, root, |_| {});
     }
     redraw(&mut harness);
     (harness, state)
 }
 
-/// The tab open on case `name`.
-fn opened(name: &str) -> (HeadlessHarness, ReviewState, tempfile::TempDir) {
-    let root = cache_with(name, HEAD);
+/// The tab open on the cache in `root`.
+fn opened_in(root: tempfile::TempDir) -> (HeadlessHarness, ReviewState, tempfile::TempDir) {
     let (mut harness, state) = harness_with_cache(Some(root.path()));
     click(&mut harness, "Changescape pill");
     (harness, state, root)
+}
+
+/// The tab open on case `name`.
+fn opened(name: &str) -> (HeadlessHarness, ReviewState, tempfile::TempDir) {
+    opened_in(cache_with(name, HEAD))
+}
+
+/// The tab open on case `name`, where this Perch can build or not.
+fn opened_building(
+    name: &str,
+    can_build: bool,
+) -> (HeadlessHarness, ReviewState, tempfile::TempDir) {
+    let root = cache_with(name, HEAD);
+    let (mut harness, state) = harness_with_cache(None);
+    show(state, root.path(), |found| found.can_build = can_build);
+    redraw(&mut harness);
+    click(&mut harness, "Changescape pill");
+    (harness, state, root)
+}
+
+/// The tab on case 12 with `marks`, each stop's mark done with its hash.
+fn with_marks(root: &Path, marks: &[(&str, Option<&str>)]) -> (HeadlessHarness, ReviewState) {
+    let (mut harness, state) = harness_with_cache(None);
+    show(state, root, |found| {
+        for (stop, h) in marks {
+            found.marks.insert(
+                stop.to_string(),
+                StoredMark {
+                    mark: TourMark::Done,
+                    h: h.map(str::to_string),
+                },
+            );
+        }
+    });
+    redraw(&mut harness);
+    (harness, state)
+}
+
+/// `calc/ops.py` as Code loads it under the Branch scope: case 12's five
+/// lines, all added.
+fn load_ops(state: ReviewState) {
+    let file = crate::backend::build_loaded_file(
+        OPS.into(),
+        "def multiply(a, b):\n    return a * b\n\ndef _multiply_helper(a, b):\n    return multiply(a, b)\n"
+            .into(),
+        String::new(),
+        Some(perch_git::ChangeStatus::Added),
+        false,
+        perch_git::Scope::Branch,
+        String::new(),
+    );
+    state.scope.set(perch_git::Scope::Branch);
+    state.files.update(|files| {
+        files.insert(OPS.to_string(), Arc::new(file));
+    });
 }
 
 fn redraw(harness: &mut HeadlessHarness) {
@@ -147,13 +203,46 @@ fn all_named(id: floem::ViewId, name: &str, found: &mut Vec<floem::ViewId>) {
     }
 }
 
-fn nth(harness: &HeadlessHarness, name: &str, n: usize) -> floem::kurbo::Rect {
+/// How many views named `name` are under `id` and drawn with a size.
+fn shown_under(id: floem::ViewId, name: &str) -> usize {
     let mut found = Vec::new();
-    all_named(harness.root_id(), name, &mut found);
+    all_named(id, name, &mut found);
     found
-        .get(n)
-        .unwrap_or_else(|| panic!("no view {n} named {name}"))
-        .get_visual_rect_no_clip()
+        .iter()
+        .filter(|v| v.get_visual_rect_no_clip().height() > 0.0)
+        .count()
+}
+
+fn stop(harness: &HeadlessHarness, id: &str) -> floem::ViewId {
+    named(harness.root_id(), &format!("Changescape stop {id}"))
+        .unwrap_or_else(|| panic!("no stop {id}"))
+}
+
+/// The first view named `name` inside the stop `id`.
+fn in_stop_view(harness: &HeadlessHarness, id: &str, name: &str) -> floem::ViewId {
+    let mut found = Vec::new();
+    all_named(stop(harness, id), name, &mut found);
+    *found
+        .first()
+        .unwrap_or_else(|| panic!("no {name} in stop {id}"))
+}
+
+fn in_stop(harness: &HeadlessHarness, id: &str, name: &str) -> floem::kurbo::Rect {
+    in_stop_view(harness, id, name).get_visual_rect_no_clip()
+}
+
+/// Click a view, once the tour has scrolled it into sight.
+fn click_view(harness: &mut HeadlessHarness, view: floem::ViewId) {
+    view.scroll_to(None);
+    redraw(harness);
+    redraw(harness);
+    click_at(harness, view.get_visual_rect_no_clip());
+}
+
+/// Click the first view named `name` in the stop `id`.
+fn click_in_stop(harness: &mut HeadlessHarness, id: &str, name: &str) {
+    let view = in_stop_view(harness, id, name);
+    click_view(harness, view);
 }
 
 fn click_at(harness: &mut HeadlessHarness, at: floem::kurbo::Rect) {
@@ -176,8 +265,8 @@ fn with_no_changescape_the_switch_is_as_it_was() {
 }
 
 #[test]
-fn case_01_adds_the_pill_and_opens_on_overview() {
-    let root = cache_with("01-minimal", HEAD);
+fn case_12_adds_the_pill_and_opens_on_the_tour() {
+    let root = cache_with(TOUR, HEAD);
     let (mut harness, state) = harness_with_cache(Some(root.path()));
     assert_eq!(
         switch_children(&harness),
@@ -185,41 +274,31 @@ fn case_01_adds_the_pill_and_opens_on_overview() {
     );
     click(&mut harness, "Changescape pill");
     assert_eq!(state.tab.get(), ItemTab::Changescape);
-    assert!(named(harness.root_id(), "Changescape section overview").is_some());
-    assert!(named(harness.root_id(), "Changescape block narration").is_some());
-    let rail = named(harness.root_id(), "Changescape rail").expect("no rail");
+    for part in [
+        "Changescape cover",
+        "Changescape lines bar",
+        "Changescape contents",
+        "Changescape chapter change",
+        "Changescape ending",
+    ] {
+        assert!(rect(&harness, part).height() > 0.0, "{part}");
+    }
+    // The read stop is open, with its buttons; the skim stop is a row.
+    assert!(in_stop(&harness, "multiply", "Changescape done").height() > 0.0);
+    assert!(named(harness.root_id(), "Changescape skim group").is_some());
     assert_eq!(
-        child_names(rail),
-        [
-            "Changescape rail overview",
-            "Changescape rail map",
-            "Changescape rail behavior",
-            "Changescape rail code",
-        ]
+        shown_under(stop(&harness, "multiply-helper"), "Changescape done"),
+        0
     );
-
-    // A section with views opens; one with none does not; Code is Code.
-    click(&mut harness, "Changescape rail map");
-    assert!(named(harness.root_id(), "Changescape section map").is_some());
-    click(&mut harness, "Changescape rail behavior");
-    assert!(named(harness.root_id(), "Changescape section map").is_some());
-    click(&mut harness, "Changescape rail code");
-    assert_eq!(state.tab.get(), ItemTab::Code);
-}
-
-#[test]
-fn a_changescape_of_an_earlier_head_is_shown_as_stale() {
-    let root = cache_with("01-minimal", "aaaaaaa1111");
-    let (mut harness, state) = harness_with_cache(Some(root.path()));
-    click(&mut harness, "Changescape pill");
-    assert!(named(harness.root_id(), "Changescape rail").is_some());
-    assert!(rect(&harness, "Changescape commit bar").height() > 0.0);
-    assert!(state.changescape.get().unwrap().stale());
+    // Narrated: no note about the narration to come.
+    assert!(named(harness.root_id(), "Changescape narration pending").is_none());
+    // The page's line numbers are the branch's.
+    assert_eq!(state.scope.get(), perch_git::Scope::Branch);
 }
 
 #[test]
 fn a_changescape_of_another_item_shows_nothing() {
-    let root = cache_with("01-minimal", HEAD);
+    let root = cache_with(TOUR, HEAD);
     let (mut harness, state) = harness_with_cache(Some(root.path()));
     state.changescape.update(|shown| {
         let found = shown.as_ref().unwrap().found.clone();
@@ -230,53 +309,268 @@ fn a_changescape_of_another_item_shows_nothing() {
 }
 
 #[test]
-fn a_row_with_a_function_opens_code_at_its_first_line() {
-    let (mut harness, state, _root) = opened("01-minimal");
-    click(&mut harness, "Changescape rail map");
-    let row = nth(&harness, "Changescape row", 0);
-    click_at(&mut harness, row);
+fn a_tour_not_yet_narrated_says_the_narration_comes_later() {
+    let root = cache_patched(TOUR, HEAD, |page| {
+        page["tour"]["narrated"] = false.into();
+    });
+    let (harness, _, _root) = opened_in(root);
+    assert!(rect(&harness, "Changescape narration pending").height() > 0.0);
+}
+
+#[test]
+fn a_stops_window_is_cut_from_the_file_and_a_line_opens_code_there() {
+    let root = cache_with(TOUR, HEAD);
+    let (mut harness, state) = harness_with_cache(Some(root.path()));
+    load_ops(state);
+    click(&mut harness, "Changescape pill");
+    redraw(&mut harness);
+    assert_eq!(
+        shown_under(stop(&harness, "multiply"), "Changescape code line"),
+        3,
+        "head lines 1 to 3"
+    );
+    let mut lines = Vec::new();
+    all_named(
+        stop(&harness, "multiply"),
+        "Changescape code line",
+        &mut lines,
+    );
+    click_view(&mut harness, lines[1]);
     assert_eq!(state.tab.get(), ItemTab::Code);
     assert_eq!(state.active.get().as_deref(), Some(OPS));
-    assert_eq!(state.jump_caret.get(), Some((0, 0)), "line 1, from 0");
-}
-
-#[test]
-fn a_removed_function_shows_its_base_excerpt() {
-    let root = cache_with_more(HEAD);
-    let (mut harness, state) = harness_with_cache(Some(root.path()));
-    click(&mut harness, "Changescape pill");
-    click(&mut harness, "Changescape rail map");
-    assert!(named(harness.root_id(), "Changescape base popover").is_none());
-    let row = nth(&harness, "Changescape row", 1);
-    click_at(&mut harness, row);
-    assert_eq!(
-        state.tab.get(),
-        ItemTab::Changescape,
-        "nothing on the head to open"
-    );
-    assert_eq!(
-        state.changescape_popover.get().as_deref(),
-        Some("fn:calc.ops.old")
-    );
-    assert!(rect(&harness, "Changescape base popover").height() > 0.0);
-
-    click(&mut harness, "Changescape show in diff");
-    assert_eq!(state.tab.get(), ItemTab::Code);
-    assert_eq!(state.layout.get(), crate::review::model::Layout::Split);
-    assert_eq!(state.changescape_popover.get(), None);
-}
-
-#[test]
-fn a_hot_node_in_a_diagram_opens_its_element() {
-    let root = cache_with_more(HEAD);
-    let (mut harness, state) = harness_with_cache(Some(root.path()));
-    click(&mut harness, "Changescape pill");
-    click(&mut harness, "Changescape rail map");
-    // Laid out once more, now the block's width has set the zoom.
+    // The file is loaded, so the editor takes the jump at once.
     redraw(&mut harness);
+    assert_eq!(state.cursor_line.get(), 1, "line 2, from 0");
+}
+
+#[test]
+fn a_skim_row_opens_its_stop_in_place() {
+    let root = cache_with(TOUR, HEAD);
+    let (mut harness, state) = harness_with_cache(Some(root.path()));
+    load_ops(state);
+    click(&mut harness, "Changescape pill");
+    let helper = stop(&harness, "multiply-helper");
+    assert_eq!(shown_under(helper, "Changescape code line"), 0);
+    click(&mut harness, "Changescape skim row multiply-helper");
+    redraw(&mut harness);
+    assert!(state.changescape_opened.get().contains("multiply-helper"));
+    assert_eq!(
+        shown_under(stop(&harness, "multiply-helper"), "Changescape code line"),
+        2
+    );
+    click(&mut harness, "Changescape skim row multiply-helper");
+    assert_eq!(
+        shown_under(stop(&harness, "multiply-helper"), "Changescape code line"),
+        0
+    );
+}
+
+#[test]
+fn done_and_come_back_mark_a_stop_and_a_second_click_clears_it() {
+    let (mut harness, state, _root) = opened(TOUR);
+    click_in_stop(&mut harness, "multiply", "Changescape done");
+    assert_eq!(
+        state.changescape_marks.get().get("multiply"),
+        Some(&TourMark::Done)
+    );
+    let bar = crate::review::changescape::tour::progress_line(
+        state,
+        state.changescape.get().unwrap().page().unwrap(),
+    );
+    assert_eq!(bar, "1 of 1 read stops done");
+    click_in_stop(&mut harness, "multiply", "Changescape later");
+    assert_eq!(
+        state.changescape_marks.get().get("multiply"),
+        Some(&TourMark::Later),
+        "one mark at a time"
+    );
+    click_in_stop(&mut harness, "multiply", "Changescape later");
+    assert!(state.changescape_marks.get().is_empty());
+}
+
+#[test]
+fn marks_the_backend_found_are_shown() {
+    let root = cache_with(TOUR, HEAD);
+    let (_harness, state) = with_marks(root.path(), &[("multiply", None)]);
+    assert_eq!(
+        state.changescape_marks.get().get("multiply"),
+        Some(&TourMark::Done)
+    );
+}
+
+#[test]
+fn a_stop_whose_hash_changed_since_its_mark_shows_as_changed_until_marked_again() {
+    let root = cache_patched(TOUR, HEAD, |page| {
+        page["tour"]["chapters"][0]["stops"][0]["h"] = "new".into();
+        page["tour"]["chapters"][0]["stops"][1]["h"] = "same".into();
+    });
+    let (mut harness, state) = with_marks(
+        root.path(),
+        &[("multiply", Some("old")), ("multiply-helper", Some("same"))],
+    );
+    click(&mut harness, "Changescape pill");
+    assert_eq!(
+        state.changescape_changed.get().get("multiply"),
+        Some(&TourMark::Done)
+    );
+    assert!(!state.changescape_marks.get().contains_key("multiply"));
+    assert_eq!(
+        state.changescape_marks.get().get("multiply-helper"),
+        Some(&TourMark::Done),
+        "the same hash keeps its mark"
+    );
+    assert!(in_stop(&harness, "multiply", "Changescape changed since marked").height() > 0.0);
+    assert!(rect(&harness, "Changescape left").height() > 0.0);
+
+    click_in_stop(&mut harness, "multiply", "Changescape done");
+    assert!(state.changescape_changed.get().is_empty());
+    assert_eq!(
+        state.changescape_marks.get().get("multiply"),
+        Some(&TourMark::Done)
+    );
+    assert_eq!(
+        in_stop(&harness, "multiply", "Changescape changed since marked").height(),
+        0.0
+    );
+}
+
+#[test]
+fn a_chapter_with_sections_draws_a_header_before_each_and_labels_the_outline() {
+    let root = cache_patched(TOUR, HEAD, |page| {
+        page["tour"]["chapters"][0]["sections"] = serde_json::json!([
+            { "title": "The product", "intro": "What it multiplies.", "stops": ["multiply"] },
+            { "title": "The helper", "stops": ["multiply-helper"] },
+        ]);
+    });
+    let (harness, _, _root) = opened_in(root);
+    for name in [
+        "Changescape section The product",
+        "Changescape section The helper",
+    ] {
+        assert!(rect(&harness, name).height() > 0.0, "{name}");
+    }
+    let mut labels = Vec::new();
+    all_named(
+        harness.root_id(),
+        "Changescape outline section",
+        &mut labels,
+    );
+    assert_eq!(labels.len(), 2);
+}
+
+#[test]
+fn a_stop_shows_what_it_relies_on_and_its_asides_and_code_opens_the_lines() {
+    let root = cache_patched(TOUR, HEAD, |page| {
+        let stop = &mut page["tour"]["chapters"][0]["stops"][0];
+        stop["relies"] = serde_json::json!([{
+            "el": "fn:calc.ops._multiply_helper", "why": "calls", "sig": "def _multiply_helper(a, b)",
+            "doc": "Multiply through the helper. More text.", "code": { "file": OPS, "head": [4, 5] } }]);
+        stop["asides"] = serde_json::json!([{
+            "view": "related", "q": "Does an open PR touch this?", "a": "One does.",
+            "rows": ["fn:calc.ops.multiply", "pr:404"] }]);
+        page["tour"]["ending"] = serde_json::json!({ "checks": [{
+            "q": "Plans that name no code?", "a": "One.", "view": "plans",
+            "rows": ["fn:calc.ops.multiply"] }] });
+    });
+    let (mut harness, state) = harness_with_cache(Some(root.path()));
+    load_ops(state);
+    click(&mut harness, "Changescape pill");
+    assert!(
+        in_stop(
+            &harness,
+            "multiply",
+            "Changescape rely fn:calc.ops._multiply_helper"
+        )
+        .height()
+            > 0.0
+    );
+    assert!(in_stop(&harness, "multiply", "Changescape aside").height() > 0.0);
+    // The aside names one element the page holds; the PR it does not is left out.
+    assert_eq!(
+        shown_under(
+            in_stop_view(&harness, "multiply", "Changescape aside"),
+            "Changescape row element"
+        ),
+        1
+    );
+    let check = named(harness.root_id(), "Changescape check").unwrap();
+    assert_eq!(shown_under(check, "Changescape row element"), 1);
+
+    let before = shown_under(stop(&harness, "multiply"), "Changescape code line");
+    click_in_stop(&mut harness, "multiply", "Changescape rely code toggle");
+    redraw(&mut harness);
+    assert_eq!(
+        shown_under(stop(&harness, "multiply"), "Changescape code line"),
+        before + 2,
+        "head lines 4 and 5"
+    );
+}
+
+#[test]
+fn next_goes_to_the_next_read_stop_past_the_skim_ones_then_the_ending() {
+    let (mut harness, state, _root) = opened_in(cache_with_more(HEAD));
+    click_in_stop(&mut harness, "multiply", "Changescape next");
+    assert!(state.changescape_opened.get().contains("again"));
+    assert!(
+        !state.changescape_opened.get().contains("multiply-helper"),
+        "a skim stop is passed over"
+    );
+    assert!(
+        state.changescape_marks.get().is_empty(),
+        "Next marks nothing"
+    );
+    // The last read stop's Next goes to the ending, which opens nothing.
+    click_in_stop(&mut harness, "again", "Changescape next");
+    assert!(!state.changescape_opened.get().contains(super::side::ENDING));
+}
+
+#[test]
+fn the_cover_has_the_flag_and_the_ending_its_checks_and_actions() {
+    let (harness, _, _root) = opened_in(cache_with_more(HEAD));
+    assert!(rect(&harness, "Changescape flag").height() > 0.0);
+    assert!(rect(&harness, "Changescape check").height() > 0.0);
+    assert!(rect(&harness, "Changescape action").height() > 0.0);
+    assert!(in_stop(&harness, "multiply", "Changescape field now").height() > 0.0);
+    assert!(in_stop(&harness, "multiply", "Changescape field watch").height() > 0.0);
+}
+
+#[test]
+fn a_watch_ref_to_an_element_opens_it_in_code() {
+    let (mut harness, state, _root) = opened_in(cache_with_more(HEAD));
+    click_in_stop(&mut harness, "multiply", "Changescape ref");
+    assert_eq!(state.tab.get(), ItemTab::Code);
+    assert_eq!(state.active.get().as_deref(), Some(OPS));
+    assert_eq!(state.jump_caret.get(), Some((3, 0)), "the helper's line 4");
+}
+
+/// The window on the tour with a spine, laid out once more so that the
+/// diagram fits the column.
+fn with_spine() -> (HeadlessHarness, ReviewState, tempfile::TempDir) {
+    let (mut harness, state, root) = opened_in(cache_with_more(HEAD));
+    redraw(&mut harness);
+    // The spine comes after the cover: in sight first.
+    let spine = named(harness.root_id(), "Changescape picture").expect("no spine");
+    spine.scroll_to(None);
+    redraw(&mut harness);
+    redraw(&mut harness);
+    (harness, state, root)
+}
+
+fn nth(harness: &HeadlessHarness, name: &str, n: usize) -> floem::kurbo::Rect {
+    let mut found = Vec::new();
+    all_named(harness.root_id(), name, &mut found);
+    found
+        .get(n)
+        .unwrap_or_else(|| panic!("no view {n} named {name}"))
+        .get_visual_rect_no_clip()
+}
+
+#[test]
+fn a_hot_node_in_the_spine_opens_its_element() {
+    let (mut harness, state, _root) = with_spine();
     let diagram = nth(&harness, "Changescape diagram", 0);
     let z = diagram.width() / 200.0;
-    assert!(z > 0.5, "fitted to the block, not left tiny: {z}");
+    assert!(z > 0.5, "fitted to the column, not left tiny: {z}");
     let (x, y) = (diagram.x0 + 40.0 * z, diagram.y0 + 20.0 * z);
     harness.pointer_move(x, y);
     harness.click(x, y);
@@ -284,17 +578,6 @@ fn a_hot_node_in_a_diagram_opens_its_element() {
     assert_eq!(state.tab.get(), ItemTab::Code);
     assert_eq!(state.active.get().as_deref(), Some(OPS));
     assert_eq!(state.jump_caret.get(), Some((0, 0)));
-}
-
-/// The window on `cache_with_more`'s Map, laid out once more so that
-/// the diagram fits its block.
-fn on_map() -> (HeadlessHarness, ReviewState, tempfile::TempDir) {
-    let root = cache_with_more(HEAD);
-    let (mut harness, state) = harness_with_cache(Some(root.path()));
-    click(&mut harness, "Changescape pill");
-    click(&mut harness, "Changescape rail map");
-    redraw(&mut harness);
-    (harness, state, root)
 }
 
 /// The diagram in the overlay.
@@ -309,19 +592,17 @@ fn expanded_diagram(harness: &HeadlessHarness) -> floem::kurbo::Rect {
 }
 
 #[test]
-fn expand_draws_the_diagram_larger_beside_the_rail() {
-    let (mut harness, state, _root) = on_map();
+fn expand_draws_the_spine_larger_under_the_commit_bar() {
+    let (mut harness, state, _root) = with_spine();
     let small = nth(&harness, "Changescape diagram", 0);
     click(&mut harness, "Changescape expand");
     redraw(&mut harness);
     assert_eq!(
-        state.changescape_expanded.get(),
-        Some(("diagram".to_string(), 0))
+        state.changescape_expanded.get().as_deref(),
+        Some("spine:change")
     );
     let overlay = rect(&harness, "Changescape expanded diagram");
-    let rail = rect(&harness, "Changescape rail");
     let bar = rect(&harness, "Changescape commit bar");
-    assert!(overlay.x0 >= rail.x1 - 0.5, "the rail stays in sight");
     assert!(overlay.y0 >= bar.y1 - 0.5, "the commit bar stays in sight");
     let large = expanded_diagram(&harness);
     assert!(
@@ -330,15 +611,13 @@ fn expand_draws_the_diagram_larger_beside_the_rail() {
         large.width(),
         small.width()
     );
-    // Fitted to the height as well as the width.
     assert!(large.height() <= overlay.height());
-    assert!(overlay.contains(large.center()));
 }
 
 #[test]
 fn escape_and_collapse_put_an_expanded_diagram_away() {
     use floem::prelude::{Code, Key, KeyState, KeyboardEvent, Modifiers, NamedKey};
-    let (mut harness, state, _root) = on_map();
+    let (mut harness, state, _root) = with_spine();
     click(&mut harness, "Changescape expand");
     harness.dispatch_event(floem::event::Event::Key(KeyboardEvent {
         state: KeyState::Down,
@@ -352,7 +631,6 @@ fn escape_and_collapse_put_an_expanded_diagram_away() {
     redraw(&mut harness);
     assert_eq!(state.changescape_expanded.get(), None);
     assert_eq!(state.tab.get(), ItemTab::Changescape);
-
     click(&mut harness, "Changescape expand");
     assert!(state.changescape_expanded.get().is_some());
     click(&mut harness, "Changescape collapse");
@@ -360,132 +638,207 @@ fn escape_and_collapse_put_an_expanded_diagram_away() {
 }
 
 #[test]
-fn a_hot_node_in_an_expanded_diagram_opens_code_and_closes_it() {
-    let (mut harness, state, _root) = on_map();
-    click(&mut harness, "Changescape expand");
-    redraw(&mut harness);
-    let diagram = expanded_diagram(&harness);
-    let z = diagram.width() / 200.0;
-    let (x, y) = (diagram.x0 + 40.0 * z, diagram.y0 + 20.0 * z);
-    harness.pointer_move(x, y);
-    harness.click(x, y);
-    redraw(&mut harness);
-    assert_eq!(state.tab.get(), ItemTab::Code);
-    assert_eq!(state.active.get().as_deref(), Some(OPS));
-    assert_eq!(state.changescape_expanded.get(), None);
-}
-
-/// A review thread's first comment on `line` of `calc/ops.py`, on `side`.
-fn comment(id: u64, line: u64, side: &str) -> perch_github::ReviewComment {
-    serde_json::from_value(serde_json::json!({
-        "id": id, "pull_request_review_id": 1, "in_reply_to_id": null,
-        "user": "u", "body": "why?", "path": OPS,
-        "line": line, "original_line": line, "diff_hunk": "", "side": side,
-        "created_at": "2026-10-07T12:00:00Z", "updated_at": null, "html_url": ""
-    }))
-    .unwrap()
-}
-
-fn with_threads(state: ReviewState, comments: Vec<perch_github::ReviewComment>) {
+fn a_thread_on_a_stops_lines_shows_on_that_stop() {
+    let root = cache_with(TOUR, HEAD);
+    let (mut harness, state) = harness_with_cache(Some(root.path()));
+    let thread = |id, line| super::stop::tests::thread(id, OPS, (line, line), Side::Right);
     state
-        .discussion
-        .set(Some(Arc::new(perch_github::Discussion {
-            review_comments: comments,
-            ..Default::default()
-        })));
-}
-
-#[test]
-fn a_thread_in_an_elements_lines_shows_a_badge_of_one() {
-    let root = cache_with_more(HEAD);
-    let (mut harness, state) = harness_with_cache(Some(root.path()));
-    // In `add()`, and on a line no element holds.
-    with_threads(state, vec![comment(1, 2, "right"), comment(2, 9, "right")]);
+        .comment_threads
+        .set(Arc::new(vec![thread("gh-1", 2), thread("gh-2", 9)]));
     click(&mut harness, "Changescape pill");
-    click(&mut harness, "Changescape rail map");
-    let mut badges = Vec::new();
-    all_named(harness.root_id(), "Changescape thread badge", &mut badges);
-    let shown: Vec<f64> = badges
-        .iter()
-        .map(|b| b.get_visual_rect_no_clip().width())
-        .collect();
-    // Two rows, then the diagram's one hot node.
-    assert_eq!(shown.len(), 3, "one slot per row and node with an element");
-    assert!(shown[0] > 0.0, "the first row's function holds the thread");
-    assert_eq!(shown[1], 0.0, "old() holds none");
-
-    // The badge goes to the thread.
-    let first = badges[0].get_visual_rect_no_clip();
-    click_at(&mut harness, first);
-    assert_eq!(state.tab.get(), ItemTab::Code);
-    assert_eq!(state.jump_caret.get(), Some((1, 0)));
+    let threads = named(stop(&harness, "multiply"), "Changescape stop threads").unwrap();
+    let cards = threads
+        .children()
+        .first()
+        .map_or(0, |list| list.children().len());
+    assert_eq!(cards, 1, "the thread on line 2, not the one on line 9");
 }
 
 #[test]
-fn a_resolved_thread_and_a_reply_do_not_count() {
-    let root = cache_with_more(HEAD);
-    let found = crate::backend::changescape::find(root.path(), REPO, 812, HEAD);
-    let page = found.page.clone().unwrap();
-    let index = perch_changescape::LineIndex::new(&page);
-    let mut reply = comment(3, 1, "right");
-    reply.in_reply_to_id = Some(1);
-    let discussion = perch_github::Discussion {
-        review_comments: vec![comment(1, 1, "right"), reply, comment(2, 5, "left")],
-        review_threads: vec![perch_github::ReviewThreadState {
-            node_id: String::new(),
-            root_comment_id: 1,
-            resolved: true,
-            outdated: false,
-            can_resolve: false,
-        }],
-        ..Default::default()
-    };
-    let counts = crate::review::changescape::threads::count(&index, &discussion);
-    assert_eq!(counts.0.len(), 1);
-    let (n, anchor) = counts.of("fn:calc.ops.old").unwrap();
+fn chat_about_this_opens_the_composer_on_the_stop_with_its_context() {
+    let (mut harness, state, _root) = opened_in(cache_with_more(HEAD));
+    click_in_stop(&mut harness, "multiply", "Changescape chat");
+    let composer = state.composer.get().expect("no composer");
+    assert_eq!(composer.about.as_deref(), Some("tour:multiply"));
+    assert!(composer.thread_id.is_none(), "a new thread");
+    let context = composer.context.unwrap_or_default();
+    assert!(context.contains("Stop: Multiply two numbers"), "{context}");
+    assert!(context.contains("Now: It multiplies a by b."), "{context}");
+    let anchor = composer.anchor.expect("no anchor");
     assert_eq!(
-        (*n, anchor.line),
-        (1, 5),
-        "a base-side thread on the removed function"
+        (anchor.path.as_str(), anchor.start_line, anchor.line),
+        (OPS, 1, 3)
+    );
+    redraw(&mut harness);
+    assert!(in_stop(&harness, "multiply", "Changescape stop composer").height() > 0.0);
+    assert!(
+        named(harness.root_id(), "composer").is_none() || state.tab.get() == ItemTab::Changescape,
+        "it is not also Conversation's"
     );
 }
 
 #[test]
-fn the_caret_in_an_element_shows_the_code_strip_which_leads_back() {
-    let root = cache_with("01-minimal", HEAD);
+fn the_caret_in_a_stops_window_shows_the_code_strip_which_leads_back() {
+    let root = cache_with(TOUR, HEAD);
     let (mut harness, state) = harness_with_cache(Some(root.path()));
-    let text: String = (1..=20).map(|n| format!("line {n}\n")).collect();
-    let file = crate::backend::build_loaded_file(
-        OPS.into(),
-        text,
-        String::new(),
-        None,
-        false,
-        perch_git::Scope::Branch,
-        String::new(),
-    );
-    state.scope.set(perch_git::Scope::Branch);
-    state.files.update(|files| {
-        files.insert(OPS.to_string(), Arc::new(file));
-    });
+    load_ops(state);
     state.active.set(Some(OPS.to_string()));
     state.show_tab(ItemTab::Code);
     // Drawn once first: opening the file puts the caret at its top.
     redraw(&mut harness);
-    // Outside every element: no strip.
-    state.cursor_line.set(9);
-    redraw(&mut harness);
-    assert!(named(harness.root_id(), "Changescape strip link").is_none());
-    // Line 1, in `add()`.
-    state.cursor_line.set(0);
+    // Line 4, in the skim stop.
+    state.cursor_line.set(3);
     redraw(&mut harness);
     assert!(rect(&harness, "Changescape code strip").height() > 0.0);
     click(&mut harness, "Changescape strip link");
     assert_eq!(state.tab.get(), ItemTab::Changescape);
+    assert!(
+        state.changescape_opened.get().contains("multiply-helper"),
+        "the skim stop opens in place"
+    );
+}
+
+#[test]
+fn a_page_this_perch_does_not_draw_says_why_and_offers_a_rebuild_where_one_helps() {
+    for (case, can_build, rebuild) in [
+        ("01-minimal", true, true),
+        ("13-malformed-tour", true, true),
+        ("02-status-without-page-schema", true, true),
+        ("02-status-without-page-schema", false, false),
+        ("03-page-schema-4", true, false),
+    ] {
+        let (harness, state, _root) = opened_building(case, can_build);
+        assert_eq!(state.tab.get(), ItemTab::Changescape, "{case}");
+        assert!(
+            named(harness.root_id(), "Changescape refused").is_some(),
+            "{case}"
+        );
+        assert!(
+            named(harness.root_id(), "Changescape tour").is_none(),
+            "{case}"
+        );
+        let offered = named(harness.root_id(), "Changescape rebuild")
+            .is_some_and(|v| v.get_visual_rect_no_clip().width() > 0.0);
+        assert_eq!(offered, rebuild, "{case}, can build: {can_build}");
+    }
+}
+
+/// Case 12 with a view of related work, Related, that a flag points at:
+/// a table whose rows name a pull request, a commit, a function, and an
+/// element the page does not hold.
+fn cache_with_view(sha: &str) -> tempfile::TempDir {
+    cache_patched(TOUR, sha, |page| {
+        page["elements"]["pr:5"] = serde_json::json!({
+            "t": "#5 Divide too", "k": "pull request", "st": "context",
+            "d": "by someone \u{b7} open", "refs": [],
+            "url": "https://github.com/acme/calc/pull/5" });
+        page["elements"]["commit:abc1234"] = serde_json::json!({
+            "t": "abc1234 \u{b7} Add multiply", "k": "commit", "st": "changed", "refs": [],
+            "url": "https://github.com/acme/calc/commit/abc1234" });
+        page["views"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+            "id": "related", "sec": "surroundings", "t": "Related work", "s": "",
+            "ic": "pr", "q": "", "state": "applies", "metric": "1 PR", "narration": null,
+            "blocks": [
+                { "type": "table", "columns": [{ "key": "t", "label": "T" }], "rows": [
+                    { "el": "pr:5", "cells": { "t": "#5" } },
+                    { "el": "commit:abc1234", "cells": { "t": "abc" } },
+                    { "el": "fn:calc.ops.multiply", "cells": { "t": "multiply" } },
+                    { "el": "pr:404", "cells": { "t": "gone" } } ] },
+                { "type": "sparkline", "rows": [{ "el": "pr:5" }] },
+            ] }));
+        page["tour"]["flags"] = serde_json::json!([{ "kind": "info", "title": "Others work here",
+            "text": "An open PR touches the same file.", "ref": "view:related" }]);
+    })
+}
+
+fn view_rows(harness: &HeadlessHarness) -> Vec<String> {
+    let card = named(harness.root_id(), "Changescape view related").expect("no popover");
+    let mut rows = Vec::new();
+    all_named(card, "Changescape view row", &mut rows);
+    rows.iter()
+        .map(|r| {
+            r.debug_name()
+                .split(" - ")
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect()
+}
+
+#[test]
+fn a_view_ref_shows_the_views_rows_as_its_elements() {
+    let (mut harness, state, _root) = opened_in(cache_with_view(HEAD));
+    assert!(named(harness.root_id(), "Changescape view related").is_none());
+    let link = named(harness.root_id(), "Changescape ref").expect("no ref");
+    click_view(&mut harness, link);
+    assert_eq!(state.changescape_view.get().as_deref(), Some("related"));
     assert_eq!(
-        state.changescape_section.get().as_deref(),
-        Some("map"),
-        "the first section that shows it: Placement's table"
+        view_rows(&harness),
+        [
+            "Changescape view row pr:5",
+            "Changescape view row commit:abc1234",
+            "Changescape view row fn:calc.ops.multiply",
+        ],
+        "each element once, in row order, and none the page lacks"
+    );
+    // Close puts it away, and so does a click beside it.
+    click(&mut harness, "Changescape view close");
+    assert_eq!(state.changescape_view.get(), None);
+    state.changescape_view.set(Some("related".into()));
+    redraw(&mut harness);
+    let card = rect(&harness, "Changescape view related");
+    harness.click(card.x0 - 8.0, card.y0 + 8.0);
+    redraw(&mut harness);
+    assert_eq!(state.changescape_view.get(), None);
+}
+
+#[test]
+fn a_code_row_in_a_view_opens_code_and_closes_the_popover() {
+    let (mut harness, state, _root) = opened_in(cache_with_view(HEAD));
+    state.changescape_view.set(Some("related".into()));
+    redraw(&mut harness);
+    click(&mut harness, "Changescape view row fn:calc.ops.multiply");
+    assert_eq!(state.changescape_view.get(), None);
+    assert_eq!(state.tab.get(), ItemTab::Code);
+    assert_eq!(state.active.get().as_deref(), Some(OPS));
+    assert_eq!(state.jump_caret.get(), Some((0, 0)));
+}
+
+#[test]
+fn a_pull_request_row_opens_that_pull_request_in_perch() {
+    let mut pull = pull_request(812);
+    pull.head_sha = HEAD.into();
+    let (mut harness, app, state) = pull_request_harness_with(pull);
+    let root = cache_with_view(HEAD);
+    show(state, root.path(), |_| {});
+    redraw(&mut harness);
+    click(&mut harness, "Changescape pill");
+    state.changescape_view.set(Some("related".into()));
+    redraw(&mut harness);
+    crate::ui::widgets::opened();
+    click(&mut harness, "Changescape view row pr:5");
+    assert_eq!(state.changescape_view.get(), None);
+    assert!(
+        crate::ui::widgets::opened().is_empty(),
+        "not the browser: Perch opens it"
+    );
+    assert_eq!(app.open_item.get(), None, "the open item gives way");
+}
+
+#[test]
+fn a_commit_the_checkout_lacks_opens_on_github() {
+    let (mut harness, state, _root) = opened_in(cache_with_view(HEAD));
+    state.changescape_view.set(Some("related".into()));
+    redraw(&mut harness);
+    crate::ui::widgets::opened();
+    click(&mut harness, "Changescape view row commit:abc1234");
+    assert_eq!(
+        crate::ui::widgets::opened(),
+        ["https://github.com/acme/calc/commit/abc1234"]
     );
 }
 
@@ -498,43 +851,51 @@ fn status_json(state: &str, error: Option<&str>) -> String {
     .to_string()
 }
 
-/// What the backend sends for a build in `json`, with an earlier head's
-/// page when `page`, and `can_build`.
-fn shown_build(state: ReviewState, json: &str, page: bool, can_build: bool) -> tempfile::TempDir {
-    let root = if page {
-        cache_with("01-minimal", "aaaaaaa1111")
-    } else {
-        tempfile::tempdir().unwrap()
+/// What the backend sends for a build in `json`, over case `earlier` at
+/// an earlier head when there is one, and `can_build`.
+fn shown_build(
+    state: ReviewState,
+    json: &str,
+    earlier: Option<&str>,
+    can_build: bool,
+) -> tempfile::TempDir {
+    let root = match earlier {
+        Some(case) => cache_with(case, "aaaaaaa1111"),
+        None => tempfile::tempdir().unwrap(),
     };
     let dir = perch_changescape::build_dir(root.path(), REPO, 812, HEAD);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("status.json"), json).unwrap();
-    let mut found = crate::backend::changescape::find(root.path(), REPO, 812, HEAD);
-    found.can_build = can_build;
-    crate::review::changescape::set_can_build(can_build);
-    state
-        .changescape
-        .set(Some(Arc::new(Shown::new("pr".into(), Arc::new(found)))));
+    show(state, root.path(), |found| found.can_build = can_build);
     root
 }
 
 #[test]
 fn a_first_build_running_shows_the_pill_and_the_building_view() {
     let (mut harness, state) = harness_with_cache(None);
-    let _root = shown_build(state, &status_json("running", None), false, true);
+    let _root = shown_build(state, &status_json("running", None), None, true);
     redraw(&mut harness);
     click(&mut harness, "Changescape pill");
     assert!(named(harness.root_id(), "Changescape building").is_some());
-    assert!(named(harness.root_id(), "Changescape rail").is_none());
+    assert!(named(harness.root_id(), "Changescape tour").is_none());
+}
+
+#[test]
+fn a_tour_of_an_earlier_head_is_shown_as_stale() {
+    let root = cache_with(TOUR, "aaaaaaa1111");
+    let (harness, state, _root) = opened_in(root);
+    assert!(named(harness.root_id(), "Changescape tour").is_some());
+    assert!(rect(&harness, "Changescape commit bar").height() > 0.0);
+    assert!(state.changescape.get().unwrap().stale());
 }
 
 #[test]
 fn a_build_over_an_earlier_page_keeps_the_page_and_says_so() {
     let (mut harness, state) = harness_with_cache(None);
-    let _root = shown_build(state, &status_json("running", None), true, true);
+    let _root = shown_build(state, &status_json("running", None), Some(TOUR), true);
     redraw(&mut harness);
     click(&mut harness, "Changescape pill");
-    assert!(named(harness.root_id(), "Changescape rail").is_some());
+    assert!(named(harness.root_id(), "Changescape tour").is_some());
     assert!(rect(&harness, "Changescape commit bar").height() > 0.0);
     assert!(state.changescape.get().unwrap().stale());
     assert_eq!(
@@ -545,17 +906,32 @@ fn a_build_over_an_earlier_page_keeps_the_page_and_says_so() {
 }
 
 #[test]
+fn a_build_over_an_earlier_page_with_no_tour_shows_its_progress() {
+    let (mut harness, state) = harness_with_cache(None);
+    let _root = shown_build(
+        state,
+        &status_json("running", None),
+        Some("01-minimal"),
+        true,
+    );
+    redraw(&mut harness);
+    click(&mut harness, "Changescape pill");
+    assert!(named(harness.root_id(), "Changescape building").is_some());
+    assert!(named(harness.root_id(), "Changescape refused").is_none());
+}
+
+#[test]
 fn a_failed_build_offers_retry_only_where_a_build_can_run() {
     let failed = status_json("failed", Some("uv: command not found"));
     let (mut harness, state) = harness_with_cache(None);
-    let _root = shown_build(state, &failed, false, true);
+    let _root = shown_build(state, &failed, None, true);
     redraw(&mut harness);
     click(&mut harness, "Changescape pill");
     assert!(named(harness.root_id(), "Changescape failed").is_some());
     assert!(rect(&harness, "Changescape retry").width() > 0.0);
 
     let (mut harness, state) = harness_with_cache(None);
-    let _root = shown_build(state, &failed, false, false);
+    let _root = shown_build(state, &failed, None, false);
     redraw(&mut harness);
     assert!(
         named(harness.root_id(), "Changescape pill").is_none(),
@@ -583,40 +959,6 @@ fn the_row_menu_offers_a_build_only_where_one_can_run() {
         .any(|line| line.contains("Build Changescape")));
 }
 
-/// The tab open on case `name`, with `can_build`.
-fn refused(name: &str, can_build: bool) -> (HeadlessHarness, ReviewState, tempfile::TempDir) {
-    crate::review::changescape::set_can_build(can_build);
-    opened(name)
-}
-
-#[test]
-fn case_02_offers_rebuild_and_keeps_the_pill() {
-    let (harness, state, _root) = refused("02-status-without-page-schema", true);
-    assert!(matches!(
-        state.changescape.get().unwrap().lookup(),
-        perch_changescape::Lookup::Outdated(_)
-    ));
-    assert_eq!(state.tab.get(), ItemTab::Changescape);
-    assert!(named(harness.root_id(), "Changescape refused").is_some());
-    assert!(named(harness.root_id(), "Changescape rail").is_none());
-    assert!(rect(&harness, "Changescape rebuild").width() > 0.0);
-    // Where no build can run, the browser page.
-    let (harness, _, _root) = refused("02-status-without-page-schema", false);
-    assert!(named(harness.root_id(), "Changescape open page").is_some());
-}
-
-#[test]
-fn case_03_offers_the_browser_page() {
-    let (harness, state, _root) = refused("03-page-schema-4", true);
-    assert!(matches!(
-        state.changescape.get().unwrap().lookup(),
-        perch_changescape::Lookup::TooNew(_)
-    ));
-    assert!(named(harness.root_id(), "Changescape refused").is_some());
-    assert!(named(harness.root_id(), "Changescape open page").is_some());
-    assert!(named(harness.root_id(), "Changescape rebuild").is_none());
-}
-
 #[test]
 fn a_page_whose_status_misstates_its_version_is_refused_by_the_page() {
     let root = cache_with("03-page-schema-4", HEAD);
@@ -633,266 +975,85 @@ fn a_page_whose_status_misstates_its_version_is_refused_by_the_page() {
 }
 
 #[test]
-fn a_page_that_does_not_read_shows_why_and_the_browser_page() {
-    crate::review::changescape::set_can_build(false);
-    let root = cache_patched("01-minimal", HEAD, |page| {
+fn a_page_that_does_not_read_shows_why() {
+    let root = cache_patched(TOUR, HEAD, |page| {
         // A status must be a string, though its set is open.
-        page["elements"]["fn:calc.ops.add"]["st"] = 5.into();
+        page["elements"]["fn:calc.ops.multiply"]["st"] = 5.into();
     });
     let (mut harness, _state) = harness_with_cache(Some(root.path()));
     click(&mut harness, "Changescape pill");
     assert!(named(harness.root_id(), "Changescape failed").is_some());
-    assert!(rect(&harness, "Changescape open page").width() > 0.0);
 }
 
 #[test]
-fn cases_10_and_11_draw_the_browser_line_for_a_block_and_the_rest() {
-    for case in ["10-unknown-block-type", "11-malformed-block"] {
-        let (mut harness, _, _root) = opened(case);
-        click(&mut harness, "Changescape rail map");
-        let mut lines = Vec::new();
-        all_named(harness.root_id(), "Changescape open page", &mut lines);
-        assert_eq!(lines.len(), 1, "{case}: one block in the browser page");
-        assert!(named(harness.root_id(), "Changescape row fn:calc.ops.add").is_some());
+fn the_outline_lists_the_tour_and_a_click_goes_to_a_stop() {
+    let (mut harness, state, _root) = opened(TOUR);
+    for name in [
+        "Changescape outline cover",
+        "Changescape outline change",
+        "Changescape outline stop multiply",
+        "Changescape outline stop multiply-helper",
+        "Changescape outline ending",
+    ] {
+        assert!(rect(&harness, name).height() > 0.0, "{name}");
     }
-}
-
-/// The lines of the Placement table, in order: its rows, its section
-/// headers and its fold controls, by debug name.
-fn table_lines(harness: &HeadlessHarness) -> Vec<String> {
-    fn walk(id: floem::ViewId, out: &mut Vec<String>) {
-        let name = id.debug_name();
-        let name = name.split(" - ").next().unwrap_or_default().trim_end();
-        if name.starts_with("Changescape row")
-            || name.starts_with("Changescape group")
-            || name.starts_with("Changescape fold")
-        {
-            out.push(name.trim_start_matches("Changescape ").to_string());
-            return;
-        }
-        for child in id.children() {
-            walk(child, out);
-        }
-    }
-    let view = named(harness.root_id(), "Changescape view placement").expect("no Placement");
-    let mut out = Vec::new();
-    walk(view, &mut out);
-    out
-}
-
-/// The tab on case `name`'s Placement table.
-fn placement(name: &str) -> (HeadlessHarness, ReviewState, tempfile::TempDir) {
-    let (mut harness, state, root) = opened(name);
-    click(&mut harness, "Changescape rail map");
-    (harness, state, root)
-}
-
-#[test]
-fn case_04_marks_the_key_row_and_folds_nothing() {
-    let (harness, _, _root) = placement("04-unknown-rank");
-    assert_eq!(
-        table_lines(&harness),
-        [
-            "row key fn:calc.ops.add",
-            "row fn:calc.ops.sub",
-            "row fn:calc.ops.mul"
-        ]
+    click(&mut harness, "Changescape outline stop multiply-helper");
+    assert!(
+        state.changescape_opened.get().contains("multiply-helper"),
+        "a skim stop opens in place"
     );
 }
 
 #[test]
-fn case_05_draws_rows_with_no_group_first() {
-    let (harness, _, _root) = placement("05-group-not-in-groups");
-    assert_eq!(
-        table_lines(&harness),
-        [
-            "row fn:calc.ops.sub",
-            "group calc.ops",
-            "row fn:calc.ops.add",
-            "row fn:calc.ops.mul"
-        ]
-    );
+fn the_code_map_lists_the_files_and_a_file_goes_to_its_stop() {
+    let (mut harness, state, _root) = opened(TOUR);
+    assert!(rect(&harness, "Changescape code map").width() > 0.0);
+    click(&mut harness, "Changescape map file calc/ops.py");
+    assert!(state.changescape_opened.get().contains("multiply"));
 }
 
 #[test]
-fn case_06_a_closed_group_opens_to_its_fold() {
-    let (mut harness, _, _root) = placement("06-groups-closed");
-    assert_eq!(
-        table_lines(&harness),
-        ["group calc.ops", "row fn:calc.ops.add", "group calc.tests"]
-    );
-    click(&mut harness, "Changescape group calc.tests");
-    assert_eq!(
-        table_lines(&harness)[2..],
-        ["group calc.tests", "fold: Show 2 more"]
-    );
-    click(&mut harness, "Changescape fold");
-    assert_eq!(
-        table_lines(&harness)[3..],
-        [
-            "row fn:calc.ops.fixture",
-            "row fn:calc.ops.setup",
-            "fold: Show fewer"
-        ]
-    );
-}
-
-#[test]
-fn case_06_the_selected_elements_row_shows_and_its_section_opens() {
-    let (mut harness, state, _root) = placement("06-groups-closed");
-    state
-        .changescape_popover
-        .set(Some("fn:calc.ops.fixture".into()));
-    redraw(&mut harness);
-    assert_eq!(
-        table_lines(&harness)[2..],
-        [
-            "group calc.tests",
-            "row fn:calc.ops.fixture",
-            "fold: Show 1 more"
-        ]
-    );
-}
-
-#[test]
-fn case_07_one_control_holds_the_rest_in_order() {
-    let (mut harness, _, _root) = placement("07-mixed-fold");
-    assert_eq!(
-        table_lines(&harness),
-        [
-            "row fn:calc.ops.add",
-            "row fn:calc.ops.sub",
-            "fold: Show 4 more (2 minor: small helpers)"
-        ]
-    );
-    click(&mut harness, "Changescape fold");
-    assert_eq!(
-        table_lines(&harness),
-        [
-            "row fn:calc.ops.add",
-            "row fn:calc.ops.sub",
-            "row fn:calc.ops.mul",
-            "row fn:calc.ops.div",
-            "row fn:calc.ops.clamp",
-            "row fn:calc.ops.sign",
-            "fold: Show fewer"
-        ]
-    );
-}
-
-#[test]
-fn case_08_folds_minor_rows_without_groups() {
-    let (harness, _, _root) = placement("08-ranks-without-groups");
-    assert_eq!(
-        table_lines(&harness),
-        [
-            "row key fn:calc.ops.add",
-            "row fn:calc.ops.sub",
-            "fold: Show 1 more"
-        ]
-    );
-}
-
-#[test]
-fn case_09_a_facet_dims_rows_outside_it_and_hides_them_on_request() {
-    let (mut harness, state, _root) = placement("09-facet-rows-without-el");
-    assert_eq!(
-        table_lines(&harness),
-        ["row fn:calc.ops.add", "row fn:calc.ops.sub", "row"]
-    );
-    let page = state.changescape.get().unwrap().page().unwrap().clone();
-    crate::review::changescape::facet_menu(state, &page)
-        .submenu_named("Focus")
-        .expect("no Focus")
-        .choose("New core");
-    assert_eq!(
-        state.changescape_facet.get(),
-        Some(("focus".to_string(), "core".to_string()))
-    );
-    redraw(&mut harness);
-    assert_eq!(
-        table_lines(&harness),
-        ["row fn:calc.ops.add", "row dim fn:calc.ops.sub", "row"],
-        "a row without an element stays as it is"
-    );
-    assert!(named(harness.root_id(), "Changescape facet note").is_some());
-
-    click(&mut harness, "Changescape facet hide");
-    assert_eq!(table_lines(&harness), ["row fn:calc.ops.add", "row"]);
-
-    click(&mut harness, "Changescape whole change");
-    assert_eq!(state.changescape_facet.get(), None);
-    assert!(named(harness.root_id(), "Changescape facet note").is_none());
-    assert_eq!(table_lines(&harness).len(), 3);
-}
-
-#[test]
-fn a_cell_with_a_facet_applies_it_on_a_click() {
-    let root = cache_patched("09-facet-rows-without-el", HEAD, |page| {
-        let views = page["views"].as_array_mut().unwrap();
-        let placement = views.iter_mut().find(|v| v["id"] == "placement").unwrap();
-        placement["blocks"][0]["rows"][0]["cells"]["st"] =
-            serde_json::json!({ "text": "New core", "facet": "focus.core" });
+fn a_file_in_no_stop_opens_in_code() {
+    let root = cache_patched(TOUR, HEAD, |page| {
+        page["tour"]["map"][0]["files"]
+            .as_array_mut()
+            .unwrap()
+            .push("calc/other.py".into());
+        let mut other = page["files"][0].clone();
+        other["path"] = "calc/other.py".into();
+        other["old"] = "calc/other.py".into();
+        page["files"].as_array_mut().unwrap().push(other);
     });
-    let (mut harness, state) = harness_with_cache(Some(root.path()));
-    click(&mut harness, "Changescape pill");
-    click(&mut harness, "Changescape rail map");
-    click(&mut harness, "Changescape facet link");
-    assert_eq!(
-        state.changescape_facet.get(),
-        Some(("focus".to_string(), "core".to_string()))
-    );
+    let (mut harness, state, _root) = opened_in(root);
+    click(&mut harness, "Changescape map file calc/other.py");
+    assert_eq!(state.tab.get(), ItemTab::Code);
 }
 
 #[test]
-fn only_a_page_with_facets_has_a_picker() {
-    let (harness, _, _root) = opened("01-minimal");
-    assert!(named(harness.root_id(), "Changescape facet picker").is_none());
-    let (harness, _, _root) = opened("09-facet-rows-without-el");
-    assert!(named(harness.root_id(), "Changescape facet picker").is_some());
-}
-
-/// The minimal case at stage `stage` without Placement's caption, as the
-/// backend sends it with `building`.
-fn facts_page(state: ReviewState, stage: &str, building: bool) -> tempfile::TempDir {
-    let root = cache_patched("01-minimal", HEAD, |page| {
-        for view in page["views"].as_array_mut().unwrap() {
-            view["narration"] = serde_json::Value::Null;
-        }
-    });
-    let dir = perch_changescape::build_dir(root.path(), REPO, 812, HEAD);
-    let status = std::fs::read_to_string(dir.join("status.json")).unwrap();
-    std::fs::write(
-        dir.join("status.json"),
-        status.replace(r#""stage": "narrated""#, &format!(r#""stage": "{stage}""#)),
-    )
-    .unwrap();
-    let mut found = crate::backend::changescape::find(root.path(), REPO, 812, HEAD);
-    found.building = building;
-    state
-        .changescape
-        .set(Some(Arc::new(Shown::new("pr".into(), Arc::new(found)))));
-    root
+fn scrolling_to_a_stop_lights_it_up_on_both_sides() {
+    let (mut harness, state, _root) = opened_in(cache_with_more(HEAD));
+    assert_eq!(state.changescape_here.get(), None);
+    let scroll = |harness: &mut HeadlessHarness, name: &str| {
+        named(harness.root_id(), name).unwrap().scroll_to(None);
+        redraw(harness);
+        redraw(harness);
+    };
+    // At the end of the tour, the last stop has passed a third of the
+    // column, and the ending has not.
+    scroll(&mut harness, "Changescape ending");
+    assert_eq!(state.changescape_here.get().as_deref(), Some("again"));
+    scroll(&mut harness, "Changescape cover");
+    assert_eq!(state.changescape_here.get(), None);
 }
 
 #[test]
-fn facts_drawn_while_this_perchs_build_runs_say_captions_are_coming() {
+fn a_skill_from_before_the_tour_offers_no_build_and_says_why() {
     let (mut harness, state) = harness_with_cache(None);
-    let _root = facts_page(state, "facts", true);
+    let root = tempfile::tempdir().unwrap();
+    show(state, root.path(), |found| found.skill_too_old = true);
     redraw(&mut harness);
     click(&mut harness, "Changescape pill");
-    click(&mut harness, "Changescape rail map");
-    assert!(state.changescape.get().unwrap().captions_pending());
-    assert!(rect(&harness, "Changescape caption pending").width() > 0.0);
-
-    // The build ended: the same page, and nothing more is coming.
-    let _root = facts_page(state, "facts", false);
-    redraw(&mut harness);
-    assert!(!state.changescape.get().unwrap().captions_pending());
-    assert_eq!(rect(&harness, "Changescape caption pending").width(), 0.0);
-
-    // Narrated while the run goes on: nothing pending either.
-    let _root = facts_page(state, "narrated", true);
-    redraw(&mut harness);
-    assert!(!state.changescape.get().unwrap().captions_pending());
+    assert!(named(harness.root_id(), "Changescape unbuilt").is_some());
+    assert_eq!(rect(&harness, "Changescape build button").width(), 0.0);
+    assert!(rect(&harness, "Changescape skill too old").height() > 0.0);
 }

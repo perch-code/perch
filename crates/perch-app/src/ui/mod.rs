@@ -720,14 +720,18 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     review.confirm_thread.set(None);
                     return EventPropagation::Stop;
                 }
-                // Then closes an expanded Changescape diagram.
+                // Then closes the rows of a Changescape view, then an
+                // expanded Changescape diagram.
                 if key.code == Code::Escape
                     && key.modifiers.is_empty()
                     && review.tab.get_untracked() == crate::review::model::ItemTab::Changescape
-                    && review.changescape_expanded.with_untracked(Option::is_some)
                 {
-                    review.changescape_expanded.set(None);
-                    return EventPropagation::Stop;
+                    for open in [review.changescape_view, review.changescape_expanded] {
+                        if open.with_untracked(Option::is_some) {
+                            open.set(None);
+                            return EventPropagation::Stop;
+                        }
+                    }
                 }
                 // Then puts the find bar away, from the code or the page;
                 // the bar takes its own Escape. A bar out of sight, on the

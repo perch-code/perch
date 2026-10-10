@@ -1,6 +1,6 @@
 //! Changescape maps: the files Changescape writes for a pull request, found
-//! and read for Perch's Map. Perch computes no map fact. It reads what
-//! Changescape left in its cache and draws that.
+//! and read for the Changescape tab. Perch computes no fact of its own. It
+//! reads what Changescape left in its cache and draws that.
 //!
 //! One build of one pull request at one head commit is one folder:
 //!
@@ -8,17 +8,15 @@
 //! <root>/<owner>/<repo>/pr-<number>/<head_sha>/
 //!   status.json   state of the build
 //!   page.json     facts and captions, the only file Perch draws
-//!   page.html     the same page for a browser
 //! ```
 //!
 //! This crate knows nothing about the UI: [`lookup`] finds a pull
-//! request's build, [`load`] reads its page once, and [`LineIndex`] says
-//! which elements hold a line.
+//! request's build, [`load`] reads its page once, and [`StopIndex`] says
+//! which tour stop shows a line.
 //!
 //! The page and status types are generated from the page format's schemas
 //! in `schema/`, by `schema/generate.sh`, into `src/generated/`.
 
-pub mod fold;
 pub mod page;
 mod skill;
 
@@ -36,7 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 pub use page::LoadedPage;
-pub use skill::skill_available;
+pub use skill::{skill_available, skill_writes_tour};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -98,10 +96,6 @@ impl Build {
         self.dir.join("page.json")
     }
 
-    pub fn html_path(&self) -> PathBuf {
-        self.dir.join("page.html")
-    }
-
     /// A finished build with a page, of any version.
     pub fn finished(&self) -> bool {
         self.status.state == State::Done && self.page_path().is_file()
@@ -160,7 +154,7 @@ pub enum Lookup {
     /// drawable one. A rebuild draws.
     Outdated(Build),
     /// A finished build whose page needs a newer Perch, and no drawable
-    /// one. The browser page draws it.
+    /// one.
     TooNew(Build),
     None,
 }
@@ -175,7 +169,8 @@ impl Lookup {
         }
     }
 
-    /// The build whose page this Perch refuses, for its browser page.
+    /// The build whose page this Perch refuses, which keeps the tab so
+    /// that it can say why.
     pub fn refused(&self) -> Option<&Build> {
         match self {
             Lookup::Outdated(build) | Lookup::TooNew(build) => Some(build),
@@ -215,6 +210,31 @@ fn pull_dir(root: &Path, repo: &str, number: u64) -> PathBuf {
 /// The folder of one build.
 pub fn build_dir(root: &Path, repo: &str, number: u64, head_sha: &str) -> PathBuf {
     pull_dir(root, repo, number).join(head_sha)
+}
+
+/// `lookup`, while a run that this reader started still builds the
+/// current head. A step of the skill can mark the build failed in the
+/// middle of the run, when it rejects the narration, and the run goes on
+/// to fix it and write the page again. So a failed status is not the end
+/// yet: the page an earlier step wrote still draws, as a finished build,
+/// and a build with no page to draw is running.
+pub fn lookup_during_run(root: &Path, repo: &str, number: u64, head_sha: &str) -> Lookup {
+    let pull = pull_dir(root, repo, number);
+    match read_build(&pull.join(head_sha)) {
+        Some(mut build) if build.status.state == State::Failed => {
+            if build.page_path().is_file() && build.version() == Version::Drawn {
+                build.status.state = State::Done;
+                build.status.error = None;
+                Lookup::Current(build)
+            } else {
+                Lookup::Running(
+                    build,
+                    newest_earlier(&pull, head_sha).filter(Build::drawable),
+                )
+            }
+        }
+        _ => lookup(root, repo, number, head_sha),
+    }
 }
 
 /// Find the map of `repo` (`owner/name`) pull request `number` at
@@ -332,16 +352,7 @@ pub fn load(build: &Build) -> Result<Arc<LoadedPage>, Error> {
         path: path.clone(),
         source,
     })?;
-    let page = Arc::new(LoadedPage::read(&bytes).map_err(|e| match e {
-        page::ReadError::Json(source) => Error::Parse {
-            path: path.clone(),
-            source,
-        },
-        page::ReadError::Version(schema) => Error::Version {
-            path: path.clone(),
-            schema,
-        },
-    })?);
+    let page = Arc::new(LoadedPage::read(&path, &bytes)?);
     cache
         .lock()
         .unwrap()
@@ -349,62 +360,51 @@ pub fn load(build: &Build) -> Result<Arc<LoadedPage>, Error> {
     Ok(page)
 }
 
-/// Which side of the diff a line is on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DiffSide {
-    Base,
-    Head,
-}
+/// Per path, `(first, last, stop id)` of each head window, sorted by
+/// first line.
+type Windows = HashMap<String, Vec<(u32, u32, String)>>;
 
-/// Per side and path, `(start, end, element id)` sorted by start.
-type Ranges = HashMap<(DiffSide, String), Vec<(u32, u32, String)>>;
-
-/// The elements on each line of each file, for the Code strip and for
-/// counting review threads. Built once per page.
+/// Which tour stop shows each head line of each file, for the Code strip.
+/// Built once per page from the stops' hunk windows.
 #[derive(Debug, Clone, Default)]
-pub struct LineIndex {
-    ranges: Ranges,
+pub struct StopIndex {
+    windows: Windows,
 }
 
-impl LineIndex {
-    pub fn new(page: &v3::Page) -> LineIndex {
-        let mut ranges = Ranges::new();
-        for (id, element) in &page.elements {
-            for r in element.refs.iter().filter(|r| r.file != Some(true)) {
-                for (side, range) in [(DiffSide::Base, &r.base), (DiffSide::Head, &r.head)] {
-                    if let Some((start, end)) = page::lines(range) {
-                        ranges.entry((side, r.f.clone())).or_default().push((
-                            start,
-                            end,
-                            id.clone(),
-                        ));
-                    }
+impl StopIndex {
+    pub fn new(page: &LoadedPage) -> StopIndex {
+        let mut windows = Windows::new();
+        let stops = page
+            .tour()
+            .into_iter()
+            .flat_map(|tour| &tour.chapters)
+            .flat_map(|chapter| &chapter.stops);
+        for stop in stops {
+            for (file, shown) in stop.pictures.iter().filter_map(page::hunk) {
+                for (first, last) in shown.iter().filter_map(|w| w.head) {
+                    windows.entry(file.to_string()).or_default().push((
+                        first,
+                        last,
+                        stop.id.clone(),
+                    ));
                 }
             }
         }
-        for list in ranges.values_mut() {
+        for list in windows.values_mut() {
             list.sort();
         }
-        LineIndex { ranges }
+        StopIndex { windows }
     }
 
-    /// Every element whose range on `side` of `path` holds `line`
-    /// (1-based), the narrowest first.
-    pub fn at(&self, side: DiffSide, path: &str, line: u32) -> Vec<&str> {
-        let Some(list) = self.ranges.get(&(side, path.to_string())) else {
-            return Vec::new();
-        };
-        let end = list.partition_point(|(start, _, _)| *start <= line);
-        let mut found: Vec<&(u32, u32, String)> = list[..end]
+    /// The stop whose narrowest head window on `path` holds `line`
+    /// (1-based).
+    pub fn at(&self, path: &str, line: u32) -> Option<&str> {
+        let list = self.windows.get(path)?;
+        let end = list.partition_point(|(first, _, _)| *first <= line);
+        list[..end]
             .iter()
             .filter(|(_, last, _)| line <= *last)
-            .collect();
-        found.sort_by_key(|(start, last, _)| last - start);
-        found.into_iter().map(|(_, _, id)| id.as_str()).collect()
-    }
-
-    /// The narrowest element on that line, for the Code strip.
-    pub fn innermost(&self, side: DiffSide, path: &str, line: u32) -> Option<&str> {
-        self.at(side, path, line).into_iter().next()
+            .min_by_key(|(first, last, _)| last - first)
+            .map(|(_, _, id)| id.as_str())
     }
 }

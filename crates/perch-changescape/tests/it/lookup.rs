@@ -1,28 +1,11 @@
 //! Lookup and load on the conformance fixtures, copied into a cache root
 //! of their own.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use perch_changescape::{load, lookup, DiffSide, LineIndex, Lookup, State};
+use perch_changescape::{load, lookup, lookup_during_run, Lookup, State, StopIndex};
 
-const REPO: &str = "calc/calc";
-const HEAD: &str = "3e81042d07e4d404b84526777e768a456a6a4fa9";
-
-fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/conformance")
-        .join(name)
-}
-
-/// Copy a fixture's build into `root` as pull request 7 at `sha`.
-fn install(root: &Path, name: &str, sha: &str) -> PathBuf {
-    let to = perch_changescape::build_dir(root, REPO, 7, sha);
-    std::fs::create_dir_all(&to).unwrap();
-    for file in ["page.json", "status.json"] {
-        std::fs::copy(fixture(name).join(file), to.join(file)).unwrap();
-    }
-    to
-}
+use crate::{install, HEAD, REPO};
 
 /// Write a status of `state`, finished at `finished`, of page format
 /// `page_schema`.
@@ -105,6 +88,44 @@ fn a_failed_build_with_nothing_earlier_is_failed() {
 }
 
 #[test]
+fn during_a_run_a_failed_build_with_a_page_still_draws_it() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = install(root.path(), "01-minimal", HEAD);
+    status(&dir, "failed", Some("2026-10-08T12:01:00Z"), Some(3));
+    assert!(matches!(
+        lookup(root.path(), REPO, 7, HEAD),
+        Lookup::Failed(_)
+    ));
+    let Lookup::Current(build) = lookup_during_run(root.path(), REPO, 7, HEAD) else {
+        panic!("expected the page of the step before");
+    };
+    assert_eq!(build.status.state, State::Done);
+    assert_eq!(build.status.error, None);
+}
+
+#[test]
+fn during_a_run_a_failed_build_with_no_page_is_running_over_the_earlier_map() {
+    let root = tempfile::tempdir().unwrap();
+    install(root.path(), "01-minimal", "aaaaaaa1");
+    let dir = perch_changescape::build_dir(root.path(), REPO, 7, HEAD);
+    std::fs::create_dir_all(&dir).unwrap();
+    status(&dir, "failed", None, None);
+    let lookup = lookup_during_run(root.path(), REPO, 7, HEAD);
+    let Lookup::Running(_, Some(previous)) = &lookup else {
+        panic!("expected a running build, got {lookup:?}");
+    };
+    assert_eq!(previous.head_sha, "aaaaaaa1");
+}
+
+#[test]
+fn during_a_run_a_status_half_written_is_not_the_end() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = install(root.path(), "01-minimal", HEAD);
+    std::fs::write(dir.join("status.json"), r#"{ "state": "do"#).unwrap();
+    assert!(lookup_during_run(root.path(), REPO, 7, HEAD).is_running());
+}
+
+#[test]
 fn a_status_that_does_not_match_its_schema_is_a_failed_build() {
     let root = tempfile::tempdir().unwrap();
     let dir = install(root.path(), "01-minimal", HEAD);
@@ -172,21 +193,14 @@ fn a_page_whose_status_misstates_its_version_is_refused_when_read() {
 }
 
 #[test]
-fn the_line_index_finds_the_narrowest_element() {
+fn the_stop_index_finds_the_stop_whose_window_holds_a_line() {
     let root = tempfile::tempdir().unwrap();
-    install(root.path(), "01-minimal", HEAD);
+    install(root.path(), "12-tour", HEAD);
     let lookup = lookup(root.path(), REPO, 7, HEAD);
     let page = load(lookup.drawable().unwrap()).unwrap();
-    let index = LineIndex::new(&page);
-    // The module is the whole file, and adds no range.
-    assert_eq!(
-        index.at(DiffSide::Head, "calc/ops.py", 1),
-        ["fn:calc.ops.add"]
-    );
-    assert_eq!(
-        index.innermost(DiffSide::Head, "calc/ops.py", 2),
-        Some("fn:calc.ops.add")
-    );
-    assert!(index.at(DiffSide::Head, "calc/ops.py", 3).is_empty());
-    assert!(index.at(DiffSide::Base, "calc/ops.py", 1).is_empty());
+    let index = StopIndex::new(&page);
+    assert_eq!(index.at("calc/ops.py", 1), Some("multiply"));
+    assert_eq!(index.at("calc/ops.py", 5), Some("multiply-helper"));
+    assert_eq!(index.at("calc/ops.py", 6), None);
+    assert_eq!(index.at("calc/other.py", 1), None);
 }

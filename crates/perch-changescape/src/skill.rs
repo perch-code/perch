@@ -20,6 +20,17 @@ fn skill_available_in(home: &Path) -> Option<PathBuf> {
     find_in_skills(&claude.join("skills")).or_else(|| find_in_plugins(&claude.join("plugins"), 0))
 }
 
+/// Whether the skill in `dir` writes a tour: its page schema has one.
+/// A skill from before the tour still reports page format 3, so its
+/// schema is the only sign.
+pub fn skill_writes_tour(dir: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(dir.join("schema/page.v3.schema.json")) else {
+        return false;
+    };
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .is_ok_and(|schema| schema.pointer("/properties/tour").is_some())
+}
+
 fn find_in_skills(skills: &Path) -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(skills)
         .ok()?
@@ -109,6 +120,18 @@ mod tests {
             "changescape",
         );
         assert_eq!(skill_available_in(home.path()), None);
+    }
+
+    #[test]
+    fn a_skill_writes_a_tour_when_its_schema_has_one() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!skill_writes_tour(dir.path()));
+        std::fs::create_dir_all(dir.path().join("schema")).unwrap();
+        let schema = dir.path().join("schema/page.v3.schema.json");
+        std::fs::write(&schema, r#"{"properties": {"sections": {}}}"#).unwrap();
+        assert!(!skill_writes_tour(dir.path()));
+        std::fs::write(&schema, r#"{"properties": {"tour": {}}}"#).unwrap();
+        assert!(skill_writes_tour(dir.path()));
     }
 
     #[test]

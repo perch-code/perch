@@ -3,47 +3,36 @@
 //! `skill/docs/page-data.md` in the Changescape repository: the schema
 //! gives the shapes, and that file the meanings.
 //!
-//! The generated types are strict, so one bad block would fail the whole
-//! page. A page is read in two steps instead: each view's blocks one by
-//! one, a block that does not read kept as [`PageBlock::Unknown`] with its
-//! type's name, and then the rest of the page.
+//! Perch draws the page's tour, and only the tour. The generated types
+//! are strict, so one bad stop would fail the whole page. A page is read
+//! in two steps instead: the tour on its own, kept out when it does not
+//! read, and then the rest. Perch draws no view as a section, so it does
+//! not read the views' blocks, and a block of a new shape never fails a
+//! page. It keeps only the element each table row names, which a
+//! `view:<id>` ref lists.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Deref;
+use std::path::Path;
 
 use serde_json::Value;
 
-use crate::v3;
+use crate::{v3, Error};
 
-/// A page this Perch draws: the generated page, with its views' blocks
-/// read one by one beside it.
+/// A page this Perch draws: the generated page, with the tour read on its
+/// own.
 #[derive(Debug, Clone)]
 pub struct LoadedPage {
     page: v3::Page,
-    /// The blocks of each view, in view order.
-    blocks: Vec<Vec<PageBlock>>,
-}
-
-/// One block of a view: read, or of a type or shape this Perch does not
-/// know, which the browser page draws.
-#[derive(Debug, Clone)]
-pub enum PageBlock {
-    Known(v3::Block),
-    Unknown { kind: String },
-}
-
-/// Why a page was not read.
-#[derive(Debug, thiserror::Error)]
-pub enum ReadError {
-    #[error("{0}")]
-    Json(#[from] serde_json::Error),
-    /// The page is of a format version this Perch does not draw.
-    #[error("page format {0}, which this Perch does not draw")]
-    Version(u32),
+    /// Why the page's tour was not read, when it has one that did not.
+    tour_error: Option<String>,
+    /// The elements each view's table rows name, by view id, in row
+    /// order and each once.
+    view_rows: HashMap<String, Vec<String>>,
 }
 
 /// The format version a page names: its `schema`, else 2.
-pub fn schema_of(value: &Value) -> u32 {
+fn schema_of(value: &Value) -> u32 {
     value
         .get("schema")
         .and_then(Value::as_u64)
@@ -53,38 +42,50 @@ pub fn schema_of(value: &Value) -> u32 {
 
 impl LoadedPage {
     /// Read a page: its version first, which must be one this Perch
-    /// draws, then each view's blocks on their own, then the rest.
-    pub fn read(bytes: &[u8]) -> Result<LoadedPage, ReadError> {
-        let mut value: Value = serde_json::from_slice(bytes)?;
+    /// draws, then its tour on its own, then the rest without the views'
+    /// blocks.
+    pub(crate) fn read(path: &Path, bytes: &[u8]) -> Result<LoadedPage, Error> {
+        let parse = |source| Error::Parse {
+            path: path.to_path_buf(),
+            source,
+        };
+        let mut value: Value = serde_json::from_slice(bytes).map_err(parse)?;
         let schema = schema_of(&value);
         if crate::Version::of(schema) != crate::Version::Drawn {
-            return Err(ReadError::Version(schema));
+            return Err(Error::Version {
+                path: path.to_path_buf(),
+                schema,
+            });
         }
-        let mut blocks = Vec::new();
+        let mut view_rows = HashMap::new();
         if let Some(views) = value.get_mut("views").and_then(Value::as_array_mut) {
             for view in views {
-                let taken = match view.get_mut("blocks").map(Value::take) {
-                    Some(Value::Array(taken)) => taken,
-                    _ => Vec::new(),
+                let Some(blocks) = view.get_mut("blocks").map(Value::take) else {
+                    continue;
                 };
-                if let Some(slot) = view.get_mut("blocks") {
-                    *slot = Value::Array(Vec::new());
+                view["blocks"] = Value::Array(Vec::new());
+                if let Some(id) = view.get("id").and_then(Value::as_str) {
+                    view_rows.insert(id.to_string(), row_elements(&blocks));
                 }
-                blocks.push(taken.into_iter().map(PageBlock::read).collect());
             }
         }
-        let page: v3::Page = serde_json::from_value(value)?;
-        Ok(LoadedPage { page, blocks })
-    }
-
-    /// The blocks of the view `id`.
-    pub fn blocks(&self, id: &str) -> &[PageBlock] {
-        self.page
-            .views
-            .iter()
-            .position(|view| view.id == id)
-            .and_then(|i| self.blocks.get(i))
-            .map_or(&[], Vec::as_slice)
+        let tour = value
+            .as_object_mut()
+            .and_then(|page| page.remove("tour"))
+            .filter(|tour| !tour.is_null());
+        let mut page: v3::Page = serde_json::from_value(value).map_err(parse)?;
+        let mut tour_error = None;
+        if let Some(tour) = tour {
+            match serde_json::from_value::<v3::Tour>(tour) {
+                Ok(tour) => page.tour = Some(tour),
+                Err(e) => tour_error = Some(e.to_string()),
+            }
+        }
+        Ok(LoadedPage {
+            page,
+            tour_error,
+            view_rows,
+        })
     }
 
     /// The view `id`.
@@ -92,43 +93,84 @@ impl LoadedPage {
         self.page.views.iter().find(|view| view.id == id)
     }
 
-    /// A section's views, in order.
-    pub fn section_views<'a>(&'a self, section: &'a v3::Section) -> Vec<&'a v3::View> {
-        section
-            .views
-            .iter()
-            .filter_map(|id| self.view(id))
+    /// The elements the view `id`'s table rows name, in row order, each
+    /// once, leaving out any the page does not hold.
+    pub fn view_rows(&self, id: &str) -> Vec<&str> {
+        self.view_rows
+            .get(id)
+            .into_iter()
+            .flatten()
+            .filter(|el| self.page.elements.contains_key(*el))
+            .map(String::as_str)
             .collect()
     }
 
-    /// The section a view is in.
-    pub fn section_of_view(&self, view: &str) -> Option<&v3::Section> {
-        self.page
-            .sections
-            .iter()
-            .find(|section| section.views.iter().any(|id| id == view))
+    /// The tour, when the page has one that read.
+    pub fn tour(&self) -> Option<&v3::Tour> {
+        self.page.tour.as_ref()
     }
 
-    /// The first section, in rail order, whose views show the element.
-    pub fn first_section_showing(&self, el: &str) -> Option<&v3::Section> {
-        self.page.sections.iter().find(|section| {
-            section.views.iter().any(|view| {
-                self.blocks(view)
-                    .iter()
-                    .any(|block| block.elements().any(|shown| shown == el))
-            })
+    /// Why the page's tour did not read.
+    pub fn tour_error(&self) -> Option<&str> {
+        self.tour_error.as_deref()
+    }
+
+    /// The stop `id` and the chapter it is in.
+    pub fn stop(&self, id: &str) -> Option<(&v3::TourChapter, &v3::TourStop)> {
+        self.tour()?.chapters.iter().find_map(|chapter| {
+            chapter
+                .stops
+                .iter()
+                .find(|stop| stop.id == id)
+                .map(|stop| (chapter, stop))
         })
     }
 
-    /// The option `option` of facet `facet`, if the page has it.
-    pub fn facet_option(&self, facet: &str, option: &str) -> Option<&v3::FacetOption> {
+    /// The comment a `comment:<kind>:<id>` ref names.
+    pub fn comment(&self, r: &str) -> Option<&v3::Comment> {
+        let (kind, id) = comment_ref(r)?;
         self.page
-            .facets
+            .comments
             .iter()
-            .find(|f| f.id == facet)?
-            .options
-            .iter()
-            .find(|o| o.id == option)
+            .find(|c| c.id == id && comment_kind(&c.kind) == kind)
+    }
+}
+
+/// The `el` of every row of every block, in order and each once. Read
+/// from the JSON as it is, so a block of any shape gives what it has.
+fn row_elements(blocks: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let rows = blocks
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|block| block.get("rows")?.as_array())
+        .flatten();
+    for el in rows.filter_map(|row| row.get("el")?.as_str()) {
+        if !out.iter().any(|seen| seen == el) {
+            out.push(el.to_string());
+        }
+    }
+    out
+}
+
+/// What a ref names: a GitHub comment, a view, or an element.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ref<'a> {
+    Comment(&'a str, i64),
+    View(&'a str),
+    Element(&'a str),
+}
+
+/// A ref as the contract writes it: `comment:<kind>:<id>`, `view:<id>`,
+/// or an element id.
+pub fn parse_ref(r: &str) -> Ref<'_> {
+    if let Some((kind, id)) = comment_ref(r) {
+        return Ref::Comment(kind, id);
+    }
+    match r.strip_prefix("view:") {
+        Some(view) => Ref::View(view),
+        None => Ref::Element(r),
     }
 }
 
@@ -138,139 +180,6 @@ impl Deref for LoadedPage {
     fn deref(&self) -> &v3::Page {
         &self.page
     }
-}
-
-impl PageBlock {
-    fn read(value: Value) -> PageBlock {
-        let kind = value
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        match serde_json::from_value(value) {
-            Ok(block) => PageBlock::Known(block),
-            Err(_) => PageBlock::Unknown { kind },
-        }
-    }
-
-    /// The `type` as written.
-    pub fn kind(&self) -> &str {
-        match self {
-            PageBlock::Unknown { kind } => kind,
-            PageBlock::Known(block) => match block {
-                v3::Block::Narration { .. } => "narration",
-                v3::Block::Text { .. } => "text",
-                v3::Block::Summary { .. } => "summary",
-                v3::Block::Table { .. } => "table",
-                v3::Block::Svg { .. } => "svg",
-                v3::Block::Lanes { .. } => "lanes",
-                v3::Block::Graph { .. } => "graph",
-                v3::Block::Code => "code",
-                v3::Block::Discussion { .. } => "discussion",
-            },
-        }
-    }
-
-    /// The heading over the block.
-    pub fn title(&self) -> Option<&str> {
-        let PageBlock::Known(block) = self else {
-            return None;
-        };
-        match block {
-            v3::Block::Text { title, .. }
-            | v3::Block::Summary { title, .. }
-            | v3::Block::Table { title, .. }
-            | v3::Block::Svg { title, .. }
-            | v3::Block::Lanes { title, .. }
-            | v3::Block::Graph { title, .. }
-            | v3::Block::Discussion { title, .. } => title.as_deref(),
-            v3::Block::Narration { .. } | v3::Block::Code => None,
-        }
-    }
-
-    /// The muted line under the block.
-    pub fn note(&self) -> Option<&str> {
-        let PageBlock::Known(block) = self else {
-            return None;
-        };
-        match block {
-            v3::Block::Text { note, .. }
-            | v3::Block::Table { note, .. }
-            | v3::Block::Svg { note, .. }
-            | v3::Block::Lanes { note, .. }
-            | v3::Block::Graph { note, .. } => note.as_deref(),
-            _ => None,
-        }
-    }
-
-    /// The block as a table, when it is one.
-    pub fn table(&self) -> Option<Table> {
-        match self {
-            PageBlock::Known(v3::Block::Table {
-                columns,
-                rows,
-                groups,
-                fold,
-                ..
-            }) => Some(Table {
-                columns: columns.clone(),
-                rows: rows.clone(),
-                groups: groups.clone(),
-                fold: fold.clone(),
-            }),
-            _ => None,
-        }
-    }
-
-    /// The block as a diagram Perch draws, when it is one.
-    pub fn svg(&self) -> Option<Svg> {
-        match self {
-            PageBlock::Known(v3::Block::Svg { svg, hot, .. }) => Some(Svg {
-                svg: svg.clone(),
-                hot: hot.iter().map(|(n, e)| (n.clone(), e.clone())).collect(),
-            }),
-            _ => None,
-        }
-    }
-
-    /// Every element the block links to.
-    pub fn elements(&self) -> Box<dyn Iterator<Item = &str> + '_> {
-        let PageBlock::Known(block) = self else {
-            return Box::new(std::iter::empty());
-        };
-        match block {
-            v3::Block::Table { rows, .. } => Box::new(rows.iter().flat_map(|row| {
-                row.el
-                    .as_deref()
-                    .into_iter()
-                    .chain(row.cells.values().flat_map(cell_elements))
-            })),
-            v3::Block::Svg { hot, .. } => Box::new(hot.values().map(String::as_str)),
-            // A graph's node names an element and its status.
-            v3::Block::Graph { hot, .. } => Box::new(hot.values().map(|label| label.0[0].as_str())),
-            _ => Box::new(std::iter::empty()),
-        }
-    }
-}
-
-fn cell_elements(cell: &v3::Cell) -> Box<dyn Iterator<Item = &str> + '_> {
-    match cell {
-        v3::Cell::CellLink(link) => Box::new(link.el.as_deref().into_iter()),
-        v3::Cell::Array(items) => Box::new(items.iter().filter_map(|item| match item {
-            v3::CellListItem::CellLink(link) => link.el.as_deref(),
-            v3::CellListItem::String(_) => None,
-        })),
-        _ => Box::new(std::iter::empty()),
-    }
-}
-
-/// A table block's parts, owned, for a view that keeps them.
-#[derive(Debug, Clone, Default)]
-pub struct Table {
-    pub columns: Vec<v3::Column>,
-    pub rows: Vec<v3::Row>,
-    pub groups: Vec<v3::TableGroup>,
-    pub fold: Option<v3::Fold>,
 }
 
 /// `value` if it is one of `known`, else `fallback`. The schema leaves
@@ -283,155 +192,146 @@ fn known(value: &str, known: &[&'static str], fallback: &'static str) -> &'stati
         .unwrap_or(fallback)
 }
 
-/// How a column draws its cells: `text`, `mono`, `num`, `status`, `bar`
-/// or `refs`. A column without a kind, or of a kind this Perch does not
-/// know, draws plain text.
-pub fn column_kind(column: &v3::Column) -> &'static str {
-    let kinds = ["text", "mono", "num", "status", "bar", "refs"];
-    known(
-        column.kind.as_deref().map_or("text", |k| k.as_str()),
-        &kinds,
-        "text",
-    )
-}
-
-/// What the change does to an element; one this Perch does not know is
-/// `changed`.
-pub fn status(st: &v3::Status) -> &'static str {
-    let statuses = ["added", "removed", "changed", "moved", "context"];
-    known(st, &statuses, "changed")
-}
-
-/// Whether a view found something; a state this Perch does not know is
-/// `na`.
-pub fn view_state(state: &v3::ViewState) -> &'static str {
-    known(state, &["applies", "nochange", "na"], "na")
-}
-
-/// A path's line-accounting kind; one this Perch does not know is `other`.
-pub fn file_kind(kind: &v3::FileKind) -> &'static str {
-    let kinds = [
-        "source",
-        "test",
-        "docs",
-        "config",
-        "generated",
-        "vendored",
-        "other",
-    ];
-    known(kind, &kinds, "other")
-}
-
 /// Where on GitHub a comment was left; a kind this Perch does not know is
 /// `issue`.
-pub fn comment_kind(kind: &v3::CommentKind) -> &'static str {
+fn comment_kind(kind: &v3::CommentKind) -> &'static str {
     known(kind, &["inline", "review", "issue"], "issue")
 }
 
-/// How much a row matters: a key row is one to read first, a minor one
-/// folds.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Rank {
-    Key,
-    #[default]
-    Normal,
-    Minor,
+/// A `comment:<kind>:<id>` ref as its kind and GitHub id.
+fn comment_ref(r: &str) -> Option<(&str, i64)> {
+    let rest = r.strip_prefix("comment:")?;
+    let (kind, id) = rest.split_once(':')?;
+    Some((kind, id.parse().ok()?))
 }
 
-/// A row's rank. The schema leaves it an open string: anything but `key`
-/// and `minor` is a normal row.
-pub fn rank(row: &v3::Row) -> Rank {
-    match row.rank.as_deref() {
-        Some("key") => Rank::Key,
-        Some("minor") => Rank::Minor,
-        _ => Rank::Normal,
+/// How closely to read a stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// The idea, or logic a reviewer must read: shown open.
+    Read,
+    /// Support code: folded into a row.
+    Skim,
+}
+
+/// A stop's verdict: its own, else its chapter's, else read. The set is
+/// open, and a value this Perch does not know reads.
+pub fn verdict(chapter: &v3::TourChapter, stop: &v3::TourStop) -> Verdict {
+    match stop.verdict.as_deref().or(chapter.verdict.as_deref()) {
+        Some("skim") => Verdict::Skim,
+        _ => Verdict::Read,
     }
 }
 
-/// A table cell as Perch draws it, whichever shape the file gives it.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct CellText {
-    pub text: String,
-    /// The number, for `num` and `bar` columns.
-    pub value: Option<f64>,
-    pub el: Option<String>,
-    pub file: Option<String>,
-    pub line: Option<u32>,
-    /// The facet option a click applies, as (facet id, option id).
-    pub facet: Option<(String, String)>,
-    /// A list cell's entries, each its own cell.
-    pub items: Vec<CellText>,
+/// One run of a chapter's stops as the tour shows them: a read stop on
+/// its own, consecutive skim stops folded together, or the header of a
+/// section, by its index in `sections`, before the section's first stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Run {
+    Read(usize),
+    Skim(Vec<usize>),
+    Section(usize),
 }
 
-impl From<&v3::Cell> for CellText {
-    fn from(cell: &v3::Cell) -> CellText {
-        match cell {
-            v3::Cell::String(text) => CellText {
-                text: text.clone(),
-                ..CellText::default()
-            },
-            v3::Cell::Number(n) => CellText {
-                text: number_text(*n),
-                value: Some(*n),
-                ..CellText::default()
-            },
-            v3::Cell::CellLink(link) => CellText::from(link),
-            // A list cell: its entries, and their texts joined.
-            v3::Cell::Array(items) => {
-                let items: Vec<CellText> = items
-                    .iter()
-                    .map(|item| match item {
-                        v3::CellListItem::String(text) => CellText {
-                            text: text.clone(),
-                            ..CellText::default()
-                        },
-                        v3::CellListItem::CellLink(link) => CellText::from(link),
-                    })
-                    .collect();
-                CellText {
-                    text: items
-                        .iter()
-                        .map(|item| item.text.as_str())
-                        .filter(|text| !text.is_empty())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    items,
-                    ..CellText::default()
-                }
+/// The section each stop of a chapter is in, by stop id: the index in
+/// `sections`. A stop in two sections is in the first.
+pub fn section_of(chapter: &v3::TourChapter) -> HashMap<&str, usize> {
+    let mut out = HashMap::new();
+    for (k, section) in chapter.sections.iter().enumerate() {
+        for id in &section.stops {
+            out.entry(id.as_str()).or_insert(k);
+        }
+    }
+    out
+}
+
+/// A chapter's stops, by index, as runs, in the stops' order. A section's
+/// header comes before its first stop, and a run of skim stops never
+/// crosses one.
+pub fn runs(chapter: &v3::TourChapter) -> Vec<Run> {
+    let sections = section_of(chapter);
+    let mut opened = Vec::new();
+    let mut out: Vec<Run> = Vec::new();
+    for (i, stop) in chapter.stops.iter().enumerate() {
+        if let Some(&k) = sections.get(stop.id.as_str()) {
+            if !opened.contains(&k) {
+                opened.push(k);
+                out.push(Run::Section(k));
             }
         }
+        match (verdict(chapter, stop), out.last_mut()) {
+            (Verdict::Read, _) => out.push(Run::Read(i)),
+            (Verdict::Skim, Some(Run::Skim(group))) => group.push(i),
+            (Verdict::Skim, _) => out.push(Run::Skim(vec![i])),
+        }
+    }
+    out
+}
+
+/// Every stop of the tour in reading order, with its chapter.
+pub fn stops(tour: &v3::Tour) -> impl Iterator<Item = (&v3::TourChapter, &v3::TourStop)> {
+    tour.chapters
+        .iter()
+        .flat_map(|chapter| chapter.stops.iter().map(move |stop| (chapter, stop)))
+}
+
+/// The read stops of the tour, in reading order.
+pub fn read_stops(tour: &v3::Tour) -> impl Iterator<Item = &v3::TourStop> {
+    stops(tour)
+        .filter(|(chapter, stop)| verdict(chapter, stop) == Verdict::Read)
+        .map(|(_, stop)| stop)
+}
+
+/// The first read stop after the stop `id`, in reading order.
+pub fn next_read(tour: &v3::Tour, id: &str) -> Option<String> {
+    stops(tour)
+        .skip_while(|(_, stop)| stop.id != id)
+        .skip(1)
+        .find(|(chapter, stop)| verdict(chapter, stop) == Verdict::Read)
+        .map(|(_, stop)| stop.id.clone())
+}
+
+/// The kind of a picture this Perch draws. The set is open: a picture of
+/// another kind is skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PictureKind {
+    Hunk,
+    Seq,
+    Other,
+}
+
+pub fn picture_kind(kind: &str) -> PictureKind {
+    match kind {
+        "hunk" => PictureKind::Hunk,
+        "seq" => PictureKind::Seq,
+        _ => PictureKind::Other,
     }
 }
 
-impl From<&v3::CellLink> for CellText {
-    fn from(link: &v3::CellLink) -> CellText {
-        CellText {
-            text: link.text.clone(),
-            value: link.text.trim().parse().ok(),
-            el: link.el.clone(),
-            file: link.file.clone(),
-            line: link.line.and_then(|n| u32::try_from(n).ok()),
-            facet: link.facet.as_deref().and_then(|facet| {
-                let (facet, option) = facet.split_once('.')?;
-                Some((facet.to_string(), option.to_string()))
-            }),
-            items: Vec::new(),
+/// A window of a hunk picture: 1-based inclusive line ranges on each side,
+/// either absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Window {
+    pub base: Option<(u32, u32)>,
+    pub head: Option<(u32, u32)>,
+}
+
+impl From<&v3::TourWindow> for Window {
+    fn from(w: &v3::TourWindow) -> Window {
+        Window {
+            base: lines(&w.base),
+            head: lines(&w.head),
         }
     }
 }
 
-/// A number as the file wrote it: `3`, not `3.0`.
-fn number_text(n: f64) -> String {
-    if n.fract() == 0.0 && n.abs() < 1e15 {
-        format!("{}", n as i64)
-    } else {
-        n.to_string()
+/// A hunk picture's file and windows.
+pub fn hunk(picture: &v3::TourPicture) -> Option<(&str, Vec<Window>)> {
+    if picture_kind(&picture.kind) != PictureKind::Hunk {
+        return None;
     }
-}
-
-/// The cell of `row` under the column `key`, empty when the row has none.
-pub fn cell(row: &v3::Row, key: &str) -> CellText {
-    row.cells.get(key).map(CellText::from).unwrap_or_default()
+    let file = picture.file.as_deref()?;
+    Some((file, picture.windows.iter().map(Window::from).collect()))
 }
 
 /// A diagram Changescape laid out, as one SVG document. `hot` maps an SVG
@@ -440,6 +340,25 @@ pub fn cell(row: &v3::Row, key: &str) -> CellText {
 pub struct Svg {
     pub svg: String,
     pub hot: BTreeMap<String, String>,
+}
+
+/// A seq picture's diagram.
+pub fn picture_svg(picture: &v3::TourPicture) -> Option<Svg> {
+    if picture_kind(&picture.kind) != PictureKind::Seq {
+        return None;
+    }
+    Some(Svg {
+        svg: picture.svg.clone()?,
+        hot: picture.hot.clone().into_iter().collect(),
+    })
+}
+
+/// A chapter's spine, as a diagram, when it is a seq.
+pub fn spine_svg(spine: &v3::TourSpine) -> Option<Svg> {
+    (picture_kind(&spine.kind) == PictureKind::Seq).then(|| Svg {
+        svg: spine.svg.clone(),
+        hot: spine.hot.clone().into_iter().collect(),
+    })
 }
 
 /// A line range as 1-based `(first, last)`.
@@ -479,66 +398,124 @@ pub fn src_rows(r: &v3::ElementRef) -> Vec<SrcRow> {
 mod tests {
     use super::*;
 
-    fn row(json: serde_json::Value) -> v3::Row {
-        serde_json::from_value(json).unwrap()
-    }
-
-    #[test]
-    fn cells_read_every_shape() {
-        let r = row(serde_json::json!({ "cells": {
-            "a": "x", "b": 3, "c": { "text": "f()", "el": "fn:f", "side": "head" },
-            "d": { "text": "x.py:4", "file": "x.py", "line": 4 },
-            "e": ["a.py", { "text": "b.py", "el": "mod:b" }] } }));
-        assert_eq!(cell(&r, "a").text, "x");
-        assert_eq!(cell(&r, "b").value, Some(3.0));
-        assert_eq!(cell(&r, "b").text, "3");
-        assert_eq!(cell(&r, "c").el.as_deref(), Some("fn:f"));
-        assert_eq!(cell(&r, "d").line, Some(4));
-        assert_eq!(cell(&r, "e").text, "a.py, b.py");
-        assert_eq!(cell(&r, "e").items[1].el.as_deref(), Some("mod:b"));
-        assert_eq!(cell(&r, "missing"), CellText::default());
-    }
-
-    #[test]
-    fn a_facet_cell_names_its_facet_and_option() {
-        let r = row(serde_json::json!({ "cells": {
-            "a": { "text": "Existing", "facet": "part.existing" },
-            "b": { "text": "x", "facet": "nodot" } } }));
-        assert_eq!(
-            cell(&r, "a").facet,
-            Some(("part".to_string(), "existing".to_string()))
-        );
-        assert_eq!(cell(&r, "b").facet, None);
-    }
-
     #[test]
     fn an_unknown_value_in_an_open_set_reads_as_the_schema_says() {
-        let column = |kind: Option<&str>| v3::Column {
-            kind: kind.map(|k| v3::ColumnKind(k.into())),
-            ..serde_json::from_value(serde_json::json!({ "key": "k", "label": "K" })).unwrap()
-        };
-        assert_eq!(column_kind(&column(None)), "text");
-        assert_eq!(column_kind(&column(Some("bar"))), "bar");
-        assert_eq!(column_kind(&column(Some("sparkline"))), "text");
-        assert_eq!(status(&v3::Status("moved".into())), "moved");
-        assert_eq!(status(&v3::Status("split".into())), "changed");
-        assert_eq!(view_state(&v3::ViewState("applies".into())), "applies");
-        assert_eq!(view_state(&v3::ViewState("partial".into())), "na");
-        assert_eq!(file_kind(&v3::FileKind("vendored".into())), "vendored");
-        assert_eq!(file_kind(&v3::FileKind("lockfile".into())), "other");
         assert_eq!(comment_kind(&v3::CommentKind("inline".into())), "inline");
         assert_eq!(comment_kind(&v3::CommentKind("commit".into())), "issue");
+        assert_eq!(picture_kind("table"), PictureKind::Other);
     }
 
     #[test]
-    fn a_rank_reads_key_and_minor_and_anything_else_as_normal() {
-        let ranks: Vec<Rank> = ["key", "minor", "pinned"]
+    fn a_ref_names_a_comment_a_view_or_an_element() {
+        assert_eq!(comment_ref("comment:inline:42"), Some(("inline", 42)));
+        assert_eq!(comment_ref("fn:a.b"), None);
+        assert_eq!(comment_ref("comment:inline:x"), None);
+        assert_eq!(parse_ref("comment:issue:7"), Ref::Comment("issue", 7));
+        assert_eq!(parse_ref("view:related"), Ref::View("related"));
+        assert_eq!(parse_ref("pr:2049"), Ref::Element("pr:2049"));
+    }
+
+    #[test]
+    fn a_views_rows_are_the_elements_its_tables_name_each_once() {
+        let blocks = serde_json::json!([
+            { "type": "table", "rows": [{ "el": "pr:1" }, { "cells": {} }, { "el": "pr:2" }] },
+            { "type": "text", "text": "x" },
+            { "type": "heatmap", "rows": [{ "el": "pr:1" }, { "el": "pr:3" }] },
+        ]);
+        assert_eq!(row_elements(&blocks), ["pr:1", "pr:2", "pr:3"]);
+    }
+
+    fn chapter(verdicts: &[Option<&str>], own: Option<&str>) -> v3::TourChapter {
+        let stops: Vec<serde_json::Value> = verdicts
             .iter()
-            .map(|rank| row(serde_json::json!({ "cells": {}, "rank": rank })))
-            .chain([row(serde_json::json!({ "cells": {} }))])
-            .map(|r| rank(&r))
+            .enumerate()
+            .map(|(i, v)| {
+                serde_json::json!({ "id": format!("s{i}"), "title": "t", "els": [],
+                    "pictures": [], "lines": 1, "verdict": v })
+            })
             .collect();
-        assert_eq!(ranks, [Rank::Key, Rank::Minor, Rank::Normal, Rank::Normal]);
+        serde_json::from_value(serde_json::json!({
+            "id": "c", "title": "C", "verdict": own, "stops": stops }))
+        .unwrap()
+    }
+
+    #[test]
+    fn consecutive_skim_stops_fold_into_one_run() {
+        let c = chapter(
+            &[Some("read"), Some("skim"), Some("skim"), None, Some("skim")],
+            None,
+        );
+        assert_eq!(
+            runs(&c),
+            [
+                Run::Read(0),
+                Run::Skim(vec![1, 2]),
+                Run::Read(3),
+                Run::Skim(vec![4])
+            ]
+        );
+    }
+
+    #[test]
+    fn a_section_header_comes_before_its_first_stop_and_splits_a_skim_run() {
+        let mut c = chapter(
+            &[
+                Some("read"),
+                Some("skim"),
+                Some("skim"),
+                Some("read"),
+                Some("read"),
+            ],
+            None,
+        );
+        c.sections = serde_json::from_value(serde_json::json!([
+            { "title": "A", "stops": ["s0", "s1"] },
+            { "title": "B", "stops": ["s2", "s3"] },
+        ]))
+        .unwrap();
+        assert_eq!(
+            runs(&c),
+            [
+                Run::Section(0),
+                Run::Read(0),
+                Run::Skim(vec![1]),
+                Run::Section(1),
+                Run::Skim(vec![2]),
+                Run::Read(3),
+                // In no section: after the last one.
+                Run::Read(4),
+            ]
+        );
+    }
+
+    #[test]
+    fn next_goes_to_the_next_read_stop_across_chapters() {
+        let first = chapter(&[Some("read"), Some("skim")], None);
+        let mut second = chapter(&[Some("skim"), Some("read")], None);
+        for stop in &mut second.stops {
+            stop.id = format!("t{}", stop.id);
+        }
+        let tour = v3::Tour {
+            below: Vec::new(),
+            chapters: vec![first, second],
+            ending: None,
+            flags: Vec::new(),
+            map: Vec::new(),
+            narrated: None,
+            summary: None,
+        };
+        assert_eq!(next_read(&tour, "s0").as_deref(), Some("ts1"));
+        assert_eq!(next_read(&tour, "s1").as_deref(), Some("ts1"));
+        assert_eq!(next_read(&tour, "ts1"), None);
+        let read: Vec<&str> = read_stops(&tour).map(|s| s.id.as_str()).collect();
+        assert_eq!(read, ["s0", "ts1"]);
+    }
+
+    #[test]
+    fn a_stop_without_a_verdict_takes_its_chapters_and_an_unknown_one_reads() {
+        let c = chapter(&[None, Some("glance")], Some("skim"));
+        assert_eq!(verdict(&c, &c.stops[0]), Verdict::Skim);
+        assert_eq!(verdict(&c, &c.stops[1]), Verdict::Read);
     }
 
     #[test]

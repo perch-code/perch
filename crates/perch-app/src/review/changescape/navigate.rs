@@ -2,7 +2,7 @@
 //! the whole branch, its merge base and head, so the scope goes to Branch
 //! first. An element on the head opens there at its first line. One only
 //! on the base, a removed function, has no line in Code to open, so its
-//! excerpt shows over the tab instead.
+//! file opens split, at the head line its diff comes nearest to.
 
 use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
 use perch_changescape::page::{lines, src_rows};
@@ -28,7 +28,11 @@ pub fn open_element(state: ReviewState, backend: &Backend, page: &LoadedPage, el
             branch_scope(state, backend);
             state.go_to_file(&path, Some((line.saturating_sub(1) as usize, 0)));
         }
-        Some(Target::BaseOnly) => state.changescape_popover.set(Some(el.to_string())),
+        Some(Target::BaseOnly) => {
+            if let Some(r) = base_ref(element) {
+                show_in_diff(state, backend, r);
+            }
+        }
         None => {}
     }
 }
@@ -40,11 +44,10 @@ pub fn open_file_line(state: ReviewState, backend: &Backend, path: &str, line: O
     state.go_to_file(path, at);
 }
 
-/// "Show in diff" on a base-only element: its file, split, at the head
-/// line its own diff comes nearest to, or at the line its base range
-/// starts on when its diff names none.
-pub fn show_in_diff(state: ReviewState, backend: &Backend, r: &Ref) {
-    state.changescape_popover.set(None);
+/// A base-only element: its file, split, at the head line its own diff
+/// comes nearest to, or at the line its base range starts on when its
+/// diff names none.
+fn show_in_diff(state: ReviewState, backend: &Backend, r: &Ref) {
     state.layout.set(Layout::Split);
     let line = nearest_head_line(r);
     open_file_line(state, backend, &r.f, line);
@@ -78,8 +81,8 @@ fn target(element: &Element) -> Option<Target> {
         .then_some(Target::BaseOnly)
 }
 
-/// The base-side ref the popover shows: the first with a base range.
-pub fn base_ref(element: &Element) -> Option<&Ref> {
+/// The base-side ref of an element: the first with a base range.
+fn base_ref(element: &Element) -> Option<&Ref> {
     element.refs.iter().find(|r| r.base.is_some())
 }
 
@@ -91,7 +94,7 @@ fn nearest_head_line(r: &Ref) -> Option<u32> {
 }
 
 /// Line numbers on the page are of the whole branch.
-fn branch_scope(state: ReviewState, backend: &Backend) {
+pub fn branch_scope(state: ReviewState, backend: &Backend) {
     if state.scope.get_untracked() == Scope::Branch {
         return;
     }

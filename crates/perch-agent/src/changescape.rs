@@ -28,6 +28,10 @@ const SKILL_COMMANDS: &[&str] = &[
     "Bash(sort *)",
     "Bash(jq *)",
     "Bash(echo *)",
+    "Bash(sed *)",
+    // How Claude reads the skill's JSON in passing. It can do no more
+    // than `uv run` already can, inside the same sandbox.
+    "Bash(python3 *)",
 ];
 
 /// What `gh`, `git fetch` and `uv` reach.

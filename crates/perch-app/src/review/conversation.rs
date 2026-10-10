@@ -456,7 +456,7 @@ fn composer(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
     let open = floem::reactive::Memo::new(move |_| {
         state.composer.with(|c| {
             c.as_ref()
-                .filter(|c| c.thread_id.is_none() && c.editing.is_none())
+                .filter(|c| c.thread_id.is_none() && c.editing.is_none() && c.about.is_none())
                 .map(|c| (c.anchor.clone(), c.opening))
         })
     });
@@ -2795,6 +2795,57 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert!(!shown(&harness, "composer-suggest"));
+    }
+
+    /// A composer a tour stop opens carries what the stop shows and says
+    /// where it is drawn, leaves the tab as it is, and is not the
+    /// question box at the foot of Conversation as well.
+    #[test]
+    fn a_composer_about_a_tour_stop_is_not_conversations() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = ReviewState::new();
+        state.tab.set(crate::review::model::ItemTab::Changescape);
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
+        let backend = Rc::new(crate::backend::Backend::detached());
+        let view = super::composer(app, state, backend);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+
+        state.open_composer_about(
+            "tour:retry".into(),
+            None,
+            "Stop: Retry budget".into(),
+            choice.clone(),
+        );
+        harness.rebuild();
+        harness.paint();
+        let composer = state.composer.get().unwrap();
+        assert_eq!(composer.about.as_deref(), Some("tour:retry"));
+        assert_eq!(composer.context.as_deref(), Some("Stop: Retry budget"));
+        assert_eq!(composer.thread_id, None);
+        assert_eq!(
+            composer.destination,
+            crate::review::model::Destination::agent(choice.clone())
+        );
+        assert_eq!(
+            state.tab.get(),
+            crate::review::model::ItemTab::Changescape,
+            "the tour keeps the reader"
+        );
+        assert!(!shown(&harness, "composer editor box"));
+
+        // A question about the item as a whole is drawn there, and
+        // carries nothing more.
+        state.open_composer(None, None, String::new(), choice);
+        harness.rebuild();
+        harness.paint();
+        let composer = state.composer.get().unwrap();
+        assert_eq!((composer.about, composer.context), (None, None));
+        assert!(shown(&harness, "composer editor box"));
     }
 
     /// A comment from GitHub with a suggestion in it is drawn as the

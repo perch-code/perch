@@ -3,9 +3,9 @@
 //! finds which `hot` node is under the pointer from the nodes' bounding
 //! boxes, rings it, and opens its element on a click.
 //!
-//! The picture fits the block's width until the reader zooms it, and
-//! then a picture wider than the block scrolls. Expand shows it over
-//! the section, fitted to the width and the height there. Changescape
+//! The picture fits the column's width until the reader zooms it, and
+//! then a picture wider than the column scrolls. Expand shows it over
+//! the tour, fitted to the width and the height there. Changescape
 //! colours it for a light page, so it sits on a light card in a dark
 //! theme too.
 
@@ -16,13 +16,13 @@ use floem::context::{LayoutChanged, PaintCx};
 use floem::kurbo::{Point, Rect, Size, Stroke};
 use floem::peniko::{Brush, Color};
 use floem::prelude::*;
-use floem::reactive::{Memo, RwSignal, SignalGet, SignalTrack, SignalUpdate, SignalWith};
+use floem::reactive::{Memo, RwSignal, SignalGet, SignalTrack, SignalUpdate};
 use floem::ui_events::pointer::PointerButtonEvent;
 use floem::views::{Container, Decorators, Label, Stack};
 use floem::{AnyView, RendererSvg, View, ViewId};
 use perch_changescape::page::Svg;
 
-use crate::review::changescape::blocks::Ctx;
+use crate::review::changescape::tour::Ctx;
 use crate::review::model::ReviewState;
 use crate::review::picture::{assumed_scale, note_scale, Drawing, MAX_RASTER};
 use crate::theme;
@@ -30,14 +30,14 @@ use crate::ui::widgets::clickable;
 
 /// The card under every diagram, whatever the theme.
 const CARD: Color = Color::WHITE;
-/// How much of a node outside the facet option the card covers.
-const DIM_COVER: f32 = 0.7;
 /// How much each zoom step scales by.
 const ZOOM_STEP: f64 = 1.25;
 const ZOOM_MIN: f64 = 0.25;
 const ZOOM_MAX: f64 = 4.0;
 /// The most a picture is scaled up to fit its block when it opens.
 const FIT_MAX: f64 = 1.5;
+/// The most times wider than the column a picture is shrunk to fit it.
+const SHRINK_MAX: f64 = 1.6;
 /// The most a picture of `natural` size zooms to at `scale`, so that its
 /// raster stays within `MAX_RASTER`.
 fn zoom_cap(natural: Size, scale: f64) -> f64 {
@@ -66,10 +66,11 @@ const MAX_HEIGHT: f64 = 560.0;
 /// Where a diagram is drawn.
 #[derive(Debug, Clone)]
 pub enum Frame {
-    /// In its section, as block `at` (view id, index): the column's
-    /// width, and at most `MAX_HEIGHT` tall.
-    Block((String, usize)),
-    /// Over the section, all of it.
+    /// In the tour's column, as the picture `key` names (see
+    /// `tour::picture`): the column's width, and at most `MAX_HEIGHT`
+    /// tall.
+    Block(String),
+    /// Over the tour, all of it.
     Expanded,
 }
 
@@ -77,6 +78,9 @@ pub enum Frame {
 fn fit(frame: &Frame, natural: Size, room: Size) -> f64 {
     let across = room.width / natural.width;
     match frame {
+        // A picture much wider than the column would shrink past reading:
+        // it keeps its size and scrolls, and Expand gives it the room.
+        Frame::Block(_) if across < 1.0 / SHRINK_MAX => 1.0,
         Frame::Block(_) => across.min(FIT_MAX),
         Frame::Expanded if natural.height > 0.0 => across.min(room.height / natural.height),
         Frame::Expanded => across,
@@ -102,18 +106,6 @@ pub fn svg_block(cx: Ctx, svg: Svg, frame: Frame) -> AnyView {
     };
     let hot = Arc::new(hot_nodes(&drawing, &svg));
     let natural = drawing.size();
-    // The hot nodes outside the facet option the tab applies, by index.
-    let outside = {
-        let (hot, state, page) = (hot.clone(), cx.state, cx.page.clone());
-        Memo::new(move |_| {
-            super::with_facet(state, &page, |option| match option {
-                Some(option) => (0..hot.len())
-                    .filter(|&i| !option.els.contains(&hot[i].el))
-                    .collect(),
-                None => Vec::new(),
-            })
-        })
-    };
     // The reader's zoom; `None` fits the room, whatever its size.
     let zoom: RwSignal<Option<f64>> = RwSignal::new(None);
     // The room inside the card, from its last layout.
@@ -143,7 +135,6 @@ pub fn svg_block(cx: Ctx, svg: Svg, frame: Frame) -> AnyView {
     floem::reactive::Effect::new(move |_| {
         hovered.track();
         shown.track();
-        outside.track();
         id.request_paint();
     });
     let picture = Diagram {
@@ -151,13 +142,11 @@ pub fn svg_block(cx: Ctx, svg: Svg, frame: Frame) -> AnyView {
         drawing,
         hot: hot.clone(),
         hovered,
-        outside,
         shown,
         painted: Size::ZERO,
         scale,
     };
     let (state, expanded) = (cx.state, matches!(frame, Frame::Expanded));
-    let marks = badges(&cx, &hot, shown);
     let (move_hot, down_hot, click_hot) = (hot.clone(), hot.clone(), hot);
     let pressed: RwSignal<Option<usize>> = RwSignal::new(None);
     let picture = picture
@@ -190,35 +179,33 @@ pub fn svg_block(cx: Ctx, svg: Svg, frame: Frame) -> AnyView {
                     s.cursor(floem::style::CursorStyle::Pointer)
                 })
         });
-    let scroller = Container::new(
-        Stack::vertical((picture, marks)).style(|s| s.position(floem::style::Position::Relative)),
-    )
-    .style(|s| s.padding(12.0).background(CARD))
-    .scroll()
-    .on_event_stop(
-        LayoutChanged::listener(),
-        move |_,
-              LayoutChanged {
-                  new_content_box, ..
-              }| {
-            let size = new_content_box.size();
-            let inside = Size::new(size.width - 24.0, size.height - 24.0);
-            if inside.width > 0.0 && room.get_untracked() != Some(inside) {
-                room.set(Some(inside));
-            }
-        },
-    )
-    .style(move |s| {
-        s.width_full()
-            .apply_if(!expanded, |s| s.max_height(MAX_HEIGHT))
-            .apply_if(expanded, |s| {
-                s.flex_grow(1.0_f32).flex_basis(0.0).min_height(0.0)
-            })
-            .background(CARD)
-            .border(1.0)
-            .border_color(theme::border_muted())
-            .border_radius(theme::RADIUS)
-    });
+    let scroller = Container::new(picture)
+        .style(|s| s.padding(12.0).background(CARD))
+        .scroll()
+        .on_event_stop(
+            LayoutChanged::listener(),
+            move |_,
+                  LayoutChanged {
+                      new_content_box, ..
+                  }| {
+                let size = new_content_box.size();
+                let inside = Size::new(size.width - 24.0, size.height - 24.0);
+                if inside.width > 0.0 && room.get_untracked() != Some(inside) {
+                    room.set(Some(inside));
+                }
+            },
+        )
+        .style(move |s| {
+            s.width_full()
+                .apply_if(!expanded, |s| s.max_height(MAX_HEIGHT))
+                .apply_if(expanded, |s| {
+                    s.flex_grow(1.0_f32).flex_basis(0.0).min_height(0.0)
+                })
+                .background(CARD)
+                .border(1.0)
+                .border_color(theme::border_muted())
+                .border_radius(theme::RADIUS)
+        });
     Stack::vertical((zoom_bar(state, zoom, shown, cap, frame), scroller))
         .style(move |s| {
             s.flex_col()
@@ -227,30 +214,6 @@ pub fn svg_block(cx: Ctx, svg: Svg, frame: Frame) -> AnyView {
                 .apply_if(expanded, |s| s.height_full())
         })
         .into_any()
-}
-
-/// Each hot node's badge of open threads, at the node's top right corner,
-/// moved with the zoom.
-fn badges(cx: &Ctx, hot: &[Hot], shown: Memo<f64>) -> impl IntoView {
-    let marks: Vec<AnyView> = hot
-        .iter()
-        .map(|h| {
-            let rect = h.rect;
-            Container::new(cx.badge(&h.el))
-                .style(move |s| {
-                    let z = shown.get();
-                    s.position(floem::style::Position::Absolute)
-                        .inset_left(rect.x1 * z - 14.0)
-                        .inset_top(rect.y0 * z - 9.0)
-                })
-                .into_any()
-        })
-        .collect();
-    Stack::vertical_from_iter(marks).style(|s| {
-        s.position(floem::style::Position::Absolute)
-            .inset_left(0.0)
-            .inset_top(0.0)
-    })
 }
 
 /// Smaller, the room's fit, larger, and Expand, or Close once expanded.
@@ -359,8 +322,6 @@ struct Diagram {
     drawing: Drawing,
     hot: Arc<Vec<Hot>>,
     hovered: RwSignal<Option<usize>>,
-    /// The hot nodes a facet dims, by index.
-    outside: Memo<Vec<usize>>,
     /// The zoom it draws at.
     shown: Memo<f64>,
     painted: Size,
@@ -397,19 +358,6 @@ impl View for Diagram {
             None::<&Brush>,
         );
         let z = self.shown.get_untracked();
-        // A node outside the facet option under a veil of the card, over
-        // the box the pointer finds it by.
-        self.outside.with_untracked(|outside| {
-            for hot in outside.iter().filter_map(|&i| self.hot.get(i)) {
-                let cover = Rect::new(
-                    hot.rect.x0 * z,
-                    hot.rect.y0 * z,
-                    hot.rect.x1 * z,
-                    hot.rect.y1 * z,
-                );
-                cx.fill(&cover, CARD.multiply_alpha(DIM_COVER), 0.0);
-            }
-        });
         if let Some(hot) = self.hovered.get_untracked().and_then(|i| self.hot.get(i)) {
             let ring = Rect::new(
                 hot.rect.x0 * z,

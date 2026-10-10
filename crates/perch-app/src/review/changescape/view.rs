@@ -1,0 +1,236 @@
+//! A view a flag or a Watch line points at, `view:<id>`, as a popover over
+//! the tour: the view's title, then a row for each element its tables
+//! name, with the element's title and description. Perch draws no table,
+//! fold or facet of the view: the rows are the elements, and a click on
+//! one opens it.
+//!
+//! What an element opens depends on its kind. A pull request or an issue
+//! opens in Perch, a commit on Code as its own changes, and code at its
+//! lines. Anything else with a page on GitHub opens there.
+
+use floem::prelude::*;
+use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
+use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
+use floem::AnyView;
+use perch_changescape::v3::Element;
+use perch_github::ItemKind;
+
+use crate::review::changescape::navigate;
+use crate::review::changescape::prose::{self, hover_row, meta, MUTED, STRONG, TITLE};
+use crate::review::changescape::tour::Ctx;
+use crate::theme;
+use crate::ui::widgets::{clickable, open_in_browser};
+
+/// Where a click on an element goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Opens {
+    /// The pull request of this number, in Perch.
+    Pull(u64),
+    /// The issue of this number, in Perch.
+    Issue(u64),
+    /// The commit of this SHA, whole or cut short, on Code.
+    Commit(String),
+    /// The element's lines, in Code.
+    Code,
+    /// Its page on GitHub.
+    Url(String),
+    Nothing,
+}
+
+/// Where a click on the element `id` goes. The kind is the id's prefix:
+/// `pr:`, `issue:` and `commit:` name what they are; an element with
+/// lines is code; anything else opens its page, if it has one.
+pub fn opens(id: &str, element: &Element) -> Opens {
+    match id.split_once(':') {
+        Some(("pr", n)) => {
+            if let Ok(n) = n.parse() {
+                return Opens::Pull(n);
+            }
+        }
+        Some(("issue", n)) => {
+            if let Ok(n) = n.parse() {
+                return Opens::Issue(n);
+            }
+        }
+        Some(("commit", sha)) if !sha.is_empty() => return Opens::Commit(sha.to_string()),
+        _ => {}
+    }
+    let lines = element
+        .refs
+        .iter()
+        .any(|r| r.head.is_some() || r.base.is_some() || r.file == Some(true));
+    if lines {
+        return Opens::Code;
+    }
+    match element.url.as_deref().filter(|url| !url.is_empty()) {
+        Some(url) => Opens::Url(url.to_string()),
+        None => Opens::Nothing,
+    }
+}
+
+/// Open what an element id names, and put away the popover it was in.
+pub fn open_element(cx: &Ctx, id: &str) {
+    let Some(element) = cx.page.elements.get(id) else {
+        return;
+    };
+    cx.state.changescape_view.set(None);
+    let reference = |number: u64, kind: ItemKind, message: &str| {
+        let navigation_id = cx
+            .backend
+            .open_reference(&cx.page.meta.repo, number, Some(kind));
+        cx.app.begin_open(message, navigation_id);
+    };
+    match opens(id, element) {
+        Opens::Pull(n) => reference(n, ItemKind::PullRequest, "Reading the pull request"),
+        Opens::Issue(n) => reference(n, ItemKind::Issue, "Reading the issue"),
+        // A commit the checkout lacks opens on GitHub.
+        Opens::Commit(sha) => {
+            if !cx.state.show_commit(&sha) {
+                if let Some(url) = element.url.as_deref().filter(|url| !url.is_empty()) {
+                    open_in_browser(url);
+                }
+            }
+        }
+        Opens::Code => navigate::open_element(cx.state, &cx.backend, &cx.page, id),
+        Opens::Url(url) => open_in_browser(&url),
+        Opens::Nothing => {}
+    }
+}
+
+/// The popover of the view the tour's state names, over the tour. A click
+/// outside it, Close, or Escape puts it away.
+pub fn popover(cx: Ctx) -> impl IntoView {
+    let state = cx.state;
+    dyn_container(
+        move || state.changescape_view.get(),
+        move |id| match id {
+            Some(id) => card(&cx, &id),
+            None => Empty::new().into_any(),
+        },
+    )
+    .debug_name("Changescape view backdrop")
+    .on_event_stop(el::Click, move |_, _| state.changescape_view.set(None))
+    .style(move |s| {
+        s.position(floem::style::Position::Absolute)
+            .inset(0.0)
+            .z_index(2)
+            .justify_center()
+            .items_start()
+            .padding_top(48.0)
+            .apply_if(state.changescape_view.with(Option::is_none), |s| s.hide())
+    })
+}
+
+fn card(cx: &Ctx, id: &str) -> AnyView {
+    let Some(view) = cx.page.view(id) else {
+        return Empty::new().into_any();
+    };
+    let state = cx.state;
+    let rows: Vec<AnyView> = cx
+        .page
+        .view_rows(id)
+        .into_iter()
+        .filter_map(|el| Some(row(cx, el, cx.page.elements.get(el)?)))
+        .collect();
+    let empty = rows.is_empty();
+    let header = Stack::horizontal((
+        Stack::vertical((prose::paragraph(&view.t, TITLE), {
+            let none = view.metric.is_empty();
+            meta(&view.metric).style(move |s| s.selectable(true).apply_if(none, |s| s.hide()))
+        }))
+        .style(|s| {
+            s.flex_col()
+                .flex_grow(1.0_f32)
+                .flex_basis(0.0)
+                .min_width(0.0)
+        }),
+        Container::new(meta("Close"))
+            .debug_name("Changescape view close")
+            .on_event_stop(el::Click, move |_, _| state.changescape_view.set(None))
+            .style(|s| clickable(s.margin_left(12.0).flex_shrink(0.0_f32))),
+    ))
+    .style(|s| s.items_start().width_full().padding_bottom(8.0));
+    let body = if empty {
+        Label::new("This view names nothing Perch can open.")
+            .style(|s| s.font_size(theme::TEXT_META).color(theme::fg_subtle()))
+            .into_any()
+    } else {
+        Stack::vertical_from_iter(rows)
+            .style(|s| s.flex_col().width_full())
+            .scroll()
+            .style(|s| s.max_height(420.0).width_full())
+            .into_any()
+    };
+    Stack::vertical((header, body))
+        .debug_name(format!("Changescape view {id}"))
+        // A click inside is not a click outside.
+        .on_event_stop(el::Click, |_, _| {})
+        .style(|s| {
+            s.flex_col()
+                .width(560.0)
+                .max_width_pct(90.0)
+                .padding(theme::CARD_PADDING)
+                .background(theme::menu_bg())
+                .border(1.0)
+                .border_color(theme::menu_ring())
+                .border_radius(theme::CARD_RADIUS)
+                .box_shadow_blur(16.0)
+                .box_shadow_color(theme::menu_shadow())
+        })
+        .into_any()
+}
+
+/// One element of the view: its title, and its description's first line.
+fn row(cx: &Ctx, id: &str, element: &Element) -> AnyView {
+    let description = element
+        .d
+        .as_deref()
+        .and_then(|d| d.lines().next())
+        .filter(|d| !d.is_empty())
+        .map_or_else(
+            || Empty::new().into_any(),
+            |d| prose::line(d, MUTED).into_any(),
+        );
+    let (cx, el) = (cx.clone(), id.to_string());
+    Container::new(
+        Stack::vertical((prose::line(&element.t, STRONG), description))
+            .style(|s| s.flex_col().width_full().min_width(0.0)),
+    )
+    .debug_name(format!("Changescape view row {id}"))
+    .on_event_stop(el::Click, move |_, _| cx.open(&el))
+    .style(|s| hover_row(s.padding_vert(6.0).padding_horiz(8.0)))
+    .into_any()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn element(refs: &str, url: Option<&str>) -> Element {
+        serde_json::from_value(serde_json::json!({
+            "t": "x", "k": "k", "st": "context", "url": url,
+            "refs": serde_json::from_str::<serde_json::Value>(refs).unwrap() }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_element_opens_by_its_kind() {
+        let bare = element("[]", Some("https://github.com/a/b/pull/7"));
+        assert_eq!(opens("pr:7", &bare), Opens::Pull(7));
+        assert_eq!(opens("issue:9", &bare), Opens::Issue(9));
+        assert_eq!(
+            opens("commit:92396a9", &bare),
+            Opens::Commit("92396a9".into())
+        );
+        let code = element(r#"[{ "f": "a.rs", "base": null, "head": [1, 2] }]"#, None);
+        assert_eq!(opens("fn:a::b", &code), Opens::Code);
+        let person = element("[]", Some("https://github.com/someone"));
+        assert_eq!(
+            opens("person:someone", &person),
+            Opens::Url("https://github.com/someone".into())
+        );
+        assert_eq!(opens("pkg:x", &element("[]", None)), Opens::Nothing);
+        // A number that is not one is not a pull request.
+        assert_eq!(opens("pr:x", &element("[]", None)), Opens::Nothing);
+    }
+}

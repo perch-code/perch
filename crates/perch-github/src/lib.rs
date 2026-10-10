@@ -31,8 +31,8 @@ pub use activity::{ActivityEvent, ActivityOutcome, ItemActivity};
 pub use assignees::{Assigned, MAX_ASSIGNEES};
 pub use auth::{resolve_token, Token, TokenSource};
 pub use cache::{
-    Cache, CacheError, CacheOpen, DraftRow, Reconciled, RunContext, RunEventAppend, StoredReveals,
-    WorkGrantRecord, NOTIFICATIONS_LAST_MODIFIED_KEY,
+    Cache, CacheError, CacheOpen, DraftRow, Reconciled, RunContext, RunEventAppend, StoredMark,
+    StoredReveals, TourMark, WorkGrantRecord, NOTIFICATIONS_LAST_MODIFIED_KEY,
 };
 pub use client::{CheckProbe, CheckTags, EditedComment, Error, GitHub, ListResult, PullLookup};
 pub use comments::{

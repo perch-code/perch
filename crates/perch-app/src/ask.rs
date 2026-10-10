@@ -784,10 +784,12 @@ pub struct PromptInput<'a> {
     /// the lines the pull request removed beside them can be quoted.
     pub file: Option<&'a DisplayBuffer>,
     pub outdated: bool,
-    /// Immutable finding identity/original code and the explicitly known
-    /// projection for a review-finding follow-up. This is repeated even
-    /// when a backend session resumes because mappings can change.
-    pub review_context: Option<&'a str>,
+    /// Text Perch assembled to go with the question, and what it is: a
+    /// review finding's immutable identity, original code and known
+    /// projection, repeated even when a backend session resumes because
+    /// mappings can change; or what the reader was looking at when they
+    /// asked, such as a Changescape tour stop, for a new thread.
+    pub review_context: Option<PromptContext<'a>>,
     pub question: &'a str,
     /// Earlier messages, only for a thread whose runs all failed and so
     /// has no session to resume. Otherwise empty: `--resume` is the memory.
@@ -798,6 +800,33 @@ pub struct PromptInput<'a> {
     pub discussion: Option<&'a str>,
     /// What changed on GitHub since the run a resumed follow-up continues.
     pub since: Option<&'a str>,
+}
+
+/// Text Perch assembled to go with a question, labelled by what it is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PromptContext<'a> {
+    /// A review finding a follow-up is about.
+    Finding(&'a str),
+    /// What the reader is looking at, such as a Changescape tour stop's
+    /// title, text and code, sent with a new thread's first question.
+    Viewing(&'a str),
+}
+
+impl<'a> PromptContext<'a> {
+    /// The text itself.
+    pub fn text(&self) -> &'a str {
+        match self {
+            PromptContext::Finding(text) | PromptContext::Viewing(text) => text,
+        }
+    }
+
+    /// The name of the untrusted block the text is set in.
+    pub fn label(&self) -> &'static str {
+        match self {
+            PromptContext::Finding(_) => "review finding",
+            PromptContext::Viewing(_) => "what the reader is looking at",
+        }
+    }
 }
 
 /// The two strings a run takes.
@@ -821,9 +850,21 @@ pub fn first_prompt(input: &PromptInput<'_>) -> Prompt {
 pub fn follow_up_prompt(input: &PromptInput<'_>) -> Prompt {
     if input.history.is_empty() {
         let mut user = String::new();
-        if let Some(context) = input.review_context {
-            user.push_str(context.trim());
-            user.push_str("\n\n");
+        match input.review_context {
+            Some(PromptContext::Finding(context)) => {
+                user.push_str(context.trim());
+                user.push_str("\n\n");
+            }
+            // Partly a model's words, so it goes in a block like the
+            // first prompt's.
+            Some(context @ PromptContext::Viewing(_)) => {
+                user.push_str(&untrusted_block(
+                    context.label(),
+                    strip_format_chars(context.text()).trim(),
+                ));
+                user.push('\n');
+            }
+            None => {}
         }
         if let Some(anchor) = input.anchor {
             user.push_str(&format!("(About {})\n\n", anchor.label()));
@@ -911,11 +952,11 @@ fn user_message(input: &PromptInput<'_>, with_context: bool) -> String {
         }
 
         if let Some(context) = input.review_context {
-            // Assembled by Perch around text the review agent wrote; its
-            // code is quoted verbatim, so only the invisible characters go.
+            // Assembled by Perch around text an agent wrote; its code is
+            // quoted verbatim, so only the invisible characters go.
             out.push_str(&untrusted_block(
-                "review finding",
-                strip_format_chars(context).trim(),
+                context.label(),
+                strip_format_chars(context.text()).trim(),
             ));
             out.push('\n');
         }
@@ -2471,7 +2512,7 @@ mod tests {
         let a = anchor(2, 3);
         let context = "Review finding context:\nOriginal code: retained";
         let p = follow_up_prompt(&PromptInput {
-            review_context: Some(context),
+            review_context: Some(PromptContext::Finding(context)),
             ..input(Some(&a), None, "still unsafe?")
         });
         assert_eq!(p.system, None);
@@ -2519,6 +2560,24 @@ mod tests {
     }
 
     #[test]
+    fn what_the_reader_is_looking_at_goes_in_its_own_block_not_a_findings() {
+        let context = "Tour stop: Retry\u{200B} budget\nThe loop now stops after three tries.";
+        let p = first_prompt(&PromptInput {
+            review_context: Some(PromptContext::Viewing(context)),
+            ..input(None, None, "why three?")
+        });
+        assert!(
+            p.user.contains(
+                "[BEGIN untrusted text: what the reader is looking at]\nTour stop: Retry budget\nThe loop now stops after three tries.\n[END untrusted text]\n"
+            ),
+            "{}",
+            p.user
+        );
+        assert!(!p.user.contains("review finding"), "{}", p.user);
+        assert!(p.user.ends_with("Question: why three?"), "{}", p.user);
+    }
+
+    #[test]
     fn a_review_finding_is_an_untrusted_block_and_a_github_reply_too() {
         let context =
             "Review finding context:\nTitle: Bounds\u{200B} panic\n```text\nlet x = v[i];\n```";
@@ -2530,7 +2589,7 @@ mod tests {
             ),
         ];
         let p = follow_up_prompt(&PromptInput {
-            review_context: Some(context),
+            review_context: Some(PromptContext::Finding(context)),
             history: &history,
             discussion: None,
             since: None,

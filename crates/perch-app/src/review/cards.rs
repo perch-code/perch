@@ -1704,29 +1704,31 @@ pub fn anchored_lines(file: &LoadedFile, anchor: &Anchor, max: usize) -> (Vec<Co
         return (Vec::new(), 0);
     }
     let text: Vec<&str> = file.buffer.text.lines().collect();
-    let mut lines: Vec<CodeLine> = (from..=to)
-        .map(|d| {
-            let (number, tint) = match rows[d] {
-                Row::Head { head_line, status } => (
-                    Some(head_line + 1),
-                    match status {
-                        LineStatus::Unchanged => Tint::Plain,
-                        LineStatus::Added => Tint::Added,
-                        LineStatus::Modified => Tint::Modified,
-                    },
-                ),
-                Row::Deleted { base_line } => (Some(base_line + 1), Tint::Removed),
-            };
-            CodeLine {
-                number,
-                tint,
-                text: text.get(d).copied().unwrap_or_default().to_string(),
-            }
-        })
-        .collect();
+    let mut lines: Vec<CodeLine> = (from..=to).map(|d| display_line(rows, &text, d)).collect();
     let more = lines.len().saturating_sub(max);
     lines.truncate(max);
     (lines, more)
+}
+
+/// Display row `d` of a file as a code line: its number on its own side,
+/// its tint, and its text.
+pub fn display_line(rows: &[Row], text: &[&str], d: usize) -> CodeLine {
+    let (number, tint) = match rows[d] {
+        Row::Head { head_line, status } => (
+            Some(head_line + 1),
+            match status {
+                LineStatus::Unchanged => Tint::Plain,
+                LineStatus::Added => Tint::Added,
+                LineStatus::Modified => Tint::Modified,
+            },
+        ),
+        Row::Deleted { base_line } => (Some(base_line + 1), Tint::Removed),
+    };
+    CodeLine {
+        number,
+        tint,
+        text: text.get(d).copied().unwrap_or_default().to_string(),
+    }
 }
 
 fn anchored_base_lines(file: &LoadedFile, anchor: &Anchor, max: usize) -> (Vec<CodeLine>, usize) {

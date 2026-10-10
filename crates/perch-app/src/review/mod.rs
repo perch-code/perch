@@ -281,7 +281,7 @@ fn item_view(
                     .into_any()
                 } else if code {
                     Stack::vertical((
-                        changescape::strip::code_strip(state, backend.clone()),
+                        changescape::strip::code_strip(state),
                         editor::editor_pane(app, state, backend.clone(), open_file.clone())
                             .style(|s| s.flex_grow(1.0_f32).min_height(0.0)),
                     ))

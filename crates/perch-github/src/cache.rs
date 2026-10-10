@@ -60,6 +60,74 @@ pub enum CacheOpen {
 /// reader opened out of a fold, inclusive, by `(path, blob)`.
 pub type StoredReveals = HashMap<(String, String), Vec<(u32, u32)>>;
 
+/// The reader's mark on one stop of a Changescape tour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TourMark {
+    /// The reader has read the stop.
+    Done,
+    /// The reader wants to come back to the stop.
+    Later,
+}
+
+impl TourMark {
+    /// The word the store keeps for the mark.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TourMark::Done => "done",
+            TourMark::Later => "later",
+        }
+    }
+
+    /// The mark a stored word names, or `None` for a word this build does
+    /// not know.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "done" => Some(TourMark::Done),
+            "later" => Some(TourMark::Later),
+            _ => None,
+        }
+    }
+}
+
+/// A mark as the store holds it: the mark, and the stop's hash when it was
+/// made (`h` on the stop), to tell a stop whose lines changed since.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredMark {
+    pub mark: TourMark,
+    pub h: Option<String>,
+}
+
+/// Create the table of tour marks if it is not there yet, and give a table
+/// from before stops carried hashes its `h` column.
+///
+/// This runs every time the cache opens, outside the numbered migrations,
+/// so the schema version does not change. The released Perch uses the same
+/// database and refuses a newer schema; at the same version it ignores a
+/// table it does not know. A later numbered migration can adopt the table
+/// as it is.
+fn ensure_tour_progress(conn: &Connection) -> Result<(), CacheError> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS tour_progress (
+            repo TEXT NOT NULL,
+            number INTEGER NOT NULL,
+            stop TEXT NOT NULL,
+            mark TEXT NOT NULL,
+            marked_at TEXT NOT NULL,
+            h TEXT,
+            PRIMARY KEY (repo, number, stop)
+        );",
+    )?;
+    let has_h: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('tour_progress') WHERE name='h')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_h {
+        conn.execute("ALTER TABLE tour_progress ADD COLUMN h TEXT", [])?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {
     #[error("sqlite: {0}")]
@@ -2675,6 +2743,7 @@ impl Cache {
     ) -> Result<(Self, CacheOpen), CacheError> {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let outcome = initialize_schema(&mut conn)?;
+        ensure_tour_progress(&conn)?;
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.pragma_update(None, "synchronous", "NORMAL").ok();
         Ok((Self { conn, avatar_dir }, outcome))
@@ -4316,6 +4385,62 @@ impl Cache {
         let mut out = HashSet::new();
         for row in rows {
             out.insert(row?);
+        }
+        Ok(out)
+    }
+
+    /// Mark a stop of a pull request's Changescape tour, or clear its mark
+    /// with `None`. Keyed by repository, number and stop id. The mark
+    /// keeps the stop's hash, so that a push that changes the stop's lines
+    /// can show it as changed since it was marked.
+    pub fn set_tour_mark(
+        &self,
+        repo: &str,
+        number: u64,
+        stop: &str,
+        mark: Option<StoredMark>,
+    ) -> Result<(), CacheError> {
+        let number = number as i64;
+        match mark {
+            Some(StoredMark { mark, h }) => {
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO tour_progress (repo, number, stop, mark, marked_at, h) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![repo, number, stop, mark.as_str(), Timestamp::now().to_string(), h],
+                )?;
+            }
+            None => {
+                self.conn.execute(
+                    "DELETE FROM tour_progress WHERE repo = ?1 AND number = ?2 AND stop = ?3",
+                    params![repo, number, stop],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Every mark on a pull request's tour stops, by stop id. A stored mark
+    /// this build does not know is skipped.
+    pub fn load_tour_marks(
+        &self,
+        repo: &str,
+        number: u64,
+    ) -> Result<HashMap<String, StoredMark>, CacheError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT stop, mark, h FROM tour_progress WHERE repo = ?1 AND number = ?2")?;
+        let rows = stmt.query_map(params![repo, number as i64], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })?;
+        let mut out = HashMap::new();
+        for row in rows {
+            let (stop, mark, h) = row?;
+            if let Some(mark) = TourMark::parse(&mark) {
+                out.insert(stop, StoredMark { mark, h });
+            }
         }
         Ok(out)
     }
@@ -8546,6 +8671,106 @@ mod tests {
             c.load_viewed("item-pr-8").unwrap().is_empty(),
             "keyed by item"
         );
+    }
+
+    #[test]
+    fn a_tour_mark_round_trips_with_its_hash_and_none_clears_it() {
+        let c = Cache::open_in_memory().unwrap();
+        assert!(c.load_tour_marks("o/r", 7).unwrap().is_empty());
+        let mark = |mark, h: Option<&str>| StoredMark {
+            mark,
+            h: h.map(str::to_string),
+        };
+
+        c.set_tour_mark("o/r", 7, "stop-1", Some(mark(TourMark::Done, Some("a1"))))
+            .unwrap();
+        c.set_tour_mark("o/r", 7, "stop-2", Some(mark(TourMark::Later, None)))
+            .unwrap();
+        let marks = c.load_tour_marks("o/r", 7).unwrap();
+        assert_eq!(marks.get("stop-1"), Some(&mark(TourMark::Done, Some("a1"))));
+        assert_eq!(marks.get("stop-2"), Some(&mark(TourMark::Later, None)));
+
+        // A new mark replaces the old one, its hash too.
+        c.set_tour_mark("o/r", 7, "stop-2", Some(mark(TourMark::Done, Some("b2"))))
+            .unwrap();
+        assert_eq!(
+            c.load_tour_marks("o/r", 7).unwrap().get("stop-2"),
+            Some(&mark(TourMark::Done, Some("b2")))
+        );
+
+        c.set_tour_mark("o/r", 7, "stop-1", None).unwrap();
+        let marks = c.load_tour_marks("o/r", 7).unwrap();
+        assert_eq!(marks.len(), 1);
+        assert!(!marks.contains_key("stop-1"));
+    }
+
+    #[test]
+    fn tour_marks_are_keyed_by_pull_request_and_unknown_marks_are_skipped() {
+        let c = Cache::open_in_memory().unwrap();
+        let done = StoredMark {
+            mark: TourMark::Done,
+            h: None,
+        };
+        c.set_tour_mark("o/r", 7, "stop-1", Some(done.clone()))
+            .unwrap();
+        assert!(c.load_tour_marks("o/r", 8).unwrap().is_empty());
+        assert!(c.load_tour_marks("o/other", 7).unwrap().is_empty());
+
+        c.conn
+            .execute(
+                "INSERT INTO tour_progress (repo, number, stop, mark, marked_at) VALUES ('o/r', 7, 'stop-9', 'someday', 'now')",
+                [],
+            )
+            .unwrap();
+        let marks = c.load_tour_marks("o/r", 7).unwrap();
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks.get("stop-1"), Some(&done));
+    }
+
+    #[test]
+    fn a_tour_progress_table_from_before_hashes_gains_the_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tour_progress (
+                repo TEXT NOT NULL, number INTEGER NOT NULL, stop TEXT NOT NULL,
+                mark TEXT NOT NULL, marked_at TEXT NOT NULL,
+                PRIMARY KEY (repo, number, stop));
+             INSERT INTO tour_progress VALUES ('o/r', 7, 's', 'done', 't');",
+        )
+        .unwrap();
+        ensure_tour_progress(&conn).unwrap();
+        ensure_tour_progress(&conn).unwrap();
+        let h: Option<String> = conn
+            .query_row("SELECT h FROM tour_progress WHERE stop = 's'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(h, None);
+    }
+
+    #[test]
+    fn reopening_a_database_keeps_tour_marks_and_the_schema_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        {
+            let c = Cache::open(&path, None).unwrap();
+            let later = StoredMark {
+                mark: TourMark::Later,
+                h: Some("a1".into()),
+            };
+            c.set_tour_mark("o/r", 7, "stop-1", Some(later)).unwrap();
+        }
+        for _ in 0..2 {
+            let (c, outcome) = Cache::open_with_outcome(&path, None).unwrap();
+            assert_eq!(outcome, CacheOpen::Current);
+            assert_eq!(
+                c.load_tour_marks("o/r", 7)
+                    .unwrap()
+                    .get("stop-1")
+                    .map(|m| m.mark),
+                Some(TourMark::Later)
+            );
+        }
     }
 
     #[test]

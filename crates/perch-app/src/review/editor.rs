@@ -1161,7 +1161,11 @@ fn card_layer(
         let composer = state.composer.with(|c| {
             c.as_ref()
                 .filter(|c| {
-                    c.thread_id.is_none() && c.anchor.as_ref().is_some_and(|a| a.path == path)
+                    // One a view of its own draws, a tour stop's, is never
+                    // a card in the code as well.
+                    c.thread_id.is_none()
+                        && c.about.is_none()
+                        && c.anchor.as_ref().is_some_and(|a| a.path == path)
                 })
                 .cloned()
         });

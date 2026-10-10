@@ -5,8 +5,8 @@
 //! Builds run outside the durable run queue, so one cut short by quitting
 //! leaves `running` until the next build.
 
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use perch_changescape::{LoadedPage, Lookup, State};
@@ -21,13 +21,19 @@ pub struct Found {
     pub page: Option<Arc<LoadedPage>>,
     /// Why the page that should be there could not be read.
     pub error: Option<String>,
-    /// Whether this Perch can build one: the skill is installed and
-    /// Claude Code is found.
+    /// Whether this Perch can build one: the skill is installed, it
+    /// writes a tour, and Claude Code is found.
     pub can_build: bool,
+    /// The installed skill is from before the tour: a build with it would
+    /// write a page with no tour over the one here.
+    pub skill_too_old: bool,
     /// Whether a build this Perch started for the pull request is still
     /// running, whatever its status says: the skill marks the facts done
     /// before the agent writes the captions.
     pub building: bool,
+    /// The reader's marks on the pull request's tour stops, by stop id,
+    /// each with the stop's hash when it was made.
+    pub marks: HashMap<String, perch_github::StoredMark>,
 }
 
 /// Look the pull request up and send what was found, `None` when
@@ -45,10 +51,25 @@ pub(super) async fn lookup(
         let head = head_sha.clone();
         let binary = config.agent.binary.clone();
         let building = building().lock().unwrap().contains(&(repo.clone(), number));
+        let marks = ctx
+            .with_cache(|c| c.load_tour_marks(&repo, number))
+            .and_then(|marks| {
+                marks
+                    .map_err(|e| tracing::warn!(error = %e, "could not read tour marks"))
+                    .ok()
+            })
+            .unwrap_or_default();
         tokio::task::spawn_blocking(move || {
-            let mut found = find(&root, &repo, number, &head);
-            found.can_build = can_build(&binary, false);
+            let mut found = if building {
+                find_during_run(&root, &repo, number, &head)
+            } else {
+                find(&root, &repo, number, &head)
+            };
+            let ability = can_build(&binary, false);
+            found.can_build = ability.can;
+            found.skill_too_old = ability.skill_too_old;
             found.building = building;
+            found.marks = marks;
             found
         })
         .await
@@ -64,7 +85,18 @@ pub(super) async fn lookup(
 }
 
 pub(crate) fn find(root: &Path, repo: &str, number: u64, head_sha: &str) -> Found {
-    let mut lookup = perch_changescape::lookup(root, repo, number, head_sha);
+    found(perch_changescape::lookup(root, repo, number, head_sha))
+}
+
+/// `find`, while this Perch's own build of the head still runs: a failure
+/// the skill wrote mid-run is not the end yet (`lookup_during_run`).
+pub(crate) fn find_during_run(root: &Path, repo: &str, number: u64, head_sha: &str) -> Found {
+    found(perch_changescape::lookup_during_run(
+        root, repo, number, head_sha,
+    ))
+}
+
+fn found(mut lookup: Lookup) -> Found {
     let (page, error) = match lookup.drawable().map(perch_changescape::load) {
         Some(Ok(page)) => (Some(page), None),
         // The page's own version, where the status misstates it.
@@ -83,37 +115,47 @@ pub(crate) fn find(root: &Path, repo: &str, number: u64, head_sha: &str) -> Foun
         page,
         error,
         can_build: false,
+        skill_too_old: false,
         building: false,
+        marks: HashMap::new(),
     }
 }
 
-/// Whether the skill and Claude Code are both there. Looked for once a
-/// session, and again on each request to build, so installing the skill
-/// takes effect at the next one.
-fn can_build(binary: &str, again: bool) -> bool {
-    static KNOWN: OnceLock<Mutex<Option<bool>>> = OnceLock::new();
+/// Whether a build can run, and why not when the skill is the reason.
+#[derive(Debug, Clone, Copy, Default)]
+struct Ability {
+    can: bool,
+    skill_too_old: bool,
+}
+
+/// Whether the skill and Claude Code are both there, and the skill writes
+/// a tour. Looked for once a session, and again on each request to
+/// build, so installing or updating the skill takes effect at the next
+/// one.
+fn can_build(binary: &str, again: bool) -> Ability {
+    static KNOWN: OnceLock<Mutex<Option<Ability>>> = OnceLock::new();
     let known = KNOWN.get_or_init(Default::default);
     if !again {
-        if let Some(can) = *known.lock().unwrap() {
-            return can;
+        if let Some(ability) = *known.lock().unwrap() {
+            return ability;
         }
     }
-    let claude = claude_binary(binary);
+    let claude = perch_agent::find_binary(binary);
     let skill = perch_changescape::skill_available();
-    let can = claude.is_some() && skill.is_some();
-    tracing::info!(?claude, ?skill, can, "changescape build available");
-    *known.lock().unwrap() = Some(can);
-    can
-}
-
-/// Claude Code: the configured path, or `claude` found as Perch finds it
-/// for any run.
-fn claude_binary(binary: &str) -> Option<PathBuf> {
-    let given = Path::new(binary);
-    if given.is_absolute() {
-        return given.is_file().then(|| given.to_path_buf());
-    }
-    perch_agent::find_binary(binary)
+    let skill_too_old = skill
+        .as_deref()
+        .is_some_and(|dir| !perch_changescape::skill_writes_tour(dir));
+    let can = claude.is_some() && skill.is_some() && !skill_too_old;
+    tracing::info!(
+        ?claude,
+        ?skill,
+        skill_too_old,
+        can,
+        "changescape build available"
+    );
+    let ability = Ability { can, skill_too_old };
+    *known.lock().unwrap() = Some(ability);
+    ability
 }
 
 /// The pull requests with a build running, by repository and number:
@@ -142,6 +184,21 @@ pub(super) async fn build(ctx: &Ctx, item_id: String) {
     };
     let repo = item.repo_full_name.clone();
     let (number, head) = (pull.number, pull.head_sha.clone());
+    // A build that cannot run leaves the folder as it is: a page there
+    // stays drawn.
+    let checked = config.agent.binary.clone();
+    let ability = tokio::task::spawn_blocking(move || can_build(&checked, true))
+        .await
+        .unwrap_or_default();
+    if !ability.can {
+        ctx.notice(if ability.skill_too_old {
+            SKILL_TOO_OLD
+        } else {
+            "The Changescape skill or Claude Code is not installed."
+        });
+        lookup(ctx, item_id, repo, number, head).await;
+        return;
+    }
     let key = (repo.clone(), number);
     if !building().lock().unwrap().insert(key.clone()) {
         lookup(ctx, item_id, repo, number, head).await;
@@ -167,14 +224,7 @@ async fn run_build(
     head: &str,
 ) -> Result<(), String> {
     let configured = config.agent.binary.clone();
-    let checked = configured.clone();
-    let can = tokio::task::spawn_blocking(move || can_build(&checked, true))
-        .await
-        .unwrap_or(false);
-    if !can {
-        return Err("The Changescape skill or Claude Code is not installed.".into());
-    }
-    let binary = claude_binary(&configured).ok_or("Claude Code is not installed.")?;
+    let binary = perch_agent::find_binary(&configured).ok_or("Claude Code is not installed.")?;
     let id = perch_git::RepoId::parse(repo).ok_or("Not a GitHub repository.")?;
     let store = ctx.preparer.store();
     if !store.has_bare_clone(&id) {
@@ -196,10 +246,15 @@ async fn run_build(
             .ok()
             .flatten()
             .map(|token| token.value);
+    // The shell takes only the commands the build's rules name, so a loop,
+    // a variable, or an environment prefix on a command is refused.
     let prompt = format!(
         "Use the changescape skill on pull request #{number} of {repo}.\n\
          The repository is at {}.\n\
-         Write the output to {}/.",
+         Write the output to {}/.\n\
+         The shell runs only plain commands: no loops, no variables, and no \
+         environment variables before a command. Use the Read and Grep tools \
+         to read files.",
         clone.display(),
         dir.display()
     );
@@ -239,6 +294,10 @@ async fn run_build(
         perch_agent::RunOutcome::Stopped { .. } => Err("The build was stopped.".into()),
     }
 }
+
+/// Why a build did not start with a skill from before the tour.
+pub const SKILL_TOO_OLD: &str =
+    "The installed Changescape skill writes no tour. Update the skill to build one.";
 
 /// The file in a build's folder that keeps what the run did.
 const BUILD_LOG: &str = "perch-build.log";
@@ -312,11 +371,12 @@ fn settle(dir: &Path, result: Result<(), String>) {
     }
 }
 
-/// A build that ended badly: failed, with why, unless the skill already
-/// wrote a failure of its own.
+/// A build that ended badly: failed, with why, while its status still
+/// says running. A failure the skill wrote stands, and so does a finished
+/// build that a run stopped before it began.
 fn settle_failed(dir: &Path, message: &str) {
-    let failed = read_status(dir).is_some_and(|status| status.state == State::Failed);
-    if !failed {
+    let ended = read_status(dir).is_some_and(|status| status.state != State::Running);
+    if !ended {
         let _ = write_status(dir, State::Failed, Some(message));
     }
 }
@@ -348,6 +408,11 @@ mod tests {
             read_status(dir.path()).unwrap().error.as_deref(),
             Some("no page")
         );
+
+        // A finished build stays finished.
+        write_status(dir.path(), State::Done, None).unwrap();
+        settle_failed(dir.path(), "no clone");
+        assert_eq!(read_status(dir.path()).unwrap().state, State::Done);
 
         write_status(dir.path(), State::Running, None).unwrap();
         settle_running(dir.path());

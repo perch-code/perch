@@ -3789,7 +3789,9 @@ mod tests {
                 page: None,
                 error: None,
                 can_build: false,
+                skill_too_old: false,
                 building: false,
+                marks: Default::default(),
             }))
         };
         for (item_id, head_sha) in [("other", "head"), ("pr", "old")] {
