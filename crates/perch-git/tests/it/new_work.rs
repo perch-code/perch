@@ -3,28 +3,10 @@
 //! checked out as they are.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use perch_git::{Preparer, RepoId, Store};
 
-fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@t")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t")
-        .output()
-        .expect("git runs");
-    assert!(
-        out.status.success(),
-        "git {args:?} in {}: {}",
-        dir.display(),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
+use crate::support::git;
 
 fn commit(dir: &Path, name: &str) -> String {
     std::fs::write(dir.join(name), name).unwrap();

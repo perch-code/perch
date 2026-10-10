@@ -14,26 +14,9 @@ use std::process::Command;
 use perch_git::cmd::Git;
 use perch_git::{branch_churn, head_commit_time, home_ref, scan_root, Preparer, RepoId, Store};
 
-const GITHUB: &[&str] = &["github.com"];
+use crate::support::git;
 
-fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@t")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t")
-        .output()
-        .expect("git runs");
-    assert!(
-        out.status.success(),
-        "git {args:?} in {}: {}",
-        dir.display(),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
+const GITHUB: &[&str] = &["github.com"];
 
 fn commit(dir: &Path, name: &str) -> String {
     std::fs::write(dir.join(format!("{name}.txt")), format!("{name}\n")).unwrap();

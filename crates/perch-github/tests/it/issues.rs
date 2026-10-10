@@ -1,26 +1,14 @@
 //! The issue fetch against a local server, to pin the mapping, the
 //! pagination of comments, and the refusal of a pull request.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use perch_github::{Error, GitHub, ItemKind};
 
-fn read_path(stream: &mut TcpStream) -> Option<String> {
-    let mut reader = BufReader::new(stream.try_clone().ok()?);
-    let mut start = String::new();
-    reader.read_line(&mut start).ok()?;
-    let path = start.split_whitespace().nth(1)?.to_string();
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).ok()? == 0 || line.trim_end().is_empty() {
-            break;
-        }
-    }
-    Some(path)
-}
+use crate::support::{page, read_path};
 
 fn respond(stream: &mut TcpStream, status: &str, body: &str) {
     let response = format!(
@@ -36,10 +24,6 @@ fn comment(id: usize) -> String {
         r#"{{"id":{id},"user":{{"login":"u{id}"}},"body":"comment {id}","created_at":"2026-09-15T09:{:02}:00Z","html_url":"https://github.com/a/b/issues/42#issuecomment-{id}"}}"#,
         id % 60
     )
-}
-
-fn page(items: Vec<String>) -> String {
-    format!("[{}]", items.join(","))
 }
 
 const ISSUE: &str = r#"{
