@@ -46,7 +46,6 @@ One build of one PR at one head commit has its own folder:
 - `stage` is `facts` (tools ran, no captions yet) or `narrated` (captions written). A `done` build at stage `facts` is drawable. It shows facts with no captions.
 - If `state` is `failed`, `error` holds a short message.
 - If `status.json` is missing but `page.json` exists, treat the build as `done`.
-- `page_schema` is the format version of the folder's `page.json`. If it is absent, the version is 2.
 
 ### Lookup
 
@@ -59,16 +58,6 @@ For the open PR item, Perch looks up its changescape with this rule:
 Perch still draws a stale changescape, under a one-line banner that names the older commit. The banner text is `Changescape of an earlier commit, <sha7>.`
 
 If the skill is available, the banner ends with a Rebuild link. "Building a changescape" below describes the build.
-
-### Page format versions
-
-Perch draws page format versions from `MIN_PAGE_SCHEMA` to `MAX_PAGE_SCHEMA` (`crates/perch-changescape/src/lib.rs`). Both are 3 now. Perch reads the version from `page_schema` in `status.json`. A folder with a page but no `status.json` counts as version 2. Perch does not keep a reader for older versions: an older page is refused, and the reader rebuilds it.
-
-- A finished build below the lowest version is `Lookup::Outdated`. The tab says "This Changescape was built by an older version. Rebuild it to see this PR." If Perch can build, the tab shows Rebuild.
-- A finished build above the highest version is `Lookup::TooNew`. The tab says "This Changescape needs a newer Perch."
-- In both cases the pill stays, so the reader finds the link.
-- The gate applies to every build that the lookup considers. An earlier head's build of another version is never a `Stale` stand-in. A running build does not show it meanwhile.
-- When the page loads, Perch reads `schema` from `page.json` before it parses the rest, and applies the same gate (`Error::Version`, then `Lookup::with_page_schema`). This catches a status that misstates the version.
 
 Lookups are file system reads only. Do them on the backend, never on the UI thread. Perch has no file watcher, so poll. When an item opens, look up its changescape once. While a build of the open item is `running`, read `status.json` every two seconds. Do not poll items that are not open.
 
@@ -223,7 +212,7 @@ The shared conformance fixtures are in `crates/perch-changescape/tests/fixtures/
 Put file types and lookup in a new crate, `crates/perch-changescape`. It has no UI dependencies.
 
 - The page and status types are generated from the schema. See "The page schema" above. `LoadedPage` holds a `v3::Page` with the tour read on its own. `page.rs` has the tour's helpers: verdicts, runs of skim stops, reading order, windows, and diagrams.
-- `fn lookup(root: &Path, repo: &str, number: u64, head_sha: &str) -> Lookup`, where `Lookup` is `Current(Build)`, `Stale(Build)`, `Running(Build, Option<Build>)` (with the last drawable earlier build), `Failed(Build)`, `Outdated(Build)`, `TooNew(Build)`, or `None`. `Build` holds the folder, the head SHA, and the status.
+- `fn lookup(root: &Path, repo: &str, number: u64, head_sha: &str) -> Lookup`, where `Lookup` is `Current(Build)`, `Stale(Build)`, `Running(Build, Option<Build>)` (with the last finished earlier build), `Failed(Build)`, or `None`. `Build` holds the folder, the head SHA, and the status.
 - `fn load(build: &Build) -> Result<Arc<LoadedPage>>`. Parse once per build and per `finished` time. Cache the result.
 - `fn skill_available() -> Option<PathBuf>` returns the skill folder.
 - `struct StopIndex` maps a path to the stops' sorted head windows, for the Code strip.

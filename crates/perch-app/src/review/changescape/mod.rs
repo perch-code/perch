@@ -64,12 +64,11 @@ impl Shown {
     }
 
     /// Whether the tab shows: a page, a running build, a page this Perch
-    /// refuses or could not read, or a build this Perch can start or
-    /// could with a newer skill.
+    /// could not read, or a build this Perch can start or could with a
+    /// newer skill.
     pub fn has_tab(&self) -> bool {
         self.found.page.is_some()
             || self.found.lookup.is_running()
-            || self.found.lookup.refused().is_some()
             || self.unreadable()
             || self.found.can_build
             || self.found.skill_too_old
@@ -249,9 +248,8 @@ enum Body {
     Failed(String),
     /// No changescape yet: the build, offered.
     Unbuilt,
-    /// A page this Perch does not draw, why, and whether to offer a
-    /// rebuild: one an older Changescape wrote, one that needs a newer
-    /// Perch, or one with no tour.
+    /// A page with no tour, or whose tour does not read: why, and whether
+    /// to offer a rebuild.
     Refused {
         message: &'static str,
         rebuild: bool,
@@ -282,14 +280,6 @@ fn body_of(state: ReviewState) -> Body {
     }
     match shown.lookup() {
         Lookup::Running(..) => Body::Building,
-        Lookup::Outdated(_) => Body::Refused {
-            message: "This Changescape was built by an older version. Rebuild it to see this PR.",
-            rebuild: shown.found.can_build,
-        },
-        Lookup::TooNew(_) => Body::Refused {
-            message: "This Changescape needs a newer Perch.",
-            rebuild: false,
-        },
         Lookup::Failed(build) => Body::Failed(
             build
                 .status

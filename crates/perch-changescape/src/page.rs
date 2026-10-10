@@ -31,18 +31,8 @@ pub struct LoadedPage {
     view_rows: HashMap<String, Vec<String>>,
 }
 
-/// The format version a page names: its `schema`, else 2.
-fn schema_of(value: &Value) -> u32 {
-    value
-        .get("schema")
-        .and_then(Value::as_u64)
-        .and_then(|n| u32::try_from(n).ok())
-        .unwrap_or(crate::UNSTATED_PAGE_SCHEMA)
-}
-
 impl LoadedPage {
-    /// Read a page: its version first, which must be one this Perch
-    /// draws, then its tour on its own, then the rest without the views'
+    /// Read a page: its tour on its own, then the rest without the views'
     /// blocks.
     pub(crate) fn read(path: &Path, bytes: &[u8]) -> Result<LoadedPage, Error> {
         let parse = |source| Error::Parse {
@@ -50,13 +40,6 @@ impl LoadedPage {
             source,
         };
         let mut value: Value = serde_json::from_slice(bytes).map_err(parse)?;
-        let schema = schema_of(&value);
-        if crate::Version::of(schema) != crate::Version::Drawn {
-            return Err(Error::Version {
-                path: path.to_path_buf(),
-                schema,
-            });
-        }
         let mut view_rows = HashMap::new();
         if let Some(views) = value.get_mut("views").and_then(Value::as_array_mut) {
             for view in views {

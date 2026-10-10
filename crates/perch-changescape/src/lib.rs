@@ -48,39 +48,6 @@ pub enum Error {
         path: PathBuf,
         source: serde_json::Error,
     },
-    /// The page is of a format version this Perch does not draw, though
-    /// its status said otherwise.
-    #[error("{path} is page format {schema}, which this Perch does not draw")]
-    Version { path: PathBuf, schema: u32 },
-}
-
-/// The lowest page format version this Perch draws.
-pub const MIN_PAGE_SCHEMA: u32 = 3;
-/// The highest page format version this Perch draws.
-pub const MAX_PAGE_SCHEMA: u32 = 3;
-/// The version of a page that does not say which it is.
-pub const UNSTATED_PAGE_SCHEMA: u32 = 2;
-
-/// Whether this Perch draws a page of a format version.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Version {
-    Drawn,
-    /// An older Changescape wrote it: a rebuild draws.
-    Outdated,
-    /// It needs a newer Perch.
-    TooNew,
-}
-
-impl Version {
-    pub fn of(schema: u32) -> Version {
-        if schema < MIN_PAGE_SCHEMA {
-            Version::Outdated
-        } else if schema > MAX_PAGE_SCHEMA {
-            Version::TooNew
-        } else {
-            Version::Drawn
-        }
-    }
 }
 
 /// One build's folder and what its status says.
@@ -96,39 +63,9 @@ impl Build {
         self.dir.join("page.json")
     }
 
-    /// A finished build with a page, of any version.
+    /// A finished build with a page.
     pub fn finished(&self) -> bool {
         self.status.state == State::Done && self.page_path().is_file()
-    }
-
-    /// Whether this Perch draws the version its status names.
-    pub fn version(&self) -> Version {
-        Version::of(self.page_schema())
-    }
-
-    /// The format version of the build's page, as its status says.
-    pub fn page_schema(&self) -> u32 {
-        self.status
-            .page_schema
-            .and_then(|n| u32::try_from(n).ok())
-            .unwrap_or(UNSTATED_PAGE_SCHEMA)
-    }
-
-    /// A finished build with a page of a version this Perch draws: one
-    /// the Map can draw.
-    pub fn drawable(&self) -> bool {
-        self.finished() && self.version() == Version::Drawn
-    }
-
-    /// What a finished build is, by its version: drawn at the head or at
-    /// an earlier one, or refused.
-    fn found(self, current: bool) -> Lookup {
-        match self.version() {
-            Version::Drawn if current => Lookup::Current(self),
-            Version::Drawn => Lookup::Stale(self),
-            Version::Outdated => Lookup::Outdated(self),
-            Version::TooNew => Lookup::TooNew(self),
-        }
     }
 
     /// The first seven characters of the head it maps.
@@ -140,60 +77,25 @@ impl Build {
 /// What the cache holds for a pull request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Lookup {
-    /// A drawable build of the pull request's current head.
+    /// A finished build of the pull request's current head.
     Current(Build),
-    /// No build of the current head, but a drawable one of an earlier head.
+    /// No finished build of the current head, but one of an earlier head.
     Stale(Build),
     /// A build of the current head is running. The second build is the
-    /// last drawable one of an earlier head, if there is one.
+    /// last finished one of an earlier head, if there is one.
     Running(Build, Option<Build>),
-    /// The build of the current head failed, and no earlier one is
-    /// drawable.
+    /// The build of the current head failed, and there is no earlier one.
     Failed(Build),
-    /// A finished build whose page an older Changescape wrote, and no
-    /// drawable one. A rebuild draws.
-    Outdated(Build),
-    /// A finished build whose page needs a newer Perch, and no drawable
-    /// one.
-    TooNew(Build),
     None,
 }
 
 impl Lookup {
-    /// The build the Map draws, if any.
+    /// The build the tab draws, if any.
     pub fn drawable(&self) -> Option<&Build> {
         match self {
             Lookup::Current(build) | Lookup::Stale(build) => Some(build),
             Lookup::Running(_, previous) => previous.as_ref(),
-            Lookup::Failed(_) | Lookup::Outdated(_) | Lookup::TooNew(_) | Lookup::None => None,
-        }
-    }
-
-    /// The build whose page this Perch refuses, which keeps the tab so
-    /// that it can say why.
-    pub fn refused(&self) -> Option<&Build> {
-        match self {
-            Lookup::Outdated(build) | Lookup::TooNew(build) => Some(build),
-            _ => None,
-        }
-    }
-
-    /// This lookup once the page of its drawable build turns out to be of
-    /// `schema`, a version the status did not say or said wrongly. A
-    /// running build loses the earlier page it would show meanwhile.
-    pub fn with_page_schema(self, schema: u32) -> Lookup {
-        let version = Version::of(schema);
-        if version == Version::Drawn {
-            return self;
-        }
-        let refuse = |build| match version {
-            Version::TooNew => Lookup::TooNew(build),
-            _ => Lookup::Outdated(build),
-        };
-        match self {
-            Lookup::Current(build) | Lookup::Stale(build) => refuse(build),
-            Lookup::Running(build, Some(_)) => Lookup::Running(build, None),
-            other => other,
+            Lookup::Failed(_) | Lookup::None => None,
         }
     }
 
@@ -222,15 +124,18 @@ pub fn lookup_during_run(root: &Path, repo: &str, number: u64, head_sha: &str) -
     let pull = pull_dir(root, repo, number);
     match read_build(&pull.join(head_sha)) {
         Some(mut build) if build.status.state == State::Failed => {
-            if build.page_path().is_file() && build.version() == Version::Drawn {
+            // A status the skill is still writing does not read yet.
+            let half_written = build
+                .status
+                .error
+                .as_deref()
+                .is_some_and(|e| e.starts_with(UNREADABLE_STATUS));
+            if build.page_path().is_file() && !half_written {
                 build.status.state = State::Done;
                 build.status.error = None;
                 Lookup::Current(build)
             } else {
-                Lookup::Running(
-                    build,
-                    newest_earlier(&pull, head_sha).filter(Build::drawable),
-                )
+                Lookup::Running(build, newest_earlier(&pull, head_sha))
             }
         }
         _ => lookup(root, repo, number, head_sha),
@@ -239,29 +144,15 @@ pub fn lookup_during_run(root: &Path, repo: &str, number: u64, head_sha: &str) -
 
 /// Find the map of `repo` (`owner/name`) pull request `number` at
 /// `head_sha`. File reads only; call it off the UI thread.
-///
-/// Only a page of a version this Perch draws counts: a finished build of
-/// another version is `Outdated` or `TooNew`, and never an earlier head's
-/// stand-in.
 pub fn lookup(root: &Path, repo: &str, number: u64, head_sha: &str) -> Lookup {
     let pull = pull_dir(root, repo, number);
-    let current = read_build(&pull.join(head_sha));
     let earlier = || newest_earlier(&pull, head_sha);
-    match current {
-        Some(build) if build.status.state == State::Running => {
-            Lookup::Running(build, earlier().filter(Build::drawable))
-        }
-        Some(build) if build.drawable() => Lookup::Current(build),
-        Some(build) => match earlier() {
-            Some(earlier) if earlier.drawable() => Lookup::Stale(earlier),
-            _ if build.finished() => build.found(true),
-            None if build.status.state == State::Failed || !build.page_path().is_file() => {
-                Lookup::Failed(build)
-            }
-            Some(earlier) => earlier.found(false),
-            None => Lookup::None,
-        },
-        None => earlier().map_or(Lookup::None, |build| build.found(false)),
+    match read_build(&pull.join(head_sha)) {
+        Some(build) if build.status.state == State::Running => Lookup::Running(build, earlier()),
+        Some(build) if build.finished() => Lookup::Current(build),
+        // Failed, or done with no page.
+        Some(build) => earlier().map_or(Lookup::Failed(build), Lookup::Stale),
+        None => earlier().map_or(Lookup::None, Lookup::Stale),
     }
 }
 
@@ -279,17 +170,16 @@ pub fn bare_status(state: State, error: Option<String>) -> Status {
     }
 }
 
+/// The start of the error of a status that does not read.
+const UNREADABLE_STATUS: &str = "status.json could not be read";
+
 /// The build in `dir`, if it is one: a folder with a status or a page. A
-/// page with no status is a finished build of a page that does not say
-/// its version, so one an older Changescape wrote.
+/// page with no status is a finished build.
 fn read_build(dir: &Path) -> Option<Build> {
     let head_sha = dir.file_name()?.to_str()?.to_string();
     let status = match std::fs::read(dir.join("status.json")) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-            bare_status(
-                State::Failed,
-                Some(format!("status.json could not be read: {e}")),
-            )
+            bare_status(State::Failed, Some(format!("{UNREADABLE_STATUS}: {e}")))
         }),
         Err(_) if dir.join("page.json").is_file() => bare_status(State::Done, None),
         Err(_) => return None,
@@ -302,25 +192,16 @@ fn read_build(dir: &Path) -> Option<Build> {
 }
 
 /// The finished build of another head of the same pull request that
-/// finished last: the newest drawable one, else the newest of any
-/// version. A build with no finish time counts by its page's
+/// finished last. A build with no finish time counts by its page's
 /// modification time.
 fn newest_earlier(pull: &Path, head_sha: &str) -> Option<Build> {
-    let entries = std::fs::read_dir(pull).ok()?;
-    let finished: Vec<Build> = entries
+    std::fs::read_dir(pull)
+        .ok()?
         .filter_map(Result::ok)
         .filter(|entry| entry.file_name() != head_sha)
         .filter_map(|entry| read_build(&entry.path()))
         .filter(Build::finished)
-        .collect();
-    let newest = |drawable: bool| {
-        finished
-            .iter()
-            .filter(|build| !drawable || build.drawable())
-            .max_by_key(|build| finished_at(build))
-            .cloned()
-    };
-    newest(true).or_else(|| newest(false))
+        .max_by_key(finished_at)
 }
 
 fn finished_at(build: &Build) -> Option<jiff::Timestamp> {

@@ -32,13 +32,7 @@ fn every_case_has_a_test() {
     names.sort();
     assert_eq!(
         names,
-        [
-            "01-minimal",
-            "02-status-without-page-schema",
-            "03-page-schema-4",
-            "12-tour",
-            "13-malformed-tour",
-        ],
+        ["01-minimal", "12-tour", "13-malformed-tour",],
         "a new case needs a test here"
     );
 }
@@ -49,20 +43,6 @@ fn case_01_draws_without_a_tour() {
     assert!(page.tour().is_none());
     assert!(page.tour_error().is_none());
     assert!(page.elements.contains_key("fn:calc.ops.add"));
-}
-
-#[test]
-fn case_02_is_outdated() {
-    let (found, _root) = found("02-status-without-page-schema");
-    assert!(matches!(found, Lookup::Outdated(_)), "{found:?}");
-    assert!(found.drawable().is_none());
-}
-
-#[test]
-fn case_03_is_too_new() {
-    let (found, _root) = found("03-page-schema-4");
-    assert!(matches!(found, Lookup::TooNew(_)), "{found:?}");
-    assert!(found.refused().is_some());
 }
 
 #[test]

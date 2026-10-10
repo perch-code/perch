@@ -699,13 +699,11 @@ fn the_caret_in_a_stops_window_shows_the_code_strip_which_leads_back() {
 }
 
 #[test]
-fn a_page_this_perch_does_not_draw_says_why_and_offers_a_rebuild_where_one_helps() {
-    for (case, can_build, rebuild) in [
-        ("01-minimal", true, true),
-        ("13-malformed-tour", true, true),
-        ("02-status-without-page-schema", true, true),
-        ("02-status-without-page-schema", false, false),
-        ("03-page-schema-4", true, false),
+fn a_page_without_a_tour_says_why_and_offers_a_rebuild_where_one_can_run() {
+    for (case, can_build) in [
+        ("01-minimal", true),
+        ("13-malformed-tour", true),
+        ("01-minimal", false),
     ] {
         let (harness, state, _root) = opened_building(case, can_build);
         assert_eq!(state.tab.get(), ItemTab::Changescape, "{case}");
@@ -719,7 +717,7 @@ fn a_page_this_perch_does_not_draw_says_why_and_offers_a_rebuild_where_one_helps
         );
         let offered = named(harness.root_id(), "Changescape rebuild")
             .is_some_and(|v| v.get_visual_rect_no_clip().width() > 0.0);
-        assert_eq!(offered, rebuild, "{case}, can build: {can_build}");
+        assert_eq!(offered, can_build, "{case}");
     }
 }
 
@@ -957,21 +955,6 @@ fn the_row_menu_offers_a_build_only_where_one_can_run() {
         .outline()
         .iter()
         .any(|line| line.contains("Build Changescape")));
-}
-
-#[test]
-fn a_page_whose_status_misstates_its_version_is_refused_by_the_page() {
-    let root = cache_with("03-page-schema-4", HEAD);
-    let dir = perch_changescape::build_dir(root.path(), REPO, 812, HEAD);
-    let status = std::fs::read_to_string(dir.join("status.json")).unwrap();
-    std::fs::write(
-        dir.join("status.json"),
-        status.replace(r#""page_schema": 4"#, r#""page_schema": 3"#),
-    )
-    .unwrap();
-    let found = crate::backend::changescape::find(root.path(), REPO, 812, HEAD);
-    assert!(found.page.is_none());
-    assert!(matches!(found.lookup, perch_changescape::Lookup::TooNew(_)));
 }
 
 #[test]

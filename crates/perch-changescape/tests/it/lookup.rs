@@ -7,16 +7,12 @@ use perch_changescape::{load, lookup, lookup_during_run, Lookup, State, StopInde
 
 use crate::{install, HEAD, REPO};
 
-/// Write a status of `state`, finished at `finished`, of page format
-/// `page_schema`.
-fn status(dir: &Path, state: &str, finished: Option<&str>, page_schema: Option<u32>) {
+/// Write a status of `state`, finished at `finished`.
+fn status(dir: &Path, state: &str, finished: Option<&str>) {
     let mut json = serde_json::json!({
         "schema": 2, "state": state, "started": "2026-10-08T12:00:00Z",
         "finished": finished, "stage": "narrated", "error": null, "skill_version": "3.0.0",
     });
-    if let Some(n) = page_schema {
-        json["page_schema"] = n.into();
-    }
     if state == "failed" {
         json["error"] = "boom".into();
     }
@@ -45,11 +41,11 @@ fn a_build_of_the_head_is_current() {
 fn a_build_of_another_head_is_stale_and_the_newest_wins() {
     let root = tempfile::tempdir().unwrap();
     let older = install(root.path(), "01-minimal", "aaaaaaa1");
-    status(&older, "done", Some("2026-10-01T00:00:00Z"), Some(3));
+    status(&older, "done", Some("2026-10-01T00:00:00Z"));
     let newer = install(root.path(), "01-minimal", "bbbbbbb2");
-    status(&newer, "done", Some("2026-10-05T00:00:00Z"), Some(3));
+    status(&newer, "done", Some("2026-10-05T00:00:00Z"));
     let failed = install(root.path(), "01-minimal", "ccccccc3");
-    status(&failed, "failed", Some("2026-10-06T00:00:00Z"), Some(3));
+    status(&failed, "failed", Some("2026-10-06T00:00:00Z"));
     let Lookup::Stale(build) = lookup(root.path(), REPO, 7, HEAD) else {
         panic!("expected a stale map");
     };
@@ -62,7 +58,7 @@ fn a_running_build_keeps_the_earlier_map() {
     install(root.path(), "01-minimal", "aaaaaaa1");
     let running = perch_changescape::build_dir(root.path(), REPO, 7, HEAD);
     std::fs::create_dir_all(&running).unwrap();
-    status(&running, "running", None, None);
+    status(&running, "running", None);
     let lookup = lookup(root.path(), REPO, 7, HEAD);
     let Lookup::Running(build, Some(previous)) = &lookup else {
         panic!("expected a running build over an earlier map, got {lookup:?}");
@@ -80,7 +76,7 @@ fn a_failed_build_with_nothing_earlier_is_failed() {
     let root = tempfile::tempdir().unwrap();
     let dir = perch_changescape::build_dir(root.path(), REPO, 7, HEAD);
     std::fs::create_dir_all(&dir).unwrap();
-    status(&dir, "failed", None, None);
+    status(&dir, "failed", None);
     let Lookup::Failed(build) = lookup(root.path(), REPO, 7, HEAD) else {
         panic!("expected a failed build");
     };
@@ -91,7 +87,7 @@ fn a_failed_build_with_nothing_earlier_is_failed() {
 fn during_a_run_a_failed_build_with_a_page_still_draws_it() {
     let root = tempfile::tempdir().unwrap();
     let dir = install(root.path(), "01-minimal", HEAD);
-    status(&dir, "failed", Some("2026-10-08T12:01:00Z"), Some(3));
+    status(&dir, "failed", Some("2026-10-08T12:01:00Z"));
     assert!(matches!(
         lookup(root.path(), REPO, 7, HEAD),
         Lookup::Failed(_)
@@ -109,7 +105,7 @@ fn during_a_run_a_failed_build_with_no_page_is_running_over_the_earlier_map() {
     install(root.path(), "01-minimal", "aaaaaaa1");
     let dir = perch_changescape::build_dir(root.path(), REPO, 7, HEAD);
     std::fs::create_dir_all(&dir).unwrap();
-    status(&dir, "failed", None, None);
+    status(&dir, "failed", None);
     let lookup = lookup_during_run(root.path(), REPO, 7, HEAD);
     let Lookup::Running(_, Some(previous)) = &lookup else {
         panic!("expected a running build, got {lookup:?}");
@@ -141,55 +137,14 @@ fn a_status_that_does_not_match_its_schema_is_a_failed_build() {
 }
 
 #[test]
-fn a_page_with_no_status_is_of_an_older_version() {
+fn a_page_with_no_status_is_a_finished_build() {
     let root = tempfile::tempdir().unwrap();
     let dir = install(root.path(), "01-minimal", HEAD);
     std::fs::remove_file(dir.join("status.json")).unwrap();
     assert!(matches!(
         lookup(root.path(), REPO, 7, HEAD),
-        Lookup::Outdated(_)
+        Lookup::Current(_)
     ));
-}
-
-#[test]
-fn an_earlier_head_of_an_older_version_stands_in_for_nothing() {
-    let root = tempfile::tempdir().unwrap();
-    install(root.path(), "02-status-without-page-schema", "aaaaaaa1");
-    let found = lookup(root.path(), REPO, 7, HEAD);
-    assert!(
-        matches!(&found, Lookup::Outdated(b) if b.head_sha == "aaaaaaa1"),
-        "{found:?}"
-    );
-    // A drawable one is the stand-in.
-    let drawn = install(root.path(), "01-minimal", "bbbbbbb2");
-    let found = lookup(root.path(), REPO, 7, HEAD);
-    assert!(
-        matches!(&found, Lookup::Stale(b) if b.head_sha == "bbbbbbb2"),
-        "{found:?}"
-    );
-    // A running build does not show the outdated one meanwhile.
-    std::fs::remove_dir_all(drawn).unwrap();
-    let running = perch_changescape::build_dir(root.path(), REPO, 7, HEAD);
-    std::fs::create_dir_all(&running).unwrap();
-    status(&running, "running", None, None);
-    assert!(matches!(
-        lookup(root.path(), REPO, 7, HEAD),
-        Lookup::Running(_, None)
-    ));
-}
-
-#[test]
-fn a_page_whose_status_misstates_its_version_is_refused_when_read() {
-    let root = tempfile::tempdir().unwrap();
-    let dir = install(root.path(), "03-page-schema-4", HEAD);
-    status(&dir, "done", Some("2026-10-08T12:01:00Z"), Some(3));
-    let found = lookup(root.path(), REPO, 7, HEAD);
-    let error = load(found.drawable().unwrap()).unwrap_err();
-    assert!(matches!(
-        error,
-        perch_changescape::Error::Version { schema: 4, .. }
-    ));
-    assert!(matches!(found.with_page_schema(4), Lookup::TooNew(_)));
 }
 
 #[test]

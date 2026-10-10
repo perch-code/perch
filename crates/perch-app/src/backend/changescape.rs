@@ -96,14 +96,9 @@ pub(crate) fn find_during_run(root: &Path, repo: &str, number: u64, head_sha: &s
     ))
 }
 
-fn found(mut lookup: Lookup) -> Found {
+fn found(lookup: Lookup) -> Found {
     let (page, error) = match lookup.drawable().map(perch_changescape::load) {
         Some(Ok(page)) => (Some(page), None),
-        // The page's own version, where the status misstates it.
-        Some(Err(perch_changescape::Error::Version { schema, .. })) => {
-            lookup = lookup.with_page_schema(schema);
-            (None, None)
-        }
         Some(Err(e)) => {
             tracing::warn!(error = %e, "could not read a changescape");
             (None, Some(e.to_string()))
@@ -337,7 +332,7 @@ fn progress_line(event: &perch_agent::RunEvent) -> Option<String> {
 
 /// `status.json` as Perch writes it: a fresh one when a build starts, and
 /// when one ends without the skill having said how, the skill's own with
-/// the end written in, so its page's version stays.
+/// the end written in, so what the skill wrote stays.
 fn write_status(dir: &Path, state: State, error: Option<&str>) -> Result<(), String> {
     let now = Some(jiff::Timestamp::now().to_string());
     let mut status = match state {
@@ -438,10 +433,9 @@ mod tests {
     }
 
     #[test]
-    fn a_status_perch_settles_keeps_the_skills_page_version() {
+    fn a_status_perch_settles_keeps_what_the_skill_wrote() {
         let dir = tempfile::tempdir().unwrap();
         let mut status = perch_changescape::bare_status(State::Running, None);
-        status.page_schema = Some(3);
         status.skill_version = "3.0.0".into();
         std::fs::write(
             dir.path().join("status.json"),
@@ -452,7 +446,6 @@ mod tests {
         settle(dir.path(), Ok(()));
         let settled = read_status(dir.path()).unwrap();
         assert_eq!(settled.state, State::Done);
-        assert_eq!(settled.page_schema, Some(3));
         assert_eq!(settled.skill_version, "3.0.0");
         assert!(settled.finished.is_some());
     }

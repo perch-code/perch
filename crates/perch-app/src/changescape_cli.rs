@@ -100,18 +100,6 @@ fn describe(lookup: &Lookup) -> String {
             at(build),
             build.status.error.as_deref().unwrap_or("no page.json")
         ),
-        Lookup::Outdated(build) => format!(
-            "outdated {}: page format {}, Perch draws {}",
-            at(build),
-            build.page_schema(),
-            perch_changescape::MIN_PAGE_SCHEMA
-        ),
-        Lookup::TooNew(build) => format!(
-            "too new {}: page format {}, Perch draws up to {}",
-            at(build),
-            build.page_schema(),
-            perch_changescape::MAX_PAGE_SCHEMA
-        ),
         Lookup::None => "none".to_string(),
     }
 }
