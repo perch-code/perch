@@ -600,8 +600,17 @@ pub fn picture_key(stop: &str, i: usize) -> String {
     format!("stop:{i}:{stop}")
 }
 
+/// The key of a view's picture.
+pub fn view_picture_key(view: &str, i: usize) -> String {
+    format!("view:{i}:{view}")
+}
+
 /// The diagram a key names, with its heading.
 pub fn picture(page: &LoadedPage, key: &str) -> Option<(String, Svg)> {
+    if let Some((i, view)) = key.strip_prefix("view:").and_then(|k| k.split_once(':')) {
+        let svg = page.view_pictures(view).get(i.parse::<usize>().ok()?)?;
+        return Some((prose::plain(&page.view(view)?.t), svg.clone()));
+    }
     let tour = page.tour()?;
     if let Some(chapter) = key.strip_prefix("spine:") {
         let spine = tour
