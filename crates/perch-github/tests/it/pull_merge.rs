@@ -1,96 +1,12 @@
 //! Pull-request merge state and mutations, and closing an issue, against
 //! a scripted local server.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
-
 use perch_github::{
     CheckKind, CheckRunState, CheckState, CommitMessage, Error, GitHub, IssueCloseReason,
     MergeMethod, MergeState, MergeableState, RepositoryPermission, ReviewDecision,
 };
 
-#[derive(Debug)]
-struct Request {
-    method: String,
-    path: String,
-    body: String,
-}
-
-struct Response {
-    status: &'static str,
-    body: String,
-}
-
-impl Response {
-    fn new(status: &'static str, body: impl Into<String>) -> Self {
-        Self {
-            status,
-            body: body.into(),
-        }
-    }
-}
-
-fn read_request(stream: &mut TcpStream) -> Option<Request> {
-    let mut reader = BufReader::new(stream.try_clone().ok()?);
-    let mut start = String::new();
-    reader.read_line(&mut start).ok()?;
-    let mut start = start.split_whitespace();
-    let method = start.next()?.to_string();
-    let path = start.next()?.to_string();
-    let mut content_length = 0usize;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).ok()? == 0 {
-            break;
-        }
-        let trimmed = line.trim_end();
-        if trimmed.is_empty() {
-            break;
-        }
-        if let Some((name, value)) = trimmed.split_once(':') {
-            if name.eq_ignore_ascii_case("content-length") {
-                content_length = value.trim().parse().unwrap_or(0);
-            }
-        }
-    }
-    let mut body = vec![0u8; content_length];
-    reader.read_exact(&mut body).ok()?;
-    Some(Request {
-        method,
-        path,
-        body: String::from_utf8_lossy(&body).into_owned(),
-    })
-}
-
-fn respond(stream: &mut TcpStream, response: Response) {
-    let wire = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{body}",
-        status = response.status,
-        length = response.body.len(),
-        body = response.body,
-    );
-    stream.write_all(wire.as_bytes()).unwrap();
-    stream.flush().unwrap();
-}
-
-fn spawn(responses: Vec<Response>) -> (String, Arc<Mutex<Vec<Request>>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let seen = requests.clone();
-    std::thread::spawn(move || {
-        for (stream, response) in listener.incoming().zip(responses) {
-            let Ok(mut stream) = stream else { continue };
-            let Some(request) = read_request(&mut stream) else {
-                continue;
-            };
-            seen.lock().unwrap().push(request);
-            respond(&mut stream, response);
-        }
-    });
-    (format!("http://{address}"), requests)
-}
+use crate::support::rest::{spawn, Response};
 
 const OVERVIEW: &str = r#"{
   "data": {
