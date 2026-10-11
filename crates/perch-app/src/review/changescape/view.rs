@@ -1,8 +1,8 @@
 //! A view a flag or a Watch line points at, `view:<id>`, as a popover over
-//! the tour: the view's title, then a row for each element its tables
-//! name, with the element's title and description. Perch draws no table,
-//! fold or facet of the view: the rows are the elements, and a click on
-//! one opens it.
+//! the tour: the view's title, its diagrams, then a row for each element
+//! its tables name, with the element's title and description. Perch draws
+//! no table, fold or facet of the view: the rows are the elements, and a
+//! click on one, or on a diagram's node, opens it.
 //!
 //! What an element opens depends on its kind. A pull request or an issue
 //! opens in Perch, a commit on Code as its own changes, and code at its
@@ -17,7 +17,8 @@ use perch_github::ItemKind;
 
 use crate::review::changescape::navigate;
 use crate::review::changescape::prose::{self, hover_row, meta, MUTED, STRONG, TITLE};
-use crate::review::changescape::tour::Ctx;
+use crate::review::changescape::svg;
+use crate::review::changescape::tour::{self, Ctx};
 use crate::theme;
 use crate::ui::widgets::{clickable, open_in_browser};
 
@@ -101,6 +102,12 @@ pub fn open_element(cx: &Ctx, id: &str) {
 /// outside it, Close, or Escape puts it away.
 pub fn popover(cx: Ctx) -> impl IntoView {
     let state = cx.state;
+    // Expand on a diagram here shows it over the tour, in place of this.
+    floem::reactive::Effect::new(move |_| {
+        if state.changescape_expanded.with(Option::is_some) {
+            state.changescape_view.set(None);
+        }
+    });
     dyn_container(
         move || state.changescape_view.get(),
         move |id| match id {
@@ -132,7 +139,17 @@ fn card(cx: &Ctx, id: &str) -> AnyView {
         .into_iter()
         .filter_map(|el| Some(row(cx, el, cx.page.elements.get(el)?)))
         .collect();
-    let empty = rows.is_empty();
+    let pictures: Vec<AnyView> = cx
+        .page
+        .view_pictures(id)
+        .iter()
+        .enumerate()
+        .map(|(i, picture)| {
+            let key = tour::view_picture_key(id, i);
+            svg::svg_block(cx.clone(), picture.clone(), svg::Frame::Block(key))
+        })
+        .collect();
+    let empty = rows.is_empty() && pictures.is_empty();
     let header = Stack::horizontal((
         Stack::vertical((prose::paragraph(&view.t, TITLE), {
             let none = view.metric.is_empty();
@@ -154,6 +171,8 @@ fn card(cx: &Ctx, id: &str) -> AnyView {
         Label::new("This view names nothing Perch can open.")
             .style(|s| s.font_size(theme::TEXT_META).color(theme::fg_subtle()))
             .into_any()
+    } else if rows.is_empty() {
+        Empty::new().into_any()
     } else {
         Stack::vertical_from_iter(rows)
             .style(|s| s.flex_col().width_full())
@@ -161,7 +180,14 @@ fn card(cx: &Ctx, id: &str) -> AnyView {
             .style(|s| s.max_height(420.0).width_full())
             .into_any()
     };
-    Stack::vertical((header, body))
+    let drawn = !pictures.is_empty();
+    let pictures = Stack::vertical_from_iter(pictures).style(move |s| {
+        s.flex_col()
+            .gap(8.0)
+            .width_full()
+            .apply_if(drawn, |s| s.padding_bottom(8.0))
+    });
+    Stack::vertical((header, pictures, body))
         .debug_name(format!("Changescape view {id}"))
         // A click inside is not a click outside.
         .on_event_stop(el::Click, |_, _| {})

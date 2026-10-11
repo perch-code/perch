@@ -840,6 +840,66 @@ fn a_commit_the_checkout_lacks_opens_on_github() {
     );
 }
 
+/// Case 12 with a view that is one diagram and no table, as Jobs is.
+fn cache_with_view_picture(sha: &str) -> tempfile::TempDir {
+    cache_patched(TOUR, sha, |page| {
+        page["views"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+            "id": "jobs", "sec": "change", "t": "Jobs", "s": "",
+            "ic": "jobs", "q": "", "state": "applies", "metric": "", "narration": null,
+            "blocks": [{ "type": "svg", "svg": DIAGRAM,
+                "hot": { "k": "fn:calc.ops.multiply" } }] }));
+    })
+}
+
+/// The diagram in the popover of the view `id`.
+fn view_diagram(harness: &HeadlessHarness, id: &str) -> floem::kurbo::Rect {
+    let card = named(harness.root_id(), &format!("Changescape view {id}")).expect("no popover");
+    let mut found = Vec::new();
+    all_named(card, "Changescape diagram", &mut found);
+    found
+        .first()
+        .expect("no diagram in the popover")
+        .get_visual_rect_no_clip()
+}
+
+#[test]
+fn a_view_that_is_a_diagram_draws_it_and_a_node_opens_its_element() {
+    let (mut harness, state, _root) = opened_in(cache_with_view_picture(HEAD));
+    state.changescape_view.set(Some("jobs".into()));
+    redraw(&mut harness);
+    redraw(&mut harness);
+    let card = named(harness.root_id(), "Changescape view jobs").expect("no popover");
+    assert_eq!(shown_under(card, "Changescape view row"), 0);
+    let diagram = view_diagram(&harness, "jobs");
+    let z = diagram.width() / 200.0;
+    assert!(z > 0.5, "fitted to the popover, not left tiny: {z}");
+    let (x, y) = (diagram.x0 + 40.0 * z, diagram.y0 + 20.0 * z);
+    harness.pointer_move(x, y);
+    harness.click(x, y);
+    redraw(&mut harness);
+    assert_eq!(state.changescape_view.get(), None);
+    assert_eq!(state.tab.get(), ItemTab::Code);
+    assert_eq!(state.active.get().as_deref(), Some(OPS));
+}
+
+#[test]
+fn expand_on_a_views_diagram_shows_it_over_the_tour_in_place_of_the_popover() {
+    let (mut harness, state, _root) = opened_in(cache_with_view_picture(HEAD));
+    state.changescape_view.set(Some("jobs".into()));
+    redraw(&mut harness);
+    click(&mut harness, "Changescape expand");
+    redraw(&mut harness);
+    assert_eq!(
+        state.changescape_expanded.get().as_deref(),
+        Some("view:0:jobs")
+    );
+    assert_eq!(state.changescape_view.get(), None);
+    expanded_diagram(&harness);
+}
+
 /// A status as the schema has it: of `state`, with `error`.
 fn status_json(state: &str, error: Option<&str>) -> String {
     serde_json::json!({

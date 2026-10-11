@@ -8,8 +8,8 @@
 //! in two steps instead: the tour on its own, kept out when it does not
 //! read, and then the rest. Perch draws no view as a section, so it does
 //! not read the views' blocks, and a block of a new shape never fails a
-//! page. It keeps only the element each table row names, which a
-//! `view:<id>` ref lists.
+//! page. It keeps only what a `view:<id>` ref shows: the element each
+//! table row names, and each diagram.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Deref;
@@ -29,6 +29,8 @@ pub struct LoadedPage {
     /// The elements each view's table rows name, by view id, in row
     /// order and each once.
     view_rows: HashMap<String, Vec<String>>,
+    /// The diagrams of each view's `svg` blocks, by view id, in order.
+    view_pictures: HashMap<String, Vec<Svg>>,
 }
 
 impl LoadedPage {
@@ -41,6 +43,7 @@ impl LoadedPage {
         };
         let mut value: Value = serde_json::from_slice(bytes).map_err(parse)?;
         let mut view_rows = HashMap::new();
+        let mut view_pictures = HashMap::new();
         if let Some(views) = value.get_mut("views").and_then(Value::as_array_mut) {
             for view in views {
                 let Some(blocks) = view.get_mut("blocks").map(Value::take) else {
@@ -49,6 +52,7 @@ impl LoadedPage {
                 view["blocks"] = Value::Array(Vec::new());
                 if let Some(id) = view.get("id").and_then(Value::as_str) {
                     view_rows.insert(id.to_string(), row_elements(&blocks));
+                    view_pictures.insert(id.to_string(), svg_blocks(&blocks));
                 }
             }
         }
@@ -68,6 +72,7 @@ impl LoadedPage {
             page,
             tour_error,
             view_rows,
+            view_pictures,
         })
     }
 
@@ -86,6 +91,11 @@ impl LoadedPage {
             .filter(|el| self.page.elements.contains_key(*el))
             .map(String::as_str)
             .collect()
+    }
+
+    /// The diagrams of the view `id`, in block order.
+    pub fn view_pictures(&self, id: &str) -> &[Svg] {
+        self.view_pictures.get(id).map_or(&[], Vec::as_slice)
     }
 
     /// The tour, when the page has one that read.
@@ -135,6 +145,32 @@ fn row_elements(blocks: &Value) -> Vec<String> {
         }
     }
     out
+}
+
+/// Each `svg` block that has its SVG, with the `hot` entries that name
+/// an element. Read from the JSON as it is, so a block of another shape
+/// is left out, not an error.
+fn svg_blocks(blocks: &Value) -> Vec<Svg> {
+    blocks
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("svg"))
+        .filter_map(|block| {
+            let svg = block.get("svg")?.as_str().filter(|svg| !svg.is_empty())?;
+            let hot = block
+                .get("hot")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+                .filter_map(|(node, el)| Some((node.clone(), el.as_str()?.to_string())))
+                .collect();
+            Some(Svg {
+                svg: svg.to_string(),
+                hot,
+            })
+        })
+        .collect()
 }
 
 /// What a ref names: a GitHub comment, a view, or an element.
@@ -406,6 +442,25 @@ mod tests {
             { "type": "heatmap", "rows": [{ "el": "pr:1" }, { "el": "pr:3" }] },
         ]);
         assert_eq!(row_elements(&blocks), ["pr:1", "pr:2", "pr:3"]);
+    }
+
+    #[test]
+    fn a_views_pictures_are_its_svg_blocks_that_have_an_svg() {
+        let blocks = serde_json::json!([
+            { "type": "svg", "svg": "<svg/>", "hot": { "a": "job:x", "b": 7 } },
+            { "type": "svg", "hot": { "a": "job:y" } },
+            { "type": "svg", "svg": "" },
+            { "type": "table", "svg": "<svg/>" },
+            { "type": "svg", "svg": "<svg id='2'/>" },
+        ]);
+        let pictures = svg_blocks(&blocks);
+        assert_eq!(pictures.len(), 2);
+        assert_eq!(pictures[0].svg, "<svg/>");
+        assert_eq!(
+            pictures[0].hot,
+            BTreeMap::from([("a".to_string(), "job:x".to_string())])
+        );
+        assert!(pictures[1].hot.is_empty());
     }
 
     fn chapter(verdicts: &[Option<&str>], own: Option<&str>) -> v3::TourChapter {
