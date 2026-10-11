@@ -2,7 +2,10 @@
 
 use perch_agent::{parse_line, RunEvent};
 
-const FIXTURE: &str = include_str!("fixtures/stream.jsonl");
+const FIXTURE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/stream.jsonl"
+));
 
 fn events() -> Vec<RunEvent> {
     FIXTURE.lines().flat_map(parse_line).collect()

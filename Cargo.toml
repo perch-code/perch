@@ -50,6 +50,16 @@ opt-level = 3
 lto = "thin"
 codegen-units = 4
 
+# A release build to run on your own machine: `cargo run --profile local`.
+# Thin LTO optimizes perch again with every dependency on each build, and
+# took 313 of the 503 seconds that a release build of the perch crate
+# took. This profile also uses more codegen units and builds incrementally.
+[profile.local]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+
 # The fork's `perch` branch is upstream main with the patches Perch waits on
 # cherry-picked onto it: a fix for a floem panic ("all view ids are created
 # with a root") when a view is removed in the same update batch as its
