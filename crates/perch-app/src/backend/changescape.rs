@@ -153,6 +153,28 @@ fn can_build(binary: &str, again: bool) -> Ability {
     ability
 }
 
+/// Bring the skill's environment up to its lock file, here and not in the
+/// build's sandbox, where `uv` cannot sync. A sync that fails leaves the
+/// environment as it was, which may still run.
+fn sync_skill(skill: &Path) {
+    let Some(uv) = perch_agent::find_binary("uv") else {
+        tracing::warn!("no uv to sync the changescape skill with");
+        return;
+    };
+    match std::process::Command::new(uv)
+        .args(["sync", "--quiet", "--project"])
+        .arg(skill)
+        .output()
+    {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => tracing::warn!(
+            stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+            "could not sync the changescape skill"
+        ),
+        Err(e) => tracing::warn!(error = %e, "could not run uv to sync the changescape skill"),
+    }
+}
+
 /// The pull requests with a build running, by repository and number:
 /// one at a time each.
 fn building() -> &'static Mutex<HashSet<(String, u64)>> {
@@ -253,13 +275,19 @@ async fn run_build(
         clone.display(),
         dir.display()
     );
+    let skill_dir = perch_changescape::skill_available();
+    if let Some(skill) = skill_dir.clone() {
+        tokio::task::spawn_blocking(move || sync_skill(&skill))
+            .await
+            .ok();
+    }
     let spec = perch_agent::ChangescapeSpec {
         binary,
         model: config.agent.model.clone(),
         repo: clone,
         cache_root: root,
         build_dir: dir.clone(),
-        skill_dir: perch_changescape::skill_available(),
+        skill_dir,
         github_token,
         prompt,
     };
