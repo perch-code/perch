@@ -22,14 +22,13 @@ pub struct AddRow {
     pub op: ::std::string::String,
     pub text: ::std::string::String,
 }
-#[doc = "The line that a comment points at, on one side of the diff."]
+#[doc = "Where an inline comment points, on one side of the diff. `lines` is None when no line of the\npage holds the code that the comment was left on, so the comment keeps only its file."]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
 pub struct Anchor {
-    pub end: i64,
+    #[serde(deserialize_with = "::std::option::Option::deserialize")]
+    pub lines: ::std::option::Option<Range>,
     pub path: ::std::string::String,
     pub side: Side,
-    #[serde(deserialize_with = "::std::option::Option::deserialize")]
-    pub start: ::std::option::Option<i64>,
 }
 #[doc = "`AppearsItem`"]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
@@ -243,23 +242,6 @@ impl ::std::convert::TryFrom<::std::string::String> for ColumnKind {
         value.parse()
     }
 }
-#[doc = "A review comment on the pull request, as plain text. A reply is always of the same kind as its parent."]
-#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
-pub struct Comment {
-    #[serde(deserialize_with = "::std::option::Option::deserialize")]
-    pub anchor: ::std::option::Option<Anchor>,
-    pub at: ::std::string::String,
-    pub author: ::std::string::String,
-    pub body: ::std::string::String,
-    pub id: i64,
-    pub kind: CommentKind,
-    pub outdated: bool,
-    #[serde(deserialize_with = "::std::option::Option::deserialize")]
-    pub reply_to: ::std::option::Option<i64>,
-    #[serde(deserialize_with = "::std::option::Option::deserialize")]
-    pub state: ::std::option::Option<::std::string::String>,
-    pub url: ::std::string::String,
-}
 #[doc = "Where a review comment sits on GitHub."]
 #[derive(
     :: serde :: Deserialize,
@@ -320,6 +302,43 @@ impl ::std::convert::TryFrom<::std::string::String> for CommentKind {
 pub struct CommentRef {
     pub id: i64,
     pub kind: CommentKind,
+}
+#[doc = "`CommentsItem`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind")]
+pub enum CommentsItem {
+    #[doc = "InlineComment\n\nA comment on a line of the diff. A reply takes the anchor of the thread that it answers."]
+    #[serde(rename = "inline")]
+    Inline {
+        anchor: Anchor,
+        at: ::std::string::String,
+        author: ::std::string::String,
+        body: ::std::string::String,
+        id: i64,
+        outdated: bool,
+        #[serde(deserialize_with = "::std::option::Option::deserialize")]
+        reply_to: ::std::option::Option<i64>,
+        url: ::std::string::String,
+    },
+    #[doc = "ReviewComment\n\nThe text of a submitted review, with its verdict."]
+    #[serde(rename = "review")]
+    Review {
+        at: ::std::string::String,
+        author: ::std::string::String,
+        body: ::std::string::String,
+        id: i64,
+        state: ReviewState,
+        url: ::std::string::String,
+    },
+    #[doc = "IssueComment\n\nA comment on the conversation of the pull request."]
+    #[serde(rename = "issue")]
+    Issue {
+        at: ::std::string::String,
+        author: ::std::string::String,
+        body: ::std::string::String,
+        id: i64,
+        url: ::std::string::String,
+    },
 }
 #[doc = "A line that the base commit deletes."]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
@@ -870,6 +889,30 @@ pub struct InView {
     #[serde(rename = "where")]
     pub where_: ::std::string::String,
 }
+#[doc = "A comment on a line of the diff. A reply takes the anchor of the thread that it answers."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
+pub struct InlineComment {
+    pub anchor: Anchor,
+    pub at: ::std::string::String,
+    pub author: ::std::string::String,
+    pub body: ::std::string::String,
+    pub id: i64,
+    pub kind: ::std::string::String,
+    pub outdated: bool,
+    #[serde(deserialize_with = "::std::option::Option::deserialize")]
+    pub reply_to: ::std::option::Option<i64>,
+    pub url: ::std::string::String,
+}
+#[doc = "A comment on the conversation of the pull request."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
+pub struct IssueComment {
+    pub at: ::std::string::String,
+    pub author: ::std::string::String,
+    pub body: ::std::string::String,
+    pub id: i64,
+    pub kind: ::std::string::String,
+    pub url: ::std::string::String,
+}
 #[doc = "`ItemsItem`"]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
 #[serde(tag = "cell")]
@@ -1167,7 +1210,7 @@ pub struct NumberCell {
 #[doc = "One page of data for one pull request."]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
 pub struct Page {
-    pub comments: ::std::vec::Vec<Comment>,
+    pub comments: ::std::vec::Vec<CommentsItem>,
     pub elements: ::std::collections::HashMap<::std::string::String, Element>,
     pub facets: ::std::vec::Vec<Facet>,
     pub files: ::std::vec::Vec<File>,
@@ -1451,6 +1494,76 @@ pub struct Rev {
     #[serde(rename = "ref")]
     pub ref_: ::std::string::String,
     pub sha: ::std::string::String,
+}
+#[doc = "The text of a submitted review, with its verdict."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
+pub struct ReviewComment {
+    pub at: ::std::string::String,
+    pub author: ::std::string::String,
+    pub body: ::std::string::String,
+    pub id: i64,
+    pub kind: ::std::string::String,
+    pub state: ReviewState,
+    pub url: ::std::string::String,
+}
+#[doc = "The verdict of a submitted review."]
+#[derive(
+    :: serde :: Deserialize,
+    :: serde :: Serialize,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    Hash,
+    Ord,
+    PartialEq,
+    PartialOrd,
+)]
+pub enum ReviewState {
+    #[serde(rename = "approved")]
+    Approved,
+    #[serde(rename = "changes_requested")]
+    ChangesRequested,
+    #[serde(rename = "commented")]
+    Commented,
+    #[serde(rename = "dismissed")]
+    Dismissed,
+}
+impl ::std::fmt::Display for ReviewState {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::Approved => f.write_str("approved"),
+            Self::ChangesRequested => f.write_str("changes_requested"),
+            Self::Commented => f.write_str("commented"),
+            Self::Dismissed => f.write_str("dismissed"),
+        }
+    }
+}
+impl ::std::str::FromStr for ReviewState {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "approved" => Ok(Self::Approved),
+            "changes_requested" => Ok(Self::ChangesRequested),
+            "commented" => Ok(Self::Commented),
+            "dismissed" => Ok(Self::Dismissed),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for ReviewState {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for ReviewState {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
 }
 #[doc = "`RowsItem`"]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]

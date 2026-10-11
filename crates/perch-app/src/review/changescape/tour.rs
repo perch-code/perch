@@ -315,7 +315,7 @@ pub fn reference(cx: &Ctx, target: Option<Target>) -> AnyView {
             let Some(comment) = cx.page.comment(r) else {
                 return Empty::new().into_any();
             };
-            let url = comment.url.clone();
+            let url = comment.url.to_string();
             (
                 format!("The comment by @{}", comment.author),
                 Box::new(move || crate::ui::widgets::open_in_browser(&url)),

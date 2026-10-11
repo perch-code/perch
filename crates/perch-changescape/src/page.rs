@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::path::Path;
 
-use crate::v4::{self, BlocksItem, PicturesItem, Verdict, ViewId};
+use crate::v4::{self, BlocksItem, CommentKind, CommentsItem, PicturesItem, Verdict, ViewId};
 use crate::Error;
 
 /// A page this Perch draws.
@@ -87,11 +87,43 @@ impl LoadedPage {
 
     /// The comment a reference names: GitHub numbers comments of each
     /// kind on their own.
-    pub fn comment(&self, r: &v4::CommentRef) -> Option<&v4::Comment> {
+    pub fn comment(&self, r: &v4::CommentRef) -> Option<Comment<'_>> {
         self.page
             .comments
             .iter()
+            .map(Comment::from)
             .find(|c| c.id == r.id && c.kind == r.kind)
+    }
+}
+
+/// What every kind of comment has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Comment<'a> {
+    pub kind: CommentKind,
+    pub id: i64,
+    pub author: &'a str,
+    pub url: &'a str,
+}
+
+impl<'a> From<&'a CommentsItem> for Comment<'a> {
+    fn from(comment: &'a CommentsItem) -> Comment<'a> {
+        let (kind, id, author, url) = match comment {
+            CommentsItem::Inline {
+                id, author, url, ..
+            } => (CommentKind::Inline, id, author, url),
+            CommentsItem::Review {
+                id, author, url, ..
+            } => (CommentKind::Review, id, author, url),
+            CommentsItem::Issue {
+                id, author, url, ..
+            } => (CommentKind::Issue, id, author, url),
+        };
+        Comment {
+            kind,
+            id: *id,
+            author,
+            url,
+        }
     }
 }
 
@@ -331,6 +363,25 @@ mod tests {
             pictures[0].hot,
             BTreeMap::from([("n".to_string(), "job:x".to_string())])
         );
+    }
+
+    #[test]
+    fn a_comment_is_named_by_its_kind_and_its_id() {
+        let mut page = page(serde_json::json!([]));
+        page.page.comments = serde_json::from_value(serde_json::json!([
+            { "kind": "inline", "id": 7, "author": "a", "at": "t", "body": "b", "url": "u/a",
+              "outdated": false, "reply_to": null,
+              "anchor": { "path": "a.py", "side": "head", "lines": null } },
+            { "kind": "issue", "id": 7, "author": "b", "at": "t", "body": "b", "url": "u/b" },
+        ]))
+        .unwrap();
+        let named = |kind| {
+            page.comment(&v4::CommentRef { kind, id: 7 })
+                .map(|c| c.author)
+        };
+        assert_eq!(named(CommentKind::Inline), Some("a"));
+        assert_eq!(named(CommentKind::Issue), Some("b"));
+        assert_eq!(named(CommentKind::Review), None);
     }
 
     #[test]

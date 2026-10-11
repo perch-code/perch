@@ -53,11 +53,17 @@
       "type": "object"
     },
     "Anchor": {
-      "description": "The line that a comment points at, on one side of the diff.",
+      "description": "Where an inline comment points, on one side of the diff. `lines` is None when no line of the\npage holds the code that the comment was left on, so the comment keeps only its file.",
       "properties": {
-        "end": {
-          "title": "End",
-          "type": "integer"
+        "lines": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Range"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "path": {
           "title": "Path",
@@ -65,24 +71,12 @@
         },
         "side": {
           "$ref": "#/$defs/Side"
-        },
-        "start": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Start"
         }
       },
       "required": [
-        "end",
+        "lines",
         "path",
-        "side",
-        "start"
+        "side"
       ],
       "title": "Anchor",
       "type": "object"
@@ -394,84 +388,6 @@
       ],
       "title": "ColumnKind",
       "type": "string"
-    },
-    "Comment": {
-      "description": "A review comment on the pull request, as plain text. A reply is always of the same kind as its parent.",
-      "properties": {
-        "anchor": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/Anchor"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "at": {
-          "title": "At",
-          "type": "string"
-        },
-        "author": {
-          "title": "Author",
-          "type": "string"
-        },
-        "body": {
-          "title": "Body",
-          "type": "string"
-        },
-        "id": {
-          "title": "Id",
-          "type": "integer"
-        },
-        "kind": {
-          "$ref": "#/$defs/CommentKind"
-        },
-        "outdated": {
-          "title": "Outdated",
-          "type": "boolean"
-        },
-        "reply_to": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "Reply To"
-        },
-        "state": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "title": "State"
-        },
-        "url": {
-          "title": "Url",
-          "type": "string"
-        }
-      },
-      "required": [
-        "anchor",
-        "at",
-        "author",
-        "body",
-        "id",
-        "kind",
-        "outdated",
-        "reply_to",
-        "state",
-        "url"
-      ],
-      "title": "Comment",
-      "type": "object"
     },
     "CommentKind": {
       "description": "Where a review comment sits on GitHub.",
@@ -1303,6 +1219,109 @@
       "title": "InView",
       "type": "object"
     },
+    "InlineComment": {
+      "description": "A comment on a line of the diff. A reply takes the anchor of the thread that it answers.",
+      "properties": {
+        "anchor": {
+          "$ref": "#/$defs/Anchor"
+        },
+        "at": {
+          "title": "At",
+          "type": "string"
+        },
+        "author": {
+          "title": "Author",
+          "type": "string"
+        },
+        "body": {
+          "title": "Body",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "inline",
+          "default": "inline",
+          "title": "Kind",
+          "type": "string"
+        },
+        "outdated": {
+          "title": "Outdated",
+          "type": "boolean"
+        },
+        "reply_to": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Reply To"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "anchor",
+        "at",
+        "author",
+        "body",
+        "id",
+        "kind",
+        "outdated",
+        "reply_to",
+        "url"
+      ],
+      "title": "InlineComment",
+      "type": "object"
+    },
+    "IssueComment": {
+      "description": "A comment on the conversation of the pull request.",
+      "properties": {
+        "at": {
+          "title": "At",
+          "type": "string"
+        },
+        "author": {
+          "title": "Author",
+          "type": "string"
+        },
+        "body": {
+          "title": "Body",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "issue",
+          "default": "issue",
+          "title": "Kind",
+          "type": "string"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "at",
+        "author",
+        "body",
+        "id",
+        "kind",
+        "url"
+      ],
+      "title": "IssueComment",
+      "type": "object"
+    },
     "KeepRow": {
       "description": "A line that both commits keep.",
       "properties": {
@@ -1956,6 +1975,62 @@
       ],
       "title": "Rev",
       "type": "object"
+    },
+    "ReviewComment": {
+      "description": "The text of a submitted review, with its verdict.",
+      "properties": {
+        "at": {
+          "title": "At",
+          "type": "string"
+        },
+        "author": {
+          "title": "Author",
+          "type": "string"
+        },
+        "body": {
+          "title": "Body",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "review",
+          "default": "review",
+          "title": "Kind",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/ReviewState"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "at",
+        "author",
+        "body",
+        "id",
+        "kind",
+        "state",
+        "url"
+      ],
+      "title": "ReviewComment",
+      "type": "object"
+    },
+    "ReviewState": {
+      "description": "The verdict of a submitted review.",
+      "enum": [
+        "approved",
+        "changes_requested",
+        "commented",
+        "dismissed"
+      ],
+      "title": "ReviewState",
+      "type": "string"
     },
     "Section": {
       "description": "A section of the page. A section with no views still gives its reason.",
@@ -3060,7 +3135,25 @@
   "properties": {
     "comments": {
       "items": {
-        "$ref": "#/$defs/Comment"
+        "discriminator": {
+          "mapping": {
+            "inline": "#/$defs/InlineComment",
+            "issue": "#/$defs/IssueComment",
+            "review": "#/$defs/ReviewComment"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/InlineComment"
+          },
+          {
+            "$ref": "#/$defs/ReviewComment"
+          },
+          {
+            "$ref": "#/$defs/IssueComment"
+          }
+        ]
       },
       "title": "Comments",
       "type": "array"
