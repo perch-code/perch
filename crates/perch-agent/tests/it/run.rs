@@ -317,7 +317,7 @@ async fn hard_parent_death_watchdog_kills_the_agent_descendant() {
     );
     let binary = fake_agent(tmp.path(), &body);
     let mut parent = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "watchdog_fixture_parent", "--nocapture"])
+        .args(["--exact", "run::watchdog_fixture_parent", "--nocapture"])
         .env(WATCHDOG_FIXTURE, "1")
         .env("PERCH_AGENT_FIXTURE_BINARY", &binary)
         .env("PERCH_AGENT_FIXTURE_READY", &ready_file)
