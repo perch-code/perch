@@ -1547,9 +1547,9 @@ pub struct ReviewState {
     /// The diagram shown expanded over the tour, by its key (see
     /// `changescape::tour::picture`). Not kept with the pane.
     pub changescape_expanded: RwSignal<Option<String>>,
-    /// The view whose rows show in a popover over the tour, by id, when a
-    /// `view:<id>` ref was followed. Not kept with the pane.
-    pub changescape_view: RwSignal<Option<String>>,
+    /// The view shown in a popover over the tour, when a target that
+    /// names it was followed. Not kept with the pane.
+    pub changescape_view: RwSignal<Option<perch_changescape::v4::ViewId>>,
     /// The stop in view in the tour, by id, which the outline and the
     /// code map light up. None above the first stop and in the ending.
     pub changescape_here: RwSignal<Option<String>>,

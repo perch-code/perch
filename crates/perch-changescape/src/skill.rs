@@ -20,22 +20,11 @@ fn skill_available_in(home: &Path) -> Option<PathBuf> {
     find_in_skills(&claude.join("skills")).or_else(|| find_in_plugins(&claude.join("plugins"), 0))
 }
 
-/// Where a skill keeps its page schema: `contract/` from skill 2.0, and
-/// `schema/` before it.
-const SCHEMAS: &[&str] = &["contract/page.v3.schema.json", "schema/page.v3.schema.json"];
-
-/// Whether the skill in `dir` writes a tour: its page schema has one.
-/// A skill from before the tour still reports page format 3, so its
-/// schema is the only sign.
-pub fn skill_writes_tour(dir: &Path) -> bool {
-    let Some(bytes) = SCHEMAS
-        .iter()
-        .find_map(|path| std::fs::read(dir.join(path)).ok())
-    else {
-        return false;
-    };
-    serde_json::from_slice::<serde_json::Value>(&bytes)
-        .is_ok_and(|schema| schema.pointer("/properties/tour").is_some())
+/// Whether the skill in `dir` writes the page format this Perch draws:
+/// it ships that format's schema.
+pub fn skill_is_current(dir: &Path) -> bool {
+    dir.join(format!("contract/page.v{}.schema.json", crate::PAGE_FORMAT))
+        .is_file()
 }
 
 fn find_in_skills(skills: &Path) -> Option<PathBuf> {
@@ -130,24 +119,13 @@ mod tests {
     }
 
     #[test]
-    fn a_skill_writes_a_tour_when_its_schema_has_one() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(!skill_writes_tour(dir.path()));
-        std::fs::create_dir_all(dir.path().join("schema")).unwrap();
-        let schema = dir.path().join("schema/page.v3.schema.json");
-        std::fs::write(&schema, r#"{"properties": {"sections": {}}}"#).unwrap();
-        assert!(!skill_writes_tour(dir.path()));
-        std::fs::write(&schema, r#"{"properties": {"tour": {}}}"#).unwrap();
-        assert!(skill_writes_tour(dir.path()));
-    }
-
-    #[test]
-    fn a_skill_keeps_its_schema_in_contract_from_2_0() {
+    fn a_skill_is_current_when_it_ships_the_format_4_schema() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("contract")).unwrap();
-        let schema = dir.path().join("contract/page.v3.schema.json");
-        std::fs::write(&schema, r#"{"properties": {"tour": {}}}"#).unwrap();
-        assert!(skill_writes_tour(dir.path()));
+        std::fs::write(dir.path().join("contract/page.v3.schema.json"), "{}").unwrap();
+        assert!(!skill_is_current(dir.path()));
+        std::fs::write(dir.path().join("contract/page.v4.schema.json"), "{}").unwrap();
+        assert!(skill_is_current(dir.path()));
     }
 
     #[test]

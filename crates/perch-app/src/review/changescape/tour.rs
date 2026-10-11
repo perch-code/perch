@@ -18,8 +18,8 @@ use std::collections::HashSet;
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 use floem::AnyView;
-use perch_changescape::page::{self, runs, Ref, Run, Svg, Verdict};
-use perch_changescape::v3::{Tour, TourChapter};
+use perch_changescape::page::{self, runs, Run, Svg, Target};
+use perch_changescape::v4::{Chapter, Flag, PicturesItem, Stop, Tour, Verdict, ViewId};
 use perch_changescape::LoadedPage;
 
 use crate::backend::Backend;
@@ -57,7 +57,7 @@ impl Ctx {
 
     /// Whether the agent wrote the tour's text.
     pub fn narrated(&self) -> bool {
-        self.tour().narrated.unwrap_or(false)
+        self.tour().narrated
     }
 }
 
@@ -229,20 +229,17 @@ pub struct Lines {
 }
 
 /// The lines each chapter has to read and to skim, and the bands below
-/// the stops by their verdict. A band of a verdict this Perch does not
-/// know is skimmed.
+/// the stops by their verdict. A band that is read is counted as skimmed.
 pub fn lines(tour: &Tour) -> Lines {
     let mut lines = Lines::default();
     for chapter in &tour.chapters {
-        if let Some(l) = &chapter.lines {
-            lines.read += l.read;
-            lines.skim += l.skim;
-        }
+        lines.read += chapter.lines.read;
+        lines.skim += chapter.lines.skim;
     }
     for band in &tour.below {
-        match band.verdict.as_str() {
-            "skip" => lines.skip += band.lines,
-            _ => lines.skim += band.lines,
+        match band.verdict {
+            Verdict::Skip => lines.skip += band.lines,
+            Verdict::Read | Verdict::Skim => lines.skim += band.lines,
         }
     }
     lines
@@ -286,17 +283,12 @@ fn lines_bar(tour: &Tour) -> impl IntoView {
 
 /// A flag: a fact that changes how to read the pull request, and a link
 /// to what it points at.
-fn flag_view(cx: &Ctx, flag: &perch_changescape::v3::TourFlag) -> impl IntoView {
-    let warn = flag.kind.as_deref() == Some("warn");
+fn flag_view(cx: &Ctx, flag: &Flag) -> impl IntoView {
     Stack::vertical((
         Stack::horizontal((
-            Label::new(if warn { "⚠" } else { "ⓘ" }).style(move |s| {
+            Label::new("⚠").style(|s| {
                 s.font_size(theme::TEXT_BODY)
-                    .color(if warn {
-                        theme::notice_fg()
-                    } else {
-                        theme::fg_muted()
-                    })
+                    .color(theme::notice_fg())
                     .margin_right(8.0)
                     .selectable(false)
             }),
@@ -304,57 +296,48 @@ fn flag_view(cx: &Ctx, flag: &perch_changescape::v3::TourFlag) -> impl IntoView 
         ))
         .style(|s| s.items_center().width_full()),
         prose::paragraph(&flag.text, MUTED),
-        reference(cx, flag.ref_.as_deref()),
+        reference(cx, flag.target.as_ref().map(Target::from)),
     ))
     .debug_name("Changescape flag")
-    .style(move |s| {
-        let s = s.flex_col().gap(4.0).width_full().padding(12.0);
-        if warn {
-            notice_box(s)
-        } else {
-            s.background(theme::canvas_subtle())
-                .border(1.0)
-                .border_color(theme::border_muted())
-                .border_radius(theme::RADIUS)
-        }
-    })
+    .style(|s| notice_box(s.flex_col().gap(4.0).width_full().padding(12.0)))
 }
 
-/// A link to what a ref names: a GitHub comment, which opens on GitHub,
-/// a view, whose rows show in a popover, or an element, which opens as
-/// `view::open_element` says. Nothing for a ref the page does not hold.
-pub fn reference(cx: &Ctx, r: Option<&str>) -> AnyView {
-    let Some(r) = r else {
+/// A link to what a flag or a stop's Watch line targets: a GitHub comment,
+/// which opens on GitHub, a view, whose rows show in a popover, or an
+/// element, which opens as `view::open_element` says. Nothing for a target
+/// the page does not hold.
+pub fn reference(cx: &Ctx, target: Option<Target>) -> AnyView {
+    let Some(target) = target else {
         return Empty::new().into_any();
     };
-    let (text, open): (String, Box<dyn Fn()>) = match page::parse_ref(r) {
-        Ref::Comment(..) => {
+    let (text, open): (String, Box<dyn Fn()>) = match target {
+        Target::Comment(r) => {
             let Some(comment) = cx.page.comment(r) else {
                 return Empty::new().into_any();
             };
             let url = comment.url.clone();
             (
-                format!("The comment by @{}", comment.by),
+                format!("The comment by @{}", comment.author),
                 Box::new(move || crate::ui::widgets::open_in_browser(&url)),
             )
         }
-        Ref::View(id) => {
+        Target::View(id) => {
             let Some(view) = cx.page.view(id) else {
                 return Empty::new().into_any();
             };
-            let (state, id) = (cx.state, id.to_string());
+            let state = cx.state;
             (
-                format!("See {}", view.t),
-                Box::new(move || state.changescape_view.set(Some(id.clone()))),
+                format!("See {}", view.title),
+                Box::new(move || state.changescape_view.set(Some(id))),
             )
         }
-        Ref::Element(el) => {
+        Target::Element(el) => {
             let Some(element) = cx.page.elements.get(el) else {
                 return Empty::new().into_any();
             };
             let (cx, el) = (cx.clone(), el.to_string());
             (
-                format!("Open {}", element.t),
+                format!("Open {}", element.title),
                 Box::new(move || cx.open(&el)),
             )
         }
@@ -382,7 +365,7 @@ pub fn element_rows(cx: &Ctx, rows: &[String]) -> AnyView {
         .iter()
         .take(ROWS_SHOWN)
         .map(|el| {
-            let title = cx.page.elements[*el].t.clone();
+            let title = cx.page.elements[*el].title.clone();
             let (cx, el) = (cx.clone(), el.to_string());
             Container::new(Label::new(title).style(|s| {
                 s.font_size(theme::TEXT_BADGE)
@@ -445,7 +428,7 @@ fn contents(cx: &Ctx) -> impl IntoView {
             .stops
             .iter()
             .map(|stop| {
-                let skim = page::verdict(chapter, stop) == Verdict::Skim;
+                let skim = page::folds(stop);
                 let meta = format!(
                     "{} lines{}",
                     thousands(stop.lines),
@@ -458,7 +441,7 @@ fn contents(cx: &Ctx) -> impl IntoView {
         tour.chapters
             .iter()
             .map(|chapter| {
-                let lines = chapter.lines.as_ref().map_or(0, |l| l.read + l.skim);
+                let lines = chapter.lines.read + chapter.lines.skim;
                 let meta = format!("{} stops · {} lines", chapter.stops.len(), thousands(lines));
                 row(chapter.id.clone(), chapter.title.clone(), meta)
             })
@@ -481,7 +464,7 @@ fn contents(cx: &Ctx) -> impl IntoView {
 // Chapters
 // ---------------------------------------------------------------------
 
-fn chapter_view(cx: &Ctx, chapter: TourChapter, n: usize, of: usize) -> AnyView {
+fn chapter_view(cx: &Ctx, chapter: Chapter, n: usize, of: usize) -> AnyView {
     let mut parts: Vec<AnyView> = Vec::new();
     if of > 1 {
         parts.push(meta(format!("Chapter {n} of {of}")).into_any());
@@ -491,18 +474,16 @@ fn chapter_view(cx: &Ctx, chapter: TourChapter, n: usize, of: usize) -> AnyView 
         parts.push(prose::paragraph(intro, BODY).into_any());
     }
     if let Some(spine) = &chapter.spine {
-        if let Some(svg) = page::spine_svg(spine) {
-            parts.push(
-                diagram(
-                    cx,
-                    spine_key(&chapter.id),
-                    spine.caption.as_deref().or(spine.title.as_deref()),
-                    spine.note.as_deref(),
-                    svg,
-                )
-                .into_any(),
-            );
-        }
+        parts.push(
+            diagram(
+                cx,
+                spine_key(&chapter.id),
+                spine.caption.as_deref().or(spine.title.as_deref()),
+                spine.note.as_deref(),
+                page::spine_svg(spine),
+            )
+            .into_any(),
+        );
     }
     let mut stops: Vec<AnyView> = Vec::new();
     for run in runs(&chapter) {
@@ -526,7 +507,7 @@ fn chapter_view(cx: &Ctx, chapter: TourChapter, n: usize, of: usize) -> AnyView 
 
 /// The header of a chapter's section `k`, before its first stop: where it
 /// is among the sections, its title, and its intro.
-fn section_header(chapter: &TourChapter, k: usize) -> AnyView {
+fn section_header(chapter: &Chapter, k: usize) -> AnyView {
     let section = &chapter.sections[k];
     Stack::vertical((
         Label::new(format!("Section {} of {}", k + 1, chapter.sections.len())).style(|s| {
@@ -601,15 +582,16 @@ pub fn picture_key(stop: &str, i: usize) -> String {
 }
 
 /// The key of a view's picture.
-pub fn view_picture_key(view: &str, i: usize) -> String {
+pub fn view_picture_key(view: ViewId, i: usize) -> String {
     format!("view:{i}:{view}")
 }
 
 /// The diagram a key names, with its heading.
 pub fn picture(page: &LoadedPage, key: &str) -> Option<(String, Svg)> {
     if let Some((i, view)) = key.strip_prefix("view:").and_then(|k| k.split_once(':')) {
-        let svg = page.view_pictures(view).get(i.parse::<usize>().ok()?)?;
-        return Some((prose::plain(&page.view(view)?.t), svg.clone()));
+        let id: ViewId = view.parse().ok()?;
+        let svg = page.view_pictures(id).into_iter().nth(i.parse().ok()?)?;
+        return Some((prose::plain(&page.view(id)?.title), svg));
     }
     let tour = page.tour()?;
     if let Some(chapter) = key.strip_prefix("spine:") {
@@ -624,17 +606,21 @@ pub fn picture(page: &LoadedPage, key: &str) -> Option<(String, Svg)> {
             .clone()
             .or(spine.title.clone())
             .unwrap_or_default();
-        return Some((prose::plain(&title), page::spine_svg(spine)?));
+        return Some((prose::plain(&title), page::spine_svg(spine)));
     }
     let (i, stop) = key.strip_prefix("stop:")?.split_once(':')?;
     let (_, stop) = page.stop(stop)?;
     let picture = stop.pictures.get(i.parse::<usize>().ok()?)?;
-    let title = picture
-        .caption
+    let (caption, title) = match picture {
+        PicturesItem::Hunk { caption, title, .. } | PicturesItem::Seq { caption, title, .. } => {
+            (caption, title)
+        }
+    };
+    let heading = caption
         .clone()
-        .or(picture.title.clone())
+        .or(title.clone())
         .unwrap_or_else(|| stop.title.clone());
-    Some((prose::plain(&title), page::picture_svg(picture)?))
+    Some((prose::plain(&heading), page::picture_svg(picture)?))
 }
 
 /// The diagram Expand opened, over the whole tour and fitted to it, with
@@ -735,7 +721,7 @@ fn ending(cx: &Ctx) -> AnyView {
                 let left: Vec<_> = page::read_stops(tour)
                     .filter(|s| !marks.contains_key(&s.id) && !changed.iter().any(|c| c.id == s.id))
                     .collect();
-                let list = |stops: Vec<&perch_changescape::v3::TourStop>| {
+                let list = |stops: Vec<&Stop>| {
                     Stack::vertical_from_iter(stops.into_iter().map(|stop| {
                         let id = stop.id.clone();
                         Container::new(prose::line(&stop.title, BODY))
@@ -778,7 +764,7 @@ fn ending(cx: &Ctx) -> AnyView {
     if !tour.below.is_empty() {
         parts.push(section("In no stop"));
         for band in &tour.below {
-            let label = band.label.clone().unwrap_or_else(|| band.part.clone());
+            let label = band.label.clone();
             let files: Vec<String> = band.files.iter().map(|f| f.path.clone()).collect();
             parts.push(
                 Stack::vertical((
@@ -811,9 +797,9 @@ fn ending(cx: &Ctx) -> AnyView {
         for check in checks {
             parts.push(
                 Stack::vertical((
-                    prose::paragraph(&check.q, STRONG),
-                    prose::paragraph(&check.a, MUTED),
-                    element_rows(cx, &check.rows),
+                    prose::paragraph(&check.question, STRONG),
+                    prose::paragraph(&check.answer, MUTED),
+                    element_rows(cx, &check.elements),
                 ))
                 .debug_name("Changescape check")
                 .style(|s| s.flex_col().width_full())
@@ -852,23 +838,30 @@ mod tests {
 
     #[test]
     fn the_bar_counts_chapters_and_bands_by_verdict() {
+        let chapter = |id: &str, read: i64, skim: i64| {
+            serde_json::json!({
+                "id": id, "title": id.to_uppercase(), "verdict": "read", "stops": [],
+                "hash": null, "intro": null, "lines": { "read": read, "skim": skim },
+                "parts": [], "sections": [], "spine": null })
+        };
+        let band = |part: &str, verdict: &str, lines: i64| {
+            serde_json::json!({
+                "files": [], "label": part, "lines": lines, "part": part, "verdict": verdict })
+        };
         let tour: Tour = serde_json::from_value(serde_json::json!({
-            "chapters": [
-                { "id": "a", "title": "A", "stops": [], "lines": { "read": 10, "skim": 4 } },
-                { "id": "b", "title": "B", "stops": [], "lines": { "read": 5, "skim": 0 } },
-            ],
             "below": [
-                { "part": "docs", "verdict": "skim", "lines": 3 },
-                { "part": "generated", "verdict": "skip", "lines": 100 },
-                { "part": "odd", "verdict": "glance", "lines": 1 },
+                band("docs", "skim", 3),
+                band("generated", "skip", 100),
             ],
+            "chapters": [chapter("a", 10, 4), chapter("b", 5, 0)],
+            "ending": null, "flags": [], "map": [], "narrated": true, "summary": null,
         }))
         .unwrap();
         assert_eq!(
             lines(&tour),
             Lines {
                 read: 15,
-                skim: 8,
+                skim: 7,
                 skip: 100
             }
         );

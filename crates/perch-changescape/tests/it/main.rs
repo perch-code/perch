@@ -1,10 +1,9 @@
 //! The crate's tests on the shared conformance fixtures
 //! (`tests/fixtures/conformance/`, copied from the Changescape repo's
-//! `skill/schema/fixtures/`), as one test binary.
+//! `skill/src/changescape/contract/`, in page format 4), as one test binary.
 
 mod conformance;
 mod lookup;
-mod open_sets;
 
 use std::path::{Path, PathBuf};
 

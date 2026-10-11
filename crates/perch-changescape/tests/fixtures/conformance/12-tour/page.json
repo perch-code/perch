@@ -1,6 +1,5 @@
 {
-  "schema": 3,
-  "kind": "pr",
+  "schema": 4,
   "meta": {
     "key": "changescape-acme-calc-8",
     "title": "Add multiply() with helpers",
@@ -10,17 +9,11 @@
     "author": "ada",
     "state": "open",
     "language": "python",
-    "base": {
-      "ref": "main",
-      "sha": "1111111111111111111111111111111111111111"
-    },
-    "head": {
-      "ref": "multiply",
-      "sha": "2222222222222222222222222222222222222222"
-    },
+    "base": { "ref": "main", "sha": "1111111111111111111111111111111111111111" },
+    "head": { "ref": "multiply", "sha": "2222222222222222222222222222222222222222" },
     "adds": 10,
     "dels": 0,
-    "nfiles": 1,
+    "files": 1,
     "issues": [],
     "generated": "2026-10-08T12:00:00Z"
   },
@@ -28,56 +21,66 @@
     {
       "id": "overview",
       "label": "Overview",
-      "ic": "overview",
-      "q": "What does this change do?",
+      "icon": "overview",
+      "question": "What does this change do?",
       "empty": "",
-      "views": [
-        "overview"
-      ],
+      "views": ["overview"],
       "reason": null
     },
     {
       "id": "code",
       "label": "Code",
-      "ic": "lines",
-      "q": "What are the exact lines?",
+      "icon": "lines",
+      "question": "What are the exact lines?",
       "empty": "",
-      "views": [
-        "lines"
-      ],
+      "views": ["lines"],
       "reason": null
     }
   ],
   "elements": {
     "fn:calc.ops.multiply": {
-      "t": "multiply()",
-      "k": "function \u00b7 calc.ops",
-      "st": "added",
-      "d": "New: multiplies two numbers.",
+      "title": "multiply()",
+      "label": "function · calc.ops",
+      "kind": "function",
+      "name": "calc.ops.multiply",
+      "status": "added",
+      "detail": "New: multiplies two numbers.",
+      "hash": null,
+      "url": null,
+      "appears": [
+        { "stop": "multiply", "where": "stop" }
+      ],
       "refs": [
         {
-          "f": "calc/ops.py",
           "base": null,
-          "head": [
-            1,
-            3
-          ]
+          "base_path": null,
+          "head": { "start": 1, "end": 3 },
+          "head_path": "calc/ops.py",
+          "rows": [],
+          "whole_file": false
         }
       ]
     },
     "fn:calc.ops._multiply_helper": {
-      "t": "_multiply_helper()",
-      "k": "function \u00b7 calc.ops",
-      "st": "added",
-      "d": "New: helper for multiply.",
+      "title": "_multiply_helper()",
+      "label": "function · calc.ops",
+      "kind": "function",
+      "name": "calc.ops._multiply_helper",
+      "status": "added",
+      "detail": "New: helper for multiply.",
+      "hash": null,
+      "url": null,
+      "appears": [
+        { "stop": "multiply-helper", "where": "stop" }
+      ],
       "refs": [
         {
-          "f": "calc/ops.py",
           "base": null,
-          "head": [
-            4,
-            5
-          ]
+          "base_path": null,
+          "head": { "start": 4, "end": 5 },
+          "head_path": "calc/ops.py",
+          "rows": [],
+          "whole_file": false
         }
       ]
     }
@@ -85,206 +88,172 @@
   "views": [
     {
       "id": "overview",
-      "sec": "overview",
-      "t": "Overview",
-      "s": "the change at a glance",
-      "ic": "overview",
-      "q": "What does this change do?",
-      "state": "applies",
+      "section": "overview",
+      "title": "Overview",
+      "subtitle": "the change at a glance",
+      "icon": "overview",
+      "question": "What does this change do?",
       "metric": "",
       "narration": "Adds multiply() and a helper.",
       "blocks": [
-        {
-          "type": "narration",
-          "text": "Adds multiply() and a helper."
-        }
+        { "type": "narration", "id": "b1", "text": "Adds multiply() and a helper." }
       ]
     },
     {
       "id": "lines",
-      "sec": "code",
-      "t": "Code",
-      "s": "the exact lines",
-      "ic": "lines",
-      "q": "What are the exact lines?",
-      "state": "applies",
-      "metric": "+10 \u22120",
+      "section": "code",
+      "title": "Code",
+      "subtitle": "the exact lines",
+      "icon": "lines",
+      "question": "What are the exact lines?",
+      "metric": "+10 −0",
       "narration": null,
       "blocks": [
-        {
-          "type": "code"
-        }
+        { "type": "code", "id": "b1" }
       ]
     }
   ],
   "files": [
     {
       "path": "calc/ops.py",
-      "old": "calc/ops.py",
+      "old_path": "calc/ops.py",
       "status": "added",
-      "add": 10,
-      "del": 0,
+      "binary": false,
+      "adds": 10,
+      "dels": 0,
       "kind": "source",
+      "made_by": null,
+      "lines_by_kind": [
+        { "kind": "source", "adds": 10, "dels": 0 }
+      ],
       "hunks": [
         {
-          "head": "@@ -0,0 +1,10 @@",
-          "lines": [
-            [
-              null,
-              1,
-              "+",
-              "def multiply(a, b):"
-            ],
-            [
-              null,
-              2,
-              "+",
-              "    return a * b"
-            ],
-            [
-              null,
-              3,
-              "+",
-              ""
-            ],
-            [
-              null,
-              4,
-              "+",
-              "def _multiply_helper(a, b):"
-            ],
-            [
-              null,
-              5,
-              "+",
-              "    return multiply(a, b)"
-            ]
+          "base": { "start": 1, "count": 0 },
+          "head": { "start": 1, "count": 10 },
+          "rows": [
+            { "head": 1, "op": "add", "text": "def multiply(a, b):" },
+            { "head": 2, "op": "add", "text": "    return a * b" },
+            { "head": 3, "op": "add", "text": "" },
+            { "head": 4, "op": "add", "text": "def _multiply_helper(a, b):" },
+            { "head": 5, "op": "add", "text": "    return multiply(a, b)" }
           ]
         }
       ],
-      "text": {
+      "ship": {
+        "ship": "whole",
         "base": null,
         "head": "def multiply(a, b):\n    return a * b\n\ndef _multiply_helper(a, b):\n    return multiply(a, b)\n"
-      },
-      "whole": {
-        "ok": true
       }
     }
   ],
   "comments": [],
-  "notes": [],
+  "facets": [],
   "parts": [
     {
       "id": "new:calc",
       "label": "calc operations",
       "kind": "new",
       "verdict": "read",
-      "lines": {
-        "add": 10,
-        "del": 0
-      },
+      "adds": 10,
+      "dels": 0,
       "files": [
-        {
-          "path": "calc/ops.py",
-          "add": 10,
-          "del": 0
-        }
+        { "path": "calc/ops.py", "adds": 10, "dels": 0 }
       ],
-      "els": [
+      "elements": [
         "fn:calc.ops.multiply",
         "fn:calc.ops._multiply_helper"
-      ]
+      ],
+      "modules": []
     }
   ],
   "tour": {
     "narrated": true,
     "summary": "Adds multiply() and a helper function to calc.ops.",
+    "flags": [],
+    "ending": null,
+    "below": [],
+    "map": [
+      {
+        "package": "calc",
+        "files": ["calc/ops.py"]
+      }
+    ],
     "chapters": [
       {
         "id": "change",
         "title": "Multiply function",
         "verdict": "read",
-        "lines": {
-          "read": 3,
-          "skim": 2
-        },
-        "parts": [
-          "new:calc"
-        ],
+        "hash": null,
+        "intro": null,
+        "lines": { "read": 3, "skim": 2 },
+        "parts": ["new:calc"],
+        "sections": [],
+        "spine": null,
         "stops": [
           {
             "id": "multiply",
             "title": "Multiply two numbers",
             "verdict": "read",
-            "els": [
-              "fn:calc.ops.multiply"
+            "hash": null,
+            "before": null,
+            "now": null,
+            "elements": ["fn:calc.ops.multiply"],
+            "asides": [],
+            "relies": [],
+            "lines": 3,
+            "files": [
+              { "path": "calc/ops.py", "part": "new:calc", "adds": 3, "dels": 0 }
             ],
             "pictures": [
               {
                 "kind": "hunk",
                 "file": "calc/ops.py",
+                "title": null,
+                "caption": null,
+                "note": null,
                 "windows": [
                   {
                     "base": null,
-                    "head": [
-                      1,
-                      3
-                    ]
+                    "head": { "start": 1, "end": 3 }
                   }
                 ]
               }
             ],
-            "lines": 3,
-            "files": [
-              {
-                "path": "calc/ops.py",
-                "part": "new:calc",
-                "add": 3,
-                "del": 0
-              }
-            ]
+            "watch": null,
+            "watch_target": null
           },
           {
             "id": "multiply-helper",
             "title": "Multiply helper forwarding",
             "verdict": "skim",
-            "els": [
-              "fn:calc.ops._multiply_helper"
+            "hash": null,
+            "before": null,
+            "now": null,
+            "elements": ["fn:calc.ops._multiply_helper"],
+            "asides": [],
+            "relies": [],
+            "lines": 2,
+            "files": [
+              { "path": "calc/ops.py", "part": "new:calc", "adds": 2, "dels": 0 }
             ],
             "pictures": [
               {
                 "kind": "hunk",
                 "file": "calc/ops.py",
+                "title": null,
+                "caption": null,
+                "note": null,
                 "windows": [
                   {
                     "base": null,
-                    "head": [
-                      4,
-                      5
-                    ]
+                    "head": { "start": 4, "end": 5 }
                   }
                 ]
               }
             ],
-            "lines": 2,
-            "files": [
-              {
-                "path": "calc/ops.py",
-                "part": "new:calc",
-                "add": 2,
-                "del": 0
-              }
-            ]
+            "watch": null,
+            "watch_target": null
           }
-        ]
-      }
-    ],
-    "below": [],
-    "map": [
-      {
-        "pkg": "calc",
-        "files": [
-          "calc/ops.py"
         ]
       }
     ]

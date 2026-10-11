@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use perch_changescape::v4::PicturesItem;
 use perch_changescape::{page, LoadedPage, Lookup};
 use perch_github::{Cache, ItemKind};
 
@@ -81,7 +82,10 @@ fn cached_head(repo: &str, number: u64) -> Result<String, String> {
 
 fn describe(lookup: &Lookup) -> String {
     let at = |build: &perch_changescape::Build| {
-        let stage = build.status.stage;
+        let stage = build
+            .status
+            .stage
+            .map_or_else(|| "none".to_string(), |stage| stage.to_string());
         format!(
             "{} (stage {stage}) in {}",
             build.short_sha(),
@@ -109,14 +113,7 @@ fn render(out: &mut String, page: &LoadedPage) {
     let _ = writeln!(out, "page format: {}", page.schema);
     let _ = writeln!(out, "elements: {}", page.elements.len());
     let Some(tour) = page.tour() else {
-        match page.tour_error() {
-            Some(e) => {
-                let _ = writeln!(out, "tour: could not be read: {e}");
-            }
-            None => {
-                let _ = writeln!(out, "tour: none");
-            }
-        }
+        let _ = writeln!(out, "tour: none");
         return;
     };
     let _ = writeln!(
@@ -124,7 +121,7 @@ fn render(out: &mut String, page: &LoadedPage) {
         "tour: {} chapters, {} stops, narrated: {}",
         tour.chapters.len(),
         page::stops(tour).count(),
-        tour.narrated.unwrap_or(false)
+        tour.narrated
     );
     for chapter in &tour.chapters {
         let spine = if chapter.spine.is_some() {
@@ -136,17 +133,18 @@ fn render(out: &mut String, page: &LoadedPage) {
         for stop in &chapter.stops {
             let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
             for picture in &stop.pictures {
-                *kinds.entry(picture.kind.as_str()).or_default() += 1;
+                let kind = match picture {
+                    PicturesItem::Hunk { .. } => "hunk",
+                    PicturesItem::Seq { .. } => "seq",
+                };
+                *kinds.entry(kind).or_default() += 1;
             }
             let kinds: Vec<String> = kinds.iter().map(|(k, n)| format!("{k} {n}")).collect();
-            let verdict = match page::verdict(chapter, stop) {
-                page::Verdict::Read => "read",
-                page::Verdict::Skim => "skim",
-            };
             let _ = writeln!(
                 out,
-                "    {} [{verdict}, {} lines, {}]: {}",
+                "    {} [{}, {} lines, {}]: {}",
                 stop.id,
+                stop.verdict,
                 stop.lines,
                 kinds.join(", "),
                 stop.title

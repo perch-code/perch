@@ -10,7 +10,7 @@ use crate::{install, HEAD, REPO};
 /// Write a status of `state`, finished at `finished`.
 fn status(dir: &Path, state: &str, finished: Option<&str>) {
     let mut json = serde_json::json!({
-        "schema": 2, "state": state, "started": "2026-10-08T12:00:00Z",
+        "page_schema": 4, "state": state, "started": "2026-10-08T12:00:00Z",
         "finished": finished, "stage": "narrated", "error": null, "skill_version": "3.0.0",
     });
     if state == "failed" {
@@ -134,6 +134,25 @@ fn a_status_that_does_not_match_its_schema_is_a_failed_build() {
         .error
         .unwrap()
         .starts_with("status.json could not be read"));
+}
+
+#[test]
+fn a_build_in_another_page_format_fails_and_is_never_stale() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = install(root.path(), "01-minimal", "0ld");
+    std::fs::write(
+        dir.join("status.json"),
+        r#"{ "schema": 2, "page_schema": 3, "state": "done" }"#,
+    )
+    .unwrap();
+    assert_eq!(lookup(root.path(), REPO, 7, HEAD), Lookup::None);
+    let Lookup::Failed(build) = lookup(root.path(), REPO, 7, "0ld") else {
+        panic!("expected a failed build");
+    };
+    assert_eq!(
+        build.status.error.as_deref(),
+        Some(perch_changescape::OTHER_FORMAT)
+    );
 }
 
 #[test]

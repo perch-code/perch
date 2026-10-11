@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use floem::headless::HeadlessHarness;
 use floem::reactive::{SignalGet, SignalUpdate};
+use perch_changescape::v4::ViewId;
 use perch_github::{Side, StoredMark, TourMark};
 
 use crate::backend::changescape::Found;
@@ -62,22 +63,29 @@ fn cache_with_more(sha: &str) -> tempfile::TempDir {
     cache_patched(TOUR, sha, |page| {
         let tour = &mut page["tour"];
         tour["flags"] = serde_json::json!([{ "kind": "warn", "title": "A flag",
-            "text": "It changes how to read this.", "ref": "fn:calc.ops.multiply" }]);
-        tour["ending"] = serde_json::json!({ "checks": [{ "q": "Does it match?", "a": "Yes." }],
-            "actions": [{ "label": "Draft the review" }] });
+            "text": "It changes how to read this.",
+            "target": { "to": "element", "element": "fn:calc.ops.multiply" } }]);
+        tour["ending"] = serde_json::json!({
+            "checks": [{ "question": "Does it match?", "answer": "Yes.", "view": null, "elements": [] }],
+            "actions": [{ "label": "Draft the review", "detail": null }] });
         let chapter = &mut tour["chapters"][0];
         chapter["intro"] = "Where `multiply` comes from.".into();
         chapter["spine"] = serde_json::json!({ "kind": "seq", "svg": DIAGRAM,
-            "hot": { "k": "fn:calc.ops.multiply" }, "title": "From the caller" });
+            "hot": { "k": "fn:calc.ops.multiply" }, "title": "From the caller",
+            "caption": null, "note": null });
         let stops = chapter["stops"].as_array_mut().unwrap();
         stops[0]["now"] = "It multiplies `a` by `b`.".into();
         stops[0]["watch"] = "The helper calls it.".into();
-        stops[0]["watch_ref"] = "fn:calc.ops._multiply_helper".into();
+        stops[0]["watch_target"] =
+            serde_json::json!({ "to": "element", "element": "fn:calc.ops._multiply_helper" });
         stops.push(serde_json::json!({
-            "id": "again", "title": "Multiply again", "verdict": "read",
-            "els": ["fn:calc.ops.multiply"], "lines": 1,
-            "pictures": [{ "kind": "hunk", "file": OPS,
-                "windows": [{ "base": null, "head": [2, 2] }] }],
+            "id": "again", "title": "Multiply again", "verdict": "read", "hash": null,
+            "before": null, "now": null, "elements": ["fn:calc.ops.multiply"],
+            "asides": [], "relies": [], "lines": 1,
+            "files": [{ "path": OPS, "part": "new:calc", "adds": 1, "dels": 0 }],
+            "pictures": [{ "kind": "hunk", "file": OPS, "title": null, "caption": null,
+                "note": null, "windows": [{ "base": null, "head": { "start": 2, "end": 2 } }] }],
+            "watch": null, "watch_target": null,
         }));
     })
 }
@@ -401,8 +409,8 @@ fn marks_the_backend_found_are_shown() {
 #[test]
 fn a_stop_whose_hash_changed_since_its_mark_shows_as_changed_until_marked_again() {
     let root = cache_patched(TOUR, HEAD, |page| {
-        page["tour"]["chapters"][0]["stops"][0]["h"] = "new".into();
-        page["tour"]["chapters"][0]["stops"][1]["h"] = "same".into();
+        page["tour"]["chapters"][0]["stops"][0]["hash"] = "new".into();
+        page["tour"]["chapters"][0]["stops"][1]["hash"] = "same".into();
     });
     let (mut harness, state) = with_marks(
         root.path(),
@@ -439,7 +447,7 @@ fn a_chapter_with_sections_draws_a_header_before_each_and_labels_the_outline() {
     let root = cache_patched(TOUR, HEAD, |page| {
         page["tour"]["chapters"][0]["sections"] = serde_json::json!([
             { "title": "The product", "intro": "What it multiplies.", "stops": ["multiply"] },
-            { "title": "The helper", "stops": ["multiply-helper"] },
+            { "title": "The helper", "intro": null, "stops": ["multiply-helper"] },
         ]);
     });
     let (harness, _, _root) = opened_in(root);
@@ -463,14 +471,16 @@ fn a_stop_shows_what_it_relies_on_and_its_asides_and_code_opens_the_lines() {
     let root = cache_patched(TOUR, HEAD, |page| {
         let stop = &mut page["tour"]["chapters"][0]["stops"][0];
         stop["relies"] = serde_json::json!([{
-            "el": "fn:calc.ops._multiply_helper", "why": "calls", "sig": "def _multiply_helper(a, b)",
-            "doc": "Multiply through the helper. More text.", "code": { "file": OPS, "head": [4, 5] } }]);
+            "element": "fn:calc.ops._multiply_helper", "why": "calls", "what": null,
+            "signature": "def _multiply_helper(a, b)",
+            "doc": "Multiply through the helper. More text.",
+            "code": { "file": OPS, "head": { "start": 4, "end": 5 } } }]);
         stop["asides"] = serde_json::json!([{
-            "view": "related", "q": "Does an open PR touch this?", "a": "One does.",
-            "rows": ["fn:calc.ops.multiply", "pr:404"] }]);
+            "view": "related", "question": "Does an open PR touch this?", "answer": "One does.",
+            "elements": ["fn:calc.ops.multiply", "pr:404"] }]);
         page["tour"]["ending"] = serde_json::json!({ "checks": [{
-            "q": "Plans that name no code?", "a": "One.", "view": "plans",
-            "rows": ["fn:calc.ops.multiply"] }] });
+            "question": "Plans that name no code?", "answer": "One.", "view": "plans",
+            "elements": ["fn:calc.ops.multiply"] }], "actions": [] });
     });
     let (mut harness, state) = harness_with_cache(Some(root.path()));
     load_ops(state);
@@ -700,11 +710,7 @@ fn the_caret_in_a_stops_window_shows_the_code_strip_which_leads_back() {
 
 #[test]
 fn a_page_without_a_tour_says_why_and_offers_a_rebuild_where_one_can_run() {
-    for (case, can_build) in [
-        ("01-minimal", true),
-        ("13-malformed-tour", true),
-        ("01-minimal", false),
-    ] {
+    for (case, can_build) in [("01-minimal", true), ("01-minimal", false)] {
         let (harness, state, _root) = opened_building(case, can_build);
         assert_eq!(state.tab.get(), ItemTab::Changescape, "{case}");
         assert!(
@@ -727,29 +733,45 @@ fn a_page_without_a_tour_says_why_and_offers_a_rebuild_where_one_can_run() {
 fn cache_with_view(sha: &str) -> tempfile::TempDir {
     cache_patched(TOUR, sha, |page| {
         page["elements"]["pr:5"] = serde_json::json!({
-            "t": "#5 Divide too", "k": "pull request", "st": "context",
-            "d": "by someone \u{b7} open", "refs": [],
-            "url": "https://github.com/acme/calc/pull/5" });
+            "title": "#5 Divide too", "label": "pull request", "kind": "pr", "name": "5",
+            "status": "context", "detail": "by someone \u{b7} open", "hash": null,
+            "url": "https://github.com/acme/calc/pull/5",
+            "appears": [{ "where": "view", "view": "related", "block": "t1" }], "refs": [] });
         page["elements"]["commit:abc1234"] = serde_json::json!({
-            "t": "abc1234 \u{b7} Add multiply", "k": "commit", "st": "changed", "refs": [],
-            "url": "https://github.com/acme/calc/commit/abc1234" });
+            "title": "abc1234 \u{b7} Add multiply", "label": "commit", "kind": "commit",
+            "name": "abc1234", "status": "changed", "detail": null, "hash": null,
+            "url": "https://github.com/acme/calc/commit/abc1234",
+            "appears": [{ "where": "view", "view": "related", "block": "t1" }], "refs": [] });
+        page["elements"]["fn:calc.ops.multiply"]["appears"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({ "where": "view", "view": "related", "block": "t1" }));
         page["views"]
             .as_array_mut()
             .unwrap()
             .push(serde_json::json!({
-            "id": "related", "sec": "surroundings", "t": "Related work", "s": "",
-            "ic": "pr", "q": "", "state": "applies", "metric": "1 PR", "narration": null,
+            "id": "related", "section": "surroundings", "title": "Related work", "subtitle": "",
+            "icon": "merge", "question": "", "metric": "1 PR", "narration": null,
             "blocks": [
-                { "type": "table", "columns": [{ "key": "t", "label": "T" }], "rows": [
-                    { "el": "pr:5", "cells": { "t": "#5" } },
-                    { "el": "commit:abc1234", "cells": { "t": "abc" } },
-                    { "el": "fn:calc.ops.multiply", "cells": { "t": "multiply" } },
-                    { "el": "pr:404", "cells": { "t": "gone" } } ] },
-                { "type": "sparkline", "rows": [{ "el": "pr:5" }] },
+                { "type": "table", "id": "t1", "title": null, "note": null, "element": null,
+                  "fold": null, "groups": [],
+                  "columns": [{ "key": "t", "label": "T", "kind": "text" }],
+                  "rows": [
+                    table_row("pr:5", "#5"),
+                    table_row("commit:abc1234", "abc"),
+                    table_row("fn:calc.ops.multiply", "multiply"),
+                    table_row("pr:404", "gone") ] },
             ] }));
-        page["tour"]["flags"] = serde_json::json!([{ "kind": "info", "title": "Others work here",
-            "text": "An open PR touches the same file.", "ref": "view:related" }]);
+        page["tour"]["flags"] = serde_json::json!([{ "kind": "warn", "title": "Others work here",
+            "text": "An open PR touches the same file.",
+            "target": { "to": "view", "view": "related" } }]);
     })
+}
+
+/// A row of a table whose one text cell `t` reads `text`, for `element`.
+fn table_row(element: &str, text: &str) -> serde_json::Value {
+    serde_json::json!({ "element": element, "side": null, "dim": false, "rank": "normal",
+        "why": null, "group": null, "cells": { "t": { "cell": "text", "text": text } } })
 }
 
 fn view_rows(harness: &HeadlessHarness) -> Vec<String> {
@@ -773,7 +795,7 @@ fn a_view_ref_shows_the_views_rows_as_its_elements() {
     assert!(named(harness.root_id(), "Changescape view related").is_none());
     let link = named(harness.root_id(), "Changescape ref").expect("no ref");
     click_view(&mut harness, link);
-    assert_eq!(state.changescape_view.get().as_deref(), Some("related"));
+    assert_eq!(state.changescape_view.get(), Some(ViewId::Related));
     assert_eq!(
         view_rows(&harness),
         [
@@ -786,7 +808,7 @@ fn a_view_ref_shows_the_views_rows_as_its_elements() {
     // Close puts it away, and so does a click beside it.
     click(&mut harness, "Changescape view close");
     assert_eq!(state.changescape_view.get(), None);
-    state.changescape_view.set(Some("related".into()));
+    state.changescape_view.set(Some(ViewId::Related));
     redraw(&mut harness);
     let card = rect(&harness, "Changescape view related");
     harness.click(card.x0 - 8.0, card.y0 + 8.0);
@@ -797,7 +819,7 @@ fn a_view_ref_shows_the_views_rows_as_its_elements() {
 #[test]
 fn a_code_row_in_a_view_opens_code_and_closes_the_popover() {
     let (mut harness, state, _root) = opened_in(cache_with_view(HEAD));
-    state.changescape_view.set(Some("related".into()));
+    state.changescape_view.set(Some(ViewId::Related));
     redraw(&mut harness);
     click(&mut harness, "Changescape view row fn:calc.ops.multiply");
     assert_eq!(state.changescape_view.get(), None);
@@ -815,7 +837,7 @@ fn a_pull_request_row_opens_that_pull_request_in_perch() {
     show(state, root.path(), |_| {});
     redraw(&mut harness);
     click(&mut harness, "Changescape pill");
-    state.changescape_view.set(Some("related".into()));
+    state.changescape_view.set(Some(ViewId::Related));
     redraw(&mut harness);
     crate::ui::widgets::opened();
     click(&mut harness, "Changescape view row pr:5");
@@ -830,7 +852,7 @@ fn a_pull_request_row_opens_that_pull_request_in_perch() {
 #[test]
 fn a_commit_the_checkout_lacks_opens_on_github() {
     let (mut harness, state, _root) = opened_in(cache_with_view(HEAD));
-    state.changescape_view.set(Some("related".into()));
+    state.changescape_view.set(Some(ViewId::Related));
     redraw(&mut harness);
     crate::ui::widgets::opened();
     click(&mut harness, "Changescape view row commit:abc1234");
@@ -847,9 +869,9 @@ fn cache_with_view_picture(sha: &str) -> tempfile::TempDir {
             .as_array_mut()
             .unwrap()
             .push(serde_json::json!({
-            "id": "jobs", "sec": "change", "t": "Jobs", "s": "",
-            "ic": "jobs", "q": "", "state": "applies", "metric": "", "narration": null,
-            "blocks": [{ "type": "svg", "svg": DIAGRAM,
+            "id": "jobs", "section": "behavior", "title": "Jobs", "subtitle": "",
+            "icon": "graph", "question": "", "metric": "", "narration": null,
+            "blocks": [{ "type": "svg", "id": "s1", "svg": DIAGRAM, "title": null, "note": null,
                 "hot": { "k": "fn:calc.ops.multiply" } }] }));
     })
 }
@@ -868,7 +890,7 @@ fn view_diagram(harness: &HeadlessHarness, id: &str) -> floem::kurbo::Rect {
 #[test]
 fn a_view_that_is_a_diagram_draws_it_and_a_node_opens_its_element() {
     let (mut harness, state, _root) = opened_in(cache_with_view_picture(HEAD));
-    state.changescape_view.set(Some("jobs".into()));
+    state.changescape_view.set(Some(ViewId::Jobs));
     redraw(&mut harness);
     redraw(&mut harness);
     let card = named(harness.root_id(), "Changescape view jobs").expect("no popover");
@@ -888,7 +910,7 @@ fn a_view_that_is_a_diagram_draws_it_and_a_node_opens_its_element() {
 #[test]
 fn expand_on_a_views_diagram_shows_it_over_the_tour_in_place_of_the_popover() {
     let (mut harness, state, _root) = opened_in(cache_with_view_picture(HEAD));
-    state.changescape_view.set(Some("jobs".into()));
+    state.changescape_view.set(Some(ViewId::Jobs));
     redraw(&mut harness);
     click(&mut harness, "Changescape expand");
     redraw(&mut harness);
@@ -903,7 +925,7 @@ fn expand_on_a_views_diagram_shows_it_over_the_tour_in_place_of_the_popover() {
 /// A status as the schema has it: of `state`, with `error`.
 fn status_json(state: &str, error: Option<&str>) -> String {
     serde_json::json!({
-        "schema": 2, "state": state, "started": "2026-10-08T12:00:00Z", "finished": null,
+        "page_schema": 4, "state": state, "started": "2026-10-08T12:00:00Z", "finished": null,
         "stage": "facts", "error": error, "skill_version": "3.0.0",
     })
     .to_string()
@@ -1020,8 +1042,8 @@ fn the_row_menu_offers_a_build_only_where_one_can_run() {
 #[test]
 fn a_page_that_does_not_read_shows_why() {
     let root = cache_patched(TOUR, HEAD, |page| {
-        // A status must be a string, though its set is open.
-        page["elements"]["fn:calc.ops.multiply"]["st"] = 5.into();
+        // A status must be one of the closed set, not a number.
+        page["elements"]["fn:calc.ops.multiply"]["status"] = 5.into();
     });
     let (mut harness, _state) = harness_with_cache(Some(root.path()));
     click(&mut harness, "Changescape pill");
@@ -1064,7 +1086,7 @@ fn a_file_in_no_stop_opens_in_code() {
             .push("calc/other.py".into());
         let mut other = page["files"][0].clone();
         other["path"] = "calc/other.py".into();
-        other["old"] = "calc/other.py".into();
+        other["old_path"] = "calc/other.py".into();
         page["files"].as_array_mut().unwrap().push(other);
     });
     let (mut harness, state, _root) = opened_in(root);

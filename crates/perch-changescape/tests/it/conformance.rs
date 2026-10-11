@@ -32,7 +32,7 @@ fn every_case_has_a_test() {
     names.sort();
     assert_eq!(
         names,
-        ["01-minimal", "12-tour", "13-malformed-tour",],
+        ["01-minimal", "12-tour"],
         "a new case needs a test here"
     );
 }
@@ -41,15 +41,16 @@ fn every_case_has_a_test() {
 fn case_01_draws_without_a_tour() {
     let page = page("01-minimal");
     assert!(page.tour().is_none());
-    assert!(page.tour_error().is_none());
-    assert!(page.elements.contains_key("fn:calc.ops.add"));
+    let add = &page.elements["fn:calc.ops.add"];
+    assert_eq!(add.kind, perch_changescape::v4::ElementKind::Function);
+    assert_eq!(add.name, "calc.ops.add");
 }
 
 #[test]
 fn case_12_reads_the_tour() {
     let page = page("12-tour");
     let tour = page.tour().expect("no tour");
-    assert_eq!(tour.narrated, Some(true));
+    assert!(tour.narrated);
     assert_eq!(tour.chapters.len(), 1);
     let (in_chapter, stop) = page.stop("multiply-helper").expect("no stop");
     assert_eq!(in_chapter.id, "change");
@@ -57,11 +58,4 @@ fn case_12_reads_the_tour() {
     assert_eq!(file, "calc/ops.py");
     assert_eq!(windows[0].head, Some((4, 5)));
     assert_eq!(windows[0].base, None);
-}
-
-#[test]
-fn case_13_drops_the_tour_and_keeps_the_page() {
-    let page = page("13-malformed-tour");
-    assert!(page.tour().is_none());
-    assert!(page.tour_error().is_some());
 }

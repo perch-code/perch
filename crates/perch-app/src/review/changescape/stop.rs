@@ -16,8 +16,8 @@ use floem::prelude::*;
 use floem::reactive::{Memo, SignalGet, SignalUpdate, SignalWith};
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 use floem::AnyView;
-use perch_changescape::page::{self, hunk, picture_kind, PictureKind, Window};
-use perch_changescape::v3::{TourAside, TourChapter, TourRely, TourStop};
+use perch_changescape::page::{self, hunk, Target, Window};
+use perch_changescape::v4::{Aside, Chapter, PicturesItem, Rely, Stop};
 use perch_github::{Anchor, CommentThread, Side, StoredMark, TourMark};
 
 use crate::review::changescape::hunk::hunk_view;
@@ -31,7 +31,7 @@ use crate::ui::nav_row::thousands;
 use crate::ui::widgets::{bordered_button, clickable, notice_box, underlined_link};
 
 /// A read stop, open.
-pub fn stop_card(cx: &Ctx, chapter: &TourChapter, i: usize) -> AnyView {
+pub fn stop_card(cx: &Ctx, chapter: &Chapter, i: usize) -> AnyView {
     let stop = chapter.stops[i].clone();
     let id = stop.id.clone();
     let view = Stack::vertical((header(cx, &stop), body(cx, chapter, &stop)))
@@ -53,7 +53,7 @@ pub fn stop_card(cx: &Ctx, chapter: &TourChapter, i: usize) -> AnyView {
 
 /// A run of skim stops: one box with a row for each, a row opening its
 /// stop in place.
-pub fn skim_group(cx: &Ctx, chapter: &TourChapter, group: Vec<usize>) -> impl IntoView {
+pub fn skim_group(cx: &Ctx, chapter: &Chapter, group: Vec<usize>) -> impl IntoView {
     let lines: i64 = group.iter().map(|&i| chapter.stops[i].lines).sum();
     let heading = format!(
         "Skim · {} {} · {} lines",
@@ -80,7 +80,7 @@ pub fn skim_group(cx: &Ctx, chapter: &TourChapter, group: Vec<usize>) -> impl In
     })
 }
 
-fn skim_row(cx: &Ctx, chapter: &TourChapter, stop: &TourStop) -> AnyView {
+fn skim_row(cx: &Ctx, chapter: &Chapter, stop: &Stop) -> AnyView {
     let state = cx.state;
     let placed = cx.placed.clone();
     let id = stop.id.clone();
@@ -196,7 +196,7 @@ fn mark_glyph(state: ReviewState, id: String) -> impl IntoView {
 }
 
 /// A read stop's first row: its mark, its claim, and its line count.
-fn header(cx: &Ctx, stop: &TourStop) -> impl IntoView {
+fn header(cx: &Ctx, stop: &Stop) -> impl IntoView {
     Stack::horizontal((
         mark_glyph(cx.state, stop.id.clone()).style(|s| s.margin_top(2.0)),
         Container::new(prose::paragraph(&stop.title, TITLE))
@@ -209,7 +209,7 @@ fn header(cx: &Ctx, stop: &TourStop) -> impl IntoView {
 
 /// Everything under a stop's title: its text, its pictures, the threads
 /// on its lines, the composer it opened, and its buttons.
-fn body(cx: &Ctx, chapter: &TourChapter, stop: &TourStop) -> Stack {
+fn body(cx: &Ctx, chapter: &Chapter, stop: &Stop) -> Stack {
     let mut parts: Vec<AnyView> = vec![changed_notice(cx.state, stop.id.clone()).into_any()];
     for (label, text) in [
         ("Before", stop.before.as_deref()),
@@ -222,14 +222,17 @@ fn body(cx: &Ctx, chapter: &TourChapter, stop: &TourStop) -> Stack {
     }
     if stop.watch.is_some() {
         parts.push(
-            Container::new(tour::reference(cx, stop.watch_ref.as_deref()))
-                .style(|s| s.padding_left(FIELD_LABEL))
-                .into_any(),
+            Container::new(tour::reference(
+                cx,
+                stop.watch_target.as_ref().map(Target::from),
+            ))
+            .style(|s| s.padding_left(FIELD_LABEL))
+            .into_any(),
         );
     }
     for (i, picture) in stop.pictures.iter().enumerate() {
-        match picture_kind(&picture.kind) {
-            PictureKind::Hunk => {
+        match picture {
+            PicturesItem::Hunk { .. } => {
                 if let Some((file, windows)) = hunk(picture) {
                     parts.push(
                         hunk_view(cx.state, cx.backend.clone(), file.to_string(), windows)
@@ -237,22 +240,25 @@ fn body(cx: &Ctx, chapter: &TourChapter, stop: &TourStop) -> Stack {
                     );
                 }
             }
-            PictureKind::Seq => {
+            PicturesItem::Seq {
+                caption,
+                title,
+                note,
+                ..
+            } => {
                 if let Some(svg) = page::picture_svg(picture) {
                     parts.push(
                         tour::diagram(
                             cx,
                             tour::picture_key(&stop.id, i),
-                            picture.caption.as_deref().or(picture.title.as_deref()),
-                            picture.note.as_deref(),
+                            caption.as_deref().or(title.as_deref()),
+                            note.as_deref(),
                             svg,
                         )
                         .into_any(),
                     );
                 }
             }
-            // A kind this Perch does not know is skipped.
-            PictureKind::Other => {}
         }
     }
     if !stop.relies.is_empty() {
@@ -290,7 +296,7 @@ fn field(label: &'static str, text: &str) -> impl IntoView {
 
 /// What a rely's entry says the stop's lines rely on: the narration's
 /// sentence, else the first sentence of the symbol's doc comment.
-pub fn rely_says(rely: &TourRely) -> Option<String> {
+pub fn rely_says(rely: &Rely) -> Option<String> {
     if let Some(what) = rely.what.as_deref().filter(|w| !w.is_empty()) {
         return Some(what.to_string());
     }
@@ -307,7 +313,7 @@ pub fn rely_says(rely: &TourRely) -> Option<String> {
 
 /// How a stop relies on the code: `calls`, `implements` or `matches`.
 /// The set is open, and a value this Perch does not know reads as calls.
-pub fn rely_why(rely: &TourRely) -> &'static str {
+pub fn rely_why(rely: &Rely) -> &'static str {
     match rely.why.as_deref() {
         Some("implements") => "implements",
         Some("matches") => "matches",
@@ -318,7 +324,7 @@ pub fn rely_why(rely: &TourRely) -> &'static str {
 /// The unchanged code a stop's new lines rely on, after its pictures: each
 /// entry's symbol, which opens it, and what it promises. Code opens the
 /// symbol's lines from the checkout, in place.
-fn relies(cx: &Ctx, relies: &[TourRely]) -> impl IntoView {
+fn relies(cx: &Ctx, relies: &[Rely]) -> impl IntoView {
     let mut parts: Vec<AnyView> = vec![Label::new("Relies on")
         .style(|s| {
             s.font_size(theme::TEXT_META)
@@ -335,15 +341,15 @@ fn relies(cx: &Ctx, relies: &[TourRely]) -> impl IntoView {
         .style(|s| s.flex_col().gap(6.0).width_full())
 }
 
-fn rely_view(cx: &Ctx, rely: &TourRely) -> AnyView {
+fn rely_view(cx: &Ctx, rely: &Rely) -> AnyView {
     let title = cx
         .page
         .elements
-        .get(&rely.el)
-        .map_or_else(|| rely.el.clone(), |e| e.t.clone());
+        .get(&rely.element)
+        .map_or_else(|| rely.element.clone(), |e| e.title.clone());
     let open = RwSignal::new(false);
     let name = {
-        let (cx, el) = (cx.clone(), rely.el.clone());
+        let (cx, el) = (cx.clone(), rely.element.clone());
         let held = cx.page.elements.contains_key(&el);
         Container::new(Label::new(title).style(move |s| {
             s.font_size(theme::TEXT_META)
@@ -381,7 +387,7 @@ fn rely_view(cx: &Ctx, rely: &TourRely) -> AnyView {
     let file = rely.code.file.clone();
     let window = Window {
         base: None,
-        head: page::lines(&Some(rely.code.head.clone())),
+        head: page::lines(&rely.code.head),
     };
     let body = dyn_container(
         move || open.get(),
@@ -399,7 +405,7 @@ fn rely_view(cx: &Ctx, rely: &TourRely) -> AnyView {
         says,
         body,
     ))
-    .debug_name(format!("Changescape rely {}", rely.el))
+    .debug_name(format!("Changescape rely {}", rely.element))
     .style(|s| {
         s.flex_col()
             .gap(2.0)
@@ -414,20 +420,20 @@ fn rely_view(cx: &Ctx, rely: &TourRely) -> AnyView {
 /// Context from the other views that matters at the stop, after what it
 /// relies on: one quiet row each, the question, its answer, and the
 /// elements of the view's rows.
-fn asides(cx: &Ctx, asides: &[TourAside]) -> impl IntoView {
+fn asides(cx: &Ctx, asides: &[Aside]) -> impl IntoView {
     let rows: Vec<AnyView> = asides
         .iter()
         .map(|aside| {
             Stack::vertical((
                 prose::paragraph(
-                    &aside.q,
+                    &aside.question,
                     prose::Ink {
                         weight: theme::weight_emphasis,
                         ..MUTED
                     },
                 ),
-                prose::paragraph(&aside.a, MUTED),
-                tour::element_rows(cx, &aside.rows),
+                prose::paragraph(&aside.answer, MUTED),
+                tour::element_rows(cx, &aside.elements),
             ))
             .debug_name("Changescape aside")
             .style(|s| s.flex_col().gap(2.0).width_full().padding_vert(3.0))
@@ -446,14 +452,14 @@ fn asides(cx: &Ctx, asides: &[TourAside]) -> impl IntoView {
 }
 
 /// Each hunk picture's file and windows.
-fn windows(stop: &TourStop) -> Vec<(&str, Vec<Window>)> {
+fn windows(stop: &Stop) -> Vec<(&str, Vec<Window>)> {
     stop.pictures.iter().filter_map(hunk).collect()
 }
 
 /// The threads whose lines a stop's windows hold: a thread on the head on
 /// a head window's lines, one on the base on a base window's, in the
 /// order the threads come.
-pub fn threads_on<'a>(stop: &TourStop, threads: &'a [CommentThread]) -> Vec<&'a CommentThread> {
+pub fn threads_on<'a>(stop: &Stop, threads: &'a [CommentThread]) -> Vec<&'a CommentThread> {
     let shown = windows(stop);
     threads
         .iter()
@@ -480,7 +486,7 @@ pub fn threads_on<'a>(stop: &TourStop, threads: &'a [CommentThread]) -> Vec<&'a 
 
 /// The review threads on the stop's lines, GitHub's and Perch's, as
 /// Conversation draws them.
-fn stop_threads(cx: &Ctx, stop: &TourStop) -> impl IntoView {
+fn stop_threads(cx: &Ctx, stop: &Stop) -> impl IntoView {
     let (state, stop) = (cx.state, stop.clone());
     let on = Memo::new(move |_| {
         state.comment_threads.with(|all| {
@@ -525,7 +531,7 @@ pub fn about(stop: &str) -> String {
 }
 
 /// The composer Chat about this opened on this stop, in place.
-fn composer(cx: &Ctx, stop: &TourStop) -> impl IntoView {
+fn composer(cx: &Ctx, stop: &Stop) -> impl IntoView {
     let (app, state, backend) = (cx.app, cx.state, cx.backend.clone());
     let key = about(&stop.id);
     let open = Memo::new(move |_| {
@@ -550,7 +556,7 @@ fn composer(cx: &Ctx, stop: &TourStop) -> impl IntoView {
 
 /// What a question about a stop carries: the chapter and the stop's
 /// text, and where its code is.
-pub fn chat_context(chapter: &TourChapter, stop: &TourStop) -> String {
+pub fn chat_context(chapter: &Chapter, stop: &Stop) -> String {
     let mut out = format!(
         "The reader is on a stop of the Changescape tour of this pull request.\nChapter: {}\nStop: {}\n",
         prose::plain(&chapter.title),
@@ -586,7 +592,7 @@ pub fn chat_context(chapter: &TourChapter, stop: &TourStop) -> String {
 
 /// The lines a question about a stop is anchored to: its first head
 /// window.
-pub fn chat_anchor(stop: &TourStop, head_sha: &str) -> Option<Anchor> {
+pub fn chat_anchor(stop: &Stop, head_sha: &str) -> Option<Anchor> {
     windows(stop).into_iter().find_map(|(file, windows)| {
         let (first, last) = windows.iter().find_map(|w| w.head)?;
         Some(Anchor {
@@ -612,7 +618,7 @@ pub fn split_marks(
     for (id, StoredMark { mark, h }) in stored {
         let now = page
             .and_then(|p| p.stop(id))
-            .and_then(|(_, s)| s.h.as_ref());
+            .and_then(|(_, s)| s.hash.as_ref());
         match (h, now) {
             (Some(then), Some(now)) if then != now => changed.insert(id.clone(), *mark),
             _ => marks.insert(id.clone(), *mark),
@@ -624,7 +630,7 @@ pub fn split_marks(
 /// Mark a stop, or clear its mark, here and in the database, keeping the
 /// stop's hash with the mark. Either way the stop is no longer changed
 /// since its mark.
-fn set_mark(cx: &Ctx, stop: &TourStop, mark: Option<TourMark>) {
+fn set_mark(cx: &Ctx, stop: &Stop, mark: Option<TourMark>) {
     let id = stop.id.clone();
     cx.state.changescape_marks.update(|marks| match mark {
         Some(mark) => {
@@ -646,7 +652,7 @@ fn set_mark(cx: &Ctx, stop: &TourStop, mark: Option<TourMark>) {
     let number = u64::try_from(cx.page.meta.number).unwrap_or_default();
     let stored = mark.map(|mark| StoredMark {
         mark,
-        h: stop.h.clone(),
+        h: stop.hash.clone(),
     });
     cx.backend
         .set_tour_mark(&cx.page.meta.repo, number, &id, stored);
@@ -675,7 +681,7 @@ fn changed_notice(state: ReviewState, id: String) -> impl IntoView {
 
 /// Done and Come back to this, each a toggle, then Chat about this, and
 /// Next, which moves on and marks nothing.
-fn buttons(cx: &Ctx, chapter: &TourChapter, stop: &TourStop) -> impl IntoView {
+fn buttons(cx: &Ctx, chapter: &Chapter, stop: &Stop) -> impl IntoView {
     let state = cx.state;
     let id = stop.id.clone();
     let mark = {
@@ -740,15 +746,19 @@ fn buttons(cx: &Ctx, chapter: &TourChapter, stop: &TourStop) -> impl IntoView {
 pub(super) mod tests {
     use super::*;
 
-    fn stop() -> TourStop {
+    fn stop() -> Stop {
         serde_json::from_value(serde_json::json!({
-            "id": "s", "title": "The `loop` asks first", "els": [], "lines": 4,
+            "id": "s", "title": "The `loop` asks first", "elements": [], "lines": 4,
+            "asides": [], "before": null, "files": [], "hash": null, "relies": [],
+            "verdict": "read", "watch": null, "watch_target": null,
             "now": "It asks the `policy`.",
             "pictures": [
-                { "kind": "seq", "svg": "<svg/>" },
-                { "kind": "hunk", "file": "a.rs", "windows": [
-                    { "base": [10, 12], "head": [20, 30] },
-                    { "base": null, "head": [50, 52] } ] },
+                { "kind": "seq", "caption": null, "hot": {}, "note": null,
+                  "svg": "<svg/>", "title": null },
+                { "kind": "hunk", "caption": null, "file": "a.rs", "note": null,
+                  "title": null, "windows": [
+                    { "base": { "start": 10, "end": 12 }, "head": { "start": 20, "end": 30 } },
+                    { "base": null, "head": { "start": 50, "end": 52 } } ] },
             ],
         }))
         .unwrap()
@@ -801,10 +811,10 @@ pub(super) mod tests {
 
     #[test]
     fn a_rely_says_the_narrations_sentence_else_its_docs_first() {
-        let rely = |what: Option<&str>, doc: &str, why: Option<&str>| -> TourRely {
+        let rely = |what: Option<&str>, doc: &str, why: Option<&str>| -> Rely {
             serde_json::from_value(serde_json::json!({
-                "el": "fn:x", "what": what, "doc": doc, "why": why,
-                "code": { "file": "a.rs", "head": [1, 2] } }))
+                "element": "fn:x", "what": what, "doc": doc, "why": why, "signature": null,
+                "code": { "file": "a.rs", "head": { "start": 1, "end": 2 } } }))
             .unwrap()
         };
         assert_eq!(
@@ -822,8 +832,10 @@ pub(super) mod tests {
 
     #[test]
     fn a_question_carries_the_stops_text_and_windows_and_anchors_to_its_first_head_window() {
-        let chapter: TourChapter = serde_json::from_value(serde_json::json!({
-            "id": "c", "title": "The claim", "stops": [] }))
+        let chapter: Chapter = serde_json::from_value(serde_json::json!({
+            "id": "c", "title": "The claim", "verdict": "read", "stops": [], "hash": null,
+            "intro": null, "lines": { "read": 0, "skim": 0 }, "parts": [], "sections": [],
+            "spine": null }))
         .unwrap();
         let context = chat_context(&chapter, &stop());
         assert!(context.contains("Stop: The loop asks first"));

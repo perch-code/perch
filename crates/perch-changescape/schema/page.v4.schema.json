@@ -1,0 +1,3143 @@
+{
+  "$defs": {
+    "Action": {
+      "description": "A step that a reader can take after the tour.",
+      "properties": {
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Detail"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        }
+      },
+      "required": [
+        "detail",
+        "label"
+      ],
+      "title": "Action",
+      "type": "object"
+    },
+    "AddRow": {
+      "description": "A line that the head commit adds.",
+      "properties": {
+        "head": {
+          "title": "Head",
+          "type": "integer"
+        },
+        "op": {
+          "const": "add",
+          "default": "add",
+          "title": "Op",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "head",
+        "op",
+        "text"
+      ],
+      "title": "AddRow",
+      "type": "object"
+    },
+    "Anchor": {
+      "description": "The line that a comment points at, on one side of the diff.",
+      "properties": {
+        "end": {
+          "title": "End",
+          "type": "integer"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "side": {
+          "$ref": "#/$defs/Side"
+        },
+        "start": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Start"
+        }
+      },
+      "required": [
+        "end",
+        "path",
+        "side",
+        "start"
+      ],
+      "title": "Anchor",
+      "type": "object"
+    },
+    "Aside": {
+      "description": "A question that a reader can ask about a stop, with its answer.",
+      "properties": {
+        "answer": {
+          "title": "Answer",
+          "type": "string"
+        },
+        "elements": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Elements",
+          "type": "array"
+        },
+        "question": {
+          "title": "Question",
+          "type": "string"
+        },
+        "view": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ViewId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "answer",
+        "elements",
+        "question",
+        "view"
+      ],
+      "title": "Aside",
+      "type": "object"
+    },
+    "Band": {
+      "description": "A part that the tour does not walk through, with its files.",
+      "properties": {
+        "files": {
+          "items": {
+            "$ref": "#/$defs/StopFile"
+          },
+          "title": "Files",
+          "type": "array"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "lines": {
+          "title": "Lines",
+          "type": "integer"
+        },
+        "part": {
+          "title": "Part",
+          "type": "string"
+        },
+        "verdict": {
+          "$ref": "#/$defs/Verdict"
+        }
+      },
+      "required": [
+        "files",
+        "label",
+        "lines",
+        "part",
+        "verdict"
+      ],
+      "title": "Band",
+      "type": "object"
+    },
+    "Chapter": {
+      "description": "A chapter of the tour, with its stops.",
+      "properties": {
+        "hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Hash"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "intro": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Intro"
+        },
+        "lines": {
+          "$ref": "#/$defs/ChapterLines"
+        },
+        "parts": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Parts",
+          "type": "array"
+        },
+        "sections": {
+          "items": {
+            "$ref": "#/$defs/ChapterSection"
+          },
+          "title": "Sections",
+          "type": "array"
+        },
+        "spine": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SeqPicture"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stops": {
+          "items": {
+            "$ref": "#/$defs/Stop"
+          },
+          "title": "Stops",
+          "type": "array"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "verdict": {
+          "$ref": "#/$defs/Verdict"
+        }
+      },
+      "required": [
+        "hash",
+        "id",
+        "intro",
+        "lines",
+        "parts",
+        "sections",
+        "spine",
+        "stops",
+        "title",
+        "verdict"
+      ],
+      "title": "Chapter",
+      "type": "object"
+    },
+    "ChapterLines": {
+      "description": "The lines of a chapter that a reader reads and that a reader skims.",
+      "properties": {
+        "read": {
+          "title": "Read",
+          "type": "integer"
+        },
+        "skim": {
+          "title": "Skim",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "read",
+        "skim"
+      ],
+      "title": "ChapterLines",
+      "type": "object"
+    },
+    "ChapterSection": {
+      "description": "A titled group of stops inside a chapter.",
+      "properties": {
+        "intro": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Intro"
+        },
+        "stops": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Stops",
+          "type": "array"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "intro",
+        "stops",
+        "title"
+      ],
+      "title": "ChapterSection",
+      "type": "object"
+    },
+    "Check": {
+      "description": "A question that a reader can answer at the end of the tour.",
+      "properties": {
+        "answer": {
+          "title": "Answer",
+          "type": "string"
+        },
+        "elements": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Elements",
+          "type": "array"
+        },
+        "question": {
+          "title": "Question",
+          "type": "string"
+        },
+        "view": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ViewId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "answer",
+        "elements",
+        "question",
+        "view"
+      ],
+      "title": "Check",
+      "type": "object"
+    },
+    "CodeBlock": {
+      "description": "A block that shows code from the page files.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "code",
+          "default": "code",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type"
+      ],
+      "title": "CodeBlock",
+      "type": "object"
+    },
+    "Column": {
+      "description": "A column of a table. The key names the cell in each row.",
+      "properties": {
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ColumnKind"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "kind",
+        "label"
+      ],
+      "title": "Column",
+      "type": "object"
+    },
+    "ColumnKind": {
+      "description": "How a table column draws its cells.",
+      "enum": [
+        "text",
+        "mono",
+        "num",
+        "status",
+        "bar",
+        "refs"
+      ],
+      "title": "ColumnKind",
+      "type": "string"
+    },
+    "Comment": {
+      "description": "A review comment on the pull request, as plain text. A reply is always of the same kind as its parent.",
+      "properties": {
+        "anchor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Anchor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "at": {
+          "title": "At",
+          "type": "string"
+        },
+        "author": {
+          "title": "Author",
+          "type": "string"
+        },
+        "body": {
+          "title": "Body",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/CommentKind"
+        },
+        "outdated": {
+          "title": "Outdated",
+          "type": "boolean"
+        },
+        "reply_to": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Reply To"
+        },
+        "state": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "State"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "anchor",
+        "at",
+        "author",
+        "body",
+        "id",
+        "kind",
+        "outdated",
+        "reply_to",
+        "state",
+        "url"
+      ],
+      "title": "Comment",
+      "type": "object"
+    },
+    "CommentKind": {
+      "description": "Where a review comment sits on GitHub.",
+      "enum": [
+        "inline",
+        "review",
+        "issue"
+      ],
+      "title": "CommentKind",
+      "type": "string"
+    },
+    "CommentRef": {
+      "description": "The name of one comment: GitHub ids are unique only within a comment kind.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/CommentKind"
+        }
+      },
+      "required": [
+        "id",
+        "kind"
+      ],
+      "title": "CommentRef",
+      "type": "object"
+    },
+    "DelRow": {
+      "description": "A line that the base commit deletes.",
+      "properties": {
+        "base": {
+          "title": "Base",
+          "type": "integer"
+        },
+        "op": {
+          "const": "del",
+          "default": "del",
+          "title": "Op",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "base",
+        "op",
+        "text"
+      ],
+      "title": "DelRow",
+      "type": "object"
+    },
+    "DiscussionBlock": {
+      "description": "A block with the review comments of the pull request.",
+      "properties": {
+        "comments": {
+          "items": {
+            "$ref": "#/$defs/CommentRef"
+          },
+          "title": "Comments",
+          "type": "array"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "discussion",
+          "default": "discussion",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "comments",
+        "id",
+        "type"
+      ],
+      "title": "DiscussionBlock",
+      "type": "object"
+    },
+    "Element": {
+      "description": "A named thing that the page draws, such as a function, a file range, or a person.",
+      "properties": {
+        "appears": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "stop": "#/$defs/InStop",
+                "view": "#/$defs/InView"
+              },
+              "propertyName": "where"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/InView"
+              },
+              {
+                "$ref": "#/$defs/InStop"
+              }
+            ]
+          },
+          "title": "Appears",
+          "type": "array"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Detail"
+        },
+        "hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Hash"
+        },
+        "kind": {
+          "$ref": "#/$defs/ElementKind"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "refs": {
+          "items": {
+            "$ref": "#/$defs/Ref"
+          },
+          "title": "Refs",
+          "type": "array"
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Url"
+        }
+      },
+      "required": [
+        "appears",
+        "detail",
+        "hash",
+        "kind",
+        "label",
+        "name",
+        "refs",
+        "status",
+        "title",
+        "url"
+      ],
+      "title": "Element",
+      "type": "object"
+    },
+    "ElementCell": {
+      "description": "A table cell that names an element.",
+      "properties": {
+        "cell": {
+          "const": "element",
+          "default": "element",
+          "title": "Cell",
+          "type": "string"
+        },
+        "element": {
+          "title": "Element",
+          "type": "string"
+        },
+        "side": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Side"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cell",
+        "element",
+        "side",
+        "text"
+      ],
+      "title": "ElementCell",
+      "type": "object"
+    },
+    "ElementKind": {
+      "description": "The kind of an element, which tells a reader what the element names.",
+      "enum": [
+        "function",
+        "class",
+        "symbol",
+        "module",
+        "package",
+        "lines",
+        "job",
+        "pr",
+        "issue",
+        "person",
+        "doc",
+        "doc_section",
+        "commit",
+        "stop",
+        "chapter"
+      ],
+      "title": "ElementKind",
+      "type": "string"
+    },
+    "Ending": {
+      "description": "The closing checks and actions of the tour.",
+      "properties": {
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/Action"
+          },
+          "title": "Actions",
+          "type": "array"
+        },
+        "checks": {
+          "items": {
+            "$ref": "#/$defs/Check"
+          },
+          "title": "Checks",
+          "type": "array"
+        }
+      },
+      "required": [
+        "actions",
+        "checks"
+      ],
+      "title": "Ending",
+      "type": "object"
+    },
+    "Facet": {
+      "description": "One way to group the elements of the page.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/FacetId"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Note"
+        },
+        "options": {
+          "items": {
+            "$ref": "#/$defs/FacetOption"
+          },
+          "title": "Options",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "note",
+        "options"
+      ],
+      "title": "Facet",
+      "type": "object"
+    },
+    "FacetCell": {
+      "description": "A table cell that names one option of a facet.",
+      "properties": {
+        "cell": {
+          "const": "facet",
+          "default": "facet",
+          "title": "Cell",
+          "type": "string"
+        },
+        "facet": {
+          "$ref": "#/$defs/FacetId"
+        },
+        "option": {
+          "title": "Option",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cell",
+        "facet",
+        "option",
+        "text"
+      ],
+      "title": "FacetCell",
+      "type": "object"
+    },
+    "FacetId": {
+      "description": "The axis that a facet groups the elements by.",
+      "enum": [
+        "part",
+        "story",
+        "focus"
+      ],
+      "title": "FacetId",
+      "type": "string"
+    },
+    "FacetOption": {
+      "description": "One value of a facet, with the elements that it selects.",
+      "properties": {
+        "elements": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Elements",
+          "type": "array"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Note"
+        }
+      },
+      "required": [
+        "elements",
+        "id",
+        "label",
+        "note"
+      ],
+      "title": "FacetOption",
+      "type": "object"
+    },
+    "File": {
+      "description": "One changed file of the pull request.",
+      "properties": {
+        "adds": {
+          "title": "Adds",
+          "type": "integer"
+        },
+        "binary": {
+          "title": "Binary",
+          "type": "boolean"
+        },
+        "dels": {
+          "title": "Dels",
+          "type": "integer"
+        },
+        "hunks": {
+          "items": {
+            "$ref": "#/$defs/Hunk"
+          },
+          "title": "Hunks",
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/Kind"
+        },
+        "lines_by_kind": {
+          "items": {
+            "$ref": "#/$defs/KindLines"
+          },
+          "title": "Lines By Kind",
+          "type": "array"
+        },
+        "made_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MadeBy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "old_path": {
+          "title": "Old Path",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "ship": {
+          "discriminator": {
+            "mapping": {
+              "hunks": "#/$defs/ShipHunks",
+              "whole": "#/$defs/ShipWhole"
+            },
+            "propertyName": "ship"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ShipWhole"
+            },
+            {
+              "$ref": "#/$defs/ShipHunks"
+            }
+          ],
+          "title": "Ship"
+        },
+        "status": {
+          "$ref": "#/$defs/FileStatus"
+        }
+      },
+      "required": [
+        "adds",
+        "binary",
+        "dels",
+        "hunks",
+        "kind",
+        "lines_by_kind",
+        "made_by",
+        "old_path",
+        "path",
+        "ship",
+        "status"
+      ],
+      "title": "File",
+      "type": "object"
+    },
+    "FileCell": {
+      "description": "A table cell that names a line of a file.",
+      "properties": {
+        "cell": {
+          "const": "file",
+          "default": "file",
+          "title": "Cell",
+          "type": "string"
+        },
+        "line": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Line"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "side": {
+          "$ref": "#/$defs/Side"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cell",
+        "line",
+        "path",
+        "side",
+        "text"
+      ],
+      "title": "FileCell",
+      "type": "object"
+    },
+    "FileStatus": {
+      "enum": [
+        "added",
+        "removed",
+        "changed"
+      ],
+      "title": "FileStatus",
+      "type": "string"
+    },
+    "Flag": {
+      "description": "A note that the tour raises before the first chapter.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/FlagKind"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "comment": "#/$defs/ToComment",
+                  "element": "#/$defs/ToElement",
+                  "view": "#/$defs/ToView"
+                },
+                "propertyName": "to"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/ToElement"
+                },
+                {
+                  "$ref": "#/$defs/ToView"
+                },
+                {
+                  "$ref": "#/$defs/ToComment"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Target"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "target",
+        "text",
+        "title"
+      ],
+      "title": "Flag",
+      "type": "object"
+    },
+    "FlagKind": {
+      "description": "The kind of a flag. Only a warning exists today.",
+      "enum": [
+        "warn"
+      ],
+      "title": "FlagKind",
+      "type": "string"
+    },
+    "Fold": {
+      "description": "How many rows a table shows before the rest fold away.",
+      "properties": {
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Label"
+        },
+        "show": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Show"
+        }
+      },
+      "required": [
+        "label",
+        "show"
+      ],
+      "title": "Fold",
+      "type": "object"
+    },
+    "Group": {
+      "description": "A group of table rows that folds under one heading.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "open": {
+          "title": "Open",
+          "type": "boolean"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Summary"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "open",
+        "summary"
+      ],
+      "title": "Group",
+      "type": "object"
+    },
+    "Hunk": {
+      "description": "One hunk of a diff, with its rows.",
+      "properties": {
+        "base": {
+          "$ref": "#/$defs/Span"
+        },
+        "head": {
+          "$ref": "#/$defs/Span"
+        },
+        "rows": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "add": "#/$defs/AddRow",
+                "del": "#/$defs/DelRow",
+                "keep": "#/$defs/KeepRow"
+              },
+              "propertyName": "op"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/AddRow"
+              },
+              {
+                "$ref": "#/$defs/DelRow"
+              },
+              {
+                "$ref": "#/$defs/KeepRow"
+              }
+            ]
+          },
+          "title": "Rows",
+          "type": "array"
+        }
+      },
+      "required": [
+        "base",
+        "head",
+        "rows"
+      ],
+      "title": "Hunk",
+      "type": "object"
+    },
+    "HunkPicture": {
+      "description": "A picture of diff windows in one file.",
+      "properties": {
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Caption"
+        },
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "kind": {
+          "const": "hunk",
+          "default": "hunk",
+          "title": "Kind",
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Note"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Title"
+        },
+        "windows": {
+          "items": {
+            "$ref": "#/$defs/Window"
+          },
+          "title": "Windows",
+          "type": "array"
+        }
+      },
+      "required": [
+        "caption",
+        "file",
+        "kind",
+        "note",
+        "title",
+        "windows"
+      ],
+      "title": "HunkPicture",
+      "type": "object"
+    },
+    "Icon": {
+      "description": "The icon that a section or a view shows.",
+      "enum": [
+        "overview",
+        "graph",
+        "lanes",
+        "sequence",
+        "api",
+        "schema",
+        "classes",
+        "lines",
+        "findings",
+        "rules",
+        "stories",
+        "doc",
+        "succession",
+        "vocab",
+        "utility",
+        "layers",
+        "merge",
+        "deploy"
+      ],
+      "title": "Icon",
+      "type": "string"
+    },
+    "InStop": {
+      "description": "An element appearance in a tour stop.",
+      "properties": {
+        "stop": {
+          "title": "Stop",
+          "type": "string"
+        },
+        "where": {
+          "const": "stop",
+          "default": "stop",
+          "title": "Where",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stop",
+        "where"
+      ],
+      "title": "InStop",
+      "type": "object"
+    },
+    "InView": {
+      "description": "An element appearance in a view.",
+      "properties": {
+        "block": {
+          "title": "Block",
+          "type": "string"
+        },
+        "view": {
+          "$ref": "#/$defs/ViewId"
+        },
+        "where": {
+          "const": "view",
+          "default": "view",
+          "title": "Where",
+          "type": "string"
+        }
+      },
+      "required": [
+        "block",
+        "view",
+        "where"
+      ],
+      "title": "InView",
+      "type": "object"
+    },
+    "KeepRow": {
+      "description": "A line that both commits keep.",
+      "properties": {
+        "base": {
+          "title": "Base",
+          "type": "integer"
+        },
+        "head": {
+          "title": "Head",
+          "type": "integer"
+        },
+        "op": {
+          "const": "keep",
+          "default": "keep",
+          "title": "Op",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "base",
+        "head",
+        "op",
+        "text"
+      ],
+      "title": "KeepRow",
+      "type": "object"
+    },
+    "Kind": {
+      "description": "The line-accounting kind of a file.",
+      "enum": [
+        "source",
+        "test",
+        "docs",
+        "config",
+        "generated",
+        "vendored",
+        "other"
+      ],
+      "title": "Kind",
+      "type": "string"
+    },
+    "KindLines": {
+      "description": "The line counts of one kind inside a file.",
+      "properties": {
+        "adds": {
+          "title": "Adds",
+          "type": "integer"
+        },
+        "dels": {
+          "title": "Dels",
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/Kind"
+        }
+      },
+      "required": [
+        "adds",
+        "dels",
+        "kind"
+      ],
+      "title": "KindLines",
+      "type": "object"
+    },
+    "Lang": {
+      "description": "The languages a repo can be read as. `NONE` is a repo with no provider. In `profile.json`\nthe id is the plain string, and `Lang(text)` at the boundary raises on an unknown one.",
+      "enum": [
+        "python",
+        "rust",
+        "none"
+      ],
+      "title": "Lang",
+      "type": "string"
+    },
+    "ListCell": {
+      "description": "A table cell with a list of cells that cannot hold another list.",
+      "properties": {
+        "cell": {
+          "const": "list",
+          "default": "list",
+          "title": "Cell",
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "element": "#/$defs/ElementCell",
+                "facet": "#/$defs/FacetCell",
+                "file": "#/$defs/FileCell",
+                "number": "#/$defs/NumberCell",
+                "status": "#/$defs/StatusCell",
+                "text": "#/$defs/TextCell"
+              },
+              "propertyName": "cell"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/TextCell"
+              },
+              {
+                "$ref": "#/$defs/NumberCell"
+              },
+              {
+                "$ref": "#/$defs/StatusCell"
+              },
+              {
+                "$ref": "#/$defs/ElementCell"
+              },
+              {
+                "$ref": "#/$defs/FileCell"
+              },
+              {
+                "$ref": "#/$defs/FacetCell"
+              }
+            ]
+          },
+          "title": "Items",
+          "type": "array"
+        }
+      },
+      "required": [
+        "cell",
+        "items"
+      ],
+      "title": "ListCell",
+      "type": "object"
+    },
+    "MadeBy": {
+      "description": "The rule that marked a file, and the note that the rule gives.",
+      "properties": {
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Note"
+        },
+        "rule": {
+          "$ref": "#/$defs/MadeRule"
+        }
+      },
+      "required": [
+        "note",
+        "rule"
+      ],
+      "title": "MadeBy",
+      "type": "object"
+    },
+    "MadeRule": {
+      "description": "The rule that marked a file as generated or vendored.",
+      "enum": [
+        "gitattributes",
+        "header",
+        "path",
+        "testdata",
+        "narration"
+      ],
+      "title": "MadeRule",
+      "type": "string"
+    },
+    "MapPackage": {
+      "description": "A package on the map, with its files.",
+      "properties": {
+        "files": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Files",
+          "type": "array"
+        },
+        "package": {
+          "title": "Package",
+          "type": "string"
+        }
+      },
+      "required": [
+        "files",
+        "package"
+      ],
+      "title": "MapPackage",
+      "type": "object"
+    },
+    "Meta": {
+      "description": "The facts about the pull request as a whole.",
+      "properties": {
+        "adds": {
+          "title": "Adds",
+          "type": "integer"
+        },
+        "author": {
+          "title": "Author",
+          "type": "string"
+        },
+        "base": {
+          "$ref": "#/$defs/Rev"
+        },
+        "dels": {
+          "title": "Dels",
+          "type": "integer"
+        },
+        "files": {
+          "title": "Files",
+          "type": "integer"
+        },
+        "generated": {
+          "title": "Generated",
+          "type": "string"
+        },
+        "head": {
+          "$ref": "#/$defs/Rev"
+        },
+        "issues": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Issues",
+          "type": "array"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "language": {
+          "$ref": "#/$defs/Lang"
+        },
+        "number": {
+          "title": "Number",
+          "type": "integer"
+        },
+        "repo": {
+          "title": "Repo",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/PrState"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "adds",
+        "author",
+        "base",
+        "dels",
+        "files",
+        "generated",
+        "head",
+        "issues",
+        "key",
+        "language",
+        "number",
+        "repo",
+        "state",
+        "title",
+        "url"
+      ],
+      "title": "Meta",
+      "type": "object"
+    },
+    "NarrationBlock": {
+      "description": "A block with text that the agent wrote.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "type": {
+          "const": "narration",
+          "default": "narration",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "text",
+        "type"
+      ],
+      "title": "NarrationBlock",
+      "type": "object"
+    },
+    "NumberCell": {
+      "description": "A table cell with a number.",
+      "properties": {
+        "cell": {
+          "const": "number",
+          "default": "number",
+          "title": "Cell",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Value"
+        }
+      },
+      "required": [
+        "cell",
+        "value"
+      ],
+      "title": "NumberCell",
+      "type": "object"
+    },
+    "Part": {
+      "description": "A group of files that the change treats as one unit.",
+      "properties": {
+        "adds": {
+          "title": "Adds",
+          "type": "integer"
+        },
+        "dels": {
+          "title": "Dels",
+          "type": "integer"
+        },
+        "elements": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Elements",
+          "type": "array"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/PartFile"
+          },
+          "title": "Files",
+          "type": "array"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/PartKind"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "modules": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Modules",
+          "type": "array"
+        },
+        "verdict": {
+          "$ref": "#/$defs/Verdict"
+        }
+      },
+      "required": [
+        "adds",
+        "dels",
+        "elements",
+        "files",
+        "id",
+        "kind",
+        "label",
+        "modules",
+        "verdict"
+      ],
+      "title": "Part",
+      "type": "object"
+    },
+    "PartFile": {
+      "description": "A file inside a part, with its line counts.",
+      "properties": {
+        "adds": {
+          "title": "Adds",
+          "type": "integer"
+        },
+        "dels": {
+          "title": "Dels",
+          "type": "integer"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "adds",
+        "dels",
+        "path"
+      ],
+      "title": "PartFile",
+      "type": "object"
+    },
+    "PartKind": {
+      "description": "The kind of a part, in the order that the parts table lists them.",
+      "enum": [
+        "new",
+        "existing",
+        "test",
+        "generated",
+        "vendored",
+        "docs"
+      ],
+      "title": "PartKind",
+      "type": "string"
+    },
+    "PrState": {
+      "description": "The state of a pull request.",
+      "enum": [
+        "open",
+        "closed",
+        "merged"
+      ],
+      "title": "PrState",
+      "type": "string"
+    },
+    "Range": {
+      "description": "A line range in one file. Both lines are 1-based and inclusive.",
+      "properties": {
+        "end": {
+          "title": "End",
+          "type": "integer"
+        },
+        "start": {
+          "title": "Start",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "end",
+        "start"
+      ],
+      "title": "Range",
+      "type": "object"
+    },
+    "Rank": {
+      "description": "How much a table row matters. A key row comes first and a minor row comes last.",
+      "enum": [
+        "key",
+        "normal",
+        "minor"
+      ],
+      "title": "Rank",
+      "type": "string"
+    },
+    "Ref": {
+      "description": "A place in the diff that backs an element. A ref names the base path or the head path, or both.",
+      "properties": {
+        "base": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Range"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "base_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Base Path"
+        },
+        "head": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Range"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "head_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Head Path"
+        },
+        "rows": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "add": "#/$defs/AddRow",
+                "del": "#/$defs/DelRow",
+                "keep": "#/$defs/KeepRow"
+              },
+              "propertyName": "op"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/AddRow"
+              },
+              {
+                "$ref": "#/$defs/DelRow"
+              },
+              {
+                "$ref": "#/$defs/KeepRow"
+              }
+            ]
+          },
+          "title": "Rows",
+          "type": "array"
+        },
+        "whole_file": {
+          "title": "Whole File",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "base",
+        "base_path",
+        "head",
+        "head_path",
+        "rows",
+        "whole_file"
+      ],
+      "title": "Ref",
+      "type": "object"
+    },
+    "Rely": {
+      "description": "An element that the stop relies on, with the code that defines it.",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/RelyCode"
+        },
+        "doc": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Doc"
+        },
+        "element": {
+          "title": "Element",
+          "type": "string"
+        },
+        "signature": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Signature"
+        },
+        "what": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "What"
+        },
+        "why": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Why"
+        }
+      },
+      "required": [
+        "code",
+        "doc",
+        "element",
+        "signature",
+        "what",
+        "why"
+      ],
+      "title": "Rely",
+      "type": "object"
+    },
+    "RelyCode": {
+      "description": "The lines of code that a reliance points at.",
+      "properties": {
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "head": {
+          "$ref": "#/$defs/Range"
+        }
+      },
+      "required": [
+        "file",
+        "head"
+      ],
+      "title": "RelyCode",
+      "type": "object"
+    },
+    "Rev": {
+      "description": "A named revision and the commit that it points at.",
+      "properties": {
+        "ref": {
+          "title": "Ref",
+          "type": "string"
+        },
+        "sha": {
+          "title": "Sha",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref",
+        "sha"
+      ],
+      "title": "Rev",
+      "type": "object"
+    },
+    "Section": {
+      "description": "A section of the page. A section with no views still gives its reason.",
+      "properties": {
+        "empty": {
+          "title": "Empty",
+          "type": "string"
+        },
+        "icon": {
+          "$ref": "#/$defs/Icon"
+        },
+        "id": {
+          "$ref": "#/$defs/SectionId"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "question": {
+          "title": "Question",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Reason"
+        },
+        "views": {
+          "items": {
+            "$ref": "#/$defs/ViewId"
+          },
+          "title": "Views",
+          "type": "array"
+        }
+      },
+      "required": [
+        "empty",
+        "icon",
+        "id",
+        "label",
+        "question",
+        "reason",
+        "views"
+      ],
+      "title": "Section",
+      "type": "object"
+    },
+    "SectionId": {
+      "description": "A section of the page, in the order that the page lists them.",
+      "enum": [
+        "overview",
+        "context",
+        "map",
+        "behavior",
+        "responsibilities",
+        "contracts",
+        "surroundings",
+        "code"
+      ],
+      "title": "SectionId",
+      "type": "string"
+    },
+    "SeqPicture": {
+      "description": "A picture in SVG with a hot map from its shapes to elements.",
+      "properties": {
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Caption"
+        },
+        "hot": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Hot",
+          "type": "object"
+        },
+        "kind": {
+          "const": "seq",
+          "default": "seq",
+          "title": "Kind",
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Note"
+        },
+        "svg": {
+          "title": "Svg",
+          "type": "string"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Title"
+        }
+      },
+      "required": [
+        "caption",
+        "hot",
+        "kind",
+        "note",
+        "svg",
+        "title"
+      ],
+      "title": "SeqPicture",
+      "type": "object"
+    },
+    "ShipHunks": {
+      "description": "A file that the page ships as hunks, with the reason.",
+      "properties": {
+        "ship": {
+          "const": "hunks",
+          "default": "hunks",
+          "title": "Ship",
+          "type": "string"
+        },
+        "why": {
+          "title": "Why",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ship",
+        "why"
+      ],
+      "title": "ShipHunks",
+      "type": "object"
+    },
+    "ShipWhole": {
+      "description": "A file that the page ships whole, with the full text of each side. A side is null if the file does not exist there.",
+      "properties": {
+        "base": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Base"
+        },
+        "head": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Head"
+        },
+        "ship": {
+          "const": "whole",
+          "default": "whole",
+          "title": "Ship",
+          "type": "string"
+        }
+      },
+      "required": [
+        "base",
+        "head",
+        "ship"
+      ],
+      "title": "ShipWhole",
+      "type": "object"
+    },
+    "Side": {
+      "description": "The side of a diff: the base commit or the head commit.",
+      "enum": [
+        "base",
+        "head"
+      ],
+      "title": "Side",
+      "type": "string"
+    },
+    "Span": {
+      "description": "The lines of one side of a hunk. An empty side starts at the line after the gap.",
+      "properties": {
+        "count": {
+          "title": "Count",
+          "type": "integer"
+        },
+        "start": {
+          "title": "Start",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "count",
+        "start"
+      ],
+      "title": "Span",
+      "type": "object"
+    },
+    "Status": {
+      "description": "How an element changed in the pull request.",
+      "enum": [
+        "added",
+        "removed",
+        "changed",
+        "moved",
+        "context"
+      ],
+      "title": "Status",
+      "type": "string"
+    },
+    "StatusCell": {
+      "description": "A table cell with the status of an element.",
+      "properties": {
+        "cell": {
+          "const": "status",
+          "default": "status",
+          "title": "Cell",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        }
+      },
+      "required": [
+        "cell",
+        "status"
+      ],
+      "title": "StatusCell",
+      "type": "object"
+    },
+    "Stop": {
+      "description": "One stop of a chapter. A stop holds each changed line once.",
+      "properties": {
+        "asides": {
+          "items": {
+            "$ref": "#/$defs/Aside"
+          },
+          "title": "Asides",
+          "type": "array"
+        },
+        "before": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Before"
+        },
+        "elements": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Elements",
+          "type": "array"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/StopFile"
+          },
+          "title": "Files",
+          "type": "array"
+        },
+        "hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Hash"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "lines": {
+          "title": "Lines",
+          "type": "integer"
+        },
+        "now": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Now"
+        },
+        "pictures": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "hunk": "#/$defs/HunkPicture",
+                "seq": "#/$defs/SeqPicture"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/HunkPicture"
+              },
+              {
+                "$ref": "#/$defs/SeqPicture"
+              }
+            ]
+          },
+          "title": "Pictures",
+          "type": "array"
+        },
+        "relies": {
+          "items": {
+            "$ref": "#/$defs/Rely"
+          },
+          "title": "Relies",
+          "type": "array"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "verdict": {
+          "$ref": "#/$defs/Verdict"
+        },
+        "watch": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Watch"
+        },
+        "watch_target": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "comment": "#/$defs/ToComment",
+                  "element": "#/$defs/ToElement",
+                  "view": "#/$defs/ToView"
+                },
+                "propertyName": "to"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/ToElement"
+                },
+                {
+                  "$ref": "#/$defs/ToView"
+                },
+                {
+                  "$ref": "#/$defs/ToComment"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Watch Target"
+        }
+      },
+      "required": [
+        "asides",
+        "before",
+        "elements",
+        "files",
+        "hash",
+        "id",
+        "lines",
+        "now",
+        "pictures",
+        "relies",
+        "title",
+        "verdict",
+        "watch",
+        "watch_target"
+      ],
+      "title": "Stop",
+      "type": "object"
+    },
+    "StopFile": {
+      "description": "A file that a stop or a band covers, with its line counts.",
+      "properties": {
+        "adds": {
+          "title": "Adds",
+          "type": "integer"
+        },
+        "dels": {
+          "title": "Dels",
+          "type": "integer"
+        },
+        "part": {
+          "title": "Part",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "adds",
+        "dels",
+        "part",
+        "path"
+      ],
+      "title": "StopFile",
+      "type": "object"
+    },
+    "SummaryBlock": {
+      "description": "A block with a list of summary items.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/SummaryItem"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "type": {
+          "const": "summary",
+          "default": "summary",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "items",
+        "type"
+      ],
+      "title": "SummaryBlock",
+      "type": "object"
+    },
+    "SummaryItem": {
+      "description": "One line of a summary, with the view that it links to.",
+      "properties": {
+        "metric": {
+          "title": "Metric",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "view": {
+          "$ref": "#/$defs/ViewId"
+        }
+      },
+      "required": [
+        "metric",
+        "text",
+        "title",
+        "view"
+      ],
+      "title": "SummaryItem",
+      "type": "object"
+    },
+    "SvgBlock": {
+      "description": "A block with a picture in SVG. The hot map gives the element that each shape names.",
+      "properties": {
+        "hot": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Hot",
+          "type": "object"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Note"
+        },
+        "svg": {
+          "title": "Svg",
+          "type": "string"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Title"
+        },
+        "type": {
+          "const": "svg",
+          "default": "svg",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "hot",
+        "id",
+        "note",
+        "svg",
+        "title",
+        "type"
+      ],
+      "title": "SvgBlock",
+      "type": "object"
+    },
+    "TableBlock": {
+      "description": "A block with a table.",
+      "properties": {
+        "columns": {
+          "items": {
+            "$ref": "#/$defs/Column"
+          },
+          "title": "Columns",
+          "type": "array"
+        },
+        "element": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Element"
+        },
+        "fold": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Fold"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "groups": {
+          "items": {
+            "$ref": "#/$defs/Group"
+          },
+          "title": "Groups",
+          "type": "array"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Note"
+        },
+        "rows": {
+          "items": {
+            "$ref": "#/$defs/TableRow"
+          },
+          "title": "Rows",
+          "type": "array"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Title"
+        },
+        "type": {
+          "const": "table",
+          "default": "table",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "columns",
+        "element",
+        "fold",
+        "groups",
+        "id",
+        "note",
+        "rows",
+        "title",
+        "type"
+      ],
+      "title": "TableBlock",
+      "type": "object"
+    },
+    "TableRow": {
+      "description": "A row of a table, with its cells by column key.",
+      "properties": {
+        "cells": {
+          "additionalProperties": {
+            "discriminator": {
+              "mapping": {
+                "element": "#/$defs/ElementCell",
+                "facet": "#/$defs/FacetCell",
+                "file": "#/$defs/FileCell",
+                "list": "#/$defs/ListCell",
+                "number": "#/$defs/NumberCell",
+                "status": "#/$defs/StatusCell",
+                "text": "#/$defs/TextCell"
+              },
+              "propertyName": "cell"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/TextCell"
+              },
+              {
+                "$ref": "#/$defs/NumberCell"
+              },
+              {
+                "$ref": "#/$defs/StatusCell"
+              },
+              {
+                "$ref": "#/$defs/ElementCell"
+              },
+              {
+                "$ref": "#/$defs/FileCell"
+              },
+              {
+                "$ref": "#/$defs/FacetCell"
+              },
+              {
+                "$ref": "#/$defs/ListCell"
+              }
+            ]
+          },
+          "title": "Cells",
+          "type": "object"
+        },
+        "dim": {
+          "title": "Dim",
+          "type": "boolean"
+        },
+        "element": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Element"
+        },
+        "group": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Group"
+        },
+        "rank": {
+          "$ref": "#/$defs/Rank"
+        },
+        "side": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Side"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "why": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Why"
+        }
+      },
+      "required": [
+        "cells",
+        "dim",
+        "element",
+        "group",
+        "rank",
+        "side",
+        "why"
+      ],
+      "title": "TableRow",
+      "type": "object"
+    },
+    "TextBlock": {
+      "description": "A block with text that the producer wrote.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "type": {
+          "const": "text",
+          "default": "text",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "text",
+        "type"
+      ],
+      "title": "TextBlock",
+      "type": "object"
+    },
+    "TextCell": {
+      "description": "A table cell with plain text.",
+      "properties": {
+        "cell": {
+          "const": "text",
+          "default": "text",
+          "title": "Cell",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cell",
+        "text"
+      ],
+      "title": "TextCell",
+      "type": "object"
+    },
+    "ToComment": {
+      "description": "A target that opens a review comment.",
+      "properties": {
+        "comment": {
+          "$ref": "#/$defs/CommentRef"
+        },
+        "to": {
+          "const": "comment",
+          "default": "comment",
+          "title": "To",
+          "type": "string"
+        }
+      },
+      "required": [
+        "comment",
+        "to"
+      ],
+      "title": "ToComment",
+      "type": "object"
+    },
+    "ToElement": {
+      "description": "A target that opens an element.",
+      "properties": {
+        "element": {
+          "title": "Element",
+          "type": "string"
+        },
+        "to": {
+          "const": "element",
+          "default": "element",
+          "title": "To",
+          "type": "string"
+        }
+      },
+      "required": [
+        "element",
+        "to"
+      ],
+      "title": "ToElement",
+      "type": "object"
+    },
+    "ToView": {
+      "description": "A target that opens a view.",
+      "properties": {
+        "to": {
+          "const": "view",
+          "default": "view",
+          "title": "To",
+          "type": "string"
+        },
+        "view": {
+          "$ref": "#/$defs/ViewId"
+        }
+      },
+      "required": [
+        "to",
+        "view"
+      ],
+      "title": "ToView",
+      "type": "object"
+    },
+    "Tour": {
+      "description": "The guided tour of the pull request.",
+      "properties": {
+        "below": {
+          "items": {
+            "$ref": "#/$defs/Band"
+          },
+          "title": "Below",
+          "type": "array"
+        },
+        "chapters": {
+          "items": {
+            "$ref": "#/$defs/Chapter"
+          },
+          "title": "Chapters",
+          "type": "array"
+        },
+        "ending": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Ending"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "flags": {
+          "items": {
+            "$ref": "#/$defs/Flag"
+          },
+          "title": "Flags",
+          "type": "array"
+        },
+        "map": {
+          "items": {
+            "$ref": "#/$defs/MapPackage"
+          },
+          "title": "Map",
+          "type": "array"
+        },
+        "narrated": {
+          "title": "Narrated",
+          "type": "boolean"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Summary"
+        }
+      },
+      "required": [
+        "below",
+        "chapters",
+        "ending",
+        "flags",
+        "map",
+        "narrated",
+        "summary"
+      ],
+      "title": "Tour",
+      "type": "object"
+    },
+    "Verdict": {
+      "description": "How much of a part or a stop a reader must read.",
+      "enum": [
+        "read",
+        "skim",
+        "skip"
+      ],
+      "title": "Verdict",
+      "type": "string"
+    },
+    "View": {
+      "description": "One view of the page, with its blocks in order.",
+      "properties": {
+        "blocks": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "code": "#/$defs/CodeBlock",
+                "discussion": "#/$defs/DiscussionBlock",
+                "narration": "#/$defs/NarrationBlock",
+                "summary": "#/$defs/SummaryBlock",
+                "svg": "#/$defs/SvgBlock",
+                "table": "#/$defs/TableBlock",
+                "text": "#/$defs/TextBlock"
+              },
+              "propertyName": "type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/NarrationBlock"
+              },
+              {
+                "$ref": "#/$defs/TextBlock"
+              },
+              {
+                "$ref": "#/$defs/SummaryBlock"
+              },
+              {
+                "$ref": "#/$defs/TableBlock"
+              },
+              {
+                "$ref": "#/$defs/SvgBlock"
+              },
+              {
+                "$ref": "#/$defs/CodeBlock"
+              },
+              {
+                "$ref": "#/$defs/DiscussionBlock"
+              }
+            ]
+          },
+          "title": "Blocks",
+          "type": "array"
+        },
+        "icon": {
+          "$ref": "#/$defs/Icon"
+        },
+        "id": {
+          "$ref": "#/$defs/ViewId"
+        },
+        "metric": {
+          "title": "Metric",
+          "type": "string"
+        },
+        "narration": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Narration"
+        },
+        "question": {
+          "title": "Question",
+          "type": "string"
+        },
+        "section": {
+          "$ref": "#/$defs/SectionId"
+        },
+        "subtitle": {
+          "title": "Subtitle",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "blocks",
+        "icon",
+        "id",
+        "metric",
+        "narration",
+        "question",
+        "section",
+        "subtitle",
+        "title"
+      ],
+      "title": "View",
+      "type": "object"
+    },
+    "ViewId": {
+      "description": "A view that the page can show.",
+      "enum": [
+        "overview",
+        "changeset",
+        "plans",
+        "related",
+        "issues",
+        "history",
+        "people",
+        "map",
+        "placement",
+        "decisions",
+        "flow",
+        "tests",
+        "jobs",
+        "api",
+        "schema",
+        "config",
+        "grammar",
+        "ci",
+        "deps",
+        "tooling",
+        "lines"
+      ],
+      "title": "ViewId",
+      "type": "string"
+    },
+    "Window": {
+      "description": "A pair of line ranges, one per side, that a picture shows.",
+      "properties": {
+        "base": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Range"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "head": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Range"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "base",
+        "head"
+      ],
+      "title": "Window",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One page of data for one pull request.",
+  "properties": {
+    "comments": {
+      "items": {
+        "$ref": "#/$defs/Comment"
+      },
+      "title": "Comments",
+      "type": "array"
+    },
+    "elements": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Element"
+      },
+      "title": "Elements",
+      "type": "object"
+    },
+    "facets": {
+      "items": {
+        "$ref": "#/$defs/Facet"
+      },
+      "title": "Facets",
+      "type": "array"
+    },
+    "files": {
+      "items": {
+        "$ref": "#/$defs/File"
+      },
+      "title": "Files",
+      "type": "array"
+    },
+    "meta": {
+      "$ref": "#/$defs/Meta"
+    },
+    "parts": {
+      "items": {
+        "$ref": "#/$defs/Part"
+      },
+      "title": "Parts",
+      "type": "array"
+    },
+    "schema": {
+      "const": 4,
+      "title": "Schema",
+      "type": "integer"
+    },
+    "sections": {
+      "items": {
+        "$ref": "#/$defs/Section"
+      },
+      "title": "Sections",
+      "type": "array"
+    },
+    "tour": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Tour"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "views": {
+      "items": {
+        "$ref": "#/$defs/View"
+      },
+      "title": "Views",
+      "type": "array"
+    }
+  },
+  "required": [
+    "comments",
+    "elements",
+    "facets",
+    "files",
+    "meta",
+    "parts",
+    "schema",
+    "sections",
+    "tour",
+    "views"
+  ],
+  "title": "Page",
+  "type": "object"
+}

@@ -22,10 +22,10 @@ pub struct Found {
     /// Why the page that should be there could not be read.
     pub error: Option<String>,
     /// Whether this Perch can build one: the skill is installed, it
-    /// writes a tour, and Claude Code is found.
+    /// writes this Perch's page format, and Claude Code is found.
     pub can_build: bool,
-    /// The installed skill is from before the tour: a build with it would
-    /// write a page with no tour over the one here.
+    /// The installed skill writes an older page format: a build with it
+    /// would write a page this Perch cannot draw over the one here.
     pub skill_too_old: bool,
     /// Whether a build this Perch started for the pull request is still
     /// running, whatever its status says: the skill marks the facts done
@@ -124,9 +124,9 @@ struct Ability {
 }
 
 /// Whether the skill and Claude Code are both there, and the skill writes
-/// a tour. Looked for once a session, and again on each request to
-/// build, so installing or updating the skill takes effect at the next
-/// one.
+/// this Perch's page format. Looked for once a session, and again on each
+/// request to build, so installing or updating the skill takes effect at
+/// the next one.
 fn can_build(binary: &str, again: bool) -> Ability {
     static KNOWN: OnceLock<Mutex<Option<Ability>>> = OnceLock::new();
     let known = KNOWN.get_or_init(Default::default);
@@ -139,7 +139,7 @@ fn can_build(binary: &str, again: bool) -> Ability {
     let skill = perch_changescape::skill_available();
     let skill_too_old = skill
         .as_deref()
-        .is_some_and(|dir| !perch_changescape::skill_writes_tour(dir));
+        .is_some_and(|dir| !perch_changescape::skill_is_current(dir));
     let can = claude.is_some() && skill.is_some() && !skill_too_old;
     tracing::info!(
         ?claude,
@@ -318,9 +318,9 @@ async fn run_build(
     }
 }
 
-/// Why a build did not start with a skill from before the tour.
+/// Why a build did not start with a skill that writes an older page format.
 pub const SKILL_TOO_OLD: &str =
-    "The installed Changescape skill writes no tour. Update the skill to build one.";
+    "The installed Changescape skill writes an older page format. Update the skill to build one.";
 
 /// The file in a build's folder that keeps what the run did.
 const BUILD_LOG: &str = "perch-build.log";
@@ -362,7 +362,7 @@ fn progress_line(event: &perch_agent::RunEvent) -> Option<String> {
 /// when one ends without the skill having said how, the skill's own with
 /// the end written in, so what the skill wrote stays.
 fn write_status(dir: &Path, state: State, error: Option<&str>) -> Result<(), String> {
-    let now = Some(jiff::Timestamp::now().to_string());
+    let now = jiff::Timestamp::now().to_string();
     let mut status = match state {
         State::Running => None,
         State::Done | State::Failed => read_status(dir),
@@ -370,8 +370,14 @@ fn write_status(dir: &Path, state: State, error: Option<&str>) -> Result<(), Str
     .unwrap_or_else(|| perch_changescape::bare_status(state, None));
     status.state = state;
     status.error = error.map(str::to_string);
-    status.started = status.started.or(now.clone());
-    status.finished = if state == State::Running { None } else { now };
+    if status.started.is_empty() {
+        status.started = now.clone();
+    }
+    status.finished = if state == State::Running {
+        None
+    } else {
+        Some(now)
+    };
     let path = dir.join("status.json");
     let json = serde_json::to_string(&status).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| format!("Could not write {}: {e}", path.display()))

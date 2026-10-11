@@ -23,18 +23,18 @@ mod skill;
 /// Code generated from the schemas. Not edited by hand.
 mod generated {
     pub mod status;
-    pub mod v3;
+    pub mod v4;
 }
 
 pub use generated::status::{BuildStage as Stage, BuildState as State, BuildStatus as Status};
-pub use generated::v3;
+pub use generated::v4;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 pub use page::LoadedPage;
-pub use skill::{skill_available, skill_writes_tour};
+pub use skill::{skill_available, skill_is_current};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -156,16 +156,18 @@ pub fn lookup(root: &Path, repo: &str, number: u64, head_sha: &str) -> Lookup {
     }
 }
 
+/// The page format this Perch draws.
+pub const PAGE_FORMAT: i64 = 4;
+
 /// A status that says only `state`, and `error` when there is one.
 pub fn bare_status(state: State, error: Option<String>) -> Status {
     Status {
         error,
         finished: None,
-        page_schema: None,
-        schema: 2,
+        page_schema: PAGE_FORMAT,
         skill_version: String::new(),
-        stage: Stage::Facts,
-        started: None,
+        stage: None,
+        started: String::new(),
         state,
     }
 }
@@ -173,14 +175,29 @@ pub fn bare_status(state: State, error: Option<String>) -> Status {
 /// The start of the error of a status that does not read.
 const UNREADABLE_STATUS: &str = "status.json could not be read";
 
+/// The error of a build in another page format.
+pub const OTHER_FORMAT: &str =
+    "This Changescape was built in another page format. Rebuild it to see it here.";
+
+/// A build's status from its file. A build in another page format is a
+/// failed one, whatever its file says, so its page is never read.
+fn read_status(bytes: &[u8]) -> Status {
+    let format = serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|v| v.get("page_schema")?.as_i64());
+    if format.is_some_and(|f| f != PAGE_FORMAT) {
+        return bare_status(State::Failed, Some(OTHER_FORMAT.to_string()));
+    }
+    serde_json::from_slice(bytes)
+        .unwrap_or_else(|e| bare_status(State::Failed, Some(format!("{UNREADABLE_STATUS}: {e}"))))
+}
+
 /// The build in `dir`, if it is one: a folder with a status or a page. A
 /// page with no status is a finished build.
 fn read_build(dir: &Path) -> Option<Build> {
     let head_sha = dir.file_name()?.to_str()?.to_string();
     let status = match std::fs::read(dir.join("status.json")) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-            bare_status(State::Failed, Some(format!("{UNREADABLE_STATUS}: {e}")))
-        }),
+        Ok(bytes) => read_status(&bytes),
         Err(_) if dir.join("page.json").is_file() => bare_status(State::Done, None),
         Err(_) => return None,
     };

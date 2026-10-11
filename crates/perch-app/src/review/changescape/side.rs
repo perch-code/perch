@@ -15,8 +15,8 @@ use floem::prelude::*;
 use floem::reactive::{Memo, SignalGet, SignalUpdate, SignalWith};
 use floem::views::{Container, Decorators, Empty, Label, Stack};
 use floem::{AnyView, ViewId};
-use perch_changescape::page::{self, Verdict};
-use perch_changescape::v3::TourStop;
+use perch_changescape::page;
+use perch_changescape::v4::Stop;
 use perch_github::TourMark;
 
 use crate::review::changescape::navigate;
@@ -176,8 +176,7 @@ fn outline(cx: &Ctx) -> impl IntoView {
                 }
             }
             n += 1;
-            let skim = page::verdict(chapter, stop) == Verdict::Skim;
-            rows.push(stop_row(state, n, stop, skim));
+            rows.push(stop_row(state, n, stop, page::folds(stop)));
         }
     }
     rows.push(heading_row(
@@ -236,7 +235,7 @@ fn section_label(title: &str) -> AnyView {
 }
 
 /// A stop: its mark or its number, its title, and skim for a skim stop.
-fn stop_row(state: ReviewState, n: usize, stop: &TourStop, skim: bool) -> AnyView {
+fn stop_row(state: ReviewState, n: usize, stop: &Stop, skim: bool) -> AnyView {
     let id = stop.id.clone();
     let mark = {
         let id = id.clone();
@@ -299,7 +298,11 @@ fn stop_paths(cx: &Ctx) -> Vec<(String, HashSet<String>)> {
                 .files
                 .iter()
                 .map(|f| f.path.clone())
-                .chain(stop.pictures.iter().filter_map(|p| p.file.clone()))
+                .chain(
+                    stop.pictures
+                        .iter()
+                        .filter_map(|p| page::hunk(p).map(|(file, _)| file.to_string())),
+                )
                 .collect();
             (stop.id.clone(), paths)
         })
@@ -313,7 +316,7 @@ fn code_map(cx: &Ctx) -> impl IntoView {
         .page
         .files
         .iter()
-        .map(|f| (f.path.as_str(), (f.add, f.del)))
+        .map(|f| (f.path.as_str(), (f.adds, f.dels)))
         .collect();
     let packages: Vec<(String, Vec<MapFile>)> = tour
         .map
@@ -327,7 +330,7 @@ fn code_map(cx: &Ctx) -> impl IntoView {
                     Some((path.clone(), *add, *del))
                 })
                 .collect::<Vec<_>>();
-            (p.pkg.clone(), files)
+            (p.package.clone(), files)
         })
         .filter(|(_, files)| !files.is_empty())
         .collect();

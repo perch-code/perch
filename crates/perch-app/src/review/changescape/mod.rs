@@ -84,7 +84,7 @@ impl Shown {
     pub fn narration_pending(&self) -> bool {
         self.found.building
             && matches!(&self.found.lookup, Lookup::Current(build)
-                if build.status.stage == perch_changescape::Stage::Facts)
+                if build.status.stage == Some(perch_changescape::Stage::Facts))
     }
 
     /// The page is of an earlier head than the pull request's.
@@ -248,8 +248,7 @@ enum Body {
     Failed(String),
     /// No changescape yet: the build, offered.
     Unbuilt,
-    /// A page with no tour, or whose tour does not read: why, and whether
-    /// to offer a rebuild.
+    /// A page with no tour: why, and whether to offer a rebuild.
     Refused {
         message: &'static str,
         rebuild: bool,
@@ -269,11 +268,7 @@ fn body_of(state: ReviewState) -> Body {
         // progress is.
         if !shown.lookup().is_running() {
             return Body::Refused {
-                message: if page.tour_error().is_some() {
-                    "This Changescape's tour could not be read."
-                } else {
-                    "This Changescape has no tour."
-                },
+                message: "This Changescape has no tour.",
                 rebuild: shown.found.can_build,
             };
         }
@@ -466,7 +461,8 @@ fn refused(
     .debug_name("Changescape refused")
 }
 
-/// Why no build is offered, when the installed skill writes no tour.
+/// Why no build is offered, when the installed skill writes an older page
+/// format.
 fn skill_note(state: ReviewState) -> impl IntoView {
     Label::new(crate::backend::changescape::SKILL_TOO_OLD)
         .debug_name("Changescape skill too old")

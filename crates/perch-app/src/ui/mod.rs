@@ -726,11 +726,13 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     && key.modifiers.is_empty()
                     && review.tab.get_untracked() == crate::review::model::ItemTab::Changescape
                 {
-                    for open in [review.changescape_view, review.changescape_expanded] {
-                        if open.with_untracked(Option::is_some) {
-                            open.set(None);
-                            return EventPropagation::Stop;
-                        }
+                    if review.changescape_view.with_untracked(Option::is_some) {
+                        review.changescape_view.set(None);
+                        return EventPropagation::Stop;
+                    }
+                    if review.changescape_expanded.with_untracked(Option::is_some) {
+                        review.changescape_expanded.set(None);
+                        return EventPropagation::Stop;
                     }
                 }
                 // Then puts the find bar away, from the code or the page;

@@ -1,4 +1,4 @@
-//! A view a flag or a Watch line points at, `view:<id>`, as a popover over
+//! A view a flag or a Watch line points at, as a popover over
 //! the tour: the view's title, its diagrams, then a row for each element
 //! its tables name, with the element's title and description. Perch draws
 //! no table, fold or facet of the view: the rows are the elements, and a
@@ -12,7 +12,7 @@ use floem::prelude::*;
 use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 use floem::AnyView;
-use perch_changescape::v3::Element;
+use perch_changescape::v4::{Element, ElementKind, ViewId};
 use perch_github::ItemKind;
 
 use crate::review::changescape::navigate;
@@ -38,28 +38,30 @@ pub enum Opens {
     Nothing,
 }
 
-/// Where a click on the element `id` goes. The kind is the id's prefix:
-/// `pr:`, `issue:` and `commit:` name what they are; an element with
-/// lines is code; anything else opens its page, if it has one.
-pub fn opens(id: &str, element: &Element) -> Opens {
-    match id.split_once(':') {
-        Some(("pr", n)) => {
-            if let Ok(n) = n.parse() {
+/// Where a click on the element goes. Its kind says what it is: a pull
+/// request, an issue or a commit, named by its number or its SHA; an
+/// element with lines is code; anything else opens its page, if it has one.
+pub fn opens(element: &Element) -> Opens {
+    match element.kind {
+        ElementKind::Pr => {
+            if let Ok(n) = element.name.parse() {
                 return Opens::Pull(n);
             }
         }
-        Some(("issue", n)) => {
-            if let Ok(n) = n.parse() {
+        ElementKind::Issue => {
+            if let Ok(n) = element.name.parse() {
                 return Opens::Issue(n);
             }
         }
-        Some(("commit", sha)) if !sha.is_empty() => return Opens::Commit(sha.to_string()),
+        ElementKind::Commit if !element.name.is_empty() => {
+            return Opens::Commit(element.name.clone())
+        }
         _ => {}
     }
     let lines = element
         .refs
         .iter()
-        .any(|r| r.head.is_some() || r.base.is_some() || r.file == Some(true));
+        .any(|r| r.head.is_some() || r.base.is_some() || r.whole_file);
     if lines {
         return Opens::Code;
     }
@@ -81,7 +83,7 @@ pub fn open_element(cx: &Ctx, id: &str) {
             .open_reference(&cx.page.meta.repo, number, Some(kind));
         cx.app.begin_open(message, navigation_id);
     };
-    match opens(id, element) {
+    match opens(element) {
         Opens::Pull(n) => reference(n, ItemKind::PullRequest, "Reading the pull request"),
         Opens::Issue(n) => reference(n, ItemKind::Issue, "Reading the issue"),
         // A commit the checkout lacks opens on GitHub.
@@ -111,7 +113,7 @@ pub fn popover(cx: Ctx) -> impl IntoView {
     dyn_container(
         move || state.changescape_view.get(),
         move |id| match id {
-            Some(id) => card(&cx, &id),
+            Some(id) => card(&cx, id),
             None => Empty::new().into_any(),
         },
     )
@@ -128,7 +130,7 @@ pub fn popover(cx: Ctx) -> impl IntoView {
     })
 }
 
-fn card(cx: &Ctx, id: &str) -> AnyView {
+fn card(cx: &Ctx, id: ViewId) -> AnyView {
     let Some(view) = cx.page.view(id) else {
         return Empty::new().into_any();
     };
@@ -151,7 +153,7 @@ fn card(cx: &Ctx, id: &str) -> AnyView {
         .collect();
     let empty = rows.is_empty() && pictures.is_empty();
     let header = Stack::horizontal((
-        Stack::vertical((prose::paragraph(&view.t, TITLE), {
+        Stack::vertical((prose::paragraph(&view.title, TITLE), {
             let none = view.metric.is_empty();
             meta(&view.metric).style(move |s| s.selectable(true).apply_if(none, |s| s.hide()))
         }))
@@ -209,7 +211,7 @@ fn card(cx: &Ctx, id: &str) -> AnyView {
 /// One element of the view: its title, and its description's first line.
 fn row(cx: &Ctx, id: &str, element: &Element) -> AnyView {
     let description = element
-        .d
+        .detail
         .as_deref()
         .and_then(|d| d.lines().next())
         .filter(|d| !d.is_empty())
@@ -219,7 +221,7 @@ fn row(cx: &Ctx, id: &str, element: &Element) -> AnyView {
         );
     let (cx, el) = (cx.clone(), id.to_string());
     Container::new(
-        Stack::vertical((prose::line(&element.t, STRONG), description))
+        Stack::vertical((prose::line(&element.title, STRONG), description))
             .style(|s| s.flex_col().width_full().min_width(0.0)),
     )
     .debug_name(format!("Changescape view row {id}"))
@@ -232,31 +234,44 @@ fn row(cx: &Ctx, id: &str, element: &Element) -> AnyView {
 mod tests {
     use super::*;
 
-    fn element(refs: &str, url: Option<&str>) -> Element {
+    /// An element of `kind` and `name`, with the given refs and url.
+    fn element(kind: &str, name: &str, refs: &str, url: Option<&str>) -> Element {
         serde_json::from_value(serde_json::json!({
-            "t": "x", "k": "k", "st": "context", "url": url,
-            "refs": serde_json::from_str::<serde_json::Value>(refs).unwrap() }))
+            "appears": [], "detail": null, "hash": null, "kind": kind, "label": "x",
+            "name": name, "refs": serde_json::from_str::<serde_json::Value>(refs).unwrap(),
+            "status": "context", "title": "x", "url": url }))
         .unwrap()
     }
 
     #[test]
     fn an_element_opens_by_its_kind() {
-        let bare = element("[]", Some("https://github.com/a/b/pull/7"));
-        assert_eq!(opens("pr:7", &bare), Opens::Pull(7));
-        assert_eq!(opens("issue:9", &bare), Opens::Issue(9));
+        let url = Some("https://github.com/a/b/pull/7");
+        assert_eq!(opens(&element("pr", "7", "[]", url)), Opens::Pull(7));
+        assert_eq!(opens(&element("issue", "9", "[]", None)), Opens::Issue(9));
         assert_eq!(
-            opens("commit:92396a9", &bare),
+            opens(&element("commit", "92396a9", "[]", None)),
             Opens::Commit("92396a9".into())
         );
-        let code = element(r#"[{ "f": "a.rs", "base": null, "head": [1, 2] }]"#, None);
-        assert_eq!(opens("fn:a::b", &code), Opens::Code);
-        let person = element("[]", Some("https://github.com/someone"));
+        let code = element(
+            "function",
+            "a::b",
+            r#"[{ "base": null, "base_path": "a.rs", "head": { "start": 1, "end": 2 },
+                  "head_path": "a.rs", "rows": [], "whole_file": false }]"#,
+            None,
+        );
+        assert_eq!(opens(&code), Opens::Code);
+        let person = element(
+            "person",
+            "someone",
+            "[]",
+            Some("https://github.com/someone"),
+        );
         assert_eq!(
-            opens("person:someone", &person),
+            opens(&person),
             Opens::Url("https://github.com/someone".into())
         );
-        assert_eq!(opens("pkg:x", &element("[]", None)), Opens::Nothing);
+        assert_eq!(opens(&element("package", "x", "[]", None)), Opens::Nothing);
         // A number that is not one is not a pull request.
-        assert_eq!(opens("pr:x", &element("[]", None)), Opens::Nothing);
+        assert_eq!(opens(&element("pr", "x", "[]", None)), Opens::Nothing);
     }
 }

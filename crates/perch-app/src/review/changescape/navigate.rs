@@ -5,8 +5,8 @@
 //! file opens split, at the head line its diff comes nearest to.
 
 use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
-use perch_changescape::page::{lines, src_rows};
-use perch_changescape::v3::{Element, ElementRef as Ref};
+use perch_changescape::page::lines;
+use perch_changescape::v4::{self, Element, RowsItem};
 use perch_changescape::LoadedPage;
 use perch_git::Scope;
 
@@ -47,10 +47,13 @@ pub fn open_file_line(state: ReviewState, backend: &Backend, path: &str, line: O
 /// A base-only element: its file, split, at the head line its own diff
 /// comes nearest to, or at the line its base range starts on when its
 /// diff names none.
-fn show_in_diff(state: ReviewState, backend: &Backend, r: &Ref) {
+fn show_in_diff(state: ReviewState, backend: &Backend, r: &v4::Ref) {
+    let Some(path) = r.base_path.as_deref() else {
+        return;
+    };
     state.layout.set(Layout::Split);
     let line = nearest_head_line(r);
-    open_file_line(state, backend, &r.f, line);
+    open_file_line(state, backend, path, line);
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -64,15 +67,16 @@ enum Target {
 }
 
 fn target(element: &Element) -> Option<Target> {
-    if let Some((f, (start, _))) = element
+    if let Some((path, (start, _))) = element
         .refs
         .iter()
-        .find_map(|r| Some((&r.f, lines(&r.head)?)))
+        .find_map(|r| Some((r.head_path.as_ref()?, lines(r.head.as_ref()?)?)))
     {
-        return Some(Target::Head(f.clone(), start));
+        return Some(Target::Head(path.clone(), start));
     }
-    if let Some(r) = element.refs.iter().find(|r| r.file == Some(true)) {
-        return Some(Target::Whole(r.f.clone()));
+    if let Some(r) = element.refs.iter().find(|r| r.whole_file) {
+        let path = r.head_path.as_ref().or(r.base_path.as_ref())?;
+        return Some(Target::Whole(path.clone()));
     }
     element
         .refs
@@ -82,15 +86,20 @@ fn target(element: &Element) -> Option<Target> {
 }
 
 /// The base-side ref of an element: the first with a base range.
-fn base_ref(element: &Element) -> Option<&Ref> {
+fn base_ref(element: &Element) -> Option<&v4::Ref> {
     element.refs.iter().find(|r| r.base.is_some())
 }
 
-fn nearest_head_line(r: &Ref) -> Option<u32> {
-    src_rows(r)
+/// The first head line the ref's rows name, or the first line of its base
+/// range when no row names a head line.
+fn nearest_head_line(r: &v4::Ref) -> Option<u32> {
+    r.rows
         .iter()
-        .find_map(|row| row.head)
-        .or(lines(&r.base).map(|(start, _)| start))
+        .find_map(|row| match row {
+            RowsItem::Add { head, .. } | RowsItem::Keep { head, .. } => u32::try_from(*head).ok(),
+            RowsItem::Del { .. } => None,
+        })
+        .or(r.base.as_ref().and_then(lines).map(|(start, _)| start))
 }
 
 /// Line numbers on the page are of the whole branch.
@@ -111,9 +120,12 @@ pub fn branch_scope(state: ReviewState, backend: &Backend) {
 mod tests {
     use super::*;
 
+    /// An element with the given refs, the rest of its fields filled in.
     fn element(refs: &str) -> Element {
         serde_json::from_str(&format!(
-            r#"{{ "t": "f()", "k": "function", "st": "changed", "refs": {refs} }}"#
+            r#"{{ "appears": [], "detail": null, "hash": null, "kind": "function",
+                "label": "f()", "name": "f", "refs": {refs}, "status": "changed",
+                "title": "f()", "url": null }}"#
         ))
         .unwrap()
     }
@@ -121,21 +133,25 @@ mod tests {
     #[test]
     fn the_first_head_range_wins() {
         let e = element(
-            r#"[ { "f": "a.py", "base": [1, 2], "head": null }, { "f": "b.py", "base": null, "head": [40, 71] } ]"#,
+            r#"[ { "base": { "start": 1, "end": 2 }, "base_path": "a.py", "head": null, "head_path": null, "rows": [], "whole_file": false },
+                 { "base": null, "base_path": null, "head": { "start": 40, "end": 71 }, "head_path": "b.py", "rows": [], "whole_file": false } ]"#,
         );
         assert_eq!(target(&e), Some(Target::Head("b.py".into(), 40)));
     }
 
     #[test]
     fn a_module_opens_its_file() {
-        let e = element(r#"[ { "f": "a.py", "base": null, "head": null, "file": true } ]"#);
+        let e = element(
+            r#"[ { "base": null, "base_path": "a.py", "head": null, "head_path": "a.py", "rows": [], "whole_file": true } ]"#,
+        );
         assert_eq!(target(&e), Some(Target::Whole("a.py".into())));
     }
 
     #[test]
     fn a_removed_function_is_base_only() {
         let e = element(
-            r#"[ { "f": "a.py", "base": [10, 12], "head": null, "src": [[10, null, "-", "def f():"]] } ]"#,
+            r#"[ { "base": { "start": 10, "end": 12 }, "base_path": "a.py", "head": null, "head_path": null,
+                   "rows": [ { "op": "del", "base": 10, "text": "def f():" } ], "whole_file": false } ]"#,
         );
         assert_eq!(target(&e), Some(Target::BaseOnly));
         assert_eq!(nearest_head_line(base_ref(&e).unwrap()), Some(10));

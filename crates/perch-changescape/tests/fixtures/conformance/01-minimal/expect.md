@@ -1,6 +1,7 @@
-# A minimal valid version 3 page
+# A minimal valid version 4 page
 
-Valid against page.v3.schema.json and status.schema.json.
+Valid against page.v4.schema.json and status.v4.schema.json.
+The schema version must be 4. The page has no tour, so `tour` is null.
 
 A reader draws the page. The nav shows four sections: Overview, Map, Behavior, and Code.
 Behavior has no views. It shows as one quiet line with its `reason`.
