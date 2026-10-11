@@ -114,8 +114,10 @@ impl ChangescapeSpec {
 
 /// The sandbox: writes to the cache, the clone, the temporary directory
 /// and `uv`'s cache; GitHub and the package index on the network.
-/// `uv` runs offline from the reader's own cache: online, it panics in
-/// the sandbox reading the proxy configuration.
+/// `uv` runs offline from the reader's own cache, and does not sync the
+/// skill's environment: a sync makes an HTTP client, which reads the
+/// system's proxy configuration, and the sandbox denies that, so `uv`
+/// panics, offline or not. Perch syncs the skill before the run instead.
 pub fn settings(repo: &Path, cache_root: &Path) -> String {
     let cache = real_path(cache_root);
     let uv_cache = std::env::var_os("UV_CACHE_DIR")
@@ -146,6 +148,7 @@ pub fn settings(repo: &Path, cache_root: &Path) -> String {
         },
         "env": {
             "UV_OFFLINE": "1",
+            "UV_NO_SYNC": "1",
         },
     })
     .to_string()
@@ -266,6 +269,7 @@ mod tests {
             assert!(writes.contains(&real_path(dir)), "{dir:?} in {writes:?}");
         }
         assert_eq!(settings["env"]["UV_OFFLINE"], "1");
+        assert_eq!(settings["env"]["UV_NO_SYNC"], "1");
     }
 
     #[test]

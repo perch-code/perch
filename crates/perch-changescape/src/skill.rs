@@ -20,11 +20,18 @@ fn skill_available_in(home: &Path) -> Option<PathBuf> {
     find_in_skills(&claude.join("skills")).or_else(|| find_in_plugins(&claude.join("plugins"), 0))
 }
 
+/// Where a skill keeps its page schema: `contract/` from skill 2.0, and
+/// `schema/` before it.
+const SCHEMAS: &[&str] = &["contract/page.v3.schema.json", "schema/page.v3.schema.json"];
+
 /// Whether the skill in `dir` writes a tour: its page schema has one.
 /// A skill from before the tour still reports page format 3, so its
 /// schema is the only sign.
 pub fn skill_writes_tour(dir: &Path) -> bool {
-    let Ok(bytes) = std::fs::read(dir.join("schema/page.v3.schema.json")) else {
+    let Some(bytes) = SCHEMAS
+        .iter()
+        .find_map(|path| std::fs::read(dir.join(path)).ok())
+    else {
         return false;
     };
     serde_json::from_slice::<serde_json::Value>(&bytes)
@@ -130,6 +137,15 @@ mod tests {
         let schema = dir.path().join("schema/page.v3.schema.json");
         std::fs::write(&schema, r#"{"properties": {"sections": {}}}"#).unwrap();
         assert!(!skill_writes_tour(dir.path()));
+        std::fs::write(&schema, r#"{"properties": {"tour": {}}}"#).unwrap();
+        assert!(skill_writes_tour(dir.path()));
+    }
+
+    #[test]
+    fn a_skill_keeps_its_schema_in_contract_from_2_0() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("contract")).unwrap();
+        let schema = dir.path().join("contract/page.v3.schema.json");
         std::fs::write(&schema, r#"{"properties": {"tour": {}}}"#).unwrap();
         assert!(skill_writes_tour(dir.path()));
     }
