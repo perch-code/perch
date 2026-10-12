@@ -68,7 +68,8 @@ pub fn tab_bar(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                 Stack::horizontal((
                     crate::review::summary::snapshot_banner(app, state, backend.clone())
                         .style(|s| s.margin_left(8.0)),
-                    crate::review::summary::notice(state).style(|s| s.margin_horiz(8.0)),
+                    crate::review::summary::notice(app, state, backend.clone())
+                        .style(|s| s.margin_horiz(8.0)),
                 ))
                 .style(|s| s.items_center().min_width(0.0))
                 .into_any()

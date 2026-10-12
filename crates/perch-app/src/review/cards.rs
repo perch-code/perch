@@ -30,8 +30,8 @@ use floem::reactive::{Memo, RwSignal, SignalGet, SignalTrack, SignalUpdate, Sign
 use floem::style::CursorStyle;
 use floem::ui_events::pointer::PointerButtonEvent;
 use floem::views::{
-    dyn_container, dyn_stack, Container, Decorators, Empty, Label, Overlay, Stack, TooltipClass,
-    TooltipExt,
+    dyn_container, dyn_stack, Container, Decorators, Empty, Label, Overlay, Stack, Tooltip,
+    TooltipClass, TooltipExt,
 };
 use perch_git::{LineStatus, Row};
 use perch_github::{
@@ -1079,7 +1079,7 @@ fn reacted_tip(group: &ReactionGroup, viewer: Option<&str>) -> String {
 
 /// A view with a line of explanation on hover, in the window's overlay so
 /// nothing drawn after it can cover it.
-pub fn tip<V: IntoView + 'static>(view: V, text: String) -> impl IntoView {
+pub fn tip<V: IntoView + 'static>(view: V, text: String) -> Tooltip {
     tip_with(view, move || text.clone())
 }
 
@@ -1088,7 +1088,7 @@ pub fn tip<V: IntoView + 'static>(view: V, text: String) -> impl IntoView {
 pub fn tip_with<V: IntoView + 'static>(
     view: V,
     text: impl Fn() -> String + Clone + 'static,
-) -> impl IntoView {
+) -> Tooltip {
     view.tooltip(move || within_window(tip_body(text.clone()).class(TooltipClass)))
 }
 
