@@ -14,7 +14,8 @@ use std::sync::Arc;
 
 use floem::prelude::*;
 use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
+use floem::style::{NoWrapOverflow, TextOverflow};
+use floem::views::{dyn_container, rich_text, ClipExt, Container, Decorators, Empty, Label, Stack};
 use floem::AnyView;
 use perch_changescape::page::Window;
 use perch_git::{Row, Scope};
@@ -24,8 +25,8 @@ use crate::review::cards::{
     display_line, line_number_labels, CodeLine, Tint, CODE_ROW_MARKER_WIDTH,
 };
 use crate::review::changescape::{navigate, SameArc};
-use crate::review::doc;
-use crate::review::editor::{code_editor, over_tints};
+use crate::review::doc::{self, Doc};
+use crate::review::editor::{code_editor, over_tints, row_tint};
 use crate::review::model::{LiveFile, LoadedFile, ReviewState};
 use crate::review::navigation;
 use crate::review::styling::PerchStyling;
@@ -248,6 +249,19 @@ fn window_gap() -> impl IntoView {
 /// share one, and none shares one with an editor of the Code tab.
 static EXCERPT_STYLING: AtomicU64 = AtomicU64::new(1 << 48);
 
+thread_local! {
+    /// The styling id of the one excerpt that is an editor, if any. In a
+    /// scope of its own, so no view's removal disposes of it.
+    static LIVE_EXCERPT: RwSignal<Option<u64>> = floem::reactive::Scope::new().create_rw_signal(None);
+}
+
+/// The excerpt that is an editor, by its styling id: the last one the
+/// pointer entered. Every excerpt reads it, so the one it names is the
+/// editor and the rest are plain rows.
+fn live_excerpt() -> RwSignal<Option<u64>> {
+    LIVE_EXCERPT.with(|live| *live)
+}
+
 #[cfg(test)]
 thread_local! {
     /// The text of each excerpt built, in the order they were built.
@@ -332,12 +346,16 @@ fn fold_row(n: usize, open: RwSignal<bool>) -> AnyView {
     .into_any()
 }
 
-/// A run of consecutive lines of a window, drawn as one excerpt: the code
-/// editor over the run's lines, with the diff tints, the syntax colours and
-/// the symbol navigation of Code, and beside it a column of numbers, one
-/// row for each line. The run is `lines` in display order, one display line
-/// after another, so the excerpt is the buffer's display lines from the
-/// first to the last.
+/// A run of consecutive lines of a window, drawn as one excerpt. It starts as
+/// plain rows, each line in the code's font and colours over its tint, which
+/// are cheap to scroll past. The pointer entering the excerpt makes it the
+/// code editor over the run's lines, with the diff tints, the syntax colours
+/// and the symbol navigation of Code. It stays the editor until the
+/// pointer enters another excerpt, so one excerpt at a time is an editor,
+/// however many the pointer crosses on its way down a tour. The two forms
+/// are as tall as each other and start the code at the same x, so the swap
+/// moves nothing. Beside either form, a column of numbers, one row for each
+/// line; a click on a number opens Code at its line.
 fn excerpt_view(
     state: ReviewState,
     backend: &Rc<Backend>,
@@ -352,17 +370,90 @@ fn excerpt_view(
     EXCERPTS.with(|e| e.borrow_mut().push(text.clone()));
     let live: LiveFile = RwSignal::new(file.clone());
     let id = EXCERPT_STYLING.fetch_add(1, Ordering::Relaxed);
-    let editor = code_editor(
-        text,
-        PerchStyling::new(
-            live,
-            doc,
-            state.highlights,
-            RwSignal::new(Arc::new(Vec::new())),
-            RwSignal::new(None),
-            id,
-        ),
-    );
+    // The tint of each row, as the editor's tint layer paints it.
+    let tints: Vec<Option<Color>> = doc.with_untracked(|d| d.rows.iter().map(row_tint).collect());
+    let editing = Memo::new(move |_| live_excerpt().get() == Some(id));
+    let (dyn_backend, dyn_path) = (backend.clone(), path.to_string());
+    let (dyn_file, dyn_run) = (file.clone(), run.to_vec());
+    let body = dyn_container(
+        move || editing.get(),
+        move |editing_now| {
+            if editing_now {
+                excerpt_editor(
+                    state,
+                    &dyn_backend,
+                    &dyn_path,
+                    &dyn_file,
+                    &dyn_run,
+                    text.clone(),
+                    PerchStyling::new(
+                        live,
+                        doc,
+                        state.highlights,
+                        RwSignal::new(Arc::new(Vec::new())),
+                        RwSignal::new(None),
+                        id,
+                    ),
+                    doc,
+                )
+            } else {
+                // The plain rows read the same styling as the editor, so a
+                // line is coloured the same in either form.
+                let styling = Rc::new(PerchStyling::new(
+                    live,
+                    doc,
+                    state.highlights,
+                    RwSignal::new(Arc::new(Vec::new())),
+                    RwSignal::new(None),
+                    id,
+                ));
+                plain_rows(state, &dyn_backend, &dyn_path, &dyn_run, styling, &tints)
+            }
+        },
+    )
+    .style(|s| s.width_full().height_full());
+
+    let gutter = Stack::vertical_from_iter(
+        run.iter()
+            .map(|line| gutter_cell(state, backend.clone(), path.to_string(), line)),
+    )
+    .style(|s| {
+        s.flex_col()
+            .flex_shrink(0.0_f32)
+            .width(theme::CODE_ROW_NUMBER_WIDTH + CODE_ROW_MARKER_WIDTH)
+    });
+    // The rows scroll inside the excerpt, and the excerpt is as tall as its
+    // lines: a vertical wheel over it has nothing to scroll, so floem's
+    // scroll lets it on to the page.
+    let height = run.len() as f64 * f64::from(theme::code_line_height());
+    Stack::horizontal((
+        gutter,
+        Container::new(body).style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full()),
+    ))
+    .debug_name("Changescape excerpt")
+    .on_event_cont(el::PointerEnter, move |_, _| {
+        if !editing.get_untracked() {
+            live_excerpt().set(Some(id));
+        }
+    })
+    .style(move |s| s.width_full().height(height).min_height(0.0))
+    .into_any()
+}
+
+/// The excerpt's code as the editor draws it, over the rows' tints, with a
+/// double click on a line opening Code at it.
+#[allow(clippy::too_many_arguments)]
+fn excerpt_editor(
+    state: ReviewState,
+    backend: &Rc<Backend>,
+    path: &str,
+    file: &Arc<LoadedFile>,
+    run: &[WindowLine],
+    text: String,
+    styling: PerchStyling,
+    doc: RwSignal<Arc<Doc>>,
+) -> AnyView {
+    let editor = code_editor(text, styling);
     let ed = editor.editor().clone();
     let viewport = ed.viewport;
     // A double click opens Code at the line the caret is on, and at the
@@ -377,28 +468,82 @@ fn excerpt_view(
         }
     });
     let editor = navigation::navigable(editor, state, backend.clone(), file.clone(), doc);
+    Container::new(over_tints(editor, doc, viewport))
+        .debug_name("Changescape excerpt editor")
+        .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full())
+        .into_any()
+}
 
-    let gutter = Stack::vertical_from_iter(
-        run.iter()
-            .map(|line| gutter_cell(state, backend.clone(), path.to_string(), line)),
-    )
-    .style(|s| {
-        s.flex_col()
-            .flex_shrink(0.0_f32)
-            .width(theme::CODE_ROW_NUMBER_WIDTH + CODE_ROW_MARKER_WIDTH)
-    });
-    // The editor scrolls inside itself, and is as tall as its lines: a
-    // vertical wheel over it has nothing to scroll, so floem's scroll lets
-    // it on to the page.
-    let height = run.len() as f64 * f64::from(theme::code_line_height());
-    Stack::horizontal((
-        gutter,
-        Container::new(over_tints(editor, doc, viewport))
-            .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full()),
-    ))
-    .debug_name("Changescape excerpt")
-    .style(move |s| s.width_full().height(height).min_height(0.0))
-    .into_any()
+/// The excerpt's rows before the pointer enters it: each line as a row of
+/// the code's height, over its tint and the code's background, with the
+/// line's text in the editor's font and colours at the editor's left gap.
+fn plain_rows(
+    state: ReviewState,
+    backend: &Rc<Backend>,
+    path: &str,
+    run: &[WindowLine],
+    styling: Rc<PerchStyling>,
+    tints: &[Option<Color>],
+) -> AnyView {
+    let rows: Vec<AnyView> = run
+        .iter()
+        .enumerate()
+        .map(|(row, line)| {
+            plain_row(
+                state,
+                backend.clone(),
+                path.to_string(),
+                line.opens,
+                styling.clone(),
+                row,
+                tints[row],
+            )
+        })
+        .collect();
+    Container::new(Stack::vertical_from_iter(rows).style(|s| s.flex_col().width_full()))
+        .debug_name("Changescape plain lines")
+        .style(|s| {
+            s.flex_grow(1.0_f32)
+                .min_width(0.0)
+                .height_full()
+                .background(theme::code_bg())
+        })
+        .into_any()
+}
+
+/// One plain row: the text of display row `row` of the excerpt, cut at the
+/// row's right edge rather than wrapped, and not selectable. A double click
+/// opens Code at the line, as the editor's does.
+fn plain_row(
+    state: ReviewState,
+    backend: Rc<Backend>,
+    path: String,
+    opens: Option<u32>,
+    styling: Rc<PerchStyling>,
+    row: usize,
+    tint: Option<Color>,
+) -> AnyView {
+    let (text, attrs) = styling.plain_line(row);
+    let text = rich_text(text, attrs, move || styling.plain_line(row))
+        .text_overflow(TextOverflow::NoWrap(NoWrapOverflow::Clip))
+        .style(|s| s.selectable(false));
+    Container::new(text)
+        .debug_name("Changescape plain row")
+        .on_event_stop(el::DoubleClick, move |_, _| {
+            navigate::open_file_line(state, &backend, &path, opens)
+        })
+        .clip()
+        .style(move |s| {
+            let base = s
+                .width_full()
+                .height(f64::from(theme::code_line_height()))
+                .padding_left(theme::CODE_GUTTER_GAP);
+            match tint {
+                Some(bg) => base.background(bg),
+                None => base,
+            }
+        })
+        .into_any()
 }
 
 /// One line's cell in an excerpt's gutter: its number and its marker, in

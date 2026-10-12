@@ -508,7 +508,7 @@ fn line_layout(file: &LoadedFile, line: usize) -> (String, AttrsList) {
 
 /// A line with each tab as four spaces, and where a byte of the line is
 /// in the result.
-fn expand_tabs(line: &str) -> (String, impl Fn(usize) -> usize) {
+pub(crate) fn expand_tabs(line: &str) -> (String, impl Fn(usize) -> usize) {
     let tabs: Vec<usize> = line.match_indices('\t').map(|(i, _)| i).collect();
     let text = line.replace('\t', "    ");
     (text, move |offset: usize| {

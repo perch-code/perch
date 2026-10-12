@@ -179,6 +179,42 @@ fn load_ops(state: ReviewState) {
     });
 }
 
+#[test]
+fn an_excerpt_is_plain_rows_until_the_pointer_enters_it() {
+    let root = cache_with(TOUR, HEAD);
+    let (mut harness, state) = harness_with_cache(Some(root.path()));
+    load_ops(state);
+    click(&mut harness, "Changescape pill");
+    redraw(&mut harness);
+    let before = in_stop(&harness, "multiply", "Changescape excerpt");
+    assert_eq!(
+        shown_under(stop(&harness, "multiply"), "Changescape plain row"),
+        3,
+        "one plain row per line"
+    );
+    assert_eq!(
+        shown_under(stop(&harness, "multiply"), "tinted editor"),
+        0,
+        "no editor until the pointer enters"
+    );
+    let row = f64::from(crate::theme::code_line_height());
+    harness.pointer_move(before.x0 + 120.0, before.y0 + row * 1.5);
+    redraw(&mut harness);
+    assert_eq!(
+        shown_under(stop(&harness, "multiply"), "tinted editor"),
+        1,
+        "the editor once the pointer is in"
+    );
+    assert_eq!(
+        shown_under(stop(&harness, "multiply"), "Changescape plain row"),
+        0,
+        "the plain rows are gone"
+    );
+    // The swap moves nothing: the excerpt keeps its place and its height.
+    let after = in_stop(&harness, "multiply", "Changescape excerpt");
+    assert_eq!(after, before, "the excerpt is where and as tall as it was");
+}
+
 fn redraw(harness: &mut HeadlessHarness) {
     harness.rebuild();
     harness.paint();
@@ -395,6 +431,10 @@ fn a_double_click_on_a_code_line_opens_code_at_that_line() {
     // The second row of the excerpt, past the numbers, on its text.
     let excerpt = in_stop(&harness, "multiply", "Changescape excerpt");
     let row = f64::from(crate::theme::code_line_height());
+    // The pointer enters the excerpt first, as it does in use, so the
+    // double click is on the editor.
+    harness.pointer_move(excerpt.x0 + 120.0, excerpt.y0 + row * 1.5);
+    redraw(&mut harness);
     harness.double_click(excerpt.x0 + 120.0, excerpt.y0 + row * 1.5);
     redraw(&mut harness);
     assert_eq!(state.tab.get(), ItemTab::Code);

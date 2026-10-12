@@ -17,7 +17,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use floem::reactive::{RwSignal, SignalGet, SignalWith};
-use floem::text::{Affinity, Attrs, AttrsList, FamilyOwned, FontWeight};
+use floem::text::{Affinity, Attrs, AttrsList, FamilyOwned, FontWeight, LineHeightValue};
 use floem::views::editor::id::EditorId;
 use floem::views::editor::layout::{LineExtraStyle, TextLayoutLine};
 use floem::views::editor::text::Styling;
@@ -28,7 +28,50 @@ use crate::review::doc::{Doc, DocRow, Tint};
 use crate::review::editor::Side;
 use crate::review::find::Match;
 use crate::review::model::LiveFile;
+use crate::review::sticky::expand_tabs;
 use crate::theme;
+
+/// The attributes of a line of code as the editor draws it, over `default`:
+/// each highlight span in its capture's colour, or, for a removed line that
+/// is context, the whole line dimmed. The editor and the plain rows of a
+/// Changescape excerpt both colour a line with this, so the two read alike.
+pub(crate) fn add_line_attrs(
+    attrs: &mut AttrsList,
+    default: &Attrs,
+    len: usize,
+    spans: &[Span],
+    ghost: bool,
+) {
+    if ghost {
+        if len > 0 {
+            attrs.add_span(0..len, default.clone().color(theme::diff_deleted_fg()));
+        }
+        return;
+    }
+    for span in spans {
+        if span.start >= span.end {
+            continue;
+        }
+        attrs.add_span(
+            span.start..span.end,
+            default.clone().color(theme::syntax_color(span.capture)),
+        );
+    }
+}
+
+/// The editor's text attributes, for a line drawn outside the editor.
+fn plain_attrs() -> Attrs<'static> {
+    // Parsed once: the family list is the same for every line.
+    static FAMILIES: std::sync::LazyLock<Vec<FamilyOwned>> =
+        std::sync::LazyLock::new(|| FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect());
+    Attrs::new()
+        .family(&FAMILIES)
+        .font_size(theme::code_font_size())
+        .weight(theme::weight_body())
+        .color(theme::fg())
+        // As the editor sets its lines, so the text sits in the same row.
+        .line_height(LineHeightValue::Pt(theme::code_line_height()))
+}
 
 pub struct PerchStyling {
     /// Read live, as the document is: a reload is edited in place under
@@ -181,6 +224,33 @@ impl PerchStyling {
     fn line_len(&self, row: usize) -> usize {
         self.doc.with_untracked(|d| d.line(row).len())
     }
+
+    /// The text of a row and its colours, for a plain row of a Changescape
+    /// excerpt, which draws the line outside the editor. The colours are
+    /// those `apply_attr_styles` gives the same row. Tabs are four spaces, as
+    /// the editor shows them, and the spans follow the text.
+    pub(crate) fn plain_line(&self, row: usize) -> (String, AttrsList) {
+        let raw = self.doc.with_untracked(|d| d.line(row).to_string());
+        let ghost = self.is_ghost(row);
+        let spans = if ghost {
+            Vec::new()
+        } else {
+            self.spans_for(row)
+        };
+        let (text, map) = expand_tabs(&raw);
+        let spans: Vec<Span> = spans
+            .into_iter()
+            .map(|span| Span {
+                start: map(span.start.min(raw.len())),
+                end: map(span.end.min(raw.len())),
+                capture: span.capture,
+            })
+            .collect();
+        let default = plain_attrs();
+        let mut attrs = AttrsList::new(default.clone());
+        add_line_attrs(&mut attrs, &default, text.len(), &spans, ghost);
+        (text, attrs)
+    }
 }
 
 impl Styling for PerchStyling {
@@ -218,25 +288,13 @@ impl Styling for PerchStyling {
         default: Attrs,
         attrs: &mut AttrsList,
     ) {
-        // Removed code is context, not the thing under review, so it is
-        // dimmed rather than fully coloured.
-        if self.is_ghost(line) {
-            let span_len = self.line_len(line);
-            if span_len > 0 {
-                attrs.add_span(0..span_len, default.clone().color(theme::diff_deleted_fg()));
-            }
-            return;
-        }
-
-        for span in self.spans_for(line) {
-            if span.start >= span.end {
-                continue;
-            }
-            attrs.add_span(
-                span.start..span.end,
-                default.clone().color(theme::syntax_color(span.capture)),
-            );
-        }
+        let ghost = self.is_ghost(line);
+        let spans = if ghost {
+            Vec::new()
+        } else {
+            self.spans_for(line)
+        };
+        add_line_attrs(attrs, &default, self.line_len(line), &spans, ghost);
     }
 
     fn apply_layout_styles(
@@ -414,5 +472,25 @@ mod tests {
             ..base
         };
         assert_eq!(head.matches_for(0), vec![(4, 8, false)]);
+    }
+
+    #[test]
+    fn a_plain_row_of_rust_has_the_syntax_colours_of_the_editor() {
+        let styling = styling("fn main() {\n    let x = 1;\n}\n", Vec::new());
+        let (text, attrs) = styling.plain_line(0);
+        assert_eq!(text, "fn main() {");
+        let colours: Vec<_> = (0..text.len())
+            .map(|i| attrs.get_span(i).get_color())
+            .collect();
+        assert!(
+            colours.iter().any(|c| *c != colours[0]),
+            "the keyword and the name are coloured differently: {colours:?}"
+        );
+        // The keyword `fn` takes the keyword's colour, not the default.
+        let keyword = perch_syntax::CAPTURES
+            .iter()
+            .position(|name| *name == "keyword")
+            .expect("a keyword capture");
+        assert_eq!(colours[0], Some(theme::syntax_color(keyword)));
     }
 }
