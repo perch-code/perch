@@ -14,7 +14,7 @@ use perch_changescape::v4::ViewId;
 use perch_github::{Side, StoredMark, TourMark};
 
 use crate::backend::changescape::Found;
-use crate::review::changescape::Shown;
+use crate::review::changescape::{tour, Shown};
 use crate::review::header::tests::{named, pull_request, pull_request_harness_with, rect};
 use crate::review::model::{ItemTab, ReviewState};
 
@@ -1218,4 +1218,84 @@ fn a_skill_from_before_the_tour_offers_no_build_and_says_why() {
     assert!(named(harness.root_id(), "Changescape unbuilt").is_some());
     assert_eq!(rect(&harness, "Changescape build button").width(), 0.0);
     assert!(rect(&harness, "Changescape skill too old").height() > 0.0);
+}
+
+/// Case `name`, changed by `patch`, as Perch reads its page.
+fn loaded(
+    name: &str,
+    patch: impl FnOnce(&mut serde_json::Value),
+) -> Arc<perch_changescape::LoadedPage> {
+    let root = cache_patched(name, HEAD, patch);
+    let perch_changescape::Lookup::Current(build) =
+        perch_changescape::lookup(root.path(), REPO, 812, HEAD)
+    else {
+        panic!("no finished build of the head");
+    };
+    perch_changescape::load(&build).unwrap()
+}
+
+/// The type map of case 07's chapter spine, as a stop's picture of kind
+/// `types`.
+fn type_map_of_07() -> serde_json::Value {
+    let page: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(case("07-tour").join("page.json")).unwrap()).unwrap();
+    page["tour"]["chapters"][0]["spine"].clone()
+}
+
+#[test]
+fn a_chapter_spine_that_is_a_type_map_is_headed_by_its_caption_or_title() {
+    let key = tour::spine_key("change");
+    let page = loaded("07-tour", |_| {});
+    let (heading, figure) = tour::picture(&page, &key).expect("no spine picture");
+    assert_eq!(heading, "The entry now holds its owner.");
+    assert!(figure.svg.svg.contains("<svg"));
+    assert!(!figure.fallback.is_empty(), "a type map keeps its list");
+
+    let page = loaded("07-tour", |page| {
+        page["tour"]["chapters"][0]["spine"]["caption"] = serde_json::Value::Null;
+    });
+    let (heading, _) = tour::picture(&page, &key).expect("no spine picture");
+    assert_eq!(heading, "Records of the store");
+}
+
+#[test]
+fn a_view_block_that_is_a_type_map_is_drawn_with_its_title_and_note() {
+    let page = loaded("02-table-groups-fold", |page| {
+        let view = page["views"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|view| view["id"] == "overview")
+            .unwrap();
+        let map = view["blocks"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|block| block["type"] == "typemap")
+            .unwrap();
+        map["map"]["note"] = "Green is added.".into();
+    });
+    let pictures = page.view_pictures(ViewId::Overview);
+    assert_eq!(pictures.len(), 1, "the overview's one map");
+    assert_eq!(pictures[0].title.as_deref(), Some("Request fields"));
+    assert_eq!(pictures[0].note.as_deref(), Some("Green is added."));
+    assert!(pictures[0].figure.svg.svg.contains("<svg"));
+}
+
+#[test]
+fn a_stop_picture_that_is_a_type_map_is_drawn_under_its_caption() {
+    let map = type_map_of_07();
+    let page = loaded(TOUR, |page| {
+        page["tour"]["chapters"][0]["stops"][0]["pictures"] = serde_json::json!([map]);
+    });
+    let (_, stop) = page.stop("multiply").expect("no stop");
+    assert!(matches!(
+        stop.pictures[0],
+        perch_changescape::v4::PicturesItem::Types { .. }
+    ));
+    let (heading, figure) =
+        tour::picture(&page, &tour::picture_key("multiply", 0)).expect("no stop picture");
+    assert_eq!(heading, "The entry now holds its owner.");
+    assert!(figure.svg.svg.contains("<svg"));
+    assert!(!figure.fallback.is_empty());
 }

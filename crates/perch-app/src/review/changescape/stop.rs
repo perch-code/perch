@@ -245,15 +245,21 @@ fn body(cx: &Ctx, chapter: &Chapter, stop: &Stop) -> Stack {
                 title,
                 note,
                 ..
+            }
+            | PicturesItem::Types {
+                caption,
+                title,
+                note,
+                ..
             } => {
-                if let Some(svg) = page::picture_svg(picture) {
+                if let Some(figure) = page::picture_figure(picture) {
                     parts.push(
                         tour::diagram(
                             cx,
                             tour::picture_key(&stop.id, i),
                             caption.as_deref().or(title.as_deref()),
                             note.as_deref(),
-                            svg,
+                            figure,
                         )
                         .into_any(),
                     );

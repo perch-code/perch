@@ -157,6 +157,37 @@
             "show": 2,
             "label": "small helpers and the store internals"
           }
+        },
+        {
+          "id": "types",
+          "map": {
+            "nodes": [
+              {
+                "id": "pkg.api.Request",
+                "name": "Request",
+                "element": null,
+                "status": "changed",
+                "was": null,
+                "kind_change": null,
+                "fields": [
+                  {
+                    "name": "timeout",
+                    "old_type": "int",
+                    "type": "float",
+                    "row": "retyped"
+                  }
+                ],
+                "hidden": 0,
+                "node": "record"
+              }
+            ],
+            "edges": [],
+            "title": "Request fields",
+            "note": null,
+            "caption": null,
+            "kind": "types"
+          },
+          "type": "typemap"
         }
       ]
     }

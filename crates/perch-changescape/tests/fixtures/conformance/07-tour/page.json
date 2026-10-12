@@ -287,7 +287,166 @@
         "parts": [
           "existing"
         ],
-        "spine": null,
+        "spine": {
+          "nodes": [
+            {
+              "id": "pkg.store.Base",
+              "name": "Base",
+              "element": null,
+              "status": "moved",
+              "was": "pkg.old.Base",
+              "kind_change": null,
+              "fields": [],
+              "hidden": 0,
+              "node": "record"
+            },
+            {
+              "id": "pkg.store.Change",
+              "name": "Change",
+              "element": null,
+              "status": "changed",
+              "was": null,
+              "hidden": 0,
+              "node": "union"
+            },
+            {
+              "id": "pkg.store.Entry",
+              "name": "Entry",
+              "element": null,
+              "status": "changed",
+              "was": null,
+              "kind_change": "TypedDict → dataclass",
+              "fields": [
+                {
+                  "name": "key",
+                  "old_type": "Any",
+                  "type": "str",
+                  "row": "retyped"
+                },
+                {
+                  "name": "owner",
+                  "type": "Owner",
+                  "status": "added",
+                  "row": "field"
+                },
+                {
+                  "name": "legacy",
+                  "type": "Legacy",
+                  "status": "removed",
+                  "row": "field"
+                },
+                {
+                  "added": 0,
+                  "removed": 0,
+                  "retyped": 0,
+                  "same": 2,
+                  "row": "folded"
+                }
+              ],
+              "hidden": 0,
+              "node": "record"
+            },
+            {
+              "id": "pkg.store.Legacy",
+              "name": "Legacy",
+              "element": null,
+              "status": "removed",
+              "was": null,
+              "kind_change": null,
+              "fields": [
+                {
+                  "name": "code",
+                  "type": "int",
+                  "status": "removed",
+                  "row": "field"
+                }
+              ],
+              "hidden": 0,
+              "node": "record"
+            },
+            {
+              "id": "pkg.store.Owner",
+              "name": "Owner",
+              "element": null,
+              "status": "added",
+              "was": null,
+              "kind_change": null,
+              "fields": [
+                {
+                  "name": "id",
+                  "type": "int",
+                  "status": "added",
+                  "row": "field"
+                }
+              ],
+              "hidden": 0,
+              "node": "record"
+            },
+            {
+              "id": "pkg.store.Policy",
+              "name": "Policy",
+              "element": null,
+              "status": "added",
+              "was": null,
+              "hidden": 0,
+              "node": "interface"
+            }
+          ],
+          "edges": [
+            {
+              "source": "pkg.store.Change",
+              "target": "pkg.store.Entry",
+              "field": null,
+              "relation": "one_of",
+              "tag": "kind=entry",
+              "status": "context"
+            },
+            {
+              "source": "pkg.store.Change",
+              "target": "pkg.store.Legacy",
+              "field": null,
+              "relation": "one_of",
+              "tag": "kind=legacy",
+              "status": "removed"
+            },
+            {
+              "source": "pkg.store.Entry",
+              "target": "pkg.store.Base",
+              "field": null,
+              "relation": "extends",
+              "tag": null,
+              "status": "context"
+            },
+            {
+              "source": "pkg.store.Entry",
+              "target": "pkg.store.Legacy",
+              "field": "legacy",
+              "relation": "holds",
+              "tag": null,
+              "status": "removed"
+            },
+            {
+              "source": "pkg.store.Entry",
+              "target": "pkg.store.Owner",
+              "field": "owner",
+              "relation": "holds",
+              "tag": null,
+              "status": "added"
+            },
+            {
+              "source": "pkg.store.Owner",
+              "target": "pkg.store.Policy",
+              "field": null,
+              "relation": "implements",
+              "tag": null,
+              "status": "added"
+            }
+          ],
+          "title": "Records of the store",
+          "note": "Green is added. Red and dashed is removed. Amber is changed. A retyped field shows old → new.",
+          "caption": "The entry now holds its owner.",
+          "kind": "types"
+        },
         "stops": [
           {
             "id": "put-checks-key",

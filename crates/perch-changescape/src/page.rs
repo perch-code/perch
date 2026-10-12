@@ -14,18 +14,20 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::typemap::{typemap_fallback, typemap_svg, FallbackLine};
 use crate::v4::{self, BlocksItem, CommentKind, CommentsItem, PicturesItem, Verdict, ViewId};
 use crate::{Error, PAGE_FORMAT};
 
 /// The block types of format 4. A block of another type is one the
 /// browser page has, and one of these types that does not parse is one
 /// Perch cannot read.
-const KNOWN_BLOCKS: [&str; 7] = [
+const KNOWN_BLOCKS: [&str; 8] = [
     "narration",
     "text",
     "summary",
     "table",
     "svg",
+    "typemap",
     "code",
     "discussion",
 ];
@@ -148,12 +150,32 @@ impl LoadedPage {
     }
 
     /// The diagrams of the view `id`, in block order.
-    pub fn view_pictures(&self, id: ViewId) -> Vec<Svg> {
+    pub fn view_pictures(&self, id: ViewId) -> Vec<ViewPicture> {
         self.view(id)
             .into_iter()
             .flat_map(|view| &view.blocks)
             .filter_map(|block| match block {
-                BlocksItem::Svg { svg, hot, .. } => Some(Svg::new(svg, hot)),
+                BlocksItem::Svg {
+                    svg,
+                    hot,
+                    title,
+                    note,
+                    ..
+                } => Some(ViewPicture {
+                    figure: Figure {
+                        svg: Svg::new(svg, hot),
+                        fallback: Vec::new(),
+                    },
+                    caption: None,
+                    title: title.clone(),
+                    note: note.clone(),
+                }),
+                BlocksItem::Typemap { map, .. } => Some(ViewPicture {
+                    figure: map_figure(map),
+                    caption: map.caption.clone(),
+                    title: map.title.clone(),
+                    note: map.note.clone(),
+                }),
                 _ => None,
             })
             .collect()
@@ -352,16 +374,18 @@ pub fn hunk(picture: &PicturesItem) -> Option<(&str, Vec<Window>)> {
         PicturesItem::Hunk { file, windows, .. } => {
             Some((file, windows.iter().map(Window::from).collect()))
         }
-        PicturesItem::Seq { .. } => None,
+        PicturesItem::Seq { .. } | PicturesItem::Types { .. } => None,
     }
 }
 
 /// A diagram Changescape laid out, as one SVG document. `hot` maps an SVG
-/// node's `id` to the element it stands for.
+/// node's `id` to the element it stands for. `tips` maps the `id` of a
+/// text to the full text it shows, when the drawing cut it short.
 #[derive(Debug, Clone, Default)]
 pub struct Svg {
     pub svg: String,
     pub hot: BTreeMap<String, String>,
+    pub tips: BTreeMap<String, String>,
 }
 
 impl Svg {
@@ -369,21 +393,72 @@ impl Svg {
         Svg {
             svg: svg.to_string(),
             hot: hot.clone().into_iter().collect(),
+            tips: BTreeMap::new(),
         }
     }
 }
 
-/// A seq picture's diagram.
-pub fn picture_svg(picture: &PicturesItem) -> Option<Svg> {
-    match picture {
-        PicturesItem::Seq { svg, hot, .. } => Some(Svg::new(svg, hot)),
-        PicturesItem::Hunk { .. } => None,
+/// A diagram as a picture draws it: its SVG, and for a type map the plain
+/// list that stands in for the SVG if the SVG does not draw. A seq picture
+/// has no list.
+#[derive(Debug, Clone, Default)]
+pub struct Figure {
+    pub svg: Svg,
+    pub fallback: Vec<FallbackLine>,
+}
+
+/// A type map's figure.
+fn map_figure(map: &v4::TypeMap) -> Figure {
+    Figure {
+        svg: typemap_svg(map),
+        fallback: typemap_fallback(map),
     }
 }
 
-/// A chapter's spine, as a diagram.
-pub fn spine_svg(spine: &v4::SeqPicture) -> Svg {
-    Svg::new(&spine.svg, &spine.hot)
+/// A diagram of a view, with the caption, title and note its block has.
+#[derive(Debug, Clone)]
+pub struct ViewPicture {
+    pub figure: Figure,
+    pub caption: Option<String>,
+    pub title: Option<String>,
+    pub note: Option<String>,
+}
+
+/// A seq picture's diagram, or a type map's.
+pub fn picture_figure(picture: &PicturesItem) -> Option<Figure> {
+    match picture {
+        PicturesItem::Seq { svg, hot, .. } => Some(Figure {
+            svg: Svg::new(svg, hot),
+            fallback: Vec::new(),
+        }),
+        PicturesItem::Hunk { .. } => None,
+        PicturesItem::Types {
+            caption,
+            edges,
+            nodes,
+            note,
+            title,
+        } => Some(map_figure(&v4::TypeMap {
+            caption: caption.clone(),
+            edges: edges.clone(),
+            kind: "types".to_string(),
+            nodes: nodes.clone(),
+            note: note.clone(),
+            title: title.clone(),
+        })),
+    }
+}
+
+/// A chapter's spine as a diagram: a seq picture's, or a type map's.
+pub fn spine_figure(spine: &v4::Spine) -> Option<Figure> {
+    match spine {
+        v4::Spine::SeqPicture(seq) => Some(Figure {
+            svg: Svg::new(&seq.svg, &seq.hot),
+            fallback: Vec::new(),
+        }),
+        v4::Spine::TypeMap(map) => Some(map_figure(map)),
+        v4::Spine::Null => None,
+    }
 }
 
 /// A line range as 1-based `(first, last)`.
@@ -452,7 +527,7 @@ mod tests {
         let pictures = page.view_pictures(ViewId::Related);
         assert_eq!(pictures.len(), 1);
         assert_eq!(
-            pictures[0].hot,
+            pictures[0].figure.svg.hot,
             BTreeMap::from([("n".to_string(), "job:x".to_string())])
         );
     }

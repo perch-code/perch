@@ -10,6 +10,7 @@
 //! theme too.
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use floem::context::{LayoutChanged, PaintCx};
@@ -20,7 +21,8 @@ use floem::reactive::{Memo, RwSignal, SignalGet, SignalTrack, SignalUpdate};
 use floem::ui_events::pointer::PointerButtonEvent;
 use floem::views::{Container, Decorators, Label, Stack};
 use floem::{AnyView, RendererSvg, View, ViewId};
-use perch_changescape::page::Svg;
+use perch_changescape::page::{Figure, Svg};
+use perch_changescape::typemap::{FallbackLine, Tone};
 
 use crate::review::changescape::tour::Ctx;
 use crate::review::model::ReviewState;
@@ -87,24 +89,36 @@ fn fit(frame: &Frame, natural: Size, room: Size) -> f64 {
     }
 }
 
-/// A hot node: where it is in the picture's own units, and its element.
+/// A box in the picture: where it is in the picture's own units, and what
+/// it stands for. For a hot node that is its element, and for a tip the
+/// full text.
 #[derive(Debug, Clone)]
 struct Hot {
     rect: Rect,
     el: String,
 }
 
-pub fn svg_block(cx: Ctx, svg: Svg, frame: Frame) -> AnyView {
+/// The diagram, or for a type map whose SVG does not draw, its fallback
+/// list. A diagram with neither says so in a line.
+pub fn svg_block(cx: Ctx, figure: Figure, frame: Frame) -> AnyView {
+    let svg = figure.svg;
     let drawing = match Drawing::parse(&svg.svg) {
         Ok(drawing) => drawing,
         Err(e) => {
             tracing::warn!(error = %e, "could not parse a changescape diagram");
-            return Label::new("This diagram could not be drawn.")
-                .style(|s| s.font_size(theme::TEXT_META).color(theme::fg_subtle()))
-                .into_any();
+            return if figure.fallback.is_empty() {
+                Label::new("This diagram could not be drawn.")
+                    .style(|s| s.font_size(theme::TEXT_META).color(theme::fg_subtle()))
+                    .into_any()
+            } else {
+                fallback_list(&figure.fallback)
+            };
         }
     };
     let hot = Arc::new(hot_nodes(&drawing, &svg));
+    let tips = Arc::new(tip_nodes(&drawing, &svg));
+    // The full text of the tip under the pointer, if any.
+    let tip: RwSignal<Option<String>> = RwSignal::new(None);
     let natural = drawing.size();
     // The reader's zoom; `None` fits the room, whatever its size.
     let zoom: RwSignal<Option<f64>> = RwSignal::new(None);
@@ -148,18 +162,26 @@ pub fn svg_block(cx: Ctx, svg: Svg, frame: Frame) -> AnyView {
     };
     let (state, expanded) = (cx.state, matches!(frame, Frame::Expanded));
     let (move_hot, down_hot, click_hot) = (hot.clone(), hot.clone(), hot);
+    let move_tips = tips.clone();
     let pressed: RwSignal<Option<usize>> = RwSignal::new(None);
     let picture = picture
         .debug_name("Changescape diagram")
         // Points arrive in the view's own coordinates.
         .on_event_cont(el::PointerMove, move |_, update| {
-            let at = update.current.logical_point();
-            let under = hit(&move_hot, scaled(at, shown.get_untracked()));
+            let at = scaled(update.current.logical_point(), shown.get_untracked());
+            let under = hit(&move_hot, at);
             if hovered.get_untracked() != under {
                 hovered.set(under);
             }
+            let text = hit(&move_tips, at).map(|i| move_tips[i].el.clone());
+            if tip.get_untracked() != text {
+                tip.set(text);
+            }
         })
-        .on_event_cont(el::PointerLeave, move |_, _| hovered.set(None))
+        .on_event_cont(el::PointerLeave, move |_, _| {
+            hovered.set(None);
+            tip.set(None);
+        })
         .on_event_cont(el::PointerDown, move |_, e: &PointerButtonEvent| {
             let at = e.state.logical_point();
             pressed.set(hit(&down_hot, scaled(at, shown.get_untracked())));
@@ -206,12 +228,52 @@ pub fn svg_block(cx: Ctx, svg: Svg, frame: Frame) -> AnyView {
                 .border_color(theme::border_muted())
                 .border_radius(theme::RADIUS)
         });
-    Stack::vertical((zoom_bar(state, zoom, shown, cap, frame), scroller))
+    // One line under the picture, empty and collapsed while no tip is under
+    // the pointer.
+    let tip_line = Label::derived(move || tip.get().unwrap_or_default()).style(move |s| {
+        s.font_size(theme::TEXT_META)
+            .color(theme::fg_subtle())
+            .width_full()
+            .text_ellipsis()
+            .apply_if(tip.get().is_none(), |s| s.hide())
+    });
+    Stack::vertical((zoom_bar(state, zoom, shown, cap, frame), scroller, tip_line))
         .style(move |s| {
             s.flex_col()
                 .gap(4.0)
                 .width_full()
                 .apply_if(expanded, |s| s.height_full())
+        })
+        .into_any()
+}
+
+/// A type map's fallback list: one line per entry, colored by its tone.
+fn fallback_list(lines: &[FallbackLine]) -> AnyView {
+    let labels: Vec<AnyView> = lines
+        .iter()
+        .map(|line| {
+            let color = match line.tone {
+                Tone::Added => theme::status_added(),
+                Tone::Removed => theme::status_deleted(),
+                Tone::Changed => theme::status_modified(),
+                Tone::Context => theme::fg_subtle(),
+            };
+            Label::new(line.text.clone())
+                .style(move |s| s.font_size(theme::TEXT_META).color(color))
+                .into_any()
+        })
+        .collect();
+    Stack::vertical_from_iter(labels)
+        .debug_name("Changescape fallback")
+        .style(|s| {
+            s.flex_col()
+                .gap(4.0)
+                .width_full()
+                .padding(12.0)
+                .background(theme::canvas())
+                .border(1.0)
+                .border_color(theme::border_muted())
+                .border_radius(theme::RADIUS)
         })
         .into_any()
 }
@@ -286,8 +348,19 @@ fn scaled(at: Point, z: f64) -> Point {
 
 /// The hot nodes the tree has, with their bounding boxes.
 fn hot_nodes(drawing: &Drawing, svg: &Svg) -> Vec<Hot> {
-    svg.hot
-        .iter()
+    boxes(drawing, &svg.hot)
+}
+
+/// The tips the tree has, with their bounding boxes: each `el` is the
+/// full text.
+fn tip_nodes(drawing: &Drawing, svg: &Svg) -> Vec<Hot> {
+    boxes(drawing, &svg.tips)
+}
+
+/// The nodes of `ids` the tree has, each with its bounding box and what
+/// `ids` says of it.
+fn boxes(drawing: &Drawing, ids: &BTreeMap<String, String>) -> Vec<Hot> {
+    ids.iter()
         .filter_map(|(node, el)| {
             let node = drawing.tree.node_by_id(node)?;
             let b = node.abs_bounding_box();
@@ -405,6 +478,7 @@ mod tests {
                 .iter()
                 .map(|(n, e)| (n.to_string(), e.to_string()))
                 .collect(),
+            ..Default::default()
         }
     }
 

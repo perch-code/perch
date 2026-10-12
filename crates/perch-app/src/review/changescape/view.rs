@@ -17,7 +17,6 @@ use perch_github::ItemKind;
 
 use crate::review::changescape::navigate;
 use crate::review::changescape::prose::{self, hover_row, meta, MUTED, STRONG, TITLE};
-use crate::review::changescape::svg;
 use crate::review::changescape::tour::{self, Ctx};
 use crate::theme;
 use crate::ui::widgets::{clickable, open_in_browser};
@@ -144,11 +143,18 @@ fn card(cx: &Ctx, id: ViewId) -> AnyView {
     let pictures: Vec<AnyView> = cx
         .page
         .view_pictures(id)
-        .iter()
+        .into_iter()
         .enumerate()
         .map(|(i, picture)| {
             let key = tour::view_picture_key(id, i);
-            svg::svg_block(cx.clone(), picture.clone(), svg::Frame::Block(key))
+            tour::diagram(
+                cx,
+                key,
+                picture.caption.as_deref().or(picture.title.as_deref()),
+                picture.note.as_deref(),
+                picture.figure,
+            )
+            .into_any()
         })
         .collect();
     // A block that did not parse is named where it was, one line each.

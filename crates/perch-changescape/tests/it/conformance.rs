@@ -179,7 +179,9 @@ fn case_07_draws_the_tour_with_its_pictures_flags_and_band() {
     let (_, stop) = page.stop("put-checks-key").expect("no stop");
     assert_eq!(stop.title, "Store keys must be strings");
 
-    let seq = page::picture_svg(&stop.pictures[0]).expect("no seq picture");
+    let seq = page::picture_figure(&stop.pictures[0])
+        .expect("no seq picture")
+        .svg;
     assert_eq!(
         seq.hot.get("n1").map(String::as_str),
         Some("fn:pkg.store.Store.put")

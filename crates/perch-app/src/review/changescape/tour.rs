@@ -18,8 +18,8 @@ use std::collections::HashSet;
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 use floem::AnyView;
-use perch_changescape::page::{self, runs, Run, Svg, Target};
-use perch_changescape::v4::{Chapter, Flag, PicturesItem, Stop, Tour, Verdict, ViewId};
+use perch_changescape::page::{self, runs, Figure, Run, Target};
+use perch_changescape::v4::{Chapter, Flag, PicturesItem, Spine, Stop, Tour, Verdict, ViewId};
 use perch_changescape::LoadedPage;
 
 use crate::backend::Backend;
@@ -473,17 +473,9 @@ fn chapter_view(cx: &Ctx, chapter: Chapter, n: usize, of: usize) -> AnyView {
     if let Some(intro) = chapter.intro.as_deref().filter(|s| !s.is_empty()) {
         parts.push(prose::paragraph(intro, BODY).into_any());
     }
-    if let Some(spine) = &chapter.spine {
-        parts.push(
-            diagram(
-                cx,
-                spine_key(&chapter.id),
-                spine.caption.as_deref().or(spine.title.as_deref()),
-                spine.note.as_deref(),
-                page::spine_svg(spine),
-            )
-            .into_any(),
-        );
+    if let Some(figure) = page::spine_figure(&chapter.spine) {
+        let (caption, title, note) = spine_text(&chapter.spine);
+        parts.push(diagram(cx, spine_key(&chapter.id), caption.or(title), note, figure).into_any());
     }
     let mut stops: Vec<AnyView> = Vec::new();
     for run in runs(&chapter) {
@@ -544,7 +536,7 @@ pub fn diagram(
     key: String,
     heading: Option<&str>,
     note: Option<&str>,
-    svg: Svg,
+    figure: Figure,
 ) -> impl IntoView {
     let heading = heading.filter(|h| !h.is_empty()).map_or_else(
         || Empty::new().into_any(),
@@ -564,7 +556,7 @@ pub fn diagram(
     );
     Stack::vertical((
         heading,
-        svg::svg_block(cx.clone(), svg, svg::Frame::Block(key)),
+        svg::svg_block(cx.clone(), figure, svg::Frame::Block(key)),
         note,
     ))
     .debug_name("Changescape picture")
@@ -586,41 +578,52 @@ pub fn view_picture_key(view: ViewId, i: usize) -> String {
     format!("view:{i}:{view}")
 }
 
+/// A chapter's spine caption, title and note, of either kind.
+fn spine_text(spine: &Spine) -> (Option<&str>, Option<&str>, Option<&str>) {
+    match spine {
+        Spine::SeqPicture(seq) => (
+            seq.caption.as_deref(),
+            seq.title.as_deref(),
+            seq.note.as_deref(),
+        ),
+        Spine::TypeMap(map) => (
+            map.caption.as_deref(),
+            map.title.as_deref(),
+            map.note.as_deref(),
+        ),
+        Spine::Null => (None, None, None),
+    }
+}
+
 /// The diagram a key names, with its heading.
-pub fn picture(page: &LoadedPage, key: &str) -> Option<(String, Svg)> {
+pub fn picture(page: &LoadedPage, key: &str) -> Option<(String, Figure)> {
     if let Some((i, view)) = key.strip_prefix("view:").and_then(|k| k.split_once(':')) {
         let id: ViewId = view.parse().ok()?;
-        let svg = page.view_pictures(id).into_iter().nth(i.parse().ok()?)?;
-        return Some((prose::plain(&page.view(id)?.title), svg));
+        let picture = page.view_pictures(id).into_iter().nth(i.parse().ok()?)?;
+        return Some((prose::plain(&page.view(id)?.title), picture.figure));
     }
     let tour = page.tour()?;
     if let Some(chapter) = key.strip_prefix("spine:") {
-        let spine = tour
-            .chapters
-            .iter()
-            .find(|c| c.id == chapter)?
-            .spine
-            .as_ref()?;
-        let title = spine
-            .caption
-            .clone()
-            .or(spine.title.clone())
-            .unwrap_or_default();
-        return Some((prose::plain(&title), page::spine_svg(spine)));
+        let spine = &tour.chapters.iter().find(|c| c.id == chapter)?.spine;
+        let (caption, title, _) = spine_text(spine);
+        return Some((
+            prose::plain(caption.or(title).unwrap_or_default()),
+            page::spine_figure(spine)?,
+        ));
     }
     let (i, stop) = key.strip_prefix("stop:")?.split_once(':')?;
     let (_, stop) = page.stop(stop)?;
     let picture = stop.pictures.get(i.parse::<usize>().ok()?)?;
     let (caption, title) = match picture {
-        PicturesItem::Hunk { caption, title, .. } | PicturesItem::Seq { caption, title, .. } => {
-            (caption, title)
-        }
+        PicturesItem::Hunk { caption, title, .. }
+        | PicturesItem::Seq { caption, title, .. }
+        | PicturesItem::Types { caption, title, .. } => (caption, title),
     };
     let heading = caption
         .clone()
         .or(title.clone())
         .unwrap_or_else(|| stop.title.clone());
-    Some((prose::plain(&heading), page::picture_svg(picture)?))
+    Some((prose::plain(&heading), page::picture_figure(picture)?))
 }
 
 /// The diagram Expand opened, over the whole tour and fitted to it, with
@@ -630,7 +633,7 @@ fn expanded(cx: Ctx) -> impl IntoView {
     dyn_container(
         move || state.changescape_expanded.get(),
         move |key| {
-            let Some((title, svg)) = key.and_then(|key| picture(&cx.page, &key)) else {
+            let Some((title, figure)) = key.and_then(|key| picture(&cx.page, &key)) else {
                 return Empty::new().into_any();
             };
             Stack::vertical((
@@ -639,7 +642,7 @@ fn expanded(cx: Ctx) -> impl IntoView {
                         .font_weight(theme::weight_strong())
                         .color(theme::fg())
                 }),
-                Container::new(svg::svg_block(cx.clone(), svg, svg::Frame::Expanded))
+                Container::new(svg::svg_block(cx.clone(), figure, svg::Frame::Expanded))
                     .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0)),
             ))
             .debug_name("Changescape expanded diagram")

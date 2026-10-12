@@ -207,9 +207,13 @@
               "$ref": "#/$defs/SeqPicture"
             },
             {
+              "$ref": "#/$defs/TypeMap"
+            },
+            {
               "type": "null"
             }
-          ]
+          ],
+          "title": "Spine"
         },
         "stops": {
           "items": {
@@ -771,6 +775,42 @@
       "title": "FacetOption",
       "type": "object"
     },
+    "FieldRow": {
+      "description": "A field that the change adds, removes, or keeps with its type.",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "row": {
+          "const": "field",
+          "default": "field",
+          "title": "Row",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "added",
+            "removed",
+            "context"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "row",
+        "status",
+        "type"
+      ],
+      "title": "FieldRow",
+      "type": "object"
+    },
     "File": {
       "description": "One changed file of the pull request.",
       "properties": {
@@ -1002,6 +1042,42 @@
         "show"
       ],
       "title": "Fold",
+      "type": "object"
+    },
+    "FoldedRow": {
+      "description": "Fields that the box does not show one by one, counted by how they changed.",
+      "properties": {
+        "added": {
+          "title": "Added",
+          "type": "integer"
+        },
+        "removed": {
+          "title": "Removed",
+          "type": "integer"
+        },
+        "retyped": {
+          "title": "Retyped",
+          "type": "integer"
+        },
+        "row": {
+          "const": "folded",
+          "default": "folded",
+          "title": "Row",
+          "type": "string"
+        },
+        "same": {
+          "title": "Same",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "added",
+        "removed",
+        "retyped",
+        "row",
+        "same"
+      ],
+      "title": "FoldedRow",
       "type": "object"
     },
     "Group": {
@@ -1281,6 +1357,65 @@
       "title": "InlineComment",
       "type": "object"
     },
+    "InterfaceNode": {
+      "description": "An interface, such as a Rust trait or a Python Protocol, drawn as a box with no rows.\nIts arrows are the records that implement it and the interfaces that it extends.",
+      "properties": {
+        "element": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Element"
+        },
+        "hidden": {
+          "title": "Hidden",
+          "type": "integer"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "node": {
+          "const": "interface",
+          "default": "interface",
+          "title": "Node",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "was": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Was"
+        }
+      },
+      "required": [
+        "element",
+        "hidden",
+        "id",
+        "name",
+        "node",
+        "status",
+        "was"
+      ],
+      "title": "InterfaceNode",
+      "type": "object"
+    },
     "IssueComment": {
       "description": "A comment on the conversation of the pull request.",
       "properties": {
@@ -1360,6 +1495,7 @@
         "test",
         "docs",
         "config",
+        "data",
         "generated",
         "vendored",
         "other"
@@ -1787,6 +1923,103 @@
       "title": "Rank",
       "type": "string"
     },
+    "RecordNode": {
+      "description": "A record type, drawn as a box with one row per shown field.\n\n`was` is the base qualified name if the type moved or was renamed. `kind_change` names a change\nof its kind, such as \"TypedDict \u2192 dataclass\". `hidden` counts the types that the size cap folded\ninto this node.",
+      "properties": {
+        "element": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Element"
+        },
+        "fields": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "field": "#/$defs/FieldRow",
+                "folded": "#/$defs/FoldedRow",
+                "retyped": "#/$defs/RetypedRow"
+              },
+              "propertyName": "row"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/FieldRow"
+              },
+              {
+                "$ref": "#/$defs/RetypedRow"
+              },
+              {
+                "$ref": "#/$defs/FoldedRow"
+              }
+            ]
+          },
+          "title": "Fields",
+          "type": "array"
+        },
+        "hidden": {
+          "title": "Hidden",
+          "type": "integer"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind_change": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Kind Change"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "node": {
+          "const": "record",
+          "default": "record",
+          "title": "Node",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "was": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Was"
+        }
+      },
+      "required": [
+        "element",
+        "fields",
+        "hidden",
+        "id",
+        "kind_change",
+        "name",
+        "node",
+        "status",
+        "was"
+      ],
+      "title": "RecordNode",
+      "type": "object"
+    },
     "Ref": {
       "description": "A place in the diff that backs an element. A ref names the base path or the head path, or both.",
       "properties": {
@@ -1872,6 +2105,17 @@
       ],
       "title": "Ref",
       "type": "object"
+    },
+    "Relation": {
+      "description": "What an edge of a type map says about its two nodes.",
+      "enum": [
+        "holds",
+        "one_of",
+        "extends",
+        "implements"
+      ],
+      "title": "Relation",
+      "type": "string"
     },
     "Rely": {
       "description": "An element that the stop relies on, with the code that defines it.",
@@ -1965,6 +2209,37 @@
       ],
       "title": "RelyWhy",
       "type": "string"
+    },
+    "RetypedRow": {
+      "description": "A field that stays and changes its type. Only this row has an old type.",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "old_type": {
+          "title": "Old Type",
+          "type": "string"
+        },
+        "row": {
+          "const": "retyped",
+          "default": "retyped",
+          "title": "Row",
+          "type": "string"
+        },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "old_type",
+        "row",
+        "type"
+      ],
+      "title": "RetypedRow",
+      "type": "object"
     },
     "Rev": {
       "description": "A named revision and the commit that it points at.",
@@ -2364,7 +2639,8 @@
             "discriminator": {
               "mapping": {
                 "hunk": "#/$defs/HunkPicture",
-                "seq": "#/$defs/SeqPicture"
+                "seq": "#/$defs/SeqPicture",
+                "types": "#/$defs/TypeMap"
               },
               "propertyName": "kind"
             },
@@ -2374,6 +2650,9 @@
               },
               {
                 "$ref": "#/$defs/SeqPicture"
+              },
+              {
+                "$ref": "#/$defs/TypeMap"
               }
             ]
           },
@@ -2974,6 +3253,233 @@
       "title": "Tour",
       "type": "object"
     },
+    "TypeEdge": {
+      "description": "A link between two nodes. `field` names the row it leaves from, or None for a union member or\na base class. `tag` is the value that picks a union member, such as \"kind=hunk\".",
+      "properties": {
+        "field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Field"
+        },
+        "relation": {
+          "$ref": "#/$defs/Relation"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "added",
+            "removed",
+            "context"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "tag": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Tag"
+        },
+        "target": {
+          "title": "Target",
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "relation",
+        "source",
+        "status",
+        "tag",
+        "target"
+      ],
+      "title": "TypeEdge",
+      "type": "object"
+    },
+    "TypeMap": {
+      "description": "A type map of both sides of the change.",
+      "properties": {
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Caption"
+        },
+        "edges": {
+          "items": {
+            "$ref": "#/$defs/TypeEdge"
+          },
+          "title": "Edges",
+          "type": "array"
+        },
+        "kind": {
+          "const": "types",
+          "default": "types",
+          "title": "Kind",
+          "type": "string"
+        },
+        "nodes": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "interface": "#/$defs/InterfaceNode",
+                "record": "#/$defs/RecordNode",
+                "union": "#/$defs/UnionNode"
+              },
+              "propertyName": "node"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/RecordNode"
+              },
+              {
+                "$ref": "#/$defs/UnionNode"
+              },
+              {
+                "$ref": "#/$defs/InterfaceNode"
+              }
+            ]
+          },
+          "title": "Nodes",
+          "type": "array"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Note"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Title"
+        }
+      },
+      "required": [
+        "caption",
+        "edges",
+        "kind",
+        "nodes",
+        "note",
+        "title"
+      ],
+      "title": "TypeMap",
+      "type": "object"
+    },
+    "TypeMapBlock": {
+      "description": "A block with a type map. The map carries its own title and note.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "map": {
+          "$ref": "#/$defs/TypeMap"
+        },
+        "type": {
+          "const": "typemap",
+          "default": "typemap",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "map",
+        "type"
+      ],
+      "title": "TypeMapBlock",
+      "type": "object"
+    },
+    "UnionNode": {
+      "description": "A union of records, drawn as a \"one of\" node with an edge to each member.",
+      "properties": {
+        "element": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Element"
+        },
+        "hidden": {
+          "title": "Hidden",
+          "type": "integer"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "node": {
+          "const": "union",
+          "default": "union",
+          "title": "Node",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "was": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Was"
+        }
+      },
+      "required": [
+        "element",
+        "hidden",
+        "id",
+        "name",
+        "node",
+        "status",
+        "was"
+      ],
+      "title": "UnionNode",
+      "type": "object"
+    },
     "Verdict": {
       "description": "How much of a part or a stop a reader must read.",
       "enum": [
@@ -2997,7 +3503,8 @@
                 "summary": "#/$defs/SummaryBlock",
                 "svg": "#/$defs/SvgBlock",
                 "table": "#/$defs/TableBlock",
-                "text": "#/$defs/TextBlock"
+                "text": "#/$defs/TextBlock",
+                "typemap": "#/$defs/TypeMapBlock"
               },
               "propertyName": "type"
             },
@@ -3016,6 +3523,9 @@
               },
               {
                 "$ref": "#/$defs/SvgBlock"
+              },
+              {
+                "$ref": "#/$defs/TypeMapBlock"
               },
               {
                 "$ref": "#/$defs/CodeBlock"

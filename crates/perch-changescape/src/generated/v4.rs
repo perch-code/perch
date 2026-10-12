@@ -111,6 +111,12 @@ pub enum BlocksItem {
         #[serde(deserialize_with = "::std::option::Option::deserialize")]
         title: ::std::option::Option<::std::string::String>,
     },
+    #[doc = "TypeMapBlock\n\nA block with a type map. The map carries its own title and note."]
+    #[serde(rename = "typemap")]
+    Typemap {
+        id: ::std::string::String,
+        map: TypeMap,
+    },
     #[doc = "CodeBlock\n\nA block that shows code from the page files."]
     #[serde(rename = "code")]
     Code { id: ::std::string::String },
@@ -132,8 +138,7 @@ pub struct Chapter {
     pub lines: ChapterLines,
     pub parts: ::std::vec::Vec<::std::string::String>,
     pub sections: ::std::vec::Vec<ChapterSection>,
-    #[serde(deserialize_with = "::std::option::Option::deserialize")]
-    pub spine: ::std::option::Option<SeqPicture>,
+    pub spine: Spine,
     pub stops: ::std::vec::Vec<Stop>,
     pub title: ::std::string::String,
     pub verdict: Verdict,
@@ -571,6 +576,99 @@ pub struct FacetOption {
     #[serde(deserialize_with = "::std::option::Option::deserialize")]
     pub note: ::std::option::Option<::std::string::String>,
 }
+#[doc = "A field that the change adds, removes, or keeps with its type."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
+pub struct FieldRow {
+    pub name: ::std::string::String,
+    pub row: ::std::string::String,
+    pub status: FieldRowStatus,
+    #[serde(rename = "type")]
+    pub type_: ::std::string::String,
+}
+#[doc = "`FieldRowStatus`"]
+#[derive(
+    :: serde :: Deserialize,
+    :: serde :: Serialize,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    Hash,
+    Ord,
+    PartialEq,
+    PartialOrd,
+)]
+pub enum FieldRowStatus {
+    #[serde(rename = "added")]
+    Added,
+    #[serde(rename = "removed")]
+    Removed,
+    #[serde(rename = "context")]
+    Context,
+}
+impl ::std::fmt::Display for FieldRowStatus {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::Added => f.write_str("added"),
+            Self::Removed => f.write_str("removed"),
+            Self::Context => f.write_str("context"),
+        }
+    }
+}
+impl ::std::str::FromStr for FieldRowStatus {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "added" => Ok(Self::Added),
+            "removed" => Ok(Self::Removed),
+            "context" => Ok(Self::Context),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for FieldRowStatus {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for FieldRowStatus {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+#[doc = "`FieldsItem`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
+#[serde(tag = "row")]
+pub enum FieldsItem {
+    #[doc = "FieldRow\n\nA field that the change adds, removes, or keeps with its type."]
+    #[serde(rename = "field")]
+    Field {
+        name: ::std::string::String,
+        status: FieldRowStatus,
+        #[serde(rename = "type")]
+        type_: ::std::string::String,
+    },
+    #[doc = "RetypedRow\n\nA field that stays and changes its type. Only this row has an old type."]
+    #[serde(rename = "retyped")]
+    Retyped {
+        name: ::std::string::String,
+        old_type: ::std::string::String,
+        #[serde(rename = "type")]
+        type_: ::std::string::String,
+    },
+    #[doc = "FoldedRow\n\nFields that the box does not show one by one, counted by how they changed."]
+    #[serde(rename = "folded")]
+    Folded {
+        added: i64,
+        removed: i64,
+        retyped: i64,
+        same: i64,
+    },
+}
 #[doc = "One changed file of the pull request."]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
 pub struct File {
@@ -729,6 +827,15 @@ pub struct Fold {
     pub label: ::std::option::Option<::std::string::String>,
     #[serde(deserialize_with = "::std::option::Option::deserialize")]
     pub show: ::std::option::Option<i64>,
+}
+#[doc = "Fields that the box does not show one by one, counted by how they changed."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
+pub struct FoldedRow {
+    pub added: i64,
+    pub removed: i64,
+    pub retyped: i64,
+    pub row: ::std::string::String,
+    pub same: i64,
 }
 #[doc = "A group of table rows that folds under one heading."]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
@@ -903,6 +1010,19 @@ pub struct InlineComment {
     pub reply_to: ::std::option::Option<i64>,
     pub url: ::std::string::String,
 }
+#[doc = "An interface, such as a Rust trait or a Python Protocol, drawn as a box with no rows.\nIts arrows are the records that implement it and the interfaces that it extends."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
+pub struct InterfaceNode {
+    #[serde(deserialize_with = "::std::option::Option::deserialize")]
+    pub element: ::std::option::Option<::std::string::String>,
+    pub hidden: i64,
+    pub id: ::std::string::String,
+    pub name: ::std::string::String,
+    pub node: ::std::string::String,
+    pub status: Status,
+    #[serde(deserialize_with = "::std::option::Option::deserialize")]
+    pub was: ::std::option::Option<::std::string::String>,
+}
 #[doc = "A comment on the conversation of the pull request."]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
 pub struct IssueComment {
@@ -981,6 +1101,8 @@ pub enum Kind {
     Docs,
     #[serde(rename = "config")]
     Config,
+    #[serde(rename = "data")]
+    Data,
     #[serde(rename = "generated")]
     Generated,
     #[serde(rename = "vendored")]
@@ -995,6 +1117,7 @@ impl ::std::fmt::Display for Kind {
             Self::Test => f.write_str("test"),
             Self::Docs => f.write_str("docs"),
             Self::Config => f.write_str("config"),
+            Self::Data => f.write_str("data"),
             Self::Generated => f.write_str("generated"),
             Self::Vendored => f.write_str("vendored"),
             Self::Other => f.write_str("other"),
@@ -1009,6 +1132,7 @@ impl ::std::str::FromStr for Kind {
             "test" => Ok(Self::Test),
             "docs" => Ok(Self::Docs),
             "config" => Ok(Self::Config),
+            "data" => Ok(Self::Data),
             "generated" => Ok(Self::Generated),
             "vendored" => Ok(Self::Vendored),
             "other" => Ok(Self::Other),
@@ -1201,6 +1325,50 @@ pub struct NarrationBlock {
     #[serde(rename = "type")]
     pub type_: ::std::string::String,
 }
+#[doc = "`NodesItem`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
+#[serde(tag = "node")]
+pub enum NodesItem {
+    #[doc = "RecordNode\n\nA record type, drawn as a box with one row per shown field.\n\n`was` is the base qualified name if the type moved or was renamed. `kind_change` names a change\nof its kind, such as \"TypedDict → dataclass\". `hidden` counts the types that the size cap folded\ninto this node."]
+    #[serde(rename = "record")]
+    Record {
+        #[serde(deserialize_with = "::std::option::Option::deserialize")]
+        element: ::std::option::Option<::std::string::String>,
+        fields: ::std::vec::Vec<FieldsItem>,
+        hidden: i64,
+        id: ::std::string::String,
+        #[serde(deserialize_with = "::std::option::Option::deserialize")]
+        kind_change: ::std::option::Option<::std::string::String>,
+        name: ::std::string::String,
+        status: Status,
+        #[serde(deserialize_with = "::std::option::Option::deserialize")]
+        was: ::std::option::Option<::std::string::String>,
+    },
+    #[doc = "UnionNode\n\nA union of records, drawn as a \"one of\" node with an edge to each member."]
+    #[serde(rename = "union")]
+    Union {
+        #[serde(deserialize_with = "::std::option::Option::deserialize")]
+        element: ::std::option::Option<::std::string::String>,
+        hidden: i64,
+        id: ::std::string::String,
+        name: ::std::string::String,
+        status: Status,
+        #[serde(deserialize_with = "::std::option::Option::deserialize")]
+        was: ::std::option::Option<::std::string::String>,
+    },
+    #[doc = "InterfaceNode\n\nAn interface, such as a Rust trait or a Python Protocol, drawn as a box with no rows.\nIts arrows are the records that implement it and the interfaces that it extends."]
+    #[serde(rename = "interface")]
+    Interface {
+        #[serde(deserialize_with = "::std::option::Option::deserialize")]
+        element: ::std::option::Option<::std::string::String>,
+        hidden: i64,
+        id: ::std::string::String,
+        name: ::std::string::String,
+        status: Status,
+        #[serde(deserialize_with = "::std::option::Option::deserialize")]
+        was: ::std::option::Option<::std::string::String>,
+    },
+}
 #[doc = "A table cell with a number."]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
 pub struct NumberCell {
@@ -1337,6 +1505,18 @@ pub enum PicturesItem {
         #[serde(deserialize_with = "::std::option::Option::deserialize")]
         title: ::std::option::Option<::std::string::String>,
     },
+    #[doc = "TypeMap\n\nA type map of both sides of the change."]
+    #[serde(rename = "types")]
+    Types {
+        #[serde(deserialize_with = "::std::option::Option::deserialize")]
+        caption: ::std::option::Option<::std::string::String>,
+        edges: ::std::vec::Vec<TypeEdge>,
+        nodes: ::std::vec::Vec<NodesItem>,
+        #[serde(deserialize_with = "::std::option::Option::deserialize")]
+        note: ::std::option::Option<::std::string::String>,
+        #[serde(deserialize_with = "::std::option::Option::deserialize")]
+        title: ::std::option::Option<::std::string::String>,
+    },
 }
 #[doc = "The state of a pull request."]
 #[derive(
@@ -1454,6 +1634,22 @@ impl ::std::convert::TryFrom<::std::string::String> for Rank {
         value.parse()
     }
 }
+#[doc = "A record type, drawn as a box with one row per shown field.\n\n`was` is the base qualified name if the type moved or was renamed. `kind_change` names a change\nof its kind, such as \"TypedDict → dataclass\". `hidden` counts the types that the size cap folded\ninto this node."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
+pub struct RecordNode {
+    #[serde(deserialize_with = "::std::option::Option::deserialize")]
+    pub element: ::std::option::Option<::std::string::String>,
+    pub fields: ::std::vec::Vec<FieldsItem>,
+    pub hidden: i64,
+    pub id: ::std::string::String,
+    #[serde(deserialize_with = "::std::option::Option::deserialize")]
+    pub kind_change: ::std::option::Option<::std::string::String>,
+    pub name: ::std::string::String,
+    pub node: ::std::string::String,
+    pub status: Status,
+    #[serde(deserialize_with = "::std::option::Option::deserialize")]
+    pub was: ::std::option::Option<::std::string::String>,
+}
 #[doc = "A place in the diff that backs an element. A ref names the base path or the head path, or both."]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
 pub struct Ref {
@@ -1467,6 +1663,65 @@ pub struct Ref {
     pub head_path: ::std::option::Option<::std::string::String>,
     pub rows: ::std::vec::Vec<RowsItem>,
     pub whole_file: bool,
+}
+#[doc = "What an edge of a type map says about its two nodes."]
+#[derive(
+    :: serde :: Deserialize,
+    :: serde :: Serialize,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    Hash,
+    Ord,
+    PartialEq,
+    PartialOrd,
+)]
+pub enum Relation {
+    #[serde(rename = "holds")]
+    Holds,
+    #[serde(rename = "one_of")]
+    OneOf,
+    #[serde(rename = "extends")]
+    Extends,
+    #[serde(rename = "implements")]
+    Implements,
+}
+impl ::std::fmt::Display for Relation {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::Holds => f.write_str("holds"),
+            Self::OneOf => f.write_str("one_of"),
+            Self::Extends => f.write_str("extends"),
+            Self::Implements => f.write_str("implements"),
+        }
+    }
+}
+impl ::std::str::FromStr for Relation {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "holds" => Ok(Self::Holds),
+            "one_of" => Ok(Self::OneOf),
+            "extends" => Ok(Self::Extends),
+            "implements" => Ok(Self::Implements),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for Relation {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for Relation {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
 }
 #[doc = "An element that the stop relies on, with the code that defines it."]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
@@ -1542,6 +1797,15 @@ impl ::std::convert::TryFrom<::std::string::String> for RelyWhy {
     ) -> ::std::result::Result<Self, self::error::ConversionError> {
         value.parse()
     }
+}
+#[doc = "A field that stays and changes its type. Only this row has an old type."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
+pub struct RetypedRow {
+    pub name: ::std::string::String,
+    pub old_type: ::std::string::String,
+    pub row: ::std::string::String,
+    #[serde(rename = "type")]
+    pub type_: ::std::string::String,
 }
 #[doc = "A named revision and the commit that it points at."]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
@@ -1832,6 +2096,24 @@ pub struct Span {
     pub count: i64,
     pub start: i64,
 }
+#[doc = "`Spine`"]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
+#[serde(untagged)]
+pub enum Spine {
+    SeqPicture(SeqPicture),
+    TypeMap(TypeMap),
+    Null,
+}
+impl ::std::convert::From<SeqPicture> for Spine {
+    fn from(value: SeqPicture) -> Self {
+        Self::SeqPicture(value)
+    }
+}
+impl ::std::convert::From<TypeMap> for Spine {
+    fn from(value: TypeMap) -> Self {
+        Self::TypeMap(value)
+    }
+}
 #[doc = "How an element changed in the pull request."]
 #[derive(
     :: serde :: Deserialize,
@@ -2093,6 +2375,107 @@ pub struct Tour {
     pub narrated: bool,
     #[serde(deserialize_with = "::std::option::Option::deserialize")]
     pub summary: ::std::option::Option<::std::string::String>,
+}
+#[doc = "A link between two nodes. `field` names the row it leaves from, or None for a union member or\na base class. `tag` is the value that picks a union member, such as \"kind=hunk\"."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
+pub struct TypeEdge {
+    #[serde(deserialize_with = "::std::option::Option::deserialize")]
+    pub field: ::std::option::Option<::std::string::String>,
+    pub relation: Relation,
+    pub source: ::std::string::String,
+    pub status: TypeEdgeStatus,
+    #[serde(deserialize_with = "::std::option::Option::deserialize")]
+    pub tag: ::std::option::Option<::std::string::String>,
+    pub target: ::std::string::String,
+}
+#[doc = "`TypeEdgeStatus`"]
+#[derive(
+    :: serde :: Deserialize,
+    :: serde :: Serialize,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    Hash,
+    Ord,
+    PartialEq,
+    PartialOrd,
+)]
+pub enum TypeEdgeStatus {
+    #[serde(rename = "added")]
+    Added,
+    #[serde(rename = "removed")]
+    Removed,
+    #[serde(rename = "context")]
+    Context,
+}
+impl ::std::fmt::Display for TypeEdgeStatus {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::Added => f.write_str("added"),
+            Self::Removed => f.write_str("removed"),
+            Self::Context => f.write_str("context"),
+        }
+    }
+}
+impl ::std::str::FromStr for TypeEdgeStatus {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "added" => Ok(Self::Added),
+            "removed" => Ok(Self::Removed),
+            "context" => Ok(Self::Context),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for TypeEdgeStatus {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for TypeEdgeStatus {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+#[doc = "A type map of both sides of the change."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
+pub struct TypeMap {
+    #[serde(deserialize_with = "::std::option::Option::deserialize")]
+    pub caption: ::std::option::Option<::std::string::String>,
+    pub edges: ::std::vec::Vec<TypeEdge>,
+    pub kind: ::std::string::String,
+    pub nodes: ::std::vec::Vec<NodesItem>,
+    #[serde(deserialize_with = "::std::option::Option::deserialize")]
+    pub note: ::std::option::Option<::std::string::String>,
+    #[serde(deserialize_with = "::std::option::Option::deserialize")]
+    pub title: ::std::option::Option<::std::string::String>,
+}
+#[doc = "A block with a type map. The map carries its own title and note."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
+pub struct TypeMapBlock {
+    pub id: ::std::string::String,
+    pub map: TypeMap,
+    #[serde(rename = "type")]
+    pub type_: ::std::string::String,
+}
+#[doc = "A union of records, drawn as a \"one of\" node with an edge to each member."]
+#[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
+pub struct UnionNode {
+    #[serde(deserialize_with = "::std::option::Option::deserialize")]
+    pub element: ::std::option::Option<::std::string::String>,
+    pub hidden: i64,
+    pub id: ::std::string::String,
+    pub name: ::std::string::String,
+    pub node: ::std::string::String,
+    pub status: Status,
+    #[serde(deserialize_with = "::std::option::Option::deserialize")]
+    pub was: ::std::option::Option<::std::string::String>,
 }
 #[doc = "`Value`"]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]

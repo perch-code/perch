@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use perch_changescape::v4::PicturesItem;
+use perch_changescape::v4::{PicturesItem, Spine};
 use perch_changescape::{page, LoadedPage, Lookup};
 use perch_github::{Cache, ItemKind};
 
@@ -124,7 +124,7 @@ fn render(out: &mut String, page: &LoadedPage) {
         tour.narrated
     );
     for chapter in &tour.chapters {
-        let spine = if chapter.spine.is_some() {
+        let spine = if !matches!(chapter.spine, Spine::Null) {
             ", spine"
         } else {
             ""
@@ -136,6 +136,7 @@ fn render(out: &mut String, page: &LoadedPage) {
                 let kind = match picture {
                     PicturesItem::Hunk { .. } => "hunk",
                     PicturesItem::Seq { .. } => "seq",
+                    PicturesItem::Types { .. } => "types",
                 };
                 *kinds.entry(kind).or_default() += 1;
             }

@@ -19,6 +19,7 @@
 
 pub mod page;
 mod skill;
+pub mod typemap;
 
 /// Code generated from the schemas. Not edited by hand.
 mod generated {
