@@ -95,7 +95,7 @@ pub fn start_work_on_thread(app: AppState, backend: &Backend, thread: &Thread) {
 #[derive(Clone, PartialEq)]
 pub enum Pending {
     Item(String),
-    Thread(Thread),
+    Thread(Box<Thread>),
 }
 
 /// Ask before cutting: the bar's button and every row's menu come here,

@@ -25530,6 +25530,7 @@ read eof || true
     /// GitHub for Invite: `login` is a user of `kind`, `open` is the title
     /// of an open issue the search finds, and filing makes #77. Writes
     /// down what was asked and what each POST sent.
+    #[allow(clippy::type_complexity)]
     fn invite_github(
         kind: &'static str,
         open: Option<&'static str>,

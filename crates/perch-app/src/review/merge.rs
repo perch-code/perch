@@ -604,6 +604,7 @@ fn check_status(state: CheckRunState) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn merge_section(
     state: ReviewState,
     backend: Rc<Backend>,

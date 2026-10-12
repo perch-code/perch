@@ -394,7 +394,10 @@ fn notification_menu(state: AppState, backend: Rc<Backend>, thread: &Thread, awa
                 item.icon(SidebarIcon::Branch)
                     .enabled(open)
                     .action(move || {
-                        start_work::ask(state, start_work::Pending::Thread(thread.clone()))
+                        start_work::ask(
+                            state,
+                            start_work::Pending::Thread(Box::new(thread.clone())),
+                        )
                     })
             })
             .separator();

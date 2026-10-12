@@ -591,6 +591,31 @@ fn screens() -> Vec<Rect> {
     Vec::new()
 }
 
+/// Nothing to see. A state update to it focuses its window: floem focuses
+/// whichever window is handling an update, and a view's update is handled
+/// by its own window.
+struct Raise {
+    id: floem::ViewId,
+}
+
+impl Raise {
+    fn new() -> Self {
+        Self {
+            id: floem::ViewId::new(),
+        }
+    }
+}
+
+impl floem::View for Raise {
+    fn id(&self) -> floem::ViewId {
+        self.id
+    }
+
+    fn update(&mut self, _cx: &mut floem::context::UpdateCx, _state: Box<dyn std::any::Any>) {
+        floem::action::focus_window();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,30 +655,5 @@ mod tests {
     fn a_frame_is_never_under_the_minimum() {
         let frame = Rect::new(100.0, 100.0, 300.0, 300.0);
         assert_eq!(fit(frame, &[SCREEN]).size(), MIN_SIZE);
-    }
-}
-
-/// Nothing to see. A state update to it focuses its window: floem focuses
-/// whichever window is handling an update, and a view's update is handled
-/// by its own window.
-struct Raise {
-    id: floem::ViewId,
-}
-
-impl Raise {
-    fn new() -> Self {
-        Self {
-            id: floem::ViewId::new(),
-        }
-    }
-}
-
-impl floem::View for Raise {
-    fn id(&self) -> floem::ViewId {
-        self.id
-    }
-
-    fn update(&mut self, _cx: &mut floem::context::UpdateCx, _state: Box<dyn std::any::Any>) {
-        floem::action::focus_window();
     }
 }

@@ -289,7 +289,7 @@ mod tests {
             "nothing new to add"
         );
         assert_eq!(
-            path_with_install_dirs(None, &[brew.clone()]),
+            path_with_install_dirs(None, std::slice::from_ref(&brew)),
             Some(brew.into_os_string())
         );
     }
