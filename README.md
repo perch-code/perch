@@ -49,6 +49,14 @@ target directory. Copy it to `/Applications`, or run it directly:
 cargo run --release -p perch-app
 ```
 
+If you change Perch and run it often, use the `local` profile. It skips
+link-time optimization, which takes most of the time of a release build, and
+it builds incrementally. The app runs a little slower than a release build.
+
+```bash
+cargo run --profile local -p perch-app
+```
+
 ## Setup
 
 ### GitHub
