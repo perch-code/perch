@@ -78,6 +78,7 @@ pub enum Language {
     TypeScript,
     Tsx,
     Java,
+    Python,
 }
 
 impl Language {
@@ -101,6 +102,7 @@ impl Language {
             Some("ts" | "mts" | "cts") => Some(Language::TypeScript),
             Some("tsx") => Some(Language::Tsx),
             Some("java") => Some(Language::Java),
+            Some("py" | "pyi" | "pyw") => Some(Language::Python),
             // Files whose name carries the type rather than an extension.
             _ => match name {
                 "Cargo.lock" => Some(Language::Toml),
@@ -121,6 +123,7 @@ impl Language {
             Language::TypeScript => "TypeScript",
             Language::Tsx => "TSX",
             Language::Java => "Java",
+            Language::Python => "Python",
         }
     }
 
@@ -137,6 +140,7 @@ impl Language {
             "typescript" | "ts" | "mts" | "cts" => Some(Language::TypeScript),
             "tsx" => Some(Language::Tsx),
             "java" => Some(Language::Java),
+            "python" | "py" => Some(Language::Python),
             _ => None,
         }
     }
@@ -238,6 +242,14 @@ impl Language {
                 tree_sitter_java::LANGUAGE,
                 "java",
                 tree_sitter_java::HIGHLIGHTS_QUERY,
+                "",
+                ""
+            ),
+            Language::Python => grammar!(
+                PYTHON,
+                tree_sitter_python::LANGUAGE,
+                "python",
+                tree_sitter_python::HIGHLIGHTS_QUERY,
                 "",
                 ""
             ),
@@ -557,6 +569,9 @@ mod tests {
             Language::from_path("jdt://contents/java.base/java.util/List.class"),
             Some(Language::Java)
         );
+        assert_eq!(Language::from_path("app/main.py"), Some(Language::Python));
+        assert_eq!(Language::from_path("app/stubs.pyi"), Some(Language::Python));
+        assert_eq!(Language::from_path("app/gui.pyw"), Some(Language::Python));
     }
 
     #[test]
@@ -569,6 +584,8 @@ mod tests {
             Some(Language::JavaScript)
         );
         assert_eq!(Language::from_fence("java"), Some(Language::Java));
+        assert_eq!(Language::from_fence("python"), Some(Language::Python));
+        assert_eq!(Language::from_fence("py"), Some(Language::Python));
         assert_eq!(Language::from_fence("diff"), None);
     }
 
@@ -592,6 +609,20 @@ mod tests {
         let names: Vec<&str> = spans.iter().map(capture_name).collect();
         assert!(names.iter().any(|n| n.starts_with("keyword")), "{names:?}");
         assert!(names.iter().any(|n| n.starts_with("string")), "{names:?}");
+    }
+
+    #[test]
+    fn python_keywords_functions_strings_and_comments_are_captured() {
+        let src = "# a note\ndef greet(name):\n    return \"hi\"\n";
+        let spans = highlight(Language::Python, src);
+        let names: Vec<(&str, &str)> = spans
+            .iter()
+            .map(|s| (capture_name(s), &src[s.start..s.end]))
+            .collect();
+        assert!(names.contains(&("keyword", "def")), "{names:?}");
+        assert!(names.contains(&("function", "greet")), "{names:?}");
+        assert!(names.contains(&("string", "\"hi\"")), "{names:?}");
+        assert!(names.contains(&("comment", "# a note")), "{names:?}");
     }
 
     #[test]
@@ -631,6 +662,7 @@ mod tests {
                 "const a = (p: { n: number }) => <b>{p.n}</b>;\n",
             ),
             (Language::Java, "class A { int f() { return 1; } }\n"),
+            (Language::Python, "def f():\n    return 1\n"),
         ];
         for (lang, src) in cases {
             assert!(

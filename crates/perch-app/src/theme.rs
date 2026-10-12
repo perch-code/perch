@@ -754,6 +754,7 @@ pub fn language_color(language: Option<perch_syntax::Language>) -> Color {
         Some(Language::JavaScript) => Color::from_rgb8(0xd4, 0xb8, 0x30),
         Some(Language::TypeScript | Language::Tsx) => Color::from_rgb8(0x31, 0x78, 0xc6),
         Some(Language::Java) => Color::from_rgb8(0xb0, 0x72, 0x19),
+        Some(Language::Python) => Color::from_rgb8(0x35, 0x72, 0xa5),
         None => Color::from_rgb8(0xa8, 0xb0, 0xb8),
     }
 }
