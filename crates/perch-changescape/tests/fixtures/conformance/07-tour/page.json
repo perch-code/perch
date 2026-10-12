@@ -1,0 +1,405 @@
+{
+  "schema": 4,
+  "meta": {
+    "key": "changescape-acme-widgets-7",
+    "title": "Add a cache and move the text helpers",
+    "repo": "acme/widgets",
+    "number": 7,
+    "url": "https://github.com/acme/widgets/pull/7",
+    "author": "alice",
+    "state": "open",
+    "language": "python",
+    "base": {
+      "ref": "main",
+      "sha": "c6f42045e20f643a2bbcfec6bb32d5750ad6a9e9"
+    },
+    "head": {
+      "ref": "cache",
+      "sha": "45d097f615470161a761dc80d71d532b1e5d7b19"
+    },
+    "adds": 52,
+    "dels": 12,
+    "files": 4,
+    "issues": [],
+    "generated": "2026-10-12T07:33:36+00:00"
+  },
+  "sections": [
+    {
+      "id": "overview",
+      "label": "Overview",
+      "icon": "overview",
+      "question": "What does this change do?",
+      "empty": "",
+      "views": [
+        "overview"
+      ],
+      "reason": null
+    }
+  ],
+  "views": [
+    {
+      "id": "overview",
+      "section": "overview",
+      "title": "Overview",
+      "subtitle": "The change in one page",
+      "question": "What does this change do?",
+      "icon": "overview",
+      "metric": "4 files",
+      "narration": null,
+      "blocks": [
+        {
+          "id": "intro",
+          "text": "The store checks its keys.",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "elements": {
+    "fn:pkg.store.Store.put": {
+      "kind": "function",
+      "name": "pkg.store.Store.put",
+      "title": "put",
+      "label": "Store.put",
+      "status": "changed",
+      "detail": null,
+      "url": null,
+      "refs": [],
+      "hash": null,
+      "appears": []
+    },
+    "stop:put-checks-key": {
+      "kind": "stop",
+      "name": "put-checks-key",
+      "title": "Store keys must be strings",
+      "label": "Store keys",
+      "status": "changed",
+      "detail": null,
+      "url": null,
+      "refs": [],
+      "hash": null,
+      "appears": []
+    },
+    "chapter:change": {
+      "kind": "chapter",
+      "name": "change",
+      "title": "The change",
+      "label": "The change",
+      "status": "changed",
+      "detail": null,
+      "url": null,
+      "refs": [],
+      "hash": null,
+      "appears": []
+    }
+  },
+  "files": [
+    {
+      "path": "pkg/store.py",
+      "old_path": "pkg/store.py",
+      "status": "changed",
+      "binary": false,
+      "kind": "source",
+      "made_by": null,
+      "adds": 2,
+      "dels": 0,
+      "lines_by_kind": [
+        {
+          "kind": "source",
+          "adds": 2,
+          "dels": 0
+        }
+      ],
+      "hunks": [
+        {
+          "base": {
+            "start": 14,
+            "count": 2
+          },
+          "head": {
+            "start": 14,
+            "count": 4
+          },
+          "rows": [
+            {
+              "base": 14,
+              "head": 14,
+              "text": "    def put(self, key, value):",
+              "op": "keep"
+            },
+            {
+              "head": 15,
+              "text": "        if not isinstance(key, str):",
+              "op": "add"
+            },
+            {
+              "head": 16,
+              "text": "            raise TypeError(\"keys are strings\")",
+              "op": "add"
+            },
+            {
+              "base": 15,
+              "head": 17,
+              "text": "        self.data[key] = value",
+              "op": "keep"
+            }
+          ]
+        }
+      ],
+      "ship": {
+        "ship": "hunks",
+        "why": "Changed code is in the hunks."
+      }
+    },
+    {
+      "path": "tests/test_store.py",
+      "old_path": "tests/test_store.py",
+      "status": "added",
+      "binary": false,
+      "kind": "test",
+      "made_by": null,
+      "adds": 5,
+      "dels": 0,
+      "lines_by_kind": [
+        {
+          "kind": "test",
+          "adds": 5,
+          "dels": 0
+        }
+      ],
+      "hunks": [],
+      "ship": {
+        "ship": "whole",
+        "base": null,
+        "head": "import pytest\n\n\ndef test_a():\n    pass\n"
+      }
+    }
+  ],
+  "comments": [
+    {
+      "kind": "inline",
+      "id": 101,
+      "author": "alice",
+      "at": "2026-10-10T09:00:00Z",
+      "body": "Should this be a set?",
+      "url": "https://github.com/acme/widgets/pull/7#discussion_r101",
+      "reply_to": null,
+      "anchor": {
+        "path": "pkg/store.py",
+        "side": "head",
+        "lines": {
+          "start": 15,
+          "end": 16
+        }
+      },
+      "outdated": false
+    }
+  ],
+  "facets": [],
+  "parts": [
+    {
+      "id": "existing",
+      "kind": "existing",
+      "verdict": "read",
+      "label": "Changes to existing files",
+      "adds": 2,
+      "dels": 0,
+      "files": [
+        {
+          "path": "pkg/store.py",
+          "adds": 2,
+          "dels": 0
+        }
+      ],
+      "modules": [
+        "pkg.store"
+      ],
+      "elements": [
+        "fn:pkg.store.Store.put"
+      ]
+    },
+    {
+      "id": "test",
+      "kind": "test",
+      "verdict": "skim",
+      "label": "Tests",
+      "adds": 5,
+      "dels": 0,
+      "files": [
+        {
+          "path": "tests/test_store.py",
+          "adds": 5,
+          "dels": 0
+        }
+      ],
+      "modules": [
+        "tests.test_store"
+      ],
+      "elements": []
+    }
+  ],
+  "tour": {
+    "narrated": false,
+    "summary": null,
+    "flags": [
+      {
+        "kind": "warn",
+        "title": "Check the key type",
+        "text": "The key check is new.",
+        "target": {
+          "to": "element",
+          "element": "fn:pkg.store.Store.put"
+        }
+      },
+      {
+        "kind": "warn",
+        "title": "Read the API",
+        "text": "The API view lists the callers.",
+        "target": {
+          "to": "view",
+          "view": "overview"
+        }
+      },
+      {
+        "kind": "warn",
+        "title": "A reviewer asked a question",
+        "text": "The comment asks about the key type.",
+        "target": {
+          "to": "comment",
+          "comment": {
+            "kind": "inline",
+            "id": 101
+          }
+        }
+      }
+    ],
+    "chapters": [
+      {
+        "id": "change",
+        "hash": "d6905d0f89ac",
+        "title": "The change",
+        "intro": null,
+        "verdict": "read",
+        "lines": {
+          "read": 2,
+          "skim": 5
+        },
+        "parts": [
+          "existing"
+        ],
+        "spine": null,
+        "stops": [
+          {
+            "id": "put-checks-key",
+            "hash": "a1b2c3d4e5f6",
+            "title": "Store keys must be strings",
+            "before": "The store accepts any key.",
+            "now": "The store rejects keys that are not strings.",
+            "watch": "Check that a number key raises TypeError.",
+            "watch_target": {
+              "to": "element",
+              "element": "fn:pkg.store.Store.put"
+            },
+            "verdict": "read",
+            "elements": [
+              "fn:pkg.store.Store.put"
+            ],
+            "pictures": [
+              {
+                "kind": "seq",
+                "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 200 60\" width=\"200\" height=\"60\"><rect id=\"n1\" x=\"10\" y=\"10\" width=\"80\" height=\"40\"/></svg>",
+                "hot": {
+                  "n1": "fn:pkg.store.Store.put"
+                },
+                "title": "From Store.put",
+                "note": null,
+                "caption": "The put call checks the key."
+              },
+              {
+                "kind": "hunk",
+                "file": "pkg/store.py",
+                "windows": [
+                  {
+                    "base": {
+                      "start": 14,
+                      "end": 15
+                    },
+                    "head": {
+                      "start": 14,
+                      "end": 17
+                    }
+                  }
+                ],
+                "title": "The key check",
+                "note": null,
+                "caption": null
+              }
+            ],
+            "relies": [],
+            "asides": [],
+            "lines": 2,
+            "files": [
+              {
+                "path": "pkg/store.py",
+                "part": "existing",
+                "adds": 2,
+                "dels": 0
+              }
+            ]
+          }
+        ],
+        "sections": [
+          {
+            "title": "The store",
+            "intro": null,
+            "stops": [
+              "put-checks-key"
+            ]
+          }
+        ]
+      }
+    ],
+    "below": [
+      {
+        "part": "test",
+        "verdict": "skim",
+        "label": "Tests",
+        "lines": 5,
+        "files": [
+          {
+            "path": "tests/test_store.py",
+            "part": "test",
+            "adds": 5,
+            "dels": 0
+          }
+        ]
+      }
+    ],
+    "ending": {
+      "checks": [
+        {
+          "question": "Does the key check match the test?",
+          "answer": "Yes.",
+          "view": null,
+          "elements": [
+            "fn:pkg.store.Store.put"
+          ]
+        }
+      ],
+      "actions": [
+        {
+          "label": "Run the tests",
+          "detail": null
+        }
+      ]
+    },
+    "map": [
+      {
+        "package": "pkg",
+        "files": [
+          "pkg/store.py"
+        ]
+      }
+    ]
+  }
+}

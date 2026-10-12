@@ -17,7 +17,7 @@ use floem::reactive::{Memo, SignalGet, SignalUpdate, SignalWith};
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 use floem::AnyView;
 use perch_changescape::page::{self, hunk, Target, Window};
-use perch_changescape::v4::{Aside, Chapter, PicturesItem, Rely, Stop};
+use perch_changescape::v4::{Aside, Chapter, PicturesItem, Rely, RelyWhy, Stop};
 use perch_github::{Anchor, CommentThread, Side, StoredMark, TourMark};
 
 use crate::review::changescape::hunk::hunk_view;
@@ -312,12 +312,12 @@ pub fn rely_says(rely: &Rely) -> Option<String> {
 }
 
 /// How a stop relies on the code: `calls`, `implements` or `matches`.
-/// The set is open, and a value this Perch does not know reads as calls.
+/// A reliance with no kind reads as calls.
 pub fn rely_why(rely: &Rely) -> &'static str {
-    match rely.why.as_deref() {
-        Some("implements") => "implements",
-        Some("matches") => "matches",
-        _ => "calls",
+    match rely.why {
+        Some(RelyWhy::Matches) => "matches",
+        Some(RelyWhy::Implements) => "implements",
+        Some(RelyWhy::Calls) | None => "calls",
     }
 }
 
@@ -827,7 +827,8 @@ pub(super) mod tests {
         );
         assert_eq!(rely_says(&rely(None, "", None)), None);
         assert_eq!(rely_why(&rely(None, "", Some("implements"))), "implements");
-        assert_eq!(rely_why(&rely(None, "", Some("overrides"))), "calls");
+        assert_eq!(rely_why(&rely(None, "", Some("matches"))), "matches");
+        assert_eq!(rely_why(&rely(None, "", None)), "calls");
     }
 
     #[test]

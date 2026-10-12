@@ -151,6 +151,21 @@ fn card(cx: &Ctx, id: ViewId) -> AnyView {
             svg::svg_block(cx.clone(), picture.clone(), svg::Frame::Block(key))
         })
         .collect();
+    // A block that did not parse is named where it was, one line each.
+    let dropped: Vec<AnyView> = cx
+        .page
+        .dropped_blocks(id)
+        .map(|block| {
+            let text = if block.known {
+                "Perch cannot read this block."
+            } else {
+                "This block is in the browser page."
+            };
+            Label::new(text)
+                .style(|s| s.font_size(theme::TEXT_META).color(theme::fg_subtle()))
+                .into_any()
+        })
+        .collect();
     let empty = rows.is_empty() && pictures.is_empty();
     let header = Stack::horizontal((
         Stack::vertical((prose::paragraph(&view.title, TITLE), {
@@ -189,23 +204,28 @@ fn card(cx: &Ctx, id: ViewId) -> AnyView {
             .width_full()
             .apply_if(drawn, |s| s.padding_bottom(8.0))
     });
-    Stack::vertical((header, pictures, body))
-        .debug_name(format!("Changescape view {id}"))
-        // A click inside is not a click outside.
-        .on_event_stop(el::Click, |_, _| {})
-        .style(|s| {
-            s.flex_col()
-                .width(560.0)
-                .max_width_pct(90.0)
-                .padding(theme::CARD_PADDING)
-                .background(theme::menu_bg())
-                .border(1.0)
-                .border_color(theme::menu_ring())
-                .border_radius(theme::CARD_RADIUS)
-                .box_shadow_blur(16.0)
-                .box_shadow_color(theme::menu_shadow())
-        })
-        .into_any()
+    Stack::vertical((
+        header,
+        pictures,
+        Stack::vertical_from_iter(dropped).style(|s| s.flex_col().gap(4.0).width_full()),
+        body,
+    ))
+    .debug_name(format!("Changescape view {id}"))
+    // A click inside is not a click outside.
+    .on_event_stop(el::Click, |_, _| {})
+    .style(|s| {
+        s.flex_col()
+            .width(560.0)
+            .max_width_pct(90.0)
+            .padding(theme::CARD_PADDING)
+            .background(theme::menu_bg())
+            .border(1.0)
+            .border_color(theme::menu_ring())
+            .border_radius(theme::CARD_RADIUS)
+            .box_shadow_blur(16.0)
+            .box_shadow_color(theme::menu_shadow())
+    })
+    .into_any()
 }
 
 /// One element of the view: its title, and its description's first line.

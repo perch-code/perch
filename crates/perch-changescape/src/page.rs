@@ -12,22 +12,112 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::path::Path;
 
-use crate::v4::{self, BlocksItem, CommentKind, CommentsItem, PicturesItem, Verdict, ViewId};
-use crate::Error;
+use serde::Deserialize;
 
-/// A page this Perch draws.
+use crate::v4::{self, BlocksItem, CommentKind, CommentsItem, PicturesItem, Verdict, ViewId};
+use crate::{Error, PAGE_FORMAT};
+
+/// The block types of format 4. A block of another type is one the
+/// browser page has, and one of these types that does not parse is one
+/// Perch cannot read.
+const KNOWN_BLOCKS: [&str; 7] = [
+    "narration",
+    "text",
+    "summary",
+    "table",
+    "svg",
+    "code",
+    "discussion",
+];
+
+/// A block of a view that did not parse, so that it is not drawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DroppedBlock {
+    /// The view the block is in.
+    pub view: ViewId,
+    /// The block's index in the view, as the page has it.
+    pub position: usize,
+    /// The block's `type`, when it has one.
+    pub tag: Option<String>,
+    /// Whether the `type` is one of `KNOWN_BLOCKS`.
+    pub known: bool,
+}
+
+/// A page this Perch draws, and what in it was dropped.
 #[derive(Debug, Clone)]
 pub struct LoadedPage {
     page: v4::Page,
+    dropped: Vec<DroppedBlock>,
+    tour_dropped: bool,
 }
 
 impl LoadedPage {
+    /// Read a page in format `PAGE_FORMAT`. The format is checked first.
+    /// Each block of a view is read on its own, and one that does not
+    /// parse is dropped and recorded, as is a tour that does not parse.
+    /// The rest is read strictly.
     pub(crate) fn read(path: &Path, bytes: &[u8]) -> Result<LoadedPage, Error> {
-        let page = serde_json::from_slice(bytes).map_err(|source| Error::Parse {
+        let parse = |source: serde_json::Error| Error::Parse {
             path: path.to_path_buf(),
             source,
-        })?;
-        Ok(LoadedPage { page })
+        };
+        let mut value: serde_json::Value = serde_json::from_slice(bytes).map_err(&parse)?;
+        if value["schema"] != PAGE_FORMAT {
+            return Err(Error::OtherFormat);
+        }
+        let mut dropped = Vec::new();
+        for view in value
+            .get_mut("views")
+            .and_then(|v| v.as_array_mut())
+            .into_iter()
+            .flatten()
+        {
+            let Ok(id) = ViewId::deserialize(&view["id"]) else {
+                continue;
+            };
+            let Some(list) = view.get_mut("blocks").and_then(|v| v.as_array_mut()) else {
+                continue;
+            };
+            let mut kept = Vec::with_capacity(list.len());
+            for (position, block) in std::mem::take(list).into_iter().enumerate() {
+                if BlocksItem::deserialize(&block).is_ok() {
+                    kept.push(block);
+                    continue;
+                }
+                let tag = block["type"].as_str().map(str::to_string);
+                let known = tag.as_deref().is_some_and(|t| KNOWN_BLOCKS.contains(&t));
+                dropped.push(DroppedBlock {
+                    view: id,
+                    position,
+                    tag,
+                    known,
+                });
+            }
+            *list = kept;
+        }
+        let mut tour_dropped = false;
+        if let Some(tour) = value.get("tour").filter(|tour| !tour.is_null()) {
+            if v4::Tour::deserialize(tour).is_err() {
+                tour_dropped = true;
+                value["tour"] = serde_json::Value::Null;
+            }
+        }
+        let page = v4::Page::deserialize(value).map_err(&parse)?;
+        Ok(LoadedPage {
+            page,
+            dropped,
+            tour_dropped,
+        })
+    }
+
+    /// The blocks of the view `id` that Perch cannot read, in order.
+    pub fn dropped_blocks(&self, id: ViewId) -> impl Iterator<Item = &DroppedBlock> {
+        self.dropped.iter().filter(move |block| block.view == id)
+    }
+
+    /// Whether the page's tour did not parse, so the page draws without one.
+    pub fn tour_dropped(&self) -> bool {
+        self.tour_dropped
     }
 
     /// The view `id`, when the page holds it: only views that apply are
@@ -308,18 +398,20 @@ pub fn lines(range: &v4::Range) -> Option<(u32, u32)> {
 mod tests {
     use super::*;
 
-    /// Case 01 with `views`, and with `pr:1` and `pr:2` as elements.
+    /// Case 07 with `views`, and with `pr:1` and `pr:2` as elements.
     fn page(views: serde_json::Value) -> LoadedPage {
         let mut value: serde_json::Value = serde_json::from_str(include_str!(
-            "../tests/fixtures/conformance/01-minimal/page.json"
+            "../tests/fixtures/conformance/07-tour/page.json"
         ))
         .unwrap();
         value["views"] = views;
-        let add = value["elements"]["fn:calc.ops.add"].clone();
+        let add = value["elements"]["fn:pkg.store.Store.put"].clone();
         value["elements"]["pr:1"] = add.clone();
         value["elements"]["pr:2"] = add;
         LoadedPage {
             page: serde_json::from_value(value).unwrap(),
+            dropped: Vec::new(),
+            tour_dropped: false,
         }
     }
 

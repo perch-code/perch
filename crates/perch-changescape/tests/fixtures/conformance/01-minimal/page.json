@@ -1,21 +1,27 @@
 {
   "schema": 4,
   "meta": {
-    "key": "changescape-acme-calc-7",
-    "title": "Add add()",
-    "repo": "acme/calc",
+    "key": "changescape-acme-widgets-7",
+    "title": "Add a cache and move the text helpers",
+    "repo": "acme/widgets",
     "number": 7,
-    "url": "https://github.com/acme/calc/pull/7",
-    "author": "ada",
+    "url": "https://github.com/acme/widgets/pull/7",
+    "author": "alice",
     "state": "open",
     "language": "python",
-    "base": { "ref": "main", "sha": "1111111111111111111111111111111111111111" },
-    "head": { "ref": "add", "sha": "2222222222222222222222222222222222222222" },
-    "adds": 2,
-    "dels": 0,
-    "files": 1,
+    "base": {
+      "ref": "main",
+      "sha": "c6f42045e20f643a2bbcfec6bb32d5750ad6a9e9"
+    },
+    "head": {
+      "ref": "cache",
+      "sha": "45d097f615470161a761dc80d71d532b1e5d7b19"
+    },
+    "adds": 52,
+    "dels": 12,
+    "files": 4,
     "issues": [],
-    "generated": "2026-10-08T12:00:00Z"
+    "generated": "2026-10-12T07:33:36+00:00"
   },
   "sections": [
     {
@@ -24,183 +30,33 @@
       "icon": "overview",
       "question": "What does this change do?",
       "empty": "",
-      "views": ["overview"],
-      "reason": null
-    },
-    {
-      "id": "map",
-      "label": "Map",
-      "icon": "graph",
-      "question": "Where in the system does it happen?",
-      "empty": "No module is added, removed, or rewired.",
-      "views": ["placement"],
-      "reason": null
-    },
-    {
-      "id": "behavior",
-      "label": "Behavior",
-      "icon": "sequence",
-      "question": "What does the code do differently?",
-      "empty": "No change to what the code decides or calls.",
-      "views": [],
-      "reason": "No change to what the code decides or calls."
-    },
-    {
-      "id": "code",
-      "label": "Code",
-      "icon": "lines",
-      "question": "What are the exact lines?",
-      "empty": "",
-      "views": ["lines"],
+      "views": [
+        "overview"
+      ],
       "reason": null
     }
   ],
-  "elements": {
-    "mod:calc.ops": {
-      "title": "calc.ops",
-      "label": "module · calc",
-      "kind": "module",
-      "name": "calc.ops",
-      "status": "added",
-      "detail": null,
-      "hash": null,
-      "url": null,
-      "appears": [],
-      "refs": [
-        {
-          "base": null,
-          "base_path": null,
-          "head": { "start": 1, "end": 2 },
-          "head_path": "calc/ops.py",
-          "rows": [],
-          "whole_file": true
-        }
-      ]
-    },
-    "fn:calc.ops.add": {
-      "title": "add()",
-      "label": "function · calc.ops",
-      "kind": "function",
-      "name": "calc.ops.add",
-      "status": "added",
-      "detail": "New: adds two numbers.",
-      "hash": null,
-      "url": null,
-      "appears": [
-        { "block": "b1", "view": "placement", "where": "view" }
-      ],
-      "refs": [
-        {
-          "base": null,
-          "base_path": null,
-          "head": { "start": 1, "end": 2 },
-          "head_path": "calc/ops.py",
-          "rows": [
-            { "head": 1, "op": "add", "text": "def add(a, b):" },
-            { "head": 2, "op": "add", "text": "    return a + b" }
-          ],
-          "whole_file": false
-        }
-      ]
-    }
-  },
   "views": [
     {
       "id": "overview",
       "section": "overview",
       "title": "Overview",
-      "subtitle": "the change at a glance",
-      "icon": "overview",
+      "subtitle": "The change in one page",
       "question": "What does this change do?",
-      "metric": "",
-      "narration": null,
-      "blocks": [
-        { "type": "narration", "id": "b1", "text": "Adds `add()` to `calc.ops`." }
-      ]
-    },
-    {
-      "id": "placement",
-      "section": "map",
-      "title": "Placement",
-      "subtitle": "where the new code lives",
-      "icon": "layers",
-      "question": "Where does the new code sit?",
-      "metric": "1 function",
+      "icon": "overview",
+      "metric": "4 files",
       "narration": null,
       "blocks": [
         {
-          "type": "table",
-          "id": "b1",
-          "title": "New functions",
-          "note": null,
-          "element": null,
-          "fold": null,
-          "groups": [],
-          "columns": [
-            { "key": "fn", "label": "Function", "kind": "mono" },
-            { "key": "st", "label": "Status", "kind": "status" }
-          ],
-          "rows": [
-            {
-              "element": "fn:calc.ops.add",
-              "cells": {
-                "fn": { "cell": "element", "text": "add()", "element": "fn:calc.ops.add", "side": null },
-                "st": { "cell": "status", "status": "added" }
-              },
-              "dim": false,
-              "group": null,
-              "rank": "normal",
-              "side": null,
-              "why": null
-            }
-          ]
+          "id": "intro",
+          "text": "The store gets a cache that drops the oldest key.",
+          "type": "text"
         }
-      ]
-    },
-    {
-      "id": "lines",
-      "section": "code",
-      "title": "Code",
-      "subtitle": "the exact lines",
-      "icon": "lines",
-      "question": "What are the exact lines?",
-      "metric": "+2 −0",
-      "narration": null,
-      "blocks": [
-        { "type": "code", "id": "b1" }
       ]
     }
   ],
-  "files": [
-    {
-      "path": "calc/ops.py",
-      "old_path": "calc/ops.py",
-      "status": "added",
-      "binary": false,
-      "adds": 2,
-      "dels": 0,
-      "kind": "source",
-      "made_by": null,
-      "lines_by_kind": [
-        { "kind": "source", "adds": 2, "dels": 0 }
-      ],
-      "hunks": [
-        {
-          "base": { "start": 1, "count": 0 },
-          "head": { "start": 1, "count": 2 },
-          "rows": [
-            { "head": 1, "op": "add", "text": "def add(a, b):" },
-            { "head": 2, "op": "add", "text": "    return a + b" }
-          ]
-        }
-      ],
-      "ship": {
-        "ship": "whole",
-        "base": null,
-        "head": "def add(a, b):\n    return a + b\n"
-      }
-    }
-  ],
+  "elements": {},
+  "files": [],
   "comments": [],
   "facets": [],
   "parts": [],

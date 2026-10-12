@@ -48,6 +48,9 @@ pub enum Error {
         path: PathBuf,
         source: serde_json::Error,
     },
+    /// The page is in another format: see `OTHER_FORMAT`.
+    #[error("{}", OTHER_FORMAT)]
+    OtherFormat,
 }
 
 /// One build's folder and what its status says.

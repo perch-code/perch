@@ -1,8 +1,8 @@
 {
   "state": "done",
+  "started": "2026-10-12T07:33:35Z",
+  "finished": "2026-10-12T07:33:36Z",
   "stage": "narrated",
-  "started": "2026-10-08T12:00:00Z",
-  "finished": "2026-10-08T12:01:00Z",
   "error": null,
   "skill_version": "2.0.0",
   "page_schema": 4

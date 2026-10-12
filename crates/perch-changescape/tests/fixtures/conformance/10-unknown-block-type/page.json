@@ -1,0 +1,212 @@
+{
+  "schema": 4,
+  "meta": {
+    "key": "changescape-acme-widgets-7",
+    "title": "Add a cache and move the text helpers",
+    "repo": "acme/widgets",
+    "number": 7,
+    "url": "https://github.com/acme/widgets/pull/7",
+    "author": "alice",
+    "state": "open",
+    "language": "python",
+    "base": {
+      "ref": "main",
+      "sha": "c6f42045e20f643a2bbcfec6bb32d5750ad6a9e9"
+    },
+    "head": {
+      "ref": "cache",
+      "sha": "45d097f615470161a761dc80d71d532b1e5d7b19"
+    },
+    "adds": 52,
+    "dels": 12,
+    "files": 4,
+    "issues": [],
+    "generated": "2026-10-12T07:33:36+00:00"
+  },
+  "sections": [
+    {
+      "id": "overview",
+      "label": "Overview",
+      "icon": "overview",
+      "question": "What does this change do?",
+      "empty": "",
+      "views": [
+        "overview"
+      ],
+      "reason": null
+    }
+  ],
+  "views": [
+    {
+      "id": "overview",
+      "section": "overview",
+      "title": "Overview",
+      "subtitle": "The change in one page",
+      "question": "What does this change do?",
+      "icon": "overview",
+      "metric": "4 files",
+      "narration": null,
+      "blocks": [
+        {
+          "id": "rows",
+          "type": "table",
+          "title": "Changed functions",
+          "note": null,
+          "element": null,
+          "columns": [
+            {
+              "key": "name",
+              "label": "Name",
+              "kind": "text"
+            },
+            {
+              "key": "lines",
+              "label": "Lines",
+              "kind": "num"
+            }
+          ],
+          "rows": [
+            {
+              "cells": {
+                "name": {
+                  "text": "handle",
+                  "cell": "text"
+                },
+                "lines": {
+                  "value": 4,
+                  "cell": "number"
+                }
+              },
+              "rank": "key",
+              "why": "The public entry point changes.",
+              "group": "api",
+              "element": "fn:pkg.api.handle",
+              "side": "head",
+              "dim": false
+            },
+            {
+              "cells": {
+                "name": {
+                  "text": "handle_cached",
+                  "cell": "text"
+                },
+                "lines": {
+                  "value": 9,
+                  "cell": "number"
+                }
+              },
+              "rank": "normal",
+              "why": null,
+              "group": "api",
+              "element": null,
+              "side": null,
+              "dim": false
+            },
+            {
+              "cells": {
+                "name": {
+                  "text": "touch",
+                  "cell": "text"
+                },
+                "lines": {
+                  "value": 3,
+                  "cell": "number"
+                }
+              },
+              "rank": "minor",
+              "why": "A small helper.",
+              "group": "store",
+              "element": "fn:pkg.store.Cache.touch",
+              "side": "head",
+              "dim": true
+            },
+            {
+              "cells": {
+                "name": {
+                  "text": "put",
+                  "cell": "text"
+                },
+                "lines": {
+                  "value": 2,
+                  "cell": "number"
+                }
+              },
+              "rank": "normal",
+              "why": null,
+              "group": "store",
+              "element": null,
+              "side": null,
+              "dim": false
+            }
+          ],
+          "groups": [
+            {
+              "id": "api",
+              "label": "Public API",
+              "summary": "2 functions",
+              "open": true
+            },
+            {
+              "id": "store",
+              "label": "Store internals",
+              "summary": "2 functions",
+              "open": false
+            }
+          ],
+          "fold": {
+            "show": 2,
+            "label": "small helpers and the store internals"
+          }
+        },
+        {
+          "id": "future",
+          "type": "heatmap",
+          "cells": []
+        }
+      ]
+    }
+  ],
+  "elements": {
+    "fn:pkg.api.handle": {
+      "kind": "function",
+      "name": "pkg.api.handle",
+      "title": "handle",
+      "label": "handle",
+      "status": "changed",
+      "detail": null,
+      "url": null,
+      "refs": [],
+      "hash": null,
+      "appears": [
+        {
+          "view": "overview",
+          "block": "rows",
+          "where": "view"
+        }
+      ]
+    },
+    "fn:pkg.store.Cache.touch": {
+      "kind": "function",
+      "name": "pkg.store.Cache.touch",
+      "title": "touch",
+      "label": "Cache.touch",
+      "status": "added",
+      "detail": null,
+      "url": null,
+      "refs": [],
+      "hash": null,
+      "appears": [
+        {
+          "view": "overview",
+          "block": "rows",
+          "where": "view"
+        }
+      ]
+    }
+  },
+  "files": [],
+  "comments": [],
+  "facets": [],
+  "parts": [],
+  "tour": null
+}

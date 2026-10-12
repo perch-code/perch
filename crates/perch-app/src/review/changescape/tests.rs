@@ -1,7 +1,9 @@
-//! The Changescape tour in the whole window, on the conformance fixtures
-//! of `perch-changescape` (`tests/fixtures/conformance/`). Case 12 is a
-//! tour of one chapter: a read stop, `multiply`, on head lines 1-3 of
-//! `calc/ops.py`, and a skim stop, `multiply-helper`, on lines 4-5.
+//! The Changescape tour in the whole window. The tour these tests read is
+//! Perch's own fixture, `tests/fixtures/changescape/calc-tour`: a tour of
+//! one chapter, a read stop, `multiply`, on head lines 1-3 of
+//! `calc/ops.py`, and a skim stop, `multiply-helper`, on lines 4-5. The
+//! other cases are the conformance fixtures of `perch-changescape`
+//! (`tests/fixtures/conformance/`).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,13 +21,21 @@ use crate::review::model::{ItemTab, ReviewState};
 const REPO: &str = "calc/calc";
 const HEAD: &str = "3e81042d07e4d404b84526777e768a456a6a4fa9";
 const OPS: &str = "calc/ops.py";
-const TOUR: &str = "12-tour";
+const TOUR: &str = "calc-tour";
 
 /// A picture 200 by 100 whose box at (0, 0), 80 by 40, is `multiply()`.
 const DIAGRAM: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><g id="k"><rect x="0" y="0" width="80" height="40" fill="#ccc"/></g></svg>"##;
 
-fn cases() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../perch-changescape/tests/fixtures/conformance")
+/// The folder of case `name`: the calc tour, or a conformance fixture.
+fn case(name: &str) -> PathBuf {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if name == TOUR {
+        manifest.join("tests/fixtures/changescape").join(name)
+    } else {
+        manifest
+            .join("../perch-changescape/tests/fixtures/conformance")
+            .join(name)
+    }
 }
 
 /// A cache root with case `name` as pull request 812 at `sha`.
@@ -43,20 +53,15 @@ fn cache_patched(
     let root = tempfile::tempdir().unwrap();
     let to = perch_changescape::build_dir(root.path(), REPO, 812, sha);
     std::fs::create_dir_all(&to).unwrap();
-    std::fs::copy(
-        cases().join(name).join("status.json"),
-        to.join("status.json"),
-    )
-    .unwrap();
+    std::fs::copy(case(name).join("status.json"), to.join("status.json")).unwrap();
     let mut page: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(cases().join(name).join("page.json")).unwrap())
-            .unwrap();
+        serde_json::from_slice(&std::fs::read(case(name).join("page.json")).unwrap()).unwrap();
     patch(&mut page);
     std::fs::write(to.join("page.json"), page.to_string()).unwrap();
     root
 }
 
-/// Case 12 with what it lacks: a spine on the chapter, a flag on the
+/// The calc tour with what it lacks: a spine on the chapter, a flag on the
 /// cover, text on the read stop, and a second read stop after the skim
 /// one.
 fn cache_with_more(sha: &str) -> tempfile::TempDir {
@@ -137,7 +142,7 @@ fn opened_building(
     (harness, state, root)
 }
 
-/// The tab on case 12 with `marks`, each stop's mark done with its hash.
+/// The tab on the calc tour with `marks`, each stop's mark done with its hash.
 fn with_marks(root: &Path, marks: &[(&str, Option<&str>)]) -> (HeadlessHarness, ReviewState) {
     let (mut harness, state) = harness_with_cache(None);
     show(state, root, |found| {
@@ -155,7 +160,7 @@ fn with_marks(root: &Path, marks: &[(&str, Option<&str>)]) -> (HeadlessHarness, 
     (harness, state)
 }
 
-/// `calc/ops.py` as Code loads it under the Branch scope: case 12's five
+/// `calc/ops.py` as Code loads it under the Branch scope: the calc tour's five
 /// lines, all added.
 fn load_ops(state: ReviewState) {
     let file = crate::backend::build_loaded_file(
@@ -273,7 +278,7 @@ fn with_no_changescape_the_switch_is_as_it_was() {
 }
 
 #[test]
-fn case_12_adds_the_pill_and_opens_on_the_tour() {
+fn the_tour_adds_the_pill_and_opens_on_the_tour() {
     let root = cache_with(TOUR, HEAD);
     let (mut harness, state) = harness_with_cache(Some(root.path()));
     assert_eq!(
@@ -710,7 +715,12 @@ fn the_caret_in_a_stops_window_shows_the_code_strip_which_leads_back() {
 
 #[test]
 fn a_page_without_a_tour_says_why_and_offers_a_rebuild_where_one_can_run() {
-    for (case, can_build) in [("01-minimal", true), ("01-minimal", false)] {
+    for (case, can_build) in [
+        ("01-minimal", true),
+        ("01-minimal", false),
+        ("12-malformed-tour", true),
+        ("12-malformed-tour", false),
+    ] {
         let (harness, state, _root) = opened_building(case, can_build);
         assert_eq!(state.tab.get(), ItemTab::Changescape, "{case}");
         assert!(
@@ -727,7 +737,7 @@ fn a_page_without_a_tour_says_why_and_offers_a_rebuild_where_one_can_run() {
     }
 }
 
-/// Case 12 with a view of related work, Related, that a flag points at:
+/// The calc tour with a view of related work, Related, that a flag points at:
 /// a table whose rows name a pull request, a commit, a function, and an
 /// element the page does not hold.
 fn cache_with_view(sha: &str) -> tempfile::TempDir {
@@ -862,7 +872,7 @@ fn a_commit_the_checkout_lacks_opens_on_github() {
     );
 }
 
-/// Case 12 with a view that is one diagram and no table, as Jobs is.
+/// The calc tour with a view that is one diagram and no table, as Jobs is.
 fn cache_with_view_picture(sha: &str) -> tempfile::TempDir {
     cache_patched(TOUR, sha, |page| {
         page["views"]

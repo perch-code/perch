@@ -268,7 +268,11 @@ fn body_of(state: ReviewState) -> Body {
         // progress is.
         if !shown.lookup().is_running() {
             return Body::Refused {
-                message: "This Changescape has no tour.",
+                message: if page.tour_dropped() {
+                    "This Changescape's tour cannot be read."
+                } else {
+                    "This Changescape has no tour."
+                },
                 rebuild: shown.found.can_build,
             };
         }

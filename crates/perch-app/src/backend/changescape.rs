@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use perch_changescape::{LoadedPage, Lookup, State};
+use perch_changescape::{Error, LoadedPage, Lookup, State, OTHER_FORMAT};
 
 use super::{Ctx, Event};
 
@@ -99,6 +99,8 @@ pub(crate) fn find_during_run(root: &Path, repo: &str, number: u64, head_sha: &s
 fn found(lookup: Lookup) -> Found {
     let (page, error) = match lookup.drawable().map(perch_changescape::load) {
         Some(Ok(page)) => (Some(page), None),
+        // The same refusal as a build whose status says another format.
+        Some(Err(Error::OtherFormat)) => (None, Some(OTHER_FORMAT.to_string())),
         Some(Err(e)) => {
             tracing::warn!(error = %e, "could not read a changescape");
             (None, Some(e.to_string()))

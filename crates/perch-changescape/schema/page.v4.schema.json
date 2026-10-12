@@ -1919,13 +1919,12 @@
         "why": {
           "anyOf": [
             {
-              "type": "string"
+              "$ref": "#/$defs/RelyWhy"
             },
             {
               "type": "null"
             }
-          ],
-          "title": "Why"
+          ]
         }
       },
       "required": [
@@ -1956,6 +1955,16 @@
       ],
       "title": "RelyCode",
       "type": "object"
+    },
+    "RelyWhy": {
+      "description": "How a stop's changed code meets an unchanged function that it relies on, best first.",
+      "enum": [
+        "matches",
+        "implements",
+        "calls"
+      ],
+      "title": "RelyWhy",
+      "type": "string"
     },
     "Rev": {
       "description": "A named revision and the commit that it points at.",

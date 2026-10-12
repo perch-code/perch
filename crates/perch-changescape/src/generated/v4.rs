@@ -1480,13 +1480,68 @@ pub struct Rely {
     #[serde(deserialize_with = "::std::option::Option::deserialize")]
     pub what: ::std::option::Option<::std::string::String>,
     #[serde(deserialize_with = "::std::option::Option::deserialize")]
-    pub why: ::std::option::Option<::std::string::String>,
+    pub why: ::std::option::Option<RelyWhy>,
 }
 #[doc = "The lines of code that a reliance points at."]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]
 pub struct RelyCode {
     pub file: ::std::string::String,
     pub head: Range,
+}
+#[doc = "How a stop's changed code meets an unchanged function that it relies on, best first."]
+#[derive(
+    :: serde :: Deserialize,
+    :: serde :: Serialize,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    Hash,
+    Ord,
+    PartialEq,
+    PartialOrd,
+)]
+pub enum RelyWhy {
+    #[serde(rename = "matches")]
+    Matches,
+    #[serde(rename = "implements")]
+    Implements,
+    #[serde(rename = "calls")]
+    Calls,
+}
+impl ::std::fmt::Display for RelyWhy {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        match *self {
+            Self::Matches => f.write_str("matches"),
+            Self::Implements => f.write_str("implements"),
+            Self::Calls => f.write_str("calls"),
+        }
+    }
+}
+impl ::std::str::FromStr for RelyWhy {
+    type Err = self::error::ConversionError;
+    fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        match value {
+            "matches" => Ok(Self::Matches),
+            "implements" => Ok(Self::Implements),
+            "calls" => Ok(Self::Calls),
+            _ => Err("invalid value".into()),
+        }
+    }
+}
+impl ::std::convert::TryFrom<&str> for RelyWhy {
+    type Error = self::error::ConversionError;
+    fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
+}
+impl ::std::convert::TryFrom<::std::string::String> for RelyWhy {
+    type Error = self::error::ConversionError;
+    fn try_from(
+        value: ::std::string::String,
+    ) -> ::std::result::Result<Self, self::error::ConversionError> {
+        value.parse()
+    }
 }
 #[doc = "A named revision and the commit that it points at."]
 #[derive(:: serde :: Deserialize, :: serde :: Serialize, Clone, Debug, PartialEq)]

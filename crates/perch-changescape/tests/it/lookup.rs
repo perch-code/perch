@@ -169,12 +169,13 @@ fn a_page_with_no_status_is_a_finished_build() {
 #[test]
 fn the_stop_index_finds_the_stop_whose_window_holds_a_line() {
     let root = tempfile::tempdir().unwrap();
-    install(root.path(), "12-tour", HEAD);
+    install(root.path(), "07-tour", HEAD);
     let lookup = lookup(root.path(), REPO, 7, HEAD);
     let page = load(lookup.drawable().unwrap()).unwrap();
     let index = StopIndex::new(&page);
-    assert_eq!(index.at("calc/ops.py", 1), Some("multiply"));
-    assert_eq!(index.at("calc/ops.py", 5), Some("multiply-helper"));
-    assert_eq!(index.at("calc/ops.py", 6), None);
-    assert_eq!(index.at("calc/other.py", 1), None);
+    assert_eq!(index.at("pkg/store.py", 13), None);
+    assert_eq!(index.at("pkg/store.py", 14), Some("put-checks-key"));
+    assert_eq!(index.at("pkg/store.py", 17), Some("put-checks-key"));
+    assert_eq!(index.at("pkg/store.py", 18), None);
+    assert_eq!(index.at("pkg/other.py", 14), None);
 }

@@ -1,0 +1,132 @@
+{
+  "schema": 4,
+  "meta": {
+    "key": "changescape-acme-widgets-7",
+    "title": "Add a cache and move the text helpers",
+    "repo": "acme/widgets",
+    "number": 7,
+    "url": "https://github.com/acme/widgets/pull/7",
+    "author": "alice",
+    "state": "open",
+    "language": "python",
+    "base": {
+      "ref": "main",
+      "sha": "c6f42045e20f643a2bbcfec6bb32d5750ad6a9e9"
+    },
+    "head": {
+      "ref": "cache",
+      "sha": "45d097f615470161a761dc80d71d532b1e5d7b19"
+    },
+    "adds": 52,
+    "dels": 12,
+    "files": 4,
+    "issues": [],
+    "generated": "2026-10-12T07:33:36+00:00"
+  },
+  "sections": [
+    {
+      "id": "overview",
+      "label": "Overview",
+      "icon": "overview",
+      "question": "What does this change do?",
+      "empty": "",
+      "views": [
+        "overview"
+      ],
+      "reason": null
+    }
+  ],
+  "views": [
+    {
+      "id": "overview",
+      "section": "overview",
+      "title": "Overview",
+      "subtitle": "The change in one page",
+      "question": "What does this change do?",
+      "icon": "overview",
+      "metric": "4 files",
+      "narration": null,
+      "blocks": [
+        {
+          "id": "discussion",
+          "type": "discussion",
+          "comments": [
+            {
+              "kind": "inline",
+              "id": 101
+            },
+            {
+              "kind": "inline",
+              "id": 102
+            },
+            {
+              "kind": "review",
+              "id": 201
+            },
+            {
+              "kind": "issue",
+              "id": 301
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "elements": {},
+  "files": [],
+  "comments": [
+    {
+      "kind": "inline",
+      "id": 101,
+      "author": "alice",
+      "at": "2026-10-10T09:00:00Z",
+      "body": "Should this be a set?",
+      "url": "https://github.com/acme/widgets/pull/7#discussion_r101",
+      "reply_to": null,
+      "anchor": {
+        "path": "pkg/store.py",
+        "side": "head",
+        "lines": {
+          "start": 15,
+          "end": 16
+        }
+      },
+      "outdated": false
+    },
+    {
+      "kind": "inline",
+      "id": 102,
+      "author": "bob",
+      "at": "2026-10-10T10:00:00Z",
+      "body": "This line moved in a later commit.",
+      "url": "https://github.com/acme/widgets/pull/7#discussion_r102",
+      "reply_to": null,
+      "anchor": {
+        "path": "pkg/store.py",
+        "side": "base",
+        "lines": null
+      },
+      "outdated": true
+    },
+    {
+      "kind": "review",
+      "id": 201,
+      "author": "bob",
+      "at": "2026-10-11T08:00:00Z",
+      "body": "Please fix the key check before merge.",
+      "url": "https://github.com/acme/widgets/pull/7#pullrequestreview-201",
+      "state": "changes_requested"
+    },
+    {
+      "kind": "issue",
+      "id": 301,
+      "author": "carol",
+      "at": "2026-10-11T09:00:00Z",
+      "body": "Please keep the old API working.",
+      "url": "https://github.com/acme/widgets/pull/7#issuecomment-301"
+    }
+  ],
+  "facets": [],
+  "parts": [],
+  "tour": null
+}
