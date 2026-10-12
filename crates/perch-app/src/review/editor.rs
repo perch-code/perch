@@ -206,7 +206,16 @@ pub fn editor_pane(
                                     .into_any(),
                                 }
                             }
-                            None => loading_view(path).into_any(),
+                            None => {
+                                ask_again_while_opening(
+                                    state,
+                                    code_backend.clone(),
+                                    path.clone(),
+                                    epoch,
+                                    ASK_AGAIN_AFTER,
+                                );
+                                loading_view(path).into_any()
+                            }
                         },
                     }
                 },
@@ -2138,6 +2147,32 @@ fn wire_page(
 pub enum Side {
     Base,
     Head,
+}
+
+/// How long a tab says "Opening…" before its file is asked for again.
+const ASK_AGAIN_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Ask again for a file still opening after `wait`, and again after twice
+/// as long, while its tab shows "Opening…". Every gate between the ask and
+/// the answer drops what is not for the view now open, and one dropped
+/// left the tab opening for good; a second answer is harmless. A load
+/// that failed is not loading, and is not asked for again.
+fn ask_again_while_opening(
+    state: ReviewState,
+    backend: Rc<Backend>,
+    path: String,
+    epoch: u64,
+    wait: std::time::Duration,
+) {
+    floem::action::exec_after(wait, move |_| {
+        if !state.still_opening(&path, epoch) {
+            return;
+        }
+        tracing::info!(path, waited = ?wait, "file still opening; asked again");
+        crate::review::load_file(&backend, &path);
+        let next = (wait * 2).min(std::time::Duration::from_secs(60));
+        ask_again_while_opening(state, backend, path, epoch, next);
+    });
 }
 
 fn loading_view(path: String) -> impl IntoView {

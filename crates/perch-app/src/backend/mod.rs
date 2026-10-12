@@ -17593,7 +17593,7 @@ async fn open_file(
     path: String,
     navigation_id: u64,
 ) -> Option<Shown> {
-    let (checkout, changed, scope, item_id, scope_gen) = navigation_requests
+    let Some((checkout, changed, scope, item_id, scope_gen)) = navigation_requests
         .with_current(navigation_id, || {
             slot.lock().ok().and_then(|guard| {
                 guard
@@ -17610,7 +17610,11 @@ async fn open_file(
                     })
             })
         })
-        .flatten()?;
+        .flatten()
+    else {
+        turned_away(&navigation_requests, &slot, &path, navigation_id);
+        return None;
+    };
 
     let entry = changed.iter().find(|f| f.path == path).cloned();
     let (base_rev, head_rev) = scope.sides(&checkout.merge_base, &checkout.head_sha);
@@ -17841,6 +17845,7 @@ async fn open_outside_file(
         })
         .flatten()
     else {
+        turned_away(&navigation_requests, &slot, &path, navigation_id);
         return false;
     };
 
@@ -17926,7 +17931,7 @@ fn send_file_event_if_current(
     scope_gen: u64,
     event: Event,
 ) -> bool {
-    navigation_requests
+    let sent = navigation_requests
         .with_current(navigation_id, || {
             let current = slot.lock().ok().is_some_and(|guard| {
                 guard.as_ref().is_some_and(|context| {
@@ -17940,7 +17945,40 @@ fn send_file_event_if_current(
             }
             current
         })
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if !sent {
+        tracing::info!(
+            navigation_id,
+            item = item_id,
+            scope_gen,
+            "file read for a view since left; not sent"
+        );
+    }
+    sent
+}
+
+/// Say why a file asked for is not read: the window that asked waits on
+/// it with "Opening…" and hears nothing back, so this line is all there
+/// is to find a stuck tab by.
+fn turned_away(
+    navigation_requests: &NavigationRequests,
+    slot: &std::sync::Mutex<Option<ReviewContext>>,
+    path: &str,
+    navigation_id: u64,
+) {
+    let current = navigation_requests.current_id();
+    let open = slot.lock().ok().and_then(|guard| {
+        guard
+            .as_ref()
+            .map(|context| (context.item_id.clone(), context.navigation_id))
+    });
+    tracing::info!(
+        path,
+        navigation_id,
+        ?current,
+        ?open,
+        "file asked for under a navigation not current; not read"
+    );
 }
 
 /// Give the open checkout a language server, if one is installed: the one

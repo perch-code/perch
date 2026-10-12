@@ -3722,6 +3722,16 @@ impl ReviewState {
         self.loading.with(|m| m.contains(path))
     }
 
+    /// Whether the editor built at `epoch` for `path` still says it is
+    /// opening the file: the file is the active one, asked for, and not
+    /// here. One that failed is not loading.
+    pub fn still_opening(&self, path: &str, epoch: u64) -> bool {
+        self.editor_epoch.get_untracked() == epoch
+            && self.active.with_untracked(|a| a.as_deref() == Some(path))
+            && self.loading.with_untracked(|l| l.contains(path))
+            && self.files.with_untracked(|f| !f.contains_key(path))
+    }
+
     /// Mark `path` loading unless it is loaded or loading already.
     /// Returns true when the caller should ask the backend to load it.
     pub fn begin_load(&self, path: &str) -> bool {
@@ -7561,6 +7571,42 @@ mod tests {
             back += 1;
         }
         assert_eq!(back, HISTORY_CAP, "the oldest were dropped");
+    }
+
+    #[test]
+    fn a_tab_opening_a_file_asked_for_already_is_still_opening_until_it_lands() {
+        let state = ReviewState::new();
+        state.tab.set(ItemTab::Code);
+        // Something asked first, and its answer never came: the tab opened
+        // after does not ask, so only asking again can land the file.
+        assert!(state.begin_load("src/a.rs"));
+        assert!(!state.open_tab("src/a.rs"), "already loading, no ask");
+        let epoch = state.editor_epoch.get_untracked();
+        assert!(state.still_opening("src/a.rs", epoch));
+
+        let file = Arc::new(crate::backend::build_loaded_file(
+            "src/a.rs".into(),
+            "fn a() {}\n".into(),
+            String::new(),
+            None,
+            false,
+            Scope::Branch,
+            String::new(),
+        ));
+        state.finish_load("src/a.rs", file);
+        assert!(!state.still_opening("src/a.rs", epoch), "it landed");
+
+        // A failed load is not asked for again.
+        state.open_tab("src/b.rs");
+        let epoch = state.editor_epoch.get_untracked();
+        state.fail_load("src/b.rs");
+        assert!(!state.still_opening("src/b.rs", epoch));
+
+        // Nor is one whose editor has gone.
+        state.open_tab("src/c.rs");
+        let epoch = state.editor_epoch.get_untracked();
+        state.open_tab("src/a.rs");
+        assert!(!state.still_opening("src/c.rs", epoch));
     }
 
     #[test]

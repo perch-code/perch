@@ -1427,6 +1427,27 @@ impl AppState {
         token
     }
 
+    /// A file's answer for a view since left is dropped. Its path may
+    /// still be loading under the view now open, waiting on an answer
+    /// that is not coming, so the drop is said.
+    fn drop_file_answer(
+        &self,
+        review: crate::review::model::ReviewState,
+        path: &str,
+        navigation_id: u64,
+        scope_gen: u64,
+    ) {
+        tracing::info!(
+            path,
+            navigation_id,
+            expected = ?self.expected_navigation_id.get_untracked(),
+            scope_gen,
+            current_gen = ?review.scope_gen.get_untracked(),
+            still_loading = review.loading.with_untracked(|l| l.contains(path)),
+            "file answer for a view since left; dropped"
+        );
+    }
+
     pub(crate) fn accepts_navigation(&self, navigation_id: u64) -> bool {
         self.expected_navigation_id.get_untracked() == Some(navigation_id)
     }
@@ -2203,6 +2224,8 @@ impl AppState {
                     && review.scope_gen.get_untracked() == Some(scope_gen)
                 {
                     review.finish_load(&path, file);
+                } else {
+                    self.drop_file_answer(review, &path, navigation_id, scope_gen);
                 }
             }
             Event::IssueComments {
@@ -2281,6 +2304,8 @@ impl AppState {
                 {
                     tracing::warn!(path, message, "could not open file");
                     review.fail_load(&path);
+                } else {
+                    self.drop_file_answer(review, &path, navigation_id, scope_gen);
                 }
             }
             // A complaint may be about the send a sent question's card is
