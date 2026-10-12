@@ -1014,7 +1014,12 @@ fn panel(host: Rc<Host>, level: Level) -> impl IntoView {
     let highlight = level.highlight;
     let scroll_level = level.clone();
     let content = Stack::vertical_from_iter(rows)
-        .style(|s| s.flex_col().min_width_full().padding(GUTTER))
+        .style(|s| {
+            s.flex_col()
+                .min_width_full()
+                .max_width_full()
+                .padding(GUTTER)
+        })
         .scroll()
         .ensure_visible(move || match highlight.get() {
             Some(i) => {
@@ -1656,6 +1661,26 @@ mod tests {
         let panel = rect(&harness, "menu-panel:0");
         assert_eq!(panel.y1, button.y0 - DROP_GAP, "over it");
         assert_eq!(panel.x1, 600.0 - EDGE, "slid in from the right");
+    }
+
+    #[test]
+    fn a_row_too_long_for_the_widest_panel_stays_inside_it() {
+        let long = "d7766ec  require the observed epoch for conditional acquisition \
+                    in every writer and compactor";
+        let (mut harness, _) = window_with((40.0, 30.0), (900.0, 400.0), move |_| {
+            Menu::new()
+                .item("Short", |i| i)
+                .item(long, |i| i.detail("3 days ago"))
+        });
+        open_it(&mut harness);
+        let panel = rect(&harness, "menu-panel:0");
+        assert_eq!(panel.width(), MAX_WIDTH);
+        let row = rect(&harness, &format!("menu-row:{long}"));
+        assert_eq!(
+            (row.x0, row.x1),
+            (panel.x0 + 1.0 + GUTTER, panel.x1 - 1.0 - GUTTER),
+            "the row fills the panel and no more"
+        );
     }
 
     #[test]

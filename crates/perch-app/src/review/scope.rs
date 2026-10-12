@@ -30,6 +30,8 @@ pub struct Entry {
     pub scope: Scope,
     /// The name, with the reason in parentheses when greyed.
     pub title: String,
+    /// Shown at the row's right, kept whole when the title is cut short.
+    pub detail: Option<String>,
     pub enabled: bool,
     /// The current scope carries the check.
     pub checked: bool,
@@ -116,6 +118,7 @@ pub fn entries(facts: &Facts) -> Vec<Entry> {
         checked: facts.current == scope,
         scope,
         title,
+        detail: None,
         enabled,
     };
     let mut out = Vec::new();
@@ -202,18 +205,20 @@ pub fn entries(facts: &Facts) -> Vec<Entry> {
 
     for commit in facts.commits.iter() {
         let title = format!(
-            "{}  {}  \u{00b7}  {}",
+            "{}  {}",
             commit.short_sha(),
             truncated(&commit.subject, SUBJECT_CHARS),
-            timefmt::relative(commit.authored_at, facts.now)
         );
-        out.push(entry(
-            Scope::Commit {
-                sha: commit.sha.clone(),
-            },
-            title,
-            true,
-        ));
+        out.push(Entry {
+            detail: Some(timefmt::relative(commit.authored_at, facts.now)),
+            ..entry(
+                Scope::Commit {
+                    sha: commit.sha.clone(),
+                },
+                title,
+                true,
+            )
+        });
     }
 
     out.push(entry(Scope::Branch, "Branch".into(), true));
@@ -281,7 +286,12 @@ pub fn menu(state: ReviewState, backend: Rc<Backend>, item_id: String) -> Menu {
 /// One row's properties: its check, its greying, and what picking it does.
 fn row(e: &Entry, pick: &Rc<dyn Fn(Scope)>) -> impl FnOnce(Item) -> Item {
     let (pick, scope, checked, enabled) = (pick.clone(), e.scope.clone(), e.checked, e.enabled);
+    let detail = e.detail.clone();
     move |m| {
+        let m = match detail {
+            Some(detail) => m.detail(detail),
+            None => m,
+        };
         m.checked(checked)
             .enabled(enabled)
             .action(move || pick(scope.clone()))
@@ -694,10 +704,8 @@ mod tests {
             .filter(|e| matches!(e.scope, Scope::Commit { .. }))
             .collect();
         assert_eq!(rows.len(), 2);
-        assert_eq!(
-            rows[0].title,
-            "bbbbbbb  Fence the manifest  \u{00b7}  an hour ago"
-        );
+        assert_eq!(rows[0].title, "bbbbbbb  Fence the manifest");
+        assert_eq!(rows[0].detail.as_deref(), Some("an hour ago"));
         assert!(rows[0].enabled && !rows[0].checked);
         assert!(rows[1].checked);
 
