@@ -531,6 +531,34 @@ pub fn build(buffer: &DisplayBuffer, folds: &[Run], cards: &[Card]) -> Doc {
     out.finish()
 }
 
+/// A document over some display lines of a buffer, in order, and nothing
+/// else: an excerpt, as a Changescape stop shows one. There are no folds
+/// and no cards, and the text has no newline after its last line, so the
+/// editor laying it out is exactly as many rows tall as the lines. The
+/// tables answer for the display and head lines the buffer has, so an
+/// excerpt that starts in the middle of a file looks up its rows by the
+/// same numbers the whole file does.
+pub fn excerpt(buffer: &DisplayBuffer, displays: std::ops::Range<usize>) -> Doc {
+    let lines: Vec<&str> = buffer.text.lines().collect();
+    let mut out = Builder::with_capacity(displays.len(), &[]);
+    for display in displays {
+        let row = buffer.rows[display];
+        out.push(
+            DocRow::Line {
+                display,
+                tint: tint_of(row),
+            },
+            lines.get(display).copied().unwrap_or(""),
+            row.head_line(),
+        );
+    }
+    let mut doc = out.finish();
+    if doc.text.ends_with('\n') {
+        doc.text.pop();
+    }
+    doc
+}
+
 /// The two documents of a split, laid out row for row along `alignment`,
 /// whose rows are one-based base and head lines with `None` where a side
 /// has nothing. A divider goes into both at the same row, so the two stay
@@ -1160,6 +1188,34 @@ mod tests {
         let base = format!("old top\n{context}old bottom\n");
         let head = format!("new top\n{context}new bottom\n");
         buffer(&base, &head)
+    }
+
+    #[test]
+    fn an_excerpt_is_its_lines_with_a_removed_one_in_the_middle() {
+        // a, ghost(b), B, c, d, e: the excerpt is the ghost, B and c.
+        let b = buffer("a\nb\nc\nd\ne\n", "a\nB\nc\nd\ne\n");
+        let doc = excerpt(&b, 1..4);
+        assert_eq!(doc.text, "b\nB\nc", "no newline after the last line");
+        assert_eq!(
+            doc.rows,
+            [
+                line(1, Tint::Deleted),
+                line(2, Tint::Modified),
+                line(3, Tint::Plain)
+            ]
+        );
+        assert_eq!(doc.line(0), "b");
+        assert_eq!(doc.line(2), "c");
+        assert_eq!(doc.head_line(0), None, "a removed line is no head line");
+        assert_eq!(doc.head_line(1), Some(1));
+        assert_eq!(doc.head_line(2), Some(2));
+        assert_eq!(doc.display_line(0), Some(1));
+        assert_eq!(doc.row_of_head(1), Some(1));
+        assert_eq!(doc.row_of_head(2), Some(2));
+        assert_eq!(doc.row_of_head(0), None, "a line before the excerpt");
+        assert_eq!(doc.row_of_head(3), None, "a line after the excerpt");
+        assert_eq!(doc.row_of_display(0), None);
+        assert_eq!(doc.row_of_display(2), Some(1));
     }
 
     // The stacked document over the buffer as it is.

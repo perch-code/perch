@@ -2,10 +2,15 @@
 //! it, with the lines the change removed in place and tinted as the diff
 //! tints them. The page's line numbers count from the merge base, so the
 //! file loads under the Branch scope, and a file of another scope shows
-//! nothing until it reloads. A long run of unchanged lines folds, and a
-//! click on any line opens Code there.
+//! nothing until it reloads. A long run of unchanged lines folds. The code
+//! between two folds is an excerpt, drawn by the code editor as Code draws
+//! a file, with its tints, its syntax colours and its symbol navigation. A
+//! column of numbers beside it opens Code on a click, and a double click
+//! on the code opens Code at its line.
 
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use floem::prelude::*;
 use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
@@ -15,9 +20,15 @@ use perch_changescape::page::Window;
 use perch_git::{Row, Scope};
 
 use crate::backend::Backend;
-use crate::review::cards::{code_row, display_line, CodeLine, Tint};
+use crate::review::cards::{
+    display_line, line_number_labels, CodeLine, Tint, CODE_ROW_MARKER_WIDTH,
+};
 use crate::review::changescape::{navigate, SameArc};
-use crate::review::model::{LoadedFile, ReviewState};
+use crate::review::doc;
+use crate::review::editor::{code_editor, over_tints};
+use crate::review::model::{LiveFile, LoadedFile, ReviewState};
+use crate::review::navigation;
+use crate::review::styling::PerchStyling;
 use crate::theme;
 use crate::ui::widgets::clickable;
 
@@ -33,6 +44,8 @@ pub struct WindowLine {
     pub line: CodeLine,
     /// 1-based.
     pub opens: Option<u32>,
+    /// The display line of the file's buffer the line is.
+    pub display: usize,
 }
 
 /// The display rows of `file` that `window` holds: every row from the
@@ -56,6 +69,7 @@ pub fn window_lines(file: &LoadedFile, window: &Window) -> Vec<WindowLine> {
         .map(|d| WindowLine {
             line: display_line(rows, &text, d),
             opens: rows[d].head_line().and_then(|h| u32::try_from(h + 1).ok()),
+            display: d,
         })
         .collect();
     // A removed line opens the head line after it.
@@ -178,7 +192,13 @@ pub fn hunk_view(
                             let gap = (i > 0).then(window_gap);
                             Stack::vertical((
                                 gap.map_or_else(|| Empty::new().into_any(), IntoView::into_any),
-                                window_view(state, backend.clone(), path.clone(), lines),
+                                window_view(
+                                    state,
+                                    backend.clone(),
+                                    path.clone(),
+                                    file.clone(),
+                                    lines,
+                                ),
                             ))
                             .style(|s| s.flex_col().width_full())
                             .into_any()
@@ -223,11 +243,24 @@ fn window_gap() -> impl IntoView {
     })
 }
 
-/// One window's lines, its long unchanged runs folded until clicked.
+/// Where the excerpts take their editor styling ids from. A counter, from
+/// far above the ids the Code tab's editors take, so that no two excerpts
+/// share one, and none shares one with an editor of the Code tab.
+static EXCERPT_STYLING: AtomicU64 = AtomicU64::new(1 << 48);
+
+#[cfg(test)]
+thread_local! {
+    /// The text of each excerpt built, in the order they were built.
+    pub(crate) static EXCERPTS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// One window's lines, its long unchanged runs folded until clicked. Each
+/// run of lines between two folds is one excerpt.
 fn window_view(
     state: ReviewState,
     backend: Rc<Backend>,
     path: String,
+    file: Arc<LoadedFile>,
     lines: Vec<WindowLine>,
 ) -> AnyView {
     if lines.is_empty() {
@@ -249,45 +282,24 @@ fn window_view(
             } else {
                 folds(&lines)
             };
-            let rows: Vec<AnyView> = shown
-                .into_iter()
-                .map(|part| match part {
-                    Part::Line(i) => {
-                        let line = lines[i].clone();
-                        let (backend, path) = (backend.clone(), path.clone());
-                        Container::new(code_row(line.line))
-                            .debug_name("Changescape code line")
-                            .on_event_stop(el::Click, move |_, _| {
-                                navigate::open_file_line(state, &backend, &path, line.opens)
-                            })
-                            .style(|s| {
-                                clickable(s.width_full())
-                                    .hover(|s| s.background(theme::canvas_hover()))
-                            })
-                            .into_any()
-                    }
+            let mut rows: Vec<AnyView> = Vec::new();
+            // The lines since the last fold, which are one excerpt.
+            let mut run: Vec<WindowLine> = Vec::new();
+            for part in shown {
+                match part {
+                    Part::Line(i) => run.push(lines[i].clone()),
                     Part::Fold(n) => {
-                        Container::new(Label::new(format!("⋯ {n} unchanged lines")).style(|s| {
-                            s.font_size(theme::TEXT_BADGE)
-                                .color(theme::diff_expander_fg())
-                                .selectable(false)
-                        }))
-                        .debug_name("Changescape fold")
-                        .on_event_stop(el::Click, move |_, _| open.set(true))
-                        .style(|s| {
-                            clickable(
-                                s.width_full()
-                                    .height(22.0)
-                                    .items_center()
-                                    .padding_left(theme::CODE_ROW_NUMBER_WIDTH)
-                                    .background(theme::diff_expander_bg()),
-                            )
-                            .hover(|s| s.background(theme::diff_expander_hover_bg()))
-                        })
-                        .into_any()
+                        if !run.is_empty() {
+                            rows.push(excerpt_view(state, &backend, &path, &file, &run));
+                            run.clear();
+                        }
+                        rows.push(fold_row(n, open));
                     }
-                })
-                .collect();
+                }
+            }
+            if !run.is_empty() {
+                rows.push(excerpt_view(state, &backend, &path, &file, &run));
+            }
             Stack::vertical_from_iter(rows)
                 .style(|s| s.flex_col().width_full())
                 .into_any()
@@ -295,6 +307,129 @@ fn window_view(
     )
     .style(|s| s.width_full())
     .into_any()
+}
+
+/// The row that stands for `n` unchanged lines folded away. A click opens
+/// the run.
+fn fold_row(n: usize, open: RwSignal<bool>) -> AnyView {
+    Container::new(Label::new(format!("⋯ {n} unchanged lines")).style(|s| {
+        s.font_size(theme::TEXT_BADGE)
+            .color(theme::diff_expander_fg())
+            .selectable(false)
+    }))
+    .debug_name("Changescape fold")
+    .on_event_stop(el::Click, move |_, _| open.set(true))
+    .style(|s| {
+        clickable(
+            s.width_full()
+                .height(22.0)
+                .items_center()
+                .padding_left(theme::CODE_ROW_NUMBER_WIDTH)
+                .background(theme::diff_expander_bg()),
+        )
+        .hover(|s| s.background(theme::diff_expander_hover_bg()))
+    })
+    .into_any()
+}
+
+/// A run of consecutive lines of a window, drawn as one excerpt: the code
+/// editor over the run's lines, with the diff tints, the syntax colours and
+/// the symbol navigation of Code, and beside it a column of numbers, one
+/// row for each line. The run is `lines` in display order, one display line
+/// after another, so the excerpt is the buffer's display lines from the
+/// first to the last.
+fn excerpt_view(
+    state: ReviewState,
+    backend: &Rc<Backend>,
+    path: &str,
+    file: &Arc<LoadedFile>,
+    run: &[WindowLine],
+) -> AnyView {
+    let (first, last) = (run[0].display, run[run.len() - 1].display);
+    let doc = RwSignal::new(Arc::new(doc::excerpt(&file.buffer, first..last + 1)));
+    let text = doc.with_untracked(|d| d.text.clone());
+    #[cfg(test)]
+    EXCERPTS.with(|e| e.borrow_mut().push(text.clone()));
+    let live: LiveFile = RwSignal::new(file.clone());
+    let id = EXCERPT_STYLING.fetch_add(1, Ordering::Relaxed);
+    let editor = code_editor(
+        text,
+        PerchStyling::new(
+            live,
+            doc,
+            state.highlights,
+            RwSignal::new(Arc::new(Vec::new())),
+            RwSignal::new(None),
+            id,
+        ),
+    );
+    let ed = editor.editor().clone();
+    let viewport = ed.viewport;
+    // A double click opens Code at the line the caret is on, and at the
+    // head line that line opens, as a click on its number does. Caught
+    // after the editor has the double click, so the word is still selected.
+    let opens: Vec<Option<u32>> = run.iter().map(|line| line.opens).collect();
+    let (dbl_backend, dbl_path) = (backend.clone(), path.to_string());
+    let editor = editor.on_event_cont(el::DoubleClick, move |_, _| {
+        let caret = ed.cursor.with_untracked(|c| c.offset());
+        if let Some(line) = opens.get(ed.line_of_offset(caret)) {
+            navigate::open_file_line(state, &dbl_backend, &dbl_path, *line);
+        }
+    });
+    let editor = navigation::navigable(editor, state, backend.clone(), file.clone(), doc);
+
+    let gutter = Stack::vertical_from_iter(
+        run.iter()
+            .map(|line| gutter_cell(state, backend.clone(), path.to_string(), line)),
+    )
+    .style(|s| {
+        s.flex_col()
+            .flex_shrink(0.0_f32)
+            .width(theme::CODE_ROW_NUMBER_WIDTH + CODE_ROW_MARKER_WIDTH)
+    });
+    // The editor scrolls inside itself, and is as tall as its lines: a
+    // vertical wheel over it has nothing to scroll, so floem's scroll lets
+    // it on to the page.
+    let height = run.len() as f64 * f64::from(theme::code_line_height());
+    Stack::horizontal((
+        gutter,
+        Container::new(over_tints(editor, doc, viewport))
+            .style(|s| s.flex_grow(1.0_f32).min_width(0.0).height_full()),
+    ))
+    .debug_name("Changescape excerpt")
+    .style(move |s| s.width_full().height(height).min_height(0.0))
+    .into_any()
+}
+
+/// One line's cell in an excerpt's gutter: its number and its marker, in
+/// the height of a code row, tinted as the line is. A click opens Code at
+/// the line.
+fn gutter_cell(
+    state: ReviewState,
+    backend: Rc<Backend>,
+    path: String,
+    line: &WindowLine,
+) -> AnyView {
+    let opens = line.opens;
+    let background = line.line.tint.colors().0;
+    let (number, marker) = line_number_labels(&line.line);
+    Container::new(Stack::horizontal((number, marker)).style(|s| s.items_center()))
+        .debug_name("Changescape code line")
+        .on_event_stop(el::Click, move |_, _| {
+            navigate::open_file_line(state, &backend, &path, opens)
+        })
+        .style(move |s| {
+            let base = clickable(
+                s.width_full()
+                    .height(f64::from(theme::code_line_height()))
+                    .items_center(),
+            );
+            match background {
+                Some(bg) => base.background(bg),
+                None => base,
+            }
+        })
+        .into_any()
 }
 
 #[cfg(test)]
@@ -337,6 +472,8 @@ mod tests {
             ]
         );
         assert_eq!(lines[1].opens, Some(2), "a removed line opens the next");
+        let displays: Vec<usize> = lines.iter().map(|l| l.display).collect();
+        assert_eq!(displays, [0, 1, 2, 3], "the buffer's rows, from the first");
     }
 
     #[test]
@@ -374,6 +511,7 @@ mod tests {
                 text: String::new(),
             },
             opens: None,
+            display: 0,
         };
         let mut lines = vec![line(Tint::Added)];
         lines.extend((0..10).map(|_| line(Tint::Plain)));

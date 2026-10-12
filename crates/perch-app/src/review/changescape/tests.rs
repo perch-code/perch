@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use floem::headless::HeadlessHarness;
-use floem::reactive::{SignalGet, SignalUpdate};
+use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
 use perch_changescape::v4::ViewId;
 use perch_github::{Side, StoredMark, TourMark};
 
@@ -352,6 +352,53 @@ fn a_stops_window_is_cut_from_the_file_and_a_line_opens_code_there() {
     assert_eq!(state.tab.get(), ItemTab::Code);
     assert_eq!(state.active.get().as_deref(), Some(OPS));
     // The file is loaded, so the editor takes the jump at once.
+    redraw(&mut harness);
+    assert_eq!(state.cursor_line.get(), 1, "line 2, from 0");
+}
+
+#[test]
+fn a_stops_code_is_one_excerpt_of_the_files_lines() {
+    use crate::review::changescape::hunk::EXCERPTS;
+    let root = cache_with(TOUR, HEAD);
+    let (mut harness, state) = harness_with_cache(Some(root.path()));
+    load_ops(state);
+    click(&mut harness, "Changescape pill");
+    redraw(&mut harness);
+    // The stop's three head lines, which the window holds with no removed
+    // line among them, are one excerpt, with no newline after the last.
+    let head = state.files.with_untracked(|files| {
+        files[OPS]
+            .buffer
+            .text
+            .lines()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
+    assert!(
+        EXCERPTS.with(|e| e.borrow().contains(&head)),
+        "an excerpt of the window's lines"
+    );
+    assert_eq!(
+        shown_under(stop(&harness, "multiply"), "Changescape excerpt"),
+        1
+    );
+}
+
+#[test]
+fn a_double_click_on_a_code_line_opens_code_at_that_line() {
+    let root = cache_with(TOUR, HEAD);
+    let (mut harness, state) = harness_with_cache(Some(root.path()));
+    load_ops(state);
+    click(&mut harness, "Changescape pill");
+    redraw(&mut harness);
+    // The second row of the excerpt, past the numbers, on its text.
+    let excerpt = in_stop(&harness, "multiply", "Changescape excerpt");
+    let row = f64::from(crate::theme::code_line_height());
+    harness.double_click(excerpt.x0 + 120.0, excerpt.y0 + row * 1.5);
+    redraw(&mut harness);
+    assert_eq!(state.tab.get(), ItemTab::Code);
+    assert_eq!(state.active.get().as_deref(), Some(OPS));
     redraw(&mut harness);
     assert_eq!(state.cursor_line.get(), 1, "line 2, from 0");
 }

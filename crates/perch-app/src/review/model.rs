@@ -3345,13 +3345,26 @@ impl ReviewState {
     }
 
     /// Open a location rust-analyzer named: the file, at the line, with
-    /// the caret on the symbol.
+    /// the caret on the symbol. From the Changescape, the jump is shown on
+    /// Code; see `code_from_changescape`.
     pub fn open_located(&self, located: &Located) {
         self.navigate_to(
             &located.path,
             located.line.saturating_sub(1),
             located.character,
         );
+        self.code_from_changescape();
+    }
+
+    /// Show Code when the Changescape is the open tab. The jump, and the
+    /// references and call hierarchy panels, are drawn on Code only, and a
+    /// Changescape's code asks for them. The Conversation keeps its tab:
+    /// its answers can land there when the server becomes ready, and they
+    /// are not the Changescape's to take the reader away from.
+    fn code_from_changescape(&self) {
+        if self.tab.get_untracked() == ItemTab::Changescape {
+            self.tab.set(ItemTab::Code);
+        }
     }
 
     /// Go to a file a comment or an answer names, on Code: at the head
@@ -3556,12 +3569,14 @@ impl ReviewState {
     pub fn open_references(&self, references: References) {
         self.hierarchy.set(None);
         self.references.set(Some(Arc::new(references)));
+        self.code_from_changescape();
     }
 
     /// Open the call hierarchy panel. The references panel closes.
     pub fn open_hierarchy(&self, hierarchy: Hierarchy) {
         self.references.set(None);
         self.hierarchy.set(Some(Arc::new(hierarchy)));
+        self.code_from_changescape();
     }
 
     /// Ask for the calls under an item, one way or the other: queued for
