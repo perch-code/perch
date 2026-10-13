@@ -21,7 +21,7 @@ use crate::{
 /// Code's review skill files through `ReportFindings`; 3 also reads the
 /// same findings when the skill prints them as a fenced JSON array instead;
 /// 4 reads the text `codex exec review` prints, including its clean prose.
-pub const REVIEW_ADAPTER_VERSION: u32 = 4;
+pub const REVIEW_ADAPTER_VERSION: u32 = 5;
 pub const REVIEW_OUTPUT_FORMAT_VERSION: u32 = 1;
 
 const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1468,6 +1468,9 @@ fn codex_finding(
 fn extract_text_review(raw: &str, manifest: &ReviewManifest) -> ReviewExtraction {
     let sections = finding_sections(raw);
     if sections.is_empty() {
+        if let Some(listed) = extract_listed_review(raw, manifest) {
+            return listed;
+        }
         if says_clean(raw) {
             return ReviewExtraction {
                 findings: Vec::new(),
@@ -1504,6 +1507,140 @@ fn extract_text_review(raw: &str, manifest: &ReviewManifest) -> ReviewExtraction
         adapter_version: REVIEW_ADAPTER_VERSION,
         output_format_version: REVIEW_OUTPUT_FORMAT_VERSION,
     }
+}
+
+/// Claude Code 2.1.296's review skill sometimes writes the findings it was
+/// told to print as a JSON array as a numbered list instead: each item opens
+/// with a backticked `path:line`, then the summary, then an indented
+/// "Failure scenario:" paragraph. Items read as the array's objects would.
+/// A numbered line that does not open with a location is not a finding.
+fn extract_listed_review(raw: &str, manifest: &ReviewManifest) -> Option<ReviewExtraction> {
+    let items = listed_items(raw);
+    if items.is_empty() {
+        return None;
+    }
+    let mut findings = Vec::new();
+    let mut diagnostics = Vec::new();
+    for (index, item) in items.into_iter().enumerate() {
+        let (file, line) = match parse_location_value(item.location) {
+            Ok((file, start, _)) => (file, start),
+            Err(error) => {
+                diagnostics.push(format!("finding {} was rejected: {error}", index + 1));
+                continue;
+            }
+        };
+        let reported = ReportedFinding {
+            file: Some(file),
+            line: line.map(i64::from),
+            summary: item.summary,
+            short_summary: None,
+            failure_scenario: item.failure_scenario,
+            category: None,
+            verdict: None,
+        };
+        match normalize_reported_finding(reported, index, raw, item.start, manifest) {
+            Ok(mut finding) => {
+                finding.evidence = EvidenceSpan {
+                    start: item.start,
+                    end: item.end,
+                    text: raw[item.start..item.end].to_string(),
+                };
+                findings.push(finding);
+            }
+            Err(error) => diagnostics.push(format!("finding {} was rejected: {error}", index + 1)),
+        }
+    }
+    Some(ReviewExtraction {
+        findings,
+        explicit_clean: false,
+        incomplete: !diagnostics.is_empty(),
+        diagnostics,
+        raw_response: raw.to_string(),
+        adapter_version: REVIEW_ADAPTER_VERSION,
+        output_format_version: REVIEW_OUTPUT_FORMAT_VERSION,
+    })
+}
+
+struct ListedItem<'a> {
+    start: usize,
+    end: usize,
+    location: &'a str,
+    summary: String,
+    failure_scenario: String,
+}
+
+fn listed_items(raw: &str) -> Vec<ListedItem<'_>> {
+    // (start, end, location, lines after the location)
+    let mut items: Vec<(usize, usize, &str, Vec<&str>)> = Vec::new();
+    let mut open = false;
+    let mut offset = 0;
+    for line in raw.split_inclusive('\n') {
+        let text = line.trim_end_matches(['\n', '\r']);
+        let line_start = offset;
+        offset += line.len();
+        if let Some((location, rest)) = listed_item_head(text) {
+            items.push((line_start, line_start + text.len(), location, vec![rest]));
+            open = true;
+            continue;
+        }
+        let Some(item) = items.last_mut().filter(|_| open) else {
+            continue;
+        };
+        if text.trim().is_empty() {
+            item.3.push("");
+        } else if text.starts_with([' ', '\t']) {
+            item.1 = line_start + text.len();
+            item.3.push(text.trim());
+        } else {
+            open = false;
+        }
+    }
+    items
+        .into_iter()
+        .map(|(start, end, location, lines)| {
+            let text = lines.join("\n");
+            let mut paragraphs = text
+                .split("\n\n")
+                .map(|paragraph| paragraph.trim().replace('\n', " "))
+                .filter(|paragraph| !paragraph.is_empty());
+            let summary = paragraphs.next().unwrap_or_default();
+            let rest = paragraphs.collect::<Vec<_>>().join("\n\n");
+            let failure_scenario = rest
+                .strip_prefix("Failure scenario:")
+                .map_or(rest.as_str(), str::trim_start)
+                .to_string();
+            ListedItem {
+                start,
+                end,
+                location,
+                summary,
+                failure_scenario,
+            }
+        })
+        .collect()
+}
+
+/// `12. `path:40`: summary` split into the location and the summary.
+fn listed_item_head(line: &str) -> Option<(&str, &str)> {
+    let digits = line.len() - line.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits == 0 {
+        return None;
+    }
+    let rest = line[digits..]
+        .strip_prefix(". ")
+        .or_else(|| line[digits..].strip_prefix(") "))?
+        .trim_start();
+    let rest = rest.strip_prefix("**").unwrap_or(rest);
+    let (location, rest) = rest.strip_prefix('`')?.split_once('`')?;
+    if location.is_empty() || location.contains(char::is_whitespace) {
+        return None;
+    }
+    let rest = rest.strip_prefix("**").unwrap_or(rest);
+    let rest = rest
+        .trim_start()
+        .trim_start_matches([':', '—', '–', '-'])
+        .trim_start();
+    Some((location, rest))
 }
 
 /// A paragraph that is one of the ways reviewers say clean. Markdown
@@ -2394,6 +2531,46 @@ mod tests {
         assert!(result.incomplete);
         assert!(!result.explicit_clean);
         assert!(result.diagnostics[0].starts_with("the printed findings array was invalid"));
+    }
+
+    #[test]
+    fn findings_printed_as_a_numbered_list_are_read_like_the_array() {
+        // What 2.1.296's review skill printed instead of its JSON array.
+        let raw = "No reviewer request is left unaddressed:\n- `read_range` now uses the cache.\n\n2 findings, most severe first:\n\n1. `src/lib.rs:4`: `discard()` waits on the lock while\n   `self.local` still holds it.\n\n   Failure scenario: A part is aborted mid-write.\n   `abort()` hangs.\n\n2. `deleted.rs:2` — Cleanup was dropped.\n\n   Failure scenario: The handle leaks.\n\n3. Not a finding, no location.\n\nDone.\n";
+        let result = extract_review(Backend::ClaudeCode, raw, &manifest());
+        assert!(!result.incomplete, "{:?}", result.diagnostics);
+        assert!(!result.explicit_clean);
+        assert_eq!(result.findings.len(), 2);
+        let first = &result.findings[0];
+        assert_eq!(
+            first.title,
+            "`discard()` waits on the lock while `self.local` still holds it."
+        );
+        assert_eq!(
+            first.body,
+            "Failure scenario: A part is aborted mid-write. `abort()` hangs."
+        );
+        assert_eq!(first.location.as_ref().unwrap().start_line, Some(4));
+        assert!(first.evidence.text.starts_with("1. `src/lib.rs:4`"));
+        assert!(first.evidence.text.ends_with("`abort()` hangs."));
+        assert_eq!(
+            &raw[first.evidence.start..first.evidence.end],
+            first.evidence.text
+        );
+        assert_eq!(result.findings[1].title, "Cleanup was dropped.");
+        let deleted = result.findings[1].location.as_ref().unwrap();
+        assert_eq!(deleted.side, ReviewSide::Left);
+
+        // A numbered list without locations is not a findings list.
+        let prose = "Checked:\n\n1. The diff.\n2. Callers.\n";
+        let result = extract_review(Backend::ClaudeCode, prose, &manifest());
+        assert!(result.incomplete);
+        assert!(result.findings.is_empty());
+
+        let outside = "1. `nowhere.rs:3`: Gone.\n\n   Failure scenario: x\n";
+        let result = extract_review(Backend::ClaudeCode, outside, &manifest());
+        assert!(result.incomplete);
+        assert_eq!(result.diagnostics.len(), 1);
     }
 
     #[test]
