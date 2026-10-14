@@ -201,6 +201,15 @@ pub enum Command {
     PushBranch {
         item_id: String,
     },
+    /// Have an agent merge the pull request's base into its branch and
+    /// resolve the conflicts, in a Work run. `ConflictsAsked` answers once
+    /// the run ends or is refused.
+    ResolveConflicts {
+        item_id: String,
+        backend: perch_agent::Backend,
+        model: String,
+        effort: perch_agent::Effort,
+    },
     /// Have an agent write the pull request's title and description,
     /// reading the branch against `base` and changing nothing.
     /// `PullRequestDescription` answers.
@@ -1117,6 +1126,11 @@ pub enum Event {
     BranchPushFailed {
         item_id: String,
         message: String,
+    },
+    /// A `ResolveConflicts` is over: its run ended, or it never started
+    /// and a notice says why.
+    ConflictsAsked {
+        item_id: String,
     },
     PullRequestDescription {
         item_id: String,
@@ -2832,6 +2846,19 @@ impl Backend {
         });
     }
 
+    pub fn resolve_conflicts(
+        &self,
+        item_id: &str,
+        (backend, model, effort): crate::review::model::AgentChoice,
+    ) {
+        let _ = self.commands.send(Command::ResolveConflicts {
+            item_id: item_id.to_string(),
+            backend,
+            model,
+            effort,
+        });
+    }
+
     pub fn write_pull_request_description(
         &self,
         item_id: &str,
@@ -4462,6 +4489,17 @@ async fn run(
             Command::PushBranch { item_id } => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move { open_pull::push_to_pull(&ctx, &item_id).await });
+            }
+            Command::ResolveConflicts {
+                item_id,
+                backend,
+                model,
+                effort,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    resolve_conflicts(&ctx, item_id, backend, model, effort).await
+                });
             }
             Command::WritePullRequestDescription {
                 item_id,
@@ -15785,6 +15823,28 @@ async fn ask(
     effort: perch_agent::Effort,
     mode: RunMode,
 ) {
+    ask_as(
+        ctx, item_id, thread_id, anchor, question, backend, model, effort, mode, false,
+    )
+    .await
+}
+
+/// `ask`, where `committer` lets a Work run go on someone else's pull
+/// request: only resolving its conflicts asks so, once GitHub has said the
+/// reader may push to its branch.
+#[allow(clippy::too_many_arguments)]
+async fn ask_as(
+    ctx: &Ctx,
+    item_id: String,
+    thread_id: Option<String>,
+    anchor: Option<Anchor>,
+    question: String,
+    backend: perch_agent::Backend,
+    model: String,
+    effort: perch_agent::Effort,
+    mode: RunMode,
+    committer: bool,
+) {
     let open = ctx.slot.lock().ok().and_then(|g| {
         g.as_ref().filter(|c| c.item_id == item_id).map(|c| {
             (
@@ -15891,7 +15951,7 @@ async fn ask(
             ctx.notice("Work runs only in the live worktree, not a review's snapshot");
             return;
         }
-        match work_setup(ctx, &item, backend) {
+        match work_setup(ctx, &item, backend, committer) {
             Ok(work) => Some(work),
             Err(message) => {
                 ctx.notice(message);
@@ -16423,11 +16483,9 @@ fn work_setup(
     ctx: &Ctx,
     item: &Item,
     backend: perch_agent::Backend,
+    committer: bool,
 ) -> Result<(perch_agent::Mode, String), String> {
-    let viewer = ctx
-        .with_cache(|c| c.meta("viewer.login").ok().flatten())
-        .flatten();
-    if !crate::items::work_allowed(item, viewer.as_deref()) {
+    if !committer && !crate::items::work_allowed(item, viewer_login(ctx).as_deref()) {
         return Err("Work runs only on your own worktrees and pull requests".into());
     }
     let config = ctx.config();
@@ -16470,6 +16528,165 @@ fn work_setup(
         approvals,
     );
     Ok((perch_agent::Mode::Work(grant), framing))
+}
+
+/// Ask an agent, in a Work run, to merge the pull request's base into the
+/// branch and resolve the conflicts. The base is fetched first: the one
+/// the open fetched may be older than what GitHub found the conflicts
+/// against.
+async fn resolve_conflicts(
+    ctx: &Ctx,
+    item_id: String,
+    backend: perch_agent::Backend,
+    model: String,
+    effort: perch_agent::Effort,
+) {
+    let asked = async {
+        let item = ctx.item(&item_id).ok_or("That item is gone")?;
+        let committer = conflicts_by_committer(ctx, &item).await?;
+        Ok::<_, String>((conflicts_base(ctx, &item_id).await?, committer))
+    }
+    .await;
+    match asked {
+        Ok((question, committer)) => {
+            ask_as(
+                ctx,
+                item_id.clone(),
+                None,
+                None,
+                question,
+                backend,
+                model,
+                effort,
+                RunMode::Work,
+                committer,
+            )
+            .await
+        }
+        Err(message) => ctx.notice(message),
+    }
+    let _ = ctx.events.send(Event::ConflictsAsked { item_id });
+}
+
+/// Fetch the pull request's base where the checkout's diff reads it, and
+/// say what to ask for merging it. A failed fetch merges the base fetched
+/// before, and says so.
+async fn conflicts_base(ctx: &Ctx, item_id: &str) -> Result<String, String> {
+    let item = ctx.item(item_id).ok_or("That item is gone")?;
+    let pr = item
+        .pull_request()
+        .ok_or("Only a pull request has conflicts to resolve")?;
+    let checkout = item
+        .checkout
+        .as_ref()
+        .filter(|c| c.on_disk)
+        .ok_or("There is no checkout to merge in")?;
+    let base = &pr.base_ref;
+    // A checkout in the store reads its base from the pull request's own
+    // refs, fetched across from the pull request's repository when the
+    // branch was cut in a fork; one in the reader's clone, from the
+    // remote that names the repository. See `base_revs_for`.
+    let (fetched, rev) = if checkout.owned && checkout.source.is_none() {
+        let clone = RepoId::parse(&item.repo_full_name)
+            .ok_or_else(|| format!("{} is not a repository name", item.repo_full_name))?;
+        let from = if item.repo_full_name.eq_ignore_ascii_case(&pr.repo_full_name) {
+            "origin".to_string()
+        } else {
+            RepoId::parse(&pr.repo_full_name)
+                .map(|upstream| upstream.clone_url())
+                .ok_or_else(|| format!("{} is not a repository name", pr.repo_full_name))?
+        };
+        let fetched = match ctx.preparer.ensure_bare(&clone, |_| {}).await {
+            Ok(bare) => ctx
+                .preparer
+                .fetch_pull(&bare, &from, pr.number, base)
+                .await
+                .map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        (fetched, format!("refs/perch/base/{}", pr.number))
+    } else {
+        let hosts = ctx.config().github_hosts();
+        let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
+        let remotes = perch_git::remotes(ctx.preparer.git(), &checkout.path)
+            .await
+            .unwrap_or_default();
+        let remote = perch_git::github_remote(&remotes, &hosts)
+            .map(|(remote, _)| remote)
+            .unwrap_or_else(|| "origin".to_string());
+        let fetched = ctx
+            .preparer
+            .fetch_branch(&checkout.path, &remote, base)
+            .await
+            .map_err(|e| e.to_string());
+        (fetched, format!("{remote}/{base}"))
+    };
+    let resolves = ctx
+        .preparer
+        .git()
+        .run(
+            Some(&checkout.path),
+            [
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "--end-of-options",
+                &format!("{rev}^{{commit}}"),
+            ],
+            Duration::from_secs(30),
+        )
+        .await
+        .is_ok();
+    match fetched {
+        Err(error) if resolves => {
+            tracing::info!(item = item_id, %error, "could not fetch the base; merging what is here");
+            ctx.notice(format!(
+                "Could not fetch {base}; the agent merges the {base} fetched before"
+            ));
+        }
+        Err(error) => return Err(format!("Could not fetch {base}: {error}")),
+        Ok(()) if !resolves => return Err(format!("{base} is not available locally")),
+        Ok(()) => {}
+    }
+    Ok(crate::review::merge::conflicts_request(
+        base,
+        &rev,
+        &checkout.branch,
+    ))
+}
+
+fn viewer_login(ctx: &Ctx) -> Option<String> {
+    ctx.with_cache(|c| c.meta("viewer.login").ok().flatten())
+        .flatten()
+}
+
+/// Whether a Work run that resolves conflicts may go on `item` though it
+/// is someone else's pull request: GitHub is asked now whether the reader
+/// may push to its branch, since a permission is never taken from a
+/// cache. `Ok(false)` on the reader's own work, which needs no asking.
+async fn conflicts_by_committer(ctx: &Ctx, item: &Item) -> Result<bool, String> {
+    let viewer = viewer_login(ctx);
+    if crate::items::work_allowed(item, viewer.as_deref()) {
+        return Ok(false);
+    }
+    let pr = item
+        .pull_request()
+        .ok_or("Only a pull request has conflicts to resolve")?;
+    let github = ctx
+        .github()
+        .ok_or("A GitHub token is required to resolve conflicts")?;
+    let overview = github
+        .fetch_pull_request_overview(&pr.repo_full_name, pr.number)
+        .await
+        .map_err(|e| format!("Could not ask GitHub who may push to #{}: {e}", pr.number))?;
+    if crate::items::may_push_pull(item, viewer.as_deref(), Some(&overview)) {
+        Ok(true)
+    } else {
+        Err(format!(
+            "You can't push to #{}'s branch, so its conflicts are resolved on GitHub",
+            pr.number
+        ))
+    }
 }
 
 /// The item's discussion as the cache has it, in the shape the files and
@@ -17197,7 +17414,13 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         return;
     };
     let work = if old.mode == RunMode::Work {
-        match work_setup(ctx, &item, backend) {
+        // A conflicts run on someone else's pull request goes again while
+        // the reader may still push to its branch.
+        let committer = old
+            .original_request
+            .starts_with(crate::review::merge::CONFLICTS_REQUEST)
+            && conflicts_by_committer(ctx, &item).await == Ok(true);
+        match work_setup(ctx, &item, backend, committer) {
             Ok(work) => Some(work),
             Err(message) => {
                 ctx.notice(message);
@@ -20193,6 +20416,8 @@ mod tests {
             viewer_permission: Some(RepositoryPermission::Write),
             squash_message: Default::default(),
             merge_message: Default::default(),
+            cross_repository: false,
+            maintainer_can_modify: false,
             allowed_merge_methods: perch_github::MergeMethods {
                 merge: true,
                 squash: true,
@@ -28915,6 +29140,142 @@ read eof || true
             ],
         );
         git(&source, &["rev-parse", "HEAD"])
+    }
+
+    /// Resolve conflicts merges the base as GitHub has it now: a checkout
+    /// in the store fetches its pull request's base again, one in the
+    /// reader's clone its remote's branch. With GitHub out of reach, the
+    /// base fetched before serves, and a notice says so.
+    #[tokio::test]
+    async fn resolving_conflicts_fetches_the_base_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let repo = RepoId::parse("a/b").unwrap();
+        pull_seven_on_github(&ctx, dir.path());
+        let bare = ctx.preparer.store().bare_path(&repo);
+        let remote = dir.path().join("remote.git");
+        let source = dir.path().join("source");
+        let advance = |text: &str| {
+            git(&source, &["checkout", "-q", "main"]);
+            std::fs::write(source.join("one.txt"), text).unwrap();
+            git(&source, &["commit", "-qam", text]);
+            git(&source, &["push", "-q", remote.to_str().unwrap(), "main"]);
+            git(&source, &["rev-parse", "HEAD"])
+        };
+
+        let main = advance("two\n");
+        let mut pull = Item::new("a/b", Timestamp::now());
+        pull.subject = Some(ItemSubject::PullRequest(pull_request(7)));
+        pull.checkout = Some(ItemCheckout {
+            base_ref: "main".into(),
+            path: bare.clone(),
+            owned: true,
+            ..root_checkout("perch/pr-7")
+        });
+        ctx.with_cache(|c| c.insert_item(&pull)).unwrap().unwrap();
+        let question = conflicts_base(&ctx, &pull.id).await.unwrap();
+        assert_eq!(git(&bare, &["rev-parse", "refs/perch/base/7"]), main);
+        assert!(
+            question.starts_with("Resolve the merge conflicts with main.\n"),
+            "{question}"
+        );
+        assert!(
+            question.contains("`git merge -m \"Merge main into perch/pr-7\" refs/perch/base/7`"),
+            "{question}"
+        );
+
+        let clone = dir.path().join("clone");
+        git(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+        );
+        let main = advance("three\n");
+        let mut mine = Item::new("a/b", Timestamp::now());
+        mine.subject = Some(ItemSubject::PullRequest(pull_request(8)));
+        mine.checkout = Some(ItemCheckout {
+            base_ref: "main".into(),
+            path: clone.clone(),
+            ..root_checkout("feature")
+        });
+        ctx.with_cache(|c| c.insert_item(&mine)).unwrap().unwrap();
+        let question = conflicts_base(&ctx, &mine.id).await.unwrap();
+        assert_eq!(git(&clone, &["rev-parse", "origin/main"]), main);
+        assert!(question.contains(" origin/main`"), "{question}");
+
+        std::fs::remove_dir_all(&remote).unwrap();
+        let _ = notices(&received);
+        let question = conflicts_base(&ctx, &mine.id).await.unwrap();
+        assert!(question.contains(" origin/main`"), "{question}");
+        assert_eq!(
+            notices(&received),
+            ["Could not fetch main; the agent merges the main fetched before"]
+        );
+    }
+
+    /// On someone else's pull request, resolving conflicts asks GitHub
+    /// first whether the reader may push to its branch: a committer may,
+    /// unless it is on a fork whose author kept maintainers out. The
+    /// reader's own pull request asks nothing.
+    #[tokio::test]
+    async fn a_committer_may_resolve_someone_elses_conflicts() {
+        let cases = [
+            ("WRITE", false, false, true),
+            ("ADMIN", true, true, true),
+            ("WRITE", true, false, false),
+            ("READ", false, false, false),
+        ];
+        for (permission, cross, modify, may) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let body = format!(
+                r#"{{ "data": {{ "repository": {{
+                    "merge_commit_allowed": true,
+                    "squash_merge_allowed": true,
+                    "rebase_merge_allowed": true,
+                    "viewer_permission": "{permission}",
+                    "pull_request": {{
+                        "head_sha": "h7",
+                        "mergeable": "CONFLICTING",
+                        "merge_state": "DIRTY",
+                        "cross_repository": {cross},
+                        "maintainer_can_modify": {modify}
+                    }}
+                }} }} }}"#
+            );
+            let (base, paths) = serve_by_path(move |_| ("200 OK", body.clone()));
+            let (ctx, _) = ctx(dir.path(), &base, &[]);
+            ctx.with_cache(|c| c.set_meta("viewer.login", "me"))
+                .unwrap()
+                .unwrap();
+            let mut item = store_pull(&ctx, 7);
+            item.checkout = Some(ItemCheckout {
+                owned: true,
+                ..root_checkout("perch/pr-7")
+            });
+            let case = format!("{permission}, fork {cross}, maintainers {modify}");
+            match conflicts_by_committer(&ctx, &item).await {
+                Ok(committer) => assert!(may && committer, "{case}"),
+                Err(message) => {
+                    assert!(!may, "{case}: {message}");
+                    assert_eq!(
+                        message,
+                        "You can't push to #7's branch, so its conflicts are resolved on GitHub"
+                    );
+                }
+            }
+            assert_eq!(paths.lock().unwrap().len(), 1, "{case}");
+
+            // The author's own: nothing to ask.
+            ctx.with_cache(|c| c.set_meta("viewer.login", "u"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(conflicts_by_committer(&ctx, &item).await, Ok(false));
+            assert_eq!(paths.lock().unwrap().len(), 1, "{case}");
+        }
     }
 
     #[tokio::test]

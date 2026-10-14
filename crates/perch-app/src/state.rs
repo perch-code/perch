@@ -2862,6 +2862,11 @@ impl AppState {
                     review.push_error.set(Some(message));
                 }
             }
+            Event::ConflictsAsked { item_id } => {
+                if review.is_item(&item_id) {
+                    review.resolving_conflicts.set(false);
+                }
+            }
             Event::PullRequestDescription { item_id, outcome } => {
                 if review.is_item(&item_id) {
                     review.describing.set(false);
@@ -3047,6 +3052,7 @@ impl AppState {
             | Event::OpenPullRequestFailed { .. }
             | Event::BranchPushed { .. }
             | Event::BranchPushFailed { .. }
+            | Event::ConflictsAsked { .. }
             | Event::DraftSet { .. }
             | Event::StateChanged { .. } => {}
             // What the reader did sends the whole list, so whatever a poll
@@ -3809,6 +3815,8 @@ mod tests {
             viewer_permission: Some(RepositoryPermission::Write),
             squash_message: Default::default(),
             merge_message: Default::default(),
+            cross_repository: false,
+            maintainer_can_modify: false,
             allowed_merge_methods: MergeMethods {
                 merge: true,
                 squash: true,

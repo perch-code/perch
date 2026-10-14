@@ -977,6 +977,25 @@ pub fn work_allowed(item: &Item, viewer: Option<&str>) -> bool {
     }
 }
 
+/// Whether the reader may push to the item's pull request from its
+/// checkout: their own pull request, where Work is allowed, or anyone's
+/// whose branch GitHub says, in `overview`, they may push to. That is a
+/// committer's, as GitHub's own Resolve conflicts lets them, and on a fork
+/// only when its author let maintainers edit it.
+pub fn may_push_pull(
+    item: &Item,
+    viewer: Option<&str>,
+    overview: Option<&perch_github::PullRequestOverview>,
+) -> bool {
+    if item.pull_request().is_none() {
+        return false;
+    }
+    work_allowed(item, viewer)
+        || (!item.is_archived()
+            && item.checkout.as_ref().is_some_and(|c| c.on_disk)
+            && overview.is_some_and(perch_github::PullRequestOverview::viewer_can_push_head))
+}
+
 /// Whether rust-analyzer or jdtls, which run a checkout's own code as they
 /// load it, may start on `item` without asking.
 ///
@@ -1588,6 +1607,81 @@ mod tests {
         issue.archived_at = None;
         issue.checkout = branch.checkout.clone();
         assert!(!work_allowed(&issue, Some(&author)));
+    }
+
+    /// Push, and an agent's merge for conflicts, go where the reader may
+    /// push: their own pull request, or anyone's as a committer, which on a
+    /// fork also needs its author's leave for maintainers to edit it.
+    #[test]
+    fn a_committer_may_push_to_someone_else_s_pull_request() {
+        use perch_github::RepositoryPermission::{Admin, Triage, Write};
+
+        let (_, items) = fixture();
+        let mut pull = items
+            .iter()
+            .find(|i| matches!(i.subject, Some(ItemSubject::PullRequest(_))))
+            .cloned()
+            .unwrap();
+        pull.archived_at = None;
+        pull.checkout = items
+            .iter()
+            .find(|i| i.subject.is_none())
+            .and_then(|i| i.checkout.clone());
+        pull.checkout.as_mut().unwrap().on_disk = true;
+        let author = pull.pull_request().unwrap().author_login.clone();
+        let overview = |permission, cross_repository, maintainer_can_modify| {
+            perch_github::PullRequestOverview {
+                head_sha: "h".into(),
+                mergeable: perch_github::MergeableState::Conflicting,
+                merge_state: perch_github::MergeState::Dirty,
+                review_decision: None,
+                viewer_can_merge_as_admin: false,
+                viewer_permission: Some(permission),
+                allowed_merge_methods: Default::default(),
+                checks: perch_github::Checks {
+                    state: perch_github::CheckState::Passing,
+                    url: None,
+                    runs: Vec::new(),
+                },
+                squash_message: Default::default(),
+                merge_message: Default::default(),
+                cross_repository,
+                maintainer_can_modify,
+            }
+        };
+
+        assert!(
+            may_push_pull(&pull, Some(&author), None),
+            "the reader's own"
+        );
+        assert!(
+            !may_push_pull(&pull, Some("me"), None),
+            "nothing says they may"
+        );
+        assert!(may_push_pull(
+            &pull,
+            Some("me"),
+            Some(&overview(Write, false, false))
+        ));
+        assert!(!may_push_pull(
+            &pull,
+            Some("me"),
+            Some(&overview(Triage, false, false))
+        ));
+        assert!(
+            !may_push_pull(&pull, Some("me"), Some(&overview(Write, true, false))),
+            "a fork that keeps maintainers out"
+        );
+        assert!(may_push_pull(
+            &pull,
+            Some("me"),
+            Some(&overview(Admin, true, true))
+        ));
+        pull.checkout.as_mut().unwrap().on_disk = false;
+        assert!(
+            !may_push_pull(&pull, Some("me"), Some(&overview(Write, false, false))),
+            "nothing on disk to push from"
+        );
     }
 
     #[test]

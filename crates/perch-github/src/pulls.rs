@@ -135,9 +135,29 @@ pub struct PullRequestOverview {
     /// The commit message GitHub's merge box would offer for a merge commit.
     #[serde(default)]
     pub merge_message: CommitMessage,
+    /// Whether the head branch is on a fork, and whether its author lets
+    /// the repository's maintainers push to it.
+    #[serde(default)]
+    pub cross_repository: bool,
+    #[serde(default)]
+    pub maintainer_can_modify: bool,
 }
 
 impl PullRequestOverview {
+    /// Whether the viewer may push to the head branch, whoever opened it:
+    /// write access to the repository and, for a branch on a fork, its
+    /// author's leave for maintainers to edit it.
+    pub fn viewer_can_push_head(&self) -> bool {
+        matches!(
+            self.viewer_permission,
+            Some(
+                RepositoryPermission::Write
+                    | RepositoryPermission::Maintain
+                    | RepositoryPermission::Admin
+            )
+        ) && (!self.cross_repository || self.maintainer_can_modify)
+    }
+
     /// The message GitHub would write for `method`; None for a rebase,
     /// which keeps each commit's own.
     pub fn commit_message(&self, method: MergeMethod) -> Option<&CommitMessage> {
@@ -423,6 +443,8 @@ query PullRequestOverview($owner: String!, $name: String!, $number: Int!, $conte
       merge_state: mergeStateStatus
       review_decision: reviewDecision
       viewer_can_merge_as_admin: viewerCanMergeAsAdmin
+      cross_repository: isCrossRepository
+      maintainer_can_modify: maintainerCanModify
       squash_title: viewerMergeHeadlineText(mergeType: SQUASH)
       squash_body: viewerMergeBodyText(mergeType: SQUASH)
       merge_title: viewerMergeHeadlineText(mergeType: MERGE)
@@ -520,6 +542,8 @@ impl OverviewRepositoryPayload {
                 title: pull.merge_title,
                 body: pull.merge_body,
             },
+            cross_repository: pull.cross_repository,
+            maintainer_can_modify: pull.maintainer_can_modify,
             check_state,
             check_contexts,
             check_page_info,
@@ -541,6 +565,8 @@ pub(crate) struct PullRequestOverviewPage {
     allowed_merge_methods: MergeMethods,
     squash_message: CommitMessage,
     merge_message: CommitMessage,
+    cross_repository: bool,
+    maintainer_can_modify: bool,
     check_state: Option<String>,
     check_contexts: Vec<Option<CheckContextPayload>>,
     check_page_info: CheckContextPageInfoPayload,
@@ -618,6 +644,8 @@ impl PullRequestOverviewAccumulator {
             checks: checks_from_contexts(self.latest.check_state, self.check_contexts),
             squash_message: self.latest.squash_message,
             merge_message: self.latest.merge_message,
+            cross_repository: self.latest.cross_repository,
+            maintainer_can_modify: self.latest.maintainer_can_modify,
         }
     }
 }
@@ -634,6 +662,10 @@ struct OverviewPullPayload {
     review_decision: Option<String>,
     #[serde(default)]
     viewer_can_merge_as_admin: bool,
+    #[serde(default)]
+    cross_repository: bool,
+    #[serde(default)]
+    maintainer_can_modify: bool,
     #[serde(default)]
     squash_title: String,
     #[serde(default)]

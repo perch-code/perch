@@ -1093,20 +1093,20 @@ fn divergence(state: ReviewState) -> impl IntoView {
         })
 }
 
-/// Whether the worktree has commits the reader's own pull request lacks,
-/// and nothing the pull request has that the worktree doesn't: a push
-/// that needs no force.
+/// Whether the worktree has commits a pull request the reader may push to
+/// lacks, and nothing the pull request has that the worktree doesn't: a
+/// push that needs no force.
 pub(crate) fn can_push(app: AppState, state: ReviewState) -> bool {
     let viewer = app
         .viewer
         .with(|v| v.as_ref().map(|(login, _)| login.clone()));
     state.item.with(|item| {
         item.as_ref().is_some_and(|item| {
-            item.pull_request().is_some()
-                && crate::items::work_allowed(item, viewer.as_deref())
-                && item
-                    .divergence()
-                    .is_some_and(|d| d.ahead.is_some_and(|a| a > 0) && d.behind == Some(0))
+            state.pull_request_overview.with(|overview| {
+                crate::items::may_push_pull(item, viewer.as_deref(), overview.as_deref())
+            }) && item
+                .divergence()
+                .is_some_and(|d| d.ahead.is_some_and(|a| a > 0) && d.behind == Some(0))
         })
     })
 }
@@ -2772,6 +2772,8 @@ mod tests {
                         },
                         squash_message: Default::default(),
                         merge_message: Default::default(),
+                        cross_repository: false,
+                        maintainer_can_modify: false,
                     })
                 }));
         };

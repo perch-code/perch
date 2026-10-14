@@ -23,7 +23,7 @@ use perch_github::{
 
 use crate::backend::Backend;
 use crate::icons::{state_color, SidebarIcon};
-use crate::review::model::ReviewState;
+use crate::review::model::{AgentChoice, ReviewState};
 use crate::review::timeline::short_sha;
 use crate::state::{AppState, Checked};
 use crate::theme;
@@ -67,6 +67,11 @@ struct MergeSnapshot {
     /// to or from a draft under way.
     may_set_draft: bool,
     draft_pending: Option<bool>,
+    /// The agent that would resolve conflicts, whether one is at it, and
+    /// which way Resolve conflicts goes.
+    resolver: Option<perch_agent::Backend>,
+    resolving: bool,
+    conflict_route: ConflictRoute,
 }
 
 /// The commit message being confirmed for a squash or a merge commit.
@@ -174,6 +179,46 @@ struct MergeFacts {
     has_merge_method: bool,
 }
 
+/// Which way Resolve conflicts goes. With an agent, where one may work
+/// here, unless the reader picks GitHub.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConflictRoute {
+    Agent,
+    GitHub,
+}
+
+/// What the merge box needs to offer an agent for conflicts.
+#[derive(Clone, Copy)]
+struct Resolver {
+    /// The agent that would resolve them, the one last asked here or
+    /// config's, or None where the reader couldn't push what it made:
+    /// someone else's pull request they can't push to, or one with no
+    /// checkout.
+    agent: Memo<Option<AgentChoice>>,
+    /// An agent asked, and not done yet.
+    busy: Memo<bool>,
+    route: RwSignal<ConflictRoute>,
+}
+
+/// The first line of what an agent is asked when it resolves conflicts,
+/// by which its run is known again after the item is reopened.
+pub(crate) const CONFLICTS_REQUEST: &str = "Resolve the merge conflicts with ";
+
+/// What an agent is asked to resolve conflicts with `base`, which the
+/// checkout has at `rev`, on `branch`: a merge, since the pull request's
+/// commits are on GitHub already and a rebase would need a force push.
+pub(crate) fn conflicts_request(base: &str, rev: &str, branch: &str) -> String {
+    format!(
+        "{CONFLICTS_REQUEST}{base}.\n\n\
+         Merge {rev}, which is {base} as GitHub has it now, into {branch} with \
+         `git merge -m \"Merge {base} into {branch}\" {rev}`. The merge writes to the git \
+         directory as a commit does, so run it the way you would run a commit here. Resolve \
+         each conflict so the changes on both sides still hold, then build and run the tests \
+         that cover what you touched. Commit the merge once it is clean. Do not rebase, and \
+         do not push."
+    )
+}
+
 /// One restrained surface between the conversation and its composer.
 pub fn surface(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let checks_expanded = RwSignal::new(true);
@@ -186,6 +231,11 @@ pub fn surface(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
     let bypass_requirements = RwSignal::new(false);
     let confirmation = RwSignal::new(None::<MergeConfirmation>);
     let message = MessageDraft::new();
+    let resolver = Resolver {
+        agent: Memo::new(move |_| conflicts_agent(app, state)),
+        busy: Memo::new(move |_| resolving_conflicts(app, state)),
+        route: RwSignal::new(ConflictRoute::Agent),
+    };
 
     // Consent and confirmation apply to one exact head, never to whichever
     // pull request happens to occupy this long-lived review view next.
@@ -202,6 +252,7 @@ pub fn surface(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
             selected_method.set(MergeMethod::Squash);
             bypass_requirements.set(false);
             confirmation.set(None);
+            resolver.route.set(ConflictRoute::Agent);
         }
         identity
     });
@@ -236,6 +287,7 @@ pub fn surface(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                         message,
                         can_push,
                         may_set_draft,
+                        resolver,
                     ),
                 ))
                 .style(|s| s.flex_col().width_full()),
@@ -614,6 +666,7 @@ fn merge_section(
     message: MessageDraft,
     can_push: Memo<bool>,
     may_set_draft: Memo<bool>,
+    resolver: Resolver,
 ) -> impl IntoView {
     dyn_container(
         move || MergeSnapshot {
@@ -642,6 +695,11 @@ fn merge_section(
             push_error: state.push_error.get(),
             may_set_draft: may_set_draft.get(),
             draft_pending: state.draft_pending.get(),
+            resolver: resolver
+                .agent
+                .with(|agent| agent.as_ref().map(|(backend, ..)| *backend)),
+            resolving: resolver.busy.get(),
+            conflict_route: resolver.route.get(),
         },
         move |snapshot| {
             merge_content(
@@ -651,12 +709,14 @@ fn merge_section(
                 bypass_requirements,
                 confirmation,
                 message,
+                resolver,
                 snapshot,
             )
         },
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn merge_content(
     state: ReviewState,
     backend: Rc<Backend>,
@@ -664,6 +724,7 @@ fn merge_content(
     bypass_requirements: RwSignal<bool>,
     confirmation: RwSignal<Option<MergeConfirmation>>,
     message: MessageDraft,
+    resolver: Resolver,
     snapshot: MergeSnapshot,
 ) -> AnyView {
     let (Some(pull), Some(item)) = (snapshot.pull.as_ref(), snapshot.item.as_ref()) else {
@@ -686,7 +747,12 @@ fn merge_content(
         .into_any();
     }
     let decision = merge_decision(&snapshot, pull, item);
-    let status = merge_status(decision, snapshot.overview.as_deref(), item.divergence());
+    let status = merge_status(
+        decision,
+        snapshot.overview.as_deref(),
+        item.divergence(),
+        conflicts_detail(&snapshot, &pull.base_ref),
+    );
     let controls = merge_controls(
         state,
         backend,
@@ -694,6 +760,7 @@ fn merge_content(
         bypass_requirements,
         confirmation,
         message,
+        resolver,
         decision,
         snapshot.clone(),
         pull.clone(),
@@ -722,6 +789,7 @@ fn merge_status(
     decision: MergeDecision,
     overview: Option<&PullRequestOverview>,
     diverged: Option<perch_github::Diverged>,
+    conflicts: String,
 ) -> impl IntoView {
     let (icon, color, title, detail): (_, fn() -> Color, _, _) = match decision {
         MergeDecision::Loading => (
@@ -734,7 +802,7 @@ fn merge_status(
             SidebarIcon::Warning,
             theme::draft,
             "This branch has conflicts that must be resolved".to_string(),
-            "Resolve the conflicts on GitHub before continuing.".to_string(),
+            conflicts,
         ),
         MergeDecision::Ready => (
             SidebarIcon::Check,
@@ -813,6 +881,7 @@ fn merge_controls(
     bypass_requirements: RwSignal<bool>,
     confirmation: RwSignal<Option<MergeConfirmation>>,
     message: MessageDraft,
+    resolver: Resolver,
     decision: MergeDecision,
     snapshot: MergeSnapshot,
     pull: Arc<PullRequest>,
@@ -820,19 +889,7 @@ fn merge_controls(
 ) -> AnyView {
     match decision {
         MergeDecision::Conflicts => {
-            let url = conflicts_url(&pull.html_url);
-            let open_url = url.clone();
-            merge_button(
-                "Resolve conflicts on GitHub".to_string(),
-                false,
-                move || url.is_some(),
-                move || {
-                    if let Some(url) = open_url.as_deref() {
-                        open_in_browser(url);
-                    }
-                },
-            )
-            .into_any()
+            conflict_controls(state, backend, resolver, &snapshot, &pull, &item.id)
         }
         MergeDecision::Loading => {
             merge_button("Checking status…".to_string(), false, || false, || {}).into_any()
@@ -1148,14 +1205,22 @@ fn merge_method_button(
     selected_method: RwSignal<MergeMethod>,
     confirmation: RwSignal<Option<MergeConfirmation>>,
 ) -> impl View {
-    Stack::horizontal((
-        Label::derived(move || {
+    picker(
+        move || {
             effective_method(selected_method.get(), methods)
                 .map(method_short)
                 .unwrap_or("Method")
                 .to_string()
-        })
-        .style(|s| {
+        },
+        move || merge_method_menu(methods, selected_method, confirmation),
+    )
+    .debug_name("merge-method")
+}
+
+/// The small button beside a merge box action that picks how it goes.
+fn picker(label: impl Fn() -> String + 'static, menu: impl Fn() -> Menu + 'static) -> impl View {
+    Stack::horizontal((
+        Label::derived(label).style(|s| {
             s.font_size(theme::TEXT_BADGE)
                 .color(theme::fg())
                 .selectable(false)
@@ -1165,7 +1230,7 @@ fn merge_method_button(
         sidebar_glyph(SidebarIcon::ChevronDown, theme::fg_subtle)
             .style(|s| s.size(9.0, 9.0).pointer_events_none()),
     ))
-    .dropdown(move || merge_method_menu(methods, selected_method, confirmation))
+    .dropdown(menu)
     .style(|s| {
         clickable(s)
             .items_center()
@@ -1179,7 +1244,6 @@ fn merge_method_button(
             .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
             .hover(|s| s.background(theme::canvas_hover()))
     })
-    .debug_name("merge-method")
     .into_view()
 }
 
@@ -1219,6 +1283,155 @@ fn merge_method_menu(
         });
     }
     menu
+}
+
+/// Resolve conflicts with the agent, where one may work here, or on
+/// GitHub, picked beside it as the merge method is. While the agent is at
+/// it, only that is shown.
+fn conflict_controls(
+    state: ReviewState,
+    backend: Rc<Backend>,
+    resolver: Resolver,
+    snapshot: &MergeSnapshot,
+    pull: &PullRequest,
+    item_id: &str,
+) -> AnyView {
+    let on_github = || {
+        let url = conflicts_url(&pull.html_url);
+        let open_url = url.clone();
+        merge_button(
+            "Resolve conflicts on GitHub".to_string(),
+            false,
+            move || url.is_some(),
+            move || {
+                if let Some(url) = open_url.as_deref() {
+                    open_in_browser(url);
+                }
+            },
+        )
+    };
+    let Some(agent) = snapshot.resolver else {
+        return on_github().into_any();
+    };
+    if snapshot.resolving {
+        return merge_button("Resolving conflicts…".to_string(), true, || false, || {}).into_any();
+    }
+    let action = match snapshot.conflict_route {
+        ConflictRoute::GitHub => on_github().into_any(),
+        ConflictRoute::Agent => {
+            let item_id = item_id.to_string();
+            merge_button(
+                format!("Resolve conflicts with {}", agent_name(agent)),
+                true,
+                || true,
+                move || {
+                    let Some(choice) = resolver.agent.get_untracked() else {
+                        return;
+                    };
+                    state.resolving_conflicts.set(true);
+                    backend.resolve_conflicts(&item_id, choice);
+                },
+            )
+            .into_any()
+        }
+    };
+    let route = resolver.route;
+    let base = pull.base_ref.clone();
+    Stack::horizontal((
+        action.style(|s| s.flex_grow(1.0_f32)),
+        picker(
+            move || match route.get() {
+                ConflictRoute::Agent => agent_name(agent).to_string(),
+                ConflictRoute::GitHub => "GitHub".to_string(),
+            },
+            move || conflict_route_menu(agent, route, &base),
+        )
+        .debug_name("conflict-route"),
+    ))
+    .style(|s| s.width_full().items_center().gap(8.0))
+    .into_any()
+}
+
+fn conflict_route_menu(
+    agent: perch_agent::Backend,
+    route: RwSignal<ConflictRoute>,
+    base: &str,
+) -> Menu {
+    let current = route.get_untracked();
+    Menu::new()
+        .item(format!("Resolve with {}", agent_name(agent)), move |item| {
+            item.checked(current == ConflictRoute::Agent)
+                .detail(format!("Merge {base} into this branch here"))
+                .action(move || route.set(ConflictRoute::Agent))
+        })
+        .item("Resolve on GitHub", move |item| {
+            item.checked(current == ConflictRoute::GitHub)
+                .detail("Open GitHub's conflict editor")
+                .action(move || route.set(ConflictRoute::GitHub))
+        })
+}
+
+/// What the conflicts status says under its title: what the agent does,
+/// or is doing, when it is the way they go.
+fn conflicts_detail(snapshot: &MergeSnapshot, base: &str) -> String {
+    match snapshot.resolver {
+        Some(agent) if snapshot.resolving => format!(
+            "{} is merging {base} into this branch. Push the merge once it's done.",
+            agent_name(agent)
+        ),
+        Some(agent) if snapshot.conflict_route == ConflictRoute::Agent => format!(
+            "{} can merge {base} into this branch here and resolve them, for you to push.",
+            agent_name(agent)
+        ),
+        _ => "Resolve the conflicts on GitHub before continuing.".to_string(),
+    }
+}
+
+/// The agent that would resolve conflicts, where the reader may push what
+/// it makes: Claude or Codex, whichever was last asked, as Write with
+/// does.
+fn conflicts_agent(app: AppState, state: ReviewState) -> Option<AgentChoice> {
+    let viewer = app
+        .viewer
+        .with(|v| v.as_ref().map(|(login, _)| login.clone()));
+    let may = state.item.with(|item| {
+        state.pull_request_overview.with(|overview| {
+            item.as_ref().is_some_and(|item| {
+                crate::items::may_push_pull(item, viewer.as_deref(), overview.as_deref())
+            })
+        })
+    });
+    may.then(|| {
+        state
+            .agent_last
+            .get()
+            .unwrap_or_else(|| crate::review::threads::defaults(app))
+    })
+}
+
+/// Whether an agent is resolving this item's conflicts: asked from here,
+/// or a run of `CONFLICTS_REQUEST` still going, which outlives a reopen.
+fn resolving_conflicts(app: AppState, state: ReviewState) -> bool {
+    if state.resolving_conflicts.get() {
+        return true;
+    }
+    let Some(id) = state.item.with(|i| i.as_ref().map(|i| i.id.clone())) else {
+        return false;
+    };
+    app.agent_runs.with(|runs| {
+        runs.iter().any(|run| {
+            run.item_id.as_deref() == Some(id.as_str())
+                && run.status.is_active()
+                && run.request.starts_with(CONFLICTS_REQUEST)
+        })
+    })
+}
+
+fn agent_name(agent: perch_agent::Backend) -> &'static str {
+    match agent {
+        perch_agent::Backend::ClaudeCode => "Claude",
+        perch_agent::Backend::Codex => "Codex",
+    }
 }
 
 /// A button of the merge surface, named in the tree for its label.
@@ -1601,8 +1814,19 @@ mod tests {
                 },
                 squash_message: CommitMessage::default(),
                 merge_message: CommitMessage::default(),
+                cross_repository: false,
+                maintainer_can_modify: false,
             })));
         state
+    }
+
+    /// Nothing to resolve conflicts with: someone else's pull request.
+    fn no_resolver() -> Resolver {
+        Resolver {
+            agent: Memo::new(|_| None),
+            busy: Memo::new(|_| false),
+            route: RwSignal::new(ConflictRoute::Agent),
+        }
     }
 
     fn named(id: floem::ViewId, name: &str) -> Option<floem::ViewId> {
@@ -1836,6 +2060,7 @@ mod tests {
             MessageDraft::new(),
             Memo::new(|_| true),
             Memo::new(|_| false),
+            no_resolver(),
         );
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         harness.rebuild();
@@ -1870,6 +2095,102 @@ mod tests {
         assert!(named(harness.root_id(), "merge-action:Push-2-commits").is_some());
     }
 
+    /// Conflicts go to an agent by default where one may work, held while
+    /// it runs, and to GitHub when the reader picks it beside the button or
+    /// no agent may work here.
+    #[test]
+    fn conflicts_are_resolved_with_an_agent_by_default() {
+        use crate::backend::Command;
+
+        let root = TestRoot::new();
+        let state = review_state(MergeState::Dirty, false);
+        state.pull_request_overview.update(|overview| {
+            let mut dirty = (**overview.as_ref().unwrap()).clone();
+            dirty.mergeable = MergeableState::Conflicting;
+            *overview = Some(Arc::new(dirty));
+        });
+        let may_work = RwSignal::new(true);
+        let resolver = Resolver {
+            agent: Memo::new(move |_| {
+                may_work.get().then(|| {
+                    (
+                        perch_agent::Backend::ClaudeCode,
+                        "opus".to_string(),
+                        perch_agent::Effort::default(),
+                    )
+                })
+            }),
+            busy: Memo::new(move |_| state.resolving_conflicts.get()),
+            route: RwSignal::new(ConflictRoute::Agent),
+        };
+        let (backend, mut commands) = Backend::recording();
+        let view = merge_section(
+            state,
+            Rc::new(backend),
+            RwSignal::new(MergeMethod::Squash),
+            RwSignal::new(false),
+            RwSignal::new(None::<MergeConfirmation>),
+            MessageDraft::new(),
+            Memo::new(|_| false),
+            Memo::new(|_| false),
+            resolver,
+        );
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+
+        let resolve = named(
+            harness.root_id(),
+            "merge-action:Resolve-conflicts-with-Claude",
+        )
+        .expect("the agent first");
+        assert!(named(harness.root_id(), "conflict-route").is_some());
+        resolve.request_focus();
+        harness.rebuild();
+        harness.dispatch_event(key(Code::Enter));
+        harness.rebuild();
+        harness.paint();
+
+        let sent: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+        assert!(
+            sent.iter().any(|c| matches!(
+                c,
+                Command::ResolveConflicts {
+                    item_id,
+                    backend: perch_agent::Backend::ClaudeCode,
+                    ..
+                } if item_id == "item-42"
+            )),
+            "{sent:?}"
+        );
+        assert!(state.resolving_conflicts.get_untracked());
+        assert!(named(harness.root_id(), "merge-action:Resolving-conflicts…").is_some());
+        assert!(named(harness.root_id(), "conflict-route").is_none());
+
+        // Done, and GitHub picked: the choice is back, going to GitHub.
+        state.resolving_conflicts.set(false);
+        resolver.route.set(ConflictRoute::GitHub);
+        harness.rebuild();
+        harness.paint();
+        assert!(named(
+            harness.root_id(),
+            "merge-action:Resolve-conflicts-on-GitHub"
+        )
+        .is_some());
+        assert!(named(harness.root_id(), "conflict-route").is_some());
+
+        // No agent may work here: GitHub alone, with nothing to pick.
+        may_work.set(false);
+        harness.rebuild();
+        harness.paint();
+        assert!(named(
+            harness.root_id(),
+            "merge-action:Resolve-conflicts-on-GitHub"
+        )
+        .is_some());
+        assert!(named(harness.root_id(), "conflict-route").is_none());
+    }
+
     /// A draft's merge box marks it ready for review, for a reader who may,
     /// and holds the button until the pull request has been read again.
     #[test]
@@ -1894,6 +2215,7 @@ mod tests {
             MessageDraft::new(),
             Memo::new(|_| false),
             Memo::new(move |_| may_set_draft.get()),
+            no_resolver(),
         );
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         harness.rebuild();
@@ -1977,6 +2299,7 @@ mod tests {
             message,
             Memo::new(|_| false),
             Memo::new(|_| false),
+            no_resolver(),
         );
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         let press = |harness: &mut HeadlessHarness, name: &str| {
@@ -2052,6 +2375,7 @@ mod tests {
             message,
             Memo::new(|_| false),
             Memo::new(|_| false),
+            no_resolver(),
         );
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         let press = |harness: &mut HeadlessHarness, name: &str| {
