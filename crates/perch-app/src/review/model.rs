@@ -168,6 +168,7 @@ pub struct Pane {
     agents_open_runs: HashSet<String>,
     code_seen: bool,
     changescape_opened: HashSet<String>,
+    changescape_files_open: HashSet<String>,
 }
 
 impl Default for Pane {
@@ -183,6 +184,7 @@ impl Default for Pane {
             agents_open_runs: HashSet::new(),
             code_seen: false,
             changescape_opened: HashSet::new(),
+            changescape_files_open: HashSet::new(),
         }
     }
 }
@@ -1540,6 +1542,8 @@ pub struct ReviewState {
     pub changescape_changed: RwSignal<HashMap<String, perch_github::TourMark>>,
     /// The skim stops the reader opened in place, by id.
     pub changescape_opened: RwSignal<HashSet<String>>,
+    /// The stops whose Files section is open, by stop id.
+    pub changescape_files_open: RwSignal<HashSet<String>>,
     /// The stop or chapter the tour scrolls to next, by id: set by Next,
     /// the cover's contents and the Code strip, and taken by the view it
     /// names.
@@ -2116,6 +2120,7 @@ impl ReviewState {
             changescape_marks: RwSignal::new(HashMap::new()),
             changescape_changed: RwSignal::new(HashMap::new()),
             changescape_opened: RwSignal::new(HashSet::new()),
+            changescape_files_open: RwSignal::new(HashSet::new()),
             changescape_focus: RwSignal::new(None),
             changescape_expanded: RwSignal::new(None),
             changescape_view: RwSignal::new(None),
@@ -2589,6 +2594,7 @@ impl ReviewState {
             file_places: self.file_places.get_untracked(),
             code_seen: self.code_seen.get_untracked(),
             changescape_opened: self.changescape_opened.get_untracked(),
+            changescape_files_open: self.changescape_files_open.get_untracked(),
         };
         self.panes.update(|panes| {
             panes.insert(id, pane);
@@ -2631,6 +2637,7 @@ impl ReviewState {
             self.file_places.set(pane.file_places);
             self.code_seen.set(pane.code_seen);
             self.changescape_opened.set(pane.changescape_opened);
+            self.changescape_files_open.set(pane.changescape_files_open);
             self.changescape_focus.set(None);
             self.changescape_expanded.set(None);
             self.changescape_view.set(None);

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use floem::headless::HeadlessHarness;
-use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
+use floem::reactive::{SignalGet, SignalUpdate};
 use perch_changescape::v4::ViewId;
 use perch_github::{Side, StoredMark, TourMark};
 
@@ -65,7 +65,12 @@ fn cache_patched(
 /// cover, text on the read stop, and a second read stop after the skim
 /// one.
 fn cache_with_more(sha: &str) -> tempfile::TempDir {
-    cache_patched(TOUR, sha, |page| {
+    cache_patched(TOUR, sha, more)
+}
+
+/// The calc tour with a flag, an ending, a spine, and a second stop.
+fn more(page: &mut serde_json::Value) {
+    {
         let tour = &mut page["tour"];
         tour["flags"] = serde_json::json!([{ "kind": "warn", "title": "A flag",
             "text": "It changes how to read this.",
@@ -92,7 +97,7 @@ fn cache_with_more(sha: &str) -> tempfile::TempDir {
                 "note": null, "windows": [{ "base": null, "head": { "start": 2, "end": 2 } }] }],
             "watch": null, "watch_target": null,
         }));
-    })
+    }
 }
 
 /// Show what the backend would find in `root`, changed by `edit`.
@@ -177,42 +182,6 @@ fn load_ops(state: ReviewState) {
     state.files.update(|files| {
         files.insert(OPS.to_string(), Arc::new(file));
     });
-}
-
-#[test]
-fn an_excerpt_is_plain_rows_until_the_pointer_enters_it() {
-    let root = cache_with(TOUR, HEAD);
-    let (mut harness, state) = harness_with_cache(Some(root.path()));
-    load_ops(state);
-    click(&mut harness, "Changescape pill");
-    redraw(&mut harness);
-    let before = in_stop(&harness, "multiply", "Changescape excerpt");
-    assert_eq!(
-        shown_under(stop(&harness, "multiply"), "Changescape plain row"),
-        3,
-        "one plain row per line"
-    );
-    assert_eq!(
-        shown_under(stop(&harness, "multiply"), "tinted editor"),
-        0,
-        "no editor until the pointer enters"
-    );
-    let row = f64::from(crate::theme::code_line_height());
-    harness.pointer_move(before.x0 + 120.0, before.y0 + row * 1.5);
-    redraw(&mut harness);
-    assert_eq!(
-        shown_under(stop(&harness, "multiply"), "tinted editor"),
-        1,
-        "the editor once the pointer is in"
-    );
-    assert_eq!(
-        shown_under(stop(&harness, "multiply"), "Changescape plain row"),
-        0,
-        "the plain rows are gone"
-    );
-    // The swap moves nothing: the excerpt keeps its place and its height.
-    let after = in_stop(&harness, "multiply", "Changescape excerpt");
-    assert_eq!(after, before, "the excerpt is where and as tall as it was");
 }
 
 fn redraw(harness: &mut HeadlessHarness) {
@@ -367,7 +336,7 @@ fn a_tour_not_yet_narrated_says_the_narration_comes_later() {
 }
 
 #[test]
-fn a_stops_window_is_cut_from_the_file_and_a_line_opens_code_there() {
+fn a_stop_draws_no_code_and_its_file_row_opens_code_at_the_line() {
     let root = cache_with(TOUR, HEAD);
     let (mut harness, state) = harness_with_cache(Some(root.path()));
     load_ops(state);
@@ -375,74 +344,28 @@ fn a_stops_window_is_cut_from_the_file_and_a_line_opens_code_there() {
     redraw(&mut harness);
     assert_eq!(
         shown_under(stop(&harness, "multiply"), "Changescape code line"),
-        3,
-        "head lines 1 to 3"
+        0,
+        "no code in a stop"
     );
-    let mut lines = Vec::new();
-    all_named(
-        stop(&harness, "multiply"),
-        "Changescape code line",
-        &mut lines,
-    );
-    click_view(&mut harness, lines[1]);
-    assert_eq!(state.tab.get(), ItemTab::Code);
-    assert_eq!(state.active.get().as_deref(), Some(OPS));
-    // The file is loaded, so the editor takes the jump at once.
-    redraw(&mut harness);
-    assert_eq!(state.cursor_line.get(), 1, "line 2, from 0");
-}
-
-#[test]
-fn a_stops_code_is_one_excerpt_of_the_files_lines() {
-    use crate::review::changescape::hunk::EXCERPTS;
-    let root = cache_with(TOUR, HEAD);
-    let (mut harness, state) = harness_with_cache(Some(root.path()));
-    load_ops(state);
-    click(&mut harness, "Changescape pill");
-    redraw(&mut harness);
-    // The stop's three head lines, which the window holds with no removed
-    // line among them, are one excerpt, with no newline after the last.
-    let head = state.files.with_untracked(|files| {
-        files[OPS]
-            .buffer
-            .text
-            .lines()
-            .take(3)
-            .collect::<Vec<_>>()
-            .join("\n")
-    });
-    assert!(
-        EXCERPTS.with(|e| e.borrow().contains(&head)),
-        "an excerpt of the window's lines"
-    );
+    // Shut, the Files section is one row; open, it lists the stop's file.
+    assert!(in_stop(&harness, "multiply", "Changescape files").height() > 0.0);
     assert_eq!(
-        shown_under(stop(&harness, "multiply"), "Changescape excerpt"),
+        shown_under(stop(&harness, "multiply"), "Changescape file row"),
+        0
+    );
+    click_in_stop(&mut harness, "multiply", "Changescape files toggle");
+    redraw(&mut harness);
+    assert!(state.changescape_files_open.get().contains("multiply"));
+    assert_eq!(
+        shown_under(stop(&harness, "multiply"), "Changescape file row"),
         1
     );
-}
-
-#[test]
-fn a_double_click_on_a_code_line_opens_code_at_that_line() {
-    let root = cache_with(TOUR, HEAD);
-    let (mut harness, state) = harness_with_cache(Some(root.path()));
-    load_ops(state);
-    click(&mut harness, "Changescape pill");
-    redraw(&mut harness);
-    // The second row of the excerpt, past the numbers, on its text.
-    let excerpt = in_stop(&harness, "multiply", "Changescape excerpt");
-    let row = f64::from(crate::theme::code_line_height());
-    // The pointer enters the excerpt first, as it does in use, so the
-    // double click is on the editor.
-    harness.pointer_move(excerpt.x0 + 120.0, excerpt.y0 + row * 1.5);
-    redraw(&mut harness);
-    harness.double_click(excerpt.x0 + 120.0, excerpt.y0 + row * 1.5);
-    redraw(&mut harness);
+    click(&mut harness, "Changescape file row calc/ops.py");
     assert_eq!(state.tab.get(), ItemTab::Code);
     assert_eq!(state.active.get().as_deref(), Some(OPS));
     redraw(&mut harness);
-    assert_eq!(state.cursor_line.get(), 1, "line 2, from 0");
+    assert_eq!(state.cursor_line.get(), 0, "line 1, from 0");
 }
-
 #[test]
 fn a_skim_row_opens_its_stop_in_place() {
     let root = cache_with(TOUR, HEAD);
@@ -456,7 +379,8 @@ fn a_skim_row_opens_its_stop_in_place() {
     assert!(state.changescape_opened.get().contains("multiply-helper"));
     assert_eq!(
         shown_under(stop(&harness, "multiply-helper"), "Changescape code line"),
-        2
+        0,
+        "a stop draws its files, not its code"
     );
     click(&mut harness, "Changescape skim row multiply-helper");
     assert_eq!(
@@ -598,14 +522,16 @@ fn a_stop_shows_what_it_relies_on_and_its_asides_and_code_opens_the_lines() {
     let check = named(harness.root_id(), "Changescape check").unwrap();
     assert_eq!(shown_under(check, "Changescape row element"), 1);
 
-    let before = shown_under(stop(&harness, "multiply"), "Changescape code line");
-    click_in_stop(&mut harness, "multiply", "Changescape rely code toggle");
-    redraw(&mut harness);
     assert_eq!(
         shown_under(stop(&harness, "multiply"), "Changescape code line"),
-        before + 2,
-        "head lines 4 and 5"
+        0,
+        "a rely draws no inline code"
     );
+    click_in_stop(&mut harness, "multiply", "Changescape rely code link");
+    redraw(&mut harness);
+    assert_eq!(state.tab.get(), ItemTab::Code);
+    assert_eq!(state.active.get().as_deref(), Some(OPS));
+    assert_eq!(state.cursor_line.get(), 3, "the helper's line 4, from 0");
 }
 
 #[test]
@@ -1193,7 +1119,15 @@ fn a_file_in_no_stop_opens_in_code() {
 
 #[test]
 fn scrolling_to_a_stop_lights_it_up_on_both_sides() {
-    let (mut harness, state, _root) = opened_in(cache_with_more(HEAD));
+    // Stops draw no code, so long text makes the tour taller than the column.
+    let root = cache_patched(TOUR, HEAD, |page| {
+        more(page);
+        let long = "It multiplies `a` by `b`. ".repeat(80);
+        for stop in page["tour"]["chapters"][0]["stops"].as_array_mut().unwrap() {
+            stop["now"] = long.clone().into();
+        }
+    });
+    let (mut harness, state, _root) = opened_in(root);
     assert_eq!(state.changescape_here.get(), None);
     let scroll = |harness: &mut HeadlessHarness, name: &str| {
         named(harness.root_id(), name).unwrap().scroll_to(None);
@@ -1298,4 +1232,37 @@ fn a_stop_picture_that_is_a_type_map_is_drawn_under_its_caption() {
     assert_eq!(heading, "The entry now holds its owner.");
     assert!(figure.svg.svg.contains("<svg"));
     assert!(!figure.fallback.is_empty());
+}
+
+#[test]
+fn a_file_links_to_the_first_head_line_of_its_hunk_window() {
+    let page = loaded(TOUR, |_| {});
+    let (_, stop) = page.stop("multiply").expect("no stop");
+    assert_eq!(
+        super::stop::file_links(stop),
+        vec![super::stop::FileLink {
+            path: OPS.into(),
+            adds: 3,
+            dels: 0,
+            part: "new:calc".into(),
+            line: Some(1),
+        }]
+    );
+    let (_, helper) = page.stop("multiply-helper").expect("no stop");
+    assert_eq!(super::stop::file_links(helper)[0].line, Some(4));
+}
+
+#[test]
+fn a_file_with_no_hunk_in_its_stop_links_to_no_line() {
+    let page = loaded(TOUR, |page| {
+        page["tour"]["chapters"][0]["stops"][0]["files"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({ "path": "calc/extra.py", "part": "", "adds": 1, "dels": 2 }));
+    });
+    let (_, stop) = page.stop("multiply").expect("no stop");
+    let links = super::stop::file_links(stop);
+    assert_eq!(links.len(), 2);
+    assert_eq!(links[1].path, "calc/extra.py");
+    assert_eq!((links[1].adds, links[1].dels, links[1].line), (1, 2, None));
 }

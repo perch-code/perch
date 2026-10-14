@@ -7,6 +7,9 @@
 //! With no changescape for the item, nothing here shows: no pill, no empty
 //! state.
 
+// Stops draw no code while the files-not-code experiment runs. The code
+// view stays, so the experiment can return to it.
+#[allow(dead_code)]
 pub mod hunk;
 pub mod navigate;
 pub mod prose;

@@ -12,15 +12,17 @@
 
 use std::collections::HashMap;
 
+use floem::peniko::Color;
 use floem::prelude::*;
 use floem::reactive::{Memo, SignalGet, SignalUpdate, SignalWith};
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 use floem::AnyView;
 use perch_changescape::page::{self, hunk, Target, Window};
-use perch_changescape::v4::{Aside, Chapter, PicturesItem, Rely, RelyWhy, Stop};
+use perch_changescape::v4::{Aside, Chapter, PicturesItem, Rely, RelyWhy, Stop, Verdict};
 use perch_github::{Anchor, CommentThread, Side, StoredMark, TourMark};
 
-use crate::review::changescape::hunk::hunk_view;
+use crate::icons::SidebarIcon;
+use crate::review::changescape::navigate;
 use crate::review::changescape::prose::{self, meta, BODY, MUTED, TITLE};
 use crate::review::changescape::side;
 use crate::review::changescape::tour::{self, focusable, Ctx};
@@ -28,7 +30,7 @@ use crate::review::model::ReviewState;
 use crate::review::threads::{self, ThreadFace};
 use crate::theme;
 use crate::ui::nav_row::thousands;
-use crate::ui::widgets::{bordered_button, clickable, notice_box, underlined_link};
+use crate::ui::widgets::{bordered_button, clickable, notice_box, sidebar_glyph, underlined_link};
 
 /// A read stop, open.
 pub fn stop_card(cx: &Ctx, chapter: &Chapter, i: usize) -> AnyView {
@@ -232,14 +234,8 @@ fn body(cx: &Ctx, chapter: &Chapter, stop: &Stop) -> Stack {
     }
     for (i, picture) in stop.pictures.iter().enumerate() {
         match picture {
-            PicturesItem::Hunk { .. } => {
-                if let Some((file, windows)) = hunk(picture) {
-                    parts.push(
-                        hunk_view(cx.state, cx.backend.clone(), file.to_string(), windows)
-                            .into_any(),
-                    );
-                }
-            }
+            // A stop's code is not drawn: its files are listed below.
+            PicturesItem::Hunk { .. } => {}
             PicturesItem::Seq {
                 caption,
                 title,
@@ -267,6 +263,9 @@ fn body(cx: &Ctx, chapter: &Chapter, stop: &Stop) -> Stack {
             }
         }
     }
+    if !stop.files.is_empty() {
+        parts.push(files(cx, stop).into_any());
+    }
     if !stop.relies.is_empty() {
         parts.push(relies(cx, &stop.relies).into_any());
     }
@@ -277,6 +276,192 @@ fn body(cx: &Ctx, chapter: &Chapter, stop: &Stop) -> Stack {
     parts.push(composer(cx, stop).into_any());
     parts.push(buttons(cx, chapter, stop).into_any());
     Stack::vertical_from_iter(parts).style(|s| s.flex_col().gap(10.0).width_full())
+}
+
+/// A stop's file as its row shows it: its path and counts, and the line
+/// Code opens it at, the first line of the stop's hunk windows on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileLink {
+    pub path: String,
+    pub adds: i64,
+    pub dels: i64,
+    pub part: String,
+    pub line: Option<u32>,
+}
+
+/// The stop's files, in the order the page lists them. A file's line is
+/// the first head line of the first window its hunk pictures show, if any.
+pub fn file_links(stop: &Stop) -> Vec<FileLink> {
+    stop.files
+        .iter()
+        .map(|file| {
+            let line = stop
+                .pictures
+                .iter()
+                .filter_map(hunk)
+                .filter(|(path, _)| *path == file.path)
+                .flat_map(|(_, windows)| windows)
+                .find_map(|window| window.head)
+                .map(|(start, _)| start);
+            FileLink {
+                path: file.path.clone(),
+                adds: file.adds,
+                dels: file.dels,
+                part: file.part.clone(),
+                line,
+            }
+        })
+        .collect()
+}
+
+/// A stop's Files section: one row with its file count and totals, which
+/// opens the file rows. Faded when the reader skims or skips the stop.
+fn files(cx: &Ctx, stop: &Stop) -> impl IntoView {
+    let id = stop.id.clone();
+    let open = {
+        let (state, id) = (cx.state, id.clone());
+        Memo::new(move |_| state.changescape_files_open.with(|o| o.contains(&id)))
+    };
+    let faded = !matches!(stop.verdict, Verdict::Read);
+    let links = file_links(stop);
+    let count = links.len();
+    let adds: i64 = links.iter().map(|l| l.adds).sum();
+    let dels: i64 = links.iter().map(|l| l.dels).sum();
+    let toggle = {
+        let (state, id) = (cx.state, id.clone());
+        move || tour::toggle(state.changescape_files_open, &id)
+    };
+    let ink: fn() -> Color = if faded { theme::fg_subtle } else { theme::fg };
+    let head = Stack::horizontal((
+        dyn_container(
+            move || open.get(),
+            move |open| {
+                let glyph = if open {
+                    SidebarIcon::ChevronDown
+                } else {
+                    SidebarIcon::ChevronRight
+                };
+                let color = if faded {
+                    theme::fg_subtle
+                } else {
+                    theme::fg_muted
+                };
+                sidebar_glyph(glyph, color)
+                    .style(|s| s.size(theme::CHEVRON_GLYPH, theme::CHEVRON_GLYPH))
+                    .into_any()
+            },
+        )
+        .style(|s| {
+            s.size(theme::CHEVRON_SLOT, theme::CHEVRON_SLOT)
+                .items_center()
+                .justify_center()
+                .margin_right(6.0)
+                .flex_shrink(0.0_f32)
+        }),
+        Label::new(if count == 1 {
+            "1 file".to_string()
+        } else {
+            format!("{count} files")
+        })
+        .style(move |s| {
+            s.font_size(theme::TEXT_META)
+                .font_weight(theme::weight_emphasis())
+                .color(ink())
+                .selectable(false)
+        }),
+        Empty::new().style(|s| s.flex_grow(1.0_f32)),
+        counts(adds, dels, faded).style(|s| s.margin_left(12.0).flex_shrink(0.0_f32)),
+    ))
+    .debug_name("Changescape files toggle")
+    .on_event_stop(el::Click, move |_, _| toggle())
+    .style(|s| prose::hover_row(s.items_center().padding_vert(3.0).padding_horiz(4.0)));
+    let rows = {
+        let cx = cx.clone();
+        dyn_container(
+            move || open.get(),
+            move |open| {
+                if open {
+                    file_rows(&cx, &links, faded).into_any()
+                } else {
+                    Empty::new().into_any()
+                }
+            },
+        )
+    };
+    Stack::vertical((head, rows))
+        .debug_name("Changescape files")
+        .style(|s| s.flex_col().gap(2.0).width_full())
+}
+
+/// The file rows of a stop's Files section, each opening its file.
+fn file_rows(cx: &Ctx, links: &[FileLink], faded: bool) -> impl IntoView {
+    let rows: Vec<AnyView> = links.iter().map(|link| file_row(cx, link, faded)).collect();
+    Stack::vertical_from_iter(rows).style(|s| s.flex_col().width_full().padding_left(20.0))
+}
+
+fn file_row(cx: &Ctx, link: &FileLink, faded: bool) -> AnyView {
+    let (folder, name) = match link.path.rfind('/') {
+        Some(i) => (link.path[..=i].to_string(), link.path[i + 1..].to_string()),
+        None => (String::new(), link.path.clone()),
+    };
+    let ink: fn() -> Color = if faded { theme::fg_subtle } else { theme::fg };
+    let (state, backend) = (cx.state, cx.backend.clone());
+    let (path, line) = (link.path.clone(), link.line);
+    Stack::horizontal((
+        Label::new(folder).style(move |s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::fg_subtle())
+                .text_ellipsis()
+                .min_width(0.0)
+                .flex_shrink(1.0_f32)
+                .selectable(false)
+        }),
+        Label::new(name).style(move |s| {
+            s.font_size(theme::TEXT_META)
+                .font_weight(theme::weight_emphasis())
+                .color(ink())
+                .flex_shrink(0.0_f32)
+                .selectable(false)
+        }),
+        Empty::new().style(|s| s.flex_grow(1.0_f32)),
+        counts(link.adds, link.dels, faded).style(|s| s.margin_left(12.0).flex_shrink(0.0_f32)),
+        if link.part.is_empty() {
+            Empty::new().into_any()
+        } else {
+            meta(&link.part)
+                .style(|s| s.margin_left(12.0).flex_shrink(0.0_f32))
+                .into_any()
+        },
+    ))
+    .debug_name(format!("Changescape file row {}", link.path))
+    .on_event_stop(el::Click, move |_, _| {
+        navigate::open_file_line(state, &backend, &path, line)
+    })
+    .style(move |s| prose::hover_row(s.items_center().padding_vert(2.0).padding_horiz(4.0)))
+    .into_any()
+}
+
+/// `+adds −dels`, in the status colours, or both faded.
+fn counts(adds: i64, dels: i64, faded: bool) -> impl IntoView {
+    let (added, removed): (fn() -> Color, fn() -> Color) = if faded {
+        (theme::fg_subtle, theme::fg_subtle)
+    } else {
+        (theme::status_added, theme::status_deleted)
+    };
+    Stack::horizontal((
+        Label::new(format!("+{adds}")).style(move |s| {
+            s.font_size(theme::TEXT_META)
+                .color(added())
+                .selectable(false)
+        }),
+        Label::new(format!("\u{2212}{dels}")).style(move |s| {
+            s.font_size(theme::TEXT_META)
+                .color(removed())
+                .margin_left(6.0)
+                .selectable(false)
+        }),
+    ))
+    .style(|s| s.items_center())
 }
 
 /// The width of a field's label.
@@ -353,7 +538,6 @@ fn rely_view(cx: &Ctx, rely: &Rely) -> AnyView {
         .elements
         .get(&rely.element)
         .map_or_else(|| rely.element.clone(), |e| e.title.clone());
-    let open = RwSignal::new(false);
     let name = {
         let (cx, el) = (cx.clone(), rely.element.clone());
         let held = cx.page.elements.contains_key(&el);
@@ -373,43 +557,28 @@ fn rely_view(cx: &Ctx, rely: &Rely) -> AnyView {
             .margin_left(8.0)
             .selectable(false)
     });
-    let code = Container::new(
-        Label::derived(move || if open.get() { "▾ Code" } else { "▸ Code" }.to_string()).style(
-            |s| {
-                s.font_size(theme::TEXT_BADGE)
-                    .color(theme::fg_muted())
-                    .selectable(false)
-            },
-        ),
-    )
-    .debug_name("Changescape rely code toggle")
-    .on_event_stop(el::Click, move |_, _| open.update(|o| *o = !*o))
-    .style(|s| clickable(s.margin_left(12.0)));
+    let code = {
+        let (state, backend) = (cx.state, cx.backend.clone());
+        let file = rely.code.file.clone();
+        let line = page::lines(&rely.code.head).map(|(start, _)| start);
+        Container::new(Label::new("Open in Code").style(|s| {
+            s.font_size(theme::TEXT_BADGE)
+                .color(theme::fg_muted())
+                .selectable(false)
+        }))
+        .debug_name("Changescape rely code link")
+        .on_event_stop(el::Click, move |_, _| {
+            navigate::open_file_line(state, &backend, &file, line)
+        })
+        .style(|s| clickable(s.margin_left(12.0)))
+    };
     let says = rely_says(rely).map_or_else(
         || Empty::new().into_any(),
         |says| prose::paragraph(&says, MUTED).into_any(),
     );
-    let (state, backend) = (cx.state, cx.backend.clone());
-    let file = rely.code.file.clone();
-    let window = Window {
-        base: None,
-        head: page::lines(&rely.code.head),
-    };
-    let body = dyn_container(
-        move || open.get(),
-        move |open| {
-            if open && window.head.is_some() {
-                hunk_view(state, backend.clone(), file.clone(), vec![window]).into_any()
-            } else {
-                Empty::new().into_any()
-            }
-        },
-    )
-    .style(|s| s.width_full());
     Stack::vertical((
         Stack::horizontal((name, why, code)).style(|s| s.items_center().width_full()),
         says,
-        body,
     ))
     .debug_name(format!("Changescape rely {}", rely.element))
     .style(|s| {
