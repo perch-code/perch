@@ -3,6 +3,9 @@
 //! order is kept, or turned over for Oldest first; filtering only removes
 //! rows from it.
 
+use std::collections::HashMap;
+
+use jiff::Timestamp;
 use perch_github::{Reason, SubjectState, Thread};
 
 use crate::items::{BrowseView, Direction, InboxFilters};
@@ -80,6 +83,23 @@ pub fn closed(thread: &Thread) -> bool {
                 | SubjectState::IssueNotPlanned
         )
     })
+}
+
+/// The time each thread's age shows: its `updated_at`, held no newer
+/// than the row above. GitHub orders the list by when it last notified
+/// the reader, which it doesn't send, while `updated_at` also moves for
+/// things that notify no one, such as an edited comment. Taken over the
+/// whole list, before filtering, so a hidden row still bounds the rows
+/// under it.
+pub fn listed_at(threads: &[Thread]) -> HashMap<String, Timestamp> {
+    let mut bound = Timestamp::MAX;
+    threads
+        .iter()
+        .map(|thread| {
+            bound = bound.min(thread.updated_at);
+            (thread.id.clone(), bound)
+        })
+        .collect()
 }
 
 /// Repository choices for the filter: every thread's, once, by name.
@@ -304,6 +324,33 @@ mod tests {
 
     /// View › Review requested, Yours, Assigned and Mentioned go by
     /// GitHub's reason; Yours also by who a look found opened it.
+    #[test]
+    fn an_edit_does_not_make_a_row_newer_than_the_one_above() {
+        let at = |id: &str, time: &str| Thread {
+            updated_at: time.parse().unwrap(),
+            ..thread(
+                id,
+                "org/one",
+                id,
+                SubjectKind::Discussion,
+                Reason::Subscribed,
+                false,
+            )
+        };
+        let threads = vec![
+            at("1", "2026-10-12T19:52:00Z"),
+            at("2", "2026-10-12T19:16:00Z"),
+            at("edited", "2026-10-12T23:52:00Z"),
+            at("4", "2026-10-05T10:00:00Z"),
+        ];
+        let listed = listed_at(&threads);
+        let shown = |id: &str| listed[id].to_string();
+        assert_eq!(shown("1"), "2026-10-12T19:52:00Z");
+        assert_eq!(shown("2"), "2026-10-12T19:16:00Z");
+        assert_eq!(shown("edited"), "2026-10-12T19:16:00Z");
+        assert_eq!(shown("4"), "2026-10-05T10:00:00Z");
+    }
+
     #[test]
     fn whose_narrows_on_the_reason_and_yours_on_the_author_too() {
         let mut mentioned_on_mine = thread(

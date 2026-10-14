@@ -11,10 +11,12 @@ use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate};
 use floem::views::{
     dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack,
 };
+use jiff::Timestamp;
 use perch_github::{CheckRunState, SubjectKind, SubjectState, Thread};
 
 use crate::backend::Backend;
 use crate::icons::{self, SidebarIcon};
+use crate::inbox;
 use crate::items::InboxView;
 use crate::review::start_work;
 use crate::snooze;
@@ -53,22 +55,31 @@ pub fn notification_list(state: AppState, backend: Rc<Backend>) -> impl IntoView
         dyn_stack(
             move || {
                 let away = show().is_put_away();
-                visible_notifications(state)
-                    .into_iter()
-                    .map(move |thread| (thread, away))
+                // Done and Snoozed are Perch's lists, not in GitHub's
+                // order, so their rows keep their own times.
+                let listed = (!away).then(|| state.notifications.with(|t| inbox::listed_at(t)));
+                visible_notifications(state).into_iter().map(move |thread| {
+                    let at = listed
+                        .as_ref()
+                        .and_then(|listed| listed.get(&thread.id).copied())
+                        .unwrap_or(thread.updated_at);
+                    (thread, away, at)
+                })
             },
-            |(thread, away): &(Thread, bool)| {
+            |(thread, away, at): &(Thread, bool, Timestamp)| {
                 (
                     thread.id.clone(),
                     *away,
                     thread.unread,
+                    // Done marks the revision the row holds.
                     thread.updated_at.to_string(),
+                    at.to_string(),
                     thread.snoozed_until,
                     // The face and the state arrive after the row does.
                     thread.subject_snapshot.clone(),
                 )
             },
-            move |(thread, away)| notification_row(state, backend.clone(), thread, away),
+            move |(thread, away, at)| notification_row(state, backend.clone(), thread, away, at),
         )
         .style(|s| s.flex_col().width_full().gap(1.0)),
     ))
@@ -84,12 +95,13 @@ pub fn visible_notifications(state: AppState) -> Vec<Thread> {
 }
 
 /// A row of the inbox, or with `away` of View › Done or Snoozed, where
-/// the row's action moves it back instead.
+/// the row's action moves it back instead. `at` is the time its age shows.
 fn notification_row(
     state: AppState,
     backend: Rc<Backend>,
     thread: Thread,
     away: bool,
+    at: Timestamp,
 ) -> impl IntoView {
     let hovered = RwSignal::new(false);
     let unread = thread.unread;
@@ -110,7 +122,7 @@ fn notification_row(
         nav_row::glyph_box(notification_glyph(&thread)),
         nav_row::lines(
             nav_row::title_label(title, false, move || unread),
-            notification_trailing(state, hovered, action_backend, action_thread, away)
+            notification_trailing(state, hovered, action_backend, action_thread, away, at)
                 .style(|s| s.pointer_events_auto()),
             byline(state, &thread),
         ),
@@ -234,9 +246,9 @@ fn notification_trailing(
     backend: Rc<Backend>,
     thread: Thread,
     away: bool,
+    at: Timestamp,
 ) -> impl IntoView {
     let unread = thread.unread;
-    let at = thread.updated_at;
     let snoozed_until = thread.snoozed_until;
     dyn_container(
         move || hovered.get(),
