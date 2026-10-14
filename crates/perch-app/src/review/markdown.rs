@@ -2330,7 +2330,8 @@ fn task_box(checked: bool, size: f32) -> AnyView {
 /// Linked text in the code font, so it selects with the prose around
 /// it. The fence's language is parsed but not coloured; it says whether
 /// the block's type names are looked up, for a block that names
-/// something of the review's worktree.
+/// something of the review's worktree. Copy sits in its top right
+/// corner while the pointer is over it, and takes the whole block.
 fn code_view(text: String, lang: Option<String>, ctx: Ctx) -> AnyView {
     let code_size = small_size(ctx.size);
     let mut plan = Plan {
@@ -2349,6 +2350,7 @@ fn code_view(text: String, lang: Option<String>, ctx: Ctx) -> AnyView {
             .border_color(theme::border_muted())
             .border_radius(theme::RADIUS)
     };
+    let whole = text.clone();
     let run = linked_run(plan, ctx.refs, move |links| {
         let text = text.clone();
         let styled_links = links.clone();
@@ -2358,7 +2360,30 @@ fn code_view(text: String, lang: Option<String>, ctx: Ctx) -> AnyView {
         .style(|s| s.width_full())
         .into_any()
     });
-    Container::new(run).style(code_box).into_any()
+    let hovered = RwSignal::new(false);
+    let copy: Rc<dyn Fn()> = Rc::new(move || crate::ui::widgets::copy_to_clipboard(whole.clone()));
+    // On the block's own surface, so the line it sits over does not show
+    // through the glyph.
+    let copy = Container::new(crate::review::cards::hover_action(
+        hovered,
+        SidebarIcon::Copy,
+        "Copy",
+        "copy-code",
+        copy,
+    ))
+    .style(|s| {
+        s.position(floem::style::Position::Absolute)
+            .inset_top(4.0)
+            .inset_right(4.0)
+            .z_index(1)
+            .border_radius(12.0)
+            .background(theme::canvas_subtle())
+    });
+    crate::review::cards::track_hover(
+        Stack::new((run, copy)).style(move |s| code_box(s).flex_col()),
+        hovered,
+    )
+    .into_any()
 }
 
 /// A suggested change as github.com draws one: headed Suggested change,
@@ -4548,6 +4573,42 @@ mod tests {
             h.rebuild();
             h.paint();
             check(&h);
+        }
+
+        /// A fenced block offers Copy in its top right corner while the
+        /// pointer is over it, and Copy takes the whole block.
+        #[test]
+        fn a_fenced_block_offers_copy_under_the_pointer() {
+            let mut h = harness("Before\n\n```\nfirst line\nsecond line\n```");
+            let copy = {
+                let mut all = Vec::new();
+                find_all(h.root_id(), "copy-code", &mut all);
+                assert_eq!(all.len(), 1);
+                all[0]
+            };
+            assert_eq!(h.get_layout_rect(copy).width(), 0.0, "hidden until hovered");
+            let before = rect(&h, "Before");
+            h.pointer_move(before.center().x, before.center().y);
+            h.rebuild();
+            h.paint();
+            assert_eq!(h.get_layout_rect(copy).width(), 0.0, "not over the prose");
+
+            let block = rects(&h, "LinkedText")[1];
+            h.pointer_move(block.center().x, block.center().y);
+            h.rebuild();
+            h.paint();
+            assert_eq!(h.get_layout_rect(copy).width(), 24.0);
+            let corner = copy.get_visual_rect_no_clip();
+            assert!(corner.x1 > WIDTH - 10.0, "at the right: {corner:?}");
+            assert!(corner.y0 < block.y0, "at the top: {corner:?} {block:?}");
+
+            crate::ui::widgets::copied();
+            let c = corner.center();
+            h.click(c.x, c.y);
+            assert_eq!(
+                crate::ui::widgets::copied(),
+                vec!["first line\nsecond line".to_string()]
+            );
         }
 
         /// Cmd-C pressed, and what it copied.
