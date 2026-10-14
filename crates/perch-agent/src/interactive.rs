@@ -347,6 +347,8 @@ pub(crate) struct CodexThread {
 const INITIALIZE: u64 = 1;
 const THREAD: u64 = 2;
 const TURN: u64 = 3;
+const UNARCHIVE: u64 = 4;
+const ARCHIVE: u64 = 5;
 /// Perch's later requests count up from here: steers, and the turns that
 /// carry a steer the last turn ended before reading.
 const LATER: u64 = 100;
@@ -355,6 +357,11 @@ const LATER: u64 = 100;
 /// starts a turn in it, turns the item notifications into the steps
 /// `codex exec` gave, and closes stdin when the last turn completes,
 /// which ends the server.
+///
+/// Codex records the thread as an interactive session, which the Codex
+/// app would list beside the reader's own. So the thread is archived as
+/// the run ends, and unarchived before it is resumed, since Codex will
+/// not resume an archived thread.
 pub(crate) struct CodexServer {
     thread: CodexThread,
     thread_id: String,
@@ -375,6 +382,8 @@ pub(crate) struct CodexServer {
     pending: HashMap<String, (Value, String, Value)>,
     errors: usize,
     done: bool,
+    /// The run is over and waits on `thread/archive` to close stdin.
+    archiving: bool,
 }
 
 impl CodexServer {
@@ -391,6 +400,7 @@ impl CodexServer {
             pending: HashMap::new(),
             errors: 0,
             done: false,
+            archiving: false,
         }
     }
 
@@ -446,14 +456,40 @@ impl CodexServer {
     }
 
     fn finish(&mut self) -> Reply {
+        let session_id = self.thread_id.clone();
+        self.end(RunEvent::Finished {
+            session_id,
+            cost_usd: None,
+            duration_ms: 0,
+        })
+    }
+
+    fn fail(&mut self, message: String) -> Reply {
+        self.end(RunEvent::Failed { message })
+    }
+
+    /// The run's last event, and `thread/archive` for its thread, if it
+    /// has one. Stdin closes once the archive is answered, either way.
+    fn end(&mut self, event: RunEvent) -> Reply {
         self.done = true;
+        let thread = Some(self.thread_id.clone())
+            .filter(|id| !id.is_empty())
+            .or_else(|| self.thread.resume.clone());
+        let Some(thread) = thread else {
+            return Reply {
+                events: vec![event],
+                close: true,
+                ..Reply::default()
+            };
+        };
+        self.archiving = true;
         Reply {
-            events: vec![RunEvent::Finished {
-                session_id: self.thread_id.clone(),
-                cost_usd: None,
-                duration_ms: 0,
-            }],
-            close: true,
+            writes: vec![request(
+                ARCHIVE,
+                "thread/archive",
+                json!({"threadId": thread}),
+            )],
+            events: vec![event],
             ..Reply::default()
         }
     }
@@ -494,15 +530,30 @@ impl CodexServer {
     }
 
     fn after_line(&mut self, v: &Value) -> Reply {
+        let response = v
+            .get("id")
+            .and_then(Value::as_u64)
+            .filter(|_| v.get("method").is_none());
         if self.done {
+            if self.archiving && response == Some(ARCHIVE) {
+                self.archiving = false;
+                return Reply {
+                    close: true,
+                    ..Reply::default()
+                };
+            }
             return Reply::default();
         }
         // A response to one of Perch's requests.
-        if let Some(id) = v
-            .get("id")
-            .and_then(Value::as_u64)
-            .filter(|_| v.get("method").is_none())
-        {
+        if let Some(id) = response {
+            // A thread that was never archived refuses to be unarchived;
+            // the resume goes ahead either way.
+            if id == UNARCHIVE {
+                return Reply {
+                    writes: vec![request(THREAD, "thread/resume", self.thread_params())],
+                    ..Reply::default()
+                };
+            }
             if let Some(error) = v.get("error") {
                 if id >= LATER {
                     // A steer that missed its turn goes in the next one,
@@ -524,15 +575,14 @@ impl CodexServer {
             let result = v.get("result").cloned().unwrap_or(Value::Null);
             return match id {
                 INITIALIZE => {
-                    let method = if self.thread.resume.is_some() {
-                        "thread/resume"
-                    } else {
-                        "thread/start"
+                    let next = match &self.thread.resume {
+                        Some(id) => request(UNARCHIVE, "thread/unarchive", json!({"threadId": id})),
+                        None => request(THREAD, "thread/start", self.thread_params()),
                     };
                     Reply {
                         writes: vec![
                             json!({"jsonrpc": "2.0", "method": "initialized"}).to_string(),
-                            request(THREAD, method, self.thread_params()),
+                            next,
                         ],
                         ..Reply::default()
                     }
@@ -644,15 +694,6 @@ impl CodexServer {
                 self.finish()
             }
             _ => Reply::default(),
-        }
-    }
-
-    fn fail(&mut self, message: String) -> Reply {
-        self.done = true;
-        Reply {
-            events: vec![RunEvent::Failed { message }],
-            close: true,
-            ..Reply::default()
         }
     }
 
@@ -1080,13 +1121,26 @@ mod tests {
             }]
         );
 
-        let mut resumed = CodexServer::new(thread(Some("th-0")));
-        resumed.opening();
-        let start: Value =
-            serde_json::from_str(&resumed.after_line(&line(r#"{"id":1,"result":{}}"#)).writes[1])
-                .unwrap();
-        assert_eq!(start["method"], "thread/resume");
-        assert_eq!(start["params"]["threadId"], "th-0");
+        // A resumed thread is unarchived first, and resumed whether or
+        // not it was archived.
+        for answer in [
+            r#"{"id":4,"result":{"thread":{"id":"th-0"}}}"#,
+            r#"{"id":4,"error":{"code":-32600,"message":"thread th-0 is not archived"}}"#,
+        ] {
+            let mut resumed = CodexServer::new(thread(Some("th-0")));
+            resumed.opening();
+            let unarchive: Value = serde_json::from_str(
+                &resumed.after_line(&line(r#"{"id":1,"result":{}}"#)).writes[1],
+            )
+            .unwrap();
+            assert_eq!(unarchive["method"], "thread/unarchive");
+            assert_eq!(unarchive["params"]["threadId"], "th-0");
+            let after = resumed.after_line(&line(answer));
+            assert!(after.events.is_empty() && !after.close);
+            let start: Value = serde_json::from_str(&after.writes[0]).unwrap();
+            assert_eq!(start["method"], "thread/resume");
+            assert_eq!(start["params"]["threadId"], "th-0");
+        }
     }
 
     #[test]
@@ -1143,10 +1197,21 @@ mod tests {
         let end = server.after_line(&line(
             r#"{"method":"turn/completed","params":{"turn":{"status":"completed"}}}"#,
         ));
-        assert!(end.close);
         assert!(
             matches!(&end.events[0], RunEvent::Finished { session_id, .. } if session_id == "th-1")
         );
+        // The thread is archived, out of the Codex app's list, before
+        // stdin closes.
+        assert!(!end.close, "stdin stays open for the archive");
+        let archive: Value = serde_json::from_str(&end.writes[0]).unwrap();
+        assert_eq!(archive["method"], "thread/archive");
+        assert_eq!(archive["params"]["threadId"], "th-1");
+        let late = server.after_line(&line(
+            r#"{"method":"thread/status/changed","params":{"threadId":"th-1"}}"#,
+        ));
+        assert_eq!(late, Reply::default());
+        let archived = server.after_line(&line(r#"{"id":5,"result":{}}"#));
+        assert!(archived.close && archived.events.is_empty());
     }
 
     #[test]
@@ -1288,7 +1353,7 @@ mod tests {
             r#"{{"id":{},"error":{{"message":"busy"}}}}"#,
             start["id"]
         )));
-        assert!(refused.close);
+        assert!(!refused.close && refused.writes[0].contains("thread/archive"));
         assert!(
             matches!(&refused.events[..], [RunEvent::Finished { .. }]),
             "{:?}",
@@ -1320,5 +1385,16 @@ mod tests {
                 message: "quota".into()
             }]
         );
+        assert!(failed.close, "no thread to archive");
+
+        // A failed resume archives the thread again; a refused archive
+        // still ends the run.
+        let mut server = CodexServer::new(thread(Some("th-0")));
+        server.after_line(&line(r#"{"id":4,"result":{}}"#));
+        let refused = server.after_line(&line(r#"{"id":2,"error":{"message":"gone"}}"#));
+        let archive: Value = serde_json::from_str(&refused.writes[0]).unwrap();
+        assert_eq!(archive["params"]["threadId"], "th-0");
+        let archived = server.after_line(&line(r#"{"id":5,"error":{"message":"no rollout"}}"#));
+        assert!(archived.close);
     }
 }
