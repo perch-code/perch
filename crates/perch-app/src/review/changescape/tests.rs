@@ -1092,17 +1092,40 @@ fn the_outline_lists_the_tour_and_a_click_goes_to_a_stop() {
     );
 }
 
+/// The calc tour with its module and package, as a Python page names
+/// them: `calc/ops.py` is module `calc.ops` in package `calc`.
+fn with_module(page: &mut serde_json::Value) {
+    let module = |name: &str, kind: &str| {
+        serde_json::json!({
+            "kind": kind, "name": name, "title": name, "label": kind,
+            "status": "added", "detail": "", "url": null, "hash": null,
+            "appears": [],
+            "refs": if kind == "module" {
+                serde_json::json!([{"base_path": null, "head_path": OPS,
+                    "base": null, "head": null, "whole_file": true, "rows": []}])
+            } else {
+                serde_json::json!([])
+            },
+        })
+    };
+    page["elements"]["mod:calc.ops"] = module("calc.ops", "module");
+    page["elements"]["pkg:calc"] = module("calc", "package");
+}
+
 #[test]
-fn the_code_map_lists_the_files_and_a_file_goes_to_its_stop() {
-    let (mut harness, state, _root) = opened(TOUR);
+fn the_code_map_lists_the_modules_and_a_module_goes_to_its_stop() {
+    let root = cache_patched(TOUR, HEAD, with_module);
+    let (mut harness, state, _root) = opened_in(root);
     assert!(rect(&harness, "Changescape code map").width() > 0.0);
-    click(&mut harness, "Changescape map file calc/ops.py");
+    assert!(rect(&harness, "Changescape map package pkg:calc").width() > 0.0);
+    click(&mut harness, "Changescape map module mod:calc.ops");
     assert!(state.changescape_opened.get().contains("multiply"));
 }
 
 #[test]
-fn a_file_in_no_stop_opens_in_code() {
+fn a_file_in_no_module_is_in_an_other_group_and_opens_in_code() {
     let root = cache_patched(TOUR, HEAD, |page| {
+        with_module(page);
         page["tour"]["map"][0]["files"]
             .as_array_mut()
             .unwrap()
@@ -1113,6 +1136,7 @@ fn a_file_in_no_stop_opens_in_code() {
         page["files"].as_array_mut().unwrap().push(other);
     });
     let (mut harness, state, _root) = opened_in(root);
+    click(&mut harness, "Changescape map other calc");
     click(&mut harness, "Changescape map file calc/other.py");
     assert_eq!(state.tab.get(), ItemTab::Code);
 }

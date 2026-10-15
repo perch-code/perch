@@ -17,6 +17,7 @@
 //! The page and status types are generated from the page format's schemas
 //! in `schema/`, by `schema/generate.sh`, into `src/generated/`.
 
+pub mod codemap;
 pub mod page;
 mod skill;
 pub mod typemap;

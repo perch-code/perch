@@ -1,0 +1,6337 @@
+{
+ "schema": 4,
+ "meta": {
+  "key": "changescape-slatedb-slatedb-2153",
+  "title": "Epoch checked Manifest Acquisition (simple)",
+  "repo": "slatedb/slatedb",
+  "number": 2153,
+  "url": "https://github.com/slatedb/slatedb/pull/2153",
+  "author": "owen-d",
+  "state": "open",
+  "language": "rust",
+  "base": {
+   "ref": "main",
+   "sha": "c7d2b7b067295198af4ed8b7d81ff4d5f2f58d71"
+  },
+  "head": {
+   "ref": "codex/expected-epoch-acquisition",
+   "sha": "d5c1a6a6d1461b75c3f1efc199184fe16bdfb149"
+  },
+  "adds": 347,
+  "dels": 52,
+  "files": 9,
+  "issues": [],
+  "generated": "2026-10-12T14:07:27+00:00"
+ },
+ "sections": [],
+ "views": [],
+ "elements": {
+  "mod:examples::bin::azure_blob_storage": {
+   "kind": "module",
+   "name": "examples::bin::azure_blob_storage",
+   "title": "examples::bin::azure_blob_storage",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "examples/src/azure_blob_storage.rs",
+     "head_path": "examples/src/azure_blob_storage.rs",
+     "base": {
+      "start": 1,
+      "end": 60
+     },
+     "head": {
+      "start": 1,
+      "end": 60
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:examples::bin::change_data_capture": {
+   "kind": "module",
+   "name": "examples::bin::change_data_capture",
+   "title": "examples::bin::change_data_capture",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "examples/src/change_data_capture.rs",
+     "head_path": "examples/src/change_data_capture.rs",
+     "base": {
+      "start": 1,
+      "end": 89
+     },
+     "head": {
+      "start": 1,
+      "end": 89
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:examples::bin::create_checkpoint": {
+   "kind": "module",
+   "name": "examples::bin::create_checkpoint",
+   "title": "examples::bin::create_checkpoint",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "examples/src/create_checkpoint.rs",
+     "head_path": "examples/src/create_checkpoint.rs",
+     "base": {
+      "start": 1,
+      "end": 30
+     },
+     "head": {
+      "start": 1,
+      "end": 30
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:examples::bin::create_snapshot": {
+   "kind": "module",
+   "name": "examples::bin::create_snapshot",
+   "title": "examples::bin::create_snapshot",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "examples/src/create_snapshot.rs",
+     "head_path": "examples/src/create_snapshot.rs",
+     "base": {
+      "start": 1,
+      "end": 40
+     },
+     "head": {
+      "start": 1,
+      "end": 40
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:examples::bin::db_without_compactor": {
+   "kind": "module",
+   "name": "examples::bin::db_without_compactor",
+   "title": "examples::bin::db_without_compactor",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "examples/src/db_without_compactor.rs",
+     "head_path": "examples/src/db_without_compactor.rs",
+     "base": {
+      "start": 1,
+      "end": 30
+     },
+     "head": {
+      "start": 1,
+      "end": 30
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:examples::bin::delete_checkpoint": {
+   "kind": "module",
+   "name": "examples::bin::delete_checkpoint",
+   "title": "examples::bin::delete_checkpoint",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "examples/src/delete_checkpoint.rs",
+     "head_path": "examples/src/delete_checkpoint.rs",
+     "base": {
+      "start": 1,
+      "end": 29
+     },
+     "head": {
+      "start": 1,
+      "end": 29
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:examples::bin::full_example": {
+   "kind": "module",
+   "name": "examples::bin::full_example",
+   "title": "examples::bin::full_example",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "examples/src/full_example.rs",
+     "head_path": "examples/src/full_example.rs",
+     "base": {
+      "start": 1,
+      "end": 59
+     },
+     "head": {
+      "start": 1,
+      "end": 59
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:examples::bin::google_cloud_storage": {
+   "kind": "module",
+   "name": "examples::bin::google_cloud_storage",
+   "title": "examples::bin::google_cloud_storage",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "examples/src/google_cloud_storage.rs",
+     "head_path": "examples/src/google_cloud_storage.rs",
+     "base": {
+      "start": 1,
+      "end": 59
+     },
+     "head": {
+      "start": 1,
+      "end": 59
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:examples::bin::range_scans": {
+   "kind": "module",
+   "name": "examples::bin::range_scans",
+   "title": "examples::bin::range_scans",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "examples/src/range_scans.rs",
+     "head_path": "examples/src/range_scans.rs",
+     "base": {
+      "start": 1,
+      "end": 65
+     },
+     "head": {
+      "start": 1,
+      "end": 65
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:examples::bin::read_tracing": {
+   "kind": "module",
+   "name": "examples::bin::read_tracing",
+   "title": "examples::bin::read_tracing",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "examples/src/read_tracing.rs",
+     "head_path": "examples/src/read_tracing.rs",
+     "base": {
+      "start": 1,
+      "end": 47
+     },
+     "head": {
+      "start": 1,
+      "end": 47
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:examples::bin::refresh_checkpoint": {
+   "kind": "module",
+   "name": "examples::bin::refresh_checkpoint",
+   "title": "examples::bin::refresh_checkpoint",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "examples/src/refresh_checkpoint.rs",
+     "head_path": "examples/src/refresh_checkpoint.rs",
+     "base": {
+      "start": 1,
+      "end": 34
+     },
+     "head": {
+      "start": 1,
+      "end": 34
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:examples::bin::rescaling": {
+   "kind": "module",
+   "name": "examples::bin::rescaling",
+   "title": "examples::bin::rescaling",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "examples/src/rescaling.rs",
+     "head_path": "examples/src/rescaling.rs",
+     "base": {
+      "start": 1,
+      "end": 356
+     },
+     "head": {
+      "start": 1,
+      "end": 356
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:examples::bin::s3_compatible": {
+   "kind": "module",
+   "name": "examples::bin::s3_compatible",
+   "title": "examples::bin::s3_compatible",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "examples/src/s3_compatible.rs",
+     "head_path": "examples/src/s3_compatible.rs",
+     "base": {
+      "start": 1,
+      "end": 26
+     },
+     "head": {
+      "start": 1,
+      "end": 26
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:examples::bin::scan_snapshot": {
+   "kind": "module",
+   "name": "examples::bin::scan_snapshot",
+   "title": "examples::bin::scan_snapshot",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "examples/src/scan_snapshot.rs",
+     "head_path": "examples/src/scan_snapshot.rs",
+     "base": {
+      "start": 1,
+      "end": 51
+     },
+     "head": {
+      "start": 1,
+      "end": 51
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:examples::bin::simple_example": {
+   "kind": "module",
+   "name": "examples::bin::simple_example",
+   "title": "examples::bin::simple_example",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "examples/src/simple_example.rs",
+     "head_path": "examples/src/simple_example.rs",
+     "base": {
+      "start": 1,
+      "end": 20
+     },
+     "head": {
+      "start": 1,
+      "end": 20
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:examples::bin::standalone_compactor": {
+   "kind": "module",
+   "name": "examples::bin::standalone_compactor",
+   "title": "examples::bin::standalone_compactor",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "examples/src/standalone_compactor.rs",
+     "head_path": "examples/src/standalone_compactor.rs",
+     "base": {
+      "start": 1,
+      "end": 27
+     },
+     "head": {
+      "start": 1,
+      "end": 27
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:examples::bin::standalone_garbage_collector": {
+   "kind": "module",
+   "name": "examples::bin::standalone_garbage_collector",
+   "title": "examples::bin::standalone_garbage_collector",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "examples/src/standalone_garbage_collector.rs",
+     "head_path": "examples/src/standalone_garbage_collector.rs",
+     "base": {
+      "start": 1,
+      "end": 27
+     },
+     "head": {
+      "start": 1,
+      "end": 27
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:examples::bin::tracing_subscriber": {
+   "kind": "module",
+   "name": "examples::bin::tracing_subscriber",
+   "title": "examples::bin::tracing_subscriber",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "examples/src/tracing_subscriber.rs",
+     "head_path": "examples/src/tracing_subscriber.rs",
+     "base": {
+      "start": 1,
+      "end": 29
+     },
+     "head": {
+      "start": 1,
+      "end": 29
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:examples::bin::write_runtime": {
+   "kind": "module",
+   "name": "examples::bin::write_runtime",
+   "title": "examples::bin::write_runtime",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "examples/src/write_runtime.rs",
+     "head_path": "examples/src/write_runtime.rs",
+     "base": {
+      "start": 1,
+      "end": 45
+     },
+     "head": {
+      "start": 1,
+      "end": 45
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb": {
+   "kind": "module",
+   "name": "slatedb",
+   "title": "slatedb",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/lib.rs",
+     "head_path": "slatedb/src/lib.rs",
+     "base": {
+      "start": 1,
+      "end": 188
+     },
+     "head": {
+      "start": 1,
+      "end": 188
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::admin": {
+   "kind": "module",
+   "name": "slatedb::admin",
+   "title": "slatedb::admin",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/admin.rs",
+     "head_path": "slatedb/src/admin.rs",
+     "base": {
+      "start": 1,
+      "end": 2105
+     },
+     "head": {
+      "start": 1,
+      "end": 2105
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::batch": {
+   "kind": "module",
+   "name": "slatedb::batch",
+   "title": "slatedb::batch",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/batch.rs",
+     "head_path": "slatedb/src/batch.rs",
+     "base": {
+      "start": 1,
+      "end": 1665
+     },
+     "head": {
+      "start": 1,
+      "end": 1665
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::batch_write": {
+   "kind": "module",
+   "name": "slatedb::batch_write",
+   "title": "slatedb::batch_write",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/batch_write.rs",
+     "head_path": "slatedb/src/batch_write.rs",
+     "base": {
+      "start": 1,
+      "end": 975
+     },
+     "head": {
+      "start": 1,
+      "end": 975
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::blob": {
+   "kind": "module",
+   "name": "slatedb::blob",
+   "title": "slatedb::blob",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/blob.rs",
+     "head_path": "slatedb/src/blob.rs",
+     "base": {
+      "start": 1,
+      "end": 14
+     },
+     "head": {
+      "start": 1,
+      "end": 14
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::block_cache_policy": {
+   "kind": "module",
+   "name": "slatedb::block_cache_policy",
+   "title": "slatedb::block_cache_policy",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/block_cache_policy.rs",
+     "head_path": "slatedb/src/block_cache_policy.rs",
+     "base": {
+      "start": 1,
+      "end": 136
+     },
+     "head": {
+      "start": 1,
+      "end": 136
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::block_iterator": {
+   "kind": "module",
+   "name": "slatedb::block_iterator",
+   "title": "slatedb::block_iterator",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/block_iterator.rs",
+     "head_path": "slatedb/src/block_iterator.rs",
+     "base": {
+      "start": 1,
+      "end": 785
+     },
+     "head": {
+      "start": 1,
+      "end": 785
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::block_iterator_v2": {
+   "kind": "module",
+   "name": "slatedb::block_iterator_v2",
+   "title": "slatedb::block_iterator_v2",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/block_iterator_v2.rs",
+     "head_path": "slatedb/src/block_iterator_v2.rs",
+     "base": {
+      "start": 1,
+      "end": 1619
+     },
+     "head": {
+      "start": 1,
+      "end": 1619
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::bytes_generator": {
+   "kind": "module",
+   "name": "slatedb::bytes_generator",
+   "title": "slatedb::bytes_generator",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/bytes_generator.rs",
+     "head_path": "slatedb/src/bytes_generator.rs",
+     "base": {
+      "start": 1,
+      "end": 95
+     },
+     "head": {
+      "start": 1,
+      "end": 95
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::bytes_range": {
+   "kind": "module",
+   "name": "slatedb::bytes_range",
+   "title": "slatedb::bytes_range",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/bytes_range.rs",
+     "head_path": "slatedb/src/bytes_range.rs",
+     "base": {
+      "start": 1,
+      "end": 581
+     },
+     "head": {
+      "start": 1,
+      "end": 581
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::cached_object_store": {
+   "kind": "module",
+   "name": "slatedb::cached_object_store",
+   "title": "slatedb::cached_object_store",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/cached_object_store/mod.rs",
+     "head_path": "slatedb/src/cached_object_store/mod.rs",
+     "base": {
+      "start": 1,
+      "end": 11
+     },
+     "head": {
+      "start": 1,
+      "end": 11
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::cached_object_store::object_store": {
+   "kind": "module",
+   "name": "slatedb::cached_object_store::object_store",
+   "title": "slatedb::cached_object_store::object_store",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/cached_object_store/object_store.rs",
+     "head_path": "slatedb/src/cached_object_store/object_store.rs",
+     "base": {
+      "start": 1,
+      "end": 2971
+     },
+     "head": {
+      "start": 1,
+      "end": 2971
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::cached_object_store::policy": {
+   "kind": "module",
+   "name": "slatedb::cached_object_store::policy",
+   "title": "slatedb::cached_object_store::policy",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/cached_object_store/policy.rs",
+     "head_path": "slatedb/src/cached_object_store/policy.rs",
+     "base": {
+      "start": 1,
+      "end": 356
+     },
+     "head": {
+      "start": 1,
+      "end": 356
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::cached_object_store::stats": {
+   "kind": "module",
+   "name": "slatedb::cached_object_store::stats",
+   "title": "slatedb::cached_object_store::stats",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/cached_object_store/stats.rs",
+     "head_path": "slatedb/src/cached_object_store/stats.rs",
+     "base": {
+      "start": 1,
+      "end": 52
+     },
+     "head": {
+      "start": 1,
+      "end": 52
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::cached_object_store::storage": {
+   "kind": "module",
+   "name": "slatedb::cached_object_store::storage",
+   "title": "slatedb::cached_object_store::storage",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/cached_object_store/storage.rs",
+     "head_path": "slatedb/src/cached_object_store/storage.rs",
+     "base": {
+      "start": 1,
+      "end": 105
+     },
+     "head": {
+      "start": 1,
+      "end": 105
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::cached_object_store::storage_fs": {
+   "kind": "module",
+   "name": "slatedb::cached_object_store::storage_fs",
+   "title": "slatedb::cached_object_store::storage_fs",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/cached_object_store/storage_fs.rs",
+     "head_path": "slatedb/src/cached_object_store/storage_fs.rs",
+     "base": {
+      "start": 1,
+      "end": 1451
+     },
+     "head": {
+      "start": 1,
+      "end": 1451
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::checkpoint": {
+   "kind": "module",
+   "name": "slatedb::checkpoint",
+   "title": "slatedb::checkpoint",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/checkpoint.rs",
+     "head_path": "slatedb/src/checkpoint.rs",
+     "base": {
+      "start": 1,
+      "end": 614
+     },
+     "head": {
+      "start": 1,
+      "end": 614
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::clock": {
+   "kind": "module",
+   "name": "slatedb::clock",
+   "title": "slatedb::clock",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/clock.rs",
+     "head_path": "slatedb/src/clock.rs",
+     "base": {
+      "start": 1,
+      "end": 84
+     },
+     "head": {
+      "start": 1,
+      "end": 84
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::clone": {
+   "kind": "module",
+   "name": "slatedb::clone",
+   "title": "slatedb::clone",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/clone.rs",
+     "head_path": "slatedb/src/clone.rs",
+     "base": {
+      "start": 1,
+      "end": 3088
+     },
+     "head": {
+      "start": 1,
+      "end": 3088
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::compaction_execute_bench": {
+   "kind": "module",
+   "name": "slatedb::compaction_execute_bench",
+   "title": "slatedb::compaction_execute_bench",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/compaction_execute_bench.rs",
+     "head_path": "slatedb/src/compaction_execute_bench.rs",
+     "base": {
+      "start": 1,
+      "end": 426
+     },
+     "head": {
+      "start": 1,
+      "end": 426
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::compaction_filter": {
+   "kind": "module",
+   "name": "slatedb::compaction_filter",
+   "title": "slatedb::compaction_filter",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/compaction_filter.rs",
+     "head_path": "slatedb/src/compaction_filter.rs",
+     "base": {
+      "start": 1,
+      "end": 213
+     },
+     "head": {
+      "start": 1,
+      "end": 213
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::compaction_filter_iterator": {
+   "kind": "module",
+   "name": "slatedb::compaction_filter_iterator",
+   "title": "slatedb::compaction_filter_iterator",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/compaction_filter_iterator.rs",
+     "head_path": "slatedb/src/compaction_filter_iterator.rs",
+     "base": {
+      "start": 1,
+      "end": 538
+     },
+     "head": {
+      "start": 1,
+      "end": 538
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::compaction_worker": {
+   "kind": "module",
+   "name": "slatedb::compaction_worker",
+   "title": "slatedb::compaction_worker",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/compaction_worker.rs",
+     "head_path": "slatedb/src/compaction_worker.rs",
+     "base": {
+      "start": 1,
+      "end": 1697
+     },
+     "head": {
+      "start": 1,
+      "end": 1697
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::compactions_store": {
+   "kind": "module",
+   "name": "slatedb::compactions_store",
+   "title": "slatedb::compactions_store",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/compactions_store.rs",
+     "head_path": "slatedb/src/compactions_store.rs",
+     "base": {
+      "start": 1,
+      "end": 619
+     },
+     "head": {
+      "start": 1,
+      "end": 620
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::compactions_store::invariants": {
+   "kind": "module",
+   "name": "slatedb::compactions_store::invariants",
+   "title": "slatedb::compactions_store::invariants",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/compactions_store/invariants.rs",
+     "head_path": "slatedb/src/compactions_store/invariants.rs",
+     "base": {
+      "start": 1,
+      "end": 184
+     },
+     "head": {
+      "start": 1,
+      "end": 184
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::compactor": {
+   "kind": "module",
+   "name": "slatedb::compactor",
+   "title": "slatedb::compactor",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/compactor.rs",
+     "head_path": "slatedb/src/compactor.rs",
+     "base": {
+      "start": 1,
+      "end": 7122
+     },
+     "head": {
+      "start": 1,
+      "end": 7164
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::compactor_executor": {
+   "kind": "module",
+   "name": "slatedb::compactor_executor",
+   "title": "slatedb::compactor_executor",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/compactor_executor.rs",
+     "head_path": "slatedb/src/compactor_executor.rs",
+     "base": {
+      "start": 1,
+      "end": 3366
+     },
+     "head": {
+      "start": 1,
+      "end": 3366
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::compactor_state": {
+   "kind": "module",
+   "name": "slatedb::compactor_state",
+   "title": "slatedb::compactor_state",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/compactor_state.rs",
+     "head_path": "slatedb/src/compactor_state.rs",
+     "base": {
+      "start": 1,
+      "end": 2680
+     },
+     "head": {
+      "start": 1,
+      "end": 2680
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::compactor_state_protocols": {
+   "kind": "module",
+   "name": "slatedb::compactor_state_protocols",
+   "title": "slatedb::compactor_state_protocols",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/compactor_state_protocols.rs",
+     "head_path": "slatedb/src/compactor_state_protocols.rs",
+     "base": {
+      "start": 1,
+      "end": 1205
+     },
+     "head": {
+      "start": 1,
+      "end": 1222
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::comparable_range": {
+   "kind": "module",
+   "name": "slatedb::comparable_range",
+   "title": "slatedb::comparable_range",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/comparable_range.rs",
+     "head_path": "slatedb/src/comparable_range.rs",
+     "base": {
+      "start": 1,
+      "end": 467
+     },
+     "head": {
+      "start": 1,
+      "end": 467
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::config": {
+   "kind": "module",
+   "name": "slatedb::config",
+   "title": "slatedb::config",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/config.rs",
+     "head_path": "slatedb/src/config.rs",
+     "base": {
+      "start": 1,
+      "end": 2304
+     },
+     "head": {
+      "start": 1,
+      "end": 2304
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::db": {
+   "kind": "module",
+   "name": "slatedb::db",
+   "title": "slatedb::db",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/db.rs",
+     "head_path": "slatedb/src/db.rs",
+     "base": {
+      "start": 1,
+      "end": 12876
+     },
+     "head": {
+      "start": 1,
+      "end": 12876
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::db::builder": {
+   "kind": "module",
+   "name": "slatedb::db::builder",
+   "title": "slatedb::db::builder",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/db/builder.rs",
+     "head_path": "slatedb/src/db/builder.rs",
+     "base": {
+      "start": 1,
+      "end": 2847
+     },
+     "head": {
+      "start": 1,
+      "end": 2889
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::db_cache": {
+   "kind": "module",
+   "name": "slatedb::db_cache",
+   "title": "slatedb::db_cache",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/db_cache/mod.rs",
+     "head_path": "slatedb/src/db_cache/mod.rs",
+     "base": {
+      "start": 1,
+      "end": 2228
+     },
+     "head": {
+      "start": 1,
+      "end": 2228
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::db_cache::foyer": {
+   "kind": "module",
+   "name": "slatedb::db_cache::foyer",
+   "title": "slatedb::db_cache::foyer",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/db_cache/foyer.rs",
+     "head_path": "slatedb/src/db_cache/foyer.rs",
+     "base": {
+      "start": 1,
+      "end": 408
+     },
+     "head": {
+      "start": 1,
+      "end": 408
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::db_cache::foyer_hybrid": {
+   "kind": "module",
+   "name": "slatedb::db_cache::foyer_hybrid",
+   "title": "slatedb::db_cache::foyer_hybrid",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/db_cache/foyer_hybrid.rs",
+     "head_path": "slatedb/src/db_cache/foyer_hybrid.rs",
+     "base": {
+      "start": 1,
+      "end": 457
+     },
+     "head": {
+      "start": 1,
+      "end": 457
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::db_cache::moka": {
+   "kind": "module",
+   "name": "slatedb::db_cache::moka",
+   "title": "slatedb::db_cache::moka",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/db_cache/moka.rs",
+     "head_path": "slatedb/src/db_cache/moka.rs",
+     "base": {
+      "start": 1,
+      "end": 136
+     },
+     "head": {
+      "start": 1,
+      "end": 136
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::db_cache::serde": {
+   "kind": "module",
+   "name": "slatedb::db_cache::serde",
+   "title": "slatedb::db_cache::serde",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/db_cache/serde.rs",
+     "head_path": "slatedb/src/db_cache/serde.rs",
+     "base": {
+      "start": 1,
+      "end": 498
+     },
+     "head": {
+      "start": 1,
+      "end": 498
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::db_cache_manager": {
+   "kind": "module",
+   "name": "slatedb::db_cache_manager",
+   "title": "slatedb::db_cache_manager",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/db_cache_manager.rs",
+     "head_path": "slatedb/src/db_cache_manager.rs",
+     "base": {
+      "start": 1,
+      "end": 1037
+     },
+     "head": {
+      "start": 1,
+      "end": 1037
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::db_common": {
+   "kind": "module",
+   "name": "slatedb::db_common",
+   "title": "slatedb::db_common",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/db_common.rs",
+     "head_path": "slatedb/src/db_common.rs",
+     "base": {
+      "start": 1,
+      "end": 83
+     },
+     "head": {
+      "start": 1,
+      "end": 83
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::db_iter": {
+   "kind": "module",
+   "name": "slatedb::db_iter",
+   "title": "slatedb::db_iter",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/db_iter.rs",
+     "head_path": "slatedb/src/db_iter.rs",
+     "base": {
+      "start": 1,
+      "end": 936
+     },
+     "head": {
+      "start": 1,
+      "end": 936
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::db_reader": {
+   "kind": "module",
+   "name": "slatedb::db_reader",
+   "title": "slatedb::db_reader",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/db_reader.rs",
+     "head_path": "slatedb/src/db_reader.rs",
+     "base": {
+      "start": 1,
+      "end": 3948
+     },
+     "head": {
+      "start": 1,
+      "end": 3948
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::db_snapshot": {
+   "kind": "module",
+   "name": "slatedb::db_snapshot",
+   "title": "slatedb::db_snapshot",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/db_snapshot.rs",
+     "head_path": "slatedb/src/db_snapshot.rs",
+     "base": {
+      "start": 1,
+      "end": 800
+     },
+     "head": {
+      "start": 1,
+      "end": 800
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::db_state": {
+   "kind": "module",
+   "name": "slatedb::db_state",
+   "title": "slatedb::db_state",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/db_state.rs",
+     "head_path": "slatedb/src/db_state.rs",
+     "base": {
+      "start": 1,
+      "end": 1775
+     },
+     "head": {
+      "start": 1,
+      "end": 1775
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::db_stats": {
+   "kind": "module",
+   "name": "slatedb::db_stats",
+   "title": "slatedb::db_stats",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/db_stats.rs",
+     "head_path": "slatedb/src/db_stats.rs",
+     "base": {
+      "start": 1,
+      "end": 184
+     },
+     "head": {
+      "start": 1,
+      "end": 184
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::db_status": {
+   "kind": "module",
+   "name": "slatedb::db_status",
+   "title": "slatedb::db_status",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/db_status.rs",
+     "head_path": "slatedb/src/db_status.rs",
+     "base": {
+      "start": 1,
+      "end": 627
+     },
+     "head": {
+      "start": 1,
+      "end": 627
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::db_transaction": {
+   "kind": "module",
+   "name": "slatedb::db_transaction",
+   "title": "slatedb::db_transaction",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/db_transaction.rs",
+     "head_path": "slatedb/src/db_transaction.rs",
+     "base": {
+      "start": 1,
+      "end": 2146
+     },
+     "head": {
+      "start": 1,
+      "end": 2146
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::dispatcher": {
+   "kind": "module",
+   "name": "slatedb::dispatcher",
+   "title": "slatedb::dispatcher",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/dispatcher.rs",
+     "head_path": "slatedb/src/dispatcher.rs",
+     "base": {
+      "start": 1,
+      "end": 2267
+     },
+     "head": {
+      "start": 1,
+      "end": 2267
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::error": {
+   "kind": "module",
+   "name": "slatedb::error",
+   "title": "slatedb::error",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/error.rs",
+     "head_path": "slatedb/src/error.rs",
+     "base": {
+      "start": 1,
+      "end": 786
+     },
+     "head": {
+      "start": 1,
+      "end": 786
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::fence": {
+   "kind": "module",
+   "name": "slatedb::fence",
+   "title": "slatedb::fence",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/fence.rs",
+     "head_path": "slatedb/src/fence.rs",
+     "base": {
+      "start": 1,
+      "end": 639
+     },
+     "head": {
+      "start": 1,
+      "end": 641
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::filter": {
+   "kind": "module",
+   "name": "slatedb::filter",
+   "title": "slatedb::filter",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/filter.rs",
+     "head_path": "slatedb/src/filter.rs",
+     "base": {
+      "start": 1,
+      "end": 524
+     },
+     "head": {
+      "start": 1,
+      "end": 524
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::filter_iterator": {
+   "kind": "module",
+   "name": "slatedb::filter_iterator",
+   "title": "slatedb::filter_iterator",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/filter_iterator.rs",
+     "head_path": "slatedb/src/filter_iterator.rs",
+     "base": {
+      "start": 1,
+      "end": 124
+     },
+     "head": {
+      "start": 1,
+      "end": 124
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::filter_policy": {
+   "kind": "module",
+   "name": "slatedb::filter_policy",
+   "title": "slatedb::filter_policy",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/filter_policy.rs",
+     "head_path": "slatedb/src/filter_policy.rs",
+     "base": {
+      "start": 1,
+      "end": 1064
+     },
+     "head": {
+      "start": 1,
+      "end": 1064
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::flatbuffer_types": {
+   "kind": "module",
+   "name": "slatedb::flatbuffer_types",
+   "title": "slatedb::flatbuffer_types",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/flatbuffer_types.rs",
+     "head_path": "slatedb/src/flatbuffer_types.rs",
+     "base": {
+      "start": 1,
+      "end": 2849
+     },
+     "head": {
+      "start": 1,
+      "end": 2849
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::flush": {
+   "kind": "module",
+   "name": "slatedb::flush",
+   "title": "slatedb::flush",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/flush.rs",
+     "head_path": "slatedb/src/flush.rs",
+     "base": {
+      "start": 1,
+      "end": 1090
+     },
+     "head": {
+      "start": 1,
+      "end": 1090
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::format": {
+   "kind": "module",
+   "name": "slatedb::format",
+   "title": "slatedb::format",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/format/mod.rs",
+     "head_path": "slatedb/src/format/mod.rs",
+     "base": {
+      "start": 1,
+      "end": 5
+     },
+     "head": {
+      "start": 1,
+      "end": 5
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::format::block": {
+   "kind": "module",
+   "name": "slatedb::format::block",
+   "title": "slatedb::format::block",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/format/block.rs",
+     "head_path": "slatedb/src/format/block.rs",
+     "base": {
+      "start": 1,
+      "end": 469
+     },
+     "head": {
+      "start": 1,
+      "end": 469
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::format::block_v2": {
+   "kind": "module",
+   "name": "slatedb::format::block_v2",
+   "title": "slatedb::format::block_v2",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/format/block_v2.rs",
+     "head_path": "slatedb/src/format/block_v2.rs",
+     "base": {
+      "start": 1,
+      "end": 906
+     },
+     "head": {
+      "start": 1,
+      "end": 906
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::format::row": {
+   "kind": "module",
+   "name": "slatedb::format::row",
+   "title": "slatedb::format::row",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/format/row.rs",
+     "head_path": "slatedb/src/format/row.rs",
+     "base": {
+      "start": 1,
+      "end": 581
+     },
+     "head": {
+      "start": 1,
+      "end": 581
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::format::row_codec_v2": {
+   "kind": "module",
+   "name": "slatedb::format::row_codec_v2",
+   "title": "slatedb::format::row_codec_v2",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/format/row_codec_v2.rs",
+     "head_path": "slatedb/src/format/row_codec_v2.rs",
+     "base": {
+      "start": 1,
+      "end": 509
+     },
+     "head": {
+      "start": 1,
+      "end": 509
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::format::sst": {
+   "kind": "module",
+   "name": "slatedb::format::sst",
+   "title": "slatedb::format::sst",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/format/sst.rs",
+     "head_path": "slatedb/src/format/sst.rs",
+     "base": {
+      "start": 1,
+      "end": 1336
+     },
+     "head": {
+      "start": 1,
+      "end": 1336
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::garbage_collector": {
+   "kind": "module",
+   "name": "slatedb::garbage_collector",
+   "title": "slatedb::garbage_collector",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/garbage_collector.rs",
+     "head_path": "slatedb/src/garbage_collector.rs",
+     "base": {
+      "start": 1,
+      "end": 2799
+     },
+     "head": {
+      "start": 1,
+      "end": 2799
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::garbage_collector::compacted_gc": {
+   "kind": "module",
+   "name": "slatedb::garbage_collector::compacted_gc",
+   "title": "slatedb::garbage_collector::compacted_gc",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/garbage_collector/compacted_gc.rs",
+     "head_path": "slatedb/src/garbage_collector/compacted_gc.rs",
+     "base": {
+      "start": 1,
+      "end": 943
+     },
+     "head": {
+      "start": 1,
+      "end": 943
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::garbage_collector::compactions_gc": {
+   "kind": "module",
+   "name": "slatedb::garbage_collector::compactions_gc",
+   "title": "slatedb::garbage_collector::compactions_gc",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/garbage_collector/compactions_gc.rs",
+     "head_path": "slatedb/src/garbage_collector/compactions_gc.rs",
+     "base": {
+      "start": 1,
+      "end": 578
+     },
+     "head": {
+      "start": 1,
+      "end": 578
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::garbage_collector::detach_gc": {
+   "kind": "module",
+   "name": "slatedb::garbage_collector::detach_gc",
+   "title": "slatedb::garbage_collector::detach_gc",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/garbage_collector/detach_gc.rs",
+     "head_path": "slatedb/src/garbage_collector/detach_gc.rs",
+     "base": {
+      "start": 1,
+      "end": 462
+     },
+     "head": {
+      "start": 1,
+      "end": 462
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::garbage_collector::filter": {
+   "kind": "module",
+   "name": "slatedb::garbage_collector::filter",
+   "title": "slatedb::garbage_collector::filter",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/garbage_collector/filter.rs",
+     "head_path": "slatedb/src/garbage_collector/filter.rs",
+     "base": {
+      "start": 1,
+      "end": 131
+     },
+     "head": {
+      "start": 1,
+      "end": 131
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::garbage_collector::manifest_gc": {
+   "kind": "module",
+   "name": "slatedb::garbage_collector::manifest_gc",
+   "title": "slatedb::garbage_collector::manifest_gc",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/garbage_collector/manifest_gc.rs",
+     "head_path": "slatedb/src/garbage_collector/manifest_gc.rs",
+     "base": {
+      "start": 1,
+      "end": 578
+     },
+     "head": {
+      "start": 1,
+      "end": 578
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::garbage_collector::stats": {
+   "kind": "module",
+   "name": "slatedb::garbage_collector::stats",
+   "title": "slatedb::garbage_collector::stats",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/garbage_collector/stats.rs",
+     "head_path": "slatedb/src/garbage_collector/stats.rs",
+     "base": {
+      "start": 1,
+      "end": 65
+     },
+     "head": {
+      "start": 1,
+      "end": 65
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::garbage_collector::wal_gc": {
+   "kind": "module",
+   "name": "slatedb::garbage_collector::wal_gc",
+   "title": "slatedb::garbage_collector::wal_gc",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/garbage_collector/wal_gc.rs",
+     "head_path": "slatedb/src/garbage_collector/wal_gc.rs",
+     "base": {
+      "start": 1,
+      "end": 205
+     },
+     "head": {
+      "start": 1,
+      "end": 205
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::instrumented_object_store": {
+   "kind": "module",
+   "name": "slatedb::instrumented_object_store",
+   "title": "slatedb::instrumented_object_store",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/instrumented_object_store.rs",
+     "head_path": "slatedb/src/instrumented_object_store.rs",
+     "base": {
+      "start": 1,
+      "end": 810
+     },
+     "head": {
+      "start": 1,
+      "end": 810
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::iter": {
+   "kind": "module",
+   "name": "slatedb::iter",
+   "title": "slatedb::iter",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/iter.rs",
+     "head_path": "slatedb/src/iter.rs",
+     "base": {
+      "start": 1,
+      "end": 117
+     },
+     "head": {
+      "start": 1,
+      "end": 117
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::manifest": {
+   "kind": "module",
+   "name": "slatedb::manifest",
+   "title": "slatedb::manifest",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/manifest/mod.rs",
+     "head_path": "slatedb/src/manifest/mod.rs",
+     "base": {
+      "start": 1,
+      "end": 5840
+     },
+     "head": {
+      "start": 1,
+      "end": 5840
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::manifest::invariants": {
+   "kind": "module",
+   "name": "slatedb::manifest::invariants",
+   "title": "slatedb::manifest::invariants",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/manifest/invariants.rs",
+     "head_path": "slatedb/src/manifest/invariants.rs",
+     "base": {
+      "start": 1,
+      "end": 276
+     },
+     "head": {
+      "start": 1,
+      "end": 276
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::manifest::store": {
+   "kind": "module",
+   "name": "slatedb::manifest::store",
+   "title": "slatedb::manifest::store",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/manifest/store.rs",
+     "head_path": "slatedb/src/manifest/store.rs",
+     "base": {
+      "start": 1,
+      "end": 1529
+     },
+     "head": {
+      "start": 1,
+      "end": 1657
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::mem_table": {
+   "kind": "module",
+   "name": "slatedb::mem_table",
+   "title": "slatedb::mem_table",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/mem_table.rs",
+     "head_path": "slatedb/src/mem_table.rs",
+     "base": {
+      "start": 1,
+      "end": 1105
+     },
+     "head": {
+      "start": 1,
+      "end": 1105
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::memtable_flusher": {
+   "kind": "module",
+   "name": "slatedb::memtable_flusher",
+   "title": "slatedb::memtable_flusher",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/memtable_flusher/mod.rs",
+     "head_path": "slatedb/src/memtable_flusher/mod.rs",
+     "base": {
+      "start": 1,
+      "end": 155
+     },
+     "head": {
+      "start": 1,
+      "end": 155
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::memtable_flusher::manifest_writer": {
+   "kind": "module",
+   "name": "slatedb::memtable_flusher::manifest_writer",
+   "title": "slatedb::memtable_flusher::manifest_writer",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/memtable_flusher/manifest_writer.rs",
+     "head_path": "slatedb/src/memtable_flusher/manifest_writer.rs",
+     "base": {
+      "start": 1,
+      "end": 2501
+     },
+     "head": {
+      "start": 1,
+      "end": 2503
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::memtable_flusher::tracker": {
+   "kind": "module",
+   "name": "slatedb::memtable_flusher::tracker",
+   "title": "slatedb::memtable_flusher::tracker",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/memtable_flusher/tracker.rs",
+     "head_path": "slatedb/src/memtable_flusher/tracker.rs",
+     "base": {
+      "start": 1,
+      "end": 1879
+     },
+     "head": {
+      "start": 1,
+      "end": 1884
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::memtable_flusher::uploader": {
+   "kind": "module",
+   "name": "slatedb::memtable_flusher::uploader",
+   "title": "slatedb::memtable_flusher::uploader",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/memtable_flusher/uploader.rs",
+     "head_path": "slatedb/src/memtable_flusher/uploader.rs",
+     "base": {
+      "start": 1,
+      "end": 1160
+     },
+     "head": {
+      "start": 1,
+      "end": 1160
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::merge_iterator": {
+   "kind": "module",
+   "name": "slatedb::merge_iterator",
+   "title": "slatedb::merge_iterator",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/merge_iterator.rs",
+     "head_path": "slatedb/src/merge_iterator.rs",
+     "base": {
+      "start": 1,
+      "end": 593
+     },
+     "head": {
+      "start": 1,
+      "end": 593
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::merge_operator": {
+   "kind": "module",
+   "name": "slatedb::merge_operator",
+   "title": "slatedb::merge_operator",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/merge_operator.rs",
+     "head_path": "slatedb/src/merge_operator.rs",
+     "base": {
+      "start": 1,
+      "end": 1324
+     },
+     "head": {
+      "start": 1,
+      "end": 1324
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::object_store_tag": {
+   "kind": "module",
+   "name": "slatedb::object_store_tag",
+   "title": "slatedb::object_store_tag",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/object_store_tag.rs",
+     "head_path": "slatedb/src/object_store_tag.rs",
+     "base": {
+      "start": 1,
+      "end": 157
+     },
+     "head": {
+      "start": 1,
+      "end": 157
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::ops": {
+   "kind": "module",
+   "name": "slatedb::ops",
+   "title": "slatedb::ops",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/ops.rs",
+     "head_path": "slatedb/src/ops.rs",
+     "base": {
+      "start": 1,
+      "end": 688
+     },
+     "head": {
+      "start": 1,
+      "end": 688
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::oracle": {
+   "kind": "module",
+   "name": "slatedb::oracle",
+   "title": "slatedb::oracle",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/oracle.rs",
+     "head_path": "slatedb/src/oracle.rs",
+     "base": {
+      "start": 1,
+      "end": 107
+     },
+     "head": {
+      "start": 1,
+      "end": 107
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::partitioned_keyspace": {
+   "kind": "module",
+   "name": "slatedb::partitioned_keyspace",
+   "title": "slatedb::partitioned_keyspace",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/partitioned_keyspace.rs",
+     "head_path": "slatedb/src/partitioned_keyspace.rs",
+     "base": {
+      "start": 1,
+      "end": 267
+     },
+     "head": {
+      "start": 1,
+      "end": 267
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::paths": {
+   "kind": "module",
+   "name": "slatedb::paths",
+   "title": "slatedb::paths",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/paths.rs",
+     "head_path": "slatedb/src/paths.rs",
+     "base": {
+      "start": 1,
+      "end": 185
+     },
+     "head": {
+      "start": 1,
+      "end": 185
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::peeking_iterator": {
+   "kind": "module",
+   "name": "slatedb::peeking_iterator",
+   "title": "slatedb::peeking_iterator",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/peeking_iterator.rs",
+     "head_path": "slatedb/src/peeking_iterator.rs",
+     "base": {
+      "start": 1,
+      "end": 122
+     },
+     "head": {
+      "start": 1,
+      "end": 122
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::prefix_extractor": {
+   "kind": "module",
+   "name": "slatedb::prefix_extractor",
+   "title": "slatedb::prefix_extractor",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/prefix_extractor.rs",
+     "head_path": "slatedb/src/prefix_extractor.rs",
+     "base": {
+      "start": 1,
+      "end": 95
+     },
+     "head": {
+      "start": 1,
+      "end": 95
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::reader": {
+   "kind": "module",
+   "name": "slatedb::reader",
+   "title": "slatedb::reader",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/reader.rs",
+     "head_path": "slatedb/src/reader.rs",
+     "base": {
+      "start": 1,
+      "end": 2830
+     },
+     "head": {
+      "start": 1,
+      "end": 2830
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::retention_iterator": {
+   "kind": "module",
+   "name": "slatedb::retention_iterator",
+   "title": "slatedb::retention_iterator",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/retention_iterator.rs",
+     "head_path": "slatedb/src/retention_iterator.rs",
+     "base": {
+      "start": 1,
+      "end": 1324
+     },
+     "head": {
+      "start": 1,
+      "end": 1324
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::retrying_object_store": {
+   "kind": "module",
+   "name": "slatedb::retrying_object_store",
+   "title": "slatedb::retrying_object_store",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/retrying_object_store.rs",
+     "head_path": "slatedb/src/retrying_object_store.rs",
+     "base": {
+      "start": 1,
+      "end": 1354
+     },
+     "head": {
+      "start": 1,
+      "end": 1354
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::segment_iterator": {
+   "kind": "module",
+   "name": "slatedb::segment_iterator",
+   "title": "slatedb::segment_iterator",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/segment_iterator.rs",
+     "head_path": "slatedb/src/segment_iterator.rs",
+     "base": {
+      "start": 1,
+      "end": 899
+     },
+     "head": {
+      "start": 1,
+      "end": 899
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::seq_tracker": {
+   "kind": "module",
+   "name": "slatedb::seq_tracker",
+   "title": "slatedb::seq_tracker",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/seq_tracker.rs",
+     "head_path": "slatedb/src/seq_tracker.rs",
+     "base": {
+      "start": 1,
+      "end": 996
+     },
+     "head": {
+      "start": 1,
+      "end": 996
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::single_flight": {
+   "kind": "module",
+   "name": "slatedb::single_flight",
+   "title": "slatedb::single_flight",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/single_flight.rs",
+     "head_path": "slatedb/src/single_flight.rs",
+     "base": {
+      "start": 1,
+      "end": 492
+     },
+     "head": {
+      "start": 1,
+      "end": 492
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::size_tiered_compaction": {
+   "kind": "module",
+   "name": "slatedb::size_tiered_compaction",
+   "title": "slatedb::size_tiered_compaction",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/size_tiered_compaction.rs",
+     "head_path": "slatedb/src/size_tiered_compaction.rs",
+     "base": {
+      "start": 1,
+      "end": 1973
+     },
+     "head": {
+      "start": 1,
+      "end": 1973
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::snapshot_manager": {
+   "kind": "module",
+   "name": "slatedb::snapshot_manager",
+   "title": "slatedb::snapshot_manager",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/snapshot_manager.rs",
+     "head_path": "slatedb/src/snapshot_manager.rs",
+     "base": {
+      "start": 1,
+      "end": 144
+     },
+     "head": {
+      "start": 1,
+      "end": 144
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::sorted_run_iterator": {
+   "kind": "module",
+   "name": "slatedb::sorted_run_iterator",
+   "title": "slatedb::sorted_run_iterator",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/sorted_run_iterator.rs",
+     "head_path": "slatedb/src/sorted_run_iterator.rs",
+     "base": {
+      "start": 1,
+      "end": 1306
+     },
+     "head": {
+      "start": 1,
+      "end": 1306
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::sst_builder": {
+   "kind": "module",
+   "name": "slatedb::sst_builder",
+   "title": "slatedb::sst_builder",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/sst_builder.rs",
+     "head_path": "slatedb/src/sst_builder.rs",
+     "base": {
+      "start": 1,
+      "end": 2604
+     },
+     "head": {
+      "start": 1,
+      "end": 2604
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::sst_io": {
+   "kind": "module",
+   "name": "slatedb::sst_io",
+   "title": "slatedb::sst_io",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/sst_io.rs",
+     "head_path": "slatedb/src/sst_io.rs",
+     "base": {
+      "start": 1,
+      "end": 111
+     },
+     "head": {
+      "start": 1,
+      "end": 111
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::sst_iter": {
+   "kind": "module",
+   "name": "slatedb::sst_iter",
+   "title": "slatedb::sst_iter",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/sst_iter.rs",
+     "head_path": "slatedb/src/sst_iter.rs",
+     "base": {
+      "start": 1,
+      "end": 3806
+     },
+     "head": {
+      "start": 1,
+      "end": 3806
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::sst_reader": {
+   "kind": "module",
+   "name": "slatedb::sst_reader",
+   "title": "slatedb::sst_reader",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/sst_reader.rs",
+     "head_path": "slatedb/src/sst_reader.rs",
+     "base": {
+      "start": 1,
+      "end": 673
+     },
+     "head": {
+      "start": 1,
+      "end": 673
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::sst_stats": {
+   "kind": "module",
+   "name": "slatedb::sst_stats",
+   "title": "slatedb::sst_stats",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/sst_stats.rs",
+     "head_path": "slatedb/src/sst_stats.rs",
+     "base": {
+      "start": 1,
+      "end": 172
+     },
+     "head": {
+      "start": 1,
+      "end": 172
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::subcompaction": {
+   "kind": "module",
+   "name": "slatedb::subcompaction",
+   "title": "slatedb::subcompaction",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/subcompaction.rs",
+     "head_path": "slatedb/src/subcompaction.rs",
+     "base": {
+      "start": 1,
+      "end": 584
+     },
+     "head": {
+      "start": 1,
+      "end": 584
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::tablestore": {
+   "kind": "module",
+   "name": "slatedb::tablestore",
+   "title": "slatedb::tablestore",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/tablestore.rs",
+     "head_path": "slatedb/src/tablestore.rs",
+     "base": {
+      "start": 1,
+      "end": 3689
+     },
+     "head": {
+      "start": 1,
+      "end": 3689
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::transaction_manager": {
+   "kind": "module",
+   "name": "slatedb::transaction_manager",
+   "title": "slatedb::transaction_manager",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/transaction_manager.rs",
+     "head_path": "slatedb/src/transaction_manager.rs",
+     "base": {
+      "start": 1,
+      "end": 1440
+     },
+     "head": {
+      "start": 1,
+      "end": 1440
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::types": {
+   "kind": "module",
+   "name": "slatedb::types",
+   "title": "slatedb::types",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/types.rs",
+     "head_path": "slatedb/src/types.rs",
+     "base": {
+      "start": 1,
+      "end": 244
+     },
+     "head": {
+      "start": 1,
+      "end": 244
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::utils": {
+   "kind": "module",
+   "name": "slatedb::utils",
+   "title": "slatedb::utils",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/utils.rs",
+     "head_path": "slatedb/src/utils.rs",
+     "base": {
+      "start": 1,
+      "end": 1832
+     },
+     "head": {
+      "start": 1,
+      "end": 1832
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::wal": {
+   "kind": "module",
+   "name": "slatedb::wal",
+   "title": "slatedb::wal",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/wal/mod.rs",
+     "head_path": "slatedb/src/wal/mod.rs",
+     "base": {
+      "start": 1,
+      "end": 451
+     },
+     "head": {
+      "start": 1,
+      "end": 451
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::wal::slatedb": {
+   "kind": "module",
+   "name": "slatedb::wal::slatedb",
+   "title": "slatedb::wal::slatedb",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/wal/slatedb/mod.rs",
+     "head_path": "slatedb/src/wal/slatedb/mod.rs",
+     "base": {
+      "start": 1,
+      "end": 12
+     },
+     "head": {
+      "start": 1,
+      "end": 12
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::wal::slatedb::admin": {
+   "kind": "module",
+   "name": "slatedb::wal::slatedb::admin",
+   "title": "slatedb::wal::slatedb::admin",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/wal/slatedb/admin.rs",
+     "head_path": "slatedb/src/wal/slatedb/admin.rs",
+     "base": {
+      "start": 1,
+      "end": 207
+     },
+     "head": {
+      "start": 1,
+      "end": 207
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::wal::slatedb::gc": {
+   "kind": "module",
+   "name": "slatedb::wal::slatedb::gc",
+   "title": "slatedb::wal::slatedb::gc",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/wal/slatedb/gc.rs",
+     "head_path": "slatedb/src/wal/slatedb/gc.rs",
+     "base": {
+      "start": 1,
+      "end": 384
+     },
+     "head": {
+      "start": 1,
+      "end": 384
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::wal::slatedb::iterator": {
+   "kind": "module",
+   "name": "slatedb::wal::slatedb::iterator",
+   "title": "slatedb::wal::slatedb::iterator",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/wal/slatedb/iterator.rs",
+     "head_path": "slatedb/src/wal/slatedb/iterator.rs",
+     "base": {
+      "start": 1,
+      "end": 968
+     },
+     "head": {
+      "start": 1,
+      "end": 968
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::wal::slatedb::reader": {
+   "kind": "module",
+   "name": "slatedb::wal::slatedb::reader",
+   "title": "slatedb::wal::slatedb::reader",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/wal/slatedb/reader.rs",
+     "head_path": "slatedb/src/wal/slatedb/reader.rs",
+     "base": {
+      "start": 1,
+      "end": 718
+     },
+     "head": {
+      "start": 1,
+      "end": 718
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::wal::slatedb::resource_limiter": {
+   "kind": "module",
+   "name": "slatedb::wal::slatedb::resource_limiter",
+   "title": "slatedb::wal::slatedb::resource_limiter",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/wal/slatedb/resource_limiter.rs",
+     "head_path": "slatedb/src/wal/slatedb/resource_limiter.rs",
+     "base": {
+      "start": 1,
+      "end": 102
+     },
+     "head": {
+      "start": 1,
+      "end": 102
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::wal::slatedb::sst_builder": {
+   "kind": "module",
+   "name": "slatedb::wal::slatedb::sst_builder",
+   "title": "slatedb::wal::slatedb::sst_builder",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/wal/slatedb/sst_builder.rs",
+     "head_path": "slatedb/src/wal/slatedb/sst_builder.rs",
+     "base": {
+      "start": 1,
+      "end": 1021
+     },
+     "head": {
+      "start": 1,
+      "end": 1021
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::wal::slatedb::sst_iterator": {
+   "kind": "module",
+   "name": "slatedb::wal::slatedb::sst_iterator",
+   "title": "slatedb::wal::slatedb::sst_iterator",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/wal/slatedb/sst_iterator.rs",
+     "head_path": "slatedb/src/wal/slatedb/sst_iterator.rs",
+     "base": {
+      "start": 1,
+      "end": 417
+     },
+     "head": {
+      "start": 1,
+      "end": 417
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::wal::slatedb::store": {
+   "kind": "module",
+   "name": "slatedb::wal::slatedb::store",
+   "title": "slatedb::wal::slatedb::store",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/wal/slatedb/store.rs",
+     "head_path": "slatedb/src/wal/slatedb/store.rs",
+     "base": {
+      "start": 1,
+      "end": 922
+     },
+     "head": {
+      "start": 1,
+      "end": 922
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::wal::slatedb::writer": {
+   "kind": "module",
+   "name": "slatedb::wal::slatedb::writer",
+   "title": "slatedb::wal::slatedb::writer",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/wal/slatedb/writer.rs",
+     "head_path": "slatedb/src/wal/slatedb/writer.rs",
+     "base": {
+      "start": 1,
+      "end": 1038
+     },
+     "head": {
+      "start": 1,
+      "end": 1038
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::wal::slatedb::writer_init": {
+   "kind": "module",
+   "name": "slatedb::wal::slatedb::writer_init",
+   "title": "slatedb::wal::slatedb::writer_init",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/wal/slatedb/writer_init.rs",
+     "head_path": "slatedb/src/wal/slatedb/writer_init.rs",
+     "base": {
+      "start": 1,
+      "end": 154
+     },
+     "head": {
+      "start": 1,
+      "end": 154
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::wal::wal_disabled": {
+   "kind": "module",
+   "name": "slatedb::wal::wal_disabled",
+   "title": "slatedb::wal::wal_disabled",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/wal/wal_disabled.rs",
+     "head_path": "slatedb/src/wal/wal_disabled.rs",
+     "base": {
+      "start": 1,
+      "end": 22
+     },
+     "head": {
+      "start": 1,
+      "end": 22
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::wal_reader": {
+   "kind": "module",
+   "name": "slatedb::wal_reader",
+   "title": "slatedb::wal_reader",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/wal_reader.rs",
+     "head_path": "slatedb/src/wal_reader.rs",
+     "base": {
+      "start": 1,
+      "end": 595
+     },
+     "head": {
+      "start": 1,
+      "end": 595
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb::wal_replay": {
+   "kind": "module",
+   "name": "slatedb::wal_replay",
+   "title": "slatedb::wal_replay",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/wal_replay.rs",
+     "head_path": "slatedb/src/wal_replay.rs",
+     "base": {
+      "start": 1,
+      "end": 902
+     },
+     "head": {
+      "start": 1,
+      "end": 902
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_bencher": {
+   "kind": "module",
+   "name": "slatedb_bencher",
+   "title": "slatedb_bencher",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-bencher/src/main.rs",
+     "head_path": "slatedb-bencher/src/main.rs",
+     "base": {
+      "start": 1,
+      "end": 247
+     },
+     "head": {
+      "start": 1,
+      "end": 247
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_bencher::args": {
+   "kind": "module",
+   "name": "slatedb_bencher::args",
+   "title": "slatedb_bencher::args",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-bencher/src/args.rs",
+     "head_path": "slatedb-bencher/src/args.rs",
+     "base": {
+      "start": 1,
+      "end": 442
+     },
+     "head": {
+      "start": 1,
+      "end": 442
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_bencher::db": {
+   "kind": "module",
+   "name": "slatedb_bencher::db",
+   "title": "slatedb_bencher::db",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-bencher/src/db.rs",
+     "head_path": "slatedb-bencher/src/db.rs",
+     "base": {
+      "start": 1,
+      "end": 498
+     },
+     "head": {
+      "start": 1,
+      "end": 498
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_bencher::stats": {
+   "kind": "module",
+   "name": "slatedb_bencher::stats",
+   "title": "slatedb_bencher::stats",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-bencher/src/stats.rs",
+     "head_path": "slatedb-bencher/src/stats.rs",
+     "base": {
+      "start": 1,
+      "end": 116
+     },
+     "head": {
+      "start": 1,
+      "end": 116
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_bencher::system_monitor": {
+   "kind": "module",
+   "name": "slatedb_bencher::system_monitor",
+   "title": "slatedb_bencher::system_monitor",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-bencher/src/system_monitor.rs",
+     "head_path": "slatedb-bencher/src/system_monitor.rs",
+     "base": {
+      "start": 1,
+      "end": 176
+     },
+     "head": {
+      "start": 1,
+      "end": 176
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_bencher::transactions": {
+   "kind": "module",
+   "name": "slatedb_bencher::transactions",
+   "title": "slatedb_bencher::transactions",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-bencher/src/transactions.rs",
+     "head_path": "slatedb-bencher/src/transactions.rs",
+     "base": {
+      "start": 1,
+      "end": 472
+     },
+     "head": {
+      "start": 1,
+      "end": 472
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_cli": {
+   "kind": "module",
+   "name": "slatedb_cli",
+   "title": "slatedb_cli",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-cli/src/main.rs",
+     "head_path": "slatedb-cli/src/main.rs",
+     "base": {
+      "start": 1,
+      "end": 460
+     },
+     "head": {
+      "start": 1,
+      "end": 460
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_cli::args": {
+   "kind": "module",
+   "name": "slatedb_cli::args",
+   "title": "slatedb_cli::args",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-cli/src/args.rs",
+     "head_path": "slatedb-cli/src/args.rs",
+     "base": {
+      "start": 1,
+      "end": 596
+     },
+     "head": {
+      "start": 1,
+      "end": 596
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_cli::scan": {
+   "kind": "module",
+   "name": "slatedb_cli::scan",
+   "title": "slatedb_cli::scan",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-cli/src/scan.rs",
+     "head_path": "slatedb-cli/src/scan.rs",
+     "base": {
+      "start": 1,
+      "end": 310
+     },
+     "head": {
+      "start": 1,
+      "end": 310
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_common": {
+   "kind": "module",
+   "name": "slatedb_common",
+   "title": "slatedb_common",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-common/src/lib.rs",
+     "head_path": "slatedb-common/src/lib.rs",
+     "base": {
+      "start": 1,
+      "end": 36
+     },
+     "head": {
+      "start": 1,
+      "end": 36
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_common::clock": {
+   "kind": "module",
+   "name": "slatedb_common::clock",
+   "title": "slatedb_common::clock",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-common/src/clock.rs",
+     "head_path": "slatedb-common/src/clock.rs",
+     "base": {
+      "start": 1,
+      "end": 505
+     },
+     "head": {
+      "start": 1,
+      "end": 505
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_common::metrics": {
+   "kind": "module",
+   "name": "slatedb_common::metrics",
+   "title": "slatedb_common::metrics",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-common/src/metrics.rs",
+     "head_path": "slatedb-common/src/metrics.rs",
+     "base": {
+      "start": 1,
+      "end": 1392
+     },
+     "head": {
+      "start": 1,
+      "end": 1392
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_common::object_metadata": {
+   "kind": "module",
+   "name": "slatedb_common::object_metadata",
+   "title": "slatedb_common::object_metadata",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-common/src/object_metadata.rs",
+     "head_path": "slatedb-common/src/object_metadata.rs",
+     "base": {
+      "start": 1,
+      "end": 79
+     },
+     "head": {
+      "start": 1,
+      "end": 79
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_common::rand": {
+   "kind": "module",
+   "name": "slatedb_common::rand",
+   "title": "slatedb_common::rand",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-common/src/rand.rs",
+     "head_path": "slatedb-common/src/rand.rs",
+     "base": {
+      "start": 1,
+      "end": 175
+     },
+     "head": {
+      "start": 1,
+      "end": 175
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_common::utils": {
+   "kind": "module",
+   "name": "slatedb_common::utils",
+   "title": "slatedb_common::utils",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-common/src/utils.rs",
+     "head_path": "slatedb-common/src/utils.rs",
+     "base": {
+      "start": 1,
+      "end": 115
+     },
+     "head": {
+      "start": 1,
+      "end": 115
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_dst": {
+   "kind": "module",
+   "name": "slatedb_dst",
+   "title": "slatedb_dst",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/lib.rs",
+     "head_path": "slatedb-dst/src/lib.rs",
+     "base": {
+      "start": 1,
+      "end": 28
+     },
+     "head": {
+      "start": 1,
+      "end": 28
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_dst::actors": {
+   "kind": "module",
+   "name": "slatedb_dst::actors",
+   "title": "slatedb_dst::actors",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/actors/mod.rs",
+     "head_path": "slatedb-dst/src/actors/mod.rs",
+     "base": {
+      "start": 1,
+      "end": 36
+     },
+     "head": {
+      "start": 1,
+      "end": 36
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_dst::actors::bank": {
+   "kind": "module",
+   "name": "slatedb_dst::actors::bank",
+   "title": "slatedb_dst::actors::bank",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/actors/bank/mod.rs",
+     "head_path": "slatedb-dst/src/actors/bank/mod.rs",
+     "base": {
+      "start": 1,
+      "end": 436
+     },
+     "head": {
+      "start": 1,
+      "end": 436
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_dst::actors::bank::auditor": {
+   "kind": "module",
+   "name": "slatedb_dst::actors::bank::auditor",
+   "title": "slatedb_dst::actors::bank::auditor",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/actors/bank/auditor.rs",
+     "head_path": "slatedb-dst/src/actors/bank/auditor.rs",
+     "base": {
+      "start": 1,
+      "end": 174
+     },
+     "head": {
+      "start": 1,
+      "end": 174
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_dst::actors::bank::transfer": {
+   "kind": "module",
+   "name": "slatedb_dst::actors::bank::transfer",
+   "title": "slatedb_dst::actors::bank::transfer",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/actors/bank/transfer.rs",
+     "head_path": "slatedb-dst/src/actors/bank/transfer.rs",
+     "base": {
+      "start": 1,
+      "end": 105
+     },
+     "head": {
+      "start": 1,
+      "end": 105
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_dst::actors::compactor": {
+   "kind": "module",
+   "name": "slatedb_dst::actors::compactor",
+   "title": "slatedb_dst::actors::compactor",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/actors/compactor.rs",
+     "head_path": "slatedb-dst/src/actors/compactor.rs",
+     "base": {
+      "start": 1,
+      "end": 138
+     },
+     "head": {
+      "start": 1,
+      "end": 138
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_dst::actors::fencer": {
+   "kind": "module",
+   "name": "slatedb_dst::actors::fencer",
+   "title": "slatedb_dst::actors::fencer",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/actors/fencer.rs",
+     "head_path": "slatedb-dst/src/actors/fencer.rs",
+     "base": {
+      "start": 1,
+      "end": 130
+     },
+     "head": {
+      "start": 1,
+      "end": 130
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_dst::actors::flusher": {
+   "kind": "module",
+   "name": "slatedb_dst::actors::flusher",
+   "title": "slatedb_dst::actors::flusher",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/actors/flusher.rs",
+     "head_path": "slatedb-dst/src/actors/flusher.rs",
+     "base": {
+      "start": 1,
+      "end": 73
+     },
+     "head": {
+      "start": 1,
+      "end": 73
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_dst::actors::shutdown": {
+   "kind": "module",
+   "name": "slatedb_dst::actors::shutdown",
+   "title": "slatedb_dst::actors::shutdown",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/actors/shutdown.rs",
+     "head_path": "slatedb-dst/src/actors/shutdown.rs",
+     "base": {
+      "start": 1,
+      "end": 61
+     },
+     "head": {
+      "start": 1,
+      "end": 61
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_dst::actors::suppress_errors": {
+   "kind": "module",
+   "name": "slatedb_dst::actors::suppress_errors",
+   "title": "slatedb_dst::actors::suppress_errors",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/actors/suppress_errors.rs",
+     "head_path": "slatedb-dst/src/actors/suppress_errors.rs",
+     "base": {
+      "start": 1,
+      "end": 125
+     },
+     "head": {
+      "start": 1,
+      "end": 125
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_dst::actors::workload": {
+   "kind": "module",
+   "name": "slatedb_dst::actors::workload",
+   "title": "slatedb_dst::actors::workload",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/actors/workload.rs",
+     "head_path": "slatedb-dst/src/actors/workload.rs",
+     "base": {
+      "start": 1,
+      "end": 463
+     },
+     "head": {
+      "start": 1,
+      "end": 463
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_dst::clocked_object_store": {
+   "kind": "module",
+   "name": "slatedb_dst::clocked_object_store",
+   "title": "slatedb_dst::clocked_object_store",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/clocked_object_store.rs",
+     "head_path": "slatedb-dst/src/clocked_object_store.rs",
+     "base": {
+      "start": 1,
+      "end": 203
+     },
+     "head": {
+      "start": 1,
+      "end": 203
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_dst::deterministic_local_filesystem": {
+   "kind": "module",
+   "name": "slatedb_dst::deterministic_local_filesystem",
+   "title": "slatedb_dst::deterministic_local_filesystem",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/deterministic_local_filesystem.rs",
+     "head_path": "slatedb-dst/src/deterministic_local_filesystem.rs",
+     "base": {
+      "start": 1,
+      "end": 1535
+     },
+     "head": {
+      "start": 1,
+      "end": 1535
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_dst::failing_object_store": {
+   "kind": "module",
+   "name": "slatedb_dst::failing_object_store",
+   "title": "slatedb_dst::failing_object_store",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/failing_object_store.rs",
+     "head_path": "slatedb-dst/src/failing_object_store.rs",
+     "base": {
+      "start": 1,
+      "end": 628
+     },
+     "head": {
+      "start": 1,
+      "end": 628
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_dst::harness": {
+   "kind": "module",
+   "name": "slatedb_dst::harness",
+   "title": "slatedb_dst::harness",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/harness.rs",
+     "head_path": "slatedb-dst/src/harness.rs",
+     "base": {
+      "start": 1,
+      "end": 758
+     },
+     "head": {
+      "start": 1,
+      "end": 758
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_dst::prefix_extractor": {
+   "kind": "module",
+   "name": "slatedb_dst::prefix_extractor",
+   "title": "slatedb_dst::prefix_extractor",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/prefix_extractor.rs",
+     "head_path": "slatedb-dst/src/prefix_extractor.rs",
+     "base": {
+      "start": 1,
+      "end": 73
+     },
+     "head": {
+      "start": 1,
+      "end": 73
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_dst::rescaling": {
+   "kind": "module",
+   "name": "slatedb_dst::rescaling",
+   "title": "slatedb_dst::rescaling",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/rescaling.rs",
+     "head_path": "slatedb-dst/src/rescaling.rs",
+     "base": {
+      "start": 1,
+      "end": 433
+     },
+     "head": {
+      "start": 1,
+      "end": 433
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_dst::scenarios": {
+   "kind": "module",
+   "name": "slatedb_dst::scenarios",
+   "title": "slatedb_dst::scenarios",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/scenarios.rs",
+     "head_path": "slatedb-dst/src/scenarios.rs",
+     "base": {
+      "start": 1,
+      "end": 270
+     },
+     "head": {
+      "start": 1,
+      "end": 270
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_dst::utils": {
+   "kind": "module",
+   "name": "slatedb_dst::utils",
+   "title": "slatedb_dst::utils",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/utils.rs",
+     "head_path": "slatedb-dst/src/utils.rs",
+     "base": {
+      "start": 1,
+      "end": 371
+     },
+     "head": {
+      "start": 1,
+      "end": 371
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_txn_obj": {
+   "kind": "module",
+   "name": "slatedb_txn_obj",
+   "title": "slatedb_txn_obj",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-txn-obj/src/lib.rs",
+     "head_path": "slatedb-txn-obj/src/lib.rs",
+     "base": {
+      "start": 1,
+      "end": 1521
+     },
+     "head": {
+      "start": 1,
+      "end": 1577
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_txn_obj::object_store": {
+   "kind": "module",
+   "name": "slatedb_txn_obj::object_store",
+   "title": "slatedb_txn_obj::object_store",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-txn-obj/src/object_store.rs",
+     "head_path": "slatedb-txn-obj/src/object_store.rs",
+     "base": {
+      "start": 1,
+      "end": 1304
+     },
+     "head": {
+      "start": 1,
+      "end": 1304
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi": {
+   "kind": "module",
+   "name": "slatedb_uniffi",
+   "title": "slatedb_uniffi",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/lib.rs",
+     "head_path": "bindings/uniffi/src/lib.rs",
+     "base": {
+      "start": 1,
+      "end": 69
+     },
+     "head": {
+      "start": 1,
+      "end": 69
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::admin": {
+   "kind": "module",
+   "name": "slatedb_uniffi::admin",
+   "title": "slatedb_uniffi::admin",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/admin.rs",
+     "head_path": "bindings/uniffi/src/admin.rs",
+     "base": {
+      "start": 1,
+      "end": 476
+     },
+     "head": {
+      "start": 1,
+      "end": 476
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::block_transformer": {
+   "kind": "module",
+   "name": "slatedb_uniffi::block_transformer",
+   "title": "slatedb_uniffi::block_transformer",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/block_transformer.rs",
+     "head_path": "bindings/uniffi/src/block_transformer.rs",
+     "base": {
+      "start": 1,
+      "end": 166
+     },
+     "head": {
+      "start": 1,
+      "end": 166
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::builder": {
+   "kind": "module",
+   "name": "slatedb_uniffi::builder",
+   "title": "slatedb_uniffi::builder",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/builder.rs",
+     "head_path": "bindings/uniffi/src/builder.rs",
+     "base": {
+      "start": 1,
+      "end": 537
+     },
+     "head": {
+      "start": 1,
+      "end": 537
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::cancellation": {
+   "kind": "module",
+   "name": "slatedb_uniffi::cancellation",
+   "title": "slatedb_uniffi::cancellation",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/cancellation.rs",
+     "head_path": "bindings/uniffi/src/cancellation.rs",
+     "base": {
+      "start": 1,
+      "end": 44
+     },
+     "head": {
+      "start": 1,
+      "end": 44
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::clock": {
+   "kind": "module",
+   "name": "slatedb_uniffi::clock",
+   "title": "slatedb_uniffi::clock",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/clock.rs",
+     "head_path": "bindings/uniffi/src/clock.rs",
+     "base": {
+      "start": 1,
+      "end": 167
+     },
+     "head": {
+      "start": 1,
+      "end": 167
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::config": {
+   "kind": "module",
+   "name": "slatedb_uniffi::config",
+   "title": "slatedb_uniffi::config",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/config.rs",
+     "head_path": "bindings/uniffi/src/config.rs",
+     "base": {
+      "start": 1,
+      "end": 1248
+     },
+     "head": {
+      "start": 1,
+      "end": 1248
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::db": {
+   "kind": "module",
+   "name": "slatedb_uniffi::db",
+   "title": "slatedb_uniffi::db",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/db.rs",
+     "head_path": "bindings/uniffi/src/db.rs",
+     "base": {
+      "start": 1,
+      "end": 318
+     },
+     "head": {
+      "start": 1,
+      "end": 318
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::db_cache": {
+   "kind": "module",
+   "name": "slatedb_uniffi::db_cache",
+   "title": "slatedb_uniffi::db_cache",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/db_cache.rs",
+     "head_path": "bindings/uniffi/src/db_cache.rs",
+     "base": {
+      "start": 1,
+      "end": 78
+     },
+     "head": {
+      "start": 1,
+      "end": 78
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::db_reader": {
+   "kind": "module",
+   "name": "slatedb_uniffi::db_reader",
+   "title": "slatedb_uniffi::db_reader",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/db_reader.rs",
+     "head_path": "bindings/uniffi/src/db_reader.rs",
+     "base": {
+      "start": 1,
+      "end": 178
+     },
+     "head": {
+      "start": 1,
+      "end": 178
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::db_snapshot": {
+   "kind": "module",
+   "name": "slatedb_uniffi::db_snapshot",
+   "title": "slatedb_uniffi::db_snapshot",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/db_snapshot.rs",
+     "head_path": "bindings/uniffi/src/db_snapshot.rs",
+     "base": {
+      "start": 1,
+      "end": 112
+     },
+     "head": {
+      "start": 1,
+      "end": 112
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::db_transaction": {
+   "kind": "module",
+   "name": "slatedb_uniffi::db_transaction",
+   "title": "slatedb_uniffi::db_transaction",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/db_transaction.rs",
+     "head_path": "bindings/uniffi/src/db_transaction.rs",
+     "base": {
+      "start": 1,
+      "end": 258
+     },
+     "head": {
+      "start": 1,
+      "end": 258
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::error": {
+   "kind": "module",
+   "name": "slatedb_uniffi::error",
+   "title": "slatedb_uniffi::error",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/error.rs",
+     "head_path": "bindings/uniffi/src/error.rs",
+     "base": {
+      "start": 1,
+      "end": 262
+     },
+     "head": {
+      "start": 1,
+      "end": 262
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::filter_policy": {
+   "kind": "module",
+   "name": "slatedb_uniffi::filter_policy",
+   "title": "slatedb_uniffi::filter_policy",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/filter_policy.rs",
+     "head_path": "bindings/uniffi/src/filter_policy.rs",
+     "base": {
+      "start": 1,
+      "end": 229
+     },
+     "head": {
+      "start": 1,
+      "end": 229
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::iterator": {
+   "kind": "module",
+   "name": "slatedb_uniffi::iterator",
+   "title": "slatedb_uniffi::iterator",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/iterator.rs",
+     "head_path": "bindings/uniffi/src/iterator.rs",
+     "base": {
+      "start": 1,
+      "end": 155
+     },
+     "head": {
+      "start": 1,
+      "end": 155
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::logging": {
+   "kind": "module",
+   "name": "slatedb_uniffi::logging",
+   "title": "slatedb_uniffi::logging",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/logging.rs",
+     "head_path": "bindings/uniffi/src/logging.rs",
+     "base": {
+      "start": 1,
+      "end": 244
+     },
+     "head": {
+      "start": 1,
+      "end": 244
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::merge_operator": {
+   "kind": "module",
+   "name": "slatedb_uniffi::merge_operator",
+   "title": "slatedb_uniffi::merge_operator",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/merge_operator.rs",
+     "head_path": "bindings/uniffi/src/merge_operator.rs",
+     "base": {
+      "start": 1,
+      "end": 52
+     },
+     "head": {
+      "start": 1,
+      "end": 52
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::metrics": {
+   "kind": "module",
+   "name": "slatedb_uniffi::metrics",
+   "title": "slatedb_uniffi::metrics",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/metrics.rs",
+     "head_path": "bindings/uniffi/src/metrics.rs",
+     "base": {
+      "start": 1,
+      "end": 825
+     },
+     "head": {
+      "start": 1,
+      "end": 825
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::object_store": {
+   "kind": "module",
+   "name": "slatedb_uniffi::object_store",
+   "title": "slatedb_uniffi::object_store",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/object_store.rs",
+     "head_path": "bindings/uniffi/src/object_store.rs",
+     "base": {
+      "start": 1,
+      "end": 31
+     },
+     "head": {
+      "start": 1,
+      "end": 31
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::object_store_builder": {
+   "kind": "module",
+   "name": "slatedb_uniffi::object_store_builder",
+   "title": "slatedb_uniffi::object_store_builder",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/object_store_builder.rs",
+     "head_path": "bindings/uniffi/src/object_store_builder.rs",
+     "base": {
+      "start": 1,
+      "end": 577
+     },
+     "head": {
+      "start": 1,
+      "end": 577
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::runtime": {
+   "kind": "module",
+   "name": "slatedb_uniffi::runtime",
+   "title": "slatedb_uniffi::runtime",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/runtime.rs",
+     "head_path": "bindings/uniffi/src/runtime.rs",
+     "base": {
+      "start": 1,
+      "end": 134
+     },
+     "head": {
+      "start": 1,
+      "end": 134
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::settings": {
+   "kind": "module",
+   "name": "slatedb_uniffi::settings",
+   "title": "slatedb_uniffi::settings",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/settings.rs",
+     "head_path": "bindings/uniffi/src/settings.rs",
+     "base": {
+      "start": 1,
+      "end": 410
+     },
+     "head": {
+      "start": 1,
+      "end": 410
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::types": {
+   "kind": "module",
+   "name": "slatedb_uniffi::types",
+   "title": "slatedb_uniffi::types",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/types.rs",
+     "head_path": "bindings/uniffi/src/types.rs",
+     "base": {
+      "start": 1,
+      "end": 922
+     },
+     "head": {
+      "start": 1,
+      "end": 922
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::validation": {
+   "kind": "module",
+   "name": "slatedb_uniffi::validation",
+   "title": "slatedb_uniffi::validation",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/validation.rs",
+     "head_path": "bindings/uniffi/src/validation.rs",
+     "base": {
+      "start": 1,
+      "end": 30
+     },
+     "head": {
+      "start": 1,
+      "end": 30
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::wal_reader": {
+   "kind": "module",
+   "name": "slatedb_uniffi::wal_reader",
+   "title": "slatedb_uniffi::wal_reader",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/wal_reader.rs",
+     "head_path": "bindings/uniffi/src/wal_reader.rs",
+     "base": {
+      "start": 1,
+      "end": 203
+     },
+     "head": {
+      "start": 1,
+      "end": 203
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::write_batch": {
+   "kind": "module",
+   "name": "slatedb_uniffi::write_batch",
+   "title": "slatedb_uniffi::write_batch",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/write_batch.rs",
+     "head_path": "bindings/uniffi/src/write_batch.rs",
+     "base": {
+      "start": 1,
+      "end": 89
+     },
+     "head": {
+      "start": 1,
+      "end": 89
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:slatedb_uniffi::write_handle": {
+   "kind": "module",
+   "name": "slatedb_uniffi::write_handle",
+   "title": "slatedb_uniffi::write_handle",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/write_handle.rs",
+     "head_path": "bindings/uniffi/src/write_handle.rs",
+     "base": {
+      "start": 1,
+      "end": 34
+     },
+     "head": {
+      "start": 1,
+      "end": 34
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:examples::bin": {
+   "kind": "package",
+   "name": "examples::bin",
+   "title": "examples::bin",
+   "label": "package",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:examples": {
+   "kind": "package",
+   "name": "examples",
+   "title": "examples",
+   "label": "package",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:slatedb": {
+   "kind": "package",
+   "name": "slatedb",
+   "title": "slatedb",
+   "label": "package",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/lib.rs",
+     "head_path": "slatedb/src/lib.rs",
+     "base": {
+      "start": 1,
+      "end": 188
+     },
+     "head": {
+      "start": 1,
+      "end": 188
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:slatedb::cached_object_store": {
+   "kind": "package",
+   "name": "slatedb::cached_object_store",
+   "title": "slatedb::cached_object_store",
+   "label": "package",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/cached_object_store/mod.rs",
+     "head_path": "slatedb/src/cached_object_store/mod.rs",
+     "base": {
+      "start": 1,
+      "end": 11
+     },
+     "head": {
+      "start": 1,
+      "end": 11
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:slatedb::compactions_store": {
+   "kind": "package",
+   "name": "slatedb::compactions_store",
+   "title": "slatedb::compactions_store",
+   "label": "package",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/compactions_store.rs",
+     "head_path": "slatedb/src/compactions_store.rs",
+     "base": {
+      "start": 1,
+      "end": 619
+     },
+     "head": {
+      "start": 1,
+      "end": 620
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:slatedb::db": {
+   "kind": "package",
+   "name": "slatedb::db",
+   "title": "slatedb::db",
+   "label": "package",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/db.rs",
+     "head_path": "slatedb/src/db.rs",
+     "base": {
+      "start": 1,
+      "end": 12876
+     },
+     "head": {
+      "start": 1,
+      "end": 12876
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:slatedb::db_cache": {
+   "kind": "package",
+   "name": "slatedb::db_cache",
+   "title": "slatedb::db_cache",
+   "label": "package",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/db_cache/mod.rs",
+     "head_path": "slatedb/src/db_cache/mod.rs",
+     "base": {
+      "start": 1,
+      "end": 2228
+     },
+     "head": {
+      "start": 1,
+      "end": 2228
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:slatedb::format": {
+   "kind": "package",
+   "name": "slatedb::format",
+   "title": "slatedb::format",
+   "label": "package",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/format/mod.rs",
+     "head_path": "slatedb/src/format/mod.rs",
+     "base": {
+      "start": 1,
+      "end": 5
+     },
+     "head": {
+      "start": 1,
+      "end": 5
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:slatedb::garbage_collector": {
+   "kind": "package",
+   "name": "slatedb::garbage_collector",
+   "title": "slatedb::garbage_collector",
+   "label": "package",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/garbage_collector.rs",
+     "head_path": "slatedb/src/garbage_collector.rs",
+     "base": {
+      "start": 1,
+      "end": 2799
+     },
+     "head": {
+      "start": 1,
+      "end": 2799
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:slatedb::manifest": {
+   "kind": "package",
+   "name": "slatedb::manifest",
+   "title": "slatedb::manifest",
+   "label": "package",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/manifest/mod.rs",
+     "head_path": "slatedb/src/manifest/mod.rs",
+     "base": {
+      "start": 1,
+      "end": 5840
+     },
+     "head": {
+      "start": 1,
+      "end": 5840
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:slatedb::memtable_flusher": {
+   "kind": "package",
+   "name": "slatedb::memtable_flusher",
+   "title": "slatedb::memtable_flusher",
+   "label": "package",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/memtable_flusher/mod.rs",
+     "head_path": "slatedb/src/memtable_flusher/mod.rs",
+     "base": {
+      "start": 1,
+      "end": 155
+     },
+     "head": {
+      "start": 1,
+      "end": 155
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:slatedb::wal": {
+   "kind": "package",
+   "name": "slatedb::wal",
+   "title": "slatedb::wal",
+   "label": "package",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/wal/mod.rs",
+     "head_path": "slatedb/src/wal/mod.rs",
+     "base": {
+      "start": 1,
+      "end": 451
+     },
+     "head": {
+      "start": 1,
+      "end": 451
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:slatedb::wal::slatedb": {
+   "kind": "package",
+   "name": "slatedb::wal::slatedb",
+   "title": "slatedb::wal::slatedb",
+   "label": "package",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb/src/wal/slatedb/mod.rs",
+     "head_path": "slatedb/src/wal/slatedb/mod.rs",
+     "base": {
+      "start": 1,
+      "end": 12
+     },
+     "head": {
+      "start": 1,
+      "end": 12
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:slatedb_bencher": {
+   "kind": "package",
+   "name": "slatedb_bencher",
+   "title": "slatedb_bencher",
+   "label": "package",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-bencher/src/main.rs",
+     "head_path": "slatedb-bencher/src/main.rs",
+     "base": {
+      "start": 1,
+      "end": 247
+     },
+     "head": {
+      "start": 1,
+      "end": 247
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:slatedb_cli": {
+   "kind": "package",
+   "name": "slatedb_cli",
+   "title": "slatedb_cli",
+   "label": "package",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-cli/src/main.rs",
+     "head_path": "slatedb-cli/src/main.rs",
+     "base": {
+      "start": 1,
+      "end": 460
+     },
+     "head": {
+      "start": 1,
+      "end": 460
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:slatedb_common": {
+   "kind": "package",
+   "name": "slatedb_common",
+   "title": "slatedb_common",
+   "label": "package",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-common/src/lib.rs",
+     "head_path": "slatedb-common/src/lib.rs",
+     "base": {
+      "start": 1,
+      "end": 36
+     },
+     "head": {
+      "start": 1,
+      "end": 36
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:slatedb_dst": {
+   "kind": "package",
+   "name": "slatedb_dst",
+   "title": "slatedb_dst",
+   "label": "package",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/lib.rs",
+     "head_path": "slatedb-dst/src/lib.rs",
+     "base": {
+      "start": 1,
+      "end": 28
+     },
+     "head": {
+      "start": 1,
+      "end": 28
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:slatedb_dst::actors": {
+   "kind": "package",
+   "name": "slatedb_dst::actors",
+   "title": "slatedb_dst::actors",
+   "label": "package",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/actors/mod.rs",
+     "head_path": "slatedb-dst/src/actors/mod.rs",
+     "base": {
+      "start": 1,
+      "end": 36
+     },
+     "head": {
+      "start": 1,
+      "end": 36
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:slatedb_dst::actors::bank": {
+   "kind": "package",
+   "name": "slatedb_dst::actors::bank",
+   "title": "slatedb_dst::actors::bank",
+   "label": "package",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-dst/src/actors/bank/mod.rs",
+     "head_path": "slatedb-dst/src/actors/bank/mod.rs",
+     "base": {
+      "start": 1,
+      "end": 436
+     },
+     "head": {
+      "start": 1,
+      "end": 436
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:slatedb_txn_obj": {
+   "kind": "package",
+   "name": "slatedb_txn_obj",
+   "title": "slatedb_txn_obj",
+   "label": "package",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "slatedb-txn-obj/src/lib.rs",
+     "head_path": "slatedb-txn-obj/src/lib.rs",
+     "base": {
+      "start": 1,
+      "end": 1521
+     },
+     "head": {
+      "start": 1,
+      "end": 1577
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:slatedb_uniffi": {
+   "kind": "package",
+   "name": "slatedb_uniffi",
+   "title": "slatedb_uniffi",
+   "label": "package",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "bindings/uniffi/src/lib.rs",
+     "head_path": "bindings/uniffi/src/lib.rs",
+     "base": {
+      "start": 1,
+      "end": 69
+     },
+     "head": {
+      "start": 1,
+      "end": 69
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  }
+ },
+ "files": [
+  {
+   "path": "slatedb-txn-obj/src/lib.rs",
+   "old_path": "slatedb-txn-obj/src/lib.rs",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 58,
+   "dels": 2,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 11,
+     "dels": 2
+    },
+    {
+     "kind": "test",
+     "adds": 47,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "slatedb/src/compactions_store.rs",
+   "old_path": "slatedb/src/compactions_store.rs",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 1,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 1,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "slatedb/src/compactor.rs",
+   "old_path": "slatedb/src/compactor.rs",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 43,
+   "dels": 1,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 6,
+     "dels": 0
+    },
+    {
+     "kind": "test",
+     "adds": 37,
+     "dels": 1
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "slatedb/src/compactor_state_protocols.rs",
+   "old_path": "slatedb/src/compactor_state_protocols.rs",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 17,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 5,
+     "dels": 0
+    },
+    {
+     "kind": "test",
+     "adds": 12,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "slatedb/src/db/builder.rs",
+   "old_path": "slatedb/src/db/builder.rs",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 43,
+   "dels": 1,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 30,
+     "dels": 1
+    },
+    {
+     "kind": "test",
+     "adds": 13,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "slatedb/src/fence.rs",
+   "old_path": "slatedb/src/fence.rs",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 5,
+   "dels": 3,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 2,
+     "dels": 0
+    },
+    {
+     "kind": "test",
+     "adds": 3,
+     "dels": 3
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "slatedb/src/manifest/store.rs",
+   "old_path": "slatedb/src/manifest/store.rs",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 169,
+   "dels": 41,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 50,
+     "dels": 11
+    },
+    {
+     "kind": "test",
+     "adds": 119,
+     "dels": 30
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "slatedb/src/memtable_flusher/manifest_writer.rs",
+   "old_path": "slatedb/src/memtable_flusher/manifest_writer.rs",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 2,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 2,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "slatedb/src/memtable_flusher/tracker.rs",
+   "old_path": "slatedb/src/memtable_flusher/tracker.rs",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 9,
+   "dels": 4,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 9,
+     "dels": 4
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  }
+ ],
+ "comments": [],
+ "facets": [],
+ "parts": [],
+ "tour": {
+  "below": [],
+  "chapters": [],
+  "ending": null,
+  "flags": [],
+  "map": [
+   {
+    "package": "slatedb",
+    "files": [
+     "slatedb/src/compactions_store.rs",
+     "slatedb/src/compactor.rs",
+     "slatedb/src/compactor_state_protocols.rs",
+     "slatedb/src/db/builder.rs",
+     "slatedb/src/fence.rs",
+     "slatedb/src/manifest/store.rs",
+     "slatedb/src/memtable_flusher/manifest_writer.rs",
+     "slatedb/src/memtable_flusher/tracker.rs"
+    ]
+   },
+   {
+    "package": "slatedb_txn_obj",
+    "files": [
+     "slatedb-txn-obj/src/lib.rs"
+    ]
+   }
+  ],
+  "narrated": false,
+  "summary": null
+ }
+}
