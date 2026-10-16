@@ -15,6 +15,7 @@ perch-syntax = { path = "../perch-syntax" }
 perch-lsp = { path = "../perch-lsp" }
 perch-agent = { path = "../perch-agent" }
 perch-knowledge = { path = "../perch-knowledge" }
+perch-changescape = { path = "../perch-changescape" }
 pulldown-cmark = { version = "0.13", default-features = false }
 semver = "1"
 anyhow.workspace = true

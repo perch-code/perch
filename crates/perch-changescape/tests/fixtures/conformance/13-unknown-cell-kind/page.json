@@ -1,0 +1,219 @@
+{
+  "schema": 4,
+  "meta": {
+    "key": "changescape-acme-widgets-7",
+    "title": "Add a cache and move the text helpers",
+    "repo": "acme/widgets",
+    "number": 7,
+    "url": "https://github.com/acme/widgets/pull/7",
+    "author": "alice",
+    "state": "open",
+    "language": "python",
+    "base": {
+      "ref": "main",
+      "sha": "c6f42045e20f643a2bbcfec6bb32d5750ad6a9e9"
+    },
+    "head": {
+      "ref": "cache",
+      "sha": "45d097f615470161a761dc80d71d532b1e5d7b19"
+    },
+    "adds": 52,
+    "dels": 12,
+    "files": 4,
+    "issues": [],
+    "generated": "2026-10-12T07:33:36+00:00"
+  },
+  "sections": [
+    {
+      "id": "overview",
+      "label": "Overview",
+      "icon": "overview",
+      "question": "What does this change do?",
+      "empty": "",
+      "views": [
+        "overview"
+      ],
+      "reason": null
+    }
+  ],
+  "views": [
+    {
+      "id": "overview",
+      "section": "overview",
+      "title": "Overview",
+      "subtitle": "The change in one page",
+      "question": "What does this change do?",
+      "icon": "overview",
+      "metric": "4 files",
+      "narration": null,
+      "blocks": [
+        {
+          "id": "cells",
+          "type": "table",
+          "title": "One row with each kind of cell",
+          "note": null,
+          "element": null,
+          "columns": [
+            {
+              "key": "text",
+              "label": "Text",
+              "kind": "text"
+            },
+            {
+              "key": "number",
+              "label": "Number",
+              "kind": "num"
+            },
+            {
+              "key": "status",
+              "label": "Status",
+              "kind": "status"
+            },
+            {
+              "key": "element",
+              "label": "Element",
+              "kind": "mono"
+            },
+            {
+              "key": "file",
+              "label": "File",
+              "kind": "text"
+            },
+            {
+              "key": "facet",
+              "label": "Facet",
+              "kind": "text"
+            },
+            {
+              "key": "list",
+              "label": "List",
+              "kind": "refs"
+            }
+          ],
+          "rows": [
+            {
+              "cells": {
+                "text": {
+                  "text": "handle",
+                  "cell": "text"
+                },
+                "number": {
+                  "value": 4,
+                  "cell": "chart"
+                },
+                "status": {
+                  "status": "changed",
+                  "cell": "status"
+                },
+                "element": {
+                  "text": "handle",
+                  "element": "fn:pkg.api.handle",
+                  "side": "head",
+                  "cell": "element"
+                },
+                "file": {
+                  "text": "api.py",
+                  "path": "pkg/api.py",
+                  "side": "head",
+                  "line": 12,
+                  "cell": "file"
+                },
+                "facet": {
+                  "text": "New code",
+                  "facet": "part",
+                  "option": "new",
+                  "cell": "facet"
+                },
+                "list": {
+                  "items": [
+                    {
+                      "text": "handle",
+                      "cell": "text"
+                    },
+                    {
+                      "value": 4,
+                      "cell": "number"
+                    },
+                    {
+                      "status": "added",
+                      "cell": "status"
+                    },
+                    {
+                      "text": "handle",
+                      "element": "fn:pkg.api.handle",
+                      "side": null,
+                      "cell": "element"
+                    },
+                    {
+                      "text": "api.py",
+                      "path": "pkg/api.py",
+                      "side": "head",
+                      "line": null,
+                      "cell": "file"
+                    },
+                    {
+                      "text": "New code",
+                      "facet": "part",
+                      "option": "new",
+                      "cell": "facet"
+                    }
+                  ],
+                  "cell": "list"
+                }
+              },
+              "rank": "key",
+              "why": "Each kind of cell.",
+              "group": null,
+              "element": null,
+              "side": null,
+              "dim": false
+            }
+          ],
+          "groups": [],
+          "fold": null
+        }
+      ]
+    }
+  ],
+  "elements": {
+    "fn:pkg.api.handle": {
+      "kind": "function",
+      "name": "pkg.api.handle",
+      "title": "handle",
+      "label": "handle",
+      "status": "changed",
+      "detail": null,
+      "url": null,
+      "refs": [],
+      "hash": null,
+      "appears": [
+        {
+          "view": "overview",
+          "block": "cells",
+          "where": "view"
+        }
+      ]
+    }
+  },
+  "files": [],
+  "comments": [],
+  "facets": [
+    {
+      "id": "part",
+      "label": "Part",
+      "note": null,
+      "options": [
+        {
+          "id": "new",
+          "label": "New code",
+          "note": null,
+          "elements": [
+            "fn:pkg.api.handle"
+          ]
+        }
+      ]
+    }
+  ],
+  "parts": [],
+  "tour": null
+}

@@ -1,0 +1,7804 @@
+{
+ "schema": 4,
+ "meta": {
+  "key": "changescape-dvryaboy-changescape-22",
+  "title": "Page format 4: typed page, facts, tour, and narration",
+  "repo": "dvryaboy/changescape",
+  "number": 22,
+  "url": "https://github.com/dvryaboy/changescape/pull/22",
+  "author": "dvryaboy",
+  "state": "open",
+  "language": "python",
+  "base": {
+   "ref": "refactor/typed-diff-rows",
+   "sha": "ae9fc071cba9dae05d4161b72f70ae1f3480222b"
+  },
+  "head": {
+   "ref": "page-v4",
+   "sha": "9439f0f8623b03a87a1d104c710b1f0e98cc72ed"
+  },
+  "adds": 19075,
+  "dels": 10092,
+  "files": 207,
+  "issues": [],
+  "generated": "2026-10-14T13:02:19+00:00"
+ },
+ "sections": [],
+ "views": [],
+ "elements": {
+  "mod:changescape": {
+   "kind": "module",
+   "name": "changescape",
+   "title": "changescape",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/__init__.py",
+     "head_path": "skill/src/changescape/__init__.py",
+     "base": null,
+     "head": null,
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.__main__": {
+   "kind": "module",
+   "name": "changescape.__main__",
+   "title": "changescape.__main__",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/__main__.py",
+     "head_path": "skill/src/changescape/__main__.py",
+     "base": {
+      "start": 1,
+      "end": 3
+     },
+     "head": {
+      "start": 1,
+      "end": 3
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.atlas": {
+   "kind": "module",
+   "name": "changescape.atlas",
+   "title": "changescape.atlas",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/atlas.py",
+     "head_path": "skill/src/changescape/atlas.py",
+     "base": {
+      "start": 1,
+      "end": 565
+     },
+     "head": {
+      "start": 1,
+      "end": 532
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.brief": {
+   "kind": "module",
+   "name": "changescape.brief",
+   "title": "changescape.brief",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/brief.py",
+     "head_path": "skill/src/changescape/brief.py",
+     "base": {
+      "start": 1,
+      "end": 232
+     },
+     "head": {
+      "start": 1,
+      "end": 259
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.build": {
+   "kind": "module",
+   "name": "changescape.build",
+   "title": "changescape.build",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "skill/src/changescape/build.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 302
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.changed": {
+   "kind": "module",
+   "name": "changescape.changed",
+   "title": "changescape.changed",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/changed.py",
+     "head_path": "skill/src/changescape/changed.py",
+     "base": {
+      "start": 1,
+      "end": 53
+     },
+     "head": {
+      "start": 1,
+      "end": 75
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.cli": {
+   "kind": "module",
+   "name": "changescape.cli",
+   "title": "changescape.cli",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/cli.py",
+     "head_path": "skill/src/changescape/cli.py",
+     "base": {
+      "start": 1,
+      "end": 59
+     },
+     "head": {
+      "start": 1,
+      "end": 59
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.commands": {
+   "kind": "module",
+   "name": "changescape.commands",
+   "title": "changescape.commands",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/commands/__init__.py",
+     "head_path": "skill/src/changescape/commands/__init__.py",
+     "base": null,
+     "head": null,
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.commands.assemble": {
+   "kind": "module",
+   "name": "changescape.commands.assemble",
+   "title": "changescape.commands.assemble",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/commands/assemble.py",
+     "head_path": "skill/src/changescape/commands/assemble.py",
+     "base": {
+      "start": 1,
+      "end": 87
+     },
+     "head": {
+      "start": 1,
+      "end": 100
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.commands.check": {
+   "kind": "module",
+   "name": "changescape.commands.check",
+   "title": "changescape.commands.check",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/commands/check.py",
+     "head_path": "skill/src/changescape/commands/check.py",
+     "base": {
+      "start": 1,
+      "end": 56
+     },
+     "head": {
+      "start": 1,
+      "end": 85
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.commands.collect": {
+   "kind": "module",
+   "name": "changescape.commands.collect",
+   "title": "changescape.commands.collect",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/commands/collect.py",
+     "head_path": "skill/src/changescape/commands/collect.py",
+     "base": {
+      "start": 1,
+      "end": 129
+     },
+     "head": {
+      "start": 1,
+      "end": 104
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.context": {
+   "kind": "module",
+   "name": "changescape.context",
+   "title": "changescape.context",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/context.py",
+     "head_path": "skill/src/changescape/context.py",
+     "base": {
+      "start": 1,
+      "end": 871
+     },
+     "head": {
+      "start": 1,
+      "end": 1098
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.delta": {
+   "kind": "module",
+   "name": "changescape.delta",
+   "title": "changescape.delta",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/delta.py",
+     "head_path": "skill/src/changescape/delta.py",
+     "base": {
+      "start": 1,
+      "end": 157
+     },
+     "head": {
+      "start": 1,
+      "end": 165
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.elements": {
+   "kind": "module",
+   "name": "changescape.elements",
+   "title": "changescape.elements",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/elements.py",
+     "head_path": "skill/src/changescape/elements.py",
+     "base": {
+      "start": 1,
+      "end": 194
+     },
+     "head": {
+      "start": 1,
+      "end": 256
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.facets": {
+   "kind": "module",
+   "name": "changescape.facets",
+   "title": "changescape.facets",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/facets.py",
+     "head_path": "skill/src/changescape/facets.py",
+     "base": {
+      "start": 1,
+      "end": 129
+     },
+     "head": {
+      "start": 1,
+      "end": 143
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.ghq": {
+   "kind": "module",
+   "name": "changescape.ghq",
+   "title": "changescape.ghq",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/ghq.py",
+     "head_path": "skill/src/changescape/ghq.py",
+     "base": {
+      "start": 1,
+      "end": 178
+     },
+     "head": {
+      "start": 1,
+      "end": 245
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.gitio": {
+   "kind": "module",
+   "name": "changescape.gitio",
+   "title": "changescape.gitio",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/gitio.py",
+     "head_path": "skill/src/changescape/gitio.py",
+     "base": {
+      "start": 1,
+      "end": 461
+     },
+     "head": {
+      "start": 1,
+      "end": 399
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.index": {
+   "kind": "module",
+   "name": "changescape.index",
+   "title": "changescape.index",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/index.py",
+     "head_path": "skill/src/changescape/index.py",
+     "base": {
+      "start": 1,
+      "end": 223
+     },
+     "head": {
+      "start": 1,
+      "end": 291
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.lang": {
+   "kind": "module",
+   "name": "changescape.lang",
+   "title": "changescape.lang",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lang/__init__.py",
+     "head_path": "skill/src/changescape/lang/__init__.py",
+     "base": {
+      "start": 1,
+      "end": 222
+     },
+     "head": {
+      "start": 1,
+      "end": 228
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.lang.base": {
+   "kind": "module",
+   "name": "changescape.lang.base",
+   "title": "changescape.lang.base",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lang/base.py",
+     "head_path": "skill/src/changescape/lang/base.py",
+     "base": {
+      "start": 1,
+      "end": 46
+     },
+     "head": {
+      "start": 1,
+      "end": 48
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.lang.pyfacts": {
+   "kind": "module",
+   "name": "changescape.lang.pyfacts",
+   "title": "changescape.lang.pyfacts",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lang/pyfacts.py",
+     "head_path": "skill/src/changescape/lang/pyfacts.py",
+     "base": {
+      "start": 1,
+      "end": 374
+     },
+     "head": {
+      "start": 1,
+      "end": 374
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.lang.python": {
+   "kind": "module",
+   "name": "changescape.lang.python",
+   "title": "changescape.lang.python",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lang/python.py",
+     "head_path": "skill/src/changescape/lang/python.py",
+     "base": {
+      "start": 1,
+      "end": 291
+     },
+     "head": {
+      "start": 1,
+      "end": 295
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.lang.rust": {
+   "kind": "module",
+   "name": "changescape.lang.rust",
+   "title": "changescape.lang.rust",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lang/rust.py",
+     "head_path": "skill/src/changescape/lang/rust.py",
+     "base": {
+      "start": 1,
+      "end": 1493
+     },
+     "head": {
+      "start": 1,
+      "end": 1503
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.lenses": {
+   "kind": "module",
+   "name": "changescape.lenses",
+   "title": "changescape.lenses",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lenses/__init__.py",
+     "head_path": "skill/src/changescape/lenses/__init__.py",
+     "base": {
+      "start": 1,
+      "end": 238
+     },
+     "head": {
+      "start": 1,
+      "end": 306
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.lenses._common": {
+   "kind": "module",
+   "name": "changescape.lenses._common",
+   "title": "changescape.lenses._common",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lenses/_common.py",
+     "head_path": "skill/src/changescape/lenses/_common.py",
+     "base": {
+      "start": 1,
+      "end": 91
+     },
+     "head": {
+      "start": 1,
+      "end": 125
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.lenses._diagrams": {
+   "kind": "module",
+   "name": "changescape.lenses._diagrams",
+   "title": "changescape.lenses._diagrams",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lenses/_diagrams.py",
+     "head_path": "skill/src/changescape/lenses/_diagrams.py",
+     "base": {
+      "start": 1,
+      "end": 208
+     },
+     "head": {
+      "start": 1,
+      "end": 292
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.lenses._jobsvg": {
+   "kind": "module",
+   "name": "changescape.lenses._jobsvg",
+   "title": "changescape.lenses._jobsvg",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lenses/_jobsvg.py",
+     "head_path": "skill/src/changescape/lenses/_jobsvg.py",
+     "base": {
+      "start": 1,
+      "end": 260
+     },
+     "head": {
+      "start": 1,
+      "end": 264
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.lenses._struct": {
+   "kind": "module",
+   "name": "changescape.lenses._struct",
+   "title": "changescape.lenses._struct",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lenses/_struct.py",
+     "head_path": "skill/src/changescape/lenses/_struct.py",
+     "base": {
+      "start": 1,
+      "end": 140
+     },
+     "head": {
+      "start": 1,
+      "end": 140
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.lenses.code": {
+   "kind": "module",
+   "name": "changescape.lenses.code",
+   "title": "changescape.lenses.code",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lenses/code.py",
+     "head_path": "skill/src/changescape/lenses/code.py",
+     "base": {
+      "start": 1,
+      "end": 28
+     },
+     "head": {
+      "start": 1,
+      "end": 33
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.lenses.context": {
+   "kind": "module",
+   "name": "changescape.lenses.context",
+   "title": "changescape.lenses.context",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lenses/context.py",
+     "head_path": "skill/src/changescape/lenses/context.py",
+     "base": {
+      "start": 1,
+      "end": 926
+     },
+     "head": {
+      "start": 1,
+      "end": 999
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.lenses.contracts": {
+   "kind": "module",
+   "name": "changescape.lenses.contracts",
+   "title": "changescape.lenses.contracts",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lenses/contracts.py",
+     "head_path": "skill/src/changescape/lenses/contracts.py",
+     "base": {
+      "start": 1,
+      "end": 686
+     },
+     "head": {
+      "start": 1,
+      "end": 779
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.lenses.decisions": {
+   "kind": "module",
+   "name": "changescape.lenses.decisions",
+   "title": "changescape.lenses.decisions",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lenses/decisions.py",
+     "head_path": "skill/src/changescape/lenses/decisions.py",
+     "base": {
+      "start": 1,
+      "end": 271
+     },
+     "head": {
+      "start": 1,
+      "end": 309
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.lenses.flow": {
+   "kind": "module",
+   "name": "changescape.lenses.flow",
+   "title": "changescape.lenses.flow",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lenses/flow.py",
+     "head_path": "skill/src/changescape/lenses/flow.py",
+     "base": {
+      "start": 1,
+      "end": 468
+     },
+     "head": {
+      "start": 1,
+      "end": 500
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.lenses.jobs": {
+   "kind": "module",
+   "name": "changescape.lenses.jobs",
+   "title": "changescape.lenses.jobs",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lenses/jobs.py",
+     "head_path": "skill/src/changescape/lenses/jobs.py",
+     "base": {
+      "start": 1,
+      "end": 668
+     },
+     "head": {
+      "start": 1,
+      "end": 737
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.lenses.map": {
+   "kind": "module",
+   "name": "changescape.lenses.map",
+   "title": "changescape.lenses.map",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lenses/map.py",
+     "head_path": "skill/src/changescape/lenses/map.py",
+     "base": {
+      "start": 1,
+      "end": 881
+     },
+     "head": {
+      "start": 1,
+      "end": 918
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.lenses.overview": {
+   "kind": "module",
+   "name": "changescape.lenses.overview",
+   "title": "changescape.lenses.overview",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lenses/overview.py",
+     "head_path": "skill/src/changescape/lenses/overview.py",
+     "base": {
+      "start": 1,
+      "end": 134
+     },
+     "head": {
+      "start": 1,
+      "end": 114
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.lenses.surroundings": {
+   "kind": "module",
+   "name": "changescape.lenses.surroundings",
+   "title": "changescape.lenses.surroundings",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lenses/surroundings.py",
+     "head_path": "skill/src/changescape/lenses/surroundings.py",
+     "base": {
+      "start": 1,
+      "end": 980
+     },
+     "head": {
+      "start": 1,
+      "end": 993
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.lenses.tests": {
+   "kind": "module",
+   "name": "changescape.lenses.tests",
+   "title": "changescape.lenses.tests",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lenses/tests.py",
+     "head_path": "skill/src/changescape/lenses/tests.py",
+     "base": {
+      "start": 1,
+      "end": 224
+     },
+     "head": {
+      "start": 1,
+      "end": 235
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.model": {
+   "kind": "module",
+   "name": "changescape.model",
+   "title": "changescape.model",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/model.py",
+     "head_path": "skill/src/changescape/model.py",
+     "base": {
+      "start": 1,
+      "end": 58
+     },
+     "head": {
+      "start": 1,
+      "end": 58
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.moves": {
+   "kind": "module",
+   "name": "changescape.moves",
+   "title": "changescape.moves",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/moves.py",
+     "head_path": "skill/src/changescape/moves.py",
+     "base": {
+      "start": 1,
+      "end": 127
+     },
+     "head": {
+      "start": 1,
+      "end": 127
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.output": {
+   "kind": "module",
+   "name": "changescape.output",
+   "title": "changescape.output",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/output.py",
+     "head_path": "skill/src/changescape/output.py",
+     "base": {
+      "start": 1,
+      "end": 73
+     },
+     "head": {
+      "start": 1,
+      "end": 67
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.page": {
+   "kind": "module",
+   "name": "changescape.page",
+   "title": "changescape.page",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "skill/src/changescape/page/__init__.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 57
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.page.core": {
+   "kind": "module",
+   "name": "changescape.page.core",
+   "title": "changescape.page.core",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "skill/src/changescape/page/core.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 381
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.page.ids": {
+   "kind": "module",
+   "name": "changescape.page.ids",
+   "title": "changescape.page.ids",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "skill/src/changescape/page/ids.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 67
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.page.json": {
+   "kind": "module",
+   "name": "changescape.page.json",
+   "title": "changescape.page.json",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "skill/src/changescape/page/json.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 101
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.page.narration": {
+   "kind": "module",
+   "name": "changescape.page.narration",
+   "title": "changescape.page.narration",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "skill/src/changescape/page/narration.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 191
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.page.tour": {
+   "kind": "module",
+   "name": "changescape.page.tour",
+   "title": "changescape.page.tour",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "skill/src/changescape/page/tour.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 250
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.page.views": {
+   "kind": "module",
+   "name": "changescape.page.views",
+   "title": "changescape.page.views",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "skill/src/changescape/page/views.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 263
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.part_elements": {
+   "kind": "module",
+   "name": "changescape.part_elements",
+   "title": "changescape.part_elements",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/part_elements.py",
+     "head_path": "skill/src/changescape/part_elements.py",
+     "base": {
+      "start": 1,
+      "end": 71
+     },
+     "head": {
+      "start": 1,
+      "end": 77
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.parts": {
+   "kind": "module",
+   "name": "changescape.parts",
+   "title": "changescape.parts",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/parts.py",
+     "head_path": "skill/src/changescape/parts.py",
+     "base": {
+      "start": 1,
+      "end": 450
+     },
+     "head": {
+      "start": 1,
+      "end": 495
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.rank": {
+   "kind": "module",
+   "name": "changescape.rank",
+   "title": "changescape.rank",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/rank.py",
+     "head_path": "skill/src/changescape/rank.py",
+     "base": {
+      "start": 1,
+      "end": 113
+     },
+     "head": {
+      "start": 1,
+      "end": 118
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.review": {
+   "kind": "module",
+   "name": "changescape.review",
+   "title": "changescape.review",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/review.py",
+     "head_path": "skill/src/changescape/review.py",
+     "base": {
+      "start": 1,
+      "end": 148
+     },
+     "head": {
+      "start": 1,
+      "end": 133
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.sections": {
+   "kind": "module",
+   "name": "changescape.sections",
+   "title": "changescape.sections",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/sections.py",
+     "head_path": "skill/src/changescape/sections.py",
+     "base": {
+      "start": 1,
+      "end": 72
+     },
+     "head": {
+      "start": 1,
+      "end": 89
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.stages": {
+   "kind": "module",
+   "name": "changescape.stages",
+   "title": "changescape.stages",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/stages/__init__.py",
+     "head_path": "skill/src/changescape/stages/__init__.py",
+     "base": {
+      "start": 1,
+      "end": 1
+     },
+     "head": {
+      "start": 1,
+      "end": 1
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.stages.base": {
+   "kind": "module",
+   "name": "changescape.stages.base",
+   "title": "changescape.stages.base",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/stages/base.py",
+     "head_path": "skill/src/changescape/stages/base.py",
+     "base": {
+      "start": 1,
+      "end": 99
+     },
+     "head": {
+      "start": 1,
+      "end": 75
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.stages.context": {
+   "kind": "module",
+   "name": "changescape.stages.context",
+   "title": "changescape.stages.context",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/stages/context.py",
+     "head_path": "skill/src/changescape/stages/context.py",
+     "base": {
+      "start": 1,
+      "end": 92
+     },
+     "head": {
+      "start": 1,
+      "end": 70
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.stages.runner": {
+   "kind": "module",
+   "name": "changescape.stages.runner",
+   "title": "changescape.stages.runner",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/stages/runner.py",
+     "head_path": "skill/src/changescape/stages/runner.py",
+     "base": {
+      "start": 1,
+      "end": 150
+     },
+     "head": {
+      "start": 1,
+      "end": 83
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.svg": {
+   "kind": "module",
+   "name": "changescape.svg",
+   "title": "changescape.svg",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/svg.py",
+     "head_path": "skill/src/changescape/svg.py",
+     "base": {
+      "start": 1,
+      "end": 138
+     },
+     "head": {
+      "start": 1,
+      "end": 121
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.text": {
+   "kind": "module",
+   "name": "changescape.text",
+   "title": "changescape.text",
+   "label": "module",
+   "status": "context",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/text.py",
+     "head_path": "skill/src/changescape/text.py",
+     "base": {
+      "start": 1,
+      "end": 9
+     },
+     "head": {
+      "start": 1,
+      "end": 9
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.tour": {
+   "kind": "module",
+   "name": "changescape.tour",
+   "title": "changescape.tour",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/tour/__init__.py",
+     "head_path": "skill/src/changescape/tour/__init__.py",
+     "base": {
+      "start": 1,
+      "end": 164
+     },
+     "head": {
+      "start": 1,
+      "end": 163
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.tour.apply": {
+   "kind": "module",
+   "name": "changescape.tour.apply",
+   "title": "changescape.tour.apply",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/tour/apply.py",
+     "head_path": "skill/src/changescape/tour/apply.py",
+     "base": {
+      "start": 1,
+      "end": 355
+     },
+     "head": {
+      "start": 1,
+      "end": 468
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.tour.asides": {
+   "kind": "module",
+   "name": "changescape.tour.asides",
+   "title": "changescape.tour.asides",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/tour/asides.py",
+     "head_path": "skill/src/changescape/tour/asides.py",
+     "base": {
+      "start": 1,
+      "end": 190
+     },
+     "head": {
+      "start": 1,
+      "end": 206
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.tour.brief": {
+   "kind": "module",
+   "name": "changescape.tour.brief",
+   "title": "changescape.tour.brief",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/tour/brief.py",
+     "head_path": "skill/src/changescape/tour/brief.py",
+     "base": {
+      "start": 1,
+      "end": 129
+     },
+     "head": {
+      "start": 1,
+      "end": 132
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.tour.build": {
+   "kind": "module",
+   "name": "changescape.tour.build",
+   "title": "changescape.tour.build",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/tour/build.py",
+     "head_path": "skill/src/changescape/tour/build.py",
+     "base": {
+      "start": 1,
+      "end": 953
+     },
+     "head": {
+      "start": 1,
+      "end": 1001
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.tour.check": {
+   "kind": "module",
+   "name": "changescape.tour.check",
+   "title": "changescape.tour.check",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/tour/check.py",
+     "head_path": "skill/src/changescape/tour/check.py",
+     "base": {
+      "start": 1,
+      "end": 83
+     },
+     "head": {
+      "start": 1,
+      "end": 96
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.tour.judge": {
+   "kind": "module",
+   "name": "changescape.tour.judge",
+   "title": "changescape.tour.judge",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/tour/judge.py",
+     "head_path": "skill/src/changescape/tour/judge.py",
+     "base": {
+      "start": 1,
+      "end": 75
+     },
+     "head": {
+      "start": 1,
+      "end": 75
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.tour.model": {
+   "kind": "module",
+   "name": "changescape.tour.model",
+   "title": "changescape.tour.model",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/tour/model.py",
+     "head_path": "skill/src/changescape/tour/model.py",
+     "base": {
+      "start": 1,
+      "end": 179
+     },
+     "head": {
+      "start": 1,
+      "end": 161
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.tour.pictures": {
+   "kind": "module",
+   "name": "changescape.tour.pictures",
+   "title": "changescape.tour.pictures",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/tour/pictures.py",
+     "head_path": "skill/src/changescape/tour/pictures.py",
+     "base": {
+      "start": 1,
+      "end": 201
+     },
+     "head": {
+      "start": 1,
+      "end": 198
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.tour.relies": {
+   "kind": "module",
+   "name": "changescape.tour.relies",
+   "title": "changescape.tour.relies",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/tour/relies.py",
+     "head_path": "skill/src/changescape/tour/relies.py",
+     "base": {
+      "start": 1,
+      "end": 283
+     },
+     "head": {
+      "start": 1,
+      "end": 315
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.tour.seq": {
+   "kind": "module",
+   "name": "changescape.tour.seq",
+   "title": "changescape.tour.seq",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/tour/seq.py",
+     "head_path": "skill/src/changescape/tour/seq.py",
+     "base": {
+      "start": 1,
+      "end": 348
+     },
+     "head": {
+      "start": 1,
+      "end": 366
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.tour.stage": {
+   "kind": "module",
+   "name": "changescape.tour.stage",
+   "title": "changescape.tour.stage",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/tour/stage.py",
+     "head_path": "skill/src/changescape/tour/stage.py",
+     "base": {
+      "start": 1,
+      "end": 68
+     },
+     "head": {
+      "start": 1,
+      "end": 50
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.weigh": {
+   "kind": "module",
+   "name": "changescape.weigh",
+   "title": "changescape.weigh",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/weigh.py",
+     "head_path": "skill/src/changescape/weigh.py",
+     "base": {
+      "start": 1,
+      "end": 470
+     },
+     "head": {
+      "start": 1,
+      "end": 500
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.narrate": {
+   "kind": "module",
+   "name": "changescape.narrate",
+   "title": "changescape.narrate",
+   "label": "module",
+   "status": "removed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/narrate.py",
+     "head_path": null,
+     "base": {
+      "start": 1,
+      "end": 69
+     },
+     "head": null,
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.schema": {
+   "kind": "module",
+   "name": "changescape.schema",
+   "title": "changescape.schema",
+   "label": "module",
+   "status": "removed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/schema.py",
+     "head_path": null,
+     "base": {
+      "start": 1,
+      "end": 78
+     },
+     "head": null,
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.stages.sections": {
+   "kind": "module",
+   "name": "changescape.stages.sections",
+   "title": "changescape.stages.sections",
+   "label": "module",
+   "status": "removed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/stages/sections.py",
+     "head_path": null,
+     "base": {
+      "start": 1,
+      "end": 60
+     },
+     "head": null,
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:changescape": {
+   "kind": "package",
+   "name": "changescape",
+   "title": "changescape",
+   "label": "package",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/__init__.py",
+     "head_path": "skill/src/changescape/__init__.py",
+     "base": null,
+     "head": null,
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:changescape.commands": {
+   "kind": "package",
+   "name": "changescape.commands",
+   "title": "changescape.commands",
+   "label": "package",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/commands/__init__.py",
+     "head_path": "skill/src/changescape/commands/__init__.py",
+     "base": null,
+     "head": null,
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:changescape.lang": {
+   "kind": "package",
+   "name": "changescape.lang",
+   "title": "changescape.lang",
+   "label": "package",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lang/__init__.py",
+     "head_path": "skill/src/changescape/lang/__init__.py",
+     "base": {
+      "start": 1,
+      "end": 222
+     },
+     "head": {
+      "start": 1,
+      "end": 228
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:changescape.lenses": {
+   "kind": "package",
+   "name": "changescape.lenses",
+   "title": "changescape.lenses",
+   "label": "package",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/lenses/__init__.py",
+     "head_path": "skill/src/changescape/lenses/__init__.py",
+     "base": {
+      "start": 1,
+      "end": 238
+     },
+     "head": {
+      "start": 1,
+      "end": 306
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:changescape.page": {
+   "kind": "package",
+   "name": "changescape.page",
+   "title": "changescape.page",
+   "label": "package",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "skill/src/changescape/page/__init__.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 57
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:changescape.stages": {
+   "kind": "package",
+   "name": "changescape.stages",
+   "title": "changescape.stages",
+   "label": "package",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/stages/__init__.py",
+     "head_path": "skill/src/changescape/stages/__init__.py",
+     "base": {
+      "start": 1,
+      "end": 1
+     },
+     "head": {
+      "start": 1,
+      "end": 1
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "pkg:changescape.tour": {
+   "kind": "package",
+   "name": "changescape.tour",
+   "title": "changescape.tour",
+   "label": "package",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/tour/__init__.py",
+     "head_path": "skill/src/changescape/tour/__init__.py",
+     "base": {
+      "start": 1,
+      "end": 164
+     },
+     "head": {
+      "start": 1,
+      "end": 163
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:changescape.kinds": {
+   "kind": "module",
+   "name": "changescape.kinds",
+   "title": "changescape.kinds",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "skill/src/changescape/kinds.py",
+     "head_path": "skill/src/changescape/kinds.py",
+     "base": {
+      "start": 1,
+      "end": 269
+     },
+     "head": {
+      "start": 1,
+      "end": 291
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.conftest": {
+   "kind": "module",
+   "name": "tests.conftest",
+   "title": "tests.conftest",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/conftest.py",
+     "head_path": "tests/conftest.py",
+     "base": {
+      "start": 1,
+      "end": 375
+     },
+     "head": {
+      "start": 1,
+      "end": 428
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_build_page": {
+   "kind": "module",
+   "name": "tests.test_build_page",
+   "title": "tests.test_build_page",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "tests/test_build_page.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 351
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_changed": {
+   "kind": "module",
+   "name": "tests.test_changed",
+   "title": "tests.test_changed",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_changed.py",
+     "head_path": "tests/test_changed.py",
+     "base": {
+      "start": 1,
+      "end": 21
+     },
+     "head": {
+      "start": 1,
+      "end": 159
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_diagrams": {
+   "kind": "module",
+   "name": "tests.test_diagrams",
+   "title": "tests.test_diagrams",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "tests/test_diagrams.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 23
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_element_hash": {
+   "kind": "module",
+   "name": "tests.test_element_hash",
+   "title": "tests.test_element_hash",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_element_hash.py",
+     "head_path": "tests/test_element_hash.py",
+     "base": {
+      "start": 1,
+      "end": 38
+     },
+     "head": {
+      "start": 1,
+      "end": 18
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_elements": {
+   "kind": "module",
+   "name": "tests.test_elements",
+   "title": "tests.test_elements",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_elements.py",
+     "head_path": "tests/test_elements.py",
+     "base": {
+      "start": 1,
+      "end": 70
+     },
+     "head": {
+      "start": 1,
+      "end": 136
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_export": {
+   "kind": "module",
+   "name": "tests.test_export",
+   "title": "tests.test_export",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_export.py",
+     "head_path": "tests/test_export.py",
+     "base": {
+      "start": 1,
+      "end": 53
+     },
+     "head": {
+      "start": 1,
+      "end": 55
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_fixtures": {
+   "kind": "module",
+   "name": "tests.test_fixtures",
+   "title": "tests.test_fixtures",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_fixtures.py",
+     "head_path": "tests/test_fixtures.py",
+     "base": {
+      "start": 1,
+      "end": 56
+     },
+     "head": {
+      "start": 1,
+      "end": 111
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_focus_facet": {
+   "kind": "module",
+   "name": "tests.test_focus_facet",
+   "title": "tests.test_focus_facet",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "tests/test_focus_facet.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 41
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_index": {
+   "kind": "module",
+   "name": "tests.test_index",
+   "title": "tests.test_index",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_index.py",
+     "head_path": "tests/test_index.py",
+     "base": {
+      "start": 1,
+      "end": 217
+     },
+     "head": {
+      "start": 1,
+      "end": 341
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_lens_contracts": {
+   "kind": "module",
+   "name": "tests.test_lens_contracts",
+   "title": "tests.test_lens_contracts",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "tests/test_lens_contracts.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 80
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_lens_decisions": {
+   "kind": "module",
+   "name": "tests.test_lens_decisions",
+   "title": "tests.test_lens_decisions",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "tests/test_lens_decisions.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 135
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_lens_jobs": {
+   "kind": "module",
+   "name": "tests.test_lens_jobs",
+   "title": "tests.test_lens_jobs",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "tests/test_lens_jobs.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 199
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_lens_surroundings": {
+   "kind": "module",
+   "name": "tests.test_lens_surroundings",
+   "title": "tests.test_lens_surroundings",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "tests/test_lens_surroundings.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 204
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_lens_tests": {
+   "kind": "module",
+   "name": "tests.test_lens_tests",
+   "title": "tests.test_lens_tests",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_lens_tests.py",
+     "head_path": "tests/test_lens_tests.py",
+     "base": {
+      "start": 1,
+      "end": 30
+     },
+     "head": {
+      "start": 1,
+      "end": 29
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_narration": {
+   "kind": "module",
+   "name": "tests.test_narration",
+   "title": "tests.test_narration",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "tests/test_narration.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 133
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_narration_template": {
+   "kind": "module",
+   "name": "tests.test_narration_template",
+   "title": "tests.test_narration_template",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_narration_template.py",
+     "head_path": "tests/test_narration_template.py",
+     "base": {
+      "start": 1,
+      "end": 67
+     },
+     "head": {
+      "start": 1,
+      "end": 68
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_packaging": {
+   "kind": "module",
+   "name": "tests.test_packaging",
+   "title": "tests.test_packaging",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_packaging.py",
+     "head_path": "tests/test_packaging.py",
+     "base": {
+      "start": 1,
+      "end": 74
+     },
+     "head": {
+      "start": 1,
+      "end": 72
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_page_contract": {
+   "kind": "module",
+   "name": "tests.test_page_contract",
+   "title": "tests.test_page_contract",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_page_contract.py",
+     "head_path": "tests/test_page_contract.py",
+     "base": {
+      "start": 1,
+      "end": 218
+     },
+     "head": {
+      "start": 1,
+      "end": 206
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_page_types": {
+   "kind": "module",
+   "name": "tests.test_page_types",
+   "title": "tests.test_page_types",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "tests/test_page_types.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 155
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_parse_diff": {
+   "kind": "module",
+   "name": "tests.test_parse_diff",
+   "title": "tests.test_parse_diff",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_parse_diff.py",
+     "head_path": "tests/test_parse_diff.py",
+     "base": {
+      "start": 1,
+      "end": 272
+     },
+     "head": {
+      "start": 1,
+      "end": 251
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_parts_apply": {
+   "kind": "module",
+   "name": "tests.test_parts_apply",
+   "title": "tests.test_parts_apply",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "tests/test_parts_apply.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 193
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_provider_methods": {
+   "kind": "module",
+   "name": "tests.test_provider_methods",
+   "title": "tests.test_provider_methods",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_provider_methods.py",
+     "head_path": "tests/test_provider_methods.py",
+     "base": {
+      "start": 1,
+      "end": 154
+     },
+     "head": {
+      "start": 1,
+      "end": 197
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_renamed_pr": {
+   "kind": "module",
+   "name": "tests.test_renamed_pr",
+   "title": "tests.test_renamed_pr",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "tests/test_renamed_pr.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 106
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_review": {
+   "kind": "module",
+   "name": "tests.test_review",
+   "title": "tests.test_review",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "tests/test_review.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 90
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_silent_failures": {
+   "kind": "module",
+   "name": "tests.test_silent_failures",
+   "title": "tests.test_silent_failures",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_silent_failures.py",
+     "head_path": "tests/test_silent_failures.py",
+     "base": {
+      "start": 1,
+      "end": 24
+     },
+     "head": {
+      "start": 1,
+      "end": 26
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_stage_atlas": {
+   "kind": "module",
+   "name": "tests.test_stage_atlas",
+   "title": "tests.test_stage_atlas",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_stage_atlas.py",
+     "head_path": "tests/test_stage_atlas.py",
+     "base": {
+      "start": 1,
+      "end": 130
+     },
+     "head": {
+      "start": 1,
+      "end": 114
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_stage_context_facts": {
+   "kind": "module",
+   "name": "tests.test_stage_context_facts",
+   "title": "tests.test_stage_context_facts",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_stage_context_facts.py",
+     "head_path": "tests/test_stage_context_facts.py",
+     "base": {
+      "start": 1,
+      "end": 28
+     },
+     "head": {
+      "start": 1,
+      "end": 27
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_stage_files": {
+   "kind": "module",
+   "name": "tests.test_stage_files",
+   "title": "tests.test_stage_files",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_stage_files.py",
+     "head_path": "tests/test_stage_files.py",
+     "base": {
+      "start": 1,
+      "end": 36
+     },
+     "head": {
+      "start": 1,
+      "end": 31
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_stage_parts": {
+   "kind": "module",
+   "name": "tests.test_stage_parts",
+   "title": "tests.test_stage_parts",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_stage_parts.py",
+     "head_path": "tests/test_stage_parts.py",
+     "base": {
+      "start": 1,
+      "end": 148
+     },
+     "head": {
+      "start": 1,
+      "end": 166
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_stage_tour": {
+   "kind": "module",
+   "name": "tests.test_stage_tour",
+   "title": "tests.test_stage_tour",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_stage_tour.py",
+     "head_path": "tests/test_stage_tour.py",
+     "base": {
+      "start": 1,
+      "end": 192
+     },
+     "head": {
+      "start": 1,
+      "end": 210
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_stage_views": {
+   "kind": "module",
+   "name": "tests.test_stage_views",
+   "title": "tests.test_stage_views",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_stage_views.py",
+     "head_path": "tests/test_stage_views.py",
+     "base": {
+      "start": 1,
+      "end": 197
+     },
+     "head": {
+      "start": 1,
+      "end": 174
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_stages_runner": {
+   "kind": "module",
+   "name": "tests.test_stages_runner",
+   "title": "tests.test_stages_runner",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_stages_runner.py",
+     "head_path": "tests/test_stages_runner.py",
+     "base": {
+      "start": 1,
+      "end": 217
+     },
+     "head": {
+      "start": 1,
+      "end": 194
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_symbol_public": {
+   "kind": "module",
+   "name": "tests.test_symbol_public",
+   "title": "tests.test_symbol_public",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "tests/test_symbol_public.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 101
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_table_settle": {
+   "kind": "module",
+   "name": "tests.test_table_settle",
+   "title": "tests.test_table_settle",
+   "label": "module",
+   "status": "added",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": null,
+     "head_path": "tests/test_table_settle.py",
+     "base": null,
+     "head": {
+      "start": 1,
+      "end": 77
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_tour_asides": {
+   "kind": "module",
+   "name": "tests.test_tour_asides",
+   "title": "tests.test_tour_asides",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_tour_asides.py",
+     "head_path": "tests/test_tour_asides.py",
+     "base": {
+      "start": 1,
+      "end": 148
+     },
+     "head": {
+      "start": 1,
+      "end": 225
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_tour_check": {
+   "kind": "module",
+   "name": "tests.test_tour_check",
+   "title": "tests.test_tour_check",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_tour_check.py",
+     "head_path": "tests/test_tour_check.py",
+     "base": {
+      "start": 1,
+      "end": 230
+     },
+     "head": {
+      "start": 1,
+      "end": 339
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_tour_lookups": {
+   "kind": "module",
+   "name": "tests.test_tour_lookups",
+   "title": "tests.test_tour_lookups",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_tour_lookups.py",
+     "head_path": "tests/test_tour_lookups.py",
+     "base": {
+      "start": 1,
+      "end": 54
+     },
+     "head": {
+      "start": 1,
+      "end": 55
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  },
+  "mod:tests.test_tour_pictures": {
+   "kind": "module",
+   "name": "tests.test_tour_pictures",
+   "title": "tests.test_tour_pictures",
+   "label": "module",
+   "status": "changed",
+   "detail": "",
+   "url": null,
+   "refs": [
+    {
+     "base_path": "tests/test_tour_pictures.py",
+     "head_path": "tests/test_tour_pictures.py",
+     "base": {
+      "start": 1,
+      "end": 95
+     },
+     "head": {
+      "start": 1,
+      "end": 92
+     },
+     "whole_file": true,
+     "rows": []
+    }
+   ],
+   "hash": null,
+   "appears": []
+  }
+ },
+ "files": [
+  {
+   "path": "AGENTS.md",
+   "old_path": "AGENTS.md",
+   "status": "changed",
+   "binary": false,
+   "kind": "docs",
+   "made_by": null,
+   "adds": 1,
+   "dels": 1,
+   "lines_by_kind": [
+    {
+     "kind": "docs",
+     "adds": 1,
+     "dels": 1
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "README.md",
+   "old_path": "README.md",
+   "status": "changed",
+   "binary": false,
+   "kind": "docs",
+   "made_by": null,
+   "adds": 1,
+   "dels": 1,
+   "lines_by_kind": [
+    {
+     "kind": "docs",
+     "adds": 1,
+     "dels": 1
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/01-minimal/expect.md",
+   "old_path": "contract-fixtures/01-minimal/expect.md",
+   "status": "changed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 4,
+   "dels": 8,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/01-minimal/page.json",
+   "old_path": "contract-fixtures/01-minimal/page.json",
+   "status": "changed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 41,
+   "dels": 90,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/01-minimal/status.json",
+   "old_path": "contract-fixtures/01-minimal/status.json",
+   "status": "changed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 3,
+   "dels": 4,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/02-status-without-page-schema/expect.md",
+   "old_path": "contract-fixtures/02-status-without-page-schema/expect.md",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 8,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/02-status-without-page-schema/page.json",
+   "old_path": "contract-fixtures/02-status-without-page-schema/page.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 113,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/02-status-without-page-schema/status.json",
+   "old_path": "contract-fixtures/02-status-without-page-schema/status.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 9,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/02-table-groups-fold/expect.md",
+   "old_path": "contract-fixtures/02-table-groups-fold/expect.md",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 12,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/02-table-groups-fold/page.json",
+   "old_path": "contract-fixtures/02-table-groups-fold/page.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 207,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/02-table-groups-fold/status.json",
+   "old_path": "contract-fixtures/03-page-schema-4/status.json",
+   "status": "changed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 2,
+   "dels": 3,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/03-page-schema-4/expect.md",
+   "old_path": "contract-fixtures/03-page-schema-4/expect.md",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 7,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/03-page-schema-4/page.json",
+   "old_path": "contract-fixtures/03-page-schema-4/page.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 114,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/03-table-ranks/expect.md",
+   "old_path": "contract-fixtures/03-table-ranks/expect.md",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 10,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/03-table-ranks/page.json",
+   "old_path": "contract-fixtures/03-table-ranks/page.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 136,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/03-table-ranks/status.json",
+   "old_path": "contract-fixtures/03-table-ranks/status.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 9,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/04-facet-rows-without-element/expect.md",
+   "old_path": "contract-fixtures/04-facet-rows-without-element/expect.md",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 10,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/04-facet-rows-without-element/page.json",
+   "old_path": "contract-fixtures/04-facet-rows-without-element/page.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 153,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/04-facet-rows-without-element/status.json",
+   "old_path": "contract-fixtures/04-facet-rows-without-element/status.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 9,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/04-unknown-rank/expect.md",
+   "old_path": "contract-fixtures/04-unknown-rank/expect.md",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 8,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/04-unknown-rank/page.json",
+   "old_path": "contract-fixtures/04-unknown-rank/page.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 129,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/04-unknown-rank/status.json",
+   "old_path": "contract-fixtures/04-unknown-rank/status.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 10,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/05-cell-kinds/expect.md",
+   "old_path": "contract-fixtures/05-cell-kinds/expect.md",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 12,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/05-cell-kinds/page.json",
+   "old_path": "contract-fixtures/05-cell-kinds/page.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 219,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/05-cell-kinds/status.json",
+   "old_path": "contract-fixtures/05-cell-kinds/status.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 9,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/05-group-not-in-groups/expect.md",
+   "old_path": "contract-fixtures/05-group-not-in-groups/expect.md",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 7,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/05-group-not-in-groups/page.json",
+   "old_path": "contract-fixtures/05-group-not-in-groups/page.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 120,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/05-group-not-in-groups/status.json",
+   "old_path": "contract-fixtures/05-group-not-in-groups/status.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 10,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/06-comments/expect.md",
+   "old_path": "contract-fixtures/06-comments/expect.md",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 11,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/06-comments/page.json",
+   "old_path": "contract-fixtures/06-comments/page.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 132,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/06-comments/status.json",
+   "old_path": "contract-fixtures/06-comments/status.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 9,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/06-groups-closed/expect.md",
+   "old_path": "contract-fixtures/06-groups-closed/expect.md",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 9,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/06-groups-closed/page.json",
+   "old_path": "contract-fixtures/06-groups-closed/page.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 135,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/06-groups-closed/status.json",
+   "old_path": "contract-fixtures/06-groups-closed/status.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 10,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/07-mixed-fold/expect.md",
+   "old_path": "contract-fixtures/07-mixed-fold/expect.md",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 9,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/07-mixed-fold/page.json",
+   "old_path": "contract-fixtures/07-mixed-fold/page.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 136,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/07-tour/expect.md",
+   "old_path": "contract-fixtures/07-tour/expect.md",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 15,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/07-tour/page.json",
+   "old_path": "contract-fixtures/07-tour/page.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 405,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/07-tour/status.json",
+   "old_path": "contract-fixtures/07-tour/status.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 9,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/08-ranks-without-groups/expect.md",
+   "old_path": "contract-fixtures/08-ranks-without-groups/expect.md",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 7,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/08-ranks-without-groups/page.json",
+   "old_path": "contract-fixtures/08-ranks-without-groups/page.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 129,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/08-ranks-without-groups/status.json",
+   "old_path": "contract-fixtures/08-ranks-without-groups/status.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 10,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/08-status-page-schema-3/expect.md",
+   "old_path": "contract-fixtures/08-status-page-schema-3/expect.md",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 7,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/08-status-page-schema-3/page.json",
+   "old_path": "contract-fixtures/08-status-page-schema-3/page.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 64,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/08-status-page-schema-3/status.json",
+   "old_path": "contract-fixtures/07-mixed-fold/status.json",
+   "status": "changed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 2,
+   "dels": 3,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/09-facet-rows-without-el/expect.md",
+   "old_path": "contract-fixtures/09-facet-rows-without-el/expect.md",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 8,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/09-facet-rows-without-el/page.json",
+   "old_path": "contract-fixtures/09-facet-rows-without-el/page.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 125,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/09-facet-rows-without-el/status.json",
+   "old_path": "contract-fixtures/09-facet-rows-without-el/status.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 10,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/09-page-schema-3/expect.md",
+   "old_path": "contract-fixtures/09-page-schema-3/expect.md",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 7,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/09-page-schema-3/page.json",
+   "old_path": "contract-fixtures/09-page-schema-3/page.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 64,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/09-page-schema-3/status.json",
+   "old_path": "contract-fixtures/09-page-schema-3/status.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 9,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/10-unknown-block-type/expect.md",
+   "old_path": "contract-fixtures/10-unknown-block-type/expect.md",
+   "status": "changed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 5,
+   "dels": 7,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/10-unknown-block-type/page.json",
+   "old_path": "contract-fixtures/10-unknown-block-type/page.json",
+   "status": "changed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 186,
+   "dels": 88,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/10-unknown-block-type/status.json",
+   "old_path": "contract-fixtures/10-unknown-block-type/status.json",
+   "status": "changed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 3,
+   "dels": 4,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/11-malformed-block/expect.md",
+   "old_path": "contract-fixtures/11-malformed-block/expect.md",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 7,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/11-malformed-block/page.json",
+   "old_path": "contract-fixtures/11-malformed-block/page.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 114,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/11-malformed-block/status.json",
+   "old_path": "contract-fixtures/11-malformed-block/status.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 10,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/11-malformed-table/expect.md",
+   "old_path": "contract-fixtures/11-malformed-table/expect.md",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 7,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/11-malformed-table/page.json",
+   "old_path": "contract-fixtures/11-malformed-table/page.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 195,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/11-malformed-table/status.json",
+   "old_path": "contract-fixtures/11-malformed-table/status.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 9,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/12-malformed-tour/expect.md",
+   "old_path": "contract-fixtures/12-malformed-tour/expect.md",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 7,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/12-malformed-tour/page.json",
+   "old_path": "contract-fixtures/12-malformed-tour/page.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 402,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/12-malformed-tour/status.json",
+   "old_path": "contract-fixtures/12-malformed-tour/status.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 9,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/12-tour/expect.md",
+   "old_path": "contract-fixtures/12-tour/expect.md",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 12,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/12-tour/page.json",
+   "old_path": "contract-fixtures/12-tour/page.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 292,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/12-tour/status.json",
+   "old_path": "contract-fixtures/12-tour/status.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 10,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/13-malformed-tour/expect.md",
+   "old_path": "contract-fixtures/13-malformed-tour/expect.md",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 6,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/13-malformed-tour/page.json",
+   "old_path": "contract-fixtures/13-malformed-tour/page.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 336,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/13-malformed-tour/status.json",
+   "old_path": "contract-fixtures/13-malformed-tour/status.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 0,
+   "dels": 10,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/13-unknown-cell-kind/expect.md",
+   "old_path": "contract-fixtures/13-unknown-cell-kind/expect.md",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 7,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/13-unknown-cell-kind/page.json",
+   "old_path": "contract-fixtures/13-unknown-cell-kind/page.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 219,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/13-unknown-cell-kind/status.json",
+   "old_path": "contract-fixtures/13-unknown-cell-kind/status.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 9,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/14-unknown-rank/expect.md",
+   "old_path": "contract-fixtures/14-unknown-rank/expect.md",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 7,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/14-unknown-rank/page.json",
+   "old_path": "contract-fixtures/14-unknown-rank/page.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 136,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/14-unknown-rank/status.json",
+   "old_path": "contract-fixtures/14-unknown-rank/status.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 9,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "contract-fixtures/README.md",
+   "old_path": "contract-fixtures/README.md",
+   "status": "changed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "conformance fixtures: test data, not code"
+   },
+   "adds": 33,
+   "dels": 35,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "dev/write-schemas.py",
+   "old_path": "dev/write-schemas.py",
+   "status": "added",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 27,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 27,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "docs/current_state/adding-a-language.md",
+   "old_path": "docs/current_state/adding-a-language.md",
+   "status": "changed",
+   "binary": false,
+   "kind": "docs",
+   "made_by": null,
+   "adds": 1,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "docs",
+     "adds": 1,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "docs/current_state/stages.md",
+   "old_path": "docs/current_state/stages.md",
+   "status": "changed",
+   "binary": false,
+   "kind": "docs",
+   "made_by": null,
+   "adds": 66,
+   "dels": 26,
+   "lines_by_kind": [
+    {
+     "kind": "docs",
+     "adds": 66,
+     "dels": 26
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "docs/design/page-v4.md",
+   "old_path": "docs/design/page-v4.md",
+   "status": "added",
+   "binary": false,
+   "kind": "docs",
+   "made_by": null,
+   "adds": 220,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "docs",
+     "adds": 220,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/SKILL.md",
+   "old_path": "skill/SKILL.md",
+   "status": "changed",
+   "binary": false,
+   "kind": "docs",
+   "made_by": null,
+   "adds": 17,
+   "dels": 10,
+   "lines_by_kind": [
+    {
+     "kind": "docs",
+     "adds": 17,
+     "dels": 10
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/pyproject.toml",
+   "old_path": "skill/pyproject.toml",
+   "status": "changed",
+   "binary": false,
+   "kind": "config",
+   "made_by": null,
+   "adds": 1,
+   "dels": 1,
+   "lines_by_kind": [
+    {
+     "kind": "config",
+     "adds": 1,
+     "dels": 1
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/atlas.py",
+   "old_path": "skill/src/changescape/atlas.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 23,
+   "dels": 56,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 23,
+     "dels": 56
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/brief.py",
+   "old_path": "skill/src/changescape/brief.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 119,
+   "dels": 92,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 119,
+     "dels": 92
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/build.py",
+   "old_path": "skill/src/changescape/build.py",
+   "status": "added",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 302,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 302,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/changed.py",
+   "old_path": "skill/src/changescape/changed.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 40,
+   "dels": 18,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 40,
+     "dels": 18
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/cli.py",
+   "old_path": "skill/src/changescape/cli.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 10,
+   "dels": 10,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 10,
+     "dels": 10
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/commands/assemble.py",
+   "old_path": "skill/src/changescape/commands/assemble.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 58,
+   "dels": 45,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 58,
+     "dels": 45
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/commands/check.py",
+   "old_path": "skill/src/changescape/commands/check.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 74,
+   "dels": 45,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 74,
+     "dels": 45
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/commands/collect.py",
+   "old_path": "skill/src/changescape/commands/collect.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 26,
+   "dels": 51,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 26,
+     "dels": 51
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/context.py",
+   "old_path": "skill/src/changescape/context.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 543,
+   "dels": 316,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 543,
+     "dels": 316
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/contract/narration.v4.schema.json",
+   "old_path": "skill/src/changescape/contract/narration.v4.schema.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "generated from the page types by dev/write-schemas.py"
+   },
+   "adds": 650,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/contract/page-data.md",
+   "old_path": "skill/src/changescape/contract/page-data.md",
+   "status": "changed",
+   "binary": false,
+   "kind": "docs",
+   "made_by": null,
+   "adds": 477,
+   "dels": 524,
+   "lines_by_kind": [
+    {
+     "kind": "docs",
+     "adds": 477,
+     "dels": 524
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/contract/page.v3.schema.json",
+   "old_path": "skill/src/changescape/contract/page.v3.schema.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "generated from the page types by dev/write-schemas.py"
+   },
+   "adds": 0,
+   "dels": 1269,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/contract/page.v4.schema.json",
+   "old_path": "skill/src/changescape/contract/page.v4.schema.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "generated from the page types by dev/write-schemas.py"
+   },
+   "adds": 3245,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/contract/status.schema.json",
+   "old_path": "skill/src/changescape/contract/status.schema.json",
+   "status": "removed",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "generated from the page types by dev/write-schemas.py"
+   },
+   "adds": 0,
+   "dels": 31,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/contract/status.v4.schema.json",
+   "old_path": "skill/src/changescape/contract/status.v4.schema.json",
+   "status": "added",
+   "binary": false,
+   "kind": "vendored",
+   "made_by": {
+    "rule": "narration",
+    "note": "generated from the page types by dev/write-schemas.py"
+   },
+   "adds": 86,
+   "dels": 0,
+   "lines_by_kind": [],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/contract/v3-to-v4.md",
+   "old_path": "skill/src/changescape/contract/v3-to-v4.md",
+   "status": "added",
+   "binary": false,
+   "kind": "docs",
+   "made_by": null,
+   "adds": 314,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "docs",
+     "adds": 314,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/delta.py",
+   "old_path": "skill/src/changescape/delta.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 17,
+   "dels": 9,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 17,
+     "dels": 9
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/elements.py",
+   "old_path": "skill/src/changescape/elements.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 122,
+   "dels": 60,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 122,
+     "dels": 60
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/facets.py",
+   "old_path": "skill/src/changescape/facets.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 53,
+   "dels": 39,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 53,
+     "dels": 39
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/ghq.py",
+   "old_path": "skill/src/changescape/ghq.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 111,
+   "dels": 44,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 111,
+     "dels": 44
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/gitio.py",
+   "old_path": "skill/src/changescape/gitio.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 6,
+   "dels": 68,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 6,
+     "dels": 68
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/index.py",
+   "old_path": "skill/src/changescape/index.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 75,
+   "dels": 7,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 75,
+     "dels": 7
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/kinds.py",
+   "old_path": "skill/src/changescape/kinds.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 51,
+   "dels": 29,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 51,
+     "dels": 29
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/lang/__init__.py",
+   "old_path": "skill/src/changescape/lang/__init__.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 8,
+   "dels": 2,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 8,
+     "dels": 2
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/lang/base.py",
+   "old_path": "skill/src/changescape/lang/base.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 3,
+   "dels": 1,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 3,
+     "dels": 1
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/lang/python.py",
+   "old_path": "skill/src/changescape/lang/python.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 4,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 4,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/lang/rust.py",
+   "old_path": "skill/src/changescape/lang/rust.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 10,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 10,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/lenses/__init__.py",
+   "old_path": "skill/src/changescape/lenses/__init__.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 164,
+   "dels": 96,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 164,
+     "dels": 96
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/lenses/_common.py",
+   "old_path": "skill/src/changescape/lenses/_common.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 68,
+   "dels": 34,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 68,
+     "dels": 34
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/lenses/_diagrams.py",
+   "old_path": "skill/src/changescape/lenses/_diagrams.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 136,
+   "dels": 52,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 136,
+     "dels": 52
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/lenses/_jobsvg.py",
+   "old_path": "skill/src/changescape/lenses/_jobsvg.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 106,
+   "dels": 102,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 106,
+     "dels": 102
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/lenses/code.py",
+   "old_path": "skill/src/changescape/lenses/code.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 22,
+   "dels": 17,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 22,
+     "dels": 17
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/lenses/context.py",
+   "old_path": "skill/src/changescape/lenses/context.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 638,
+   "dels": 565,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 638,
+     "dels": 565
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/lenses/contracts.py",
+   "old_path": "skill/src/changescape/lenses/contracts.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 451,
+   "dels": 358,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 451,
+     "dels": 358
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/lenses/decisions.py",
+   "old_path": "skill/src/changescape/lenses/decisions.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 113,
+   "dels": 75,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 113,
+     "dels": 75
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/lenses/flow.py",
+   "old_path": "skill/src/changescape/lenses/flow.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 166,
+   "dels": 134,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 166,
+     "dels": 134
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/lenses/jobs.py",
+   "old_path": "skill/src/changescape/lenses/jobs.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 176,
+   "dels": 107,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 176,
+     "dels": 107
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/lenses/map.py",
+   "old_path": "skill/src/changescape/lenses/map.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 285,
+   "dels": 248,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 285,
+     "dels": 248
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/lenses/overview.py",
+   "old_path": "skill/src/changescape/lenses/overview.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 78,
+   "dels": 98,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 78,
+     "dels": 98
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/lenses/surroundings.py",
+   "old_path": "skill/src/changescape/lenses/surroundings.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 253,
+   "dels": 240,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 253,
+     "dels": 240
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/lenses/tests.py",
+   "old_path": "skill/src/changescape/lenses/tests.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 82,
+   "dels": 71,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 82,
+     "dels": 71
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/model.py",
+   "old_path": "skill/src/changescape/model.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 9,
+   "dels": 9,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 9,
+     "dels": 9
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/narrate.py",
+   "old_path": "skill/src/changescape/narrate.py",
+   "status": "removed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 0,
+   "dels": 69,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 0,
+     "dels": 69
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/output.py",
+   "old_path": "skill/src/changescape/output.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 11,
+   "dels": 17,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 11,
+     "dels": 17
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/page/__init__.py",
+   "old_path": "skill/src/changescape/page/__init__.py",
+   "status": "added",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 57,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 57,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/page/core.py",
+   "old_path": "skill/src/changescape/page/core.py",
+   "status": "added",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 381,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 381,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/page/ids.py",
+   "old_path": "skill/src/changescape/page/ids.py",
+   "status": "added",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 67,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 67,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/page/json.py",
+   "old_path": "skill/src/changescape/page/json.py",
+   "status": "added",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 101,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 101,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/page/narration.py",
+   "old_path": "skill/src/changescape/page/narration.py",
+   "status": "added",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 191,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 191,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/page/tour.py",
+   "old_path": "skill/src/changescape/page/tour.py",
+   "status": "added",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 250,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 250,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/page/views.py",
+   "old_path": "skill/src/changescape/page/views.py",
+   "status": "added",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 263,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 263,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/part_elements.py",
+   "old_path": "skill/src/changescape/part_elements.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 34,
+   "dels": 28,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 34,
+     "dels": 28
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/parts.py",
+   "old_path": "skill/src/changescape/parts.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 235,
+   "dels": 190,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 235,
+     "dels": 190
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/rank.py",
+   "old_path": "skill/src/changescape/rank.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 107,
+   "dels": 102,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 107,
+     "dels": 102
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/review.py",
+   "old_path": "skill/src/changescape/review.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 63,
+   "dels": 78,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 63,
+     "dels": 78
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/schema.py",
+   "old_path": "skill/src/changescape/schema.py",
+   "status": "removed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 0,
+   "dels": 78,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 0,
+     "dels": 78
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/sections.py",
+   "old_path": "skill/src/changescape/sections.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 79,
+   "dels": 62,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 79,
+     "dels": 62
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/stages/base.py",
+   "old_path": "skill/src/changescape/stages/base.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 8,
+   "dels": 32,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 8,
+     "dels": 32
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/stages/context.py",
+   "old_path": "skill/src/changescape/stages/context.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 2,
+   "dels": 24,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 2,
+     "dels": 24
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/stages/runner.py",
+   "old_path": "skill/src/changescape/stages/runner.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 8,
+   "dels": 75,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 8,
+     "dels": 75
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/stages/sections.py",
+   "old_path": "skill/src/changescape/stages/sections.py",
+   "status": "removed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 0,
+   "dels": 60,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 0,
+     "dels": 60
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/svg.py",
+   "old_path": "skill/src/changescape/svg.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 1,
+   "dels": 18,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 1,
+     "dels": 18
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/tour/__init__.py",
+   "old_path": "skill/src/changescape/tour/__init__.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 5,
+   "dels": 6,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 5,
+     "dels": 6
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/tour/apply.py",
+   "old_path": "skill/src/changescape/tour/apply.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 409,
+   "dels": 296,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 409,
+     "dels": 296
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/tour/asides.py",
+   "old_path": "skill/src/changescape/tour/asides.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 77,
+   "dels": 61,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 77,
+     "dels": 61
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/tour/brief.py",
+   "old_path": "skill/src/changescape/tour/brief.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 43,
+   "dels": 40,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 43,
+     "dels": 40
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/tour/build.py",
+   "old_path": "skill/src/changescape/tour/build.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 173,
+   "dels": 125,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 173,
+     "dels": 125
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/tour/check.py",
+   "old_path": "skill/src/changescape/tour/check.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 64,
+   "dels": 51,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 64,
+     "dels": 51
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/tour/judge.py",
+   "old_path": "skill/src/changescape/tour/judge.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 6,
+   "dels": 6,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 6,
+     "dels": 6
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/tour/model.py",
+   "old_path": "skill/src/changescape/tour/model.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 41,
+   "dels": 59,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 41,
+     "dels": 59
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/tour/pictures.py",
+   "old_path": "skill/src/changescape/tour/pictures.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 34,
+   "dels": 37,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 34,
+     "dels": 37
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/tour/relies.py",
+   "old_path": "skill/src/changescape/tour/relies.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 112,
+   "dels": 80,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 112,
+     "dels": 80
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/tour/seq.py",
+   "old_path": "skill/src/changescape/tour/seq.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 93,
+   "dels": 75,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 93,
+     "dels": 75
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/tour/stage.py",
+   "old_path": "skill/src/changescape/tour/stage.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 8,
+   "dels": 26,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 8,
+     "dels": 26
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "skill/src/changescape/weigh.py",
+   "old_path": "skill/src/changescape/weigh.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 105,
+   "dels": 75,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 105,
+     "dels": 75
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/conftest.py",
+   "old_path": "tests/conftest.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 55,
+   "dels": 2,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 55,
+     "dels": 2
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_build_page.py",
+   "old_path": "tests/test_build_page.py",
+   "status": "added",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 351,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 351,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_changed.py",
+   "old_path": "tests/test_changed.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 143,
+   "dels": 5,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 143,
+     "dels": 5
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_diagrams.py",
+   "old_path": "tests/test_diagrams.py",
+   "status": "added",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 23,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 23,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_element_hash.py",
+   "old_path": "tests/test_element_hash.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 5,
+   "dels": 25,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 5,
+     "dels": 25
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_elements.py",
+   "old_path": "tests/test_elements.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 81,
+   "dels": 15,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 81,
+     "dels": 15
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_export.py",
+   "old_path": "tests/test_export.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 5,
+   "dels": 3,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 5,
+     "dels": 3
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_fixtures.py",
+   "old_path": "tests/test_fixtures.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 85,
+   "dels": 30,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 85,
+     "dels": 30
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_focus_facet.py",
+   "old_path": "tests/test_focus_facet.py",
+   "status": "added",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 41,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 41,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_index.py",
+   "old_path": "tests/test_index.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 134,
+   "dels": 10,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 134,
+     "dels": 10
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_lens_contracts.py",
+   "old_path": "tests/test_lens_contracts.py",
+   "status": "added",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 80,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 80,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_lens_decisions.py",
+   "old_path": "tests/test_lens_decisions.py",
+   "status": "added",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 135,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 135,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_lens_jobs.py",
+   "old_path": "tests/test_lens_jobs.py",
+   "status": "added",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 199,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 199,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_lens_surroundings.py",
+   "old_path": "tests/test_lens_surroundings.py",
+   "status": "added",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 204,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 204,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_lens_tests.py",
+   "old_path": "tests/test_lens_tests.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 1,
+   "dels": 2,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 1,
+     "dels": 2
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_narration.py",
+   "old_path": "tests/test_narration.py",
+   "status": "added",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 133,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 133,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_narration_template.py",
+   "old_path": "tests/test_narration_template.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 5,
+   "dels": 4,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 5,
+     "dels": 4
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_packaging.py",
+   "old_path": "tests/test_packaging.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 1,
+   "dels": 3,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 1,
+     "dels": 3
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_page_contract.py",
+   "old_path": "tests/test_page_contract.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 43,
+   "dels": 55,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 43,
+     "dels": 55
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_page_types.py",
+   "old_path": "tests/test_page_types.py",
+   "status": "added",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 155,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 155,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_parse_diff.py",
+   "old_path": "tests/test_parse_diff.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 8,
+   "dels": 29,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 8,
+     "dels": 29
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_parts_apply.py",
+   "old_path": "tests/test_parts_apply.py",
+   "status": "added",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 193,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 193,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_provider_methods.py",
+   "old_path": "tests/test_provider_methods.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 43,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 43,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_renamed_pr.py",
+   "old_path": "tests/test_renamed_pr.py",
+   "status": "added",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 106,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 106,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_review.py",
+   "old_path": "tests/test_review.py",
+   "status": "added",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 90,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 90,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_silent_failures.py",
+   "old_path": "tests/test_silent_failures.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 11,
+   "dels": 9,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 11,
+     "dels": 9
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_stage_atlas.py",
+   "old_path": "tests/test_stage_atlas.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 22,
+   "dels": 38,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 22,
+     "dels": 38
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_stage_context_facts.py",
+   "old_path": "tests/test_stage_context_facts.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 6,
+   "dels": 7,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 6,
+     "dels": 7
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_stage_files.py",
+   "old_path": "tests/test_stage_files.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 18,
+   "dels": 23,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 18,
+     "dels": 23
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_stage_parts.py",
+   "old_path": "tests/test_stage_parts.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 50,
+   "dels": 32,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 50,
+     "dels": 32
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_stage_tour.py",
+   "old_path": "tests/test_stage_tour.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 116,
+   "dels": 98,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 116,
+     "dels": 98
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_stage_views.py",
+   "old_path": "tests/test_stage_views.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 116,
+   "dels": 139,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 116,
+     "dels": 139
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_stages_runner.py",
+   "old_path": "tests/test_stages_runner.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 14,
+   "dels": 37,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 14,
+     "dels": 37
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_symbol_public.py",
+   "old_path": "tests/test_symbol_public.py",
+   "status": "added",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 101,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 101,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_table_settle.py",
+   "old_path": "tests/test_table_settle.py",
+   "status": "added",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 77,
+   "dels": 0,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 77,
+     "dels": 0
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_tour_asides.py",
+   "old_path": "tests/test_tour_asides.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 134,
+   "dels": 57,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 134,
+     "dels": 57
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_tour_check.py",
+   "old_path": "tests/test_tour_check.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 253,
+   "dels": 144,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 253,
+     "dels": 144
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_tour_lookups.py",
+   "old_path": "tests/test_tour_lookups.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 4,
+   "dels": 3,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 4,
+     "dels": 3
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "tests/test_tour_pictures.py",
+   "old_path": "tests/test_tour_pictures.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "test",
+   "made_by": null,
+   "adds": 35,
+   "dels": 38,
+   "lines_by_kind": [
+    {
+     "kind": "test",
+     "adds": 35,
+     "dels": 38
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "uv.lock",
+   "old_path": "uv.lock",
+   "status": "changed",
+   "binary": false,
+   "kind": "generated",
+   "made_by": {
+    "rule": "path",
+    "note": null
+   },
+   "adds": 144,
+   "dels": 2,
+   "lines_by_kind": [
+    {
+     "kind": "generated",
+     "adds": 144,
+     "dels": 2
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "viewer/README.md",
+   "old_path": "viewer/README.md",
+   "status": "changed",
+   "binary": false,
+   "kind": "docs",
+   "made_by": null,
+   "adds": 18,
+   "dels": 10,
+   "lines_by_kind": [
+    {
+     "kind": "docs",
+     "adds": 18,
+     "dels": 10
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "viewer/blocks/code.js",
+   "old_path": "viewer/blocks/code.js",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 24,
+   "dels": 24,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 24,
+     "dels": 24
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "viewer/blocks/context.js",
+   "old_path": "viewer/blocks/context.js",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 3,
+   "dels": 4,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 3,
+     "dels": 4
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "viewer/blocks/review.js",
+   "old_path": "viewer/blocks/review.js",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 28,
+   "dels": 17,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 28,
+     "dels": 17
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "viewer/blocks/tour.js",
+   "old_path": "viewer/blocks/tour.js",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 69,
+   "dels": 75,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 69,
+     "dels": 75
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "viewer/boot.js",
+   "old_path": "viewer/boot.js",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 1,
+   "dels": 1,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 1,
+     "dels": 1
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "viewer/page.html",
+   "old_path": "viewer/page.html",
+   "status": "changed",
+   "binary": false,
+   "kind": "other",
+   "made_by": null,
+   "adds": 0,
+   "dels": 1,
+   "lines_by_kind": [
+    {
+     "kind": "other",
+     "adds": 0,
+     "dels": 1
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "viewer/render.py",
+   "old_path": "viewer/render.py",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 7,
+   "dels": 2,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 7,
+     "dels": 2
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "viewer/shell.css",
+   "old_path": "viewer/shell.css",
+   "status": "changed",
+   "binary": false,
+   "kind": "other",
+   "made_by": null,
+   "adds": 2,
+   "dels": 32,
+   "lines_by_kind": [
+    {
+     "kind": "other",
+     "adds": 2,
+     "dels": 32
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  },
+  {
+   "path": "viewer/shell.js",
+   "old_path": "viewer/shell.js",
+   "status": "changed",
+   "binary": false,
+   "kind": "source",
+   "made_by": null,
+   "adds": 154,
+   "dels": 223,
+   "lines_by_kind": [
+    {
+     "kind": "source",
+     "adds": 154,
+     "dels": 223
+    }
+   ],
+   "hunks": [],
+   "ship": {
+    "ship": "hunks",
+    "why": "trimmed"
+   }
+  }
+ ],
+ "comments": [],
+ "facets": [],
+ "parts": [],
+ "tour": {
+  "below": [],
+  "chapters": [],
+  "ending": null,
+  "flags": [],
+  "map": [
+   {
+    "package": "changescape",
+    "files": [
+     "skill/src/changescape/atlas.py",
+     "skill/src/changescape/brief.py",
+     "skill/src/changescape/build.py",
+     "skill/src/changescape/changed.py",
+     "skill/src/changescape/cli.py",
+     "skill/src/changescape/commands/assemble.py",
+     "skill/src/changescape/commands/check.py",
+     "skill/src/changescape/commands/collect.py",
+     "skill/src/changescape/context.py",
+     "skill/src/changescape/delta.py",
+     "skill/src/changescape/elements.py",
+     "skill/src/changescape/facets.py",
+     "skill/src/changescape/ghq.py",
+     "skill/src/changescape/gitio.py",
+     "skill/src/changescape/index.py",
+     "skill/src/changescape/kinds.py",
+     "skill/src/changescape/lang/__init__.py",
+     "skill/src/changescape/lang/base.py",
+     "skill/src/changescape/lang/python.py",
+     "skill/src/changescape/lang/rust.py",
+     "skill/src/changescape/lenses/__init__.py",
+     "skill/src/changescape/lenses/_common.py",
+     "skill/src/changescape/lenses/_diagrams.py",
+     "skill/src/changescape/lenses/_jobsvg.py",
+     "skill/src/changescape/lenses/code.py",
+     "skill/src/changescape/lenses/context.py",
+     "skill/src/changescape/lenses/contracts.py",
+     "skill/src/changescape/lenses/decisions.py",
+     "skill/src/changescape/lenses/flow.py",
+     "skill/src/changescape/lenses/jobs.py",
+     "skill/src/changescape/lenses/map.py",
+     "skill/src/changescape/lenses/overview.py",
+     "skill/src/changescape/lenses/surroundings.py",
+     "skill/src/changescape/lenses/tests.py",
+     "skill/src/changescape/model.py",
+     "skill/src/changescape/narrate.py",
+     "skill/src/changescape/output.py",
+     "skill/src/changescape/page/__init__.py",
+     "skill/src/changescape/page/core.py",
+     "skill/src/changescape/page/ids.py",
+     "skill/src/changescape/page/json.py",
+     "skill/src/changescape/page/narration.py",
+     "skill/src/changescape/page/tour.py",
+     "skill/src/changescape/page/views.py",
+     "skill/src/changescape/part_elements.py",
+     "skill/src/changescape/parts.py",
+     "skill/src/changescape/rank.py",
+     "skill/src/changescape/review.py",
+     "skill/src/changescape/schema.py",
+     "skill/src/changescape/sections.py",
+     "skill/src/changescape/stages/base.py",
+     "skill/src/changescape/stages/context.py",
+     "skill/src/changescape/stages/runner.py",
+     "skill/src/changescape/stages/sections.py",
+     "skill/src/changescape/svg.py",
+     "skill/src/changescape/tour/__init__.py",
+     "skill/src/changescape/tour/apply.py",
+     "skill/src/changescape/tour/asides.py",
+     "skill/src/changescape/tour/brief.py",
+     "skill/src/changescape/tour/build.py",
+     "skill/src/changescape/tour/check.py",
+     "skill/src/changescape/tour/judge.py",
+     "skill/src/changescape/tour/model.py",
+     "skill/src/changescape/tour/pictures.py",
+     "skill/src/changescape/tour/relies.py",
+     "skill/src/changescape/tour/seq.py",
+     "skill/src/changescape/tour/stage.py",
+     "skill/src/changescape/weigh.py"
+    ]
+   },
+   {
+    "package": "skill",
+    "files": [
+     "skill/SKILL.md",
+     "skill/pyproject.toml",
+     "skill/src/changescape/contract/narration.v4.schema.json",
+     "skill/src/changescape/contract/page-data.md",
+     "skill/src/changescape/contract/page.v3.schema.json",
+     "skill/src/changescape/contract/page.v4.schema.json",
+     "skill/src/changescape/contract/status.schema.json",
+     "skill/src/changescape/contract/status.v4.schema.json",
+     "skill/src/changescape/contract/v3-to-v4.md"
+    ]
+   },
+   {
+    "package": "contract-fixtures",
+    "files": [
+     "contract-fixtures/01-minimal/expect.md",
+     "contract-fixtures/01-minimal/page.json",
+     "contract-fixtures/01-minimal/status.json",
+     "contract-fixtures/02-status-without-page-schema/expect.md",
+     "contract-fixtures/02-status-without-page-schema/page.json",
+     "contract-fixtures/02-status-without-page-schema/status.json",
+     "contract-fixtures/02-table-groups-fold/expect.md",
+     "contract-fixtures/02-table-groups-fold/page.json",
+     "contract-fixtures/02-table-groups-fold/status.json",
+     "contract-fixtures/03-page-schema-4/expect.md",
+     "contract-fixtures/03-page-schema-4/page.json",
+     "contract-fixtures/03-table-ranks/expect.md",
+     "contract-fixtures/03-table-ranks/page.json",
+     "contract-fixtures/03-table-ranks/status.json",
+     "contract-fixtures/04-facet-rows-without-element/expect.md",
+     "contract-fixtures/04-facet-rows-without-element/page.json",
+     "contract-fixtures/04-facet-rows-without-element/status.json",
+     "contract-fixtures/04-unknown-rank/expect.md",
+     "contract-fixtures/04-unknown-rank/page.json",
+     "contract-fixtures/04-unknown-rank/status.json",
+     "contract-fixtures/05-cell-kinds/expect.md",
+     "contract-fixtures/05-cell-kinds/page.json",
+     "contract-fixtures/05-cell-kinds/status.json",
+     "contract-fixtures/05-group-not-in-groups/expect.md",
+     "contract-fixtures/05-group-not-in-groups/page.json",
+     "contract-fixtures/05-group-not-in-groups/status.json",
+     "contract-fixtures/06-comments/expect.md",
+     "contract-fixtures/06-comments/page.json",
+     "contract-fixtures/06-comments/status.json",
+     "contract-fixtures/06-groups-closed/expect.md",
+     "contract-fixtures/06-groups-closed/page.json",
+     "contract-fixtures/06-groups-closed/status.json",
+     "contract-fixtures/07-mixed-fold/expect.md",
+     "contract-fixtures/07-mixed-fold/page.json",
+     "contract-fixtures/07-tour/expect.md",
+     "contract-fixtures/07-tour/page.json",
+     "contract-fixtures/07-tour/status.json",
+     "contract-fixtures/08-ranks-without-groups/expect.md",
+     "contract-fixtures/08-ranks-without-groups/page.json",
+     "contract-fixtures/08-ranks-without-groups/status.json",
+     "contract-fixtures/08-status-page-schema-3/expect.md",
+     "contract-fixtures/08-status-page-schema-3/page.json",
+     "contract-fixtures/08-status-page-schema-3/status.json",
+     "contract-fixtures/09-facet-rows-without-el/expect.md",
+     "contract-fixtures/09-facet-rows-without-el/page.json",
+     "contract-fixtures/09-facet-rows-without-el/status.json",
+     "contract-fixtures/09-page-schema-3/expect.md",
+     "contract-fixtures/09-page-schema-3/page.json",
+     "contract-fixtures/09-page-schema-3/status.json",
+     "contract-fixtures/10-unknown-block-type/expect.md",
+     "contract-fixtures/10-unknown-block-type/page.json",
+     "contract-fixtures/10-unknown-block-type/status.json",
+     "contract-fixtures/11-malformed-block/expect.md",
+     "contract-fixtures/11-malformed-block/page.json",
+     "contract-fixtures/11-malformed-block/status.json",
+     "contract-fixtures/11-malformed-table/expect.md",
+     "contract-fixtures/11-malformed-table/page.json",
+     "contract-fixtures/11-malformed-table/status.json",
+     "contract-fixtures/12-malformed-tour/expect.md",
+     "contract-fixtures/12-malformed-tour/page.json",
+     "contract-fixtures/12-malformed-tour/status.json",
+     "contract-fixtures/12-tour/expect.md",
+     "contract-fixtures/12-tour/page.json",
+     "contract-fixtures/12-tour/status.json",
+     "contract-fixtures/13-malformed-tour/expect.md",
+     "contract-fixtures/13-malformed-tour/page.json",
+     "contract-fixtures/13-malformed-tour/status.json",
+     "contract-fixtures/13-unknown-cell-kind/expect.md",
+     "contract-fixtures/13-unknown-cell-kind/page.json",
+     "contract-fixtures/13-unknown-cell-kind/status.json",
+     "contract-fixtures/14-unknown-rank/expect.md",
+     "contract-fixtures/14-unknown-rank/page.json",
+     "contract-fixtures/14-unknown-rank/status.json",
+     "contract-fixtures/README.md"
+    ]
+   },
+   {
+    "package": "tests",
+    "files": [
+     "tests/conftest.py",
+     "tests/test_build_page.py",
+     "tests/test_changed.py",
+     "tests/test_diagrams.py",
+     "tests/test_element_hash.py",
+     "tests/test_elements.py",
+     "tests/test_export.py",
+     "tests/test_fixtures.py",
+     "tests/test_focus_facet.py",
+     "tests/test_index.py",
+     "tests/test_lens_contracts.py",
+     "tests/test_lens_decisions.py",
+     "tests/test_lens_jobs.py",
+     "tests/test_lens_surroundings.py",
+     "tests/test_lens_tests.py",
+     "tests/test_narration.py",
+     "tests/test_narration_template.py",
+     "tests/test_packaging.py",
+     "tests/test_page_contract.py",
+     "tests/test_page_types.py",
+     "tests/test_parse_diff.py",
+     "tests/test_parts_apply.py",
+     "tests/test_provider_methods.py",
+     "tests/test_renamed_pr.py",
+     "tests/test_review.py",
+     "tests/test_silent_failures.py",
+     "tests/test_stage_atlas.py",
+     "tests/test_stage_context_facts.py",
+     "tests/test_stage_files.py",
+     "tests/test_stage_parts.py",
+     "tests/test_stage_tour.py",
+     "tests/test_stage_views.py",
+     "tests/test_stages_runner.py",
+     "tests/test_symbol_public.py",
+     "tests/test_table_settle.py",
+     "tests/test_tour_asides.py",
+     "tests/test_tour_check.py",
+     "tests/test_tour_lookups.py",
+     "tests/test_tour_pictures.py"
+    ]
+   },
+   {
+    "package": "viewer",
+    "files": [
+     "viewer/README.md",
+     "viewer/blocks/code.js",
+     "viewer/blocks/context.js",
+     "viewer/blocks/review.js",
+     "viewer/blocks/tour.js",
+     "viewer/boot.js",
+     "viewer/page.html",
+     "viewer/render.py",
+     "viewer/shell.css",
+     "viewer/shell.js"
+    ]
+   },
+   {
+    "package": "docs",
+    "files": [
+     "docs/current_state/adding-a-language.md",
+     "docs/current_state/stages.md",
+     "docs/design/page-v4.md"
+    ]
+   },
+   {
+    "package": "(root)",
+    "files": [
+     "AGENTS.md",
+     "README.md",
+     "uv.lock"
+    ]
+   },
+   {
+    "package": "dev",
+    "files": [
+     "dev/write-schemas.py"
+    ]
+   }
+  ],
+  "narrated": false,
+  "summary": null
+ }
+}

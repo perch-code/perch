@@ -1,0 +1,136 @@
+{
+  "schema": 4,
+  "meta": {
+    "key": "changescape-acme-widgets-7",
+    "title": "Add a cache and move the text helpers",
+    "repo": "acme/widgets",
+    "number": 7,
+    "url": "https://github.com/acme/widgets/pull/7",
+    "author": "alice",
+    "state": "open",
+    "language": "python",
+    "base": {
+      "ref": "main",
+      "sha": "c6f42045e20f643a2bbcfec6bb32d5750ad6a9e9"
+    },
+    "head": {
+      "ref": "cache",
+      "sha": "45d097f615470161a761dc80d71d532b1e5d7b19"
+    },
+    "adds": 52,
+    "dels": 12,
+    "files": 4,
+    "issues": [],
+    "generated": "2026-10-12T07:33:36+00:00"
+  },
+  "sections": [
+    {
+      "id": "overview",
+      "label": "Overview",
+      "icon": "overview",
+      "question": "What does this change do?",
+      "empty": "",
+      "views": [
+        "overview"
+      ],
+      "reason": null
+    }
+  ],
+  "views": [
+    {
+      "id": "overview",
+      "section": "overview",
+      "title": "Overview",
+      "subtitle": "The change in one page",
+      "question": "What does this change do?",
+      "icon": "overview",
+      "metric": "4 files",
+      "narration": null,
+      "blocks": [
+        {
+          "id": "rows",
+          "type": "table",
+          "title": "Changed functions",
+          "note": null,
+          "element": null,
+          "columns": [
+            {
+              "key": "name",
+              "label": "Name",
+              "kind": "text"
+            },
+            {
+              "key": "lines",
+              "label": "Lines",
+              "kind": "num"
+            }
+          ],
+          "rows": [
+            {
+              "cells": {
+                "name": {
+                  "text": "handle",
+                  "cell": "text"
+                },
+                "lines": {
+                  "value": 4,
+                  "cell": "number"
+                }
+              },
+              "rank": "key",
+              "why": "The public entry point changes.",
+              "group": null,
+              "element": null,
+              "side": null,
+              "dim": false
+            },
+            {
+              "cells": {
+                "name": {
+                  "text": "put",
+                  "cell": "text"
+                },
+                "lines": {
+                  "value": 2,
+                  "cell": "number"
+                }
+              },
+              "rank": "high",
+              "why": null,
+              "group": null,
+              "element": null,
+              "side": null,
+              "dim": false
+            },
+            {
+              "cells": {
+                "name": {
+                  "text": "touch",
+                  "cell": "text"
+                },
+                "lines": {
+                  "value": 3,
+                  "cell": "number"
+                }
+              },
+              "rank": "minor",
+              "why": "A small helper.",
+              "group": null,
+              "element": null,
+              "side": null,
+              "dim": false
+            }
+          ],
+          "groups": [],
+          "fold": null
+        }
+      ]
+    }
+  ],
+  "elements": {},
+  "files": [],
+  "comments": [],
+  "facets": [],
+  "parts": [],
+  "tour": null
+}

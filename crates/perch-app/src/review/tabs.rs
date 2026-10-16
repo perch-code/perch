@@ -241,7 +241,7 @@ pub fn step_tab(state: ReviewState, backend: &Backend, forward: bool) -> bool {
                 .as_deref()
                 .and_then(|a| files.iter().position(|p| p == a))
         }),
-        ItemTab::Conversation => None,
+        ItemTab::Conversation | ItemTab::Changescape => None,
     };
     let next = match current {
         Some(i) if forward => (i + 1) % count,

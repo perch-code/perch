@@ -7,6 +7,7 @@
 //! works with whatever version of the CLI the user has, and the parsers
 //! are the whole contract with them.
 
+mod changescape;
 mod codex;
 mod discover;
 mod interactive;
@@ -29,6 +30,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
 use tokio::sync::Notify;
 
+pub use changescape::ChangescapeSpec;
 pub use codex::CodexParser;
 pub use discover::{
     codex_catalog, codex_default_model, find_binary, install_dirs, parse_codex_catalog,
@@ -1420,6 +1422,7 @@ impl Run {
             None,
             conversation,
             events,
+            Vec::new(),
         )
     }
 
@@ -1460,6 +1463,7 @@ impl Run {
             transcript,
             None,
             events,
+            Vec::new(),
         )
     }
 
@@ -1480,6 +1484,7 @@ impl Run {
             transcript,
             None,
             events,
+            Vec::new(),
         )
     }
 
@@ -1491,6 +1496,7 @@ impl Run {
         transcript: Option<Transcript>,
         mut conversation: Option<Conversation>,
         events: UnboundedSender<RunEvent>,
+        env: Vec<(String, String)>,
     ) -> Result<Run, Error> {
         let started_at = Instant::now();
         let mut command = Command::new(&binary);
@@ -1508,6 +1514,8 @@ impl Run {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         scrub_env(&mut command);
+        // What this run is given on purpose, after the scrub.
+        command.envs(env);
         // Put every CLI invocation in its own process group. Claude and
         // Codex may launch commands and subagents of their own; signalling
         // the group keeps those descendants under the same lifetime.

@@ -3692,6 +3692,7 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "perch-agent",
+ "perch-changescape",
  "perch-git",
  "perch-github",
  "perch-knowledge",
@@ -3708,6 +3709,17 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "perch-changescape"
+version = "0.3.0"
+dependencies = [
+ "jiff",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

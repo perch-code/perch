@@ -524,6 +524,7 @@ pub fn composer_view(
                         model,
                         *effort,
                         sending_mode(app, state, composer.mode),
+                        composer.context.clone(),
                     );
                     state.agent_last.set(Some((*agent, model.clone(), *effort)));
                 }

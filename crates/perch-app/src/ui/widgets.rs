@@ -482,17 +482,28 @@ pub fn text_button(
         .style(|s| s.items_center()),
     )
     .on_event_stop(floem::event::listener::Click, move |_, _| on_click())
-    .style(|s| {
-        clickable(s)
-            .height(28.0)
-            .items_center()
-            .padding_horiz(10.0)
-            .background(theme::canvas())
-            .border(1.0)
-            .border_color(theme::border())
-            .border_radius(theme::RADIUS)
-            .hover(|s| s.background(theme::canvas_hover()))
-    })
+    .style(bordered_button)
+}
+
+/// The look of a small bordered text button.
+pub fn bordered_button(s: floem::style::Style) -> floem::style::Style {
+    clickable(s)
+        .height(28.0)
+        .items_center()
+        .padding_horiz(10.0)
+        .background(theme::canvas())
+        .border(1.0)
+        .border_color(theme::border())
+        .border_radius(theme::RADIUS)
+        .hover(|s| s.background(theme::canvas_hover()))
+}
+
+/// A box on the notice colours, as a warning or a question sits in.
+pub fn notice_box(s: floem::style::Style) -> floem::style::Style {
+    s.background(theme::notice_bg())
+        .border(1.0)
+        .border_color(theme::notice_border())
+        .border_radius(theme::RADIUS)
 }
 
 /// A question before a delete, on the notice colours: `question`, what
@@ -531,15 +542,7 @@ pub(crate) fn confirmation(
     ))
     .debug_name(format!("{name}-confirmation"))
     .on_event_stop(floem::event::listener::Click, |_, _| {})
-    .style(|s| {
-        s.flex_col()
-            .width_full()
-            .padding(10.0)
-            .background(theme::notice_bg())
-            .border(1.0)
-            .border_color(theme::notice_border())
-            .border_radius(theme::RADIUS)
-    })
+    .style(|s| notice_box(s.flex_col().width_full().padding(10.0)))
 }
 
 /// A small round icon button, as sits at the end of an item row.

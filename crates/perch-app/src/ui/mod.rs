@@ -561,6 +561,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 if let Some(paging) = paging {
                     let showing = match review.tab.get() {
                         crate::review::model::ItemTab::Conversation => true,
+                        // Its own scroll takes the keys.
+                        crate::review::model::ItemTab::Changescape => false,
                         crate::review::model::ItemTab::Code => {
                             review.active_file().is_some_and(|f| !f.truncated)
                                 && review.drawn_picture().is_none()
@@ -593,6 +595,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         crate::review::model::ItemTab::Conversation => {
                             Some(crate::review::find::Pane::Conversation)
                         }
+                        crate::review::model::ItemTab::Changescape => None,
                     }
                 };
                 let find_open = match finding {
@@ -716,6 +719,21 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 {
                     review.confirm_thread.set(None);
                     return EventPropagation::Stop;
+                }
+                // Then closes the rows of a Changescape view, then an
+                // expanded Changescape diagram.
+                if key.code == Code::Escape
+                    && key.modifiers.is_empty()
+                    && review.tab.get_untracked() == crate::review::model::ItemTab::Changescape
+                {
+                    if review.changescape_view.with_untracked(Option::is_some) {
+                        review.changescape_view.set(None);
+                        return EventPropagation::Stop;
+                    }
+                    if review.changescape_expanded.with_untracked(Option::is_some) {
+                        review.changescape_expanded.set(None);
+                        return EventPropagation::Stop;
+                    }
                 }
                 // Then puts the find bar away, from the code or the page;
                 // the bar takes its own Escape. A bar out of sight, on the
@@ -1843,6 +1861,7 @@ mod tests {
         };
         let showing = |review: &ReviewState| match review.tab.get() {
             ItemTab::Conversation => "conversation".to_string(),
+            ItemTab::Changescape => "changescape".to_string(),
             ItemTab::Code => review.active.get().unwrap_or_default(),
         };
 

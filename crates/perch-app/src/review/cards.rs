@@ -1610,7 +1610,8 @@ pub enum Tint {
 }
 
 impl Tint {
-    fn colors(self) -> (Option<Color>, Color) {
+    /// The background and the text colour a line of this tint is drawn in.
+    pub(crate) fn colors(self) -> (Option<Color>, Color) {
         match self {
             Tint::Plain => (None, theme::fg()),
             Tint::Added => (Some(theme::diff_added_bg()), theme::fg()),
@@ -1704,29 +1705,31 @@ pub fn anchored_lines(file: &LoadedFile, anchor: &Anchor, max: usize) -> (Vec<Co
         return (Vec::new(), 0);
     }
     let text: Vec<&str> = file.buffer.text.lines().collect();
-    let mut lines: Vec<CodeLine> = (from..=to)
-        .map(|d| {
-            let (number, tint) = match rows[d] {
-                Row::Head { head_line, status } => (
-                    Some(head_line + 1),
-                    match status {
-                        LineStatus::Unchanged => Tint::Plain,
-                        LineStatus::Added => Tint::Added,
-                        LineStatus::Modified => Tint::Modified,
-                    },
-                ),
-                Row::Deleted { base_line } => (Some(base_line + 1), Tint::Removed),
-            };
-            CodeLine {
-                number,
-                tint,
-                text: text.get(d).copied().unwrap_or_default().to_string(),
-            }
-        })
-        .collect();
+    let mut lines: Vec<CodeLine> = (from..=to).map(|d| display_line(rows, &text, d)).collect();
     let more = lines.len().saturating_sub(max);
     lines.truncate(max);
     (lines, more)
+}
+
+/// Display row `d` of a file as a code line: its number on its own side,
+/// its tint, and its text.
+pub fn display_line(rows: &[Row], text: &[&str], d: usize) -> CodeLine {
+    let (number, tint) = match rows[d] {
+        Row::Head { head_line, status } => (
+            Some(head_line + 1),
+            match status {
+                LineStatus::Unchanged => Tint::Plain,
+                LineStatus::Added => Tint::Added,
+                LineStatus::Modified => Tint::Modified,
+            },
+        ),
+        Row::Deleted { base_line } => (Some(base_line + 1), Tint::Removed),
+    };
+    CodeLine {
+        number,
+        tint,
+        text: text.get(d).copied().unwrap_or_default().to_string(),
+    }
 }
 
 fn anchored_base_lines(file: &LoadedFile, anchor: &Anchor, max: usize) -> (Vec<CodeLine>, usize) {
@@ -1786,9 +1789,13 @@ fn code_lines(lines: Vec<CodeLine>) -> impl IntoView {
 
 /// The column a line's `+` or `-` sits in, between its number and its
 /// text, as GitHub sets a diff's lines.
-const CODE_ROW_MARKER_WIDTH: f64 = 22.0;
+pub(crate) const CODE_ROW_MARKER_WIDTH: f64 = 22.0;
 
-pub(crate) fn code_row(line: CodeLine) -> impl IntoView {
+/// A line's number and its `+` or `-` marker, as two labels in the code
+/// font: the number right-aligned in the gutter, then the marker in its
+/// own column. The caller lays them out in a row, so a view that shows
+/// a line's gutter without its text draws them as the code row does.
+pub(crate) fn line_number_labels(line: &CodeLine) -> (impl IntoView, impl IntoView) {
     let tint = line.tint;
     let number = line.number.map(|n| n.to_string()).unwrap_or_default();
     let marker = match line.tint {
@@ -1796,27 +1803,35 @@ pub(crate) fn code_row(line: CodeLine) -> impl IntoView {
         Tint::Added | Tint::Modified => "+",
         Tint::Removed => "-",
     };
+    let number = Label::derived(move || number.clone()).style(|s| {
+        s.width(theme::CODE_ROW_NUMBER_WIDTH)
+            .padding_right(10.0)
+            .text_align(floem::text::Alignment::End)
+            .font_family(theme::CODE_FONT_STACK.to_string())
+            .font_size(theme::TEXT_BADGE)
+            .color(theme::gutter_fg())
+            .selectable(false)
+            .flex_shrink(0.0_f32)
+    });
+    let marker = Label::derived(move || marker.to_string()).style(move |s| {
+        s.width(CODE_ROW_MARKER_WIDTH)
+            .padding_left(8.0)
+            .font_family(theme::CODE_FONT_STACK.to_string())
+            .font_size(theme::TEXT_BADGE)
+            .color(tint.colors().1)
+            .selectable(false)
+            .flex_shrink(0.0_f32)
+    });
+    (number, marker)
+}
+
+pub(crate) fn code_row(line: CodeLine) -> impl IntoView {
+    let tint = line.tint;
+    let (number, marker) = line_number_labels(&line);
     let text = line.text;
     Stack::horizontal((
-        Label::derived(move || number.clone()).style(|s| {
-            s.width(theme::CODE_ROW_NUMBER_WIDTH)
-                .padding_right(10.0)
-                .text_align(floem::text::Alignment::End)
-                .font_family(theme::CODE_FONT_STACK.to_string())
-                .font_size(theme::TEXT_BADGE)
-                .color(theme::gutter_fg())
-                .selectable(false)
-                .flex_shrink(0.0_f32)
-        }),
-        Label::derived(move || marker.to_string()).style(move |s| {
-            s.width(CODE_ROW_MARKER_WIDTH)
-                .padding_left(8.0)
-                .font_family(theme::CODE_FONT_STACK.to_string())
-                .font_size(theme::TEXT_BADGE)
-                .color(tint.colors().1)
-                .selectable(false)
-                .flex_shrink(0.0_f32)
-        }),
+        number,
+        marker,
         Label::derived(move || text.clone()).style(move |s| {
             s.font_family(theme::CODE_FONT_STACK.to_string())
                 .font_size(theme::TEXT_BADGE)

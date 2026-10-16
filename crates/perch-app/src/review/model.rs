@@ -141,13 +141,14 @@ pub enum Paging {
     End,
 }
 
-/// What the item view shows: Conversation, or Code, the open file and the
-/// tabs over it. The two are the switch in the bar; Conversation cannot
-/// be closed.
+/// What the item view shows: Conversation, Changescape's account of the
+/// pull request when there is one, or Code, the open file and the tabs
+/// over it. They are the switch in the bar; Conversation cannot be closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ItemTab {
     #[default]
     Conversation,
+    Changescape,
     Code,
 }
 
@@ -166,6 +167,8 @@ pub struct Pane {
     agents_unfolded: bool,
     agents_open_runs: HashSet<String>,
     code_seen: bool,
+    changescape_opened: HashSet<String>,
+    changescape_files_open: HashSet<String>,
 }
 
 impl Default for Pane {
@@ -180,6 +183,8 @@ impl Default for Pane {
             agents_unfolded: false,
             agents_open_runs: HashSet::new(),
             code_seen: false,
+            changescape_opened: HashSet::new(),
+            changescape_files_open: HashSet::new(),
         }
     }
 }
@@ -718,11 +723,12 @@ pub struct Place {
     pub spot: Spot,
 }
 
-/// Where on an item: Conversation, Code with no file open, or a head line
-/// of a file.
+/// Where on an item: Conversation, the Changescape tour, Code with no
+/// file open, or a head line of a file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Spot {
     Conversation,
+    Changescape,
     Code,
     Line { path: String, line: usize },
 }
@@ -1216,6 +1222,15 @@ pub struct Composer {
     pub opening: u64,
     /// Ask or Work, where the item allows Work; see `composer_mode`.
     pub mode: perch_github::RunMode,
+    /// Text Perch assembled about what the reader is looking at, such as
+    /// a Changescape tour stop's title, text and code, sent with a new
+    /// thread's first question. `None` for a composer with nothing more
+    /// to say than its anchor.
+    pub context: Option<String>,
+    /// Where the composer is shown when it is neither on Conversation nor
+    /// in the code, such as `"tour:<stop id>"`; the view named draws it
+    /// and no other does. `None` everywhere else.
+    pub about: Option<String>,
 }
 
 /// One open editor tab. The origin is here as well as on the loaded
@@ -1510,8 +1525,41 @@ pub struct ReviewState {
     /// dashboard state remains in `AppState` and is restored on Back.
     pub historical_findings: RwSignal<Option<Arc<Vec<ReviewFindingSummary>>>>,
     historical_review_rollback: RwSignal<Option<HistoricalReviewRollback>>,
-    /// Conversation or the open file.
+    /// Conversation, Changescape, or the open file.
     pub tab: RwSignal<ItemTab>,
+    /// What Changescape's cache holds for the open pull request, as the
+    /// backend last found it. It names its item, so one left over from
+    /// the item before shows nothing.
+    pub changescape: RwSignal<Option<Arc<crate::review::changescape::Shown>>>,
+    /// The reader's marks on the tour's stops, by stop id: Done, or Come
+    /// back to this. A stop with neither has no entry. Seeded from what
+    /// the backend found, and written through to the database. A stop
+    /// whose lines changed since its mark is not here but in
+    /// `changescape_changed`.
+    pub changescape_marks: RwSignal<HashMap<String, perch_github::TourMark>>,
+    /// The marks on stops whose lines changed since the reader made them,
+    /// by stop id. Marking the stop again takes it out.
+    pub changescape_changed: RwSignal<HashMap<String, perch_github::TourMark>>,
+    /// The skim stops the reader opened in place, by id.
+    pub changescape_opened: RwSignal<HashSet<String>>,
+    /// The stops whose Files section is open, by stop id.
+    pub changescape_files_open: RwSignal<HashSet<String>>,
+    /// The stop or chapter the tour scrolls to next, by id: set by Next,
+    /// the cover's contents and the Code strip, and taken by the view it
+    /// names.
+    pub changescape_focus: RwSignal<Option<String>>,
+    /// The diagram shown expanded over the tour, by its key (see
+    /// `changescape::tour::picture`). Not kept with the pane.
+    pub changescape_expanded: RwSignal<Option<String>>,
+    /// The view shown in a popover over the tour, when a target that
+    /// names it was followed. Not kept with the pane.
+    pub changescape_view: RwSignal<Option<perch_changescape::v4::ViewId>>,
+    /// The stop in view in the tour, by id, which the outline and the
+    /// code map light up. None above the first stop and in the ending.
+    pub changescape_here: RwSignal<Option<String>>,
+    /// What the running Changescape build of the open item has done, a
+    /// line a step, oldest first.
+    pub changescape_log: RwSignal<Vec<String>>,
     /// Each item's pane as it was last left, by item, for the life of the
     /// app.
     pub panes: RwSignal<HashMap<String, Pane>>,
@@ -2068,6 +2116,16 @@ impl ReviewState {
             historical_review_rollback: RwSignal::new(None),
             tab: RwSignal::new(ItemTab::Conversation),
             panes: RwSignal::new(HashMap::new()),
+            changescape: RwSignal::new(None),
+            changescape_marks: RwSignal::new(HashMap::new()),
+            changescape_changed: RwSignal::new(HashMap::new()),
+            changescape_opened: RwSignal::new(HashSet::new()),
+            changescape_files_open: RwSignal::new(HashSet::new()),
+            changescape_focus: RwSignal::new(None),
+            changescape_expanded: RwSignal::new(None),
+            changescape_view: RwSignal::new(None),
+            changescape_here: RwSignal::new(None),
+            changescape_log: RwSignal::new(Vec::new()),
             code_seen: RwSignal::new(false),
             tree_wanted: RwSignal::new(false),
             agents_unfolded: RwSignal::new(false),
@@ -2535,6 +2593,8 @@ impl ReviewState {
             agents_open_runs: self.agents_open_runs.get_untracked(),
             file_places: self.file_places.get_untracked(),
             code_seen: self.code_seen.get_untracked(),
+            changescape_opened: self.changescape_opened.get_untracked(),
+            changescape_files_open: self.changescape_files_open.get_untracked(),
         };
         self.panes.update(|panes| {
             panes.insert(id, pane);
@@ -2576,6 +2636,12 @@ impl ReviewState {
             self.agents_open_runs.set(pane.agents_open_runs);
             self.file_places.set(pane.file_places);
             self.code_seen.set(pane.code_seen);
+            self.changescape_opened.set(pane.changescape_opened);
+            self.changescape_files_open.set(pane.changescape_files_open);
+            self.changescape_focus.set(None);
+            self.changescape_expanded.set(None);
+            self.changescape_view.set(None);
+            self.changescape_here.set(None);
             self.tree_wanted.set(false);
             if !paths.is_empty() {
                 self.loading
@@ -3170,6 +3236,7 @@ impl ReviewState {
             let item = self.item.with(|i| i.as_ref().map(|i| i.id.clone()));
             let spot = match self.tab.get() {
                 ItemTab::Conversation => Spot::Conversation,
+                ItemTab::Changescape => Spot::Changescape,
                 ItemTab::Code => match self.active.get() {
                     Some(path) => {
                         // The file's own caret first: `last_position` can
@@ -3270,34 +3337,41 @@ impl ReviewState {
 
     /// Show a spot on the open item, remembering nothing.
     fn go_to_spot(&self, spot: Spot) {
-        match spot {
-            Spot::Conversation => {
-                if self.tab.get_untracked() != ItemTab::Conversation {
-                    self.tab.set(ItemTab::Conversation);
-                }
-            }
-            Spot::Code => {
-                if self.tab.get_untracked() != ItemTab::Code {
-                    self.tab.set(ItemTab::Code);
-                }
-            }
+        let tab = match spot {
+            Spot::Conversation => ItemTab::Conversation,
+            Spot::Changescape => ItemTab::Changescape,
+            Spot::Code => ItemTab::Code,
             Spot::Line { path, line } => {
                 self.pending_jump.set(Some((path, line, 0)));
-                if self.tab.get_untracked() != ItemTab::Code {
-                    self.tab.set(ItemTab::Code);
-                }
+                ItemTab::Code
             }
+        };
+        if self.tab.get_untracked() != tab {
+            self.tab.set(tab);
         }
     }
 
     /// Open a location rust-analyzer named: the file, at the line, with
-    /// the caret on the symbol.
+    /// the caret on the symbol. From the Changescape, the jump is shown on
+    /// Code; see `code_from_changescape`.
     pub fn open_located(&self, located: &Located) {
         self.navigate_to(
             &located.path,
             located.line.saturating_sub(1),
             located.character,
         );
+        self.code_from_changescape();
+    }
+
+    /// Show Code when the Changescape is the open tab. The jump, and the
+    /// references and call hierarchy panels, are drawn on Code only, and a
+    /// Changescape's code asks for them. The Conversation keeps its tab:
+    /// its answers can land there when the server becomes ready, and they
+    /// are not the Changescape's to take the reader away from.
+    fn code_from_changescape(&self) {
+        if self.tab.get_untracked() == ItemTab::Changescape {
+            self.tab.set(ItemTab::Code);
+        }
     }
 
     /// Go to a file a comment or an answer names, on Code: at the head
@@ -3502,12 +3576,14 @@ impl ReviewState {
     pub fn open_references(&self, references: References) {
         self.hierarchy.set(None);
         self.references.set(Some(Arc::new(references)));
+        self.code_from_changescape();
     }
 
     /// Open the call hierarchy panel. The references panel closes.
     pub fn open_hierarchy(&self, hierarchy: Hierarchy) {
         self.references.set(None);
         self.hierarchy.set(Some(Arc::new(hierarchy)));
+        self.code_from_changescape();
     }
 
     /// Ask for the calls under an item, one way or the other: queued for
@@ -4222,7 +4298,7 @@ impl ReviewState {
         self.composer
             .with(|c| {
                 c.as_ref()
-                    .filter(|c| c.thread_id.is_none())
+                    .filter(|c| c.thread_id.is_none() && c.about.is_none())
                     .and_then(|c| c.anchor.clone())
             })
             .or_else(|| self.sent_composer.get())
@@ -4238,7 +4314,7 @@ impl ReviewState {
         };
         self.composer.with(|c| {
             c.as_ref()
-                .filter(|c| c.thread_id.is_none())
+                .filter(|c| c.thread_id.is_none() && c.about.is_none())
                 .and_then(|c| c.anchor.as_ref())
                 .is_some_and(|a| a.path == file.path && card_line(&file, a).is_some())
         })
@@ -4882,6 +4958,58 @@ impl ReviewState {
         destination: Destination,
         editing: Option<String>,
     ) {
+        self.place_composer(thread_id, anchor, draft, destination, editing, None, None);
+        let in_code = self.composer_in_code_untracked();
+        if !in_code && self.tab.get_untracked() != ItemTab::Conversation {
+            self.show_tab(ItemTab::Conversation);
+        } else if let Some(id) = self
+            .composer
+            .with_untracked(|c| c.as_ref().and_then(|c| c.thread_id.clone()))
+        {
+            self.expand_card(&CardId::Thread(id));
+        }
+    }
+
+    /// Open a composer for a new thread that a view of its own draws, the
+    /// one `about` names, such as a Changescape tour stop's Chat about
+    /// this. It goes to an agent, the last one used or else `defaults`,
+    /// as a question about the item as a whole does, and carries
+    /// `context`, what the reader is looking at, into the thread's first
+    /// prompt. The tab is left as it is: the composer is shown where the
+    /// reader asked, not on Conversation or in the code.
+    pub fn open_composer_about(
+        &self,
+        about: String,
+        anchor: Option<Anchor>,
+        context: String,
+        defaults: AgentChoice,
+    ) {
+        let destination = Destination::agent(self.agent_last.get_untracked().unwrap_or(defaults));
+        self.place_composer(
+            None,
+            anchor,
+            String::new(),
+            destination,
+            None,
+            Some(about),
+            Some(context),
+        );
+    }
+
+    /// Make a composer with these parts the open one, as a new opening
+    /// with a fresh draft, putting away what was about the composer it
+    /// replaces. Where it is shown is the caller's business.
+    #[allow(clippy::too_many_arguments)]
+    fn place_composer(
+        &self,
+        thread_id: Option<String>,
+        anchor: Option<Anchor>,
+        draft: String,
+        destination: Destination,
+        editing: Option<String>,
+        about: Option<String>,
+        context: Option<String>,
+    ) {
         self.composer_draft.set(draft.clone());
         // A confirm or a refusal was about the composer this replaces.
         self.composer_confirming.set(false);
@@ -4902,17 +5030,10 @@ impl ReviewState {
                 opening,
                 editing,
                 mode,
+                context,
+                about,
             }));
         });
-        let in_code = self.composer_in_code_untracked();
-        if !in_code && self.tab.get_untracked() != ItemTab::Conversation {
-            self.show_tab(ItemTab::Conversation);
-        } else if let Some(id) = self
-            .composer
-            .with_untracked(|c| c.as_ref().and_then(|c| c.thread_id.clone()))
-        {
-            self.expand_card(&CardId::Thread(id));
-        }
     }
 
     /// Close the composer and forget its draft. A composer card's rows go

@@ -2284,9 +2284,24 @@ fn list_view(start: Option<u64>, items: Vec<Item>, ctx: Ctx) -> AnyView {
 
 /// How wide `text` is in the body font at `size`.
 fn text_width(text: &str, size: f32) -> f64 {
-    let family: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::FONT_STACK).collect();
-    let attrs = AttrsList::new(Attrs::new().font_size(size).family(&family));
-    TextLayout::new_with_text(text, attrs, None).size().width
+    text_width_in(text, theme::FONT_STACK, size, None)
+}
+
+/// How wide `text` is on one line in the fonts of `stack` at `size`.
+pub(crate) fn text_width_in(
+    text: &str,
+    stack: &str,
+    size: f32,
+    weight: Option<floem::text::FontWeight>,
+) -> f64 {
+    let family: Vec<FamilyOwned> = FamilyOwned::parse_list(stack).collect();
+    let mut attrs = Attrs::new().font_size(size).family(&family);
+    if let Some(weight) = weight {
+        attrs = attrs.weight(weight);
+    }
+    TextLayout::new_with_text(text, AttrsList::new(attrs), None)
+        .size()
+        .width
 }
 
 /// A task item's box, drawn as the sidebar draws a checkbox but smaller

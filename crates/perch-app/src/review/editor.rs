@@ -774,8 +774,9 @@ fn tint_layer(doc: RwSignal<Arc<Doc>>, viewport: RwSignal<Rect>) -> impl IntoVie
 
 /// An editor over its rows' tints: a box with the code's background, the
 /// tint layer over that, and the editor over both, painting no background
-/// of its own and set in from the left by the gap before the code.
-fn over_tints(
+/// of its own and set in from the left by the gap before the code. The
+/// Changescape's excerpts are over their tints this way too.
+pub(crate) fn over_tints(
     editor: impl IntoView + 'static,
     doc: RwSignal<Arc<Doc>>,
     viewport: RwSignal<Rect>,
@@ -1170,7 +1171,11 @@ fn card_layer(
         let composer = state.composer.with(|c| {
             c.as_ref()
                 .filter(|c| {
-                    c.thread_id.is_none() && c.anchor.as_ref().is_some_and(|a| a.path == path)
+                    // One a view of its own draws, a tour stop's, is never
+                    // a card in the code as well.
+                    c.thread_id.is_none()
+                        && c.about.is_none()
+                        && c.anchor.as_ref().is_some_and(|a| a.path == path)
                 })
                 .cloned()
         });
@@ -1737,13 +1742,14 @@ thread_local! {
     static STACKED_CURSOR: std::cell::Cell<Option<RwSignal<Cursor>>> = const { std::cell::Cell::new(None) };
 }
 
-/// A read-only editor over one document, drawn as code.
+/// A read-only editor over one document, drawn as code. The Changescape's
+/// excerpts are drawn by it too.
 ///
 /// The editor fills its box: floem sizes the scroll inside it to the
 /// box's padding box, so padding here would push the scroll, and the
 /// vertical bar at its right edge, out past the box. The gap before the
 /// code is `over_tints`'s.
-fn code_editor(text: String, styling: PerchStyling) -> TextEditor {
+pub(crate) fn code_editor(text: String, styling: PerchStyling) -> TextEditor {
     text_editor(text)
         .read_only()
         .styling(styling)

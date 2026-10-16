@@ -1,0 +1,86 @@
+{
+  "$defs": {
+    "BuildStage": {
+      "description": "A stage that a build can be in.",
+      "enum": [
+        "facts",
+        "narrated"
+      ],
+      "title": "BuildStage",
+      "type": "string"
+    },
+    "BuildState": {
+      "description": "The state of a build.",
+      "enum": [
+        "running",
+        "done",
+        "failed"
+      ],
+      "title": "BuildState",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The status of a build, as the agent and the viewer read it.",
+  "properties": {
+    "error": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Error"
+    },
+    "finished": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Finished"
+    },
+    "page_schema": {
+      "const": 4,
+      "title": "Page Schema",
+      "type": "integer"
+    },
+    "skill_version": {
+      "title": "Skill Version",
+      "type": "string"
+    },
+    "stage": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BuildStage"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "started": {
+      "title": "Started",
+      "type": "string"
+    },
+    "state": {
+      "$ref": "#/$defs/BuildState"
+    }
+  },
+  "required": [
+    "error",
+    "finished",
+    "page_schema",
+    "skill_version",
+    "stage",
+    "started",
+    "state"
+  ],
+  "title": "BuildStatus",
+  "type": "object"
+}

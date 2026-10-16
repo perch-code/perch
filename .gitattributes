@@ -1,0 +1,4 @@
+# Code generated from a schema: GitHub folds it in pull request diffs and
+# leaves it out of the language counts. Changescape skips any path under a
+# generated/ folder.
+crates/perch-changescape/src/generated/** linguist-generated=true

@@ -463,6 +463,15 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
                 .action(move || ask(state, Pending::Item(i.clone())))
         });
     }
+    // Only for a pull request, where a build can run.
+    if item.pull_request().is_some() && crate::review::changescape::can_build() {
+        let (b, i) = (backend.clone(), id.clone());
+        menu = menu.item("Build Changescape", move |m| {
+            let (b, i) = (b.clone(), i.clone());
+            m.icon(SidebarIcon::Branch)
+                .action(move || crate::review::changescape::request_build(state, &b, &i))
+        });
+    }
     menu = menu.separator();
 
     {
