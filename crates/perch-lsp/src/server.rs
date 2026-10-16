@@ -12,14 +12,17 @@ pub enum ServerKind {
     /// TypeScript and JavaScript both.
     TypescriptLanguageServer,
     Jdtls,
+    /// Astral's type checker, which serves Python.
+    Ty,
 }
 
 impl ServerKind {
-    pub const ALL: [ServerKind; 4] = [
+    pub const ALL: [ServerKind; 5] = [
         ServerKind::RustAnalyzer,
         ServerKind::Gopls,
         ServerKind::TypescriptLanguageServer,
         ServerKind::Jdtls,
+        ServerKind::Ty,
     ];
 
     /// The server's own name, as statuses and toasts say it.
@@ -29,6 +32,7 @@ impl ServerKind {
             ServerKind::Gopls => "gopls",
             ServerKind::TypescriptLanguageServer => "typescript-language-server",
             ServerKind::Jdtls => "jdtls",
+            ServerKind::Ty => "ty",
         }
     }
 
@@ -41,7 +45,7 @@ impl ServerKind {
         match self {
             ServerKind::RustAnalyzer => Some("build scripts and proc macros"),
             ServerKind::Jdtls => Some("Gradle or Maven build"),
-            ServerKind::Gopls | ServerKind::TypescriptLanguageServer => None,
+            ServerKind::Gopls | ServerKind::TypescriptLanguageServer | ServerKind::Ty => None,
         }
     }
 
@@ -60,6 +64,7 @@ impl ServerKind {
             "typescript" | "ts" | "tsx" | "javascript" | "js" | "jsx" | "mjs" | "cjs" | "mts"
             | "cts" => Some(ServerKind::TypescriptLanguageServer),
             "java" => Some(ServerKind::Jdtls),
+            "python" | "py" => Some(ServerKind::Ty),
             _ => None,
         }
     }
@@ -80,13 +85,19 @@ impl ServerKind {
                 "settings.gradle",
                 "settings.gradle.kts",
             ],
+            ServerKind::Ty => &[
+                "pyproject.toml",
+                "setup.py",
+                "setup.cfg",
+                "requirements.txt",
+            ],
         }
     }
 
     /// How long the handshake waits for the server's answer.
     pub fn initialize_timeout(self) -> Duration {
         match self {
-            ServerKind::RustAnalyzer | ServerKind::Gopls => Duration::from_secs(5),
+            ServerKind::RustAnalyzer | ServerKind::Gopls | ServerKind::Ty => Duration::from_secs(5),
             // tsserver starts under it, which takes a while on a large
             // project.
             ServerKind::TypescriptLanguageServer => Duration::from_secs(15),
@@ -120,6 +131,7 @@ pub fn language_id(path: &str) -> Option<(ServerKind, &'static str)> {
         "js" | "mjs" | "cjs" => Some((ServerKind::TypescriptLanguageServer, "javascript")),
         "jsx" => Some((ServerKind::TypescriptLanguageServer, "javascriptreact")),
         "java" => Some((ServerKind::Jdtls, "java")),
+        "py" | "pyi" | "pyw" => Some((ServerKind::Ty, "python")),
         _ => None,
     }
 }
@@ -381,6 +393,7 @@ pub fn find(kind: ServerKind, root: &Path, env: &Env) -> Result<ServerSpec, Miss
         ServerKind::Gopls => find_gopls(env),
         ServerKind::TypescriptLanguageServer => find_typescript_language_server(env),
         ServerKind::Jdtls => find_jdtls(root, env),
+        ServerKind::Ty => find_ty(env),
     }
 }
 
@@ -587,6 +600,7 @@ pub fn outdated(spec: &ServerSpec, env: &Env) -> Option<Outdated> {
         ServerKind::Gopls => gopls_install(&env.which("go")?, env),
         ServerKind::TypescriptLanguageServer => typescript_install(&env.which("npm")?, env),
         ServerKind::Jdtls => jdtls_install(env),
+        ServerKind::Ty => ty_install(env),
     };
     let pin = install.version()?.to_string();
     (compare_versions(&installed, &pin) == std::cmp::Ordering::Less).then_some(Outdated {
@@ -884,6 +898,74 @@ pub(crate) fn gopls_install(go: &Path, env: &Env) -> Install {
             ("GOTOOLCHAIN".into(), "local".into()),
         ],
         into: Some(into),
+    }
+}
+
+/// The ty Perch downloads: the pinned release, and for each processor its
+/// tarball's name and the SHA-256 Astral publishes for it. 0.0.86 is the
+/// first release whose macOS binaries are signed and notarized.
+const TY_PIN: &str = "0.0.86";
+const TY_AARCH64: (&str, &str) = (
+    "aarch64",
+    "ba782554d855aa69ce6ec8fa5898f5256a8603eb81f35d1927434576a434ae4e",
+);
+const TY_X86_64: (&str, &str) = (
+    "x86_64",
+    "6b7908dec8629f9c18fe8c76fdcc22497ff823b14c351636aebe4d552d0e1fe9",
+);
+
+/// The release tarball for the processor Perch runs on: arm64 or x86_64.
+fn ty_release() -> (&'static str, &'static str) {
+    if std::env::consts::ARCH == "aarch64" {
+        TY_AARCH64
+    } else {
+        TY_X86_64
+    }
+}
+
+/// ty on `PATH`, else Perch's own install, else a download of the pinned
+/// release. ty runs none of the checkout's code, so it starts without a
+/// trust prompt.
+fn find_ty(env: &Env) -> Result<ServerSpec, Missing> {
+    let kind = ServerKind::Ty;
+    let perchs = || {
+        newest_install(env, kind)
+            .map(|(_, dir)| ty_binary(&dir))
+            .filter(|p| p.is_file())
+    };
+    if let Some(binary) = env.which("ty").or_else(perchs) {
+        return Ok(ServerSpec {
+            kind,
+            binary,
+            args: vec!["server".into()],
+            options: serde_json::Value::Null,
+        });
+    }
+    Err(Missing {
+        kind,
+        needs: None,
+        install: Some(Box::new(ty_install(env))),
+        toolchain: None,
+    })
+}
+
+/// The ty binary in an install's folder. The release tarball unpacks to a
+/// folder named for its target, as `ty-aarch64-apple-darwin/ty`.
+fn ty_binary(dir: &Path) -> PathBuf {
+    let (arch, _) = ty_release();
+    dir.join(format!("ty-{arch}-apple-darwin")).join("ty")
+}
+
+/// The download of the pinned ty for this processor, into Perch's
+/// directory.
+fn ty_install(env: &Env) -> Install {
+    let (arch, sha256) = ty_release();
+    Install::Download {
+        url: format!(
+            "https://github.com/astral-sh/ty/releases/download/{TY_PIN}/ty-{arch}-apple-darwin.tar.gz"
+        ),
+        sha256: sha256.into(),
+        into: env.servers.join(ServerKind::Ty.name()).join(TY_PIN),
     }
 }
 
@@ -1364,6 +1446,72 @@ mod tests {
         assert_eq!(gopls(&fake).unwrap().binary, on_path);
     }
 
+    /// ty: the user's on PATH, else Perch's own install, else the pinned
+    /// release downloaded with its checksum for this processor.
+    #[test]
+    fn ty_is_the_users_else_perchs_else_downloaded() {
+        let fake = Fake::new();
+        let (arch, sha256) = if std::env::consts::ARCH == "aarch64" {
+            (
+                "aarch64",
+                "ba782554d855aa69ce6ec8fa5898f5256a8603eb81f35d1927434576a434ae4e",
+            )
+        } else {
+            (
+                "x86_64",
+                "6b7908dec8629f9c18fe8c76fdcc22497ff823b14c351636aebe4d552d0e1fe9",
+            )
+        };
+        let ty = |fake: &Fake| find(ServerKind::Ty, &fake.path("checkout"), &fake.env());
+        let missing = ty(&fake).unwrap_err();
+        assert_eq!(missing.describe(), "ty isn't installed.");
+        assert_eq!(
+            missing.install.as_deref(),
+            Some(&Install::Download {
+                url: format!(
+                    "https://github.com/astral-sh/ty/releases/download/0.0.86/ty-{arch}-apple-darwin.tar.gz"
+                ),
+                sha256: sha256.into(),
+                into: fake.path("servers/ty/0.0.86"),
+            })
+        );
+
+        // Perch's own, where the tarball unpacks it.
+        let binary = fake.path(&format!("servers/ty/0.0.86/ty-{arch}-apple-darwin/ty"));
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, "").unwrap();
+        let spec = ty(&fake).unwrap();
+        assert_eq!(spec.binary, binary);
+        assert_eq!(spec.kind, ServerKind::Ty);
+        assert_eq!(spec.args, ["server"]);
+        assert_eq!(spec.options, serde_json::Value::Null);
+
+        // The user's, on PATH.
+        let users = fake.tool("ty", "exit 0");
+        assert_eq!(ty(&fake).unwrap().binary, users);
+    }
+
+    /// Only Perch's own ty, older than the pin, is offered the pin.
+    #[test]
+    fn an_old_install_of_ty_is_offered_the_pin() {
+        let fake = Fake::new();
+        let (arch, _) = ty_release();
+        let old = fake.path(&format!("servers/ty/0.0.85/ty-{arch}-apple-darwin/ty"));
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, "").unwrap();
+        let spec = find(ServerKind::Ty, &fake.path("checkout"), &fake.env()).unwrap();
+        let old_one = outdated(&spec, &fake.env()).unwrap();
+        assert_eq!(old_one.installed, "0.0.85");
+        assert_eq!(old_one.pin, "0.0.86");
+        assert_eq!(old_one.describe(), "ty 0.0.86 is available.");
+        assert_eq!(old_one.install, ty_install(&fake.env()));
+
+        // The user's own: never Perch's to update.
+        fake.tool("ty", "exit 0");
+        let spec = find(ServerKind::Ty, &fake.path("checkout"), &fake.env()).unwrap();
+        assert_eq!(outdated(&spec, &fake.env()), None);
+    }
+
     /// The TypeScript server: the user's with the TypeScript it would load
     /// itself, else Perch's with the one beside it, and never the
     /// checkout's; missing, npm into Perch's directory without install
@@ -1665,6 +1813,9 @@ mod tests {
             std::fs::create_dir_all(servers.join("gopls").join(version)).unwrap();
         }
         std::fs::create_dir_all(servers.join("jdtls/1.61.0.partial")).unwrap();
+        for version in ["0.0.85", "0.0.86", "0.0.87.partial"] {
+            std::fs::create_dir_all(servers.join("ty").join(version)).unwrap();
+        }
         let live = jdtls_data(&fake.env(), &fake.path("checkout"));
         let gone = jdtls_data(&fake.env(), &fake.path("gone"));
         let unmarked = servers.join("jdtls-data/000000000000");
@@ -1681,6 +1832,7 @@ mod tests {
             names
         };
         assert_eq!(left("gopls"), ["0.23.0"]);
+        assert_eq!(left("ty"), ["0.0.86"]);
         assert!(left("jdtls").is_empty());
         assert!(live.is_dir());
         assert!(!gone.exists());
@@ -1747,6 +1899,12 @@ mod tests {
         assert_eq!(language_id("index.mjs"), Some((ts, "javascript")));
         assert_eq!(language_id("a.d.cts"), Some((ts, "typescript")));
         assert_eq!(ServerKind::for_fence("tsx"), Some(ts));
+        let ty = ServerKind::Ty;
+        assert_eq!(language_id("pkg/app.py"), Some((ty, "python")));
+        assert_eq!(language_id("stubs/app.pyi"), Some((ty, "python")));
+        assert_eq!(language_id("bin/run.PYW"), Some((ty, "python")));
+        assert_eq!(ServerKind::for_fence("py"), Some(ty));
+        assert_eq!(ServerKind::for_fence("Python"), Some(ty));
     }
 
     #[test]
@@ -1760,6 +1918,11 @@ mod tests {
         assert_eq!(
             kinds_at_root(&dir),
             [ServerKind::RustAnalyzer, ServerKind::Gopls]
+        );
+        std::fs::write(dir.join("pyproject.toml"), "").unwrap();
+        assert_eq!(
+            kinds_at_root(&dir),
+            [ServerKind::RustAnalyzer, ServerKind::Gopls, ServerKind::Ty]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1776,6 +1939,7 @@ mod tests {
         );
         assert_eq!(ServerKind::Gopls.project_code(), None);
         assert_eq!(ServerKind::TypescriptLanguageServer.project_code(), None);
+        assert_eq!(ServerKind::Ty.project_code(), None);
     }
 
     #[test]

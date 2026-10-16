@@ -1427,6 +1427,27 @@ impl AppState {
         token
     }
 
+    /// A file's answer for a view since left is dropped. Its path may
+    /// still be loading under the view now open, waiting on an answer
+    /// that is not coming, so the drop is said.
+    fn drop_file_answer(
+        &self,
+        review: crate::review::model::ReviewState,
+        path: &str,
+        navigation_id: u64,
+        scope_gen: u64,
+    ) {
+        tracing::info!(
+            path,
+            navigation_id,
+            expected = ?self.expected_navigation_id.get_untracked(),
+            scope_gen,
+            current_gen = ?review.scope_gen.get_untracked(),
+            still_loading = review.loading.with_untracked(|l| l.contains(path)),
+            "file answer for a view since left; dropped"
+        );
+    }
+
     pub(crate) fn accepts_navigation(&self, navigation_id: u64) -> bool {
         self.expected_navigation_id.get_untracked() == Some(navigation_id)
     }
@@ -1496,10 +1517,21 @@ impl AppState {
                     review.item.set(Some(item));
                     review.stale_head.set(stale_head);
                     review.pull_request.set(pull_request);
-                    let paths = review
+                    let mut paths = review
                         .files_reload
                         .try_update(std::mem::take)
                         .unwrap_or_default();
+                    // A thread card on Conversation may have asked for its
+                    // file meanwhile, of the checkout that was not there
+                    // yet. That answer is for no generation the window
+                    // knows and is dropped, and the path, still loading,
+                    // would never be asked for again: a tab opened on it
+                    // would say it is opening for good.
+                    let mut asked: Vec<String> = review.loading.with_untracked(|l| {
+                        l.iter().filter(|p| !paths.contains(p)).cloned().collect()
+                    });
+                    asked.sort();
+                    paths.extend(asked);
                     if !paths.is_empty() {
                         self.reload.update(|reload| reload.extend(paths));
                     }
@@ -2192,6 +2224,8 @@ impl AppState {
                     && review.scope_gen.get_untracked() == Some(scope_gen)
                 {
                     review.finish_load(&path, file);
+                } else {
+                    self.drop_file_answer(review, &path, navigation_id, scope_gen);
                 }
             }
             Event::IssueComments {
@@ -2270,6 +2304,8 @@ impl AppState {
                 {
                     tracing::warn!(path, message, "could not open file");
                     review.fail_load(&path);
+                } else {
+                    self.drop_file_answer(review, &path, navigation_id, scope_gen);
                 }
             }
             // A complaint may be about the send a sent question's card is
@@ -4382,6 +4418,36 @@ mod tests {
         assert_eq!(review.files_pending.get(), None);
         assert_eq!(review.phase.get(), Phase::Ready);
         assert!(review.is_item("pr"));
+    }
+
+    /// A thread card drawn while a pull request waits for its checkout
+    /// asks for its file of a checkout that is not there; the answer is
+    /// dropped. The file is asked for again when the files come, or a tab
+    /// opened on it later says it is opening for good.
+    #[test]
+    fn a_file_asked_for_before_the_checkout_is_asked_for_again() {
+        let app = AppState::new();
+        let review = ReviewState::new();
+        app.begin_item_review(review, "Reading the pull request", "pr", 40);
+        let mut item = Item::new("slatedb/slatedb", "2026-09-18T09:59:00Z".parse().unwrap());
+        item.id = "pr".into();
+        app.apply_with_review(
+            Event::PullRequestReady {
+                navigation_id: 40,
+                item: Arc::new(item),
+                pull_request: Arc::new(pull_request(7, "h", "open")),
+            },
+            review,
+        );
+        assert!(review.begin_load("src/card.rs"), "the card asks");
+
+        let mut ready = review_ready("pr", 40);
+        if let Event::ReviewReady { shown_early, .. } = &mut ready {
+            *shown_early = true;
+        }
+        app.apply_with_review(ready, review);
+        assert_eq!(app.reload.get(), ["src/card.rs"]);
+        assert!(review.is_loading("src/card.rs"));
     }
 
     /// The checkout of a pull request already showing could not be made:

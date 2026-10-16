@@ -1192,16 +1192,19 @@ fn churn_labels(
 fn notices(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let present =
         move || state.historical_review.with(Option::is_some) || notice_text(state).is_some();
-    Stack::horizontal((snapshot_banner(app, state, backend), notice(state)))
-        .debug_name("summary notices")
-        .style(move |s| {
-            s.items_center()
-                .width_full()
-                .min_width(0.0)
-                .col_gap(theme::SUMMARY_GAP)
-                .height(theme::SUMMARY_ROW)
-                .apply_if(!present(), |s| s.hide())
-        })
+    Stack::horizontal((
+        snapshot_banner(app, state, backend.clone()),
+        notice(app, state, backend),
+    ))
+    .debug_name("summary notices")
+    .style(move |s| {
+        s.items_center()
+            .width_full()
+            .min_width(0.0)
+            .col_gap(theme::SUMMARY_GAP)
+            .height(theme::SUMMARY_ROW)
+            .apply_if(!present(), |s| s.hide())
+    })
 }
 
 /// `Review #N snapshot · read-only`, and Back to current beside it. Over
@@ -1272,36 +1275,58 @@ pub fn back_to_current(app: AppState, state: ReviewState, backend: Rc<Backend>) 
 /// Why the files on screen may not be the pull request's latest.
 ///
 /// Two cases, one shape: the pull request moved while the worktree had
-/// work in it, or it could not be fetched at all. Neither offers a
-/// button. Reading what is on screen is the right answer today.
+/// work in it, or it could not be fetched at all. Both offer Check again,
+/// which opens the item as a click on its row does: once the work is
+/// pushed or discarded, or GitHub answers, that catches up.
 ///
 /// A commit, the index or a run on Code is no case: the language servers
 /// are given each file as it shows.
 fn notice_text(state: ReviewState) -> Option<String> {
+    notice_lines(state).map(|(text, _)| text)
+}
+
+/// The notice and the longer account its tip gives on hover. The notice
+/// is cut from the end, so it leads with what happened.
+fn notice_lines(state: ReviewState) -> Option<(String, String)> {
     if let Some(head) = state.stale_head.get() {
-        return Some(format!(
-            "Pull request moved to {}; showing the worktree as it is",
-            crate::review::timeline::short_sha(&head)
+        let sha = crate::review::timeline::short_sha(&head);
+        return Some((
+            format!("Not updated to {sha}: worktree has local work"),
+            format!(
+                "New commits were pushed to this pull request, up to {sha}. \
+                 Perch left them out because the worktree has uncommitted \
+                 changes or commits of its own, and checking them out would \
+                 lose that work. The files here are the worktree as it is. \
+                 To get the new commits, push or discard that work, then \
+                 click Check again."
+            ),
         ));
     }
     if state.offline.get() {
-        return Some("Offline; showing the checkout as it was last left".to_string());
+        return Some((
+            "Offline; showing the checkout as it was last left".to_string(),
+            "GitHub could not be reached, so the pull request was not \
+             fetched. The files here are the worktree as it was last left, \
+             and may be behind the pull request. Check again asks GitHub \
+             again."
+                .to_string(),
+        ));
     }
     None
 }
 
 /// The notice as a pill, over the rows on Conversation and in the tab
 /// bar on Code. It gives way, as the branches and the worktree name do:
-/// it is a sentence, and its start says what it is about. Hidden when
-/// there is nothing to say.
-pub fn notice(state: ReviewState) -> impl IntoView {
+/// it is a sentence, and its start says what it is about. Check again
+/// does not give way. Hidden when there is nothing to say.
+pub fn notice(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     dyn_container(
-        move || notice_text(state),
-        move |text| {
-            let Some(text) = text else {
+        move || notice_lines(state),
+        move |lines| {
+            let Some((text, why)) = lines else {
                 return Empty::new().into_any();
             };
-            Stack::horizontal((
+            let words = Stack::horizontal((
                 sidebar_glyph(SidebarIcon::Warning, theme::notice_fg)
                     .style(|s| s.size(13.0, 13.0).margin_right(6.0).flex_shrink(0.0_f32)),
                 Label::derived(move || text.clone()).style(|s| {
@@ -1311,19 +1336,24 @@ pub fn notice(state: ReviewState) -> impl IntoView {
                         .min_width(0.0)
                 }),
             ))
-            .style(|s| {
-                s.items_center()
-                    .height(22.0)
-                    .padding_horiz(9.0)
-                    .max_width(380.0)
-                    .min_width(0.0)
-                    .background(theme::notice_bg())
-                    .border(1.0)
-                    .border_color(theme::notice_border())
-                    .border_radius(theme::RADIUS)
-                    .selectable(false)
-            })
-            .into_any()
+            .style(|s| s.items_center().min_width(0.0));
+            // The tip wraps the words, so it gives way too.
+            let words = tip(words, why).style(|s| s.min_width(0.0).flex_shrink(1.0_f32));
+            Stack::horizontal((words, check_again(app, state, backend.clone())))
+                .style(|s| {
+                    s.items_center()
+                        .height(22.0)
+                        .padding_left(9.0)
+                        .padding_right(2.0)
+                        .max_width(460.0)
+                        .min_width(0.0)
+                        .background(theme::notice_bg())
+                        .border(1.0)
+                        .border_color(theme::notice_border())
+                        .border_radius(theme::RADIUS)
+                        .selectable(false)
+                })
+                .into_any()
         },
     )
     .debug_name("item notice")
@@ -1332,6 +1362,36 @@ pub fn notice(state: ReviewState) -> impl IntoView {
             .flex_shrink(1.0_f32)
             .apply_if(notice_text(state).is_none(), |s| s.hide())
     })
+}
+
+/// Check again: the item opened again, as a click on its row does, which
+/// fetches the pull request and moves a clean worktree to its head.
+fn check_again(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    Label::derived(|| "Check again".to_string())
+        .on_event_stop(el::Click, move |_, _| {
+            if let Some(item_id) = state
+                .item
+                .with_untracked(|item| item.as_ref().map(|item| item.id.clone()))
+            {
+                let navigation_id = backend.open_item(&item_id);
+                app.begin_item_review(state, "Reading the pull request", &item_id, navigation_id);
+            }
+        })
+        .debug_name("check again")
+        .style(|s| {
+            clickable(s)
+                .height(18.0)
+                .items_center()
+                .margin_left(8.0)
+                .padding_horiz(6.0)
+                .font_size(theme::TEXT_BADGE)
+                .font_weight(theme::weight_emphasis())
+                .color(theme::fg())
+                .background(theme::canvas())
+                .border_radius(theme::RADIUS)
+                .flex_shrink(0.0_f32)
+                .selectable(false)
+        })
 }
 
 // ---------------------------------------------------------------------
@@ -2050,6 +2110,40 @@ mod tests {
             "twenty tabs squeezed the notice to {notice:?}"
         );
         assert!(within(notice, rect(&harness, "tab strip")));
+    }
+
+    #[test]
+    fn check_again_on_a_stale_head_opens_the_pull_request_again() {
+        let (mut harness, _, state) = pull_request_harness();
+        state.stale_head.set(Some("7e30b27c0ffee".into()));
+        harness.rebuild();
+        harness.paint();
+        let notice = rect(&harness, "item notice");
+        let again = rect(&harness, "check again");
+        assert!(again.width() > 0.0);
+        assert!(within(again, notice), "{again:?} is not in {notice:?}");
+
+        // Twenty tabs squeeze the words, not the button.
+        state.tab.set(ItemTab::Code);
+        for i in 0..20 {
+            state.open_tab(&format!("src/file-{i}.rs"));
+        }
+        harness.rebuild();
+        harness.paint();
+        let again_on_code = rect(&harness, "check again");
+        assert_eq!(again_on_code.width(), again.width());
+        assert!(within(again_on_code, rect(&harness, "item notice")));
+
+        harness.click(again_on_code.center().x, again_on_code.center().y);
+        assert!(
+            matches!(
+                state.preparing.get(),
+                crate::review::model::Preparing::Working { ref message, .. }
+                    if message == "Reading the pull request"
+            ),
+            "{:?}",
+            state.preparing.get()
+        );
     }
 
     fn snapshot() -> crate::review::model::ReviewGroupSummary {
