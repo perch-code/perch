@@ -237,6 +237,15 @@ fn parse_symref_head(out: &str) -> Option<String> {
     })
 }
 
+/// A directory removed when this is dropped, if it is still there.
+struct RemoveOnDrop<'a>(&'a Path);
+
+impl Drop for RemoveOnDrop<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(self.0);
+    }
+}
+
 pub struct Preparer {
     git: Git,
     store: Store,
@@ -465,6 +474,10 @@ impl Preparer {
         // under a temporary name and move it into place only on success.
         let staging = bare.with_extension("git.partial");
         let _ = std::fs::remove_dir_all(&staging);
+        // A clone dropped before it ends, as one for an open the reader
+        // left is, kills git, which cleans up after nothing; the partial
+        // directory, gigabytes for a large repository, goes with it here.
+        let _partial = RemoveOnDrop(&staging);
 
         self.git
             .run_with_progress(

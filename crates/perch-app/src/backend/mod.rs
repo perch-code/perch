@@ -14781,6 +14781,13 @@ async fn open_pull_request_ahead(
         });
     let prefetch = async {
         let clone = clone.as_ref()?;
+        // Left mid-clone, there is nothing to fetch ahead, and the open
+        // gives up before it would clone again.
+        match clone_while_wanted(ctx, clone, navigation_id).await {
+            Ok(true) => {}
+            Ok(false) => return None,
+            Err(e) => return Some(Err(e)),
+        }
         let on_step = checkout_progress(ctx, clone, navigation_id);
         Some(
             ctx.preparer
@@ -14838,6 +14845,37 @@ async fn open_pull_request_ahead(
         navigation_id,
     )
     .await
+}
+
+/// Make the bare clone a pull request's checkout starts from, unless the
+/// reader leaves the open first. A large repository clones for minutes,
+/// and the open holds the item lifecycle lock all that time, so every open
+/// after it would wait on a clone nobody is looking at. Dropped, the clone
+/// kills git and takes its partial directory with it; the next open starts
+/// it over. False when the reader left.
+async fn clone_while_wanted(
+    ctx: &Ctx,
+    repo: &RepoId,
+    navigation_id: u64,
+) -> Result<bool, perch_git::Error> {
+    if ctx.preparer.store().has_bare_clone(repo) {
+        return Ok(true);
+    }
+    let left = async {
+        while ctx.navigation_requests.is_current(navigation_id) {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    };
+    tokio::select! {
+        biased;
+        () = left => {
+            tracing::info!(repo = %repo.full_name(), "clone dropped: the open it was for was left");
+            Ok(false)
+        }
+        cloned = ctx
+            .preparer
+            .ensure_bare(repo, checkout_progress(ctx, repo, navigation_id)) => cloned.map(|_| true),
+    }
 }
 
 /// A checkout's steps, as the open's progress.
@@ -14971,6 +15009,14 @@ async fn open_pull_request_at(
             .await
         }
         _ => {
+            match clone_while_wanted(ctx, &repo, navigation_id).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    ctx.cancel_committed_archived_navigation(&item.id, navigation_id);
+                    return false;
+                }
+                Err(e) => fail!("{e}"),
+            }
             ctx.preparer
                 .prepare_after(
                     &repo,
@@ -30259,6 +30305,24 @@ read eof || true
         }
         git(&source, &["update-ref", "refs/pull/3/head", &heads[1]]);
         (heads[0].clone(), heads[1].clone())
+    }
+
+    /// A clone for an open the reader has left is not made: the open would
+    /// otherwise hold the item lifecycle lock through it, and every open
+    /// after it would wait.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_clone_for_a_left_open_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _events) = ctx(dir.path(), &nowhere(), &[]);
+        let repo = RepoId::new("a", "b");
+        let left = ctx.navigation_requests.begin_current();
+        ctx.navigation_requests.begin_current();
+
+        let cloned = clone_while_wanted(&ctx, &repo, left).await;
+        assert!(matches!(cloned, Ok(false)), "{cloned:?}");
+        let bare = ctx.preparer.store().bare_path(&repo);
+        assert!(!bare.exists());
+        assert!(!bare.with_extension("git.partial").exists());
     }
 
     /// The order an open's events came in, by what each was.
