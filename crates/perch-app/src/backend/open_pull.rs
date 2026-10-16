@@ -19,6 +19,8 @@ use super::{
 };
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
+/// A commit runs the repository's hooks, which can take a while.
+const COMMIT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How a branch stands for a pull request, and what the form fills in.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +31,8 @@ pub struct PullRequestReadiness {
     pub base: String,
     /// Commits on the branch the base doesn't have.
     pub ahead: u32,
-    /// Files with uncommitted changes, which a pull request leaves out.
+    /// Files with uncommitted changes. Opening commits them unless the
+    /// reader says to leave them out.
     pub dirty_files: u32,
     /// The branch the worktree's HEAD is on; `None` when detached.
     pub head_branch: Option<String>,
@@ -43,6 +46,7 @@ pub struct PullRequestReadiness {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenStep {
     Checking,
+    Committing,
     Pushing,
     Opening,
 }
@@ -106,7 +110,8 @@ pub(super) async fn bases(ctx: &Ctx, item_id: &str) -> Result<Vec<String>, Strin
     Ok(names)
 }
 
-/// Push the branch and open its pull request, telling the UI each step.
+/// Commit what is uncommitted when `commit` says to, push the branch and
+/// open its pull request, telling the UI each step.
 pub(super) async fn create(
     ctx: &Ctx,
     item_id: &str,
@@ -114,8 +119,9 @@ pub(super) async fn create(
     body: &str,
     base: &str,
     draft: bool,
+    commit: bool,
 ) {
-    let outcome = create_inner(ctx, item_id, title, body, base, draft).await;
+    let outcome = create_inner(ctx, item_id, title, body, base, draft, commit).await;
     let event = match outcome {
         Ok((number, notice)) => Event::PullRequestOpened {
             item_id: item_id.to_string(),
@@ -137,6 +143,7 @@ async fn create_inner(
     body: &str,
     base: &str,
     draft: bool,
+    commit: bool,
 ) -> Result<(u64, Option<String>), String> {
     let github = ctx
         .github()
@@ -189,6 +196,10 @@ async fn create_inner(
         ));
     }
 
+    if commit {
+        commit_all(ctx, item_id, &checkout.path, title).await?;
+    }
+
     step(ctx, item_id, OpenStep::Pushing);
     push(ctx, &item, &checkout, &head_repo, &checkout.branch).await?;
 
@@ -211,6 +222,52 @@ async fn create_inner(
     tracing::info!(item = item_id, number, "opened a pull request");
     attach(ctx, item_id, pr)?;
     Ok((number, None))
+}
+
+/// Commit every uncommitted file in the worktree, untracked ones too,
+/// with the reader's own git, hooks and identity. A clean worktree
+/// commits nothing.
+async fn commit_all(
+    ctx: &Ctx,
+    item_id: &str,
+    worktree: &Path,
+    message: &str,
+) -> Result<(), String> {
+    let git = ctx.preparer.git();
+    let status = git
+        .run(
+            Some(worktree),
+            ["status", "--porcelain", "--untracked-files=normal"],
+            QUERY_TIMEOUT,
+        )
+        .await
+        .map_err(|e| format!("Couldn't read the worktree: {e}"))?;
+    if status.trim().is_empty() {
+        return Ok(());
+    }
+    step(ctx, item_id, OpenStep::Committing);
+    let committed = async {
+        git.run(Some(worktree), ["add", "-A", "--", "."], QUERY_TIMEOUT)
+            .await?;
+        git.run(Some(worktree), ["commit", "-m", message], COMMIT_TIMEOUT)
+            .await
+    }
+    .await;
+    committed.map(|_| ()).map_err(|e| {
+        tracing::info!(item = item_id, error = %e, "the commit failed");
+        match e {
+            perch_git::Error::Git { stderr, .. } => format!(
+                "Couldn't commit: {}",
+                stderr
+                    .lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("git failed")
+                    .trim()
+            ),
+            other => format!("Couldn't commit: {other}"),
+        }
+    })
 }
 
 /// Push the commits the item's open pull request doesn't have yet.
@@ -449,15 +506,31 @@ async fn description_prompt(
         )
         .await
         .map_err(|e| e.to_string())?;
+    let status = git
+        .run(
+            Some(&checkout.path),
+            ["status", "--short", "--untracked-files=normal"],
+            QUERY_TIMEOUT,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut user = format!(
+        "The branch {branch} goes into {base}. Its commits, oldest first:\n\n{log}\n\n\
+         What it changes (`git diff --stat {base}...HEAD`):\n\n{stat}",
+        branch = checkout.branch,
+        log = log.trim_end(),
+        stat = stat.trim_end(),
+    );
+    if !status.trim().is_empty() {
+        user.push_str(&format!(
+            "\n\nUncommitted changes, which will be committed into the pull request too \
+             (`git status --short`):\n\n{}",
+            status.trim_end()
+        ));
+    }
     Ok(crate::ask::Prompt {
         system: Some(DESCRIPTION_FRAMING.to_string()),
-        user: format!(
-            "The branch {branch} goes into {base}. Its commits, oldest first:\n\n{log}\n\n\
-             What it changes (`git diff --stat {base}...HEAD`):\n\n{stat}",
-            branch = checkout.branch,
-            log = log.trim_end(),
-            stat = stat.trim_end(),
-        ),
+        user,
     })
 }
 

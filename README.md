@@ -11,8 +11,8 @@ worktree behind every item.
 - A GitHub token (the easiest way is `gh auth login`)
 - Optional: [Claude Code](https://claude.com/claude-code) 2.1.223+ and/or
   [Codex CLI](https://github.com/openai/codex) 0.155.1+ for agents and reviews
-- Optional, for code navigation in Rust, Go, TypeScript, JavaScript and
-  Java: a language server for each (see [Language servers](#language-servers)).
+- Optional, for code navigation in Rust, Go, TypeScript, JavaScript, Java
+  and Python: a language server for each (see [Language servers](#language-servers)).
   Perch offers to install one that's missing.
 
 ## Install
@@ -129,6 +129,7 @@ others as you open their files:
 | Go | gopls | `PATH`, `~/go/bin` | `go install` (needs Go) |
 | TypeScript, JavaScript | typescript-language-server | `PATH`, with the TypeScript installed with it | `npm install` (needs Node) |
 | Java | jdtls | `PATH` (Homebrew's) | a checksummed download from Eclipse (needs a JDK 21+) |
+| Python | ty | `PATH` | a checksummed download from GitHub (needs nothing else) |
 
 When a server is missing, a toast says so with an **Install** button; its
 tooltip is the command it runs. Perch downloads nothing without that click,
@@ -153,8 +154,8 @@ its own box. While they wait, the Worktree row on Conversation has a
 warning, and its menu has **Trust and Start** and **Always Trust** once the
 toast is closed. The same menu, on any item in the repository, has **Stop
 Trusting** for a server trusted there. After upgrading, a branch you had
-already cut from a pull request, your own included, asks once. gopls and
-typescript-language-server start either way. To trust every server on
+already cut from a pull request, your own included, asks once. gopls,
+typescript-language-server and ty start either way. To trust every server on
 everything in a repository, pull requests from anyone included:
 
 ```toml

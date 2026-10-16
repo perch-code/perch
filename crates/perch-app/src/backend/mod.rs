@@ -197,7 +197,8 @@ pub enum Command {
     PullRequestBases {
         item_id: String,
     },
-    /// Push the branch and open a pull request from it. Steps, then
+    /// Commit the uncommitted files when `commit` says to, push the
+    /// branch and open a pull request from it. Steps, then
     /// `PullRequestOpened` or `OpenPullRequestFailed`, answer.
     CreatePullRequest {
         item_id: String,
@@ -205,6 +206,7 @@ pub enum Command {
         body: String,
         base: String,
         draft: bool,
+        commit: bool,
     },
     /// Push the commits the item's open pull request doesn't have.
     /// `BranchPushed` or `BranchPushFailed` answers.
@@ -2828,6 +2830,7 @@ impl Backend {
         body: &str,
         base: &str,
         draft: bool,
+        commit: bool,
     ) {
         let _ = self.commands.send(Command::CreatePullRequest {
             item_id: item_id.to_string(),
@@ -2835,6 +2838,7 @@ impl Backend {
             body: body.to_string(),
             base: base.to_string(),
             draft,
+            commit,
         });
     }
 
@@ -4521,10 +4525,11 @@ async fn run(
                 body,
                 base,
                 draft,
+                commit,
             } => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    open_pull::create(&ctx, &item_id, &title, &body, &base, draft).await
+                    open_pull::create(&ctx, &item_id, &title, &body, &base, draft, commit).await
                 });
             }
             Command::PushBranch { item_id } => {
@@ -17729,7 +17734,7 @@ async fn open_file(
     path: String,
     navigation_id: u64,
 ) -> Option<Shown> {
-    let (checkout, changed, scope, item_id, scope_gen) = navigation_requests
+    let Some((checkout, changed, scope, item_id, scope_gen)) = navigation_requests
         .with_current(navigation_id, || {
             slot.lock().ok().and_then(|guard| {
                 guard
@@ -17746,7 +17751,11 @@ async fn open_file(
                     })
             })
         })
-        .flatten()?;
+        .flatten()
+    else {
+        turned_away(&navigation_requests, &slot, &path, navigation_id);
+        return None;
+    };
 
     let entry = changed.iter().find(|f| f.path == path).cloned();
     let (base_rev, head_rev) = scope.sides(&checkout.merge_base, &checkout.head_sha);
@@ -17977,6 +17986,7 @@ async fn open_outside_file(
         })
         .flatten()
     else {
+        turned_away(&navigation_requests, &slot, &path, navigation_id);
         return false;
     };
 
@@ -18062,7 +18072,7 @@ fn send_file_event_if_current(
     scope_gen: u64,
     event: Event,
 ) -> bool {
-    navigation_requests
+    let sent = navigation_requests
         .with_current(navigation_id, || {
             let current = slot.lock().ok().is_some_and(|guard| {
                 guard.as_ref().is_some_and(|context| {
@@ -18076,7 +18086,40 @@ fn send_file_event_if_current(
             }
             current
         })
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if !sent {
+        tracing::info!(
+            navigation_id,
+            item = item_id,
+            scope_gen,
+            "file read for a view since left; not sent"
+        );
+    }
+    sent
+}
+
+/// Say why a file asked for is not read: the window that asked waits on
+/// it with "Opening…" and hears nothing back, so this line is all there
+/// is to find a stuck tab by.
+fn turned_away(
+    navigation_requests: &NavigationRequests,
+    slot: &std::sync::Mutex<Option<ReviewContext>>,
+    path: &str,
+    navigation_id: u64,
+) {
+    let current = navigation_requests.current_id();
+    let open = slot.lock().ok().and_then(|guard| {
+        guard
+            .as_ref()
+            .map(|context| (context.item_id.clone(), context.navigation_id))
+    });
+    tracing::info!(
+        path,
+        navigation_id,
+        ?current,
+        ?open,
+        "file asked for under a navigation not current; not read"
+    );
 }
 
 /// Give the open checkout a language server, if one is installed: the one
@@ -29334,7 +29377,7 @@ read eof || true
         );
         assert_eq!(ready.title, "two");
 
-        open_pull::create(&ctx, &item.id, "Add two", "Adds two.", "main", true).await;
+        open_pull::create(&ctx, &item.id, "Add two", "Adds two.", "main", true, false).await;
 
         assert_eq!(open_outcome(&received), Ok((12, None)));
         assert_eq!(
@@ -29368,6 +29411,78 @@ read eof || true
         );
     }
 
+    /// A branch with nothing committed past its base and its work still
+    /// in the worktree, an edit and a new file, with an identity of its
+    /// own so the commit doesn't lean on the machine's.
+    fn uncommitted_branch(ctx: &Ctx, dir: &Path) -> (Item, std::path::PathBuf, std::path::PathBuf) {
+        let (item, worktree, remote) = pushable_branch(ctx, dir);
+        git(&worktree, &["reset", "-q", "--hard", "main"]);
+        git(&worktree, &["config", "user.name", "t"]);
+        git(&worktree, &["config", "user.email", "t@t"]);
+        std::fs::write(worktree.join("one.txt"), "one, edited\n").unwrap();
+        std::fs::write(worktree.join("three.txt"), "three\n").unwrap();
+        (item, worktree, remote)
+    }
+
+    #[tokio::test]
+    async fn opening_commits_what_is_uncommitted_under_the_title_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, _paths) = serve_by_body(move |method, path, _, _| {
+            if method == "POST" && path == "/repos/a/b/pulls" {
+                ("201 Created", opened_pull(12, "h", "open"))
+            } else {
+                ("200 OK", "[]".to_string())
+            }
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let (item, worktree, remote) = uncommitted_branch(&ctx, dir.path());
+
+        let ready = open_pull::readiness(&ctx, &item.id, None).await.unwrap();
+        assert_eq!((ready.ahead, ready.dirty_files), (0, 2));
+
+        open_pull::create(&ctx, &item.id, "Add three", "", "main", false, true).await;
+
+        let steps: Vec<Event> = received.try_iter().collect();
+        assert!(steps
+            .iter()
+            .any(|e| matches!(e, Event::PullRequestOpened { number: 12, .. })));
+        assert!(steps.iter().any(|e| matches!(
+            e,
+            Event::OpenPullRequestStep {
+                step: OpenStep::Committing,
+                ..
+            }
+        )));
+        assert_eq!(git(&worktree, &["status", "--porcelain"]), "");
+        assert_eq!(
+            git(&remote, &["log", "-1", "--format=%s", "feature"]),
+            "Add three"
+        );
+        assert_eq!(git(&remote, &["show", "feature:three.txt"]), "three");
+    }
+
+    #[tokio::test]
+    async fn a_refused_commit_says_why_and_pushes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve_by_body(move |_, _, _, _| ("200 OK", "[]".to_string()));
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let (item, worktree, remote) = uncommitted_branch(&ctx, dir.path());
+        let hook = dir.path().join("widgets/.git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\necho 'lint failed' >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        open_pull::create(&ctx, &item.id, "Add three", "", "main", false, true).await;
+
+        assert_eq!(
+            open_outcome(&received),
+            Err("Couldn't commit: lint failed".into())
+        );
+        assert!(git(&worktree, &["status", "--porcelain"]).contains("three.txt"));
+        assert!(git(&remote, &["branch", "--list", "feature"]).is_empty());
+        assert!(paths.lock().unwrap().iter().all(|p| !p.ends_with("/pulls")));
+    }
+
     #[tokio::test]
     async fn a_pull_request_already_open_is_attached_without_a_push() {
         let dir = tempfile::tempdir().unwrap();
@@ -29379,7 +29494,7 @@ read eof || true
         let (ctx, received) = ctx(dir.path(), &base, &[]);
         let (item, _worktree, remote) = pushable_branch(&ctx, dir.path());
 
-        open_pull::create(&ctx, &item.id, "Add two", "", "main", false).await;
+        open_pull::create(&ctx, &item.id, "Add two", "", "main", false, false).await;
 
         assert_eq!(
             open_outcome(&received),
@@ -29426,7 +29541,7 @@ read eof || true
         let (ctx, received) = ctx(dir.path(), &base, &[]);
         let (item, _worktree, _remote) = pushable_branch(&ctx, dir.path());
 
-        open_pull::create(&ctx, &item.id, "Add two", "", "main", false).await;
+        open_pull::create(&ctx, &item.id, "Add two", "", "main", false, false).await;
 
         assert_eq!(open_outcome(&received), Ok((8, None)));
         assert_eq!(
@@ -29460,7 +29575,7 @@ read eof || true
         git(&other, &["push", "-q", "origin", "feature"]);
         let theirs = git(&other, &["rev-parse", "HEAD"]);
 
-        open_pull::create(&ctx, &item.id, "Add two", "", "main", false).await;
+        open_pull::create(&ctx, &item.id, "Add two", "", "main", false, false).await;
 
         assert_eq!(
             open_outcome(&received),
@@ -29484,14 +29599,14 @@ read eof || true
         let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
         let (item, worktree, _remote) = pushable_branch(&ctx, dir.path());
 
-        open_pull::create(&ctx, &item.id, "  ", "", "main", false).await;
+        open_pull::create(&ctx, &item.id, "  ", "", "main", false, false).await;
         assert_eq!(
             open_outcome(&received),
             Err("The pull request needs a title".into())
         );
 
         git(&worktree, &["checkout", "-q", "-b", "elsewhere"]);
-        open_pull::create(&ctx, &item.id, "Add two", "", "main", false).await;
+        open_pull::create(&ctx, &item.id, "Add two", "", "main", false, false).await;
         assert_eq!(
             open_outcome(&received),
             Err("The worktree is on elsewhere, not feature.".into())
@@ -29567,7 +29682,7 @@ read eof || true
         std::fs::write(&hook, format!("#!/bin/sh\nenv > '{}'\n", seen.display())).unwrap();
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        open_pull::create(&ctx, &item.id, "Add two", "", "main", false).await;
+        open_pull::create(&ctx, &item.id, "Add two", "", "main", false, false).await;
 
         assert_eq!(open_outcome(&received), Ok((12, None)));
         let env = std::fs::read_to_string(&seen).expect("the hook ran");

@@ -1,8 +1,10 @@
 //! Opening a pull request from a worktree of the reader's own, at the foot
 //! of Conversation, where a pull request has Checks and Merge.
 //!
-//! Folded, one line: how many commits the branch has past its base, and
-//! a button. Unfolded, the form: title, description, base and Draft.
+//! Folded, one line: how many commits the branch has past its base, how
+//! many files are uncommitted, and a button. Unfolded, the form: title,
+//! description, base, Draft, and whether to commit the uncommitted files
+//! first, which it does unless told not to.
 //! What is typed is kept per item in `AppState` until Perch quits or the
 //! pull request opens, so folding, or opening another item, loses
 //! nothing. The backend does the pushing and the opening
@@ -34,6 +36,8 @@ pub struct PullRequestDraft {
     /// The base picked from the chip; `None` goes into the branch's own.
     pub base: Option<String>,
     pub draft: bool,
+    /// The reader unticked committing the uncommitted files.
+    pub leave_uncommitted: bool,
     pub unfolded: bool,
     /// Perch's fills have been put in, which happens once.
     pub filled: bool,
@@ -137,7 +141,7 @@ pub(crate) fn refusal(app: AppState, state: ReviewState, title: &str) -> Option<
     if readiness.base == readiness.branch {
         return Some("A pull request needs a base other than its own branch.".into());
     }
-    if readiness.ahead == 0 {
+    if readiness.ahead == 0 && !commits_dirt(app, &item_id, &readiness) {
         return Some(format!(
             "{} has nothing {} doesn't.",
             readiness.branch, readiness.base
@@ -149,9 +153,32 @@ pub(crate) fn refusal(app: AppState, state: ReviewState, title: &str) -> Option<
     None
 }
 
-fn commits_ahead(readiness: &PullRequestReadiness) -> String {
-    let commits = count_of(readiness.ahead as usize, "commit", "commits");
-    format!("{commits} ahead of {}", readiness.base)
+/// Whether opening commits the uncommitted files first: there are some,
+/// and the reader hasn't unticked it.
+fn commits_dirt(app: AppState, item_id: &str, readiness: &PullRequestReadiness) -> bool {
+    readiness.dirty_files > 0
+        && !app
+            .pull_request_drafts
+            .with(|drafts| drafts.get(item_id).is_some_and(|d| d.leave_uncommitted))
+}
+
+/// What the branch has to propose: its commits past the base, and the
+/// files not committed yet.
+fn standing(readiness: &PullRequestReadiness) -> String {
+    let files = count_of(readiness.dirty_files as usize, "file", "files");
+    match (readiness.ahead, readiness.dirty_files) {
+        (0, 0) => String::new(),
+        (0, _) => format!("{files} uncommitted, no commits past {}", readiness.base),
+        (ahead, dirty) => {
+            let commits = count_of(ahead as usize, "commit", "commits");
+            let ahead = format!("{commits} ahead of {}", readiness.base);
+            if dirty == 0 {
+                ahead
+            } else {
+                format!("{ahead}, {files} uncommitted")
+            }
+        }
+    }
 }
 
 /// The surface, on a branch that has something to propose. Nothing on
@@ -182,9 +209,10 @@ pub fn surface(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
         }
     });
 
-    // Shown from the first readiness that finds commits past the base,
-    // and kept while the form is open, so a base picked with nothing
-    // past it says so rather than taking the form away.
+    // Shown from the first readiness that finds commits past the base or
+    // uncommitted files, and kept while the form is open, so a base
+    // picked with nothing past it says so rather than taking the form
+    // away.
     let shown = Memo::new(move |_| {
         let item_id = branch_id(state)?;
         let unfolded = app
@@ -193,7 +221,7 @@ pub fn surface(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
         let has_commits = state.pull_readiness.with(|r| {
             r.as_ref()
                 .and_then(|r| r.as_ref().ok())
-                .is_some_and(|r| r.ahead > 0 && r.base != r.branch)
+                .is_some_and(|r| (r.ahead > 0 || r.dirty_files > 0) && r.base != r.branch)
         });
         let generation = app
             .pull_request_drafts
@@ -246,7 +274,7 @@ fn folded(
                 .selectable(false)
                 .flex_shrink(0.0_f32)
         }),
-        Label::derived(move || ready(state).map(|r| commits_ahead(&r)).unwrap_or_default())
+        Label::derived(move || ready(state).map(|r| standing(&r)).unwrap_or_default())
             .debug_name("open-pull-request-ahead")
             .style(|s| {
                 s.font_size(theme::TEXT_META)
@@ -327,10 +355,18 @@ fn form(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: String
             let Some(base) = base_of(app, state, &item_id) else {
                 return;
             };
+            let commit = ready(state).is_some_and(|r| commits_dirt(app, &item_id, &r));
             let draft = draft_of(app, &item_id);
             state.pull_error.set(None);
             state.pull_step.set(Some(OpenStep::Checking));
-            backend.create_pull_request(&item_id, &draft.title, &draft.body, &base, draft.draft);
+            backend.create_pull_request(
+                &item_id,
+                &draft.title,
+                &draft.body,
+                &base,
+                draft.draft,
+                commit,
+            );
         })
     };
 
@@ -370,6 +406,7 @@ fn form(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: String
             action_button(
                 move || match state.pull_step.get() {
                     Some(OpenStep::Checking) => "Checking…".to_string(),
+                    Some(OpenStep::Committing) => "Committing…".to_string(),
                     Some(OpenStep::Pushing) => "Pushing…".to_string(),
                     Some(OpenStep::Opening) => "Opening…".to_string(),
                     None => "Open pull request".to_string(),
@@ -398,7 +435,8 @@ fn form(app: AppState, state: ReviewState, backend: Rc<Backend>, item_id: String
         }),
         title_input,
         body,
-        notes(app, state, title),
+        commit_box(app, state, item_id.clone()),
+        notes(app, state, title, item_id.clone()),
         offer(app, state, item_id.clone()),
         error_line(state),
         controls,
@@ -695,11 +733,61 @@ fn draft_box(app: AppState, item_id: String) -> impl IntoView {
     .debug_name("open-pull-request-draft")
 }
 
+/// Commit the uncommitted files first, ticked unless the reader unticks
+/// it. Only there when some files are uncommitted.
+fn commit_box(app: AppState, state: ReviewState, item_id: String) -> impl IntoView {
+    let dirty = move || ready(state).map_or(0, |r| r.dirty_files);
+    let checked_id = item_id.clone();
+    let toggle = move || {
+        update_draft(app, &item_id, |draft| {
+            draft.leave_uncommitted = !draft.leave_uncommitted
+        })
+    };
+    let click = toggle.clone();
+    Stack::horizontal((
+        checkbox(
+            move || {
+                let left = app
+                    .pull_request_drafts
+                    .with(|drafts| drafts.get(&checked_id).is_some_and(|d| d.leave_uncommitted));
+                if left {
+                    Checked::Empty
+                } else {
+                    Checked::Full
+                }
+            },
+            toggle,
+        ),
+        Label::derived(move || {
+            let files = count_of(dirty() as usize, "uncommitted file", "uncommitted files");
+            format!("Commit {files}")
+        })
+        .style(|s| {
+            s.font_size(theme::TEXT_BADGE)
+                .color(theme::fg())
+                .selectable(false)
+                .margin_left(6.0)
+        }),
+    ))
+    .on_event_stop(el::Click, move |_, _| click())
+    .style(move |s| {
+        clickable(s)
+            .items_center()
+            .apply_if(dirty() == 0, |s| s.hide())
+    })
+    .debug_name("open-pull-request-commit")
+}
+
 /// A warning that stops nothing, and the reason Open pull request is off.
-fn notes(app: AppState, state: ReviewState, title: RwSignal<String>) -> impl IntoView {
+fn notes(
+    app: AppState,
+    state: ReviewState,
+    title: RwSignal<String>,
+    item_id: String,
+) -> impl IntoView {
     let dirty = move || {
         ready(state)
-            .filter(|r| r.dirty_files > 0)
+            .filter(|r| r.dirty_files > 0 && !commits_dirt(app, &item_id, r))
             .map(|r| match r.dirty_files {
                 1 => "1 file has uncommitted changes. It won't be in the pull request.".to_string(),
                 n => format!(
@@ -713,13 +801,14 @@ fn notes(app: AppState, state: ReviewState, title: RwSignal<String>) -> impl Int
         }
         refusal(app, state, &title.get())
     };
+    let hide_dirty = dirty.clone();
     Stack::vertical((
         Label::derived(move || dirty().unwrap_or_default())
             .debug_name("open-pull-request-dirty")
             .style(move |s| {
                 s.font_size(theme::TEXT_META)
                     .color(theme::draft_yellow())
-                    .apply_if(dirty().is_none(), |s| s.hide())
+                    .apply_if(hide_dirty().is_none(), |s| s.hide())
             }),
         Label::derived(move || refused().unwrap_or_default())
             .debug_name("open-pull-request-refusal")
@@ -897,6 +986,48 @@ mod tests {
     }
 
     #[test]
+    fn uncommitted_files_alone_show_the_surface_and_are_committed_unless_unticked() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_on(branch());
+        let (backend, mut commands) = Backend::recording();
+        let view = surface(app, state, Rc::new(backend));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 700.0);
+        state.pull_readiness.set(Some(Ok(PullRequestReadiness {
+            dirty_files: 5,
+            ..readiness(0)
+        })));
+        settle(&mut harness);
+        assert!(find(
+            harness.root_id(),
+            "5 files uncommitted, no commits past main"
+        )
+        .is_some());
+
+        click(&mut harness, "open-pull-request-unfold");
+        assert!(find(harness.root_id(), "Commit 5 uncommitted files").is_some());
+        assert_eq!(refusal(app, state, "Title"), None);
+        commands_of(&mut commands);
+        click(&mut harness, "open-pull-request-submit");
+        let sent = commands_of(&mut commands);
+        assert!(
+            sent.iter()
+                .any(|c| matches!(c, Command::CreatePullRequest { commit: true, .. })),
+            "{sent:?}"
+        );
+
+        // Unticked, a branch with no commits has nothing to propose.
+        state.pull_step.set(None);
+        click(&mut harness, "open-pull-request-commit");
+        assert!(draft_of(app, "item-7").leave_uncommitted);
+        assert_eq!(
+            refusal(app, state, "Title"),
+            Some("feature has nothing main doesn't.".into())
+        );
+        assert!(find(harness.root_id(), "won't be in the pull request").is_some());
+    }
+
+    #[test]
     fn the_form_fills_once_and_opens_with_what_it_holds() {
         let root = TestRoot::new();
         let app = AppState::new();
@@ -944,7 +1075,7 @@ mod tests {
         assert!(
             sent.iter().any(|c| matches!(
                 c,
-                Command::CreatePullRequest { item_id, title, body, base, draft: true }
+                Command::CreatePullRequest { item_id, title, body, base, draft: true, commit: false }
                     if item_id == "item-7" && title == "My title"
                         && body == "Because the fence had none." && base == "develop"
             )),
@@ -1026,7 +1157,7 @@ mod tests {
     }
 
     #[test]
-    fn uncommitted_files_warn_and_do_not_refuse() {
+    fn uncommitted_files_left_out_warn_and_do_not_refuse() {
         let root = TestRoot::new();
         let app = AppState::new();
         let state = state_on(branch());
@@ -1037,7 +1168,14 @@ mod tests {
             ..readiness(1)
         })));
         settle(&mut harness);
+        assert!(find(
+            harness.root_id(),
+            "1 commit ahead of main, 4 files uncommitted"
+        )
+        .is_some());
         click(&mut harness, "open-pull-request-unfold");
+        assert!(find(harness.root_id(), "won't be in the pull request").is_none());
+        click(&mut harness, "open-pull-request-commit");
         assert!(find(
             harness.root_id(),
             "4 files have uncommitted changes. They won't be in the pull request."
