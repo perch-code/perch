@@ -54,6 +54,10 @@ async fn main() -> anyhow::Result<()> {
                     None => eprint!("\r  cloning: {phase}   "),
                 },
                 Step::Fetching => eprintln!("\n  fetching pull request ref"),
+                Step::Downloading { phase, percent } => match percent {
+                    Some(p) => eprint!("\r  downloading files: {phase} {p}%   "),
+                    None => eprint!("\r  downloading files: {phase}   "),
+                },
                 Step::CreatingWorktree => eprintln!("  creating worktree"),
                 Step::ComputingDiff => eprintln!("  diffing"),
             },

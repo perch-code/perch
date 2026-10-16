@@ -4070,7 +4070,7 @@ async fn run(
         review_admissions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         review_reconcile: Arc::new(tokio::sync::Mutex::new(())),
         knowledge,
-        item_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
+        item_lifecycle: Arc::new(perch_git::KeyedMutex::new()),
         root_cuts: Arc::new(tokio::sync::Mutex::new(())),
         avatars,
         assignments: Arc::default(),
@@ -4661,7 +4661,7 @@ async fn run(
                         return;
                     };
                     if item.is_archived() {
-                        let _lifecycle = ctx.item_lifecycle.lock().await;
+                        let _lifecycle = ctx.lock_item(&id).await;
                         if !ctx.navigation_requests.is_current(navigation_id) {
                             return;
                         }
@@ -5550,7 +5550,8 @@ async fn run(
             Command::CloseReview { navigation_id } => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    let _lifecycle = ctx.item_lifecycle.lock().await;
+                    // No item lock: the navigation fence keeps an open that
+                    // finishes after this from taking the slot back.
                     let closed = ctx
                         .navigation_requests
                         .with_current(navigation_id, || {
@@ -5906,9 +5907,12 @@ struct Ctx {
     review_reconcile: Arc<tokio::sync::Mutex<()>>,
     /// Plain Markdown export is best-effort and never gates durable review.
     knowledge: Option<Arc<perch_knowledge::Knowledge>>,
-    /// Serializes checkout archive/restore/delete so deferred agent cleanup
-    /// cannot remove a worktree while it is being restored or deleted.
-    item_lifecycle: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes an item's open, archive, restore, and delete so deferred
+    /// agent cleanup cannot remove a worktree while it is being restored or
+    /// deleted. One lock per item, and one per subject for the opens that
+    /// find or make its item, so a slow open (a large clone) holds up only
+    /// its own item: see `lock_item` and `lock_subject`.
+    item_lifecycle: Arc<perch_git::KeyedMutex>,
     /// Held by a root scan, and by a cut in a root from `git worktree add`
     /// until its row is in, so the scan cannot find the new worktree first
     /// and take it for the reader's own.
@@ -6830,6 +6834,29 @@ impl Ctx {
             .is_some_and(|g| g.as_ref().is_some_and(|c| c.item_id == item_id))
     }
 
+    /// Hold one item's lifecycle. Nothing that holds it waits on a subject
+    /// or on another item, so `lock_subject` then this cannot deadlock.
+    async fn lock_item(&self, item_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        self.item_lifecycle.lock(format!("item {item_id}")).await
+    }
+
+    /// Hold a pull request's or an issue's opens, so two opens of one with
+    /// no item yet do not make two. Taken before its item's, never after.
+    async fn lock_subject(
+        &self,
+        repo_full_name: &str,
+        kind: ItemKind,
+        number: u64,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let kind = match kind {
+            ItemKind::PullRequest => "pull",
+            ItemKind::Issue => "issue",
+        };
+        self.item_lifecycle
+            .lock(format!("{kind} {}#{number}", repo_full_name.to_lowercase()))
+            .await
+    }
+
     /// Whether any window has the item open.
     fn is_open_anywhere(&self, item_id: &str) -> bool {
         self.views().iter().any(|ctx| ctx.is_open(item_id))
@@ -7066,7 +7093,7 @@ async fn view_review_attempt_owner(ctx: &Ctx, item_id: &str, attempt_id: &str, r
     if !owner_was_open {
         match ctx.item(item_id) {
             Some(item) if item.is_archived() => {
-                let _lifecycle = ctx.item_lifecycle.lock().await;
+                let _lifecycle = ctx.lock_item(item_id).await;
                 if !ctx
                     .navigation_requests
                     .is_current_attempt(attempt_id, request_id)
@@ -7629,7 +7656,7 @@ async fn refresh_checkout_pulls(ctx: &Ctx) {
             pr.number,
             fresh.subject_state(),
         );
-        let _lifecycle = ctx.item_lifecycle.lock().await;
+        let _lifecycle = ctx.lock_item(&item.id).await;
         let Some(mut item) = ctx.item(&item.id) else {
             continue;
         };
@@ -7729,7 +7756,7 @@ async fn archive_item(
     id: &str,
     suspended_navigation: Option<&SuspendedNavigation>,
 ) -> Result<(), String> {
-    let lifecycle = ctx.item_lifecycle.lock().await;
+    let lifecycle = ctx.lock_item(id).await;
     if suspended_navigation
         .is_some_and(|suspended| !ctx.navigation_requests.archive_fence_is_current(suspended))
     {
@@ -7817,7 +7844,7 @@ async fn archive_item(
 /// Remove an archived owned checkout once no process can still be using it.
 /// Re-read under the lifecycle lock so Restore or Delete always wins cleanly.
 async fn retire_archived_checkout(ctx: &Ctx, id: &str) -> Result<(), String> {
-    let _lifecycle = ctx.item_lifecycle.lock().await;
+    let _lifecycle = ctx.lock_item(id).await;
     if ctx.runs.has_active_owner(id, None) {
         return Ok(());
     }
@@ -7935,7 +7962,7 @@ async fn retire_archived_checkout_from_cache(
 /// Remove the row and its threads. An owned checkout's directory and
 /// branch go too; a checkout under a root is not touched.
 async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), String> {
-    let _lifecycle = ctx.item_lifecycle.lock().await;
+    let _lifecycle = ctx.lock_item(id).await;
     let Some(item) = ctx.item(id) else {
         return Err("That item is gone".into());
     };
@@ -8056,9 +8083,11 @@ async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), Strin
     Ok(())
 }
 
-/// Open whatever an item is.
+/// Open whatever an item is. A pull request or an issue opens by its
+/// subject, which takes the subject's lock and then the item's, so this
+/// lets the item's go first rather than wait on the subject holding it.
 async fn open_item(ctx: &Ctx, id: &str, navigation_id: u64) -> bool {
-    let _lifecycle = ctx.item_lifecycle.lock().await;
+    let lifecycle = ctx.lock_item(id).await;
     if !ctx.navigation_requests.is_current_item(id, navigation_id) {
         return false;
     }
@@ -8089,6 +8118,7 @@ async fn open_item(ctx: &Ctx, id: &str, navigation_id: u64) -> bool {
     }
     match (&item.subject, &item.checkout) {
         (Some(ItemSubject::PullRequest(pr)), _) => {
+            drop(lifecycle);
             open_subject(
                 ctx,
                 pr.repo_full_name.clone(),
@@ -8099,6 +8129,7 @@ async fn open_item(ctx: &Ctx, id: &str, navigation_id: u64) -> bool {
             .await
         }
         (Some(ItemSubject::Issue(issue)), _) => {
+            drop(lifecycle);
             open_subject(
                 ctx,
                 issue.repo_full_name.clone(),
@@ -12165,6 +12196,7 @@ async fn start_work_on_issue(
             percent: None,
         },
     );
+    size_up_clone(ctx, &repo).await;
     let progress = ctx.events.clone();
     let progress_requests = ctx.navigation_requests.clone();
     let label = repo.full_name();
@@ -12471,6 +12503,7 @@ async fn create_worktree(ctx: &Ctx, work: &NewWork, navigation_id: u64) -> Resul
         if let Some(message) = no_root_for_local(ctx, identity) {
             return Err(message);
         }
+        size_up_clone(ctx, &repo).await;
         let progress_events = ctx.events.clone();
         let progress_requests = ctx.navigation_requests.clone();
         let label = repo.full_name();
@@ -12737,6 +12770,7 @@ async fn start_work_on_pull(ctx: &Ctx, id: &str, navigation_id: u64) -> Result<S
             percent: None,
         },
     );
+    size_up_clone(ctx, &repo).await;
     let progress = ctx.events.clone();
     let progress_requests = ctx.navigation_requests.clone();
     let label = repo.full_name();
@@ -14245,11 +14279,8 @@ async fn open_subject_navigation(
     number: u64,
     navigation_id: u64,
 ) {
-    let opened = {
-        let _lifecycle = ctx.item_lifecycle.lock().await;
-        ctx.navigation_requests.is_current(navigation_id)
-            && open_subject(ctx, repo_full_name, kind, number, navigation_id).await
-    };
+    let opened = ctx.navigation_requests.is_current(navigation_id)
+        && open_subject(ctx, repo_full_name, kind, number, navigation_id).await;
     if opened {
         start_language_server(ctx, navigation_id).await;
     }
@@ -14273,6 +14304,12 @@ async fn open_subject(
                 ),
             },
         );
+        return false;
+    }
+    // Every open of this subject, from a notification or a row, waits for
+    // the one before it; its item's lock comes once the item is known.
+    let _subject = ctx.lock_subject(&repo_full_name, kind, number).await;
+    if !ctx.navigation_requests.is_current(navigation_id) {
         return false;
     }
     // The notification is read beside the open: GitHub's answer changes
@@ -14366,6 +14403,13 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
                 .flatten()
         })
         .flatten();
+    // The item's lock, to the end of the open, and the row read again
+    // under it.
+    let _item_lock = match &existing {
+        Some(item) => Some(ctx.lock_item(&item.id).await),
+        None => None,
+    };
+    let existing = existing.and_then(|item| ctx.item(&item.id));
 
     // The conversation as it was last kept, for offline and for a first
     // paint that does not wait on the network.
@@ -14615,6 +14659,7 @@ async fn prepare_issue_home(ctx: &Ctx, repo: &RepoId) {
     });
     if due {
         let prepared = async {
+            size_up_clone(ctx, repo).await;
             ctx.preparer.ensure_bare(repo, |_| {}).await?;
             let default = ctx.preparer.default_branch(repo).await?;
             ctx.preparer.ensure_home(repo, &default).await
@@ -14696,6 +14741,16 @@ async fn open_pull_request(
                 .flatten()
         })
         .flatten();
+    // The item's lock, to the end of the open. The row is read again under
+    // it: an archive or a delete may have finished while this waited.
+    let mut _item_lock = None;
+    let existing = match existing {
+        Some(item) => {
+            _item_lock = Some(ctx.lock_item(&item.id).await);
+            ctx.item(&item.id)
+        }
+        None => None,
+    };
 
     let on_disk = existing
         .as_ref()
@@ -14732,7 +14787,13 @@ async fn open_pull_request(
     // reader's own on its head branch, else a new one.
     let existing = match existing {
         Some(item) => Some(item),
-        None => branch_item_for(ctx, &pull_request),
+        None => match branch_item_for(ctx, &pull_request) {
+            Some(item) => {
+                _item_lock = Some(ctx.lock_item(&item.id).await);
+                ctx.item(&item.id)
+            }
+            None => None,
+        },
     };
     // What the row held until now is this open's "since".
     let since = existing
@@ -14849,10 +14910,11 @@ async fn open_pull_request_ahead(
 
 /// Make the bare clone a pull request's checkout starts from, unless the
 /// reader leaves the open first. A large repository clones for minutes,
-/// and the open holds the item lifecycle lock all that time, so every open
-/// after it would wait on a clone nobody is looking at. Dropped, the clone
-/// kills git and takes its partial directory with it; the next open starts
-/// it over. False when the reader left.
+/// and the open holds its subject's and its item's locks all that time,
+/// so going back to the pull request would wait on the clone it left
+/// without saying so. Dropped, the clone kills git and takes its partial
+/// directory with it; the next open starts it over, its progress showing.
+/// False when the reader left.
 async fn clone_while_wanted(
     ctx: &Ctx,
     repo: &RepoId,
@@ -14861,6 +14923,7 @@ async fn clone_while_wanted(
     if ctx.preparer.store().has_bare_clone(repo) {
         return Ok(true);
     }
+    size_up_clone(ctx, repo).await;
     let left = async {
         while ctx.navigation_requests.is_current(navigation_id) {
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -14875,6 +14938,32 @@ async fn clone_while_wanted(
         cloned = ctx
             .preparer
             .ensure_bare(repo, checkout_progress(ctx, repo, navigation_id)) => cloned.map(|_| true),
+    }
+}
+
+/// Repositories GitHub counts larger than this, in kilobytes, are cloned
+/// partially: half a gigabyte is minutes on a fast line.
+const PARTIAL_CLONE_OVER_KB: u64 = 500 * 1024;
+
+/// Before a repository's first clone, ask GitHub how large it is, and have
+/// a large one cloned without its history's file contents. A clone that is
+/// already there stays as it was made.
+async fn size_up_clone(ctx: &Ctx, repo: &RepoId) {
+    if ctx.preparer.store().has_bare_clone(repo) {
+        return;
+    }
+    let Some(github) = ctx.github() else {
+        return;
+    };
+    match github.repository_size_kb(&repo.full_name()).await {
+        Ok(size_kb) if size_kb > PARTIAL_CLONE_OVER_KB => {
+            tracing::info!(repo = %repo.full_name(), size_kb, "cloning a large repository partially");
+            ctx.preparer.clone_partially(repo);
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::debug!(repo = %repo.full_name(), error = %e, "could not ask how large a repository is");
+        }
     }
 }
 
@@ -14893,6 +14982,9 @@ fn checkout_progress(
                 (format!("Cloning {label}: {phase}"), percent)
             }
             perch_git::Step::Fetching => ("Fetching the pull request".into(), None),
+            perch_git::Step::Downloading { phase, percent } => {
+                (format!("Downloading the files: {phase}"), percent)
+            }
             perch_git::Step::CreatingWorktree => ("Checking out the files".into(), None),
             perch_git::Step::ComputingDiff => ("Computing the diff".into(), None),
         };
@@ -15114,7 +15206,7 @@ fn refetch_opened_pull_request<'a>(
         {
             Ok(fresh) if fresh.head_sha != shown.head_sha => {
                 let opened = {
-                    let _lifecycle = ctx.item_lifecycle.lock().await;
+                    let _lifecycle = ctx.lock_item(item_id).await;
                     if !ctx.is_open(item_id)
                         || !ctx
                             .navigation_requests
@@ -19888,7 +19980,7 @@ mod tests {
             review_admissions: Default::default(),
             review_reconcile: Arc::new(tokio::sync::Mutex::new(())),
             knowledge: None,
-            item_lifecycle: Arc::new(tokio::sync::Mutex::new(())),
+            item_lifecycle: Arc::new(perch_git::KeyedMutex::new()),
             root_cuts: Arc::new(tokio::sync::Mutex::new(())),
             avatars: Arc::new(Semaphore::new(1)),
             assignments: Arc::default(),
@@ -30097,6 +30189,49 @@ read eof || true
             open_pull::DescriptionOutcome::Stopped
         );
         assert!(started.elapsed() < Duration::from_secs(20));
+    }
+
+    /// A pull request whose open is slow, cloning a large repository, holds
+    /// up its own item and nobody else's: an issue opens beside it, while
+    /// an archive of the pull request's item waits.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_slow_open_holds_up_only_its_own_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, _paths) = serve_by_path(|path| {
+            if path.starts_with("/repos/a/b/issues/5/") {
+                ("200 OK", "[]".into())
+            } else if path.starts_with("/repos/a/b/issues/5") {
+                ("200 OK", r#"{"number":5,"title":"t"}"#.into())
+            } else {
+                ("404 Not Found", r#"{"message":"Not Found"}"#.into())
+            }
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &["a/b"]);
+        owned_clone(&ctx, dir.path());
+        store_issue(&ctx, 5);
+        let pull = store_pull(&ctx, 3);
+
+        // What an open of pull request 3 holds while it clones.
+        let _subject = ctx.lock_subject("a/b", ItemKind::PullRequest, 3).await;
+        let _item = ctx.lock_item(&pull.id).await;
+
+        let navigation_id = ctx.navigation_requests.begin_current();
+        let opened = tokio::time::timeout(
+            Duration::from_secs(5),
+            open_subject(&ctx, "a/b".into(), ItemKind::Issue, 5, navigation_id),
+        )
+        .await;
+        assert!(opened.is_ok(), "the issue did not wait on the pull request");
+        assert!(received
+            .try_iter()
+            .any(|event| matches!(event, Event::IssueReady { .. })));
+
+        let archived = tokio::time::timeout(
+            Duration::from_millis(200),
+            archive_item(&ctx, &pull.id, None),
+        )
+        .await;
+        assert!(archived.is_err(), "the pull request's own archive waits");
     }
 
     /// An issue read before shows at once, as it was kept: GitHub's answer

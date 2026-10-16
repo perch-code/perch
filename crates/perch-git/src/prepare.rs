@@ -4,10 +4,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::cmd::{Git, Progress};
+use crate::keyed::KeyedMutex;
 use crate::store::{RepoId, Store};
 use crate::Error;
 
-const CLONE_TIMEOUT: Duration = Duration::from_secs(600);
+/// How long a clone may go without reporting progress. A clone has no
+/// limit on the whole: a large repository takes as long as it takes.
+const CLONE_IDLE: Duration = Duration::from_secs(120);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 const WORKTREE_TIMEOUT: Duration = Duration::from_secs(30);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -15,8 +18,16 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 /// What the caller is told while a checkout is being prepared.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Step {
-    Cloning { phase: String, percent: Option<u8> },
+    Cloning {
+        phase: String,
+        percent: Option<u8>,
+    },
     Fetching,
+    /// A partial clone's files for the checkout, ahead of writing them.
+    Downloading {
+        phase: String,
+        percent: Option<u8>,
+    },
     CreatingWorktree,
     ComputingDiff,
 }
@@ -249,13 +260,17 @@ impl Drop for RemoveOnDrop<'_> {
 pub struct Preparer {
     git: Git,
     store: Store,
-    /// Held while a bare clone is made, so two callers that both find it
-    /// missing do not clone into the same staging directory.
-    cloning: tokio::sync::Mutex<()>,
-    /// Held while a home is fetched and moved, so a home brought up to date
-    /// behind an open issue and one Start work needs do not race on its ref
-    /// and its directory.
-    homes: tokio::sync::Mutex<()>,
+    /// A repository's, held while its bare clone is made, so two callers
+    /// that both find it missing do not clone into the same staging
+    /// directory. Per repository: a large clone holds no other up.
+    cloning: KeyedMutex,
+    /// A repository's, held while its home is fetched and moved, so a home
+    /// brought up to date behind an open issue and one Start work needs do
+    /// not race on its ref and its directory.
+    homes: KeyedMutex,
+    /// Repositories to clone without their history's file contents: see
+    /// `clone_partially`.
+    partial: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 /// Where the bare clone remembers its remote's default branch. A clone
@@ -267,8 +282,9 @@ impl Preparer {
         Self {
             git: Git::new(token),
             store,
-            cloning: tokio::sync::Mutex::new(()),
-            homes: tokio::sync::Mutex::new(()),
+            cloning: KeyedMutex::new(),
+            homes: KeyedMutex::new(),
+            partial: Default::default(),
         }
     }
 
@@ -375,6 +391,7 @@ impl Preparer {
             return Err(Error::NoMergeBase);
         }
 
+        self.fill_blobs(&bare, head_sha, &mut on_step).await?;
         on_step(Step::CreatingWorktree);
         let worktree = self.store.worktree_path(id, branch);
 
@@ -452,6 +469,99 @@ impl Preparer {
         })
     }
 
+    /// In a partial clone, download the files `rev` has that are not here
+    /// yet, saying how it goes, before a checkout writes them out. git
+    /// would fetch them itself as the checkout reads them, but silently,
+    /// and under the checkout's short timeout, which a large tree outlasts.
+    /// The request is the one git makes for them. A full clone has every
+    /// file already, so this asks nothing of it.
+    async fn fill_blobs(
+        &self,
+        repo: &Path,
+        rev: &str,
+        on_step: &mut (impl FnMut(Step) + Send),
+    ) -> Result<(), Error> {
+        let promisor = self
+            .git
+            .run(
+                Some(repo),
+                ["config", "--get", "remote.origin.promisor"],
+                QUERY_TIMEOUT,
+            )
+            .await
+            .is_ok_and(|value| value.trim() == "true");
+        if !promisor {
+            return Ok(());
+        }
+        // `--missing=print` lists what is not here rather than fetching it.
+        let listed = self
+            .git
+            .run(
+                Some(repo),
+                [
+                    "rev-list",
+                    "--objects",
+                    "--missing=print",
+                    &format!("{rev}^{{tree}}"),
+                ],
+                QUERY_TIMEOUT,
+            )
+            .await?;
+        let missing: String = listed
+            .lines()
+            .filter_map(|line| line.strip_prefix('?'))
+            .map(|oid| format!("{oid}\n"))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        self.git
+            .run_with_progress_input(
+                Some(repo),
+                [
+                    "-c",
+                    "fetch.negotiationAlgorithm=noop",
+                    "fetch",
+                    "--progress",
+                    "origin",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "--recurse-submodules=no",
+                    "--filter=blob:none",
+                    "--stdin",
+                ],
+                Some(missing.into_bytes()),
+                CLONE_IDLE,
+                |p: Progress| {
+                    on_step(Step::Downloading {
+                        phase: p.phase,
+                        percent: p.percent,
+                    })
+                },
+            )
+            .await
+    }
+
+    /// Clone this repository, if it is cloned from now on, with its commits
+    /// and trees but not the contents of every file it ever had
+    /// (`--filter=blob:none`). git fetches a file's contents when a checkout
+    /// or a diff reads them, so a review costs what its files weigh rather
+    /// than what the whole history does. For a repository too large to
+    /// download whole: a read deep in history becomes a round trip to
+    /// GitHub, and a reviewer's snapshot of it cannot read what was never
+    /// fetched.
+    pub fn clone_partially(&self, id: &RepoId) {
+        if let Ok(mut partial) = self.partial.lock() {
+            partial.insert(id.full_name().to_lowercase());
+        }
+    }
+
+    fn clones_partially(&self, id: &RepoId) -> bool {
+        self.partial
+            .lock()
+            .is_ok_and(|partial| partial.contains(&id.full_name().to_lowercase()))
+    }
+
     /// The bare clone, made if it is missing. Every checkout starts here.
     pub async fn ensure_bare(
         &self,
@@ -462,7 +572,7 @@ impl Preparer {
         if self.store.has_bare_clone(id) {
             return Ok(bare);
         }
-        let _cloning = self.cloning.lock().await;
+        let _cloning = self.cloning.lock(id.full_name().to_lowercase()).await;
         if self.store.has_bare_clone(id) {
             return Ok(bare);
         }
@@ -470,8 +580,9 @@ impl Preparer {
         if let Some(parent) = bare.parent() {
             std::fs::create_dir_all(parent).map_err(|e| Error::Io(e.to_string()))?;
         }
-        // A partial clone would be gone if it failed halfway, so build it
-        // under a temporary name and move it into place only on success.
+        // A clone that failed halfway would be taken for a whole one, so
+        // build it under a temporary name and move it into place only on
+        // success.
         let staging = bare.with_extension("git.partial");
         let _ = std::fs::remove_dir_all(&staging);
         // A clone dropped before it ends, as one for an open the reader
@@ -479,24 +590,23 @@ impl Preparer {
         // directory, gigabytes for a large repository, goes with it here.
         let _partial = RemoveOnDrop(&staging);
 
+        let mut args = vec![
+            "clone".to_string(),
+            "--bare".to_string(),
+            "--progress".to_string(),
+        ];
+        if self.clones_partially(id) {
+            args.push("--filter=blob:none".to_string());
+        }
+        args.push(id.clone_url());
+        args.push(staging.to_string_lossy().into_owned());
         self.git
-            .run_with_progress(
-                None,
-                [
-                    "clone".to_string(),
-                    "--bare".to_string(),
-                    "--progress".to_string(),
-                    id.clone_url(),
-                    staging.to_string_lossy().into_owned(),
-                ],
-                CLONE_TIMEOUT,
-                |p: Progress| {
-                    on_step(Step::Cloning {
-                        phase: p.phase,
-                        percent: p.percent,
-                    })
-                },
-            )
+            .run_with_progress(None, args, CLONE_IDLE, |p: Progress| {
+                on_step(Step::Cloning {
+                    phase: p.phase,
+                    percent: p.percent,
+                })
+            })
             .await?;
 
         std::fs::rename(&staging, &bare).map_err(|e| Error::Io(e.to_string()))?;
@@ -599,7 +709,7 @@ impl Preparer {
     /// a home.
     pub async fn ensure_home(&self, id: &RepoId, default_branch: &str) -> Result<PathBuf, Error> {
         let bare = self.ensure_bare(id, |_| {}).await?;
-        let _homes = self.homes.lock().await;
+        let _homes = self.homes.lock(id.full_name().to_lowercase()).await;
         let fetched = home_ref(default_branch);
 
         let fetch = self
@@ -630,6 +740,7 @@ impl Preparer {
         }
 
         let home = self.store.home_path(id);
+        self.fill_blobs(&bare, &fetched, &mut |_| {}).await?;
 
         if !home.join(".git").exists() {
             std::fs::create_dir_all(self.store.homes_dir())
@@ -931,6 +1042,7 @@ impl Preparer {
             .run(Some(repo), ["worktree", "prune"], WORKTREE_TIMEOUT)
             .await;
 
+        self.fill_blobs(repo, commitish, &mut |_| {}).await?;
         let path = worktree.to_string_lossy().into_owned();
         let mut args = vec!["worktree", "add"];
         args.extend_from_slice(flags);
@@ -1428,6 +1540,66 @@ mod tests {
 
     fn preparer(dir: &Path) -> Preparer {
         Preparer::new(Store::new(dir.join("store")), None)
+    }
+
+    /// The objects `rev`'s tree has that `repo` does not.
+    fn missing(repo: &Path, rev: &str) -> usize {
+        git(
+            repo,
+            &[
+                "rev-list",
+                "--objects",
+                "--missing=print",
+                &format!("{rev}^{{tree}}"),
+            ],
+        )
+        .lines()
+        .filter(|line| line.starts_with('?'))
+        .count()
+    }
+
+    /// A partial clone gets a tree's files ahead of a checkout, saying how
+    /// it goes; a full clone is asked for nothing.
+    #[tokio::test]
+    async fn a_partial_clone_downloads_a_trees_files_before_its_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, _clone) = clone_with_feature(dir.path());
+        git(&remote, &["config", "uploadpack.allowFilter", "true"]);
+        git(
+            &remote,
+            &["config", "uploadpack.allowAnySHA1InWant", "true"],
+        );
+        let url = format!("file://{}", remote.display());
+        let partial = dir.path().join("partial.git");
+        let full = dir.path().join("full.git");
+        for (args, to) in [(vec!["--filter=blob:none"], &partial), (Vec::new(), &full)] {
+            let mut clone = vec!["clone", "-q", "--bare"];
+            clone.extend(args);
+            clone.extend([url.as_str(), to.to_str().unwrap()]);
+            git(dir.path(), &clone);
+        }
+        assert_eq!(missing(&partial, "main"), 1, "a.txt is not here yet");
+
+        let preparer = preparer(dir.path());
+        let mut steps = Vec::new();
+        preparer
+            .fill_blobs(&partial, "main", &mut |step| steps.push(step))
+            .await
+            .unwrap();
+        assert_eq!(missing(&partial, "main"), 0);
+        assert!(
+            steps
+                .iter()
+                .any(|step| matches!(step, Step::Downloading { .. })),
+            "{steps:?}"
+        );
+
+        let mut steps = Vec::new();
+        preparer
+            .fill_blobs(&full, "main", &mut |step| steps.push(step))
+            .await
+            .unwrap();
+        assert!(steps.is_empty(), "{steps:?}");
     }
 
     #[tokio::test]

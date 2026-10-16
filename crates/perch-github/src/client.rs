@@ -396,6 +396,20 @@ impl GitHub {
         })
     }
 
+    /// How big a repository is, in kilobytes, as GitHub counts it: about
+    /// what a full clone downloads.
+    pub async fn repository_size_kb(&self, repo_full_name: &str) -> Result<u64, Error> {
+        #[derive(serde::Deserialize)]
+        struct Repository {
+            #[serde(default)]
+            size: u64,
+        }
+        let body = self.get_text(&format!("/repos/{repo_full_name}")).await?;
+        let repository: Repository =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        Ok(repository.size)
+    }
+
     /// Fetch a pull request by number.
     ///
     /// `repo_full_name` is the repository it was asked for under, used only

@@ -396,7 +396,7 @@ async fn start_inner(ctx: &Ctx, request: ReviewLaunchRequest) -> Result<(), Stri
     // Deletion/archive owns the same fence. Keep the source checkout and
     // item row stable until the snapshot, durable group, and scheduler
     // children have all been admitted.
-    let _lifecycle = ctx.item_lifecycle.lock().await;
+    let _lifecycle = ctx.lock_item(&request.item_id).await;
     validate_launch(ctx, &request)?;
     let item = ctx
         .item(&request.item_id)
@@ -591,7 +591,10 @@ pub(super) async fn retry_attempt(ctx: &Ctx, attempt_id: &str) {
 }
 
 async fn retry_attempt_inner(ctx: &Ctx, attempt_id: &str) -> Result<(), String> {
-    let _lifecycle = ctx.item_lifecycle.lock().await;
+    let _lifecycle = match group_item_of_attempt(ctx, attempt_id) {
+        Some(item_id) => Some(ctx.lock_item(&item_id).await),
+        None => None,
+    };
     let previous = cache(ctx, |cache| cache.load_reviewer_attempt(attempt_id))?
         .ok_or_else(|| "That reviewer attempt no longer exists".to_string())?;
     let group = cache(ctx, |cache| cache.load_review_group(&previous.group_id))?
@@ -644,8 +647,28 @@ async fn retry_attempt_inner(ctx: &Ctx, attempt_id: &str) -> Result<(), String> 
     Ok(())
 }
 
+/// The item a reviewer attempt's group belongs to, whose lock a retry
+/// takes. None when either is gone, which the retry then says itself.
+fn group_item_of_attempt(ctx: &Ctx, attempt_id: &str) -> Option<String> {
+    let attempt = cache(ctx, |cache| cache.load_reviewer_attempt(attempt_id))
+        .ok()
+        .flatten()?;
+    group_item(ctx, &attempt.group_id)
+}
+
+/// The item a review group belongs to, which never changes.
+fn group_item(ctx: &Ctx, group_id: &str) -> Option<String> {
+    cache(ctx, |cache| cache.load_review_group(group_id))
+        .ok()
+        .flatten()
+        .map(|group| group.item_id)
+}
+
 pub(super) async fn open_snapshot(ctx: &Ctx, group_id: &str, request_id: u64) {
-    let _lifecycle = ctx.item_lifecycle.lock().await;
+    let _lifecycle = match group_item(ctx, group_id) {
+        Some(item_id) => Some(ctx.lock_item(&item_id).await),
+        None => None,
+    };
     let result = async {
         if !ctx
             .navigation_requests

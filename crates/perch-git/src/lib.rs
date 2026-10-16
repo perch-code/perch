@@ -6,6 +6,7 @@
 pub mod cmd;
 pub mod diff;
 pub mod display;
+pub mod keyed;
 pub mod prepare;
 pub mod review_snapshot;
 pub mod scan;
@@ -18,6 +19,7 @@ pub use diff::{
     DELETED_VIEWED_KEY,
 };
 pub use display::{DisplayBuffer, Row};
+pub use keyed::KeyedMutex;
 pub use prepare::{home_ref, BaseBranch, Checkout, Cut, Prefetched, Preparer, PushError, Step};
 pub use review_snapshot::{
     map_anchor_between, AnchorMapping, CaptureOutcome, DiffSide, MappedAnchor, MappingCandidate,

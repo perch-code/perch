@@ -241,11 +241,32 @@ impl Git {
     ///
     /// git writes progress to stderr with carriage returns rather than
     /// newlines, so the stream is split on both.
+    ///
+    /// `idle` is how long git may go without a word before it is taken
+    /// for stuck and killed. There is no limit on the whole run: a large
+    /// repository clones for as long as it keeps moving.
     pub async fn run_with_progress<I, S>(
         &self,
         cwd: Option<&Path>,
         args: I,
-        timeout: Duration,
+        idle: Duration,
+        on_progress: impl FnMut(Progress) + Send,
+    ) -> Result<(), Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.run_with_progress_input(cwd, args, None, idle, on_progress)
+            .await
+    }
+
+    /// `run_with_progress`, with `input` written to git's stdin.
+    pub async fn run_with_progress_input<I, S>(
+        &self,
+        cwd: Option<&Path>,
+        args: I,
+        input: Option<Vec<u8>>,
+        idle: Duration,
         mut on_progress: impl FnMut(Progress) + Send,
     ) -> Result<(), Error>
     where
@@ -254,56 +275,62 @@ impl Git {
     {
         let mut command = self.command(cwd, args);
         command.stdout(Stdio::null()).stderr(Stdio::piped());
+        if input.is_some() {
+            command.stdin(Stdio::piped());
+        }
 
         let mut child = command.spawn().map_err(|e| Error::Spawn(e.to_string()))?;
         let stderr = child.stderr.take().expect("stderr piped");
+        // Written beside the reading, so a large input cannot fill the pipe
+        // while git waits for its stderr to be read.
+        if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+            tokio::spawn(async move {
+                let _ = stdin.write_all(&input).await;
+                let _ = stdin.shutdown().await;
+            });
+        }
 
-        let pump = async {
-            let mut reader = BufReader::new(stderr);
-            let mut buf = Vec::new();
-            let mut tail = String::new();
-            loop {
-                buf.clear();
-                // Progress lines end in \r; the final summary ends in \n.
-                let read = reader.read_until(b'\r', &mut buf).await.unwrap_or(0);
-                if read == 0 {
-                    break;
+        let mut reader = BufReader::new(stderr);
+        let mut buf = Vec::new();
+        let mut tail = String::new();
+        loop {
+            buf.clear();
+            // Progress lines end in \r; the final summary ends in \n.
+            let read = match tokio::time::timeout(idle, reader.read_until(b'\r', &mut buf)).await {
+                Ok(read) => read.unwrap_or(0),
+                Err(_) => {
+                    let _ = child.start_kill();
+                    return Err(Error::Timeout);
                 }
-                let chunk = String::from_utf8_lossy(&buf);
-                for line in chunk.split(['\r', '\n']) {
-                    let line = line.trim();
-                    if line.is_empty() {
-                        continue;
-                    }
-                    tail = line.to_string();
-                    on_progress(parse_progress(line));
-                }
+            };
+            if read == 0 {
+                break;
             }
-            tail
-        };
+            let chunk = String::from_utf8_lossy(&buf);
+            for line in chunk.split(['\r', '\n']) {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                tail = line.to_string();
+                on_progress(parse_progress(line));
+            }
+        }
 
-        let result = tokio::time::timeout(timeout, async {
-            let tail = pump.await;
-            let status = child
-                .wait()
-                .await
-                .map_err(|e| Error::Spawn(e.to_string()))?;
-            Ok::<_, Error>((status, tail))
-        })
-        .await;
-
-        match result {
+        let status = match tokio::time::timeout(idle, child.wait()).await {
+            Ok(status) => status.map_err(|e| Error::Spawn(e.to_string()))?,
             Err(_) => {
                 let _ = child.start_kill();
-                Err(Error::Timeout)
+                return Err(Error::Timeout);
             }
-            Ok(Err(e)) => Err(e),
-            Ok(Ok((status, tail))) if !status.success() => Err(Error::Git {
+        };
+        if !status.success() {
+            return Err(Error::Git {
                 status: status.code().unwrap_or(-1),
                 stderr: tail,
-            }),
-            Ok(Ok(_)) => Ok(()),
+            });
         }
+        Ok(())
     }
 
     fn command<I, S>(&self, cwd: Option<&Path>, args: I) -> Command
@@ -564,5 +591,44 @@ mod tests {
         assert!(!said.contains(TOKEN), "{said}");
         assert!(!said.contains("inherited"), "{said}");
         assert!(!said.contains(ASKED), "{said}");
+    }
+
+    /// git as a shell alias, so a test can say when it speaks.
+    fn alias(script: &str) -> [String; 3] {
+        [
+            "-c".to_string(),
+            format!("alias.talk=!{script}"),
+            "talk".to_string(),
+        ]
+    }
+
+    #[tokio::test]
+    async fn progress_keeps_a_long_run_alive() {
+        let mut seen = 0;
+        let result = Git::plain()
+            .run_with_progress(
+                None,
+                alias("for i in 1 2 3 4 5 6; do printf 'Receiving objects: %d%%\\r' $i >&2; sleep 0.2; done"),
+                Duration::from_millis(600),
+                |_| seen += 1,
+            )
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(seen, 6);
+    }
+
+    #[tokio::test]
+    async fn a_silent_run_is_stopped() {
+        let started = std::time::Instant::now();
+        let result = Git::plain()
+            .run_with_progress(
+                None,
+                alias("printf 'Receiving objects: 1%%\\r' >&2; sleep 5"),
+                Duration::from_millis(300),
+                |_| {},
+            )
+            .await;
+        assert!(matches!(result, Err(Error::Timeout)), "{result:?}");
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 }
