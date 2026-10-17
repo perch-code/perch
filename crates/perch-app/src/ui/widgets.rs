@@ -566,9 +566,14 @@ pub fn icon_button(
     })
 }
 
+/// How far a disabled form button fades.
+const DISABLED_ALPHA: f32 = 0.45;
+
 /// A form's button, filled when `prominent`: Cancel, Submit, Merge. A
 /// click presses it, and so do Enter and Space once it has the keyboard;
 /// while `enabled` says no it is faded and nothing presses it.
+///
+/// The fade is in the colours: the renderer ignores `opacity`.
 pub(crate) fn action_button(
     label: impl Fn() -> String + 'static,
     debug: impl Into<String>,
@@ -579,15 +584,21 @@ pub(crate) fn action_button(
     let enabled: std::rc::Rc<dyn Fn() -> bool> = std::rc::Rc::new(enabled);
     let event_enabled = enabled.clone();
     let style_enabled = enabled.clone();
+    let label_enabled = enabled.clone();
     let action: std::rc::Rc<dyn Fn()> = std::rc::Rc::new(action);
     let click = action.clone();
     Container::new(Label::derived(label).style(move |s| {
+        let color = if prominent {
+            theme::canvas()
+        } else {
+            theme::fg_muted()
+        };
         s.font_size(theme::TEXT_BADGE)
             .font_weight(theme::weight_emphasis())
-            .color(if prominent {
-                theme::canvas()
+            .color(if label_enabled() || prominent {
+                color
             } else {
-                theme::fg_muted()
+                color.with_alpha(DISABLED_ALPHA)
             })
             .selectable(false)
             .pointer_events_none()
@@ -607,31 +618,29 @@ pub(crate) fn action_button(
     })
     .style(move |s| {
         let available = style_enabled();
+        // A filled button fades its fill to grey; an outlined one, its
+        // label. Its white label stays white on the grey.
+        let fill = if !prominent {
+            theme::canvas()
+        } else if available {
+            theme::fg()
+        } else {
+            theme::fg().with_alpha(DISABLED_ALPHA)
+        };
         clickable(s)
             .height(30.0)
             .padding_horiz(11.0)
             .items_center()
             .justify_center()
             .flex_shrink(0.0_f32)
-            .background(if prominent {
-                theme::fg()
-            } else {
-                theme::canvas()
-            })
+            .background(fill)
             .border(1.0)
-            .border_color(if prominent {
-                theme::fg()
-            } else {
-                theme::border()
-            })
+            .border_color(if prominent { fill } else { theme::border() })
             .border_radius(theme::RADIUS)
             .keyboard_navigable()
             .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
             .set_disabled(!available)
-            .apply_if(!available, |s| {
-                s.opacity(0.45_f32)
-                    .cursor(floem::style::CursorStyle::Default)
-            })
+            .apply_if(!available, |s| s.cursor(floem::style::CursorStyle::Default))
             .apply_if(available, |s| {
                 s.hover(move |s| {
                     s.background(if prominent {

@@ -75,6 +75,8 @@ pub(crate) fn section(app: AppState, state: ReviewState, backend: Rc<Backend>) -
     let submit_backend = backend.clone();
     let submit: Rc<dyn Fn()> = Rc::new(move || submit(state, &submit_backend));
     let editor = review_editor(app, state, backend.clone(), submit.clone());
+    let back_backend = backend.clone();
+    let note = Memo::new(move |_| unavailable_note(state));
     let drafts = drafts_list(state, backend);
     let message = |text: Option<String>, debug: &'static str| match text {
         Some(text) => Label::derived(move || text.clone())
@@ -96,17 +98,32 @@ pub(crate) fn section(app: AppState, state: ReviewState, backend: Rc<Backend>) -
                 .color(theme::fg())
         }),
         dyn_container(
-            move || unavailable_note(state),
-            |note| match note {
-                Some(note) => Label::derived(move || note.to_string())
-                    .style(|s| {
-                        s.width_full()
-                            .font_size(theme::TEXT_META)
-                            .color(theme::fg_subtle())
-                            .text_wrap()
-                    })
-                    .debug_name("submit-review-held")
-                    .into_any(),
+            move || note.get(),
+            move |note| match note {
+                Some((note, snapshot)) => Stack::vertical((
+                    Label::derived(move || note.clone())
+                        .style(|s| {
+                            s.width_full()
+                                .font_size(theme::TEXT_META)
+                                .color(theme::fg_subtle())
+                                .text_wrap()
+                        })
+                        .debug_name("submit-review-held"),
+                    if snapshot {
+                        crate::review::summary::back_to_current(app, state, back_backend.clone())
+                            .style(|s| {
+                                s.border(1.0)
+                                    .border_color(theme::border())
+                                    .padding_horiz(8.0)
+                                    .height(24.0)
+                            })
+                            .into_any()
+                    } else {
+                        Empty::new().into_any()
+                    },
+                ))
+                .style(|s| s.flex_col().width_full().items_start().gap(8.0))
+                .into_any(),
                 None => Empty::new().into_any(),
             },
         ),
@@ -205,14 +222,32 @@ pub(crate) fn folded(state: ReviewState) -> impl IntoView {
     .debug_name("submit-review-folded")
 }
 
-/// Why drafts held for an open pull request cannot go now.
-fn unavailable_note(state: ReviewState) -> Option<&'static str> {
+/// Why drafts held for an open pull request cannot go now, and whether
+/// the way out is Back to current, off a review's snapshot.
+fn unavailable_note(state: ReviewState) -> Option<(String, bool)> {
     if is_available(state) {
         None
     } else if state.offline.get() {
-        Some("Offline. The drafts are kept until GitHub can be reached.")
+        Some((
+            "Offline. The drafts are kept until GitHub can be reached.".into(),
+            false,
+        ))
+    } else if let Some(number) = state
+        .historical_review
+        .with(|review| review.as_ref().map(|r| r.group.number))
+    {
+        Some((
+            format!(
+                "Review #{number}'s snapshot is read-only. Go back to the current \
+                 pull request to submit; the drafts are kept."
+            ),
+            true,
+        ))
     } else {
-        Some("The pull request has new commits. Update it to submit; the drafts are kept.")
+        Some((
+            "The pull request has new commits. Update it to submit; the drafts are kept.".into(),
+            false,
+        ))
     }
 }
 
@@ -802,10 +837,8 @@ fn submit(state: ReviewState, backend: &Backend) {
             .set(Some("This pull request is no longer open in Perch.".into()));
         return;
     };
-    if !is_available(state) {
-        state.submit_review_error.set(Some(
-            "Refresh the current pull request before submitting a review.".into(),
-        ));
+    if let Some((note, _)) = unavailable_note(state) {
+        state.submit_review_error.set(Some(note));
         return;
     }
 
@@ -1335,6 +1368,86 @@ mod tests {
             .submit_review_event
             .set(PullReviewEvent::RequestChanges);
         assert!(!can_submit(state));
+    }
+
+    #[test]
+    fn a_snapshot_says_so_and_offers_the_way_back() {
+        let root = TestRoot::new();
+        let state = review_state();
+        state.submit_review_autofocus.set(true);
+        state
+            .comment_threads
+            .set(Arc::new(vec![draft_thread("t1", "head-42", None, "one")]));
+        let created_at = "2026-09-19T12:00:00Z".parse().unwrap();
+        state
+            .historical_review
+            .set(Some(crate::review::model::ReviewGroupSummary {
+                group: perch_github::ReviewGroup {
+                    id: "group".into(),
+                    item_id: "item-42".into(),
+                    snapshot_id: "snapshot".into(),
+                    number: 1,
+                    status: perch_github::ReviewGroupStatus::Completed,
+                    new_findings: 0,
+                    still_present: 0,
+                    verified_fixed: 0,
+                    not_verified: 0,
+                    created_at,
+                    started_at: Some(created_at),
+                    ended_at: Some(created_at),
+                    instructions: None,
+                },
+                snapshot: perch_github::ReviewSnapshot {
+                    id: "snapshot".into(),
+                    item_id: "item-42".into(),
+                    repository: "acme/repo".into(),
+                    branch_label: Some("feature".into()),
+                    requested_base_ref: "main".into(),
+                    base_tip_sha: "base".into(),
+                    merge_base_sha: "base".into(),
+                    head_sha: "head-42".into(),
+                    dirty_edits_excluded: false,
+                    retention_key: "snapshot".into(),
+                    retained_ref: None,
+                    manifest_path: None,
+                    diff_path: None,
+                    created_at,
+                    worktree_parent_sha: None,
+                },
+                attempts: Vec::new(),
+            }));
+        open(state, None);
+        let (backend, mut commands) = Backend::recording();
+        let view = control(AppState::new(), state, Rc::new(backend));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 800.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(!can_submit(state));
+        let held = named(harness.root_id(), "submit-review-held").expect("no word on why");
+        assert!(shown(&harness, held));
+        assert!(find(harness.root_id(), "snapshot is read-only").is_some());
+        assert!(find(harness.root_id(), "new commits").is_none());
+
+        // Cmd-Enter says the same, by the button, and sends nothing.
+        harness.dispatch_event(enter(Modifiers::META));
+        harness.rebuild();
+        assert!(state
+            .submit_review_error
+            .get()
+            .is_some_and(|e| e.contains("snapshot is read-only")));
+        assert!(matches!(
+            next_command(&mut commands),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        let back = find(harness.root_id(), "back to current").expect("no way back");
+        let center = back.get_visual_rect_no_clip().center();
+        harness.click(center.x, center.y);
+        harness.rebuild();
+        match next_command(&mut commands) {
+            Ok(Command::OpenItem { id, .. }) => assert_eq!(id, "item-42"),
+            other => panic!("Back to current did not open the item: {other:?}"),
+        }
     }
 
     #[test]
