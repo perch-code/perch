@@ -179,10 +179,17 @@ incremental = true
 # that lets a rich text view keep to one line, cut short with an
 # ellipsis as a label is, where it always wrapped: an event's line on
 # Conversation is one text, so a drag selects across its name, sha and
-# subject, and a long subject still ends in "...". Last, one that makes
+# subject, and a long subject still ends in "...". Then one that makes
 # no click from a mouse's back and forward buttons, as a browser makes
 # none. floem clicked for every button but the right one, so Back
 # pressed over a sidebar row or a button went back and pressed it too.
+# Last, one that paints a view's `opacity`, which floem defined and
+# never read, so a disabled icon button drew at full strength. A faded
+# view paints itself and its children into a layer of that alpha. vger
+# has no layers, so it multiplies the alpha into every paint instead,
+# and draws a faded image or full-colour SVG through its glyph path,
+# the one that takes a paint. Children that overlap inside a faded view
+# show through each other there.
 # Drop a patch from the branch once upstream merges it; `cargo update -p floem`
 # takes the branch's new head. `floem_renderer` is patched too so that
 # perch-app's own dependency on it resolves to the checkout floem's does,

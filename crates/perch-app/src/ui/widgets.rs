@@ -573,7 +573,9 @@ const DISABLED_ALPHA: f32 = 0.45;
 /// click presses it, and so do Enter and Space once it has the keyboard;
 /// while `enabled` says no it is faded and nothing presses it.
 ///
-/// The fade is in the colours: the renderer ignores `opacity`.
+/// The fade is in the colours, not `opacity`: vger fades each paint on
+/// its own rather than the button as one layer, so a filled button's
+/// white label would grey over its faded fill.
 pub(crate) fn action_button(
     label: impl Fn() -> String + 'static,
     debug: impl Into<String>,

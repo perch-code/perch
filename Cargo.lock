@@ -1110,7 +1110,7 @@ checksum = "98de4bbd547a563b716d8dfa9aad1cb19bfab00f4fa09a6a4ed21dbcf44ce9c4"
 [[package]]
 name = "floem"
 version = "0.2.0"
-source = "git+https://github.com/criccomini/floem?branch=perch#b8eefb693f76e47ea0bd96fb7185cbe7cb4ef1c4"
+source = "git+https://github.com/criccomini/floem?branch=perch#fa61ab36ad17affce74a5482db901903589873b1"
 dependencies = [
  "bitflags 2.13.2",
  "clipboard-win",
@@ -1164,7 +1164,7 @@ dependencies = [
 [[package]]
 name = "floem-editor-core"
 version = "0.2.0"
-source = "git+https://github.com/criccomini/floem?branch=perch#b8eefb693f76e47ea0bd96fb7185cbe7cb4ef1c4"
+source = "git+https://github.com/criccomini/floem?branch=perch#fa61ab36ad17affce74a5482db901903589873b1"
 dependencies = [
  "bitflags 2.13.2",
  "itertools",
@@ -1408,7 +1408,7 @@ dependencies = [
 [[package]]
 name = "floem_reactive"
 version = "0.2.0"
-source = "git+https://github.com/criccomini/floem?branch=perch#b8eefb693f76e47ea0bd96fb7185cbe7cb4ef1c4"
+source = "git+https://github.com/criccomini/floem?branch=perch#fa61ab36ad17affce74a5482db901903589873b1"
 dependencies = [
  "parking_lot",
  "smallvec",
@@ -1417,7 +1417,7 @@ dependencies = [
 [[package]]
 name = "floem_renderer"
 version = "0.2.0"
-source = "git+https://github.com/criccomini/floem?branch=perch#b8eefb693f76e47ea0bd96fb7185cbe7cb4ef1c4"
+source = "git+https://github.com/criccomini/floem?branch=perch#fa61ab36ad17affce74a5482db901903589873b1"
 dependencies = [
  "floem-winit",
  "fontique",
@@ -1433,7 +1433,7 @@ dependencies = [
 [[package]]
 name = "floem_tiny_skia_renderer"
 version = "0.2.0"
-source = "git+https://github.com/criccomini/floem?branch=perch#b8eefb693f76e47ea0bd96fb7185cbe7cb4ef1c4"
+source = "git+https://github.com/criccomini/floem?branch=perch#fa61ab36ad17affce74a5482db901903589873b1"
 dependencies = [
  "anyhow",
  "floem_renderer",
@@ -1449,7 +1449,7 @@ dependencies = [
 [[package]]
 name = "floem_vger_renderer"
 version = "0.2.0"
-source = "git+https://github.com/criccomini/floem?branch=perch#b8eefb693f76e47ea0bd96fb7185cbe7cb4ef1c4"
+source = "git+https://github.com/criccomini/floem?branch=perch#fa61ab36ad17affce74a5482db901903589873b1"
 dependencies = [
  "anyhow",
  "floem-vger",
@@ -5923,7 +5923,7 @@ dependencies = [
 [[package]]
 name = "ui-events-floem-winit"
 version = "0.2.0"
-source = "git+https://github.com/criccomini/floem?branch=perch#b8eefb693f76e47ea0bd96fb7185cbe7cb4ef1c4"
+source = "git+https://github.com/criccomini/floem?branch=perch#fa61ab36ad17affce74a5482db901903589873b1"
 dependencies = [
  "dpi 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "floem-winit",
