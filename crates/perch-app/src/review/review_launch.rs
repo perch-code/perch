@@ -20,7 +20,9 @@ use crate::review::model::{
 use crate::state::{AppState, Checked};
 use crate::theme;
 use crate::ui::menu::{Menu, MenuExt};
-use crate::ui::widgets::{checkbox, clickable, editor_box, prose_editor, sidebar_glyph};
+use crate::ui::widgets::{
+    checkbox, clickable, editor_box, prose_editor, sidebar_glyph, DISABLED_ALPHA,
+};
 
 /// Keep the open item's reviews loaded, and the launcher's choices in step
 /// with what the reviewers support while the Review popover is open.
@@ -1340,15 +1342,21 @@ pub(crate) fn action_button(
     let enabled: Rc<dyn Fn() -> bool> = Rc::new(enabled);
     let event_enabled = enabled.clone();
     let style_enabled = enabled.clone();
+    let label_enabled = enabled.clone();
     let action: Rc<dyn Fn()> = Rc::new(action);
     let click = action.clone();
     Container::new(Label::derived(move || label.clone()).style(move |s| {
+        let color = if prominent {
+            theme::canvas()
+        } else {
+            theme::fg_muted()
+        };
         s.font_size(theme::TEXT_BADGE)
             .font_weight(theme::weight_emphasis())
-            .color(if prominent {
-                theme::canvas()
+            .color(if label_enabled() || prominent {
+                color
             } else {
-                theme::fg_muted()
+                color.with_alpha(DISABLED_ALPHA)
             })
             .selectable(false)
             .pointer_events_none()
@@ -1368,28 +1376,27 @@ pub(crate) fn action_button(
     })
     .style(move |s| {
         let available = style_enabled();
+        // Faded by colour, as widgets::action_button is: a filled button's
+        // fill greys and its white label stays white.
+        let fill = if !prominent {
+            theme::canvas()
+        } else if available {
+            theme::fg()
+        } else {
+            theme::fg().with_alpha(DISABLED_ALPHA)
+        };
         clickable(s)
             .height(28.0)
             .padding_horiz(10.0)
             .items_center()
             .justify_center()
-            .background(if prominent {
-                theme::fg()
-            } else {
-                theme::canvas()
-            })
+            .background(fill)
             .border(1.0)
-            .border_color(if prominent {
-                theme::fg()
-            } else {
-                theme::border()
-            })
+            .border_color(if prominent { fill } else { theme::border() })
             .border_radius(theme::RADIUS)
             .keyboard_navigable()
             .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
-            .apply_if(!available, |s| {
-                s.opacity(0.45_f32).cursor(CursorStyle::Default)
-            })
+            .apply_if(!available, |s| s.cursor(CursorStyle::Default))
             .apply_if(available, |s| {
                 s.hover(move |s| {
                     s.background(if prominent {

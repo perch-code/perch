@@ -567,7 +567,7 @@ pub fn icon_button(
 }
 
 /// How far a disabled form button fades.
-const DISABLED_ALPHA: f32 = 0.45;
+pub(crate) const DISABLED_ALPHA: f32 = 0.45;
 
 /// A form's button, filled when `prominent`: Cancel, Submit, Merge. A
 /// click presses it, and so do Enter and Space once it has the keyboard;
