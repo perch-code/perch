@@ -24,7 +24,7 @@ use floem::views::editor::text::Styling;
 use floem::views::editor::EditorStyle;
 use perch_syntax::Span;
 
-use crate::review::doc::{Doc, DocRow, Tint};
+use crate::review::doc::{Doc, DocRow, Piece, Tint};
 use crate::review::editor::Side;
 use crate::review::find::Match;
 use crate::review::model::LiveFile;
@@ -94,29 +94,30 @@ impl PerchStyling {
     }
 
     /// The columns of the caret's symbol's uses on a row: those on the
-    /// row's head line, clamped to the line. A row that is no head line,
-    /// a ghost or a base side's line, has none; a use inside a fold is on
-    /// no row, and is not drawn until a reveal puts it on one.
+    /// row's head line, clamped to the part of the line the row shows. A
+    /// row that is no head line, a ghost or a base side's line, has none;
+    /// a use inside a fold is on no row, and is not drawn until a reveal
+    /// puts it on one.
     fn highlights_for(&self, row: usize) -> Vec<(usize, usize)> {
         let Some(head) = self.doc.with_untracked(|d| d.head_line(row)) else {
             return Vec::new();
         };
-        let len = self.line_len(row);
+        let piece = self.piece(row);
         self.highlights.with_untracked(|h| {
             h.iter()
                 .filter(|(line, _, _)| *line == head)
-                .map(|(_, start, end)| ((*start).min(len), (*end).min(len)))
-                .filter(|(start, end)| start < end)
+                .filter_map(|(_, start, end)| piece.clip(*start, *end))
                 .collect()
         })
     }
 
     /// The columns of the find bar's matches on a row, each with whether
     /// it is the one the bar is on: those on the row's display line,
-    /// clamped to the line. A match is a line of the unified buffer, so a
-    /// ghost's are drawn where the ghost is, and a split's base side,
-    /// whose lines are the base file's own, draws none. A row that is no
-    /// line has none, and a match inside a fold is on no row.
+    /// clamped to the part of the line the row shows. A match is a line of
+    /// the unified buffer, so a ghost's are drawn where the ghost is, and a
+    /// split's base side, whose lines are the base file's own, draws none.
+    /// A row that is no line has none, and a match inside a fold is on no
+    /// row.
     fn matches_for(&self, row: usize) -> Vec<(usize, usize, bool)> {
         if self.side == Some(Side::Base) {
             return Vec::new();
@@ -124,7 +125,7 @@ impl PerchStyling {
         let Some(display) = self.doc.with_untracked(|d| d.display_line(row)) else {
             return Vec::new();
         };
-        let len = self.line_len(row);
+        let piece = self.piece(row);
         let current = self.find_current.get_untracked();
         self.find.with_untracked(|matches| {
             // In order down the file, so the row's are one run of it.
@@ -133,8 +134,10 @@ impl PerchStyling {
                 .iter()
                 .take_while(|m| m.display == display)
                 .enumerate()
-                .map(|(i, m)| (m.start.min(len), m.end.min(len), current == Some(first + i)))
-                .filter(|(start, end, _)| start < end)
+                .filter_map(|(i, m)| {
+                    let (start, end) = piece.clip(m.start, m.end)?;
+                    Some((start, end, current == Some(first + i)))
+                })
                 .collect()
         })
     }
@@ -144,12 +147,16 @@ impl PerchStyling {
     }
 
     /// Highlight spans for a row, taken from whichever side of the diff
-    /// its line came from. A row that is no line has none.
+    /// its line came from, as columns of the part of the line the row
+    /// shows. A row that is no line has none.
     fn spans_for(&self, row: usize) -> Vec<Span> {
-        let Some(DocRow::Line { display, .. }) = self.row(row) else {
+        let (Some(DocRow::Line { display, .. }) | Some(DocRow::Wrap { display, .. })) =
+            self.row(row)
+        else {
             return Vec::new();
         };
-        self.file.with_untracked(|file| {
+        let piece = self.piece(row);
+        let spans = self.file.with_untracked(|file| {
             match self.side {
                 // The base side's document is over the base file, whose
                 // display lines are its own.
@@ -161,7 +168,17 @@ impl PerchStyling {
                 },
             }
             .to_vec()
-        })
+        });
+        if piece.from == 0 && piece.indent == 0 {
+            return spans;
+        }
+        spans
+            .into_iter()
+            .filter_map(|span| {
+                let (start, end) = piece.clip(span.start, span.end)?;
+                Some(Span { start, end, ..span })
+            })
+            .collect()
     }
 
     /// Whether a row is a ghost of the stacked view: a removed line spliced
@@ -171,15 +188,24 @@ impl PerchStyling {
         self.side.is_none()
             && matches!(
                 self.row(row),
-                Some(DocRow::Line {
-                    tint: Tint::Deleted,
-                    ..
-                })
+                Some(
+                    DocRow::Line {
+                        tint: Tint::Deleted,
+                        ..
+                    } | DocRow::Wrap {
+                        tint: Tint::Deleted,
+                        ..
+                    }
+                )
             )
     }
 
     fn line_len(&self, row: usize) -> usize {
         self.doc.with_untracked(|d| d.line(row).len())
+    }
+
+    fn piece(&self, row: usize) -> Piece {
+        self.doc.with_untracked(|d| d.piece(row))
     }
 }
 
@@ -307,6 +333,7 @@ mod tests {
             &DisplayBuffer::plain(text),
             &folds,
             &[],
+            None,
         )));
         PerchStyling::new(
             RwSignal::new(file),
@@ -351,7 +378,7 @@ mod tests {
         );
 
         // Revealed, the fold's lines have rows, and the use is drawn.
-        let whole = doc::build(&DisplayBuffer::plain(text), &[], &[]);
+        let whole = doc::build(&DisplayBuffer::plain(text), &[], &[], None);
         styling.doc.set(Arc::new(whole));
         assert_eq!(styling.highlights_for(3), vec![(8, 12)]);
         assert_eq!(styling.doc.with_untracked(|d| d.head_line(3)), Some(3));
@@ -359,6 +386,37 @@ mod tests {
         // A range past the line is clamped to it, and one on nothing is
         // dropped.
         assert_eq!(styling.highlights_for(5), vec![(8, 12)]);
+    }
+
+    #[test]
+    fn a_wrapped_rows_uses_and_matches_are_the_lines_columns_on_that_row() {
+        let m = |display, start, end| Match {
+            display,
+            start,
+            end,
+        };
+        let text = "    call(first_argument, second_argument);\n";
+        let styling = styling(text, vec![]);
+        styling.doc.set(Arc::new(doc::build(
+            &DisplayBuffer::plain(text),
+            &[],
+            &[],
+            Some(30),
+        )));
+        // Row 0 is `    call(first_argument, `, row 1 `    second_argument);`.
+        assert_eq!(
+            styling.doc.with_untracked(|d| d.line(1).to_string()),
+            "    second_argument);"
+        );
+        // A use across the break is drawn on both rows, each its part.
+        styling
+            .highlights
+            .set(Arc::new(vec![(0, 9, 23), (0, 23, 31)]));
+        assert_eq!(styling.highlights_for(0), vec![(9, 23), (23, 25)]);
+        assert_eq!(styling.highlights_for(1), vec![(4, 10)]);
+        styling.find.set(Arc::new(vec![m(0, 25, 40)]));
+        assert!(styling.matches_for(0).is_empty());
+        assert_eq!(styling.matches_for(1), vec![(4, 19, false)]);
     }
 
     #[test]
@@ -395,7 +453,7 @@ mod tests {
         );
 
         // Revealed, line 3's match has a row, and is not the current one.
-        let whole = doc::build(&DisplayBuffer::plain(text), &[], &[]);
+        let whole = doc::build(&DisplayBuffer::plain(text), &[], &[], None);
         styling.doc.set(Arc::new(whole));
         assert_eq!(styling.matches_for(3), vec![(8, 12, false)]);
         assert_eq!(styling.matches_for(5), vec![(8, 12, true)]);

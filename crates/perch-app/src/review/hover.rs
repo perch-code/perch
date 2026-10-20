@@ -77,45 +77,25 @@ impl Fit {
     }
 }
 
-/// A byte offset in the buffer, as line and column.
-///
-/// Columns are byte offsets within the line, which is what the protocol's
-/// UTF-8 position encoding wants and what the highlight spans already use.
-pub fn line_col_of_offset(text: &str, offset: usize) -> (usize, usize) {
-    let offset = offset.min(text.len());
-    let mut line = 0usize;
-    let mut line_start = 0usize;
-
-    for (i, byte) in text.bytes().enumerate() {
-        if i >= offset {
-            break;
-        }
-        if byte == b'\n' {
-            line += 1;
-            line_start = i + 1;
-        }
-    }
-
-    (line, offset.saturating_sub(line_start))
-}
-
 /// The identifier the character at a byte offset of an editor's document
 /// belongs to, as a symbol in the head file `path`. The offset is a
 /// character's, not a caret's: the one under the pointer, so a pointer on
 /// the `(` after a name is on nothing, where a caret there would still be
 /// on the name. `None` on a row that is no head line too.
 pub fn symbol_at(doc: &Doc, path: &str, offset: usize) -> Option<Symbol> {
-    let (row, column) = line_col_of_offset(doc.text(), offset);
-    let line = doc.head_line(row)?;
-    let text = doc.line(row);
-    if !text[column.min(text.len())..]
+    // The character in the document, not the line's at the column: in the
+    // indent a wrapped row repeats, the pointer is on a space.
+    if !doc.text()[offset.min(doc.text().len())..]
         .chars()
         .next()
         .is_some_and(references::is_identifier_char)
     {
         return None;
     }
-    let (start, text) = identifier_at(text, column)?;
+    let (row, column) = doc.locate(offset);
+    let line = doc.head_line(row)?;
+    let text = doc.source_line(row);
+    let (start, text) = identifier_at(&text, column)?;
     Some(Symbol {
         path: path.to_string(),
         line,
@@ -326,27 +306,30 @@ mod tests {
     use crate::review::doc::{self, Run};
     use perch_git::DisplayBuffer;
 
+    fn plain(text: &str) -> doc::Doc {
+        doc::build(&DisplayBuffer::plain(text), &[], &[], None)
+    }
+
     #[test]
     fn offsets_resolve_to_a_line_and_column() {
-        let text = "one\ntwo\nthree\n";
-        assert_eq!(line_col_of_offset(text, 0), (0, 0));
-        assert_eq!(line_col_of_offset(text, 2), (0, 2));
-        assert_eq!(line_col_of_offset(text, 4), (1, 0));
-        assert_eq!(line_col_of_offset(text, 9), (2, 1));
+        let doc = plain("one\ntwo\nthree\n");
+        assert_eq!(doc.locate(0), (0, 0));
+        assert_eq!(doc.locate(2), (0, 2));
+        assert_eq!(doc.locate(4), (1, 0));
+        assert_eq!(doc.locate(9), (2, 1));
     }
 
     #[test]
     fn an_offset_past_the_end_clamps_rather_than_panicking() {
-        let text = "one\ntwo\n";
-        let (line, _) = line_col_of_offset(text, 9_999);
-        assert!(line <= text.lines().count());
+        let doc = plain("one\ntwo\n");
+        let (line, _) = doc.locate(9_999);
+        assert!(line < doc.len());
     }
 
     #[test]
     fn columns_are_byte_offsets_so_wide_characters_line_up() {
         // "é" is two bytes; the protocol's UTF-8 encoding counts bytes.
-        let text = "let é = 1;\n";
-        let (_, col) = line_col_of_offset(text, 6);
+        let (_, col) = plain("let é = 1;\n").locate(6);
         assert_eq!(col, 6);
     }
 
@@ -363,7 +346,7 @@ mod tests {
     #[test]
     fn a_symbol_is_found_through_the_rows_of_a_document_with_a_ghost() {
         let buffer = diffed();
-        let doc = doc::build(&buffer, &[], &[]);
+        let doc = doc::build(&buffer, &[], &[], None);
         // Row 0 is `fn alpha`, row 1 the ghost of `old_name`, row 2 `new_name`.
         assert_eq!(doc.head_line(1), None, "the ghost is no head line");
         let on_ghost = doc.offset_of_row(1) + 4;
@@ -403,7 +386,7 @@ mod tests {
         // Fold display lines 4 to 8, head lines 3 to 7: rows are alpha,
         // ghost, new_name, gamma, a divider, then iota and kappa.
         let folds = vec![Run::new(4, 8, 3)];
-        let doc = doc::build(&buffer, &folds, &[]);
+        let doc = doc::build(&buffer, &folds, &[], None);
         assert!(doc.run_of(4).is_some(), "row 4 is the divider");
         assert_eq!(symbol_at(&doc, "src/x.rs", doc.offset_of_row(4)), None);
 
@@ -412,6 +395,26 @@ mod tests {
         assert_eq!(symbol.text, "iota");
         assert_eq!(symbol.line, 8, "head line, past the fold");
         assert_eq!((symbol.column, symbol.end), (3, 7));
+    }
+
+    #[test]
+    fn a_symbol_on_a_wrapped_row_is_at_its_column_of_the_whole_line() {
+        let text = "fn f() {\n    call(first_argument, second_argument);\n}\n";
+        let doc = doc::build(&DisplayBuffer::plain(text), &[], &[], Some(30));
+        // The call's second row is `    second_argument);`, its own
+        // indent then the rest of the line.
+        let row = doc.row_of_head(1).unwrap() + 1;
+        assert_eq!(doc.line(row), "    second_argument);");
+        let symbol = symbol_at(&doc, "src/x.rs", doc.offset_of_row(row) + 6)
+            .expect("second_argument is a symbol");
+        assert_eq!(symbol.text, "second_argument");
+        assert_eq!(symbol.line, 1);
+        assert_eq!((symbol.column, symbol.end), (25, 40));
+        // The indent the row repeats is only spaces.
+        assert_eq!(
+            symbol_at(&doc, "src/x.rs", doc.offset_of_row(row) + 3),
+            None
+        );
     }
 
     const HOVER: &str = "```rust\nslatedb::db::Db\n```\n\n```rust\npub async fn flush(&self) -> Result<(), crate::Error>\n```\n\n---\n\nFlush in-memory writes.\n\nMore.\n";

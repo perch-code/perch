@@ -451,6 +451,16 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M8 14 V10.4 M5.9 12.3 L8 10.2 L10.1 12.3" fill="none" stroke="{c}"
                      stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
+        // A line, then one that runs to the edge and turns back under
+        // itself, an arrow at its end, onto a short third: word wrap, as
+        // editors draw it.
+        SidebarIcon::Wrap => format!(
+            r#"<path d="M2.5 4 H13.5 M2.5 12 H5.5" stroke="{c}" stroke-width="1.5" stroke-linecap="round"/>
+               <path d="M2.5 8 H11.2 a2 2 0 0 1 0 4 H8.6" fill="none" stroke="{c}"
+                     stroke-width="1.5" stroke-linecap="round"/>
+               <path d="M10.2 10.4 L8.6 12 L10.2 13.6" fill="none" stroke="{c}"
+                     stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#
+        ),
         // The fold opened: the rule dotted, and the chevrons pointing away
         // from it, as github.com draws Show resolved.
         SidebarIcon::Unfold => format!(
@@ -601,6 +611,8 @@ pub enum SidebarIcon {
     /// The same rule dotted, with the chevrons pointing away from it:
     /// something folded, to open.
     Unfold,
+    /// A line turning back under itself: long lines wrapped.
+    Wrap,
     /// A dotted rule with an arrow down from it: a divider's Down, which
     /// grows the code above it into the hidden lines.
     ExpandDown,
@@ -694,7 +706,7 @@ impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 73] = [
+    pub const ALL: [SidebarIcon; 74] = [
         SidebarIcon::Invite,
         SidebarIcon::Bug,
         SidebarIcon::Waiting,
@@ -717,6 +729,7 @@ impl SidebarIcon {
         SidebarIcon::TaskList,
         SidebarIcon::Clear,
         SidebarIcon::Unfold,
+        SidebarIcon::Wrap,
         SidebarIcon::ExpandDown,
         SidebarIcon::ExpandUp,
         SidebarIcon::ExpandAll,

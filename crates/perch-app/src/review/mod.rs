@@ -46,6 +46,7 @@ pub mod tabs;
 pub mod threads;
 pub mod timeline;
 pub mod tree;
+pub mod wrap;
 
 use std::rc::Rc;
 

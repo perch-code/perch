@@ -13,13 +13,21 @@
 //! A document is over one `DisplayBuffer`: the unified buffer for the
 //! stacked layout and the head side of a split, and the base buffer for the
 //! base side, whose display lines are its own lines. Every builder is pure.
+//!
+//! Word wrap is the same kind of transform: a line longer than the editor
+//! is wide goes on as many rows as it needs, each a piece of the line, so a
+//! row is still one row of the editor and the gutter, the tints and the
+//! cards place themselves as they do without it. A row's text is then not
+//! the whole of its line, so whatever reads a column of a line rather than
+//! a row goes through `locate` and `offset_at`, which put the pieces
+//! together again.
 
 use std::collections::BTreeSet;
 
 use perch_git::{DisplayBuffer, LineStatus, Row};
 use perch_github::{CommentThread, Side};
 
-use crate::review::hover;
+use crate::review::wrap;
 
 /// How many lines of context stay in view on each side of a change or an
 /// anchor. A run that is not longer than twice this is shown whole: a
@@ -141,6 +149,10 @@ pub enum Expand {
 pub enum DocRow {
     /// A display line of the buffer the document is over.
     Line { display: usize, tint: Tint },
+    /// While lines wrap: the rest of the line on the row above, carried
+    /// onto a row of its own after the line's indent. On a split, also a
+    /// blank row under a line, so that it is as tall as the line beside it.
+    Wrap { display: usize, tint: Tint },
     /// Split only: the other side has a line here and this one does not.
     Filler,
     /// A run of unchanged lines hidden behind this row, by index into the
@@ -151,6 +163,31 @@ pub enum DocRow {
     /// One of the rows reserved under a line for a card; `row` is which of
     /// the card's this is.
     Spacer { card: CardId, row: usize },
+}
+
+/// The part of its line a row shows: `len` bytes from byte `from` of the
+/// line, after `indent` bytes of the line's own indent that the row
+/// repeats, which a row carrying on a wrapped line does. A row that is no
+/// line shows nothing of one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Piece {
+    pub from: usize,
+    pub len: usize,
+    pub indent: usize,
+}
+
+impl Piece {
+    /// A range of the line's bytes as bytes of the row: the part of it
+    /// this row shows, or `None` when it shows none of it.
+    pub fn clip(&self, start: usize, end: usize) -> Option<(usize, usize)> {
+        let (start, end) = (start.max(self.from), end.min(self.from + self.len));
+        (start < end).then(|| {
+            (
+                start - self.from + self.indent,
+                end - self.from + self.indent,
+            )
+        })
+    }
 }
 
 /// The text the editor lays out and what each line of it is.
@@ -169,6 +206,9 @@ pub struct Doc {
     heads: Vec<Option<usize>>,
     /// The byte offset each row's text starts at.
     starts: Vec<usize>,
+    /// The piece of its line each row shows. The whole line, from its
+    /// first byte, for a line that does not wrap.
+    pieces: Vec<Piece>,
     /// The row each display line of the buffer is on, by display line;
     /// `None` inside a fold.
     display_rows: Vec<Option<usize>>,
@@ -281,7 +321,8 @@ impl Doc {
             return false;
         }
         match (&self.rows[row], &other.rows[other_row]) {
-            (DocRow::Line { tint: a, .. }, DocRow::Line { tint: b, .. }) => a == b,
+            (DocRow::Line { tint: a, .. }, DocRow::Line { tint: b, .. })
+            | (DocRow::Wrap { tint: a, .. }, DocRow::Wrap { tint: b, .. }) => a == b,
             (DocRow::Divider { run: a, expand: x }, DocRow::Divider { run: b, expand: y }) => {
                 let hidden = |doc: &Doc, run: usize| doc.folds.get(run).map(|r| r.last - r.first);
                 x == y && hidden(self, *a) == hidden(other, *b)
@@ -290,13 +331,152 @@ impl Doc {
         }
     }
 
-    /// The display line a row is. `None` for a filler, a divider or a
-    /// spacer, which is no line of anything.
+    /// The display line a row is, or is a piece of. `None` for a filler, a
+    /// divider or a spacer, which is no line of anything.
     pub fn display_line(&self, row: usize) -> Option<usize> {
         match self.rows.get(row)? {
-            DocRow::Line { display, .. } => Some(*display),
+            DocRow::Line { display, .. } | DocRow::Wrap { display, .. } => Some(*display),
             _ => None,
         }
+    }
+
+    /// The part of its line a row shows; see `Piece`.
+    pub fn piece(&self, row: usize) -> Piece {
+        self.pieces.get(row).copied().unwrap_or_default()
+    }
+
+    /// The row a line starts on, for any of its rows: the row itself but
+    /// for a row that carries on a wrapped line.
+    pub fn lead(&self, mut row: usize) -> usize {
+        while row > 0 && matches!(self.rows.get(row), Some(DocRow::Wrap { .. })) {
+            row -= 1;
+        }
+        row
+    }
+
+    /// Every row of the line on `row`: one, unless it wraps.
+    pub fn line_rows(&self, row: usize) -> std::ops::Range<usize> {
+        let lead = self.lead(row);
+        let wraps = self.rows.get(lead + 1..).map_or(0, |rest| {
+            rest.iter()
+                .take_while(|r| matches!(r, DocRow::Wrap { .. }))
+                .count()
+        });
+        lead..lead + 1 + wraps
+    }
+
+    /// The row a byte offset in the text is on.
+    fn row_of_offset(&self, offset: usize) -> usize {
+        self.starts
+            .partition_point(|&start| start <= offset)
+            .saturating_sub(1)
+    }
+
+    /// Where a byte offset in the text is, as the row its line starts on
+    /// and a byte column of the whole line: what a column of the file is,
+    /// wrapped or not. Columns are bytes, which is what the protocol's
+    /// UTF-8 position encoding wants and what the highlight spans already
+    /// use. An offset in the indent a wrapped row repeats is at the start
+    /// of the row's piece.
+    pub fn locate(&self, offset: usize) -> (usize, usize) {
+        let offset = offset.min(self.text.len());
+        let row = self.row_of_offset(offset);
+        let piece = self.piece(row);
+        let into = offset - self.offset_of_row(row);
+        (
+            self.lead(row),
+            piece.from + into.saturating_sub(piece.indent),
+        )
+    }
+
+    /// The byte offset in the text of a byte column of the line on `row`,
+    /// on whichever of the line's rows shows it. A column past the line is
+    /// its end, and one inside a character is the character's start.
+    pub fn offset_at(&self, row: usize, column: usize) -> usize {
+        let rows = self.line_rows(row);
+        let at = rows
+            .clone()
+            .find(|&r| {
+                let piece = self.piece(r);
+                column < piece.from + piece.len
+            })
+            .unwrap_or_else(|| {
+                // Past the end: the last row with any of the line on it,
+                // and not the blank rows a split pads it out with.
+                rows.clone()
+                    .rev()
+                    .find(|&r| self.piece(r).len > 0)
+                    .unwrap_or(rows.start)
+            });
+        let piece = self.piece(at);
+        let text = self.line(at);
+        let mut into =
+            (piece.indent + column.saturating_sub(piece.from).min(piece.len)).min(text.len());
+        while !text.is_char_boundary(into) {
+            into -= 1;
+        }
+        self.offset_of_row(at) + into
+    }
+
+    /// As `offset_at`, but a column where the line breaks is the end of
+    /// the row before rather than the start of the next: where a range
+    /// that ends there ends.
+    pub fn end_offset_at(&self, row: usize, column: usize) -> usize {
+        let Some(before) = column.checked_sub(1) else {
+            return self.offset_at(row, column);
+        };
+        let at = self.line_rows(row).find(|&r| {
+            let piece = self.piece(r);
+            before < piece.from + piece.len
+        });
+        match at {
+            Some(at) => {
+                let piece = self.piece(at);
+                self.offset_of_row(at) + piece.indent + (column - piece.from)
+            }
+            None => self.offset_at(row, column),
+        }
+    }
+
+    /// The whole of the line on `row`, its pieces put back together.
+    pub fn source_line(&self, row: usize) -> std::borrow::Cow<'_, str> {
+        let rows = self.line_rows(row);
+        if rows.len() == 1 {
+            return std::borrow::Cow::Borrowed(self.line(rows.start));
+        }
+        let mut line = String::new();
+        for r in rows {
+            line.push_str(&self.line(r)[self.piece(r).indent..]);
+        }
+        std::borrow::Cow::Owned(line)
+    }
+
+    /// The text between two byte offsets as the file has it: a wrapped
+    /// line is one line again, without the breaks and the indents its
+    /// rows carry, so a copy of it pastes as the line.
+    pub fn copy(&self, start: usize, end: usize) -> String {
+        let (start, end) = (start.min(self.text.len()), end.min(self.text.len()));
+        if start >= end {
+            return String::new();
+        }
+        let (first, last) = (self.row_of_offset(start), self.row_of_offset(end));
+        let mut out = String::new();
+        for row in first..=last {
+            let from = self.offset_of_row(row);
+            let to = from + self.line(row).len();
+            let lo = start.max(from + self.piece(row).indent);
+            let hi = end.min(to);
+            if lo < hi {
+                out.push_str(&self.text[lo..hi]);
+            }
+            // The newline after the row, when the range takes it and it
+            // is the line's own rather than a break wrapping put in.
+            let carries_on = matches!(self.rows.get(row + 1), Some(DocRow::Wrap { .. }));
+            if end > to && !carries_on {
+                out.push('\n');
+            }
+        }
+        out
     }
 
     /// The row a display line is on. `None` when the line is folded away.
@@ -330,7 +510,7 @@ impl Doc {
     /// column, if it lands in it at all: a ghost, a filler, a divider or a
     /// spacer is nowhere.
     pub fn head_position(&self, offset: usize) -> Option<(usize, usize)> {
-        let (row, column) = hover::line_col_of_offset(&self.text, offset);
+        let (row, column) = self.locate(offset);
         Some((self.head_line(row)?, column))
     }
 
@@ -349,6 +529,10 @@ impl Doc {
     }
 }
 
+/// What one side of a split has on a row: its line, as its display line,
+/// tint, text and head line, or nothing, for a filler.
+type SideLine<'a> = Option<(usize, Tint, &'a str, Option<usize>)>;
+
 /// A document under construction: the lines joined as the editor wants
 /// them, with the head line of each row noted for the tables.
 struct Builder {
@@ -357,6 +541,7 @@ struct Builder {
     folds: Vec<Run>,
     heads: Vec<Option<usize>>,
     starts: Vec<usize>,
+    pieces: Vec<Piece>,
 }
 
 impl Builder {
@@ -367,17 +552,93 @@ impl Builder {
             folds: folds.to_vec(),
             heads: Vec::with_capacity(rows),
             starts: Vec::with_capacity(rows),
+            pieces: Vec::with_capacity(rows),
         }
     }
 
-    fn push(&mut self, row: DocRow, line: &str, head: Option<usize>) {
+    /// A row that is no line, with no text.
+    fn push(&mut self, row: DocRow) {
+        self.push_piece(row, "", "", None, Piece::default());
+    }
+
+    fn push_piece(
+        &mut self,
+        row: DocRow,
+        indent: &str,
+        text: &str,
+        head: Option<usize>,
+        piece: Piece,
+    ) {
         if !self.rows.is_empty() {
             self.text.push('\n');
         }
         self.starts.push(self.text.len());
-        self.text.push_str(line);
+        self.text.push_str(indent);
+        self.text.push_str(text);
         self.rows.push(row);
         self.heads.push(head);
+        self.pieces.push(piece);
+    }
+
+    /// A line, on as many rows as `columns` wide rows take, or on one when
+    /// there is no width to wrap at; how many rows.
+    fn push_line(
+        &mut self,
+        display: usize,
+        tint: Tint,
+        line: &str,
+        head: Option<usize>,
+        columns: Option<usize>,
+    ) -> usize {
+        let (breaks, indent) = match columns {
+            Some(columns) => wrap::breaks(line, columns),
+            None => (Vec::new(), 0),
+        };
+        let mut from = 0;
+        for (i, to) in breaks.iter().copied().chain([line.len()]).enumerate() {
+            let (row, indent) = if i == 0 {
+                (DocRow::Line { display, tint }, "")
+            } else {
+                (DocRow::Wrap { display, tint }, &line[..indent])
+            };
+            let piece = Piece {
+                from,
+                len: to - from,
+                indent: indent.len(),
+            };
+            self.push_piece(row, indent, &line[from..to], head, piece);
+            from = to;
+        }
+        breaks.len() + 1
+    }
+
+    /// One side's part of a row of a split: its line, on as many rows as
+    /// it wraps to, or a filler; how many rows.
+    fn push_side(&mut self, line: SideLine, columns: Option<usize>) -> usize {
+        match line {
+            Some((display, tint, text, head)) => self.push_line(display, tint, text, head, columns),
+            None => {
+                self.push(DocRow::Filler);
+                1
+            }
+        }
+    }
+
+    /// One side made as tall as the other, `rows` rows past `from`, its
+    /// length before the row was pushed: a line with blank rows of its
+    /// own under it, and a filler with fillers.
+    fn level(&mut self, line: SideLine, from: usize, rows: usize) {
+        let Some((display, tint, text, head)) = line else {
+            return self.fill_to(from, rows);
+        };
+        let piece = Piece {
+            from: text.len(),
+            len: 0,
+            indent: 0,
+        };
+        while self.rows.len() < from + rows {
+            self.push_piece(DocRow::Wrap { display, tint }, "", "", head, piece);
+        }
     }
 
     /// The rows a card takes, under the line just pushed.
@@ -390,14 +651,10 @@ impl Builder {
         let mut pushed = 0;
         for card in cards {
             for row in 0..card.rows {
-                self.push(
-                    DocRow::Spacer {
-                        card: card.id.clone(),
-                        row,
-                    },
-                    "",
-                    None,
-                );
+                self.push(DocRow::Spacer {
+                    card: card.id.clone(),
+                    row,
+                });
             }
             pushed += card.rows;
         }
@@ -408,7 +665,7 @@ impl Builder {
     /// before the cards were pushed, so both sides end level.
     fn fill_to(&mut self, from: usize, rows: usize) {
         while self.rows.len() < from + rows {
-            self.push(DocRow::Filler, "", None);
+            self.push(DocRow::Filler);
         }
     }
 
@@ -427,13 +684,14 @@ impl Builder {
                 display_rows[*display] = Some(row);
             }
         }
+        // A wrapped line is on the row it starts on.
         let mut head_rows = Vec::new();
         for (row, head) in self.heads.iter().enumerate() {
             if let Some(head) = head {
                 if *head >= head_rows.len() {
                     head_rows.resize(head + 1, None);
                 }
-                head_rows[*head] = Some(row);
+                head_rows[*head].get_or_insert(row);
             }
         }
         let cards = self
@@ -451,6 +709,7 @@ impl Builder {
             folds: self.folds,
             heads: self.heads,
             starts: self.starts,
+            pieces: self.pieces,
             display_rows,
             head_rows,
             cards,
@@ -492,8 +751,9 @@ fn display_of_heads(buffer: &DisplayBuffer) -> Vec<usize> {
 /// in `folds` replaced by a divider, a row for each of its expanders, and
 /// each card's rows reserved under its line. The folds are in display
 /// lines, in order and apart; a card under a folded line is not placed,
-/// since its line is not shown.
-pub fn build(buffer: &DisplayBuffer, folds: &[Run], cards: &[Card]) -> Doc {
+/// since its line is not shown. With `columns`, a line longer than that
+/// goes on rows of its own under it, before the cards under it.
+pub fn build(buffer: &DisplayBuffer, folds: &[Run], cards: &[Card], columns: Option<usize>) -> Doc {
     let lines: Vec<&str> = buffer.text.lines().collect();
     let reserved: usize = cards.iter().map(|c| c.rows).sum();
     let mut out = Builder::with_capacity(buffer.len() + reserved, folds);
@@ -503,27 +763,22 @@ pub fn build(buffer: &DisplayBuffer, folds: &[Run], cards: &[Card]) -> Doc {
     while display < buffer.len() {
         if let Some(run) = folds.get(next_fold).filter(|r| r.first == display) {
             for &expand in run.expanders(buffer.len()) {
-                out.push(
-                    DocRow::Divider {
-                        run: next_fold,
-                        expand,
-                    },
-                    "",
-                    None,
-                );
+                out.push(DocRow::Divider {
+                    run: next_fold,
+                    expand,
+                });
             }
             next_fold += 1;
             display = run.last + 1;
             continue;
         }
         let row = buffer.rows[display];
-        out.push(
-            DocRow::Line {
-                display,
-                tint: tint_of(row),
-            },
+        out.push_line(
+            display,
+            tint_of(row),
             lines.get(display).copied().unwrap_or(""),
             row.head_line(),
+            columns,
         );
         out.push_cards(cards, display);
         display += 1;
@@ -546,12 +801,17 @@ pub fn build(buffer: &DisplayBuffer, folds: &[Run], cards: &[Card]) -> Doc {
 /// off the unified buffer, which also says where each head line is
 /// displayed: the folds and the cards are in the buffer's display lines,
 /// and so is the right side's `display`.
+///
+/// With `columns`, each side's lines longer than that go on rows of their
+/// own, and the line beside a wrapped one has blank rows under it to
+/// match, so a row on one side is still the row beside it on the other.
 pub fn build_split(
     alignment: &[(Option<usize>, Option<usize>)],
     base: &str,
     buffer: &DisplayBuffer,
     folds: &[Run],
     cards: &[Card],
+    columns: Option<usize>,
 ) -> (Doc, Doc) {
     let base_lines: Vec<&str> = base.lines().collect();
     let head_lines: Vec<&str> = buffer.text.lines().collect();
@@ -583,22 +843,14 @@ pub fn build_split(
             }
             if let Some(run) = folds.get(next_fold).filter(|r| r.first == display) {
                 for &expand in run.expanders(buffer.len()) {
-                    left.push(
-                        DocRow::Divider {
-                            run: next_fold,
-                            expand,
-                        },
-                        "",
-                        None,
-                    );
-                    right.push(
-                        DocRow::Divider {
-                            run: next_fold,
-                            expand,
-                        },
-                        "",
-                        None,
-                    );
+                    left.push(DocRow::Divider {
+                        run: next_fold,
+                        expand,
+                    });
+                    right.push(DocRow::Divider {
+                        run: next_fold,
+                        expand,
+                    });
                 }
                 next_fold += 1;
                 skip_to = Some(run.last);
@@ -607,35 +859,30 @@ pub fn build_split(
         }
 
         let head_status = display.and_then(|d| buffer.row(d)).and_then(|r| r.status());
-        match base_line {
-            None => left.push(DocRow::Filler, "", None),
-            Some(b) => {
-                let tint = match head_status {
-                    None | Some(LineStatus::Modified) => Tint::Deleted,
-                    Some(_) => Tint::Plain,
-                };
-                left.push(
-                    DocRow::Line { display: b, tint },
-                    base_lines.get(b).copied().unwrap_or(""),
-                    None,
-                );
-            }
-        }
-        match (display, head_status) {
+        let left_line: SideLine = base_line.map(|b| {
+            let tint = match head_status {
+                None | Some(LineStatus::Modified) => Tint::Deleted,
+                Some(_) => Tint::Plain,
+            };
+            (b, tint, base_lines.get(b).copied().unwrap_or(""), None)
+        });
+        let right_line: SideLine = match (display, head_status) {
             (Some(d), Some(status)) => {
                 let tint = match status {
                     LineStatus::Added => Tint::Added,
                     LineStatus::Modified => Tint::Modified,
                     LineStatus::Unchanged => Tint::Plain,
                 };
-                right.push(
-                    DocRow::Line { display: d, tint },
-                    head_lines.get(d).copied().unwrap_or(""),
-                    head_line,
-                );
+                Some((d, tint, head_lines.get(d).copied().unwrap_or(""), head_line))
             }
-            _ => right.push(DocRow::Filler, "", None),
-        }
+            _ => None,
+        };
+        let (from_left, from_right) = (left.rows.len(), right.rows.len());
+        let rows = left
+            .push_side(left_line, columns)
+            .max(right.push_side(right_line, columns));
+        left.level(left_line, from_left, rows);
+        right.level(right_line, from_right, rows);
 
         // A card under this row's head line, or under the ghost this row's
         // base line is in the unified buffer, takes its rows on its own
@@ -1133,7 +1380,7 @@ mod tests {
         let diff = file_diff(base, head);
         let alignment = perch_git::alignment(&diff, base, head);
         let buffer = DisplayBuffer::unified(head, base, &diff);
-        build_split(&alignment, base, &buffer, &[], &[])
+        build_split(&alignment, base, &buffer, &[], &[], None)
     }
 
     fn lines(doc: &Doc) -> Vec<&str> {
@@ -1168,7 +1415,7 @@ mod tests {
     fn the_stacked_document_is_the_buffer_with_a_tint_per_row() {
         // a, ghost(b), B, c, ghost(d).
         let b = buffer("a\nb\nc\nd\n", "a\nB\nc\n");
-        let doc = build(&b, &[], &[]);
+        let doc = build(&b, &[], &[], None);
         assert_eq!(doc.text, b.text);
         assert_eq!(
             doc.rows,
@@ -1200,7 +1447,7 @@ mod tests {
         // Display: a, ghost(b), B, c. Offset 0 is the first head line; the
         // ghost is nowhere; the line after the ghost is head line 1, not
         // display line 2.
-        let doc = build(&buffer("a\nb\nc\n", "a\nB\nc\n"), &[], &[]);
+        let doc = build(&buffer("a\nb\nc\n", "a\nB\nc\n"), &[], &[], None);
         assert_eq!(doc.head_position(0), Some((0, 0)));
         let ghost: usize = doc.text.lines().take(1).map(|l| l.len() + 1).sum();
         assert_eq!(
@@ -1219,7 +1466,7 @@ mod tests {
 
     #[test]
     fn an_empty_buffer_is_an_empty_document() {
-        let doc = build(&DisplayBuffer::plain(""), &[], &[]);
+        let doc = build(&DisplayBuffer::plain(""), &[], &[], None);
         assert_eq!(doc.len(), 0);
         assert_eq!(doc.text, "");
         assert_eq!(doc.nearest_display_line(0), None);
@@ -1397,7 +1644,7 @@ mod tests {
         let b = two_changes(20);
         // Hide display lines 5 to 10.
         let fold = Run::new(5, 10, 4);
-        let doc = build(&b, &[fold], &[]);
+        let doc = build(&b, &[fold], &[], None);
         assert_eq!(doc.len(), b.len() - 6 + 1);
         assert_eq!(
             doc.rows[5],
@@ -1433,7 +1680,7 @@ mod tests {
             rows: 3,
             side: Side::Right,
         };
-        let doc = build(&b, &[], std::slice::from_ref(&card));
+        let doc = build(&b, &[], std::slice::from_ref(&card), None);
         assert_eq!(doc.len(), b.len() + 3);
         assert_eq!(doc.rows[2], line(2, Tint::Plain));
         for row in 0..3 {
@@ -1471,7 +1718,7 @@ mod tests {
             rows: 1,
             side: Side::Right,
         };
-        let doc = build(&b, &[], &[first.clone(), second.clone()]);
+        let doc = build(&b, &[], &[first.clone(), second.clone()], None);
         assert_eq!(doc.len(), b.len() + 3);
         assert_eq!(doc.rows[2], line(2, Tint::Plain));
         assert_eq!(
@@ -1501,7 +1748,7 @@ mod tests {
             &[(first.id.clone(), 3), (second.id.clone(), 5)]
         );
         // Given the other way round, they stack the other way round.
-        let doc = build(&b, &[], &[second.clone(), first.clone()]);
+        let doc = build(&b, &[], &[second.clone(), first.clone()], None);
         assert_eq!(doc.cards(), &[(second.id, 3), (first.id, 4)]);
         // A card under a folded line is not placed, and is not a card of
         // the document.
@@ -1515,6 +1762,7 @@ mod tests {
             &two_changes(20),
             &[Run::new(5, 10, 4)],
             std::slice::from_ref(&folded),
+            None,
         );
         assert!(doc.cards().is_empty());
         assert_eq!(doc.first_spacer_row(&folded.id), None);
@@ -1543,7 +1791,7 @@ mod tests {
                 side: Side::Right,
             },
         ];
-        let doc = build(&b, &[], &cards);
+        let doc = build(&b, &[], &cards, None);
         assert_eq!(doc.len(), b.len() + 6);
         assert_eq!(doc.rows[2], line(2, Tint::Plain));
         assert_eq!(
@@ -1572,7 +1820,7 @@ mod tests {
         let head = format!("new top\n{}new bottom\n", context(0, 4));
         let diff = file_diff(&base, &head);
         let alignment = perch_git::alignment(&diff, &base, &head);
-        let (left, right) = build_split(&alignment, &base, &b, &[], &cards);
+        let (left, right) = build_split(&alignment, &base, &b, &[], &cards, None);
         assert_eq!(left.len(), right.len());
         assert_eq!(
             right.cards(),
@@ -1584,6 +1832,171 @@ mod tests {
         );
         assert!(left.cards().is_empty());
         assert!(left.rows[2..8].iter().all(|r| *r == DocRow::Filler));
+    }
+
+    // Word wrap.
+
+    fn wrap(display: usize, tint: Tint) -> DocRow {
+        DocRow::Wrap { display, tint }
+    }
+
+    /// A head with one long line between two short ones, its long line
+    /// indented and changed from the base's.
+    fn long_line() -> DisplayBuffer {
+        let base = "fn f() {\n    short();\n}\n";
+        let head = "fn f() {\n    call(first_argument, second_argument, third_argument);\n}\n";
+        buffer(base, head)
+    }
+
+    #[test]
+    fn a_long_line_goes_on_rows_of_its_own_under_it_after_its_indent() {
+        let b = long_line();
+        let doc = build(&b, &[], &[], Some(30));
+        // fn f() {, ghost(short), the call on three rows, }.
+        assert_eq!(
+            doc.rows,
+            vec![
+                line(0, Tint::Plain),
+                line(1, Tint::Deleted),
+                line(2, Tint::Modified),
+                wrap(2, Tint::Modified),
+                wrap(2, Tint::Modified),
+                line(3, Tint::Plain),
+            ]
+        );
+        assert_eq!(
+            lines(&doc)[2..5],
+            [
+                "    call(first_argument, ",
+                "    second_argument, ",
+                "    third_argument);"
+            ]
+        );
+        // The line is on the row it starts on, and each of its rows is it.
+        assert_eq!(doc.row_of_display(2), Some(2));
+        assert_eq!(doc.row_of_head(1), Some(2));
+        assert_eq!(doc.row_of_display(3), Some(5));
+        for row in 2..5 {
+            assert_eq!(doc.display_line(row), Some(2));
+            assert_eq!(doc.head_line(row), Some(1));
+            assert_eq!(doc.lead(row), 2);
+            assert_eq!(doc.line_rows(row), 2..5);
+        }
+        assert_eq!(
+            doc.source_line(3),
+            "    call(first_argument, second_argument, third_argument);"
+        );
+        // Unwrapped, the same buffer is the buffer.
+        assert_eq!(build(&b, &[], &[], None).text, b.text);
+        assert_eq!(build(&b, &[], &[], Some(80)).text, b.text);
+    }
+
+    #[test]
+    fn every_column_of_a_wrapped_line_is_found_again_from_its_offset() {
+        let b = long_line();
+        let doc = build(&b, &[], &[], Some(30));
+        let source = doc.source_line(2).into_owned();
+        for column in 0..=source.len() {
+            let offset = doc.offset_at(2, column);
+            assert_eq!(doc.locate(offset), (2, column), "column {column}");
+            assert_eq!(doc.head_position(offset), Some((1, column)));
+        }
+        // A column where the line breaks is the start of the next row, or
+        // for the end of a range, the end of the row before.
+        let second = source.find("second").unwrap();
+        assert_eq!(doc.offset_at(2, second), doc.offset_of_row(3) + 4);
+        assert_eq!(
+            doc.end_offset_at(2, second),
+            doc.offset_of_row(2) + doc.line(2).len()
+        );
+        // The indent a row repeats is no part of the line: an offset in
+        // it is at the start of the row's piece.
+        assert_eq!(doc.locate(doc.offset_of_row(3) + 1), (2, second));
+        // Past the line, its end.
+        assert_eq!(
+            doc.offset_at(2, 999),
+            doc.offset_of_row(4) + doc.line(4).len()
+        );
+    }
+
+    #[test]
+    fn a_copy_across_a_wrapped_line_is_the_line_as_the_file_has_it() {
+        let b = long_line();
+        let doc = build(&b, &[], &[], Some(30));
+        let whole = doc.copy(0, doc.text.len());
+        assert_eq!(whole, b.text, "the ghost and all, one line each");
+        let call = doc.copy(doc.offset_of_row(2), doc.offset_of_row(5));
+        assert_eq!(
+            call,
+            "    call(first_argument, second_argument, third_argument);\n"
+        );
+        // From inside one row's piece to inside the next's.
+        let from = doc.offset_at(2, 9);
+        let to = doc.offset_at(2, 31);
+        assert_eq!(doc.copy(from, to), "first_argument, second");
+    }
+
+    #[test]
+    fn a_card_under_a_wrapped_line_is_under_its_last_row() {
+        let b = long_line();
+        let card = Card {
+            id: CardId::Thread("t1".into()),
+            after_display_line: 2,
+            rows: 2,
+            side: Side::Right,
+        };
+        let doc = build(&b, &[], std::slice::from_ref(&card), Some(30));
+        assert_eq!(doc.first_spacer_row(&card.id), Some(5));
+        assert_eq!(
+            doc.line_rows(2),
+            2..5,
+            "the spacers are no part of the line"
+        );
+    }
+
+    #[test]
+    fn a_split_gives_the_line_beside_a_wrapped_one_blank_rows_to_match() {
+        let base = "fn f() {\n    short();\n}\n";
+        let head = "fn f() {\n    call(first_argument, second_argument, third_argument);\n    added();\n}\n";
+        let diff = file_diff(base, head);
+        let alignment = perch_git::alignment(&diff, base, head);
+        let b = DisplayBuffer::unified(head, base, &diff);
+        let (left, right) = build_split(&alignment, base, &b, &[], &[], Some(30));
+        assert_eq!(left.len(), right.len(), "the sides stay level");
+        // The rewritten line: three rows on the right, the old line and
+        // two blank rows of it on the left, tinted as it is.
+        let row = right.row_of_head(1).unwrap();
+        assert_eq!(right.line_rows(row), row..row + 3);
+        assert_eq!(left.line_rows(row), row..row + 3);
+        assert_eq!(left.rows[row + 1], wrap(1, Tint::Deleted));
+        assert_eq!(left.line(row + 1), "");
+        assert_eq!(left.source_line(row), "    short();");
+        // The blank rows are the line's end: a caret past it lands on the
+        // row the line is on, not on a blank one.
+        assert_eq!(left.offset_at(row, 999), left.offset_of_row(row) + 12);
+        // The added line has a filler beside it, as without wrapping.
+        let added = right.row_of_head(2).unwrap();
+        assert_eq!(left.rows[added], DocRow::Filler);
+        // Unwrapped, as it was.
+        let (plain_left, plain_right) = build_split(&alignment, base, &b, &[], &[], None);
+        assert!(plain_left
+            .rows
+            .iter()
+            .all(|r| !matches!(r, DocRow::Wrap { .. })));
+        assert!(plain_right
+            .rows
+            .iter()
+            .all(|r| !matches!(r, DocRow::Wrap { .. })));
+    }
+
+    #[test]
+    fn rewrapping_at_another_width_is_one_region() {
+        let b = long_line();
+        let narrow = build(&b, &[], &[], Some(30));
+        let wide = build(&b, &[], &[], None);
+        let region = changed_region(&wide, &narrow).unwrap();
+        assert_eq!(region.old_rows, 2..3);
+        assert_eq!(region.new_rows, 2..5);
     }
 
     // The estimate.
@@ -1727,7 +2140,7 @@ mod tests {
             rows: 2,
             side: Side::Right,
         };
-        let (left, right) = build_split(&alignment, base, &b, &[fold], &[card]);
+        let (left, right) = build_split(&alignment, base, &b, &[fold], &[card], None);
         assert_eq!(left.len(), right.len());
         let divider = right
             .rows
@@ -1799,14 +2212,14 @@ mod tests {
         let fillers = [line(0, Tint::Plain), DocRow::Filler, DocRow::Filler];
 
         // On a's lines, the head's: its rows are on the right.
-        let (left, right) = build_split(&alignment, base, &b, &[], &[card(Side::Right)]);
+        let (left, right) = build_split(&alignment, base, &b, &[], &[card(Side::Right)], None);
         assert_eq!(left.rows[..3], lines);
         assert_eq!(left.rows[3], DocRow::Filler);
         assert_eq!(right.rows[..3], fillers);
         assert_eq!(right.rows[3], spacer);
 
         // On c, the base's: its rows are on the left.
-        let (left, right) = build_split(&alignment, base, &b, &[], &[card(Side::Left)]);
+        let (left, right) = build_split(&alignment, base, &b, &[], &[card(Side::Left)], None);
         assert_eq!(left.rows[..3], lines);
         assert_eq!(left.rows[3], spacer);
         assert_eq!(right.rows[..3], fillers);
@@ -1820,6 +2233,7 @@ mod tests {
                 rows: 1,
                 side: Side::Right,
             }],
+            None,
         );
         assert_eq!(
             stacked.rows[3],
@@ -1874,6 +2288,7 @@ mod tests {
             &b,
             &[],
             &[under_ghost.clone(), under_line.clone()],
+            None,
         );
         assert_eq!(
             left.rows[..2],
@@ -1890,7 +2305,7 @@ mod tests {
         assert_eq!(left.len(), right.len());
         assert_eq!(left.cards(), &[(CardId::Thread("t1".into()), 2)]);
         assert_eq!(right.cards(), &[(CardId::Thread("gh-9".into()), 2)]);
-        let stacked = build(&b, &[], &[under_ghost, under_line]);
+        let stacked = build(&b, &[], &[under_ghost, under_line], None);
         assert_eq!(stacked.rows[2..4], spacers[..2]);
         assert_eq!(stacked.rows[4], line(2, Tint::Modified));
         assert_eq!(stacked.rows[5], spacers[2]);
@@ -2155,7 +2570,7 @@ mod tests {
         // bottom. The run of thirty-four between the changes is two rows.
         let b = two_changes(40);
         let run = runs(&b, &[])[0];
-        let doc = build(&b, &[run], &[]);
+        let doc = build(&b, &[run], &[], None);
         assert_eq!(doc.len(), 44 - 34 + 2);
         assert_eq!(
             doc.rows[5],
@@ -2193,7 +2608,7 @@ mod tests {
         let head = format!("new top\n{}new bottom\n", context(0, 40));
         let diff = file_diff(&base, &head);
         let alignment = perch_git::alignment(&diff, &base, &head);
-        let (left, right) = build_split(&alignment, &base, &b, &[run], &[]);
+        let (left, right) = build_split(&alignment, &base, &b, &[run], &[], None);
         assert_eq!(left.len(), right.len());
         let row = right
             .rows
@@ -2224,7 +2639,7 @@ mod tests {
         // Two runs whose rows touch are still two dividers: a span is one
         // run's rows.
         let b = two_changes(40);
-        let doc = build(&b, &[Run::new(5, 10, 4), Run::new(11, 16, 10)], &[]);
+        let doc = build(&b, &[Run::new(5, 10, 4), Run::new(11, 16, 10)], &[], None);
         assert_eq!(doc.divider_span(5), Some(5..6));
         assert_eq!(doc.divider_span(6), Some(6..7));
     }
@@ -2430,7 +2845,7 @@ mod tests {
     /// The stacked document of a buffer folded around its changes, less
     /// the reveals.
     fn folded(b: &DisplayBuffer, reveals: &Reveals) -> Doc {
-        build(b, &reveals.apply(&runs(b, &[])), &[])
+        build(b, &reveals.apply(&runs(b, &[])), &[], None)
     }
 
     #[test]
@@ -2532,7 +2947,7 @@ mod tests {
         let folds = reveals.apply(&all);
         assert_eq!(folds.len(), 4);
 
-        let (left, right) = build_split(&alignment, &base, &b, &folds, &[]);
+        let (left, right) = build_split(&alignment, &base, &b, &folds, &[], None);
         assert_eq!(left.len(), right.len());
         let rows: Vec<usize> = (0..right.len())
             .filter(|r| right.run_of(*r).is_some())
@@ -2555,7 +2970,7 @@ mod tests {
         assert_eq!(left.hidden_lines(), right.hidden_lines());
         // The same folds hide the same lines in the stacked document; the
         // heights differ only by the ghosts the split pairs away.
-        let stacked = build(&b, &folds, &[]);
+        let stacked = build(&b, &folds, &[], None);
         assert_eq!(stacked.hidden_lines(), right.hidden_lines());
         assert_eq!(stacked.len(), right.len() + 3);
         // Every revealed head line is on a row of the head side, and the
@@ -2581,7 +2996,7 @@ mod tests {
     #[test]
     fn a_line_an_anchor_sits_on_stays_in_view_with_its_context() {
         let b = two_changes(40);
-        let doc = build(&b, &runs(&b, &[(20, 20)]), &[]);
+        let doc = build(&b, &runs(&b, &[(20, 20)]), &[], None);
         // Two dividers, with head lines 17 to 23 between them.
         let dividers: Vec<usize> = (0..doc.len())
             .filter(|r| doc.run_of(*r).is_some())
@@ -2662,7 +3077,7 @@ mod tests {
         let b = two_changes(40);
         let doc = folded(&b, &Reveals::default());
         assert_eq!(changed_region(&doc, &doc.clone()), None);
-        let empty = build(&DisplayBuffer::plain(""), &[], &[]);
+        let empty = build(&DisplayBuffer::plain(""), &[], &[], None);
         assert_eq!(changed_region(&empty, &empty.clone()), None);
         // From nothing to something is everything.
         let region = changed_region(&empty, &doc).unwrap();
@@ -2689,11 +3104,11 @@ mod tests {
         let b = buffer(&base, &head);
         let all = runs(&b, &[]);
         assert_eq!(all.len(), 2);
-        let old = build(&b, &all, &[]);
+        let old = build(&b, &all, &[], None);
         let mut reveals = Reveals::default();
         let (a, z) = all[0].whole();
         reveals.add(a, z);
-        let new = build(&b, &reveals.apply(&all), &[]);
+        let new = build(&b, &reveals.apply(&all), &[], None);
         assert_eq!(new.folds, vec![all[1]]);
 
         let region = changed_region(&old, &new).unwrap();

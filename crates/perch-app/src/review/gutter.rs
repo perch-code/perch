@@ -6,12 +6,13 @@
 //! built-in one is hidden and this view is drawn beside the editor.
 //!
 //! Line wrapping is turned off on the editor, which makes the geometry exact:
-//! display line N sits at `N * line_height`. That means this view needs only
-//! the viewport to place itself, and one reactive offset moves the whole
-//! column rather than each row carrying a position of its own. An earlier
-//! version gave every row an absolute `inset_top` captured when the row was
-//! built; rows survive scrolling, so those positions went stale and the
-//! numbers piled up on each other.
+//! display line N sits at `N * line_height`. Word wrap keeps it so, since it
+//! is the document's: a wrapped line is rows of it, each one row high. That
+//! means this view needs only the viewport to place itself, and one
+//! reactive offset moves the whole column rather than each row carrying a
+//! position of its own. An earlier version gave every row an absolute
+//! `inset_top` captured when the row was built; rows survive scrolling, so
+//! those positions went stale and the numbers piled up on each other.
 //!
 //! A split has a gutter on each side, over that side's rows: base numbers
 //! on the left, head numbers on the right, and nothing on a filler. Thread
@@ -113,6 +114,12 @@ fn digit_width() -> f64 {
         cell.set(Some(width));
         width
     })
+}
+
+/// How wide a column of code is: the code's font is monospaced, so a
+/// digit's width.
+pub(crate) fn column_width() -> f64 {
+    digit_width()
 }
 
 /// How wide a gutter is whose widest number has `digits` digits: the
@@ -415,9 +422,10 @@ fn side_row(
 }
 
 /// A row that is no line: a divider's row is its expander when this
-/// gutter holds them and the divider's tint when it does not, and a
-/// filler or a spacer is blank. A blank row records no pointer, so
-/// nothing lights a `+`.
+/// gutter holds them and the divider's tint when it does not, the rest of
+/// a wrapped line has its line's change bar and no number, and a filler
+/// or a spacer is blank. A blank row records no pointer, so nothing
+/// lights a `+`.
 fn other_row(
     state: ReviewState,
     app: AppState,
@@ -437,6 +445,16 @@ fn other_row(
                     .background(theme::diff_divider_bg())
             })
             .into_any(),
+        DocRow::Wrap { tint, .. } => row_view(
+            state,
+            app,
+            file,
+            row,
+            None,
+            false,
+            change_bar_color(tint),
+            Slot::Blank,
+        ),
         DocRow::Line { .. } | DocRow::Filler | DocRow::Spacer { .. } => {
             row_view(state, app, file, row, None, false, None, Slot::Blank)
         }

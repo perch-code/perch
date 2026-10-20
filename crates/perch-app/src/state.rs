@@ -3115,6 +3115,11 @@ impl AppState {
                         review.layout.set(layout);
                     }
                 }
+                "review.wrap" => {
+                    if let Some(review) = self.review.get_untracked() {
+                        review.wrap.set(value.trim() == "on");
+                    }
+                }
                 "drawer.view" => self.tree_open.set(crate::ui::drawer::parse(&value)),
                 "drawer.width" => match value.parse::<f64>() {
                     Ok(width) => self.drawer_width.set(width.clamp(

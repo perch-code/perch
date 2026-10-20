@@ -20,8 +20,8 @@ use floem::kurbo::Point;
 use floem::prelude::*;
 use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::CursorStyle;
+use floem::ui_events::keyboard::{Code, KeyboardEvent};
 use floem::ui_events::pointer::PointerButton;
-use floem::views::editor::core::buffer::rope_text::RopeText;
 use floem::views::editor::core::cursor::CursorAffinity;
 use floem::views::editor::Editor;
 use floem::views::{dyn_container, tooltip, Decorators, Delay, Empty, TextEditor, TooltipClass};
@@ -139,9 +139,27 @@ pub fn navigable(
             }
             let at = cx.world_transform.inverse() * e.state.logical_point();
             let symbol = state.pointer_symbol.get_untracked();
-            let menu = symbol_menu(state, &menu_backend, &menu_ed, symbol);
+            let menu = symbol_menu(state, &menu_backend, &menu_ed, doc, symbol);
             crate::ui::menu::open_at(cx, editor_id, at, menu);
             EventPropagation::Stop
+        },
+    );
+
+    // Cmd-C copies here rather than in the editor, which would copy the
+    // document's text, a wrapped line's breaks and indents with it.
+    let copy_ed = ed.clone();
+    let editor = editor.on_event_with_config(
+        el::KeyDown,
+        floem::context::EventCallbackConfig {
+            phases: floem::context::Phases::CAPTURE,
+        },
+        move |_, key: &KeyboardEvent| {
+            if key.modifiers == crate::ui::OS_MOD && key.code == Code::KeyC {
+                copy_selection(&copy_ed, doc);
+                EventPropagation::Stop
+            } else {
+                EventPropagation::Continue
+            }
         },
     );
 
@@ -466,6 +484,7 @@ fn symbol_menu(
     state: ReviewState,
     backend: &Rc<Backend>,
     ed: &Editor,
+    doc: RwSignal<Arc<Doc>>,
     symbol: Option<Symbol>,
 ) -> crate::ui::menu::Menu {
     let mut menu = crate::ui::menu::Menu::new();
@@ -497,7 +516,7 @@ fn symbol_menu(
                     references::find(state, &backend, symbol, Locations::References)
                 }
                 (Entry::CallHierarchy, Some(symbol)) => hierarchy::show(state, &backend, symbol),
-                (Entry::Copy, _) => copy_selection(&ed),
+                (Entry::Copy, _) => copy_selection(&ed, doc),
                 (_, None) => {}
             })
         });
@@ -505,19 +524,28 @@ fn symbol_menu(
     menu
 }
 
-/// Copy the editor's selection to the clipboard, as Cmd-C does.
-fn copy_selection(ed: &Editor) {
-    let doc = ed.doc();
+/// Copy the editor's selection to the clipboard as the file has it: a
+/// wrapped line goes as the one line it is. A caret copies its line, as
+/// floem's own Cmd-C does with nothing selected, and the regions go one
+/// after another, a line apart.
+fn copy_selection(ed: &Editor, doc: RwSignal<Arc<Doc>>) {
     let text = ed.cursor.with_untracked(|c| {
-        let rope = doc.rope_text();
-        c.mode
-            .regions_iter()
-            .map(|(a, b, _)| {
-                let (start, end) = (a.min(b), a.max(b));
-                rope.slice_to_cow(start..end).into_owned()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        doc.with_untracked(|doc| {
+            let mut text = String::new();
+            for (a, b, _) in c.mode.regions_iter() {
+                let part = if a == b {
+                    let rows = doc.line_rows(doc.locate(a).0);
+                    doc.copy(doc.offset_of_row(rows.start), doc.offset_of_row(rows.end))
+                } else {
+                    doc.copy(a.min(b), a.max(b))
+                };
+                if !text.is_empty() && !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(&part);
+            }
+            text
+        })
     });
     if !text.is_empty() {
         crate::ui::widgets::copy_to_clipboard(text);

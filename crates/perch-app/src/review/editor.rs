@@ -240,25 +240,42 @@ pub fn editor_pane(
 
 /// What a file's document is built from besides the file: whether the
 /// file is folded, the head lines its threads are anchored on, the
-/// reveals for its content, and its cards with the rows each has. Read
-/// tracked, so an effect over them runs when any changes, or untracked
-/// for the document an editor is built from.
+/// reveals for its content, its cards with the rows each has, and the
+/// columns its lines wrap at. Read tracked, so an effect over them runs
+/// when any changes, or untracked for the document an editor is built
+/// from.
 struct Inputs {
     folded: bool,
     anchors: Vec<(usize, usize)>,
     reveals: Reveals,
     cards: Vec<Card>,
+    /// The columns a row holds while lines wrap; `None` while they run on.
+    wrap: Option<usize>,
 }
 
 impl Inputs {
     /// `file`'s stacked document; see `stacked_doc`.
     fn stacked(&self, file: &LoadedFile) -> Doc {
-        stacked_doc(file, self.folded, &self.anchors, &self.reveals, &self.cards)
+        stacked_doc(
+            file,
+            self.folded,
+            &self.anchors,
+            &self.reveals,
+            &self.cards,
+            self.wrap,
+        )
     }
 
     /// `file`'s split documents; see `split_doc`.
     fn split(&self, file: &LoadedFile) -> Option<(Doc, Doc)> {
-        split_doc(file, self.folded, &self.anchors, &self.reveals, &self.cards)
+        split_doc(
+            file,
+            self.folded,
+            &self.anchors,
+            &self.reveals,
+            &self.cards,
+            self.wrap,
+        )
     }
 }
 
@@ -282,14 +299,53 @@ impl Memos {
         }
     }
 
-    fn inputs(&self, state: ReviewState, file: &LoadedFile) -> Inputs {
+    fn inputs(&self, state: ReviewState, file: &LoadedFile, wrap: Option<usize>) -> Inputs {
         Inputs {
             folded: state.folded(&file.path),
             anchors: self.anchors.get(),
             reveals: state.reveals_for(&file.path, &file.blob),
             cards: self.cards.get(),
+            wrap,
         }
     }
+}
+
+/// The columns an editor of `layout` is built wrapping at, while lines
+/// wrap: the last such editor's. Its own width is not known until it has
+/// been laid out, and the window is seldom another width by then.
+fn first_columns(state: ReviewState, layout: Layout) -> Option<usize> {
+    if !state.wrap.get_untracked() {
+        return None;
+    }
+    state.wrap_columns.with_untracked(|c| c[layout.index()])
+}
+
+/// The columns an editor's rows hold while lines wrap, from its width,
+/// with a gap at the right edge as wide as the one at the left, and
+/// `None` while they run on. Until the editor has a width, what it was
+/// built with. Each width is kept for the next editor of the layout; see
+/// `first_columns`.
+fn wrap_columns(
+    state: ReviewState,
+    viewport: RwSignal<Rect>,
+    layout: Layout,
+) -> Memo<Option<usize>> {
+    let columns = Memo::new(move |_| {
+        if !state.wrap.get() {
+            return None;
+        }
+        let width = viewport.get().width();
+        crate::review::wrap::columns_for(width, gutter::column_width(), theme::CODE_GUTTER_GAP)
+            .or_else(|| state.wrap_columns.with_untracked(|c| c[layout.index()]))
+    });
+    Effect::new(move |_| {
+        if let Some(c) = columns.get() {
+            state
+                .wrap_columns
+                .update(|all| all[layout.index()] = Some(c));
+        }
+    });
+    columns
 }
 
 /// The file, stacked or split. A file with nothing to put on the left,
@@ -309,7 +365,9 @@ fn code_view(
 ) -> impl IntoView {
     let memos = Memos::new(state, &file);
     let split = Effect::untrack(|| match layout {
-        Layout::Split => memos.inputs(state, &file).split(&file),
+        Layout::Split => memos
+            .inputs(state, &file, first_columns(state, Layout::Split))
+            .split(&file),
         Layout::Stacked => None,
     });
     // New sides of the file that fit this editor are set in here, and
@@ -361,7 +419,11 @@ fn stacked_view(
     backend: Rc<Backend>,
 ) -> impl IntoView {
     let file = live_file.get_untracked();
-    let built = Effect::untrack(|| memos.inputs(state, &file).stacked(&file));
+    let built = Effect::untrack(|| {
+        memos
+            .inputs(state, &file, first_columns(state, Layout::Stacked))
+            .stacked(&file)
+    });
     let text = built.text.clone();
     let doc = RwSignal::new(Arc::new(built));
     let editor = code_editor(
@@ -399,7 +461,8 @@ fn stacked_view(
     // and the reveal has to reach the editor before the jump looks for the
     // row to scroll to.
     wire_highlights(state, &live, live_file);
-    wire_folds(state, live_file, memos, epoch, {
+    let columns = wrap_columns(state, viewport, Layout::Stacked);
+    wire_folds(state, live_file, memos, columns, epoch, {
         move |file: &LoadedFile, inputs: &Inputs, reloaded: bool| {
             apply(
                 &live,
@@ -513,18 +576,20 @@ fn folds_of(
 
 /// The stacked document of a file: folded to the changes and the anchors
 /// less the reveals, or whole, with each card's rows reserved under its
-/// line.
+/// line, and its lines wrapped at `wrap` columns when there are some.
 pub(crate) fn stacked_doc(
     file: &LoadedFile,
     folded: bool,
     anchors: &[(usize, usize)],
     reveals: &Reveals,
     cards: &[Card],
+    wrap: Option<usize>,
 ) -> Doc {
     doc::build(
         &file.buffer,
         &folds_of(file, folded, anchors, reveals),
         cards,
+        wrap,
     )
 }
 
@@ -540,6 +605,7 @@ pub(crate) fn split_doc(
     anchors: &[(usize, usize)],
     reveals: &Reveals,
     cards: &[Card],
+    wrap: Option<usize>,
 ) -> Option<(Doc, Doc)> {
     if !splits(file) {
         return None;
@@ -552,6 +618,7 @@ pub(crate) fn split_doc(
         &file.buffer,
         &folds,
         cards,
+        wrap,
     ))
 }
 
@@ -559,19 +626,22 @@ pub(crate) fn split_doc(
 /// can build the new document and edit the editor to match, told whether
 /// the file is a new one. The inputs are read tracked, so the effect runs
 /// on each of them: the file, when a reload is set in its place, Show
-/// whole, the file's reveals, and the anchors and the cards, which are memos so that
+/// whole, the file's reveals, the anchors and the cards, which are memos so that
 /// a thread's messages changing under them, as they do every line of a
-/// streaming answer, do not rebuild a document that would be the same.
+/// streaming answer, do not rebuild a document that would be the same,
+/// and the columns lines wrap at, which change as Word wrap is turned on
+/// or off and as the pane is made wider or narrower.
 fn wire_folds(
     state: ReviewState,
     file: LiveFile,
     memos: Memos,
+    columns: Memo<Option<usize>>,
     epoch: u64,
     rebuild: impl Fn(&LoadedFile, &Inputs, bool) + 'static,
 ) {
     Effect::new(move |before: Option<Arc<LoadedFile>>| {
         let file = file.get();
-        let inputs = memos.inputs(state, &file);
+        let inputs = memos.inputs(state, &file, columns.get());
         // The editor was just built from these; nothing to do but subscribe.
         let Some(before) = before else {
             return file;
@@ -668,9 +738,13 @@ fn apply(
         // does, adds and takes away below it too, and that is not counted.
         // When no line from the top of the view down is still shown, the
         // rows after the region keep their place instead.
+        // A row of a wrapped line keeps its place as the same row of the
+        // line, or the line's last when it is on fewer rows now.
         let shift = (first_visible..old.len())
             .find_map(|row| {
-                Some(new.row_of_display(old.display_line(row)?)? as isize - row as isize)
+                let lead = new.row_of_display(old.display_line(row)?)?;
+                let into = (row - old.lead(row)).min(new.line_rows(lead).len() - 1);
+                Some((lead + into) as isize - row as isize)
             })
             .unwrap_or_else(|| region.row_delta());
         vp.y0 + shift as f64 * line_height
@@ -710,12 +784,13 @@ fn shift_cursor(cursor: &mut Cursor, start: usize, delta: isize) {
     }
 }
 
-/// The colour behind a row: a line's diff tint, grey for a split's
-/// filler, github.com's hunk row blue for a divider. A plain line has
-/// none, and a spacer none, since the card is drawn over its rows.
+/// The colour behind a row: a line's diff tint, on every row of a
+/// wrapped one, grey for a split's filler, github.com's hunk row blue for
+/// a divider. A plain line has none, and a spacer none, since the card is
+/// drawn over its rows.
 pub(crate) fn row_tint(row: &DocRow) -> Option<Color> {
     match row {
-        DocRow::Line { tint, .. } => match tint {
+        DocRow::Line { tint, .. } | DocRow::Wrap { tint, .. } => match tint {
             Tint::Plain => None,
             Tint::Added => Some(theme::diff_added_bg()),
             Tint::Modified => Some(theme::diff_modified_bg()),
@@ -1443,7 +1518,9 @@ fn split_view(
     // right is edited first: it owns the scroll, and the left follows.
     wire_highlights(state, &right_live, live_file);
     wire_highlights(state, &left_live, live_file);
-    wire_folds(state, live_file, memos, epoch, {
+    // The two sides are the same width, so the head's says for both.
+    let columns = wrap_columns(state, right_viewport, Layout::Split);
+    wire_folds(state, live_file, memos, columns, epoch, {
         move |file: &LoadedFile, inputs: &Inputs, reloaded: bool| {
             let Some((new_left, new_right)) = inputs.split(file) else {
                 return;
@@ -1748,9 +1825,11 @@ fn code_editor(text: String, styling: PerchStyling) -> TextEditor {
         .read_only()
         .styling(styling)
         .editor_style(|s| {
-            // Wrapping would put a long line on several visual rows, which
-            // breaks the gutter's one-row-per-line geometry and makes a diff
-            // hard to follow. Long lines scroll sideways instead.
+            // The editor's own wrapping would put a long line on several
+            // visual rows, which breaks the gutter's one-row-per-line
+            // geometry and a split's rows beside each other. Long lines
+            // scroll sideways instead, or Word wrap breaks them in the
+            // document, a row each; see `doc`.
             s.hide_gutter(true)
                 .wrap_method(floem::views::editor::text::WrapMethod::None)
                 .selection_color(theme::selection_bg())
@@ -1851,7 +1930,7 @@ fn wire_cursor(
             None => doc.display_line(row),
         };
 
-        let (row, _) = hover::line_col_of_offset(doc.text(), offset);
+        let (row, column) = doc.locate(offset);
         if let Some(line) = doc.nearest(row, display_line) {
             state.cursor_line.set(line);
         }
@@ -1867,8 +1946,8 @@ fn wire_cursor(
                 })
         });
         if lo != usize::MAX {
-            let (first_row, _) = hover::line_col_of_offset(doc.text(), lo);
-            let (last_row, _) = hover::line_col_of_offset(doc.text(), hi);
+            let (first_row, _) = doc.locate(lo);
+            let (last_row, _) = doc.locate(hi);
             let first = (first_row..=last_row).find_map(display_line);
             let last = (first_row..=last_row).rev().find_map(display_line);
             state.selection.set(first.zip(last));
@@ -1893,8 +1972,9 @@ fn wire_cursor(
         // The identifier at the caret, by the caret's reading: just past
         // a word is still on it. The tint stays while the caret stays on
         // the symbol it is for, wherever in the word it is.
-        let symbol = position.and_then(|(line, column)| {
-            let (start, text) = references::identifier_at(doc.line(row), column)?;
+        let symbol = position.and_then(|(line, _)| {
+            let source = doc.source_line(row);
+            let (start, text) = references::identifier_at(&source, column)?;
             Some(crate::review::model::Symbol {
                 path: file.path.clone(),
                 line,
@@ -1982,11 +2062,13 @@ fn wire_place(
 fn place_of(doc: &Doc, viewport: Rect, caret: usize) -> FilePlace {
     let line_height = theme::code_line_height() as f64;
     let top = (viewport.y0 / line_height).floor().max(0.0) as usize;
+    // From the row the line starts on, so a line wrapped at another
+    // width when the place is put back is still where it was.
     let anchor = (top..doc.len()).find_map(|row| {
         let line = doc.display_line(row)?;
-        Some((line, viewport.y0 - row as f64 * line_height))
+        Some((line, viewport.y0 - doc.lead(row) as f64 * line_height))
     });
-    let (row, column) = hover::line_col_of_offset(doc.text(), caret);
+    let (row, column) = doc.locate(caret);
     FilePlace {
         anchor,
         x: viewport.x0,
@@ -2007,16 +2089,11 @@ fn restore_place(
     cursor: RwSignal<Cursor>,
 ) {
     let line_height = theme::code_line_height() as f64;
-    let caret = place.caret.and_then(|(line, column)| {
-        let row = doc.row_of_display(line)?;
-        // The line's text may have changed under the column since.
-        let text = doc.line(row);
-        let mut column = column.min(text.len());
-        while !text.is_char_boundary(column) {
-            column -= 1;
-        }
-        Some(doc.offset_of_row(row) + column)
-    });
+    // The line's text may have changed under the column since, which
+    // `offset_at` clamps to.
+    let caret = place
+        .caret
+        .and_then(|(line, column)| Some(doc.offset_at(doc.row_of_display(line)?, column)));
     if let Some(offset) = caret {
         cursor.update(|c| c.set_offset(offset, CursorAffinity::Backward, false, false));
     }
@@ -2075,10 +2152,7 @@ fn wire_jump(
             .try_update(|c| c.take_if(|(line, _)| *line == head_line))
             .flatten();
         if let Some((_, column)) = caret {
-            let offset = doc.with_untracked(|d| {
-                let line_len = d.line(row).len();
-                d.offset_of_row(row) + column.min(line_len)
-            });
+            let offset = doc.with_untracked(|d| d.offset_at(row, column));
             cursor.update(|c| c.set_offset(offset, CursorAffinity::Backward, false, false));
         }
     });
@@ -2126,7 +2200,7 @@ fn wire_page(
             // A line of the file, not a divider or a card's spacer.
             let mut rows = (0..d.len()).filter(|&r| d.display_line(r).is_some());
             let row = if end { rows.next_back() } else { rows.next() };
-            row.map(|r| d.offset_of_row(r))
+            row.map(|r| d.offset_of_row(d.lead(r)))
         });
         if let Some(offset) = offset {
             cursor.update(|c| c.set_offset(offset, CursorAffinity::Backward, false, false));
@@ -2194,7 +2268,7 @@ mod tests {
 
     /// A file's split shown whole, with nothing folded.
     fn split_of(file: &LoadedFile) -> Option<(Doc, Doc)> {
-        split_doc(file, false, &[], &Reveals::default(), &[])
+        split_doc(file, false, &[], &Reveals::default(), &[], None)
     }
 
     #[test]
@@ -2276,7 +2350,7 @@ mod tests {
         );
         assert_eq!(right.row_of_head(2), Some(2));
         // And the stacked document over the same file is the buffer.
-        let stacked = doc::build(&file.buffer, &[], &[]);
+        let stacked = doc::build(&file.buffer, &[], &[], None);
         assert_eq!(stacked.text, file.buffer.text);
         assert_eq!(stacked.len(), file.buffer.len());
         assert_eq!(stacked.row_of_head(1), Some(2));
@@ -2302,7 +2376,7 @@ mod tests {
             2,
             "the runs are there to fold"
         );
-        let doc = stacked_doc(&plain, true, &anchors, &Reveals::default(), &[]);
+        let doc = stacked_doc(&plain, true, &anchors, &Reveals::default(), &[], None);
         assert!(doc.folds.is_empty());
         assert_eq!(doc.hidden_lines(), 0);
         assert_eq!(doc.text, text);
@@ -2318,7 +2392,7 @@ mod tests {
             perch_git::Scope::Branch,
             String::new(),
         );
-        let doc = stacked_doc(&changed, true, &anchors, &Reveals::default(), &[]);
+        let doc = stacked_doc(&changed, true, &anchors, &Reveals::default(), &[], None);
         assert_eq!(doc.folds.len(), 2);
         assert!(doc.hidden_lines() > 0);
     }
@@ -3351,8 +3425,9 @@ mod window {
 
     /// The tiles sit at the strip's right end: 8 of padding, then the
     /// tree's tile and its rule, then
-    /// Split then Stacked reading leftwards, each `LAYOUT_TILE` square with
-    /// 2 between, in a strip `TAB_HEIGHT` tall under the header's bar.
+    /// Split, Stacked and Word wrap reading leftwards, each `LAYOUT_TILE`
+    /// square with 2 between, in a strip `TAB_HEIGHT` tall under the
+    /// header's bar.
     fn tile_center(layout: Layout) -> (f64, f64) {
         let tile = crate::theme::LAYOUT_TILE;
         let split_right =
@@ -3388,12 +3463,17 @@ mod window {
 
     /// The Show whole tile is left of Stacked, past the rule and the room
     /// on either side of it.
-    fn fold_tile_center() -> (f64, f64) {
+    /// Word wrap's tile, left of Stacked.
+    fn wrap_tile_center() -> (f64, f64) {
         let (stacked, y) = tile_center(Layout::Stacked);
+        (stacked - crate::theme::LAYOUT_TILE - 2.0, y)
+    }
+
+    fn fold_tile_center() -> (f64, f64) {
+        let (wrap, y) = wrap_tile_center();
         let tile = crate::theme::LAYOUT_TILE;
         (
-            stacked
-                - tile / 2.0
+            wrap - tile / 2.0
                 - crate::theme::TILE_RULE_GAP
                 - 1.0
                 - crate::theme::TILE_RULE_GAP
@@ -3434,6 +3514,119 @@ mod window {
             labels: Vec::new(),
             assignees: Vec::new(),
         }
+    }
+
+    /// Word wrap's tile wraps the open file's long lines at the editor's
+    /// width, in place, and a click again lets them run on; the split's
+    /// two sides wrap level with each other.
+    #[test]
+    fn the_wrap_tile_wraps_long_lines_at_the_editors_width_and_back() {
+        let long = format!("    let words = [{}];\n", "\"word\", ".repeat(60));
+        let (mut harness, state) = harness_with(
+            format!("fn a() {{\n{long}}}\n"),
+            "fn a() {\n}\n".to_string(),
+        );
+        let live = stacked(state);
+        let whole = live.doc.get().text.clone();
+        assert!(!state.wrap.get(), "lines run on by default");
+
+        let (x, y) = wrap_tile_center();
+        let under = harness.element_id_at(x, y);
+        harness.click(x, y);
+        harness.rebuild();
+        harness.paint();
+        assert!(
+            state.wrap.get(),
+            "click at ({x}, {y}) over {under:?} did not wrap"
+        );
+        let doc = live.doc.get();
+        assert_eq!(laid_out_text(&live), doc.text, "edited into the editor");
+        let wraps = doc
+            .rows
+            .iter()
+            .filter(|r| matches!(r, crate::review::doc::DocRow::Wrap { .. }))
+            .count();
+        assert!(wraps > 0, "the long line wraps");
+        // Every row fits the editor, at its width less the gap at the
+        // right edge.
+        let width = super::STACKED_VIEWPORT
+            .with(|v| v.get())
+            .unwrap()
+            .get()
+            .width();
+        let columns = ((width - crate::theme::CODE_GUTTER_GAP)
+            / crate::review::gutter::column_width()) as usize;
+        assert_eq!(state.wrap_columns.get()[0], Some(columns));
+        for row in 0..doc.len() {
+            assert!(doc.line(row).len() <= columns, "row {row} fits");
+        }
+        assert_eq!(doc.source_line(1), long.trim_end());
+
+        // Cmd-C over the wrapped line copies the line, not its rows.
+        let (left, top) = pane_origin();
+        harness.click(
+            left + 200.0,
+            top + crate::theme::code_line_height() as f64 / 2.0,
+        );
+        harness.rebuild();
+        harness.paint();
+        let (from, to) = (
+            doc.offset_of_row(1),
+            doc.offset_of_row(doc.line_rows(1).end),
+        );
+        super::STACKED_CURSOR
+            .with(|c| c.get())
+            .unwrap()
+            .update(|c| {
+                c.set_insert(floem::views::editor::core::selection::Selection::region(
+                    from,
+                    to,
+                    CursorAffinity::Backward,
+                ))
+            });
+        let cmd_c = || {
+            floem::event::Event::Key(floem::prelude::KeyboardEvent {
+                state: floem::prelude::KeyState::Down,
+                key: floem::prelude::Key::Character("c".into()),
+                code: floem::prelude::Code::KeyC,
+                location: Default::default(),
+                modifiers: crate::ui::OS_MOD,
+                repeat: false,
+                is_composing: false,
+            })
+        };
+        crate::ui::widgets::copied();
+        harness.dispatch_event(cmd_c());
+        assert_eq!(crate::ui::widgets::copied(), std::slice::from_ref(&long));
+        // With nothing selected, the caret's line, whichever of its rows
+        // the caret is on.
+        let caret = doc.offset_of_row(2) + 6;
+        super::STACKED_CURSOR
+            .with(|c| c.get())
+            .unwrap()
+            .update(|c| c.set_offset(caret, CursorAffinity::Backward, false, false));
+        harness.dispatch_event(cmd_c());
+        assert_eq!(crate::ui::widgets::copied(), std::slice::from_ref(&long));
+
+        harness.click(x, y);
+        harness.rebuild();
+        harness.paint();
+        assert!(!state.wrap.get());
+        assert_eq!(live.doc.get().text, whole, "the lines run on again");
+        assert_eq!(laid_out_text(&live), whole);
+
+        // Split, wrapped: the two sides are as long as each other, and
+        // the line beside the wrapped one is as tall as it.
+        state.wrap.set(true);
+        state.layout.set(Layout::Split);
+        harness.rebuild();
+        harness.paint();
+        let (left, right) = sides(state);
+        let (left, right) = (left.doc.get(), right.doc.get());
+        assert_eq!(left.len(), right.len());
+        let row = right.row_of_head(1).unwrap();
+        assert!(right.line_rows(row).len() > 1, "wrapped on the head side");
+        assert!(right.line_rows(row).end <= left.len());
     }
 
     #[test]

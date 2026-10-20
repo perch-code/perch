@@ -50,9 +50,10 @@ const AVATAR_CONCURRENCY: usize = 6;
 const NOTIFICATION_RECONCILE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 /// Settings the UI keeps between launches. Sent back at startup. Show
 /// whole is not here: it is the open tab's, and every file opens folded.
-pub const UI_META_KEYS: [&str; 6] = [
+pub const UI_META_KEYS: [&str; 7] = [
     "item_filters",
     "review.layout",
+    "review.wrap",
     "drawer.view",
     "drawer.width",
     "viewer.login",

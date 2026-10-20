@@ -297,7 +297,7 @@ pub(crate) fn layer(
         let (_, lines) = counted.get();
         outline.with(|blocks| {
             doc.with(|d| {
-                place(
+                let mut placed = place(
                     blocks,
                     d.len(),
                     lines,
@@ -309,7 +309,13 @@ pub(crate) fn layer(
                         }
                     },
                     |row| matches!(d.rows.get(row), Some(DocRow::Divider { .. })),
-                )
+                );
+                // A block ends on the last row of its last line, which is
+                // not the line's row when it wraps.
+                for block in &mut placed {
+                    block.end_row = d.line_rows(block.end_row).end - 1;
+                }
+                placed
             })
         })
     });

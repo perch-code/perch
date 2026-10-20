@@ -450,19 +450,19 @@ fn nav_button(state: ReviewState, forward: bool) -> impl IntoView {
 }
 
 /// The tiles at the strip's right end: while a file shows, Source, when
-/// the file is a picture, then Show whole, then Stacked and Split, with a
-/// rule after each group; then the tree in the drawer on the right. A
-/// chosen tile is filled;
+/// the file is a picture, then Show whole, then Word wrap, Stacked and
+/// Split, with a rule after each group; then the tree in the drawer on
+/// the right. A chosen tile is filled;
 /// the others are only a glyph until the pointer is over one. The last
 /// group is at the strip's end, so its tiles keep their place when the
 /// file's come and go.
 ///
 /// The rules are there because the groups are kinds of preference. The
-/// layout outlives the item: it is a way of reading, not a fact about a
-/// file, so it goes to `meta` under one key and comes back at the next
-/// launch. Show whole is the open tab's: a reader unfolds the file they
-/// are reading and not the others, so it lasts as long as the tab and
-/// every file opens folded. Source is the file's, for the app's life: a
+/// layout and Word wrap outlive the item: they are ways of reading, not
+/// facts about a file, so each goes to `meta` under a key and comes back
+/// at the next launch. Show whole is the open tab's: a reader unfolds the
+/// file they are reading and not the others, so it lasts as long as the
+/// tab and every file opens folded. Source is the file's, for the app's life: a
 /// reader wants the markup of this SVG, not of SVGs. The drawer is the
 /// window's, and comes back at the next launch as the layout does.
 fn tiles(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
@@ -472,6 +472,7 @@ fn tiles(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoVi
             fold_tile(state),
             tile_rule(),
             Stack::horizontal((
+                wrap_tile(app, state),
                 layout_tile(app, state, Layout::Stacked, SidebarIcon::Stacked),
                 layout_tile(app, state, Layout::Split, SidebarIcon::Split),
             ))
@@ -568,6 +569,29 @@ fn layout_tile(
             .set(Some(("review.layout".into(), layout.name().into())));
     })
     .debug_name(format!("{} tile", layout.name()))
+}
+
+/// Word wrap: filled while long lines wrap at the code's width, and a
+/// glyph while they scroll sideways, which is the default.
+fn wrap_tile(app: AppState, state: ReviewState) -> impl IntoView {
+    let wraps = move || state.wrap.get();
+    tip_with(
+        tile(SidebarIcon::Wrap, wraps, move || {
+            let wrap = !state.wrap.get_untracked();
+            state.wrap.set(wrap);
+            let value = if wrap { "on" } else { "off" };
+            app.pending_meta
+                .set(Some(("review.wrap".into(), value.into())));
+        })
+        .debug_name("wrap tile"),
+        move || {
+            if wraps() {
+                "Long lines wrap. Click to scroll them sideways instead.".to_string()
+            } else {
+                "Long lines scroll sideways. Click to wrap them.".to_string()
+            }
+        },
+    )
 }
 
 /// The tree in the drawer on the right: filled while it shows, and a

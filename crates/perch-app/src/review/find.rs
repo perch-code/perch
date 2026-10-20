@@ -44,7 +44,6 @@ use crate::review::cards::tip;
 use crate::review::conversation_find;
 use crate::review::doc::Doc;
 use crate::review::editor;
-use crate::review::hover;
 use crate::review::model::{Layout, LiveDoc, ReviewState};
 use crate::review::references;
 use crate::theme;
@@ -542,7 +541,7 @@ fn caret(state: ReviewState, end: bool) -> Option<(usize, usize)> {
     let offset = if end { hi } else { lo };
     live.doc.try_with_untracked(|d| {
         let d = d?;
-        let (row, column) = hover::line_col_of_offset(d.text(), offset);
+        let (row, column) = d.locate(offset);
         match d.display_line(row) {
             Some(display) => Some((display, column)),
             None => Some((d.nearest_display_line(row)?, 0)),
@@ -558,11 +557,12 @@ fn seed(state: ReviewState) -> Option<String> {
     live.doc.try_with_untracked(|d| {
         let d = d?;
         if lo < hi {
-            let text = d.text().get(lo..hi)?;
-            return (!text.contains('\n')).then(|| text.to_string());
+            let text = d.copy(lo, hi);
+            return (!text.contains('\n')).then_some(text);
         }
-        let (row, column) = hover::line_col_of_offset(d.text(), lo);
-        let (_, word) = references::identifier_at(d.line(row), column)?;
+        let (row, column) = d.locate(lo);
+        let source = d.source_line(row);
+        let (_, word) = references::identifier_at(&source, column)?;
         Some(word.to_string())
     })
 }
@@ -588,9 +588,7 @@ fn go_to(state: ReviewState, m: Match) {
     let Some(row) = row else { return };
     let Some((start, end)) = live.doc.try_with_untracked(|d| {
         let d = d?;
-        let at = d.offset_of_row(row);
-        let len = d.line(row).len();
-        Some((at + m.start.min(len), at + m.end.min(len)))
+        Some((d.offset_at(row, m.start), d.end_offset_at(row, m.end)))
     }) else {
         return;
     };

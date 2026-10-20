@@ -232,6 +232,14 @@ impl Layout {
             _ => None,
         }
     }
+
+    /// Where the layout's columns are in `wrap_columns`.
+    pub fn index(self) -> usize {
+        match self {
+            Layout::Stacked => 0,
+            Layout::Split => 1,
+        }
+    }
 }
 
 /// An identifier at a head position: what the pointer is over, and what
@@ -1543,6 +1551,14 @@ pub struct ReviewState {
     pub file_places: RwSignal<HashMap<String, FilePlace>>,
     /// Stacked or Split, remembered across items in `meta`.
     pub layout: RwSignal<Layout>,
+    /// Whether long lines wrap at the code's width, rather than running
+    /// on past it. A way of reading, as the layout is, so remembered
+    /// across items in `meta` the same way.
+    pub wrap: RwSignal<bool>,
+    /// The columns the last editor of each layout wrapped at, stacked and
+    /// split, so that a file opens wrapped at the width it will have
+    /// rather than whole until its editor has been laid out.
+    pub wrap_columns: RwSignal<[Option<usize>; 2]>,
     /// The files with a picture that the reader asked to see as markup,
     /// by path. A picture is drawn until they ask, and the strip's Source
     /// tile asks and unasks; the choice lives as long as the app.
@@ -2079,6 +2095,8 @@ impl ReviewState {
             conversation_scroll: RwSignal::new(0.0),
             file_places: RwSignal::new(HashMap::new()),
             layout: RwSignal::new(Layout::Stacked),
+            wrap: RwSignal::new(false),
+            wrap_columns: RwSignal::new([None; 2]),
             as_source: RwSignal::new(HashSet::new()),
             scope: RwSignal::new(Scope::Branch),
             scope_gen: RwSignal::new(None),

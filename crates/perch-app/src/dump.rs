@@ -158,7 +158,7 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
     };
     let folded = !whole;
     let sides = if split {
-        let sides = editor::split_doc(&file, folded, &anchors, &reveals, &cards);
+        let sides = editor::split_doc(&file, folded, &anchors, &reveals, &cards, None);
         if sides.is_none() {
             eprintln!(
                 "note: {path} has no base side; the window shows it stacked, and so does this"
@@ -169,10 +169,10 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
         None
     };
     let rendered = match sides {
-        Some((left, right)) => Rendered::Split(left, right),
-        None => Rendered::Stacked(editor::stacked_doc(
-            &file, folded, &anchors, &reveals, &cards,
-        )),
+        Some((left, right)) => Rendered::Split(Box::new(left), Box::new(right)),
+        None => Rendered::Stacked(Box::new(editor::stacked_doc(
+            &file, folded, &anchors, &reveals, &cards, None,
+        ))),
     };
 
     println!("file:     {}", file.path);
@@ -215,10 +215,11 @@ async fn dump(target: &str, path: &str, whole: bool, split: bool) -> Result<(), 
     Ok(())
 }
 
-/// What is printed: the stacked document, or a split's two sides.
+/// What is printed: the stacked document, or a split's two sides. Boxed,
+/// so the split is not twice the size of the other.
 enum Rendered {
-    Stacked(Doc),
-    Split(Doc, Doc),
+    Stacked(Box<Doc>),
+    Split(Box<Doc>, Box<Doc>),
 }
 
 impl Rendered {
@@ -282,6 +283,11 @@ fn print_rows(file: &LoadedFile, doc: &Doc, side: Option<Side>, threads: &[Comme
             }
             DocRow::Filler => {
                 println!();
+                continue;
+            }
+            // The rest of a wrapped line, under it, with no number.
+            DocRow::Wrap { .. } => {
+                println!("            {}", doc.line(index));
                 continue;
             }
         };
