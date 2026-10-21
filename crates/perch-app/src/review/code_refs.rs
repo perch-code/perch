@@ -1204,6 +1204,8 @@ mod tests {
         assert!(names_in_fence(None));
         assert!(names_in_fence(Some("Rust")));
         assert!(!names_in_fence(Some("no-such-language")));
+        assert!(names_in_fence(Some("python")));
+        assert!(!names_in_fence(Some("ruby")));
     }
 
     #[test]
