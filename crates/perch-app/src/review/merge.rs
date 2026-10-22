@@ -167,11 +167,18 @@ struct MergeFacts {
     offline: bool,
     historical: bool,
     stale: bool,
+    /// A worktree of the reader's own is never moved to the pull
+    /// request's head, so its files can be ahead of, behind, or beside
+    /// what GitHub would merge.
+    diverged: bool,
     open: bool,
     draft: bool,
     overview_present: bool,
     overview_loading: bool,
     heads_match: bool,
+    /// The checkout holds GitHub's head and commits of its own on top,
+    /// none missing: conflicts merged here go up with them.
+    only_ahead: bool,
     has_write_permission: bool,
     mergeable: Option<MergeableState>,
     merge_state: Option<MergeState>,
@@ -679,14 +686,7 @@ fn merge_section(
             merge_error: state.merge_error.get(),
             offline: state.offline.get(),
             historical: state.historical_review.with(Option::is_some),
-            // A worktree of the reader's own is never moved to the pull
-            // request's head, so its files can be ahead of, behind, or
-            // beside what GitHub would merge.
-            stale: state.stale_head.with(Option::is_some)
-                || state.item.with(|item| {
-                    item.as_ref()
-                        .is_some_and(|item| item.divergence().is_some())
-                }),
+            stale: state.stale_head.with(Option::is_some),
             selected_method: selected_method.get(),
             bypass_requirements: bypass_requirements.get(),
             confirmation: confirmation.get(),
@@ -1473,15 +1473,21 @@ fn merge_facts(
                 .as_ref()
                 .is_some_and(|checkout| checkout.head_sha == overview.head_sha)
     });
+    let only_ahead = overview.is_some_and(|overview| pull.head_sha == overview.head_sha)
+        && item
+            .divergence()
+            .is_some_and(|d| d.behind == Some(0) && d.ahead.is_some_and(|ahead| ahead > 0));
     MergeFacts {
         offline,
         historical,
         stale,
+        diverged: item.divergence().is_some(),
         open: pull.is_open() && !pull.merged,
         draft: pull.draft,
         overview_present: overview.is_some(),
         overview_loading,
         heads_match,
+        only_ahead,
         has_write_permission: overview.is_some_and(|overview| {
             overview.viewer_can_merge_as_admin
                 || matches!(
@@ -1510,7 +1516,12 @@ fn decide_merge(facts: MergeFacts) -> MergeDecision {
     if facts.historical {
         return MergeDecision::Disabled(DisabledReason::Historical);
     }
-    if facts.stale {
+    let conflicting = matches!(facts.mergeable, Some(MergeableState::Conflicting))
+        || matches!(facts.merge_state, Some(MergeState::Dirty));
+    // Unpushed commits don't hide conflicts: pushing them alone leaves
+    // GitHub's head conflicting, and the merge can go on top.
+    let ahead_of_conflicts = conflicting && facts.only_ahead;
+    if facts.stale || (facts.diverged && !ahead_of_conflicts) {
         return MergeDecision::Disabled(DisabledReason::StaleCheckout);
     }
     if !facts.open {
@@ -1526,15 +1537,13 @@ fn decide_merge(facts: MergeFacts) -> MergeDecision {
             MergeDecision::Disabled(DisabledReason::Unknown)
         };
     }
-    if !facts.heads_match {
+    if !facts.heads_match && !ahead_of_conflicts {
         return MergeDecision::Disabled(DisabledReason::StaleCheckout);
     }
     if !facts.has_write_permission {
         return MergeDecision::Disabled(DisabledReason::NoWritePermission);
     }
-    if matches!(facts.mergeable, Some(MergeableState::Conflicting))
-        || matches!(facts.merge_state, Some(MergeState::Dirty))
-    {
+    if conflicting {
         return MergeDecision::Conflicts;
     }
     if matches!(facts.mergeable, None | Some(MergeableState::Unknown))
@@ -1724,11 +1733,13 @@ mod tests {
             offline: false,
             historical: false,
             stale: false,
+            diverged: false,
             open: true,
             draft: false,
             overview_present: true,
             overview_loading: false,
             heads_match: true,
+            only_ahead: false,
             has_write_permission: true,
             mergeable: Some(MergeableState::Mergeable),
             merge_state: Some(MergeState::Clean),
@@ -1876,6 +1887,74 @@ mod tests {
         assert_eq!(
             conflicts_url("https://github.com/acme/repo/pull/42/"),
             Some("https://github.com/acme/repo/pull/42/conflicts".to_string())
+        );
+    }
+
+    #[test]
+    fn unpushed_commits_dont_hide_conflicts() {
+        let mut facts = mergeable_facts();
+        facts.mergeable = Some(MergeableState::Conflicting);
+        facts.merge_state = Some(MergeState::Dirty);
+        facts.heads_match = false;
+        facts.diverged = true;
+        assert_eq!(
+            decide_merge(facts),
+            MergeDecision::Disabled(DisabledReason::StaleCheckout)
+        );
+
+        facts.only_ahead = true;
+        assert_eq!(decide_merge(facts), MergeDecision::Conflicts);
+
+        facts.mergeable = Some(MergeableState::Mergeable);
+        facts.merge_state = Some(MergeState::Clean);
+        assert_eq!(
+            decide_merge(facts),
+            MergeDecision::Disabled(DisabledReason::StaleCheckout)
+        );
+    }
+
+    /// The reader's worktree with a commit on top of GitHub's conflicting
+    /// head is offered the agent's merge, not just Push.
+    #[test]
+    fn a_worktree_ahead_of_conflicts_can_resolve_them() {
+        let state = review_state(MergeState::Dirty, false);
+        let pull = pull_request("head-42");
+        let mut item = (*state.item.get_untracked().unwrap()).clone();
+        item.subject = Some(perch_github::ItemSubject::PullRequest((*pull).clone()));
+        let checkout = item.checkout.as_mut().unwrap();
+        checkout.head_sha = "head-43".into();
+        checkout.divergence = Some(perch_github::Divergence {
+            head: "head-43".into(),
+            pr_head: "head-42".into(),
+            ahead: 1,
+            behind: 0,
+        });
+        let mut overview = (*state.pull_request_overview.get_untracked().unwrap()).clone();
+        overview.mergeable = MergeableState::Conflicting;
+        let decide = |item: &Item| {
+            decide_merge(merge_facts(
+                &pull,
+                item,
+                Some(&overview),
+                false,
+                false,
+                false,
+                false,
+            ))
+        };
+        assert_eq!(decide(&item), MergeDecision::Conflicts);
+
+        // Behind GitHub's head, a merge here couldn't be pushed.
+        item.checkout
+            .as_mut()
+            .unwrap()
+            .divergence
+            .as_mut()
+            .unwrap()
+            .behind = 1;
+        assert_eq!(
+            decide(&item),
+            MergeDecision::Disabled(DisabledReason::StaleCheckout)
         );
     }
 
