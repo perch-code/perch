@@ -3542,7 +3542,7 @@ mod window {
             .count();
         assert!(wraps > 0, "the long line wraps");
         // Every row fits the editor, at its width less the gap at the
-        // right edge.
+        // right edge, but for the spaces that hang past it before a break.
         let width = super::STACKED_VIEWPORT
             .with(|v| v.get())
             .unwrap()
@@ -3552,7 +3552,7 @@ mod window {
             / crate::review::gutter::column_width()) as usize;
         assert_eq!(state.wrap_columns.get()[0], Some(columns));
         for row in 0..doc.len() {
-            assert!(doc.line(row).len() <= columns, "row {row} fits");
+            assert!(doc.line(row).trim_end().len() <= columns, "row {row} fits");
         }
         assert_eq!(doc.source_line(1), long.trim_end());
 
