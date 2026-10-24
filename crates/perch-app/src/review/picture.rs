@@ -256,7 +256,7 @@ fn frame_of(sides: &[&Result<Drawing, String>]) -> Size {
 /// has held: at this cap a picture is 2048 device pixels on a 2x screen
 /// and the atlas 4096 square, 80 MB across its colour and mask halves,
 /// and a side of 4096 would ask for a texture past the 8192 wgpu allows.
-const MAX_SIDE: f64 = 1024.0;
+pub(crate) const MAX_SIDE: f64 = 1024.0;
 
 /// How big a picture `natural` big draws in a box `bounds` big: at the
 /// one scale that fits `frame` into the box, keeping its shape. A
@@ -361,6 +361,18 @@ fn in_column(natural: Size, width: f64) -> Size {
         .min(MAX_SIDE / natural.height)
         .min(1.0);
     Size::new(natural.width * scale, natural.height * scale)
+}
+
+/// A picture drawn plain at `size`, as a figure is: a tile of one too
+/// big for the renderer to draw whole.
+pub(crate) fn plain(drawing: Drawing, size: Size) -> impl IntoView {
+    Drawn {
+        id: ViewId::new(),
+        drawing,
+        plain: true,
+        painted: Size::ZERO,
+    }
+    .style(move |s| s.width(size.width).height(size.height).flex_shrink(0.0_f32))
 }
 
 /// A picture set in a column of text, as a figure: at its own size, or

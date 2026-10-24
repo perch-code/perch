@@ -324,6 +324,10 @@ pub fn news_fg() -> Color {
 pub fn news_button_hover() -> Color {
     pick(rgb(0xb6e3ff), rgb(0x203551))
 }
+/// Over the window, under something opened over it.
+pub fn scrim() -> Color {
+    pick(rgba(0x000000, 0x40), rgba(0x000000, 0x80))
+}
 pub fn shadow() -> Color {
     pick(rgba(0x20201e, 0x12), rgba(0x000000, 0x40))
 }
