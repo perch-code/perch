@@ -239,6 +239,8 @@ pub enum Command {
         backend: perch_agent::Backend,
         model: String,
         effort: perch_agent::Effort,
+        /// What the reader asked the agent to keep in mind, or nothing.
+        guidance: String,
     },
     StopWalkthrough {
         item_id: String,
@@ -2914,12 +2916,14 @@ impl Backend {
         &self,
         item_id: &str,
         (backend, model, effort): crate::review::model::AgentChoice,
+        guidance: &str,
     ) {
         let _ = self.commands.send(Command::WriteWalkthrough {
             item_id: item_id.to_string(),
             backend,
             model,
             effort,
+            guidance: guidance.to_string(),
         });
     }
 
@@ -4574,10 +4578,11 @@ async fn run(
                 backend,
                 model,
                 effort,
+                guidance,
             } => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    walkthrough::write(&ctx, &item_id, backend, &model, effort).await
+                    walkthrough::write(&ctx, &item_id, (backend, &model, effort), &guidance).await
                 });
             }
             Command::StopWalkthrough { item_id } => walkthrough::stop(&item_id),
@@ -30327,9 +30332,12 @@ read eof || true
         walkthrough::write(
             &ctx,
             &item.id,
-            perch_agent::Backend::ClaudeCode,
-            "sonnet",
-            perch_agent::Effort::Medium,
+            (
+                perch_agent::Backend::ClaudeCode,
+                "sonnet",
+                perch_agent::Effort::Medium,
+            ),
+            "",
         )
         .await;
 
@@ -30400,9 +30408,12 @@ read eof || true
         walkthrough::write(
             &ctx,
             &item.id,
-            perch_agent::Backend::ClaudeCode,
-            "sonnet",
-            perch_agent::Effort::Medium,
+            (
+                perch_agent::Backend::ClaudeCode,
+                "sonnet",
+                perch_agent::Effort::Medium,
+            ),
+            "",
         )
         .await;
 
@@ -30437,9 +30448,12 @@ read eof || true
         walkthrough::write(
             &ctx,
             &item.id,
-            perch_agent::Backend::ClaudeCode,
-            "sonnet",
-            perch_agent::Effort::Medium,
+            (
+                perch_agent::Backend::ClaudeCode,
+                "sonnet",
+                perch_agent::Effort::Medium,
+            ),
+            "",
         )
         .await;
 

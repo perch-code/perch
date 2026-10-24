@@ -1659,6 +1659,11 @@ pub struct ReviewState {
     pub walkthroughs: RwSignal<HashMap<String, Option<Arc<crate::backend::Walkthrough>>>>,
     pub walkthroughs_writing: RwSignal<HashSet<String>>,
     pub walkthrough_errors: RwSignal<HashMap<String, String>>,
+    /// What the reader has written to steer each item's next walkthrough,
+    /// and the agent picked for walkthroughs, `None` until one is: then
+    /// the one last asked here.
+    pub walkthrough_guidance: RwSignal<HashMap<String, String>>,
+    pub walkthrough_agent: RwSignal<Option<AgentChoice>>,
     /// Close as issue under way, and what stopped the last.
     pub issue_closing: RwSignal<bool>,
     pub issue_error: RwSignal<Option<String>>,
@@ -2143,6 +2148,8 @@ impl ReviewState {
             walkthroughs: RwSignal::new(HashMap::new()),
             walkthroughs_writing: RwSignal::new(HashSet::new()),
             walkthrough_errors: RwSignal::new(HashMap::new()),
+            walkthrough_guidance: RwSignal::new(HashMap::new()),
+            walkthrough_agent: RwSignal::new(None),
             issue_closing: RwSignal::new(false),
             issue_error: RwSignal::new(None),
             issue_body_height: RwSignal::new(None),

@@ -54,6 +54,10 @@ pub struct Walkthrough {
     pub steps: Vec<Step>,
     /// Every hunk of the change, which the steps name by id.
     pub hunks: Vec<Hunk>,
+    /// What the reader asked the agent to keep in mind, if anything, so
+    /// writing it again starts from the same words.
+    #[serde(default)]
+    pub guidance: String,
 }
 
 impl Walkthrough {
@@ -198,9 +202,8 @@ pub(super) async fn load(ctx: &Ctx, item_id: &str) {
 pub(super) async fn write(
     ctx: &Ctx,
     item_id: &str,
-    backend: perch_agent::Backend,
-    model: &str,
-    effort: perch_agent::Effort,
+    (backend, model, effort): (perch_agent::Backend, &str, perch_agent::Effort),
+    guidance: &str,
 ) {
     let taken = WRITING.lock().is_ok_and(|mut writing| {
         if writing.contains_key(item_id) {
@@ -217,7 +220,7 @@ pub(super) async fn write(
         );
         return;
     }
-    let outcome = write_inner(ctx, item_id, backend, model, effort).await;
+    let outcome = write_inner(ctx, item_id, backend, model, effort, guidance.trim()).await;
     if let Ok(mut writing) = WRITING.lock() {
         writing.remove(item_id);
     }
@@ -242,6 +245,7 @@ async fn write_inner(
     backend: perch_agent::Backend,
     model: &str,
     effort: perch_agent::Effort,
+    guidance: &str,
 ) -> WalkthroughOutcome {
     let range = match range_of(ctx, item_id).await {
         Ok(range) => range,
@@ -262,7 +266,7 @@ async fn write_inner(
         .item(item_id)
         .map(|item| item.title().to_string())
         .unwrap_or_default();
-    let prompt = match first_prompt(ctx, &range, &title, &hunks, &threads).await {
+    let prompt = match first_prompt(ctx, &range, &title, &hunks, &threads, guidance).await {
         Ok(prompt) => prompt,
         Err(message) => return WalkthroughOutcome::Failed(message),
     };
@@ -347,6 +351,7 @@ async fn write_inner(
         background: background.pop(),
         steps,
         hunks,
+        guidance: guidance.to_string(),
     })
 }
 
@@ -590,6 +595,7 @@ async fn first_prompt(
     title: &str,
     hunks: &[Hunk],
     threads: &[CommentThread],
+    guidance: &str,
 ) -> Result<crate::ask::Prompt, String> {
     let git = ctx.preparer.git();
     let ask = |args: Vec<String>| async move {
@@ -613,7 +619,7 @@ async fn first_prompt(
     .await?;
     Ok(crate::ask::Prompt {
         system: Some(FRAMING.to_string()),
-        user: user_message(range, title, &log, &stat, hunks, threads),
+        user: user_message(range, title, &log, &stat, hunks, threads, guidance),
     })
 }
 
@@ -624,6 +630,7 @@ fn user_message(
     stat: &str,
     hunks: &[Hunk],
     threads: &[CommentThread],
+    guidance: &str,
 ) -> String {
     let mut out = String::new();
     if !title.trim().is_empty() {
@@ -689,6 +696,13 @@ fn user_message(
                 ));
             }
         }
+    }
+    // The reader's own words, so not fenced as untrusted: they steer what
+    // the walkthrough dwells on, and the answer keeps its shape.
+    if !guidance.is_empty() {
+        out.push_str(&format!(
+            "\nThe reader asks you to keep this in mind as you write it:\n\n{guidance}\n"
+        ));
     }
     out
 }
@@ -1372,6 +1386,7 @@ mod tests {
             " 2 files\n",
             &hunks(),
             &[thread],
+            "Start from the cache.",
         );
         assert!(
             message
@@ -1391,6 +1406,10 @@ mod tests {
             "{message}"
         );
         assert!(message.contains(&format!("git diff {} {}", "b".repeat(40), "c".repeat(40))));
+        assert!(
+            message.ends_with("keep this in mind as you write it:\n\nStart from the cache.\n"),
+            "{message}"
+        );
     }
 
     /// The agent is told to write in Simple English, briefly, as
@@ -1422,6 +1441,7 @@ mod tests {
             background: None,
             steps: Vec::new(),
             hunks: hunks(),
+            guidance: String::new(),
         };
         assert_eq!(read_kept(dir.path(), Some("x")), None);
         keep(dir.path(), &walkthrough("old")).unwrap();

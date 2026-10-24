@@ -153,8 +153,11 @@ easiest to follow: usually the way data or control flows through it, not file
 by file. It works for a pull request and for a branch with no pull request
 alike.
 
-**Write with Claude**, or Codex, whichever the composer last used, has the
-agent read the change under Ask's rules (read only, no network, nothing
+Pick the model and effort under the card, as in the composer; they start
+on whichever the composer last used. The box above them takes guidance for
+the agent, such as what to dwell on or where to start, and is kept with the
+walkthrough so **Write again** starts from the same words. **Write**
+(Cmd-Enter in the box) has the agent read the change under Ask's rules (read only, no network, nothing
 reaches GitHub) and answer with a summary, a background and the steps. The
 summary sits at the top: in a few sentences, what the change is and why,
 what it changes, and anything a reviewer should weigh, such as a risk or a

@@ -22,7 +22,7 @@ use perch_github::{Anchor, Author, CommentThread};
 use crate::backend::{Backend, CodeSide, Part, Step, Walkthrough, WalkthroughOutcome};
 use crate::review::cards::{self, perch_surface};
 use crate::review::doc::CardId;
-use crate::review::model::{ItemTab, Paging, ReviewState};
+use crate::review::model::{AgentChoice, ItemTab, Paging, ReviewState};
 use crate::review::OpenFile;
 use crate::state::AppState;
 use crate::theme;
@@ -38,12 +38,29 @@ pub fn apply(review: ReviewState, item_id: String, outcome: WalkthroughOutcome) 
             writing.remove(item_id);
         });
     };
+    // The guidance a kept walkthrough was written with fills the box,
+    // unless the reader has written there already.
+    let remember = |review: ReviewState, item_id: &str, guidance: &str| {
+        if !guidance.is_empty() {
+            review.walkthrough_guidance.update(|drafts| {
+                drafts
+                    .entry(item_id.to_string())
+                    .or_insert_with(|| guidance.to_string());
+            });
+        }
+    };
     match outcome {
-        WalkthroughOutcome::Loaded(kept) => review.walkthroughs.update(|walkthroughs| {
-            walkthroughs.insert(item_id, kept.map(Arc::new));
-        }),
+        WalkthroughOutcome::Loaded(kept) => {
+            if let Some(kept) = &kept {
+                remember(review, &item_id, &kept.guidance);
+            }
+            review.walkthroughs.update(|walkthroughs| {
+                walkthroughs.insert(item_id, kept.map(Arc::new));
+            })
+        }
         WalkthroughOutcome::Written(walkthrough) => {
             done(review, &item_id);
+            remember(review, &item_id, &walkthrough.guidance);
             review.walkthrough_errors.update(|errors| {
                 errors.remove(&item_id);
             });
@@ -61,7 +78,18 @@ pub fn apply(review: ReviewState, item_id: String, outcome: WalkthroughOutcome) 
     }
 }
 
-/// Ask for a walkthrough of the open item, with the agent last asked here.
+/// The agent a walkthrough is written with: the one picked here, else
+/// the one last asked anywhere, else config's.
+fn choice(app: AppState, state: ReviewState) -> AgentChoice {
+    state
+        .walkthrough_agent
+        .get()
+        .or_else(|| state.agent_last.get())
+        .unwrap_or_else(|| crate::review::threads::defaults(app))
+}
+
+/// Ask for a walkthrough of the open item, with the agent picked and the
+/// reader's guidance.
 fn write(app: AppState, state: ReviewState, backend: &Backend) {
     let Some(item_id) = state
         .item
@@ -69,17 +97,19 @@ fn write(app: AppState, state: ReviewState, backend: &Backend) {
     else {
         return;
     };
-    let choice = state
-        .agent_last
-        .get_untracked()
-        .unwrap_or_else(|| crate::review::threads::defaults(app));
+    let choice = floem::reactive::Effect::untrack(|| choice(app, state));
+    let guidance = state
+        .walkthrough_guidance
+        .with_untracked(|drafts| drafts.get(&item_id).cloned())
+        .unwrap_or_default();
+    state.agent_last.set(Some(choice.clone()));
     state.walkthroughs_writing.update(|writing| {
         writing.insert(item_id.clone());
     });
     state.walkthrough_errors.update(|errors| {
         errors.remove(&item_id);
     });
-    backend.write_walkthrough(&item_id, choice);
+    backend.write_walkthrough(&item_id, choice, &guidance);
 }
 
 pub fn view(
@@ -208,8 +238,9 @@ pub fn view(
 
 /// The card over the steps: the change's summary once there is one, and
 /// under it what a walkthrough is before there is one, that it is being
-/// written, why it could not be, or that it is of an older head; and
-/// Write, or Write again, or Stop.
+/// written, why it could not be, or that it is of an older head. Under
+/// that the reader's guidance, the model and effort, and Write, or Write
+/// again, or Stop.
 fn head_card(
     app: AppState,
     state: ReviewState,
@@ -277,38 +308,25 @@ fn head_card(
                 .apply_if(words().is_empty(), |s| s.hide())
         }),
     ))
-    .style(|s| {
-        s.flex_col()
-            .gap(8.0)
-            .min_width(0.0)
-            .flex_grow(1.0_f32)
-            .flex_basis(0.0)
-    });
-    let choice = move || {
-        state
-            .agent_last
-            .get()
-            .unwrap_or_else(|| crate::review::threads::defaults(app))
-    };
+    .style(|s| s.flex_col().gap(8.0).width_full());
+    let write_backend = backend.clone();
     let stop_backend = backend.clone();
-    Stack::horizontal((
-        text,
+    let controls = Stack::horizontal((
+        agent_picker(app, state, writing),
+        effort_picker(app, state, writing),
+        Empty::new().style(|s| s.flex_grow(1.0_f32)),
         action_button(
             move || {
-                let agent = match choice().0 {
-                    perch_agent::Backend::ClaudeCode => "Claude",
-                    perch_agent::Backend::Codex => "Codex",
-                };
                 if shown.with(Option::is_some) {
-                    format!("Write again with {agent}")
+                    "Write again".to_string()
                 } else {
-                    format!("Write with {agent}")
+                    "Write".to_string()
                 }
             },
             "walkthrough-write",
             false,
             || true,
-            move || write(app, state, &backend),
+            move || write(app, state, &write_backend),
         )
         .style(move |s| s.flex_shrink(0.0_f32).apply_if(writing.get(), |s| s.hide())),
         action_button(
@@ -327,14 +345,154 @@ fn head_card(
                 .apply_if(!writing.get(), |s| s.hide())
         }),
     ))
+    .style(|s| s.items_center().width_full().gap(6.0));
+    Stack::vertical((
+        text,
+        guidance_box(app, state, backend, item, writing),
+        controls,
+    ))
     .debug_name("walkthrough-head")
     .style(|s| {
         perch_surface(s)
-            .items_center()
+            .flex_col()
             .width_full()
             .gap(12.0)
             .padding(theme::CARD_PADDING)
     })
+}
+
+/// The model to write with, Claude's then Codex's, as the composer lists
+/// them. Hidden while one writes.
+fn agent_picker(app: AppState, state: ReviewState, writing: Memo<bool>) -> impl IntoView {
+    use crate::ui::menu::Menu;
+
+    crate::review::review_launch::menu_button(
+        move || {
+            let (agent, model, _) = choice(app, state);
+            crate::review::threads::model_name(agent.name(), &model)
+        },
+        move || {
+            let (_, selected, effort) = floem::reactive::Effect::untrack(|| choice(app, state));
+            let agent = app.agent.get_untracked();
+            let mut menu = Menu::new();
+            for (i, group) in crate::review::threads::model_groups(&agent)
+                .into_iter()
+                .enumerate()
+            {
+                if i > 0 {
+                    menu = menu.separator();
+                }
+                for (backend, model) in group {
+                    let checked = model == selected;
+                    let effort = crate::review::threads::nearest_effort(&agent, &model, effort);
+                    menu = menu.item(crate::review::threads::model_label(&model), move |item| {
+                        let model = model.clone();
+                        item.checked(checked).action(move || {
+                            state
+                                .walkthrough_agent
+                                .set(Some((backend, model.clone(), effort)))
+                        })
+                    });
+                }
+            }
+            menu
+        },
+        "walkthrough-model".to_string(),
+    )
+    .style(move |s| s.apply_if(writing.get(), |s| s.hide()))
+}
+
+/// The effort to write with. One the model doesn't take is shown but
+/// can't be picked.
+fn effort_picker(app: AppState, state: ReviewState, writing: Memo<bool>) -> impl IntoView {
+    use crate::ui::menu::Menu;
+
+    crate::review::review_launch::menu_button(
+        move || choice(app, state).2.label().to_string(),
+        move || {
+            let (backend, model, selected) =
+                floem::reactive::Effect::untrack(|| choice(app, state));
+            let agent = app.agent.get_untracked();
+            let mut menu = Menu::new();
+            for effort in perch_agent::Effort::ALL {
+                let takes = agent.effort_supported(&model, effort.name());
+                let model = model.clone();
+                menu = menu.item(effort.label(), move |item| {
+                    item.checked(effort == selected)
+                        .enabled(takes)
+                        .action(move || {
+                            state
+                                .walkthrough_agent
+                                .set(Some((backend, model.clone(), effort)))
+                        })
+                });
+            }
+            menu
+        },
+        "walkthrough-effort".to_string(),
+    )
+    .style(move |s| s.apply_if(writing.get(), |s| s.hide()))
+}
+
+/// What the reader wants the agent to keep in mind, kept per item until
+/// they change it. Built again for each item, and once more when its kept
+/// walkthrough arrives with the guidance it was written with. Cmd-Enter
+/// writes. Hidden while one writes.
+fn guidance_box(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    item: Memo<Option<String>>,
+    writing: Memo<bool>,
+) -> impl IntoView {
+    use floem::views::editor::command::CommandExecuted;
+
+    let key = Memo::new(move |_| {
+        let id = item.get()?;
+        let loaded = state.walkthroughs.with(|kept| kept.contains_key(&id));
+        Some((id, loaded))
+    });
+    dyn_container(
+        move || key.get(),
+        move |key| {
+            let Some((id, _)) = key else {
+                return Empty::new().into_any();
+            };
+            let backend = backend.clone();
+            let text = state
+                .walkthrough_guidance
+                .with_untracked(|drafts| drafts.get(&id).cloned())
+                .unwrap_or_default();
+            let editor = crate::ui::widgets::prose_editor(
+                text,
+                "Guidance for the agent (optional)",
+                Some(state.next_token()),
+            )
+            .pre_command(move |cmd| {
+                if crate::review::threads::cmd_enter(&cmd) {
+                    write(app, state, &backend);
+                    return CommandExecuted::Yes;
+                }
+                CommandExecuted::No
+            })
+            .update(move |update| {
+                if let Some(editor) = update.editor {
+                    let text = editor.doc().text().to_string();
+                    state.walkthrough_guidance.update(|drafts| {
+                        drafts.insert(id.clone(), text);
+                    });
+                }
+            })
+            .style(|s| {
+                s.size_full()
+                    .font_family(theme::FONT_STACK.to_string())
+                    .font_size(theme::TEXT_BODY)
+            })
+            .debug_name("walkthrough-guidance");
+            crate::ui::widgets::editor_box(editor, || (64.0, 160.0), true).into_any()
+        },
+    )
+    .style(move |s| s.width_full().apply_if(writing.get(), |s| s.hide()))
 }
 
 /// The steps, each its own card.
@@ -824,6 +982,7 @@ mod tests {
                 start: 1,
                 end: 3,
             }],
+            guidance: String::new(),
         }
     }
 
@@ -889,7 +1048,8 @@ mod tests {
     }
 
     /// The tab asks for what is kept; with nothing kept it offers to
-    /// write, writes with the agent, and offers Stop while it does.
+    /// write, writes with the agent picked and the reader's guidance, and
+    /// offers Stop while it does.
     #[test]
     fn the_tab_asks_for_whats_kept_then_writes_and_can_stop() {
         let root = TestRoot::new();
@@ -906,13 +1066,29 @@ mod tests {
 
         apply(state, "item-7".into(), WalkthroughOutcome::Loaded(None));
         settle(&mut harness);
-        assert!(find(harness.root_id(), "Write with Claude").is_some());
+        assert!(named(harness.root_id(), "walkthrough-guidance").is_some());
+        assert!(named(harness.root_id(), "walkthrough-model").is_some());
 
+        // The model picked here and the guidance written go with it.
+        state.walkthrough_agent.set(Some((
+            perch_agent::Backend::Codex,
+            "gpt-5.5".into(),
+            perch_agent::Effort::High,
+        )));
+        state.walkthrough_guidance.update(|drafts| {
+            drafts.insert("item-7".into(), "Start from the cache.".into());
+        });
+        settle(&mut harness);
+        assert!(find(harness.root_id(), "Codex GPT 5.5").is_some());
         let write = named(harness.root_id(), "walkthrough-write").unwrap();
         click_on(&mut harness, write);
         assert!(commands_of(&mut commands).iter().any(|c| matches!(
             c,
-            Command::WriteWalkthrough { item_id, .. } if item_id == "item-7"
+            Command::WriteWalkthrough { item_id, backend, model, guidance, .. }
+                if item_id == "item-7"
+                    && *backend == perch_agent::Backend::Codex
+                    && model == "gpt-5.5"
+                    && guidance == "Start from the cache."
         )));
         assert!(find(harness.root_id(), "Writing the walkthrough").is_some());
         let stop = named(harness.root_id(), "walkthrough-stop").unwrap();
@@ -933,6 +1109,37 @@ mod tests {
             "couldn't be written: The agent wrote nothing"
         )
         .is_some());
+    }
+
+    /// A kept walkthrough brings back the guidance it was written with,
+    /// unless the reader has written some since.
+    #[test]
+    fn a_kept_walkthrough_fills_the_guidance_left_empty() {
+        let _root = TestRoot::new();
+        let state = ReviewState::new();
+        let kept = |guidance: &str| Walkthrough {
+            guidance: guidance.into(),
+            ..walkthrough("head-7")
+        };
+        apply(
+            state,
+            "a".into(),
+            WalkthroughOutcome::Loaded(Some(kept("Start from the cache."))),
+        );
+        state.walkthrough_guidance.update(|drafts| {
+            drafts.insert("b".into(), "Mine.".into());
+        });
+        apply(
+            state,
+            "b".into(),
+            WalkthroughOutcome::Written(kept("Start from the cache.")),
+        );
+        let drafts = state.walkthrough_guidance.get();
+        assert_eq!(
+            drafts.get("a").map(String::as_str),
+            Some("Start from the cache.")
+        );
+        assert_eq!(drafts.get("b").map(String::as_str), Some("Mine."));
     }
 
     /// Each step is drawn with its prose, the hunk's lines as the diff
@@ -989,7 +1196,7 @@ mod tests {
         assert!(find(harness.root_id(), "beta2").is_some());
         assert!(find(harness.root_id(), "delta").is_some());
         assert!(find(harness.root_id(), "lines 4\u{2013}4").is_some());
-        assert!(find(harness.root_id(), "Write again with Claude").is_some());
+        assert!(find(harness.root_id(), "Write again").is_some());
         // The diagram is drawn as a figure, in the column's width at most.
         let diagram = named(harness.root_id(), "walkthrough-diagram").unwrap();
         let figure = named(diagram, "figure").expect("drawn, not an error");
