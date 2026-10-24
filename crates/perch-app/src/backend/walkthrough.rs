@@ -197,6 +197,136 @@ pub(super) async fn load(ctx: &Ctx, item_id: &str) {
     send(ctx, item_id, WalkthroughOutcome::Loaded(kept));
 }
 
+/// Read each path at the walkthrough's own commits, as Code reads a file
+/// at the branch's, and send it. The walkthrough's line numbers are that
+/// range's, so its lines come from it, whatever scope Code is on and
+/// however far the branch has moved since.
+pub(super) async fn load_files(
+    ctx: &Ctx,
+    item_id: &str,
+    merge_base: &str,
+    head: &str,
+    paths: Vec<String>,
+) {
+    let answer = |path: String, file: Result<Arc<crate::review::model::LoadedFile>, String>| {
+        let _ = ctx.events.send(Event::WalkthroughFile {
+            item_id: item_id.to_string(),
+            merge_base: merge_base.to_string(),
+            head: head.to_string(),
+            path,
+            file,
+        });
+    };
+    let diff = match worktree_of(ctx, item_id) {
+        Some(worktree) => perch_git::RangeDiff::read(&worktree, merge_base, head)
+            .await
+            .map(|diff| (worktree, diff))
+            .map_err(|e| e.to_string()),
+        None => Err("The item has no checkout".to_string()),
+    };
+    let (worktree, diff) = match diff {
+        Ok(read) => read,
+        Err(e) => {
+            for path in paths {
+                answer(path, Err(e.clone()));
+            }
+            return;
+        }
+    };
+    for path in paths {
+        let file = file_at(ctx, &worktree, &diff, merge_base, head, &path).await;
+        answer(path, file.map(Arc::new));
+    }
+}
+
+/// Where the item's commits can be read: the open checkout, else the
+/// item's.
+fn worktree_of(ctx: &Ctx, item_id: &str) -> Option<PathBuf> {
+    let open = ctx.slot.lock().ok().and_then(|slot| {
+        slot.as_ref()
+            .filter(|open| open.item_id == item_id)
+            .map(|open| open.checkout.worktree.clone())
+    });
+    open.or_else(|| Some(ctx.item(item_id)?.checkout.as_ref()?.path.clone()))
+}
+
+/// One file over `merge_base..head`. A file the range changed is diffed
+/// as Code diffs it; one it left alone is the same at both ends and has
+/// no diff, and one only the base has, a rename's old name, is shown as
+/// it was.
+async fn file_at(
+    ctx: &Ctx,
+    worktree: &Path,
+    diff: &perch_git::RangeDiff,
+    merge_base: &str,
+    head: &str,
+    path: &str,
+) -> Result<crate::review::model::LoadedFile, String> {
+    let git = ctx.preparer.git();
+    let read = |rev: &str, path: &str| {
+        let rev = perch_git::Rev::Sha(rev.to_string());
+        let path = path.to_string();
+        async move {
+            perch_git::read_side(git, worktree, &rev, &path)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    };
+    let (head_text, base_text, status, binary, blob) = match diff.file(path) {
+        Some(file) if file.binary => (
+            String::new(),
+            String::new(),
+            Some(file.status),
+            true,
+            file.head_blob.clone().unwrap_or_default(),
+        ),
+        Some(file) => {
+            let head_text = match file.path_on(perch_git::DiffSide::Right) {
+                Some(path) => read(head, path).await?.unwrap_or_default(),
+                None => String::new(),
+            };
+            let base_text = match file.path_on(perch_git::DiffSide::Left) {
+                Some(path) => read(merge_base, path).await?.unwrap_or_default(),
+                None => String::new(),
+            };
+            (
+                head_text,
+                base_text,
+                Some(file.status),
+                false,
+                file.head_blob.clone().unwrap_or_default(),
+            )
+        }
+        None => {
+            let text = match read(head, path).await? {
+                Some(text) => text,
+                None => read(merge_base, path)
+                    .await?
+                    .ok_or_else(|| "file is not there".to_string())?,
+            };
+            (text, String::new(), None, false, String::new())
+        }
+    };
+    if head_text.len().max(base_text.len()) > super::MAX_FILE_BYTES {
+        return Err("file is too large to display".into());
+    }
+    let path = path.to_string();
+    // Its scope is the branch's: the merge base to a head, if not today's.
+    tokio::task::spawn_blocking(move || {
+        super::build_loaded_file(
+            path,
+            head_text,
+            base_text,
+            status,
+            binary,
+            perch_git::Scope::Branch,
+            blob,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// Have an agent write the item's walkthrough, check it, keep it, and
 /// send it.
 pub(super) async fn write(

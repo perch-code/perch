@@ -1664,6 +1664,9 @@ pub struct ReviewState {
     /// the one last asked here.
     pub walkthrough_guidance: RwSignal<HashMap<String, String>>,
     pub walkthrough_agent: RwSignal<Option<AgentChoice>>,
+    /// The files each item's walkthrough draws its lines from, read at
+    /// its own commits rather than Code's.
+    pub walkthrough_files: RwSignal<HashMap<String, crate::review::walkthrough::WalkthroughFiles>>,
     /// Close as issue under way, and what stopped the last.
     pub issue_closing: RwSignal<bool>,
     pub issue_error: RwSignal<Option<String>>,
@@ -2150,6 +2153,7 @@ impl ReviewState {
             walkthrough_errors: RwSignal::new(HashMap::new()),
             walkthrough_guidance: RwSignal::new(HashMap::new()),
             walkthrough_agent: RwSignal::new(None),
+            walkthrough_files: RwSignal::new(HashMap::new()),
             issue_closing: RwSignal::new(false),
             issue_error: RwSignal::new(None),
             issue_body_height: RwSignal::new(None),

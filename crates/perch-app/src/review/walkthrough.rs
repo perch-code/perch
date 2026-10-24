@@ -6,9 +6,11 @@
 //! card draws its lines, and the threads it names, which open on
 //! Conversation. All of it is Perch's own, so all of it is grey.
 //!
-//! A walkthrough written for an older head is shown without its lines,
-//! whose numbers were that head's, and says so.
+//! The lines are read at the commits the walkthrough was written for, not
+//! taken from Code, so they are its lines whatever Code shows. One written
+//! for an older head still shows them, as they were, and says so.
 
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -22,7 +24,7 @@ use perch_github::{Anchor, Author, CommentThread};
 use crate::backend::{Backend, CodeSide, Part, Step, Walkthrough, WalkthroughOutcome};
 use crate::review::cards::{self, perch_surface};
 use crate::review::doc::CardId;
-use crate::review::model::{AgentChoice, ItemTab, Paging, ReviewState};
+use crate::review::model::{AgentChoice, ItemTab, LoadedFile, Paging, ReviewState};
 use crate::review::OpenFile;
 use crate::state::AppState;
 use crate::theme;
@@ -164,17 +166,17 @@ pub fn view(
             }),
             head_card(app, state, backend, item, shown, stale),
             dyn_container(
-                move || (shown.get(), stale.get()),
-                move |(shown, stale)| match shown {
-                    Some(walkthrough) => steps(
+                move || shown.get(),
+                move |shown| match (shown, item.get_untracked()) {
+                    (Some(walkthrough), Some(item_id)) => steps(
                         state,
-                        steps_backend.clone(),
+                        &steps_backend,
                         open_file.clone(),
+                        item_id,
                         walkthrough,
-                        stale,
                     )
                     .into_any(),
-                    None => Empty::new().into_any(),
+                    _ => Empty::new().into_any(),
                 },
             )
             .style(|s| s.width_full()),
@@ -275,8 +277,8 @@ fn head_card(
                      checks that every hunk is in one."
                 .to_string(),
             Some(w) if stale.get() => format!(
-                "Written for {}, before the latest commits, so the code isn't shown. Write \
-                 it again to see the change as it is.",
+                "Written for {}, before the latest commits, and its code is as it was then. \
+                 Write it again to see the change as it is.",
                 crate::review::timeline::short_sha(&w.head)
             ),
             Some(_) => String::new(),
@@ -584,11 +586,12 @@ fn guidance_box(
 /// The steps, each its own card.
 fn steps(
     state: ReviewState,
-    backend: Rc<Backend>,
+    backend: &Backend,
     open_file: OpenFile,
+    item_id: String,
     walkthrough: Arc<Walkthrough>,
-    stale: bool,
 ) -> impl IntoView {
+    ask_files(state, backend, &item_id, &walkthrough);
     // The background first, unnumbered, then the steps from 1.
     let cards: Vec<(Option<usize>, Step)> = walkthrough
         .background
@@ -610,12 +613,11 @@ fn steps(
             let (number, step) = cards[i].clone();
             step_card(
                 state,
-                backend.clone(),
                 open_file.clone(),
+                item_id.clone(),
                 walkthrough.clone(),
                 step,
                 number,
-                stale,
             )
         },
     )
@@ -628,17 +630,84 @@ fn steps(
     })
 }
 
+/// Files an item's walkthrough draws its lines from, read at its commits.
+/// Another walkthrough of other commits starts them over.
+#[derive(Default)]
+pub struct WalkthroughFiles {
+    pub merge_base: String,
+    pub head: String,
+    /// Each path asked for, and the answer once there is one.
+    pub files: HashMap<String, Option<Result<Arc<LoadedFile>, String>>>,
+}
+
+/// Ask for the files the walkthrough's blocks show that haven't been
+/// asked for at its commits.
+fn ask_files(state: ReviewState, backend: &Backend, item_id: &str, walkthrough: &Walkthrough) {
+    let paths: BTreeSet<&str> = walkthrough
+        .background
+        .iter()
+        .chain(&walkthrough.steps)
+        .flat_map(|step| &step.body)
+        .filter_map(|part| match part {
+            Part::Hunk { id, .. } => walkthrough.hunk(id).map(|hunk| hunk.path.as_str()),
+            Part::Code(lines) => Some(lines.path.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut wanted = Vec::new();
+    state.walkthrough_files.update(|all| {
+        let pinned = all.entry(item_id.to_string()).or_default();
+        if pinned.merge_base != walkthrough.merge_base || pinned.head != walkthrough.head {
+            *pinned = WalkthroughFiles {
+                merge_base: walkthrough.merge_base.clone(),
+                head: walkthrough.head.clone(),
+                files: HashMap::new(),
+            };
+        }
+        for path in paths {
+            if !pinned.files.contains_key(path) {
+                pinned.files.insert(path.to_string(), None);
+                wanted.push(path.to_string());
+            }
+        }
+    });
+    if !wanted.is_empty() {
+        backend.load_walkthrough_files(item_id, &walkthrough.merge_base, &walkthrough.head, wanted);
+    }
+}
+
+/// A file read at a walkthrough's commits, kept if the item's walkthrough
+/// is still of them.
+pub fn file_read(
+    review: ReviewState,
+    item_id: String,
+    (merge_base, head): (String, String),
+    path: String,
+    file: Result<Arc<LoadedFile>, String>,
+) {
+    let wanted = review.walkthrough_files.with_untracked(|all| {
+        all.get(&item_id)
+            .is_some_and(|pinned| pinned.merge_base == merge_base && pinned.head == head)
+    });
+    if wanted {
+        review.walkthrough_files.update(|all| {
+            if let Some(pinned) = all.get_mut(&item_id) {
+                pinned.files.insert(path, Some(file));
+            }
+        });
+    }
+}
+
 /// A step: its number and title, then its body in order, prose with the
 /// lines and threads it is about where it set them. The background has
 /// no number, and says it is the background over its title.
 fn step_card(
     state: ReviewState,
-    backend: Rc<Backend>,
     open_file: OpenFile,
+    item_id: String,
     walkthrough: Arc<Walkthrough>,
     step: Step,
     number: Option<usize>,
-    stale: bool,
 ) -> impl IntoView {
     let title = step.title.clone();
     let eyebrow = Label::derived(|| "Background".to_string()).style(move |s| {
@@ -685,7 +754,7 @@ fn step_card(
                 end: end.unwrap_or(hunk.end),
                 context: false,
             };
-            Some(block_view(state, backend.clone(), open_file.clone(), block, stale).into_any())
+            Some(block_view(state, open_file.clone(), item_id.clone(), block).into_any())
         }
         Part::Code(lines) => {
             let block = Block {
@@ -695,7 +764,7 @@ fn step_card(
                 end: lines.end,
                 context: true,
             };
-            Some(block_view(state, backend.clone(), open_file.clone(), block, stale).into_any())
+            Some(block_view(state, open_file.clone(), item_id.clone(), block).into_any())
         }
         Part::Thread { id } => Some(thread_row(state, id.clone()).into_any()),
         Part::Diagram { source } => Some(crate::review::diagram::view(source.clone()).into_any()),
@@ -733,14 +802,12 @@ struct Block {
 
 /// A block: the file and lines over them, the file opening Code at the
 /// first line; then the lines, as the diff tints them, once the file is
-/// loaded at the branch's changes. Only the header for a stale
-/// walkthrough.
+/// read at the walkthrough's commits.
 fn block_view(
     state: ReviewState,
-    backend: Rc<Backend>,
     open_file: OpenFile,
+    item_id: String,
     block: Block,
-    stale: bool,
 ) -> impl IntoView {
     let path = block.path.clone();
     let line = block.start as usize;
@@ -787,29 +854,14 @@ fn block_view(
             .height(28.0)
             .padding_horiz(10.0)
     });
-    if stale {
-        return Stack::vertical((header,)).style(block_style).into_any();
-    }
-    // Asked for once there are files to ask of, as a thread's lines are.
-    {
-        let path = block.path.clone();
-        floem::reactive::Effect::new(move |asked: Option<bool>| {
-            if asked == Some(true) || state.files_pending.with(Option::is_some) {
-                return asked.unwrap_or(false);
-            }
-            if state.begin_load(&path) {
-                backend.open_file(&path);
-            }
-            true
-        });
-    }
-    let loaded = {
+    // Read at the walkthrough's own commits, whose lines these are.
+    let read = {
+        let item_id = item_id.clone();
         let path = block.path.clone();
         Memo::new(move |_| {
-            state.files.with(|files| {
-                files
-                    .get(&path)
-                    .map(|file| file.scope == perch_git::Scope::Branch)
+            state.walkthrough_files.with(|all| {
+                let read = all.get(&item_id)?.files.get(&path)?.as_ref()?;
+                Some(read.as_ref().map(|_| ()).map_err(Clone::clone))
             })
         })
     };
@@ -821,10 +873,13 @@ fn block_view(
         commit_sha: String::new(),
     };
     let lines = dyn_container(
-        move || loaded.get(),
-        move |loaded| match loaded {
-            Some(true) => {
-                let Some(file) = state.file(&anchor.path) else {
+        move || read.get(),
+        move |read| match read {
+            Some(Ok(())) => {
+                let file = state.walkthrough_files.with_untracked(|all| {
+                    all.get(&item_id)?.files.get(&anchor.path)?.clone()?.ok()
+                });
+                let Some(file) = file else {
                     return Empty::new().into_any();
                 };
                 // A file the change leaves alone has no base of its own
@@ -842,17 +897,14 @@ fn block_view(
                     .style(|s| s.flex_col().width_full())
                     .into_any()
             }
-            // Code shows another scope's diff, whose lines aren't these.
-            Some(false) => {
-                Label::derived(|| "Pick All changes on Code to see these lines here.".to_string())
-                    .style(|s| {
-                        s.font_size(theme::TEXT_BADGE)
-                            .color(theme::fg_subtle())
-                            .padding_horiz(10.0)
-                            .padding_vert(6.0)
-                    })
-                    .into_any()
-            }
+            Some(Err(e)) => Label::derived(move || format!("These lines couldn't be read: {e}."))
+                .style(|s| {
+                    s.font_size(theme::TEXT_BADGE)
+                        .color(theme::fg_subtle())
+                        .padding_horiz(10.0)
+                        .padding_vert(6.0)
+                })
+                .into_any(),
             None => Empty::new().into_any(),
         },
     )
@@ -1072,7 +1124,9 @@ mod tests {
         }
     }
 
-    fn loaded_x(state: ReviewState) {
+    /// src/x.rs, which the change modifies, and src/y.rs, which it leaves
+    /// alone.
+    fn files() -> (Arc<LoadedFile>, Arc<LoadedFile>) {
         let file = crate::backend::build_loaded_file(
             "src/x.rs".into(),
             "alpha\nbeta2\ngamma\ndelta\n".into(),
@@ -1092,9 +1146,24 @@ mod tests {
             perch_git::Scope::Branch,
             String::new(),
         );
-        state.files.update(|files| {
-            files.insert("src/x.rs".into(), Arc::new(file));
-            files.insert("src/y.rs".into(), Arc::new(untouched));
+        (Arc::new(file), Arc::new(untouched))
+    }
+
+    /// The files a walkthrough of `head` draws from, read at its commits.
+    fn read_at(state: ReviewState, head: &str) {
+        let (x, y) = files();
+        state.walkthrough_files.update(|all| {
+            all.insert(
+                "item-7".into(),
+                WalkthroughFiles {
+                    merge_base: "base-7".into(),
+                    head: head.into(),
+                    files: HashMap::from([
+                        ("src/x.rs".to_string(), Some(Ok(x))),
+                        ("src/y.rs".to_string(), Some(Ok(y))),
+                    ]),
+                },
+            );
         });
     }
 
@@ -1236,7 +1305,7 @@ mod tests {
         let root = TestRoot::new();
         let app = AppState::new();
         let state = state_on_branch();
-        loaded_x(state);
+        read_at(state, "head-7");
         state.comment_threads.set(Arc::new(vec![thread_on_x()]));
         state.tab.set(ItemTab::Walkthrough);
         let (backend, _commands) = Backend::recording();
@@ -1303,14 +1372,14 @@ mod tests {
         );
     }
 
-    /// One written for another head says so and draws no lines, whose
-    /// numbers were that head's.
+    /// One written for another head says so, and draws its lines as they
+    /// were at that head.
     #[test]
-    fn a_walkthrough_of_an_older_head_shows_no_lines() {
+    fn a_walkthrough_of_an_older_head_shows_its_lines_as_they_were() {
         let root = TestRoot::new();
         let app = AppState::new();
         let state = state_on_branch();
-        loaded_x(state);
+        read_at(state, "old-head");
         let (backend, _commands) = Backend::recording();
         let view = view(app, state, Rc::new(backend), Rc::new(|_: &str| {}));
         let mut harness = HeadlessHarness::new_with_size(root, view, 1000.0, 1400.0);
@@ -1322,10 +1391,87 @@ mod tests {
         settle(&mut harness);
 
         assert!(find(harness.root_id(), "Written for old-hea").is_some());
+        assert!(find(harness.root_id(), "code is as it was then").is_some());
         assert!(find(harness.root_id(), "Stores each request").is_some());
         assert!(find(harness.root_id(), "Parse the request").is_some());
-        assert!(find(harness.root_id(), "src/x.rs").is_some());
+        assert!(find(harness.root_id(), "beta2").is_some());
+        assert!(find(harness.root_id(), "delta").is_some());
+    }
+
+    /// Blocks ask for their files at the walkthrough's commits, once, and
+    /// draw them as they come, not what Code has loaded. An answer for
+    /// other commits is dropped, and one that failed says why.
+    #[test]
+    fn blocks_read_their_files_at_the_walkthroughs_commits() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_on_branch();
+        let (x, _) = files();
+        state.files.update(|files| {
+            files.insert("src/x.rs".into(), x.clone());
+        });
+        let (backend, mut commands) = Backend::recording();
+        let view = view(app, state, Rc::new(backend), Rc::new(|_: &str| {}));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1000.0, 1400.0);
+        apply(
+            state,
+            "item-7".into(),
+            WalkthroughOutcome::Written(walkthrough("head-7")),
+        );
+        settle(&mut harness);
+
+        let asked: Vec<_> = commands_of(&mut commands)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::LoadWalkthroughFiles {
+                    item_id,
+                    merge_base,
+                    head,
+                    paths,
+                } => Some((item_id, merge_base, head, paths)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            asked,
+            vec![(
+                "item-7".to_string(),
+                "base-7".to_string(),
+                "head-7".to_string(),
+                vec!["src/x.rs".to_string(), "src/y.rs".to_string()]
+            )]
+        );
         assert!(find(harness.root_id(), "beta2").is_none());
-        assert!(find(harness.root_id(), "delta").is_none());
+
+        file_read(
+            state,
+            "item-7".into(),
+            ("base-7".into(), "old-head".into()),
+            "src/x.rs".into(),
+            Ok(x.clone()),
+        );
+        settle(&mut harness);
+        assert!(find(harness.root_id(), "beta2").is_none());
+
+        file_read(
+            state,
+            "item-7".into(),
+            ("base-7".into(), "head-7".into()),
+            "src/x.rs".into(),
+            Ok(x),
+        );
+        file_read(
+            state,
+            "item-7".into(),
+            ("base-7".into(), "head-7".into()),
+            "src/y.rs".into(),
+            Err("file is not there".into()),
+        );
+        settle(&mut harness);
+        assert!(find(harness.root_id(), "beta2").is_some());
+        assert!(find(harness.root_id(), "couldn't be read: file is not there").is_some());
+        assert!(commands_of(&mut commands)
+            .iter()
+            .all(|c| !matches!(c, Command::LoadWalkthroughFiles { .. })));
     }
 }

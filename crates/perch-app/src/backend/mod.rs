@@ -245,6 +245,14 @@ pub enum Command {
     StopWalkthrough {
         item_id: String,
     },
+    /// Read files at a walkthrough's own commits, whatever Code shows.
+    /// `WalkthroughFile` answers, one to a path.
+    LoadWalkthroughFiles {
+        item_id: String,
+        merge_base: String,
+        head: String,
+        paths: Vec<String>,
+    },
     /// Submit a final review of the exact pull request head the reader saw,
     /// with the drafts in the cache: the backend reads them itself, so a
     /// stale view cannot post one the reader deleted.
@@ -1161,6 +1169,14 @@ pub enum Event {
     Walkthrough {
         item_id: String,
         outcome: WalkthroughOutcome,
+    },
+    /// A file read at a walkthrough's commits, or why it couldn't be.
+    WalkthroughFile {
+        item_id: String,
+        merge_base: String,
+        head: String,
+        path: String,
+        file: Result<Arc<crate::review::model::LoadedFile>, String>,
     },
     /// The branches `repo` can start new work from, the base first, or why
     /// they could not be listed.
@@ -2933,6 +2949,21 @@ impl Backend {
         });
     }
 
+    pub fn load_walkthrough_files(
+        &self,
+        item_id: &str,
+        merge_base: &str,
+        head: &str,
+        paths: Vec<String>,
+    ) {
+        let _ = self.commands.send(Command::LoadWalkthroughFiles {
+            item_id: item_id.to_string(),
+            merge_base: merge_base.to_string(),
+            head: head.to_string(),
+            paths,
+        });
+    }
+
     pub fn prepare_feedback(&self, request: crate::feedback::PrepareRequest) {
         let _ = self
             .commands
@@ -4586,6 +4617,17 @@ async fn run(
                 });
             }
             Command::StopWalkthrough { item_id } => walkthrough::stop(&item_id),
+            Command::LoadWalkthroughFiles {
+                item_id,
+                merge_base,
+                head,
+                paths,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    walkthrough::load_files(&ctx, &item_id, &merge_base, &head, paths).await
+                });
+            }
             Command::SubmitPullRequestReview {
                 attempt_id,
                 item_id,
@@ -30434,6 +30476,49 @@ read eof || true
                 end: None
             }]
         );
+    }
+
+    /// A walkthrough's files are read at its own commits: a commit since
+    /// doesn't show, a file the range left alone has no diff, and a path
+    /// neither end has says so.
+    #[tokio::test]
+    async fn walkthrough_files_are_read_at_its_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let (item, worktree, _remote) = pushable_branch(&ctx, dir.path());
+        let head = git(&worktree, &["rev-parse", "HEAD"]);
+        let merge_base = git(&worktree, &["merge-base", "main", "HEAD"]);
+        std::fs::write(worktree.join("two.txt"), "two\nthree\n").unwrap();
+        git(&worktree, &["commit", "-q", "-am", "three"]);
+
+        walkthrough::load_files(
+            &ctx,
+            &item.id,
+            &merge_base,
+            &head,
+            vec!["two.txt".into(), "one.txt".into(), "gone.txt".into()],
+        )
+        .await;
+
+        let read: std::collections::HashMap<_, _> = received
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::WalkthroughFile {
+                    path,
+                    file,
+                    head: read_head,
+                    ..
+                } if read_head == head => Some((path, file)),
+                _ => None,
+            })
+            .collect();
+        let two = read["two.txt"].as_ref().unwrap();
+        assert_eq!(two.buffer.text, "two\n");
+        assert_eq!(two.status, Some(perch_git::ChangeStatus::Added));
+        let one = read["one.txt"].as_ref().unwrap();
+        assert_eq!(one.buffer.text, "one\n");
+        assert_eq!(one.status, None);
+        assert_eq!(read["gone.txt"].as_ref().unwrap_err(), "file is not there");
     }
 
     #[tokio::test]

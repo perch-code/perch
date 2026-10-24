@@ -2941,6 +2941,21 @@ impl AppState {
             Event::Walkthrough { item_id, outcome } => {
                 crate::review::walkthrough::apply(review, item_id, outcome);
             }
+            Event::WalkthroughFile {
+                item_id,
+                merge_base,
+                head,
+                path,
+                file,
+            } => {
+                crate::review::walkthrough::file_read(
+                    review,
+                    item_id,
+                    (merge_base, head),
+                    path,
+                    file,
+                );
+            }
             other => self.apply(other),
         }
     }
@@ -3022,7 +3037,7 @@ impl AppState {
             }
             Event::PullRequestDescription { .. } => {}
             // The window that asked draws it.
-            Event::Walkthrough { .. } => {}
+            Event::Walkthrough { .. } | Event::WalkthroughFile { .. } => {}
             // The issue is open, so what was typed for it is spent.
             Event::ClosedAsIssue {
                 item_id,
