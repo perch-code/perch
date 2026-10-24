@@ -104,7 +104,7 @@ fn write(app: AppState, state: ReviewState, backend: &Backend) {
         .unwrap_or_default();
     state.agent_last.set(Some(choice.clone()));
     state.walkthroughs_writing.update(|writing| {
-        writing.insert(item_id.clone());
+        writing.insert(item_id.clone(), jiff::Timestamp::now());
     });
     state.walkthrough_errors.update(|errors| {
         errors.remove(&item_id);
@@ -249,13 +249,13 @@ fn head_card(
     shown: Memo<Option<Arc<Walkthrough>>>,
     stale: Memo<bool>,
 ) -> impl IntoView {
-    let writing = Memo::new(move |_| {
-        item.get().is_some_and(|id| {
-            state
-                .walkthroughs_writing
-                .with(|writing| writing.contains(&id))
-        })
+    let started = Memo::new(move |_| {
+        let id = item.get()?;
+        state
+            .walkthroughs_writing
+            .with(|writing| writing.get(&id).copied())
     });
+    let writing = Memo::new(move |_| started.get().is_some());
     let error = Memo::new(move |_| {
         let id = item.get()?;
         state
@@ -264,9 +264,7 @@ fn head_card(
     });
     let words = move || {
         if writing.get() {
-            return "Writing the walkthrough. It takes a few minutes, and goes on while you \
-                    look elsewhere."
-                .to_string();
+            return String::new();
         }
         if let Some(error) = error.get() {
             return format!("The walkthrough couldn't be written: {error}");
@@ -308,7 +306,14 @@ fn head_card(
                 .apply_if(words().is_empty(), |s| s.hide())
         }),
     ))
-    .style(|s| s.flex_col().gap(8.0).width_full());
+    .style(move |s| {
+        s.flex_col()
+            .gap(8.0)
+            .width_full()
+            .apply_if(summary.with(Option::is_none) && words().is_empty(), |s| {
+                s.hide()
+            })
+    });
     let write_backend = backend.clone();
     let stop_backend = backend.clone();
     let controls = Stack::horizontal((
@@ -328,28 +333,19 @@ fn head_card(
             || true,
             move || write(app, state, &write_backend),
         )
-        .style(move |s| s.flex_shrink(0.0_f32).apply_if(writing.get(), |s| s.hide())),
-        action_button(
-            || "Stop".to_string(),
-            "walkthrough-stop",
-            false,
-            || true,
-            move || {
-                if let Some(id) = item.get_untracked() {
-                    stop_backend.stop_walkthrough(&id);
-                }
-            },
-        )
-        .style(move |s| {
-            s.flex_shrink(0.0_f32)
-                .apply_if(!writing.get(), |s| s.hide())
-        }),
+        .style(|s| s.flex_shrink(0.0_f32)),
     ))
-    .style(|s| s.items_center().width_full().gap(6.0));
+    .style(move |s| {
+        s.items_center()
+            .width_full()
+            .gap(6.0)
+            .apply_if(writing.get(), |s| s.hide())
+    });
     Stack::vertical((
         text,
         guidance_box(app, state, backend, item, writing),
         controls,
+        writing_bar(item, started, stop_backend),
     ))
     .debug_name("walkthrough-head")
     .style(|s| {
@@ -359,6 +355,96 @@ fn head_card(
             .gap(12.0)
             .padding(theme::CARD_PADDING)
     })
+}
+
+/// While one is written: a spinner, how long it has gone, and Stop, on
+/// one line, as a running thread's header has them.
+fn writing_bar(
+    item: Memo<Option<String>>,
+    started: Memo<Option<jiff::Timestamp>>,
+    backend: Rc<Backend>,
+) -> impl IntoView {
+    let now = RwSignal::new(jiff::Timestamp::now());
+    let elapsed = Label::derived(move || {
+        let Some(started) = started.get() else {
+            return String::new();
+        };
+        let ms = now.get().duration_since(started).as_millis().max(0);
+        format!(
+            "\u{00b7} {}",
+            crate::review::threads::worked_for(u64::try_from(ms).unwrap_or(0))
+        )
+    })
+    .debug_name("walkthrough-elapsed")
+    .style(|s| {
+        s.font_size(theme::TEXT_BODY)
+            .color(theme::fg_subtle())
+            .margin_left(6.0)
+            .selectable(false)
+            .flex_shrink(0.0_f32)
+    });
+    // A clock of its own, ticking while one is written and the bar is up.
+    let clock = elapsed.id();
+    let ticking = Rc::new(std::cell::Cell::new(false));
+    floem::reactive::Effect::new(move |_| {
+        if started.get().is_some() && !ticking.replace(true) {
+            now.set(jiff::Timestamp::now());
+            tick(clock, now, started, ticking.clone());
+        }
+    });
+    let row = Stack::horizontal((
+        crate::review::run_view::spinner(theme::fg_muted)
+            .style(|s| s.size(14.0, 14.0).flex_shrink(0.0_f32).margin_right(10.0)),
+        Label::derived(|| "Writing the walkthrough".to_string()).style(|s| {
+            s.font_size(theme::TEXT_BODY)
+                .color(theme::fg())
+                .selectable(false)
+                .flex_shrink(0.0_f32)
+        }),
+        elapsed,
+        Label::derived(|| "\u{00b7} it goes on while you look elsewhere".to_string()).style(|s| {
+            s.font_size(theme::TEXT_BODY)
+                .color(theme::fg_subtle())
+                .margin_left(6.0)
+                .selectable(false)
+                .text_ellipsis()
+                .min_width(0.0)
+        }),
+        Empty::new().style(|s| s.flex_grow(1.0_f32).min_width(8.0)),
+        action_button(
+            || "Stop".to_string(),
+            "walkthrough-stop",
+            false,
+            || true,
+            move || {
+                if let Some(id) = item.get_untracked() {
+                    backend.stop_walkthrough(&id);
+                }
+            },
+        )
+        .style(|s| s.flex_shrink(0.0_f32)),
+    ));
+    row.debug_name("walkthrough-writing").style(move |s| {
+        s.items_center()
+            .width_full()
+            .apply_if(started.get().is_none(), |s| s.hide())
+    })
+}
+
+fn tick(
+    clock: floem::ViewId,
+    now: RwSignal<jiff::Timestamp>,
+    started: Memo<Option<jiff::Timestamp>>,
+    ticking: Rc<std::cell::Cell<bool>>,
+) {
+    floem::action::exec_after(std::time::Duration::from_secs(1), move |_| {
+        if clock.is_valid() && started.get_untracked().is_some() {
+            now.set(jiff::Timestamp::now());
+            tick(clock, now, started, ticking);
+        } else {
+            ticking.set(false);
+        }
+    });
 }
 
 /// The model to write with, Claude's then Codex's, as the composer lists

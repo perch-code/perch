@@ -1653,11 +1653,11 @@ pub struct ReviewState {
     pub description_error: RwSignal<Option<String>>,
     pub description_offer: RwSignal<Option<(String, String)>>,
     /// Walkthroughs by item: the one kept for each item asked about,
-    /// `None` when it has none, the items one is being written for, and
-    /// what stopped the last for each. By item and not reset with it, as a
+    /// `None` when it has none, the items one is being written for and
+    /// since when, and what stopped the last for each. By item and not reset with it, as a
     /// walkthrough takes minutes and the reader may look elsewhere.
     pub walkthroughs: RwSignal<HashMap<String, Option<Arc<crate::backend::Walkthrough>>>>,
-    pub walkthroughs_writing: RwSignal<HashSet<String>>,
+    pub walkthroughs_writing: RwSignal<HashMap<String, jiff::Timestamp>>,
     pub walkthrough_errors: RwSignal<HashMap<String, String>>,
     /// What the reader has written to steer each item's next walkthrough,
     /// and the agent picked for walkthroughs, `None` until one is: then
@@ -2146,7 +2146,7 @@ impl ReviewState {
             description_error: RwSignal::new(None),
             description_offer: RwSignal::new(None),
             walkthroughs: RwSignal::new(HashMap::new()),
-            walkthroughs_writing: RwSignal::new(HashSet::new()),
+            walkthroughs_writing: RwSignal::new(HashMap::new()),
             walkthrough_errors: RwSignal::new(HashMap::new()),
             walkthrough_guidance: RwSignal::new(HashMap::new()),
             walkthrough_agent: RwSignal::new(None),
