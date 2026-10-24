@@ -181,19 +181,19 @@ pub fn doing_now(run: &RunRecord) -> (String, String, bool) {
         RunStatus::Queued => word("Queued"),
         RunStatus::Starting => word("Starting"),
         RunStatus::Stopping => word("Stopping"),
-        _ => match run
-            .steps
-            .iter()
-            .rev()
-            .find(|s| s.pending && !s.note && !s.user)
-        {
-            Some(step) => {
-                let line = step_line(&step.summary);
-                (line.doing, line.arg, is_code(line.kind))
-            }
-            None => word("Thinking"),
-        },
+        _ => doing_step(&run.steps).unwrap_or_else(|| word("Thinking")),
     }
+}
+
+/// The call the agent is waiting on, the latest first, as `doing_now`
+/// words it.
+pub fn doing_step(steps: &[RunStep]) -> Option<(String, String, bool)> {
+    let step = steps
+        .iter()
+        .rev()
+        .find(|s| s.pending && !s.note && !s.user)?;
+    let line = step_line(&step.summary);
+    Some((line.doing, line.arg, is_code(line.kind)))
 }
 
 /// How long a run has gone, from when it started, or from when it was
@@ -353,28 +353,7 @@ pub fn run_header(app: AppState, backend: Rc<Backend>, live: Memo<RunRecord>) ->
         },
     );
     let row = Stack::horizontal((
-        spinner(theme::fg_muted)
-            .style(|s| s.size(12.0, 12.0).flex_shrink(0.0_f32).margin_right(8.0)),
-        Label::derived(move || doing.get().0).style(|s| {
-            s.font_size(theme::TEXT_META)
-                .color(theme::fg())
-                .selectable(false)
-                .flex_shrink(0.0_f32)
-        }),
-        Label::derived(move || doing.get().1).style(move |s| {
-            let (_, arg, code) = doing.get();
-            s.font_size(if code {
-                theme::TEXT_BADGE
-            } else {
-                theme::TEXT_META
-            })
-            .apply_if(code, |s| s.font_family(theme::CODE_FONT_STACK.to_string()))
-            .color(theme::fg_muted())
-            .margin_left(5.0)
-            .text_ellipsis()
-            .min_width(0.0)
-            .apply_if(arg.is_empty(), |s| s.hide())
-        }),
+        doing_row(doing),
         Label::derived(move || {
             let now = app.now.get();
             format!("\u{00b7} {}", live.with(|run| elapsed(run, now)))
@@ -406,6 +385,36 @@ pub fn run_header(app: AppState, backend: Rc<Backend>, live: Memo<RunRecord>) ->
     .debug_name("run-header")
     .style(|s| s.items_center().width_full().height(28.0));
     cards::track_hover(row, hovered)
+}
+
+/// A spinner, then what the agent is doing and what to, as `doing_now`
+/// words it, the start of a running run's line.
+pub fn doing_row(doing: Memo<(String, String, bool)>) -> impl IntoView {
+    Stack::horizontal((
+        spinner(theme::fg_muted)
+            .style(|s| s.size(12.0, 12.0).flex_shrink(0.0_f32).margin_right(8.0)),
+        Label::derived(move || doing.get().0).style(|s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::fg())
+                .selectable(false)
+                .flex_shrink(0.0_f32)
+        }),
+        Label::derived(move || doing.get().1).style(move |s| {
+            let (_, arg, code) = doing.get();
+            s.font_size(if code {
+                theme::TEXT_BADGE
+            } else {
+                theme::TEXT_META
+            })
+            .apply_if(code, |s| s.font_family(theme::CODE_FONT_STACK.to_string()))
+            .color(theme::fg_muted())
+            .margin_left(5.0)
+            .text_ellipsis()
+            .min_width(0.0)
+            .apply_if(arg.is_empty(), |s| s.hide())
+        }),
+    ))
+    .style(|s| s.items_center().min_width(0.0))
 }
 
 // ---------------------------------------------------------------------

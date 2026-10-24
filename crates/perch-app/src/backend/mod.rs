@@ -1170,6 +1170,12 @@ pub enum Event {
         item_id: String,
         outcome: WalkthroughOutcome,
     },
+    /// What the agent writing the item's walkthrough has done so far, as
+    /// a run's steps, sent again with each thing it does.
+    WalkthroughProgress {
+        item_id: String,
+        steps: Vec<perch_github::RunStep>,
+    },
     /// A file read at a walkthrough's commits, or why it couldn't be.
     WalkthroughFile {
         item_id: String,

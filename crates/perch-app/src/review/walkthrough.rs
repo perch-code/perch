@@ -39,6 +39,9 @@ pub fn apply(review: ReviewState, item_id: String, outcome: WalkthroughOutcome) 
         review.walkthroughs_writing.update(|writing| {
             writing.remove(item_id);
         });
+        review.walkthrough_steps.update(|steps| {
+            steps.remove(item_id);
+        });
     };
     // The guidance a kept walkthrough was written with fills the box,
     // unless the reader has written there already.
@@ -80,6 +83,19 @@ pub fn apply(review: ReviewState, item_id: String, outcome: WalkthroughOutcome) 
     }
 }
 
+/// What the agent writing the item's walkthrough has done so far. Steps
+/// that come after it is done are of a run already over.
+pub fn progress(review: ReviewState, item_id: String, steps: Vec<perch_github::RunStep>) {
+    if review
+        .walkthroughs_writing
+        .with_untracked(|writing| writing.contains_key(&item_id))
+    {
+        review.walkthrough_steps.update(|all| {
+            all.insert(item_id, steps);
+        });
+    }
+}
+
 /// The agent a walkthrough is written with: the one picked here, else
 /// the one last asked anywhere, else config's.
 fn choice(app: AppState, state: ReviewState) -> AgentChoice {
@@ -107,6 +123,9 @@ fn write(app: AppState, state: ReviewState, backend: &Backend) {
     state.agent_last.set(Some(choice.clone()));
     state.walkthroughs_writing.update(|writing| {
         writing.insert(item_id.clone(), jiff::Timestamp::now());
+    });
+    state.walkthrough_steps.update(|steps| {
+        steps.remove(&item_id);
     });
     state.walkthrough_errors.update(|errors| {
         errors.remove(&item_id);
@@ -347,7 +366,7 @@ fn head_card(
         text,
         guidance_box(app, state, backend, item, writing),
         controls,
-        writing_bar(item, started, stop_backend),
+        writing_bar(state, item, started, stop_backend),
     ))
     .debug_name("walkthrough-head")
     .style(|s| {
@@ -359,13 +378,27 @@ fn head_card(
     })
 }
 
-/// While one is written: a spinner, how long it has gone, and Stop, on
-/// one line, as a running thread's header has them.
+/// While one is written: what the agent is doing, how long it has gone,
+/// and Stop, over the steps it has taken, as a running thread has them.
 fn writing_bar(
+    state: ReviewState,
     item: Memo<Option<String>>,
     started: Memo<Option<jiff::Timestamp>>,
     backend: Rc<Backend>,
 ) -> impl IntoView {
+    use crate::review::run_view::{doing_row, doing_step, timeline};
+
+    let steps = Memo::new(move |_| {
+        let id = item.get()?;
+        state
+            .walkthrough_steps
+            .with(|steps| steps.get(&id).cloned())
+    });
+    let doing = Memo::new(move |_| {
+        steps
+            .with(|steps| steps.as_deref().and_then(doing_step))
+            .unwrap_or_else(|| ("Writing the walkthrough".to_string(), String::new(), false))
+    });
     let now = RwSignal::new(jiff::Timestamp::now());
     let elapsed = Label::derived(move || {
         let Some(started) = started.get() else {
@@ -379,7 +412,7 @@ fn writing_bar(
     })
     .debug_name("walkthrough-elapsed")
     .style(|s| {
-        s.font_size(theme::TEXT_BODY)
+        s.font_size(theme::TEXT_BADGE)
             .color(theme::fg_subtle())
             .margin_left(6.0)
             .selectable(false)
@@ -394,41 +427,35 @@ fn writing_bar(
             tick(clock, now, started, ticking.clone());
         }
     });
-    let row = Stack::horizontal((
-        crate::review::run_view::spinner(theme::fg_muted)
-            .style(|s| s.size(14.0, 14.0).flex_shrink(0.0_f32).margin_right(10.0)),
-        Label::derived(|| "Writing the walkthrough".to_string()).style(|s| {
-            s.font_size(theme::TEXT_BODY)
-                .color(theme::fg())
-                .selectable(false)
-                .flex_shrink(0.0_f32)
-        }),
-        elapsed,
-        Label::derived(|| "\u{00b7} it goes on while you look elsewhere".to_string()).style(|s| {
-            s.font_size(theme::TEXT_BODY)
-                .color(theme::fg_subtle())
-                .margin_left(6.0)
-                .selectable(false)
-                .text_ellipsis()
-                .min_width(0.0)
-        }),
-        Empty::new().style(|s| s.flex_grow(1.0_f32).min_width(8.0)),
-        action_button(
-            || "Stop".to_string(),
-            "walkthrough-stop",
-            false,
-            || true,
+    let stop = cards::tip(
+        crate::ui::widgets::icon_button(
+            || crate::icons::SidebarIcon::Stop,
+            theme::fg_muted,
             move || {
                 if let Some(id) = item.get_untracked() {
                     backend.stop_walkthrough(&id);
                 }
             },
         )
-        .style(|s| s.flex_shrink(0.0_f32)),
-    ));
-    row.debug_name("walkthrough-writing").style(move |s| {
-        s.items_center()
+        .debug_name("walkthrough-stop"),
+        "Stop".to_string(),
+    );
+    let header = Stack::horizontal((
+        doing_row(doing),
+        elapsed,
+        Empty::new().style(|s| s.flex_grow(1.0_f32).min_width(8.0)),
+        Container::new(stop).style(|s| s.flex_shrink(0.0_f32)),
+    ))
+    .style(|s| s.items_center().width_full().height(28.0));
+    Stack::vertical((
+        header,
+        timeline(state, move || steps.get().unwrap_or_default(), || true),
+    ))
+    .debug_name("walkthrough-writing")
+    .style(move |s| {
+        s.flex_col()
             .width_full()
+            .gap(4.0)
             .apply_if(started.get().is_none(), |s| s.hide())
     })
 }
@@ -1246,6 +1273,22 @@ mod tests {
                     && guidance == "Start from the cache."
         )));
         assert!(find(harness.root_id(), "Writing the walkthrough").is_some());
+        // What the agent does shows as it goes, the call it waits on
+        // first.
+        progress(
+            state,
+            "item-7".into(),
+            vec![perch_github::RunStep {
+                summary: "Read src/cache.rs".into(),
+                ok: true,
+                note: false,
+                pending: true,
+                user: false,
+            }],
+        );
+        settle(&mut harness);
+        assert!(find(harness.root_id(), "src/cache.rs").is_some());
+        assert!(find(harness.root_id(), "Writing the walkthrough").is_none());
         let stop = named(harness.root_id(), "walkthrough-stop").unwrap();
         click_on(&mut harness, stop);
         assert!(commands_of(&mut commands)
@@ -1253,6 +1296,9 @@ mod tests {
             .any(|c| matches!(c, Command::StopWalkthrough { item_id } if item_id == "item-7")));
 
         apply(state, "item-7".into(), WalkthroughOutcome::Stopped);
+        assert!(state
+            .walkthrough_steps
+            .with_untracked(std::collections::HashMap::is_empty));
         apply(
             state,
             "item-7".into(),

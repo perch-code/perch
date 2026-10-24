@@ -2956,6 +2956,9 @@ impl AppState {
                     file,
                 );
             }
+            Event::WalkthroughProgress { item_id, steps } => {
+                crate::review::walkthrough::progress(review, item_id, steps);
+            }
             other => self.apply(other),
         }
     }
@@ -3037,7 +3040,9 @@ impl AppState {
             }
             Event::PullRequestDescription { .. } => {}
             // The window that asked draws it.
-            Event::Walkthrough { .. } | Event::WalkthroughFile { .. } => {}
+            Event::Walkthrough { .. }
+            | Event::WalkthroughProgress { .. }
+            | Event::WalkthroughFile { .. } => {}
             // The issue is open, so what was typed for it is spent.
             Event::ClosedAsIssue {
                 item_id,

@@ -14,7 +14,8 @@
 //! are dropped, and lines are cut to the file they name.
 //!
 //! The run is Ask's: it reads the worktree and changes nothing, and like
-//! Write with Claude it is not a run Perch records. What it wrote is kept
+//! Write with Claude it is not a run Perch records. What it does as it
+//! goes is sent as a run's steps, for the tab to show while it writes. What it wrote is kept
 //! under Perch's data root by item and head, and nowhere else. One written
 //! for an older head is still shown, marked as such, until another is.
 
@@ -23,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
-use perch_github::{Author, CommentThread};
+use perch_github::{Author, CommentThread, RunStep};
 use serde::{Deserialize, Serialize};
 
 use super::{Ctx, Event};
@@ -362,6 +363,103 @@ pub(super) async fn write(
     send(ctx, item_id, outcome);
 }
 
+/// What the agent has done across the runs of one walkthrough, folded as
+/// a recorded run folds its events into steps.
+#[derive(Default)]
+struct Progress {
+    steps: Vec<RunStep>,
+    /// Calls not yet answered, by id, to the step each is.
+    open: HashMap<String, usize>,
+}
+
+impl Progress {
+    /// Fold one event in; whether the steps changed.
+    fn fold(&mut self, event: &perch_agent::RunEvent) -> bool {
+        use perch_agent::RunEvent;
+        let step = |summary: String, ok: bool, note: bool, pending: bool| RunStep {
+            summary,
+            ok,
+            note,
+            pending,
+            user: false,
+        };
+        match event {
+            // The answer itself is JSON, not something to show as it is.
+            RunEvent::Text(text) => {
+                let text = text.trim();
+                if text.is_empty() || is_answer(text) {
+                    return false;
+                }
+                self.steps.push(step(text.to_string(), true, true, false));
+            }
+            RunEvent::ToolCall {
+                id,
+                summary,
+                parent_id,
+                ..
+            } => {
+                let summary = match parent_id {
+                    Some(_) => format!("\u{21b3} {summary}"),
+                    None => summary.clone(),
+                };
+                self.open.insert(id.clone(), self.steps.len());
+                self.steps.push(step(summary, true, false, true));
+            }
+            RunEvent::ToolResult { id, ok, summary } => {
+                let Some(step) = self.open.remove(id).and_then(|i| self.steps.get_mut(i)) else {
+                    return false;
+                };
+                step.ok = *ok;
+                step.pending = false;
+                if !ok && !summary.is_empty() {
+                    step.summary = format!("{}: {summary}", step.summary);
+                }
+            }
+            RunEvent::PermissionDenied { tool, message } => {
+                let summary = match tool {
+                    Some(tool) => format!("{tool}: {message}"),
+                    None => message.clone(),
+                };
+                self.steps.push(step(summary, false, false, false));
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Calls a run left unanswered as it ended are over too.
+    fn close(&mut self) {
+        for i in self.open.drain().map(|(_, i)| i) {
+            if let Some(step) = self.steps.get_mut(i) {
+                step.pending = false;
+            }
+        }
+    }
+}
+
+/// Whether what the agent said is its answer, or the start of it.
+fn is_answer(text: &str) -> bool {
+    text.starts_with('{') || text.starts_with("```") || parse_answer(text).is_some()
+}
+
+/// Change the progress, and send the steps if they changed.
+fn fold(
+    ctx: &Ctx,
+    item_id: &str,
+    progress: &Mutex<Progress>,
+    change: impl FnOnce(&mut Progress) -> bool,
+) {
+    let Ok(mut progress) = progress.lock() else {
+        return;
+    };
+    if change(&mut progress) {
+        let _ = ctx.events.send(Event::WalkthroughProgress {
+            item_id: item_id.to_string(),
+            steps: progress.steps.clone(),
+        });
+    }
+}
+
 fn send(ctx: &Ctx, item_id: &str, outcome: WalkthroughOutcome) {
     let _ = ctx.events.send(Event::Walkthrough {
         item_id: item_id.to_string(),
@@ -401,8 +499,10 @@ async fn write_inner(
         Err(message) => return WalkthroughOutcome::Failed(message),
     };
     let thread_ids: HashSet<String> = threads.iter().map(|t| t.id.clone()).collect();
+    let progress = Mutex::new(Progress::default());
     let run = |prompt: crate::ask::Prompt, resume: Option<String>| {
         let worktree = range.worktree.clone();
+        let progress = &progress;
         async move {
             run_once(
                 ctx,
@@ -411,6 +511,7 @@ async fn write_inner(
                 &prompt,
                 resume,
                 (backend, model, effort),
+                progress,
             )
             .await
         }
@@ -494,6 +595,7 @@ async fn run_once(
     prompt: &crate::ask::Prompt,
     resume: Option<String>,
     (backend, model, effort): (perch_agent::Backend, &str, perch_agent::Effort),
+    progress: &Mutex<Progress>,
 ) -> Result<(String, Option<String>), WalkthroughOutcome> {
     let spec = crate::ask::run_spec(
         &ctx.config().agent,
@@ -527,6 +629,7 @@ async fn run_once(
     let mut said = String::new();
     let mut session = None;
     while let Some(event) = received.recv().await {
+        fold(ctx, item_id, progress, |p| p.fold(&event));
         match event {
             perch_agent::RunEvent::Started { session_id, .. } if !session_id.is_empty() => {
                 session = Some(session_id);
@@ -535,6 +638,10 @@ async fn run_once(
             _ => {}
         }
     }
+    fold(ctx, item_id, progress, |p| {
+        p.close();
+        true
+    });
     let outcome = run.wait().await;
     if let Ok(mut writing) = WRITING.lock() {
         if let Some(writing) = writing.get_mut(item_id) {
@@ -1231,6 +1338,46 @@ fn read_kept(dir: &Path, head: Option<&str>) -> Option<Walkthrough> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Calls become steps, pending until answered; words between them are
+    /// notes, but the answer is not; a call left open at the end is over.
+    #[test]
+    fn progress_folds_calls_and_words_but_not_the_answer() {
+        use perch_agent::RunEvent;
+        let call = |id: &str, summary: &str| RunEvent::ToolCall {
+            id: id.into(),
+            name: "Read".into(),
+            summary: summary.into(),
+            parent_id: None,
+        };
+        let mut progress = Progress::default();
+        assert!(progress.fold(&call("t1", "Read src/a.rs")));
+        assert!(progress.steps[0].pending);
+        assert!(progress.fold(&RunEvent::ToolResult {
+            id: "t1".into(),
+            ok: true,
+            summary: String::new(),
+        }));
+        assert!(!progress.steps[0].pending);
+        assert!(progress.fold(&RunEvent::Text("Now the tests.".into())));
+        assert!(progress.fold(&call("t2", "Read src/b.rs")));
+        assert!(!progress.fold(&RunEvent::Text(r#"{"summary": "s", "steps": []}"#.into())));
+        assert!(!progress.fold(&RunEvent::Text("```json\n{}\n```".into())));
+        progress.close();
+        let summaries: Vec<_> = progress
+            .steps
+            .iter()
+            .map(|s| (s.summary.as_str(), s.note, s.pending))
+            .collect();
+        assert_eq!(
+            summaries,
+            [
+                ("Read src/a.rs", false, false),
+                ("Now the tests.", true, false),
+                ("Read src/b.rs", false, false),
+            ]
+        );
+    }
 
     fn hunk(id: &str, path: &str, start: u32, end: u32) -> Hunk {
         Hunk {

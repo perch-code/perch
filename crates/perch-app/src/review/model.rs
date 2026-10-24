@@ -1658,6 +1658,8 @@ pub struct ReviewState {
     /// walkthrough takes minutes and the reader may look elsewhere.
     pub walkthroughs: RwSignal<HashMap<String, Option<Arc<crate::backend::Walkthrough>>>>,
     pub walkthroughs_writing: RwSignal<HashMap<String, jiff::Timestamp>>,
+    /// What the agent writing each one has done so far.
+    pub walkthrough_steps: RwSignal<HashMap<String, Vec<perch_github::RunStep>>>,
     pub walkthrough_errors: RwSignal<HashMap<String, String>>,
     /// What the reader has written to steer each item's next walkthrough,
     /// and the agent picked for walkthroughs, `None` until one is: then
@@ -2150,6 +2152,7 @@ impl ReviewState {
             description_offer: RwSignal::new(None),
             walkthroughs: RwSignal::new(HashMap::new()),
             walkthroughs_writing: RwSignal::new(HashMap::new()),
+            walkthrough_steps: RwSignal::new(HashMap::new()),
             walkthrough_errors: RwSignal::new(HashMap::new()),
             walkthrough_guidance: RwSignal::new(HashMap::new()),
             walkthrough_agent: RwSignal::new(None),
