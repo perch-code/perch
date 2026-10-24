@@ -322,6 +322,11 @@ impl RangeDiff {
     pub fn file(&self, path: &str) -> Option<&SnapshotFile> {
         self.files.iter().find(|file| file.path == path)
     }
+
+    /// Every file the range changed, in git's order.
+    pub fn files(&self) -> &[SnapshotFile] {
+        &self.files
+    }
 }
 
 #[derive(Debug, Clone)]

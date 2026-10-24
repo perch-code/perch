@@ -1766,7 +1766,7 @@ fn anchored_base_lines(file: &LoadedFile, anchor: &Anchor, max: usize) -> (Vec<C
 }
 
 /// The lines, one row each, in the code font. Nothing when there are none.
-fn code_lines(lines: Vec<CodeLine>) -> impl IntoView {
+pub(crate) fn code_lines(lines: Vec<CodeLine>) -> impl IntoView {
     if lines.is_empty() {
         return Empty::new().into_any();
     }
@@ -1840,7 +1840,7 @@ pub(crate) fn code_row(line: CodeLine) -> impl IntoView {
 }
 
 /// A last row saying how many lines were left out.
-fn more_row(more: usize) -> impl IntoView {
+pub(crate) fn more_row(more: usize) -> impl IntoView {
     if more == 0 {
         return Empty::new().into_any();
     }

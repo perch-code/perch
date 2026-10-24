@@ -572,7 +572,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 .filter(|_| !boxed && review.is_open());
                 if let Some(paging) = paging {
                     let showing = match review.tab.get() {
-                        crate::review::model::ItemTab::Conversation => true,
+                        crate::review::model::ItemTab::Conversation
+                        | crate::review::model::ItemTab::Walkthrough => true,
                         crate::review::model::ItemTab::Code => {
                             review.active_file().is_some_and(|f| !f.truncated)
                                 && review.drawn_picture().is_none()
@@ -605,6 +606,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         crate::review::model::ItemTab::Conversation => {
                             Some(crate::review::find::Pane::Conversation)
                         }
+                        crate::review::model::ItemTab::Walkthrough => None,
                     }
                 };
                 let find_open = match finding {
@@ -1890,6 +1892,7 @@ mod tests {
         };
         let showing = |review: &ReviewState| match review.tab.get() {
             ItemTab::Conversation => "conversation".to_string(),
+            ItemTab::Walkthrough => "walkthrough".to_string(),
             ItemTab::Code => review.active.get().unwrap_or_default(),
         };
 

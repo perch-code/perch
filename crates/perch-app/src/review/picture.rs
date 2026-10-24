@@ -77,7 +77,7 @@ pub fn is_svg(path: &str) -> bool {
 }
 
 impl Drawing {
-    fn parse(markup: &str) -> Result<Drawing, String> {
+    pub(crate) fn parse(markup: &str) -> Result<Drawing, String> {
         let tree = Tree::from_str(markup, &options(markup)).map_err(|e| e.to_string())?;
         let mut hasher = std::hash::DefaultHasher::new();
         markup.hash(&mut hasher);
@@ -91,6 +91,19 @@ impl Drawing {
     pub fn size(&self) -> Size {
         let size = self.tree.size();
         Size::new(f64::from(size.width()), f64::from(size.height()))
+    }
+
+    /// Where what it draws reaches, strokes and text included, in the
+    /// units of [`size`](Self::size): past it when the SVG draws outside
+    /// its own frame.
+    pub fn bounds(&self) -> floem::kurbo::Rect {
+        let b = self.tree.root().abs_stroke_bounding_box();
+        floem::kurbo::Rect::new(
+            f64::from(b.left()),
+            f64::from(b.top()),
+            f64::from(b.right()),
+            f64::from(b.bottom()),
+        )
     }
 }
 
@@ -274,6 +287,9 @@ thread_local! {
 struct Drawn {
     id: ViewId,
     drawing: Drawing,
+    /// Drawn straight onto what is under it, with no canvas or hairline:
+    /// a figure in a column, not a file.
+    plain: bool,
     /// The size the last paint drew at. The renderer keeps pictures in
     /// an atlas it grows only as a frame begins, so the first paint at a
     /// size the atlas cannot hold draws nothing; a paint at a new size
@@ -297,6 +313,7 @@ fn drawn(drawing: Drawing, frame: Size) -> impl IntoView {
         Drawn {
             id: ViewId::new(),
             drawing,
+            plain: false,
             painted: Size::ZERO,
         }
         .style(move |s| {
@@ -332,6 +349,55 @@ fn drawn(drawing: Drawing, frame: Size) -> impl IntoView {
     })
 }
 
+/// How big a figure `natural` big draws in a column `width` wide: as
+/// it is, or smaller to fit the column, never larger; and no side past
+/// [`MAX_SIDE`], for the atlas.
+fn in_column(natural: Size, width: f64) -> Size {
+    if natural.width <= 0.0 || natural.height <= 0.0 || width <= 0.0 {
+        return Size::ZERO;
+    }
+    let scale = (width / natural.width)
+        .min(MAX_SIDE / natural.width)
+        .min(MAX_SIDE / natural.height)
+        .min(1.0);
+    Size::new(natural.width * scale, natural.height * scale)
+}
+
+/// A picture set in a column of text, as a figure: at its own size, or
+/// shrunk to the column's width, on whatever is under it.
+pub(crate) fn figure(drawing: Drawing) -> impl IntoView {
+    let natural = drawing.size();
+    let width = RwSignal::new(0.0_f64);
+    Container::new(
+        Drawn {
+            id: ViewId::new(),
+            drawing,
+            plain: true,
+            painted: Size::ZERO,
+        }
+        .style(move |s| {
+            let size = in_column(natural, width.get());
+            s.width(size.width.floor())
+                .height(size.height.floor())
+                .flex_shrink(0.0_f32)
+        }),
+    )
+    .debug_name("figure")
+    .on_event_stop(
+        LayoutChanged::listener(),
+        move |_,
+              LayoutChanged {
+                  new_content_box, ..
+              }| {
+            let size = new_content_box.size().width;
+            if width.get_untracked() != size {
+                width.set(size);
+            }
+        },
+    )
+    .style(|s| s.width_full().justify_center())
+}
+
 impl View for Drawn {
     fn id(&self) -> ViewId {
         self.id
@@ -351,8 +417,10 @@ impl View for Drawn {
         }
         #[cfg(test)]
         DRAWN.with(|drawn| drawn.borrow_mut().push((self.drawing.size(), rect)));
-        cx.fill(&rect, theme::picture_canvas(), 0.0);
-        cx.stroke(&rect.inset(-0.5), theme::border_muted(), &Stroke::new(1.0));
+        if !self.plain {
+            cx.fill(&rect, theme::picture_canvas(), 0.0);
+            cx.stroke(&rect.inset(-0.5), theme::border_muted(), &Stroke::new(1.0));
+        }
         // Clipped to its canvas: what an SVG draws outside its own bounds
         // would otherwise land on the side beside it.
         cx.clip(&rect);

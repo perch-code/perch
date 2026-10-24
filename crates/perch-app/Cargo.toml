@@ -60,6 +60,10 @@ emojis = "0.9"
 # (bundled) and drawn as an SVG of its glyphs' outlines, where GitHub runs
 # MathJax. Pure Rust, on ttf-parser alone.
 latex-rust = { version = "2.1", default-features = false, features = ["std"] }
+# Mermaid diagrams in a walkthrough, laid out and written as an SVG of
+# plain shapes and `<text>`, which usvg draws as it draws any picture.
+# Pure Rust, on thiserror alone; its themes take Perch's colours.
+mermaid-svg = "0.7"
 # How many columns a character takes in the code's font, for word wrap: a
 # CJK character or an emoji takes two. Already in the tree through
 # codespan-reporting.

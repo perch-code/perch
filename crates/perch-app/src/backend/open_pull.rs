@@ -624,7 +624,7 @@ fn is_sha(s: &str) -> bool {
 /// A ref in the worktree's repository for `base` on GitHub: the
 /// remote-tracking branch of the remote that is the item's repository,
 /// then any remote's, then Perch's home ref, then a local branch.
-async fn resolve_base(
+pub(super) async fn resolve_base(
     ctx: &Ctx,
     item: &Item,
     checkout: &ItemCheckout,

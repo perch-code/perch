@@ -121,12 +121,14 @@ closed history is never backfilled.
 
 ## Conversation and Code
 
-An item has two modes, the two pills at the centre of its bar, as Codex has
+An item has three modes, the pills at the centre of its bar, as Codex has
 Summary and Code. **Conversation** is the item's summary, its timeline and its
-threads, with a composer at the foot. **Code** is the worktree: the open files
-as tabs over the editor, and the file tree in the drawer on the right (see
-[The file tree](#the-file-tree)). An issue with no checkout has no Code and no
-pills; Start work gives it a checkout, and the pills come. When the bar's
+threads, with a composer at the foot. **Walkthrough** tells the change start
+to finish (see [Walkthrough](#walkthrough)). **Code** is the worktree: the open
+files as tabs over the editor, and the file tree in the drawer on the right
+(see [The file tree](#the-file-tree)). An issue with no checkout has no
+Walkthrough or Code and no pills; Start work gives it a checkout, and the
+pills come. When the bar's
 controls take more than half of it, the pills give way to them rather than
 sit at the centre.
 
@@ -143,6 +145,50 @@ cannot be closed.
 | Close the file | `Cmd-W` |
 | The file tree | `Cmd-Shift-E` |
 | Agents | `Cmd-Shift-A` |
+
+## Walkthrough
+
+**Walkthrough** is the change told as a story, in the order that makes it
+easiest to follow: usually the way data or control flows through it, not file
+by file. It works for a pull request and for a branch with no pull request
+alike.
+
+**Write with Claude**, or Codex, whichever the composer last used, has the
+agent read the change under Ask's rules (read only, no network, nothing
+reaches GitHub) and answer with a summary, a background and the steps. The
+summary sits at the top: in a few sentences, what the change is and why,
+what it changes, and anything a reviewer should weigh, such as a risk or a
+compatibility cost. The background comes next: what the parts the change touches are for, how they work and
+where the rest of the system uses them, as they were before it, with the
+unchanged code that shows it. It is written for someone who knows the
+codebase but not this corner of it, or has forgotten it. Each step has a
+title and a body that reads like an article with its figures in place: a
+few sentences, then the hunk of the diff they lead into, then what it shows,
+then the next piece. A long hunk can be shown in pieces with words between
+them. Besides hunks, a body can show other lines the story needs, such as an
+unchanged caller or what a function used to be, the review threads it
+discusses, where it discusses them, and Mermaid diagrams where a picture says
+more than words: data moving between parts, a sequence of calls, states. Perch
+lays a diagram out and draws it in its own colours, light or dark; a diagram
+that isn't Mermaid Perch can draw is asked about again, and left out if it
+still isn't. Dashed lines are drawn solid. The agent never writes code into
+it. Perch draws each step's lines from
+the checkout, as a thread's card draws its lines, numbered and tinted as the
+diff tints them. A file's name over its lines opens it on Code at the first
+line, and a thread opens on Conversation.
+
+Perch gives the agent the list of hunks and checks that every one is shown,
+and that no whole hunk is shown twice. Hunks the answer leaves out are asked
+about once more, in the same session; any still left out go into a last
+step, **Also changed**, so nothing in the diff is out of sight. Hunks and
+threads the item doesn't have are dropped, a piece of a hunk is cut to the
+hunk, and other lines are cut to their file.
+
+A walkthrough takes a few minutes and goes on while you look elsewhere;
+**Stop** ends it. It is kept for the head it was written at, under
+`walkthroughs/` in Perch's data directory, and never sent anywhere. One
+written before the latest commits is still shown, without its lines, whose
+numbers were the old head's, and **Write again** writes it for the head.
 
 ## Timeline
 
@@ -1044,9 +1090,9 @@ stacked layout.
 | Match case, whole word, regular expression | `Alt-Cmd-C`, `Alt-Cmd-W`, `Alt-Cmd-R` |
 | Close the bar | `Escape` |
 
-`Page Up` and `Page Down` scroll the open file or Conversation by a page,
-keeping a line of the last in sight, and leave the caret where it is. They
-work from the code, the page or a composer. `Cmd-Up` and `Cmd-Down` go to the
+`Page Up` and `Page Down` scroll the open file, Conversation or the
+Walkthrough by a page, keeping a line of the last in sight, and leave the
+caret where it is. They work from the code, the page or a composer. `Cmd-Up` and `Cmd-Down` go to the
 top and the end, the caret with them in the code; a composer keeps them for
 its own text. The find bar and the other boxes keep all four.
 

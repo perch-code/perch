@@ -8,6 +8,7 @@ pub mod code_refs;
 pub mod composer_styling;
 pub mod conversation;
 pub mod conversation_find;
+pub mod diagram;
 pub mod doc;
 pub mod editor;
 pub mod emoji;
@@ -46,6 +47,7 @@ pub mod tabs;
 pub mod threads;
 pub mod timeline;
 pub mod tree;
+pub mod walkthrough;
 pub mod wrap;
 
 use std::rc::Rc;
@@ -201,6 +203,14 @@ fn showing_code(state: ReviewState) -> bool {
         && state.has_files()
 }
 
+/// Whether the pane shows the Walkthrough. Like Code, only for an item
+/// with files. Tracked.
+fn showing_walkthrough(state: ReviewState) -> bool {
+    matches!(state.phase.get(), Phase::Issue | Phase::Ready)
+        && state.tab.get() == ItemTab::Walkthrough
+        && state.has_files()
+}
+
 /// The head the pull request moved to that the files on screen are not
 /// at, unless it is the one a dirty worktree was already left behind by,
 /// which opening again would not change. None while the files are still
@@ -231,6 +241,7 @@ fn item_view(
     // A memo, so the pane is built again when what it shows changes and
     // not on every write to the tab.
     let showing = floem::reactive::Memo::new(move |_| showing_code(state));
+    let walking = floem::reactive::Memo::new(move |_| showing_walkthrough(state));
     // Whether Code is waiting on the checkout, and whether that failed.
     let pending = floem::reactive::Memo::new(move |_| {
         state.files_pending.with(|pending| match pending {
@@ -242,8 +253,8 @@ fn item_view(
     let refresh_backend = backend.clone();
     Stack::vertical((
         dyn_container(
-            move || (showing.get(), pending.get()),
-            move |(code, pending)| {
+            move || (showing.get(), walking.get(), pending.get()),
+            move |(code, walk, pending)| {
                 if code && pending == Some(false) {
                     header::preparing_card(
                         move || match state.files_pending.get() {
@@ -270,6 +281,8 @@ fn item_view(
                     .into_any()
                 } else if code {
                     editor::editor_pane(app, state, backend.clone(), open_file.clone()).into_any()
+                } else if walk {
+                    walkthrough::view(app, state, backend.clone(), open_file.clone()).into_any()
                 } else {
                     conversation::view(
                         app,

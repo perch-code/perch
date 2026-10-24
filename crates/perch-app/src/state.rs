@@ -2938,6 +2938,9 @@ impl AppState {
             Event::LspReferences { token, locations } => {
                 review.finish_references(token, locations);
             }
+            Event::Walkthrough { item_id, outcome } => {
+                crate::review::walkthrough::apply(review, item_id, outcome);
+            }
             other => self.apply(other),
         }
     }
@@ -3018,6 +3021,8 @@ impl AppState {
                 }
             }
             Event::PullRequestDescription { .. } => {}
+            // The window that asked draws it.
+            Event::Walkthrough { .. } => {}
             // The issue is open, so what was typed for it is spent.
             Event::ClosedAsIssue {
                 item_id,

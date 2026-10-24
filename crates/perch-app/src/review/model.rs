@@ -141,13 +141,14 @@ pub enum Paging {
     End,
 }
 
-/// What the item view shows: Conversation, or Code, the open file and the
-/// tabs over it. The two are the switch in the bar; Conversation cannot
-/// be closed.
+/// What the item view shows: Conversation, the Walkthrough of the change,
+/// or Code, the open file and the tabs over it. The three are the switch
+/// in the bar; Conversation cannot be closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ItemTab {
     #[default]
     Conversation,
+    Walkthrough,
     Code,
 }
 
@@ -726,11 +727,12 @@ pub struct Place {
     pub spot: Spot,
 }
 
-/// Where on an item: Conversation, Code with no file open, or a head line
-/// of a file.
+/// Where on an item: Conversation, the Walkthrough, Code with no file
+/// open, or a head line of a file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Spot {
     Conversation,
+    Walkthrough,
     Code,
     Line { path: String, line: usize },
 }
@@ -1650,6 +1652,13 @@ pub struct ReviewState {
     pub describing: RwSignal<bool>,
     pub description_error: RwSignal<Option<String>>,
     pub description_offer: RwSignal<Option<(String, String)>>,
+    /// Walkthroughs by item: the one kept for each item asked about,
+    /// `None` when it has none, the items one is being written for, and
+    /// what stopped the last for each. By item and not reset with it, as a
+    /// walkthrough takes minutes and the reader may look elsewhere.
+    pub walkthroughs: RwSignal<HashMap<String, Option<Arc<crate::backend::Walkthrough>>>>,
+    pub walkthroughs_writing: RwSignal<HashSet<String>>,
+    pub walkthrough_errors: RwSignal<HashMap<String, String>>,
     /// Close as issue under way, and what stopped the last.
     pub issue_closing: RwSignal<bool>,
     pub issue_error: RwSignal<Option<String>>,
@@ -2131,6 +2140,9 @@ impl ReviewState {
             describing: RwSignal::new(false),
             description_error: RwSignal::new(None),
             description_offer: RwSignal::new(None),
+            walkthroughs: RwSignal::new(HashMap::new()),
+            walkthroughs_writing: RwSignal::new(HashSet::new()),
+            walkthrough_errors: RwSignal::new(HashMap::new()),
             issue_closing: RwSignal::new(false),
             issue_error: RwSignal::new(None),
             issue_body_height: RwSignal::new(None),
@@ -2516,9 +2528,9 @@ impl ReviewState {
         self.historical_review_rollback.set(None);
     }
 
-    /// Show Conversation or Code. Code with no file open opens none, and
-    /// the pane says so; the item's first visit to Code asks for the tree
-    /// beside it, to pick one from.
+    /// Show Conversation, the Walkthrough or Code. Code with no file open
+    /// opens none, and the pane says so; the item's first visit to Code
+    /// asks for the tree beside it, to pick one from.
     pub fn show_tab(&self, tab: ItemTab) {
         if tab == ItemTab::Code && !self.code_seen.get_untracked() {
             self.code_seen.set(true);
@@ -3193,6 +3205,7 @@ impl ReviewState {
             let item = self.item.with(|i| i.as_ref().map(|i| i.id.clone()));
             let spot = match self.tab.get() {
                 ItemTab::Conversation => Spot::Conversation,
+                ItemTab::Walkthrough => Spot::Walkthrough,
                 ItemTab::Code => match self.active.get() {
                     Some(path) => {
                         // The file's own caret first: `last_position` can
@@ -3297,6 +3310,11 @@ impl ReviewState {
             Spot::Conversation => {
                 if self.tab.get_untracked() != ItemTab::Conversation {
                     self.tab.set(ItemTab::Conversation);
+                }
+            }
+            Spot::Walkthrough => {
+                if self.tab.get_untracked() != ItemTab::Walkthrough {
+                    self.tab.set(ItemTab::Walkthrough);
                 }
             }
             Spot::Code => {
