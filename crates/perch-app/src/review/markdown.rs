@@ -2398,6 +2398,7 @@ fn suggestion_view(text: String, original: Option<Original>, foot: Option<Foot>)
         number: first.map(|f| f + i),
         tint,
         text: text.to_string(),
+        spans: Vec::new(),
     };
     let mut rows: Vec<AnyView> = Vec::new();
     for (i, old) in original.iter().flat_map(|o| o.lines.iter()).enumerate() {

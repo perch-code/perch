@@ -1621,12 +1621,14 @@ impl Tint {
 }
 
 /// One line of code as a card shows it: numbered on the side it counts
-/// in, tinted, without the diff's `+` or `-`.
+/// in, tinted, without the diff's `+` or `-`, and coloured as the editor
+/// colours it where the file's spans are known.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodeLine {
     pub number: Option<usize>,
     pub tint: Tint,
     pub text: String,
+    pub spans: Vec<perch_syntax::Span>,
 }
 
 /// The last `count` lines of a unified hunk, as GitHub sends one under a
@@ -1673,6 +1675,7 @@ pub fn hunk_tail(hunk: &str, count: usize) -> Vec<CodeLine> {
             number,
             tint,
             text: text.to_string(),
+            spans: Vec::new(),
         });
     }
     let skip = lines.len().saturating_sub(count);
@@ -1706,7 +1709,7 @@ pub fn anchored_lines(file: &LoadedFile, anchor: &Anchor, max: usize) -> (Vec<Co
     let text: Vec<&str> = file.buffer.text.lines().collect();
     let mut lines: Vec<CodeLine> = (from..=to)
         .map(|d| {
-            let (number, tint) = match rows[d] {
+            let (number, tint, spans) = match rows[d] {
                 Row::Head { head_line, status } => (
                     Some(head_line + 1),
                     match status {
@@ -1714,13 +1717,19 @@ pub fn anchored_lines(file: &LoadedFile, anchor: &Anchor, max: usize) -> (Vec<Co
                         LineStatus::Added => Tint::Added,
                         LineStatus::Modified => Tint::Modified,
                     },
+                    file.head_spans.line(head_line),
                 ),
-                Row::Deleted { base_line } => (Some(base_line + 1), Tint::Removed),
+                Row::Deleted { base_line } => (
+                    Some(base_line + 1),
+                    Tint::Removed,
+                    file.base_spans.line(base_line),
+                ),
             };
             CodeLine {
                 number,
                 tint,
                 text: text.get(d).copied().unwrap_or_default().to_string(),
+                spans: spans.to_vec(),
             }
         })
         .collect();
@@ -1758,6 +1767,7 @@ fn anchored_base_lines(file: &LoadedFile, anchor: &Anchor, max: usize) -> (Vec<C
                 Tint::Plain
             },
             text: text[base_line].to_string(),
+            spans: file.base_spans.line(base_line).to_vec(),
         })
         .collect();
     let more = lines.len().saturating_sub(max);
@@ -1796,7 +1806,7 @@ pub(crate) fn code_row(line: CodeLine) -> impl IntoView {
         Tint::Added | Tint::Modified => "+",
         Tint::Removed => "-",
     };
-    let text = line.text;
+    let text = code_text(line.text, line.spans, tint);
     Stack::horizontal((
         Label::derived(move || number.clone()).style(|s| {
             s.width(theme::CODE_ROW_NUMBER_WIDTH)
@@ -1817,14 +1827,7 @@ pub(crate) fn code_row(line: CodeLine) -> impl IntoView {
                 .selectable(false)
                 .flex_shrink(0.0_f32)
         }),
-        Label::derived(move || text.clone()).style(move |s| {
-            s.font_family(theme::CODE_FONT_STACK.to_string())
-                .font_size(theme::TEXT_BADGE)
-                .color(tint.colors().1)
-                .text_ellipsis()
-                .min_width(0.0)
-                .flex_grow(1.0_f32)
-        }),
+        text,
     ))
     .style(move |s| {
         let base = s
@@ -1837,6 +1840,61 @@ pub(crate) fn code_row(line: CodeLine) -> impl IntoView {
             None => base,
         }
     })
+}
+
+/// A line's text in the code font. Coloured by its spans, as the editor
+/// colours it, unless it was removed: the editor dims removed code, and
+/// so does a card. Rich text wraps, and a line must not; the clip is one
+/// row tall, so only the first line shows.
+fn code_text(text: String, spans: Vec<perch_syntax::Span>, tint: Tint) -> floem::AnyView {
+    use floem::views::ClipExt;
+
+    if spans.is_empty() || tint == Tint::Removed {
+        return Label::derived(move || text.clone())
+            .style(move |s| {
+                s.font_family(theme::CODE_FONT_STACK.to_string())
+                    .font_size(theme::TEXT_BADGE)
+                    .color(tint.colors().1)
+                    .text_ellipsis()
+                    .min_width(0.0)
+                    .flex_grow(1.0_f32)
+            })
+            .into_any();
+    }
+    // Laid out again when the appearance changes: the colours are in it.
+    let (first, attrs) = code_layout(&text, &spans);
+    floem::views::rich_text(first, attrs, move || code_layout(&text, &spans))
+        .style(|s| s.width_full())
+        .clip()
+        .style(|s| {
+            s.height(theme::CODE_ROW_HEIGHT)
+                .flex_grow(1.0_f32)
+                .min_width(0.0)
+        })
+        .into_any()
+}
+
+fn code_layout(text: &str, spans: &[perch_syntax::Span]) -> (String, floem::text::AttrsList) {
+    use floem::text::{Attrs, AttrsList, FamilyOwned, LineHeightValue};
+
+    let families: Vec<FamilyOwned> = FamilyOwned::parse_list(theme::CODE_FONT_STACK).collect();
+    let default = Attrs::new()
+        .family(&families)
+        .font_size(theme::TEXT_BADGE)
+        .weight(theme::weight_body())
+        .color(theme::fg())
+        .line_height(LineHeightValue::Pt(theme::CODE_ROW_HEIGHT as f32));
+    let mut attrs = AttrsList::new(default.clone());
+    for span in spans {
+        let end = span.end.min(text.len());
+        if span.start < end && text.is_char_boundary(span.start) && text.is_char_boundary(end) {
+            attrs.add_span(
+                span.start..end,
+                default.clone().color(theme::syntax_color(span.capture)),
+            );
+        }
+    }
+    (text.to_string(), attrs)
 }
 
 /// A last row saying how many lines were left out.
@@ -3177,22 +3235,26 @@ mod tests {
                 CodeLine {
                     number: Some(41),
                     tint: Tint::Removed,
-                    text: "let b = 2;".into()
+                    text: "let b = 2;".into(),
+                    spans: Vec::new(),
                 },
                 CodeLine {
                     number: Some(41),
                     tint: Tint::Added,
-                    text: "let b = 3;".into()
+                    text: "let b = 3;".into(),
+                    spans: Vec::new(),
                 },
                 CodeLine {
                     number: Some(42),
                     tint: Tint::Added,
-                    text: "let c = 4;".into()
+                    text: "let c = 4;".into(),
+                    spans: Vec::new(),
                 },
                 CodeLine {
                     number: Some(43),
                     tint: Tint::Plain,
-                    text: "let d = 5;".into()
+                    text: "let d = 5;".into(),
+                    spans: Vec::new(),
                 },
             ]
         );
@@ -3273,6 +3335,38 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(Some(2), Tint::Removed, "b")]
         );
+    }
+
+    /// Lines carry the editor's colours: a head line its head spans, a
+    /// removed one its base spans, on either side.
+    #[test]
+    fn anchored_lines_carry_their_sides_spans() {
+        let file = crate::backend::build_loaded_file(
+            "src/x.rs".into(),
+            "fn a() {}\nfn c() {}\n".into(),
+            "fn a() {}\nfn b() {}\n".into(),
+            Some(perch_git::ChangeStatus::Modified),
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        );
+        let anchor = |side| Anchor {
+            path: "src/x.rs".into(),
+            start_line: 1,
+            line: 2,
+            side,
+            commit_sha: "h".into(),
+        };
+        let (lines, _) = anchored_lines(&file, &anchor(perch_github::Side::Right), 8);
+        assert_eq!(lines.len(), 3);
+        for line in &lines {
+            assert!(!line.spans.is_empty(), "{line:?}");
+        }
+        assert_eq!(lines[1].tint, Tint::Removed);
+        assert_eq!(lines[1].spans, file.base_spans.line(1));
+        assert_eq!(lines[2].spans, file.head_spans.line(1));
+        let (lines, _) = anchored_lines(&file, &anchor(perch_github::Side::Left), 8);
+        assert_eq!(lines[1].spans, file.base_spans.line(1));
     }
 
     #[test]

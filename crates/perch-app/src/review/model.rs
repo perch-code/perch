@@ -2018,6 +2018,11 @@ pub struct ReviewState {
     /// definition puts the caret on it, so the next jump remembers leaving
     /// from there. Read by the jump, and cleared by it.
     pub jump_caret: RwSignal<Option<(usize, usize)>>,
+    /// The last head line of a range `jump_to_line` starts, when the jump
+    /// is to lines and not a line: the jump reveals all of them in a
+    /// folded file, not just the few around the first. Read by the jump,
+    /// and cleared by it.
+    pub jump_through: RwSignal<Option<usize>>,
     /// Page Up, Page Down, Cmd-Up or Cmd-Down, pressed. Conversation or
     /// the open file's editor, whichever is showing, scrolls and clears it.
     pub paging: RwSignal<Option<Paging>>,
@@ -2267,6 +2272,7 @@ impl ReviewState {
             pending_ready: RwSignal::new(Vec::new()),
             jump_to_line: RwSignal::new(None),
             jump_caret: RwSignal::new(None),
+            jump_through: RwSignal::new(None),
             paging: RwSignal::new(None),
             last_position: RwSignal::new(None),
             expanded: RwSignal::new(std::collections::HashSet::new()),
@@ -4634,15 +4640,21 @@ impl ReviewState {
     /// is not in it. The reveal reaches the editor before this returns:
     /// the effect that rebuilds the document runs on the write.
     pub fn reveal_around(&self, file: &LoadedFile, head_line: usize) {
+        self.reveal_lines(file, head_line, head_line);
+    }
+
+    /// Reveal head lines `first` to `last` of a folded file and a few of
+    /// context on either side, as `reveal_around` does for one line.
+    pub fn reveal_lines(&self, file: &LoadedFile, first: usize, last: usize) {
         let folded = floem::reactive::Effect::untrack(|| self.folded(&file.path));
-        if !folded || file.buffer.display_line(head_line).is_none() {
+        if !folded || file.buffer.display_line(first).is_none() {
             return;
         }
         self.reveal(
             &file.path,
             &file.blob,
-            head_line.saturating_sub(doc::CONTEXT_LINES),
-            head_line + doc::CONTEXT_LINES,
+            first.saturating_sub(doc::CONTEXT_LINES),
+            last.max(first) + doc::CONTEXT_LINES,
         );
     }
 

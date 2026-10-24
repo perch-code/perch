@@ -2127,6 +2127,19 @@ fn wire_jump(
             return;
         }
         state.jump_to_line.set(None);
+        // Lines, not a line: all of them shown, if a fold hides any.
+        let through = state
+            .jump_through
+            .try_update(Option::take)
+            .flatten()
+            .filter(|last| *last > head_line);
+        if let Some(last) = through {
+            let hidden =
+                doc.with_untracked(|d| (head_line..=last).any(|l| d.row_of_head(l).is_none()));
+            if hidden {
+                state.reveal_lines(&file.get_untracked(), head_line, last);
+            }
+        }
         let mut row = doc.with_untracked(|d| d.row_of_head(head_line));
         if row.is_none() {
             state.reveal_around(&file.get_untracked(), head_line);
@@ -4511,6 +4524,23 @@ mod window {
         harness.rebuild();
         harness.paint();
         assert_eq!(state.last_position.get(), Some((62, 0)));
+    }
+
+    /// A jump to lines shows them all, not just the few around the
+    /// first, and lands on the first.
+    #[test]
+    fn a_jump_through_folded_lines_reveals_all_of_them() {
+        let (mut harness, state) = one_long_run();
+        let live = stacked(state);
+        assert_eq!(live.doc.get().row_of_head(30), None, "folded");
+        state.jump_through.set(Some(40));
+        state.jump_to_line.set(Some(20));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.jump_to_line.get(), None, "the editor took the jump");
+        assert_eq!(state.jump_through.get(), None, "and the lines with it");
+        let doc = live.doc.get();
+        assert!((20..=40).all(|line| doc.row_of_head(line).is_some()));
     }
 
     #[test]

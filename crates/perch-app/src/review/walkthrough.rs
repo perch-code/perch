@@ -828,8 +828,9 @@ struct Block {
 }
 
 /// A block: the file and lines over them, the file opening Code at the
-/// first line; then the lines, as the diff tints them, once the file is
-/// read at the walkthrough's commits.
+/// first line, a line from before the change at the head line it became;
+/// then the lines, as the diff tints them and on code's white, once the
+/// file is read at the walkthrough's commits.
 fn block_view(
     state: ReviewState,
     open_file: OpenFile,
@@ -837,7 +838,6 @@ fn block_view(
     block: Block,
 ) -> impl IntoView {
     let path = block.path.clone();
-    let line = block.start as usize;
     let where_ = match (block.side, block.context) {
         (CodeSide::Base, _) => format!("lines {}\u{2013}{}, before", block.start, block.end),
         (CodeSide::Head, true) => format!("lines {}\u{2013}{}", block.start, block.end),
@@ -848,13 +848,28 @@ fn block_view(
             let path = block.path.clone();
             move || path.clone()
         })
-        .on_event_stop(el::Click, move |_, _| {
-            state.one_move(|| {
-                state.show_tab(ItemTab::Code);
-                open_file(&path);
-            });
-            if block.side == CodeSide::Head {
-                state.jump_to_line.set(Some(line.saturating_sub(1)));
+        .on_event_stop(el::Click, {
+            let item_id = item_id.clone();
+            move |_, _| {
+                let (start, end) = (block.start as usize, block.end as usize);
+                let (first, last) = match block.side {
+                    CodeSide::Head => (start, end),
+                    CodeSide::Base => state
+                        .walkthrough_files
+                        .with_untracked(|all| {
+                            let file = all.get(&item_id)?.files.get(&path)?.clone()?.ok()?;
+                            Some((head_line_of(&file, start), head_line_of(&file, end)))
+                        })
+                        .unwrap_or((start, end)),
+                };
+                state.one_move(|| {
+                    state.show_tab(ItemTab::Code);
+                    open_file(&path);
+                });
+                // Through first: an editor already open takes the jump
+                // as it is written.
+                state.jump_through.set(Some(last.saturating_sub(1)));
+                state.jump_to_line.set(Some(first.saturating_sub(1)));
             }
         })
         .debug_name("walkthrough-path")
@@ -939,10 +954,40 @@ fn block_view(
         s.width_full()
             .border_top(1.0)
             .border_color(theme::border_muted())
+            .background(theme::code_bg())
+            // Inside the block's frame, its corners less the border.
+            .border_bottom_left_radius(5.0)
+            .border_bottom_right_radius(5.0)
     });
     Stack::vertical((header, lines))
         .style(block_style)
         .into_any()
+}
+
+/// The head line a base line became, both 1-based: itself in a file the
+/// change leaves alone, else its pair's, and for a removed line the head
+/// line after it, where Code shows it.
+fn head_line_of(file: &LoadedFile, base_line: usize) -> usize {
+    if file.status.is_none() {
+        return base_line;
+    }
+    let Some(at) = file
+        .alignment
+        .iter()
+        .position(|(base, _)| *base == Some(base_line))
+    else {
+        return base_line;
+    };
+    file.alignment[at..]
+        .iter()
+        .find_map(|(_, head)| *head)
+        .or_else(|| {
+            file.alignment[..at]
+                .iter()
+                .rev()
+                .find_map(|(_, head)| *head)
+        })
+        .unwrap_or(base_line)
 }
 
 fn block_style(s: floem::style::Style) -> floem::style::Style {
@@ -1416,6 +1461,37 @@ mod tests {
             state.focus_card.get_untracked(),
             Some(CardId::Thread("gh-9".into()))
         );
+
+        // A block's file opens Code on all its lines, these from before
+        // the change at the head lines they became.
+        let path = named(harness.root_id(), "walkthrough-path").unwrap();
+        click_on(&mut harness, path);
+        assert_eq!(state.tab.get_untracked(), ItemTab::Code);
+        assert_eq!(state.jump_to_line.get_untracked(), Some(0));
+        assert_eq!(state.jump_through.get_untracked(), Some(1));
+    }
+
+    /// A line from before the change is found where it is after: moved
+    /// down by what was put in above it, and a removed one at the line
+    /// that follows it. A file the change leaves alone is the same on
+    /// both sides.
+    #[test]
+    fn a_base_line_maps_to_the_head_line_it_became() {
+        let file = crate::backend::build_loaded_file(
+            "src/z.rs".into(),
+            "new\nalso new\na\nc\nd\n".into(),
+            "a\ngone\nc\nd\n".into(),
+            Some(perch_git::ChangeStatus::Modified),
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        );
+        assert_eq!(head_line_of(&file, 1), 3);
+        assert_eq!(head_line_of(&file, 2), 4, "removed: the line after it");
+        assert_eq!(head_line_of(&file, 3), 4);
+        assert_eq!(head_line_of(&file, 4), 5);
+        let (_, untouched) = files();
+        assert_eq!(head_line_of(&untouched, 2), 2);
     }
 
     /// One written for another head says so, and draws its lines as they
