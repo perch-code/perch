@@ -820,7 +820,10 @@ fn toggle_tile(
                 base.hover(|s| s.background(theme::canvas_hover()))
             }
         });
-    tip(tile, format!("{tip_text} ({})", crate::ui::menu::Shortcut::label_of(keys)))
+    tip(
+        tile,
+        format!("{tip_text} ({})", crate::ui::menu::Shortcut::label_of(keys)),
+    )
 }
 
 /// "3 of 8", "? of 8" before the bar has walked to one, "No results",

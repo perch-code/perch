@@ -605,7 +605,10 @@ fn jdk_major(home: &Path) -> Option<u64> {
     if let Some(line) = release.lines().find(|l| l.starts_with("JAVA_VERSION=")) {
         return java_major(line);
     }
-    let out = std::process::Command::new(java).arg("-version").output().ok()?;
+    let out = std::process::Command::new(java)
+        .arg("-version")
+        .output()
+        .ok()?;
     // `java -version` writes to stderr.
     java_major(&String::from_utf8_lossy(&out.stderr))
 }
@@ -1296,7 +1299,11 @@ mod tests {
             let home = self.path(sub);
             std::fs::create_dir_all(home.join("bin")).unwrap();
             std::fs::write(home.join("bin/java"), "").unwrap();
-            std::fs::write(home.join("release"), format!("JAVA_VERSION=\"{version}\"\n")).unwrap();
+            std::fs::write(
+                home.join("release"),
+                format!("JAVA_VERSION=\"{version}\"\n"),
+            )
+            .unwrap();
             home
         }
 
@@ -1831,15 +1838,25 @@ mod tests {
         let new = fake.jdk("jvm/java-21-openjdk", "21.0.12");
         // As Arch has it, a `default` link beside the JDKs.
         std::os::unix::fs::symlink(&new, fake.path("jvm/default")).unwrap();
-        assert_eq!(find_jdk(&fake.env()), Some(newer.clone()), "the newest installed");
+        assert_eq!(
+            find_jdk(&fake.env()),
+            Some(newer.clone()),
+            "the newest installed"
+        );
 
         // `java` on PATH is the system's choice, through a link.
         std::os::unix::fs::symlink(new.join("bin/java"), fake.path("bin/java")).unwrap();
         assert_eq!(find_jdk(&fake.env()), Some(new.clone()));
 
-        let env = Env { java_home: Some(newer.clone()), ..fake.env() };
+        let env = Env {
+            java_home: Some(newer.clone()),
+            ..fake.env()
+        };
         assert_eq!(find_jdk(&env), Some(newer.clone()), "JAVA_HOME first");
-        let env = Env { java_home: Some(old.clone()), ..fake.env() };
+        let env = Env {
+            java_home: Some(old.clone()),
+            ..fake.env()
+        };
         assert_eq!(find_jdk(&env), Some(new), "an old JAVA_HOME is passed over");
     }
 

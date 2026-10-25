@@ -774,7 +774,9 @@ pub fn install_code_font(wanted: Option<&str>) {
         .chain(CODE_FONT_FAMILIES)
         .find_map(|name| collection.family_by_name(name));
     let family = named.or_else(|| {
-        let id = collection.generic_families(GenericFamily::Monospace).next()?;
+        let id = collection
+            .generic_families(GenericFamily::Monospace)
+            .next()?;
         collection.family(id)
     });
     let Some(family) = family else {
@@ -1340,7 +1342,11 @@ mod tests {
         prefer(Appearance::chosen(Choice::Dark));
         assert_eq!(appearance(), Appearance::Dark);
         system_appearance(Appearance::Light);
-        assert_eq!(appearance(), Appearance::Dark, "the system does not overrule it");
+        assert_eq!(
+            appearance(),
+            Appearance::Dark,
+            "the system does not overrule it"
+        );
 
         prefer(Appearance::chosen(Choice::System));
         system_appearance(Appearance::Light);
