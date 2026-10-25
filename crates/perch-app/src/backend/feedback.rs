@@ -603,7 +603,10 @@ async fn os_facts() -> OsFacts {
         (Err(why), _) => Err(why),
     };
     OsFacts {
-        lines: vec![format!("macOS: {}", version.as_ref().unwrap_or_else(|why| why))],
+        lines: vec![format!(
+            "macOS: {}",
+            version.as_ref().unwrap_or_else(|why| why)
+        )],
         short: format!("macOS {}", version.as_deref().unwrap_or("unknown")),
     }
 }
@@ -968,12 +971,19 @@ mod tests {
     #[test]
     #[cfg(not(target_os = "macos"))]
     fn a_distribution_is_named_as_os_release_names_it() {
-        assert_eq!(os_name("NAME=\"Manjaro Linux\"\nPRETTY_NAME=\"Manjaro Linux\"\nBUILD_ID=rolling\n"), "Manjaro Linux");
+        assert_eq!(
+            os_name("NAME=\"Manjaro Linux\"\nPRETTY_NAME=\"Manjaro Linux\"\nBUILD_ID=rolling\n"),
+            "Manjaro Linux"
+        );
         assert_eq!(
             os_name("NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nPRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\n"),
             "Ubuntu 24.04.1 LTS"
         );
-        assert_eq!(os_name("NAME=Fedora\nVERSION_ID=42\n"), "Fedora 42", "no pretty name");
+        assert_eq!(
+            os_name("NAME=Fedora\nVERSION_ID=42\n"),
+            "Fedora 42",
+            "no pretty name"
+        );
         assert_eq!(os_name("NAME=Alpine\nPRETTY_NAME=\n"), "Alpine");
         assert_eq!(os_name(""), "Linux");
     }
@@ -982,8 +992,15 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     fn a_session_is_its_display_server_and_desktop() {
         assert_eq!(session(Some("x11"), false, true, Some("XFCE")), "X11, XFCE");
-        assert_eq!(session(Some("wayland"), true, true, Some("ubuntu:GNOME")), "Wayland, ubuntu/GNOME");
-        assert_eq!(session(None, true, true, None), "Wayland", "the socket says so");
+        assert_eq!(
+            session(Some("wayland"), true, true, Some("ubuntu:GNOME")),
+            "Wayland, ubuntu/GNOME"
+        );
+        assert_eq!(
+            session(None, true, true, None),
+            "Wayland",
+            "the socket says so"
+        );
         assert_eq!(session(Some("tty"), false, true, Some("KDE")), "X11, KDE");
         assert_eq!(session(None, false, false, None), "unknown");
     }

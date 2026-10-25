@@ -484,7 +484,10 @@ pub fn close_button(state: AppState) -> impl IntoView {
             theme::fg_muted,
             move || state.new_work.open.set(false),
         ),
-        format!("Close ({})", crate::ui::menu::Shortcut::label_of("super+BracketLeft")),
+        format!(
+            "Close ({})",
+            crate::ui::menu::Shortcut::label_of("super+BracketLeft")
+        ),
     )
     .debug_name("new-work-close")
     .style(|s| s.flex_shrink(0.0_f32).pointer_events_auto())

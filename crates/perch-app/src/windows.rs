@@ -488,7 +488,10 @@ fn position(frame: Rect) -> Option<Point> {
 fn placement() -> Rect {
     if !cfg!(target_os = "macos") {
         let size = LEFT_AT.get().map_or(DEFAULT_SIZE, |frame| frame.size());
-        let size = Size::new(size.width.max(MIN_SIZE.width), size.height.max(MIN_SIZE.height));
+        let size = Size::new(
+            size.width.max(MIN_SIZE.width),
+            size.height.max(MIN_SIZE.height),
+        );
         return Rect::from_origin_size(Point::ZERO, size);
     }
     let screens = screens();
@@ -655,7 +658,11 @@ mod tests {
         LEFT_AT.set(Some(Rect::new(300.0, 200.0, 1500.0, 1100.0)));
         let frame = placement();
         assert_eq!(frame.size(), Size::new(1200.0, 900.0));
-        assert_eq!(position(frame), None, "where it was left is the window manager's to say");
+        assert_eq!(
+            position(frame),
+            None,
+            "where it was left is the window manager's to say"
+        );
 
         LEFT_AT.set(Some(Rect::new(0.0, 0.0, 400.0, 300.0)));
         assert_eq!(placement().size(), MIN_SIZE);

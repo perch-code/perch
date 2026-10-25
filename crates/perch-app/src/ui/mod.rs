@@ -1592,7 +1592,11 @@ mod tests {
         harness.rebuild();
         harness.paint();
 
-        harness.dispatch_event(key(Code::KeyN, Key::Character("N".into()), OS_MOD | Modifiers::SHIFT));
+        harness.dispatch_event(key(
+            Code::KeyN,
+            Key::Character("N".into()),
+            OS_MOD | Modifiers::SHIFT,
+        ));
         harness.rebuild();
         assert!(!state.new_work.open.get(), "New Window is not new work");
 
