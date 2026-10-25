@@ -1429,7 +1429,7 @@ mod tests {
         assert!(find(harness.root_id(), "new commits").is_none());
 
         // Cmd-Enter says the same, by the button, and sends nothing.
-        harness.dispatch_event(enter(Modifiers::META));
+        harness.dispatch_event(enter(crate::ui::OS_MOD));
         harness.rebuild();
         assert!(state
             .submit_review_error
