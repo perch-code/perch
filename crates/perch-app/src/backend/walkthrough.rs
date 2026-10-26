@@ -798,6 +798,11 @@ pieces: give `start` and `end` within its lines, on its side, and talk between t
 Don't show the same lines twice.
 - Don't quote code in `text` beyond names in backticks; Perch draws the code for each `hunk` \
 and `code` part where it stands.
+- A `text` may hold a short fenced block of pseudocode or ASCII art where it explains better \
+than words or a diagram: the outline of an algorithm, a layout of bytes, a table of states, how \
+a buffer or tree looks before and after. Keep it to a few lines, at most 70 characters wide, \
+since Perch wraps longer lines. Pseudocode sketches the idea; it never stands in for the real \
+code.
 - A `code` part is for lines outside the hunks that the story needs, such as an unchanged \
 caller, or what something looked like before (`\"side\": \"base\"`, counted in the base \
 commit's file). Only cite lines you have read; never guess line numbers.
