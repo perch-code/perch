@@ -1226,6 +1226,9 @@ pub struct Composer {
     pub opening: u64,
     /// Ask or Work, where the item allows Work; see `composer_mode`.
     pub mode: perch_github::RunMode,
+    /// The walkthrough block it was opened under, which draws it there;
+    /// `None` for one opened anywhere else.
+    pub block: Option<String>,
 }
 
 /// One open editor tab. The origin is here as well as on the loaded
@@ -4882,17 +4885,57 @@ impl ReviewState {
         draft: String,
         defaults: AgentChoice,
     ) {
-        let thread = thread_id.as_ref().and_then(|id| {
+        let destination = self.destination_for(thread_id.as_deref(), anchor.as_ref(), defaults);
+        self.open_composer_with(thread_id, anchor, draft, destination, None);
+    }
+
+    /// Open a composer for a new thread on lines a walkthrough's block
+    /// shows, under the block, with Walkthrough staying up. With `keep`,
+    /// one already under the block keeps what was typed and where it
+    /// goes, as a shift-click's range does.
+    pub fn open_composer_under(
+        &self,
+        block: String,
+        anchor: Anchor,
+        keep: bool,
+        defaults: AgentChoice,
+    ) {
+        let kept = keep
+            .then(|| {
+                self.composer.with_untracked(|c| {
+                    c.as_ref()
+                        .filter(|c| c.thread_id.is_none() && c.block.as_ref() == Some(&block))
+                        .map(|c| c.destination.clone())
+                })
+            })
+            .flatten();
+        let (draft, destination) = match kept {
+            Some(destination) => (self.composer_draft.get_untracked(), destination),
+            None => (
+                String::new(),
+                self.destination_for(None, Some(&anchor), defaults),
+            ),
+        };
+        self.place_composer(None, Some(anchor), draft, destination, None, Some(block));
+    }
+
+    /// Where a new composer about `thread_id` or `anchor` sends: the rules'
+    /// pick, with GitHub only where a draft could go.
+    fn destination_for(
+        &self,
+        thread_id: Option<&str>,
+        anchor: Option<&Anchor>,
+        defaults: AgentChoice,
+    ) -> Destination {
+        let thread = thread_id.and_then(|id| {
             self.comment_threads
-                .with_untracked(|t| t.iter().find(|t| &t.id == id).cloned())
+                .with_untracked(|t| t.iter().find(|t| t.id == id).cloned())
         });
-        let face = floem::reactive::Effect::untrack(|| {
-            self.face_for(thread_id.as_deref(), anchor.as_ref())
-        });
+        let face = floem::reactive::Effect::untrack(|| self.face_for(thread_id, anchor));
         let destination = self.agent.with_untracked(|agent| {
             default_destination(
                 thread.as_ref(),
-                anchor.as_ref(),
+                anchor,
                 self.last_destination[face.index()].get_untracked(),
                 self.agent_last.get_untracked(),
                 defaults.clone(),
@@ -4902,26 +4945,24 @@ impl ReviewState {
         });
         // The rules say GitHub where a draft could go; where none can, on
         // a branch or a pull request no longer open, the last agent.
-        let destination = if destination.is_github()
-            && !self.github_offered_for(thread_id.as_deref(), anchor.as_ref())
-        {
+        if destination.is_github() && !self.github_offered_for(thread_id, anchor) {
             Destination::agent(self.agent_last.get_untracked().unwrap_or(defaults))
         } else {
             destination
-        };
-        self.open_composer_with(thread_id, anchor, draft, destination, None);
+        }
     }
 
     /// The face a composer about `thread_id` or `anchor` would take: inline
-    /// when Files is showing and it has a card in the code, else a card on
-    /// Conversation. Tracked, as the placement checks are.
+    /// when Files is showing and it has a card in the code, else a card,
+    /// on Conversation or under a walkthrough's block. Tracked, as the
+    /// placement checks are.
     fn face_for(
         &self,
         thread_id: Option<&str>,
         anchor: Option<&Anchor>,
     ) -> crate::review::threads::ThreadFace {
         use crate::review::threads::ThreadFace;
-        if self.tab.get() == ItemTab::Conversation {
+        if matches!(self.tab.get(), ItemTab::Conversation | ItemTab::Walkthrough) {
             return ThreadFace::Card;
         }
         let in_code = match thread_id {
@@ -4949,6 +4990,22 @@ impl ReviewState {
         destination: Destination,
         editing: Option<String>,
     ) {
+        self.place_composer(thread_id, anchor, draft, destination, editing, None);
+    }
+
+    /// Open a composer, under a walkthrough's block when `block` names
+    /// one, where Walkthrough stays up; else in the code when it has a
+    /// card there, else on Conversation.
+    fn place_composer(
+        &self,
+        thread_id: Option<String>,
+        anchor: Option<Anchor>,
+        draft: String,
+        destination: Destination,
+        editing: Option<String>,
+        block: Option<String>,
+    ) {
+        let under_block = block.is_some();
         self.composer_draft.set(draft.clone());
         // A confirm or a refusal was about the composer this replaces.
         self.composer_confirming.set(false);
@@ -4969,10 +5026,13 @@ impl ReviewState {
                 opening,
                 editing,
                 mode,
+                block,
             }));
         });
         let in_code = self.composer_in_code_untracked();
-        if !in_code && self.tab.get_untracked() != ItemTab::Conversation {
+        if under_block {
+            self.show_tab(ItemTab::Walkthrough);
+        } else if !in_code && self.tab.get_untracked() != ItemTab::Conversation {
             self.show_tab(ItemTab::Conversation);
         } else if let Some(id) = self
             .composer

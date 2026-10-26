@@ -16,19 +16,22 @@ use std::sync::Arc;
 
 use floem::prelude::*;
 use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
+use floem::ui_events::pointer::PointerButton;
 use floem::views::{
     dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack,
 };
-use perch_github::{Anchor, Author, CommentThread};
+use perch_github::{Anchor, Author, CommentThread, Side};
 
 use crate::backend::{Backend, CodeSide, Part, Step, Walkthrough, WalkthroughOutcome};
-use crate::review::cards::{self, perch_surface};
+use crate::icons::SidebarIcon;
+use crate::review::cards::{self, perch_surface, CodeLine, Tint};
 use crate::review::doc::CardId;
 use crate::review::model::{AgentChoice, ItemTab, LoadedFile, Paging, ReviewState};
+use crate::review::threads::{self, ThreadFace};
 use crate::review::OpenFile;
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::{action_button, clickable};
+use crate::ui::widgets::{action_button, clickable, sidebar_glyph};
 
 /// The most lines a block shows before it says how many more.
 const BLOCK_LINES: usize = 40;
@@ -188,8 +191,9 @@ pub fn view(
                 move || shown.get(),
                 move |shown| match (shown, item.get_untracked()) {
                     (Some(walkthrough), Some(item_id)) => steps(
+                        app,
                         state,
-                        &steps_backend,
+                        steps_backend.clone(),
                         open_file.clone(),
                         item_id,
                         walkthrough,
@@ -586,13 +590,14 @@ fn guidance_box(
 
 /// The summary, then the steps, each its own card.
 fn steps(
+    app: AppState,
     state: ReviewState,
-    backend: &Backend,
+    backend: Rc<Backend>,
     open_file: OpenFile,
     item_id: String,
     walkthrough: Arc<Walkthrough>,
 ) -> impl IntoView {
-    ask_files(state, backend, &item_id, &walkthrough);
+    ask_files(state, &backend, &item_id, &walkthrough);
     // The background first, unnumbered, then the steps from 1.
     let cards: Vec<(Option<usize>, Step)> = walkthrough
         .background
@@ -615,7 +620,9 @@ fn steps(
         move |i| {
             let (number, step) = cards[i].clone();
             step_card(
+                app,
                 state,
+                backend.clone(),
                 open_file.clone(),
                 item_id.clone(),
                 walkthrough.clone(),
@@ -725,8 +732,11 @@ pub fn file_read(
 /// A step: its number and title, then its body in order, prose with the
 /// lines and threads it is about where it set them. The background has
 /// no number, and says it is the background over its title.
+#[allow(clippy::too_many_arguments)]
 fn step_card(
+    app: AppState,
     state: ReviewState,
+    backend: Rc<Backend>,
     open_file: OpenFile,
     item_id: String,
     walkthrough: Arc<Walkthrough>,
@@ -767,32 +777,64 @@ fn step_card(
             .style(|s| s.font_size(theme::TEXT_BODY).color(theme::fg_muted()))
             .into_any()
     });
-    let parts = step.body.iter().filter_map(|part| match part {
-        Part::Text { text } => Some(crate::review::markdown::render_linked(text, state).into_any()),
-        Part::Hunk { id, start, end } => {
-            let hunk = walkthrough.hunk(id)?;
-            let block = Block {
-                path: hunk.path.clone(),
-                side: hunk.side,
-                start: start.unwrap_or(hunk.start),
-                end: end.unwrap_or(hunk.end),
-                context: false,
-            };
-            Some(block_view(state, open_file.clone(), item_id.clone(), block).into_any())
-        }
-        Part::Code(lines) => {
-            let block = Block {
+    // The threads the step names have rows of their own, so a block
+    // under them leaves them out.
+    let named: Rc<BTreeSet<String>> = Rc::new(
+        step.body
+            .iter()
+            .filter_map(|part| match part {
+                Part::Thread { id } => Some(id.clone()),
+                _ => None,
+            })
+            .collect(),
+    );
+    let key = |i: usize| format!("{}/{}/{i}", walkthrough.head, number.unwrap_or(0));
+    let view_of = |block: Block| {
+        block_view(
+            app,
+            state,
+            backend.clone(),
+            open_file.clone(),
+            item_id.clone(),
+            named.clone(),
+            block,
+        )
+        .into_any()
+    };
+    let parts = step
+        .body
+        .iter()
+        .enumerate()
+        .filter_map(|(i, part)| match part {
+            Part::Text { text } => {
+                Some(crate::review::markdown::render_linked(text, state).into_any())
+            }
+            Part::Hunk { id, start, end } => {
+                let hunk = walkthrough.hunk(id)?;
+                Some(view_of(Block {
+                    key: key(i),
+                    head: walkthrough.head.clone(),
+                    path: hunk.path.clone(),
+                    side: hunk.side,
+                    start: start.unwrap_or(hunk.start),
+                    end: end.unwrap_or(hunk.end),
+                    context: false,
+                }))
+            }
+            Part::Code(lines) => Some(view_of(Block {
+                key: key(i),
+                head: walkthrough.head.clone(),
                 path: lines.path.clone(),
                 side: lines.side,
                 start: lines.start,
                 end: lines.end,
                 context: true,
-            };
-            Some(block_view(state, open_file.clone(), item_id.clone(), block).into_any())
-        }
-        Part::Thread { id } => Some(thread_row(state, id.clone()).into_any()),
-        Part::Diagram { source } => Some(crate::review::diagram::view(source.clone()).into_any()),
-    });
+            })),
+            Part::Thread { id } => Some(thread_row(state, id.clone()).into_any()),
+            Part::Diagram { source } => {
+                Some(crate::review::diagram::view(source.clone()).into_any())
+            }
+        });
     let body = Stack::vertical_from_iter(note.into_iter().chain(parts))
         .style(|s| s.flex_col().width_full().gap(10.0));
     Stack::vertical((
@@ -816,6 +858,11 @@ fn step_card(
 /// Lines a step shows: a hunk of the change, or lines it cites.
 #[derive(Debug, Clone)]
 struct Block {
+    /// Which block of the walkthrough this is, for a composer opened
+    /// under it.
+    key: String,
+    /// The head the walkthrough was written for, whose lines these are.
+    head: String,
     path: String,
     side: CodeSide,
     start: u32,
@@ -827,11 +874,16 @@ struct Block {
 /// A block: the file and lines over them, the file opening Code at the
 /// first line, a line from before the change at the head line it became;
 /// then the lines, as the diff tints them and on code's white, once the
-/// file is read at the walkthrough's commits.
+/// file is read at the walkthrough's commits. A line's `+` asks about it
+/// in a composer under the block, as Code's gutter does, and the threads
+/// on its lines that the step doesn't name already are listed under it.
 fn block_view(
+    app: AppState,
     state: ReviewState,
+    backend: Rc<Backend>,
     open_file: OpenFile,
     item_id: String,
+    named: Rc<BTreeSet<String>>,
     block: Block,
 ) -> impl IntoView {
     let path = block.path.clone();
@@ -847,6 +899,7 @@ fn block_view(
         })
         .on_event_stop(el::Click, {
             let item_id = item_id.clone();
+            let block = block.clone();
             move |_, _| {
                 let (start, end) = (block.start as usize, block.end as usize);
                 let (first, last) = match block.side {
@@ -894,70 +947,283 @@ fn block_view(
             .padding_horiz(10.0)
     });
     // Read at the walkthrough's own commits, whose lines these are.
-    let read = {
+    let file = {
         let item_id = item_id.clone();
         let path = block.path.clone();
+        move || {
+            state
+                .walkthrough_files
+                .with(|all| all.get(&item_id)?.files.get(&path)?.clone())
+        }
+    };
+    let read = {
+        let file = file.clone();
+        Memo::new(move |_| file().map(|read| read.map(|_| ())))
+    };
+    let hovered: RwSignal<Option<(Side, usize)>> = RwSignal::new(None);
+    let lines = {
+        let file = file.clone();
+        let block = block.clone();
+        dyn_container(
+            move || read.get(),
+            move |read| match read {
+                Some(Ok(())) => {
+                    let Some(Ok(file)) = floem::reactive::Effect::untrack(&file) else {
+                        return Empty::new().into_any();
+                    };
+                    let (anchor, lines, more) = block_lines(&file, &block);
+                    let rows = (!lines.is_empty()).then(|| {
+                        Stack::vertical_from_iter(lines.into_iter().map(|(side, line)| {
+                            line_row(app, state, &block, &anchor, side, line, hovered)
+                        }))
+                        .style(|s| {
+                            s.flex_col()
+                                .width_full()
+                                .border_bottom(1.0)
+                                .border_color(theme::border())
+                        })
+                    });
+                    Stack::vertical((
+                        rows.map_or_else(|| Empty::new().into_any(), IntoView::into_any),
+                        cards::more_row(more),
+                    ))
+                    .style(|s| s.flex_col().width_full())
+                    .into_any()
+                }
+                Some(Err(e)) => {
+                    Label::derived(move || format!("These lines couldn't be read: {e}."))
+                        .style(|s| {
+                            s.font_size(theme::TEXT_BADGE)
+                                .color(theme::fg_subtle())
+                                .padding_horiz(10.0)
+                                .padding_vert(6.0)
+                        })
+                        .into_any()
+                }
+                None => Empty::new().into_any(),
+            },
+        )
+        .style(|s| {
+            s.width_full()
+                .border_top(1.0)
+                .border_color(theme::border_muted())
+                .background(theme::code_bg())
+                // Inside the block's frame, its corners less the border.
+                .border_bottom_left_radius(5.0)
+                .border_bottom_right_radius(5.0)
+        })
+    };
+    // The threads on the block's lines: on these lines at the head the
+    // walkthrough was written for, or on the current head's when that is
+    // the one, as Code shows them.
+    let threads = {
+        let block = block.clone();
         Memo::new(move |_| {
-            state.walkthrough_files.with(|all| {
-                let read = all.get(&item_id)?.files.get(&path)?.as_ref()?;
-                Some(read.as_ref().map(|_| ()).map_err(Clone::clone))
+            let shown: Vec<(Side, usize)> = match file() {
+                Some(Ok(file)) => block_lines(&file, &block)
+                    .1
+                    .into_iter()
+                    .filter_map(|(side, line)| Some((side, line.number?)))
+                    .collect(),
+                _ => return Vec::new(),
+            };
+            let current = state.item.with(|i| {
+                i.as_ref()
+                    .and_then(|i| i.checkout.as_ref())
+                    .is_some_and(|c| c.head_sha == block.head)
+            });
+            state.comment_threads.with(|threads| {
+                threads
+                    .iter()
+                    .filter(|t| !named.contains(&t.id) && state.thread_visible(t))
+                    .filter(|t| {
+                        t.anchor.as_ref().is_some_and(|a| {
+                            a.path == block.path
+                                && shown.contains(&(a.side, a.line as usize))
+                                && (a.commit_sha == block.head || (current && !t.outdated))
+                        })
+                    })
+                    .map(|t| t.id.clone())
+                    .collect::<Vec<_>>()
             })
         })
+    };
+    let thread_rows = dyn_stack(
+        move || threads.get(),
+        String::clone,
+        move |id| thread_row(state, id),
+    )
+    .debug_name("walkthrough-block-threads")
+    .style(move |s| {
+        s.flex_col()
+            .width_full()
+            .gap(4.0)
+            .apply_if(threads.with(Vec::is_empty), |s| s.hide())
+    });
+    // Keyed on which opening it is, not on the composer, which picking a
+    // model writes, so what is typed stays.
+    let opening = {
+        let key = block.key.clone();
+        Memo::new(move |_| {
+            state.composer.with(|c| {
+                c.as_ref()
+                    .filter(|c| c.thread_id.is_none() && c.block.as_ref() == Some(&key))
+                    .map(|c| c.opening)
+            })
+        })
+    };
+    let composer = dyn_container(
+        move || opening.get(),
+        move |opening| match (opening, state.composer.get_untracked()) {
+            (Some(_), Some(c)) => {
+                threads::composer_view(app, state, backend.clone(), c, ThreadFace::Card).into_any()
+            }
+            _ => Empty::new().into_any(),
+        },
+    )
+    .debug_name("walkthrough-composer")
+    .style(move |s| {
+        s.width_full()
+            .apply_if(opening.with(Option::is_none), |s| s.hide())
+    });
+    Stack::vertical((
+        Stack::vertical((header, lines)).style(block_style),
+        thread_rows,
+        composer,
+    ))
+    .style(|s| s.flex_col().width_full().gap(8.0))
+    .into_any()
+}
+
+/// The lines a block shows, each with the side it counts on, at most
+/// [`BLOCK_LINES`] and how many more; and the anchor they are read by.
+/// A file the change leaves alone has no base of its own to read: its
+/// base lines are its head lines.
+fn block_lines(file: &LoadedFile, block: &Block) -> (Anchor, Vec<(Side, CodeLine)>, usize) {
+    let side = if file.status.is_none() {
+        Side::Right
+    } else {
+        block.side.github()
     };
     let anchor = Anchor {
         path: block.path.clone(),
         start_line: block.start,
         line: block.end,
-        side: block.side.github(),
-        commit_sha: String::new(),
+        side,
+        commit_sha: block.head.clone(),
     };
-    let lines = dyn_container(
-        move || read.get(),
-        move |read| match read {
-            Some(Ok(())) => {
-                let file = state.walkthrough_files.with_untracked(|all| {
-                    all.get(&item_id)?.files.get(&anchor.path)?.clone()?.ok()
-                });
-                let Some(file) = file else {
-                    return Empty::new().into_any();
-                };
-                // A file the change leaves alone has no base of its own
-                // to read: its base lines are its head lines.
-                let anchor = if file.status.is_none() {
-                    Anchor {
-                        side: perch_github::Side::Right,
-                        ..anchor.clone()
-                    }
-                } else {
-                    anchor.clone()
-                };
-                let (lines, more) = cards::anchored_lines(&file, &anchor, BLOCK_LINES);
-                Stack::vertical((cards::code_lines(lines), cards::more_row(more)))
-                    .style(|s| s.flex_col().width_full())
-                    .into_any()
-            }
-            Some(Err(e)) => Label::derived(move || format!("These lines couldn't be read: {e}."))
-                .style(|s| {
-                    s.font_size(theme::TEXT_BADGE)
-                        .color(theme::fg_subtle())
-                        .padding_horiz(10.0)
-                        .padding_vert(6.0)
-                })
-                .into_any(),
-            None => Empty::new().into_any(),
-        },
+    let (lines, more) = cards::anchored_lines(file, &anchor, BLOCK_LINES);
+    // Lines read from the base are the base's; among the head's, a removed
+    // one counts on the base side.
+    let lines = lines
+        .into_iter()
+        .map(|line| {
+            let side = if side == Side::Left || line.tint == Tint::Removed {
+                Side::Left
+            } else {
+                Side::Right
+            };
+            (side, line)
+        })
+        .collect();
+    (anchor, lines, more)
+}
+
+/// A line of a block, with the `+` that asks about it under the pointer,
+/// as Code's gutter has: about this line, or with Shift from the line a
+/// composer under the block starts on to this one. The lines a composer
+/// under the block is about are marked.
+fn line_row(
+    app: AppState,
+    state: ReviewState,
+    block: &Block,
+    anchor: &Anchor,
+    side: Side,
+    line: CodeLine,
+    hovered: RwSignal<Option<(Side, usize)>>,
+) -> floem::AnyView {
+    let Some(number) = line.number else {
+        return cards::code_row(line).into_any();
+    };
+    let at = (side, number);
+    let key = block.key.clone();
+    // The lines of the composer under this block, on this line's side.
+    let asked = {
+        let key = key.clone();
+        move || {
+            state.composer.with(|c| {
+                c.as_ref()
+                    .filter(|c| c.thread_id.is_none() && c.block.as_ref() == Some(&key))
+                    .and_then(|c| c.anchor.as_ref())
+                    .filter(|a| a.side == side)
+                    .map(|a| (a.start_line.min(a.line), a.start_line.max(a.line)))
+            })
+        }
+    };
+    let marked = {
+        let asked = asked.clone();
+        move || asked().is_some_and(|(first, last)| (first..=last).contains(&(number as u32)))
+    };
+    let anchor = anchor.clone();
+    let plus = Container::new(
+        sidebar_glyph(SidebarIcon::Plus, theme::canvas).style(|s| s.size(11.0, 11.0)),
     )
-    .style(|s| {
-        s.width_full()
-            .border_top(1.0)
-            .border_color(theme::border_muted())
-            .background(theme::code_bg())
-            // Inside the block's frame, its corners less the border.
-            .border_bottom_left_radius(5.0)
-            .border_bottom_right_radius(5.0)
+    .debug_name("walkthrough-plus")
+    .on_event_stop(el::PointerDown, move |_, e: &PointerButtonEvent| {
+        if e.button != Some(PointerButton::Primary) {
+            return;
+        }
+        let line = number as u32;
+        let from = e
+            .state
+            .modifiers
+            .shift()
+            .then(|| floem::reactive::Effect::untrack(&asked))
+            .flatten()
+            .map(|(first, _)| first);
+        let (start, end) = match from {
+            Some(first) => (first.min(line), first.max(line)),
+            None => (line, line),
+        };
+        state.open_composer_under(
+            key.clone(),
+            Anchor {
+                start_line: start,
+                line: end,
+                side,
+                ..anchor.clone()
+            },
+            from.is_some(),
+            crate::review::threads::defaults(app),
+        );
+    })
+    .style(move |s| {
+        clickable(s)
+            .absolute()
+            .inset_left(4.0)
+            .inset_top((theme::CODE_ROW_HEIGHT - 16.0) / 2.0)
+            .size(16.0, 16.0)
+            .items_center()
+            .justify_center()
+            .border_radius(3.0)
+            .background(theme::accent())
+            .apply_if(hovered.get() != Some(at), |s| s.hide())
     });
-    Stack::vertical((header, lines))
-        .style(block_style)
+    let mark = Empty::new().style(move |s| {
+        s.absolute()
+            .inset(0.0)
+            .pointer_events_none()
+            .background(theme::selection_bg())
+            .apply_if(!marked(), |s| s.hide())
+    });
+    Stack::new((cards::code_row(line), mark, plus))
+        .on_event_cont(el::PointerEnter, move |_, _| hovered.set(Some(at)))
+        .on_event_cont(el::PointerLeave, move |_, _| {
+            if hovered.get_untracked() == Some(at) {
+                hovered.set(None);
+            }
+        })
+        .style(|s| s.width_full())
         .into_any()
 }
 
@@ -1473,6 +1739,174 @@ mod tests {
         assert_eq!(state.tab.get_untracked(), ItemTab::Code);
         assert_eq!(state.jump_to_line.get_untracked(), Some(0));
         assert_eq!(state.jump_through.get_untracked(), Some(1));
+    }
+
+    /// The primary button going down at a point, with Shift held or not.
+    fn press(x: f64, y: f64, shift: bool) -> floem::event::Event {
+        use floem::ui_events::keyboard::Modifiers;
+        use floem::ui_events::pointer::{
+            PointerButtonEvent, PointerEvent, PointerId, PointerInfo, PointerState, PointerType,
+        };
+        let mut state = PointerState::default();
+        state.position.x = x;
+        state.position.y = y;
+        state.count = 1;
+        if shift {
+            state.modifiers = Modifiers::SHIFT;
+        }
+        floem::event::Event::Pointer(PointerEvent::Down(PointerButtonEvent {
+            state,
+            button: Some(PointerButton::Primary),
+            pointer: PointerInfo {
+                pointer_id: Some(PointerId::PRIMARY),
+                persistent_device_id: None,
+                pointer_type: PointerType::Mouse,
+            },
+        }))
+    }
+
+    /// Every view named `name` under `id`.
+    fn all_named(id: floem::ViewId, name: &str, found: &mut Vec<floem::ViewId>) {
+        if id.debug_name().split_whitespace().any(|part| part == name) {
+            found.push(id);
+        }
+        for child in id.children() {
+            all_named(child, name, found);
+        }
+    }
+
+    /// Point at the first line of the first step showing `text`, and
+    /// press its `+`.
+    fn ask_on(harness: &mut HeadlessHarness, text: &str, shift: bool) {
+        let step = named(harness.root_id(), "walkthrough-step").unwrap();
+        let y = find(step, text)
+            .unwrap_or_else(|| panic!("no {text}"))
+            .get_visual_rect_no_clip()
+            .center()
+            .y;
+        harness.pointer_move(300.0, y);
+        settle(harness);
+        let mut pluses = Vec::new();
+        all_named(harness.root_id(), "walkthrough-plus", &mut pluses);
+        let plus = pluses
+            .into_iter()
+            .map(|id| id.get_visual_rect_no_clip())
+            .find(|r| r.width() > 0.0 && r.y0 <= y && y <= r.y1)
+            .expect("a + on the line under the pointer");
+        let at = plus.center();
+        harness.dispatch_event(press(at.x, at.y, shift));
+        harness.pointer_up(at.x, at.y);
+        settle(harness);
+    }
+
+    /// The one block's composer slot that holds a composer.
+    fn open_composer(harness: &HeadlessHarness) -> floem::ViewId {
+        let mut slots = Vec::new();
+        all_named(harness.root_id(), "walkthrough-composer", &mut slots);
+        let open: Vec<_> = slots
+            .into_iter()
+            .filter(|slot| named(*slot, "composer-box").is_some())
+            .collect();
+        assert_eq!(open.len(), 1, "one block draws the composer");
+        open[0]
+    }
+
+    /// A block's line offers a `+` under the pointer, which opens a
+    /// composer on it under the block, Walkthrough staying up. Shift on
+    /// another widens it to both and keeps what was typed. The thread it
+    /// starts is listed under the block; one the step names already is
+    /// not listed twice.
+    #[test]
+    fn a_blocks_lines_are_asked_about_under_the_block() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_on_branch();
+        read_at(state, "head-7");
+        state.comment_threads.set(Arc::new(vec![thread_on_x()]));
+        state.tab.set(ItemTab::Walkthrough);
+        let (backend, _commands) = Backend::recording();
+        let view = view(app, state, Rc::new(backend), Rc::new(|_: &str| {}));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1000.0, 1400.0);
+        apply(
+            state,
+            "item-7".into(),
+            WalkthroughOutcome::Written(walkthrough("head-7")),
+        );
+        settle(&mut harness);
+        assert!(named(harness.root_id(), "composer-box").is_none());
+
+        ask_on(&mut harness, "beta2", false);
+        let anchor = |state: ReviewState| {
+            state
+                .composer
+                .get_untracked()
+                .and_then(|c| c.block.is_some().then_some(c.anchor).flatten())
+                .map(|a| (a.path, a.start_line, a.line, a.side, a.commit_sha))
+        };
+        assert_eq!(
+            anchor(state),
+            Some((
+                "src/x.rs".to_string(),
+                2,
+                2,
+                Side::Right,
+                "head-7".to_string()
+            ))
+        );
+        assert_eq!(state.tab.get_untracked(), ItemTab::Walkthrough);
+        let composer = open_composer(&harness);
+        assert!(find(composer, "src/x.rs:2").is_some());
+
+        state.composer_draft.set("Why?".into());
+        ask_on(&mut harness, "alpha", true);
+        assert_eq!(
+            anchor(state),
+            Some((
+                "src/x.rs".to_string(),
+                1,
+                2,
+                Side::Right,
+                "head-7".to_string()
+            ))
+        );
+        assert_eq!(state.composer_draft.get_untracked(), "Why?");
+        let composer = open_composer(&harness);
+        assert!(find(composer, "src/x.rs:1\u{2013}2").is_some());
+
+        // Sent, the box goes, and the thread it started is under the
+        // block, gh-9 only in the step's own row.
+        let mut asked = thread_on_x();
+        asked.id = "local-1".into();
+        asked.origin = perch_github::ThreadOrigin::Local;
+        asked.github_id = None;
+        asked.anchor = Some(Anchor {
+            start_line: 1,
+            ..asked.anchor.clone().unwrap()
+        });
+        asked.messages[0].author = Author::User;
+        asked.messages[0].body = "Why?".into();
+        state.composer_sent();
+        state
+            .comment_threads
+            .set(Arc::new(vec![thread_on_x(), asked]));
+        settle(&mut harness);
+        assert!(named(harness.root_id(), "composer-box").is_none());
+        let mut listed = Vec::new();
+        all_named(harness.root_id(), "walkthrough-block-threads", &mut listed);
+        let listed: Vec<_> = listed
+            .into_iter()
+            .filter(|id| !id.children().is_empty())
+            .collect();
+        assert_eq!(listed.len(), 1, "only the block it was asked from");
+        assert!(find(listed[0], "you: Why?").is_some());
+        assert!(find(listed[0], "ana").is_none());
+
+        // A removed line asks about the base's.
+        ask_on(&mut harness, "beta", false);
+        assert_eq!(
+            anchor(state).map(|(_, start, line, side, _)| (start, line, side)),
+            Some((2, 2, Side::Left))
+        );
     }
 
     /// A line from before the change is found where it is after: moved
