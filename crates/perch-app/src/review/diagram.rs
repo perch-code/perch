@@ -7,7 +7,8 @@
 //! solid, and rotated text unrotated.
 //!
 //! One wider than the column is shrunk to fit it, labels and all, and a
-//! click opens it at its own size over the window. The renderer draws a
+//! click opens it at its own size over the window; the pointer over it
+//! is a magnifying glass to say so. The renderer draws a
 //! picture whole and no bigger than [`picture::MAX_SIDE`] on a side, so
 //! an opened diagram is cut into tiles it can each draw.
 
@@ -18,6 +19,7 @@ use floem::kurbo::{Rect, Size};
 use floem::peniko::Color;
 use floem::prelude::*;
 use floem::reactive::{Memo, RwSignal};
+use floem::style::CursorStyle;
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, ScrollExt, Stack};
 use floem::ViewId;
 
@@ -25,7 +27,7 @@ use crate::icons::SidebarIcon;
 use crate::review::cards;
 use crate::review::picture::{self, Drawing};
 use crate::theme;
-use crate::ui::widgets::{clickable, icon_button};
+use crate::ui::widgets::icon_button;
 
 /// `source` laid out and drawn in the appearance's colours, or why not.
 #[cfg(test)]
@@ -167,7 +169,8 @@ pub fn view(source: String) -> impl IntoView {
     .style(|s| s.width_full())
 }
 
-/// The figure, which opens the diagram when the column has shrunk it.
+/// The figure, which opens the diagram when the column has shrunk it,
+/// and shows the zoom-in pointer while it would.
 fn figure(drawing: Drawing, svg: String) -> impl IntoView {
     let natural = drawing.size().width;
     let width = RwSignal::new(0.0_f64);
@@ -188,7 +191,11 @@ fn figure(drawing: Drawing, svg: String) -> impl IntoView {
             },
         )
         .debug_name("diagram-figure")
-        .style(move |s| s.width_full().apply_if(shrunk.get(), clickable))
+        .style(move |s| {
+            s.width_full().apply_if(shrunk.get(), |s| {
+                s.selectable(false).hover(|s| s.cursor(CursorStyle::ZoomIn))
+            })
+        })
 }
 
 thread_local! {

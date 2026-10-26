@@ -189,12 +189,14 @@ incremental = true
 # has no layers, so it multiplies the alpha into every paint instead,
 # and draws a faded image or full-colour SVG through its glyph path,
 # the one that takes a paint. Children that overlap inside a faded view
-# show through each other there. Last, one that paints a window when
+# show through each other there. Then one that paints a window when
 # the system asks it to redraw. floem painted only when it had asked
 # for a paint itself, and an X11 window with no compositor keeps no
 # copy of its pixels, so on Linux a window that another had covered
 # showed what had been on the screen there until something in it
-# changed.
+# changed. Last, one that adds zoom-in and zoom-out cursors, which
+# winit draws and floem's `CursorStyle` had no names for; a shrunk
+# walkthrough diagram shows the zoom-in one.
 # Drop a patch from the branch once upstream merges it; `cargo update -p floem`
 # takes the branch's new head. `floem_renderer` is patched too so that
 # perch-app's own dependency on it resolves to the checkout floem's does,
