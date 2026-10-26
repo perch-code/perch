@@ -26,15 +26,15 @@ use crate::backend::{Backend, CodeSide, Part, Step, Walkthrough, WalkthroughOutc
 use crate::icons::SidebarIcon;
 use crate::review::cards::{self, perch_surface, CodeLine, Tint};
 use crate::review::doc::CardId;
-use crate::review::model::{AgentChoice, ItemTab, LoadedFile, Paging, ReviewState};
+use crate::review::model::{AgentChoice, ItemTab, LoadedFile, Paging, ReviewState, Symbol};
 use crate::review::threads::{self, ThreadFace};
 use crate::review::OpenFile;
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::{action_button, clickable, sidebar_glyph};
+use crate::ui::widgets::{action_button, clickable, icon_action, sidebar_glyph};
 
-/// The most lines a block shows before it says how many more.
-const BLOCK_LINES: usize = 40;
+/// The most rows a block is tall; a longer range scrolls.
+const BLOCK_ROWS: usize = 40;
 
 /// Fold the backend's answer into the item's walkthrough.
 pub fn apply(review: ReviewState, item_id: String, outcome: WalkthroughOutcome) {
@@ -877,6 +877,8 @@ struct Block {
 /// file is read at the walkthrough's commits. A line's `+` asks about it
 /// in a composer under the block, as Code's gutter does, and the threads
 /// on its lines that the step doesn't name already are listed under it.
+/// The whole file scrolls under the lines, and once it has, a button at
+/// the right of the header takes it back to them.
 fn block_view(
     app: AppState,
     state: ReviewState,
@@ -886,6 +888,9 @@ fn block_view(
     named: Rc<BTreeSet<String>>,
     block: Block,
 ) -> impl IntoView {
+    // Bumped to scroll back to the block's lines.
+    let home = RwSignal::new(0_u64);
+    let moved = RwSignal::new(false);
     let path = block.path.clone();
     let where_ = match (block.side, block.context) {
         (CodeSide::Base, _) => format!("lines {}\u{2013}{}, before", block.start, block.end),
@@ -938,6 +943,17 @@ fn block_view(
                 .flex_shrink(0.0_f32)
                 .selectable(false)
         }),
+        icon_action(
+            SidebarIcon::Undo,
+            "walkthrough-lines-back",
+            || true,
+            move || home.update(|h| *h += 1),
+        )
+        .style(move |s| {
+            s.size(22.0, 22.0)
+                .margin_right(-6.0)
+                .apply_if(!moved.get(), |s| s.hide())
+        }),
     ))
     .style(|s| {
         s.items_center()
@@ -964,6 +980,7 @@ fn block_view(
     let lines = {
         let file = file.clone();
         let block = block.clone();
+        let backend = backend.clone();
         dyn_container(
             move || read.get(),
             move |read| match read {
@@ -971,24 +988,26 @@ fn block_view(
                     let Some(Ok(file)) = floem::reactive::Effect::untrack(&file) else {
                         return Empty::new().into_any();
                     };
-                    let (anchor, lines, more) = block_lines(&file, &block);
-                    let rows = (!lines.is_empty()).then(|| {
-                        Stack::vertical_from_iter(lines.into_iter().map(|(side, line)| {
-                            line_row(app, state, &block, &anchor, side, line, hovered)
-                        }))
-                        .style(|s| {
-                            s.flex_col()
-                                .width_full()
-                                .border_bottom(1.0)
-                                .border_color(theme::border())
-                        })
-                    });
-                    Stack::vertical((
-                        rows.map_or_else(|| Empty::new().into_any(), IntoView::into_any),
-                        cards::more_row(more),
-                    ))
-                    .style(|s| s.flex_col().width_full())
-                    .into_any()
+                    let (anchor, lines, range) = block_lines(&file, &block);
+                    if lines.is_empty() {
+                        return Empty::new().into_any();
+                    }
+                    // Its head lines are the checkout's, for rust-analyzer
+                    // to be asked about, when it was written for its head.
+                    let linked = anchor.side == Side::Right
+                        && state.item.with_untracked(|i| {
+                            i.as_ref()
+                                .and_then(|i| i.checkout.as_ref())
+                                .is_some_and(|c| c.head_sha == block.head)
+                        });
+                    let links = linked.then(|| (backend.clone(), block.path.clone()));
+                    let hand: RwSignal<Option<usize>> = RwSignal::new(None);
+                    let block = block.clone();
+                    let row = move |i: usize, (side, line): (Side, CodeLine)| {
+                        let link = links.clone().map(|links| Link { links, hand, i });
+                        line_row(app, state, &block, &anchor, side, line, hovered, link)
+                    };
+                    file_scroll(lines, range, home, moved, hand, row).into_any()
                 }
                 Some(Err(e)) => {
                     Label::derived(move || format!("These lines couldn't be read: {e}."))
@@ -1020,11 +1039,13 @@ fn block_view(
         let block = block.clone();
         Memo::new(move |_| {
             let shown: Vec<(Side, usize)> = match file() {
-                Some(Ok(file)) => block_lines(&file, &block)
-                    .1
-                    .into_iter()
-                    .filter_map(|(side, line)| Some((side, line.number?)))
-                    .collect(),
+                Some(Ok(file)) => {
+                    let (_, lines, range) = block_lines(&file, &block);
+                    lines[range]
+                        .iter()
+                        .filter_map(|(side, line)| Some((*side, line.number?)))
+                        .collect()
+                }
                 _ => return Vec::new(),
             };
             let current = state.item.with(|i| {
@@ -1095,11 +1116,14 @@ fn block_view(
     .into_any()
 }
 
-/// The lines a block shows, each with the side it counts on, at most
-/// [`BLOCK_LINES`] and how many more; and the anchor they are read by.
+/// The lines of a block's file, each with the side it counts on, and
+/// where the block's own are among them; and the anchor they are read by.
 /// A file the change leaves alone has no base of its own to read: its
 /// base lines are its head lines.
-fn block_lines(file: &LoadedFile, block: &Block) -> (Anchor, Vec<(Side, CodeLine)>, usize) {
+fn block_lines(
+    file: &LoadedFile,
+    block: &Block,
+) -> (Anchor, Vec<(Side, CodeLine)>, std::ops::Range<usize>) {
     let side = if file.status.is_none() {
         Side::Right
     } else {
@@ -1112,7 +1136,7 @@ fn block_lines(file: &LoadedFile, block: &Block) -> (Anchor, Vec<(Side, CodeLine
         side,
         commit_sha: block.head.clone(),
     };
-    let (lines, more) = cards::anchored_lines(file, &anchor, BLOCK_LINES);
+    let (lines, range) = cards::file_lines(file, &anchor);
     // Lines read from the base are the base's; among the head's, a removed
     // one counts on the base side.
     let lines = lines
@@ -1126,13 +1150,101 @@ fn block_lines(file: &LoadedFile, block: &Block) -> (Anchor, Vec<(Side, CodeLine
             (side, line)
         })
         .collect();
-    (anchor, lines, more)
+    (anchor, lines, range)
+}
+
+/// A file's lines in a box the height of `range`'s, opened on them and
+/// scrolling through the rest, as wide as its longest line, each drawn by
+/// `row`. `moved` says whether it is somewhere else; a bump of `home`
+/// takes it back. `hand` is cleared as the pointer leaves.
+fn file_scroll(
+    lines: Vec<(Side, CodeLine)>,
+    range: std::ops::Range<usize>,
+    home: RwSignal<u64>,
+    moved: RwSignal<bool>,
+    hand: RwSignal<Option<usize>>,
+    row: impl Fn(usize, (Side, CodeLine)) -> floem::AnyView + 'static,
+) -> impl IntoView {
+    use floem::views::scroll::ScrollChanged;
+
+    let start = floem::kurbo::Vec2::new(0.0, range.start as f64 * theme::CODE_ROW_HEIGHT);
+    let height = range.len().clamp(1, BLOCK_ROWS) as f64 * theme::CODE_ROW_HEIGHT;
+    // The row's own right padding past the longest line.
+    let width = lines
+        .iter()
+        .map(|(_, l)| &l.text)
+        .max_by_key(|text| text.chars().count())
+        .map_or(0.0, |text| cards::code_line_layout(text).size().width)
+        + cards::CODE_TEXT_INSET
+        + 12.0;
+    let lines = Arc::new(lines);
+    floem::views::virtual_stack(
+        move || Lines(lines.clone()),
+        |(i, _)| *i,
+        move |(i, line)| row(i, line),
+    )
+    .item_size_fixed(|| theme::CODE_ROW_HEIGHT)
+    .style(move |s| s.flex_col().min_width_full().width(width))
+    .scroll()
+    .scroll_to(move || {
+        home.track();
+        Some(start.to_point())
+    })
+    .on_event_cont(
+        ScrollChanged::listener(),
+        move |_, event: &ScrollChanged| {
+            let away = (event.offset - start).hypot() > 0.5;
+            if moved.get_untracked() != away {
+                moved.set(away);
+            }
+        },
+    )
+    .on_event_cont(el::PointerLeave, move |_, _| hand.set(None))
+    .debug_name("walkthrough-lines")
+    .style(move |s| {
+        s.width_full()
+            .height(height + 1.0)
+            .border_bottom(1.0)
+            .border_color(theme::border())
+    })
+}
+
+/// A file's lines as the virtual stack reads them, a slice at a time.
+struct Lines(Arc<Vec<(Side, CodeLine)>>);
+
+impl floem::views::VirtualVector<(usize, (Side, CodeLine))> for Lines {
+    fn total_len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn slice(
+        &self,
+        range: std::ops::Range<usize>,
+    ) -> impl Iterator<Item = (usize, (Side, CodeLine))> {
+        let start = range.start;
+        self.0[range]
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(move |(i, line)| (start + i, line))
+    }
+}
+
+/// What a row of a linked block needs for Cmd-click: the backend and the
+/// head file to ask about, the block's hand, and which row this is.
+struct Link {
+    links: (Rc<Backend>, String),
+    hand: RwSignal<Option<usize>>,
+    i: usize,
 }
 
 /// A line of a block, with the `+` that asks about it under the pointer,
 /// as Code's gutter has: about this line, or with Shift from the line a
 /// composer under the block starts on to this one. The lines a composer
-/// under the block is about are marked.
+/// under the block is about are marked. With `link`, the name under the
+/// pointer in a head line shows the hand while Cmd is held, and a
+/// Cmd-click asks where it is defined, which opens on Code.
+#[allow(clippy::too_many_arguments)]
 fn line_row(
     app: AppState,
     state: ReviewState,
@@ -1141,6 +1253,7 @@ fn line_row(
     side: Side,
     line: CodeLine,
     hovered: RwSignal<Option<(Side, usize)>>,
+    link: Option<Link>,
 ) -> floem::AnyView {
     let Some(number) = line.number else {
         return cards::code_row(line).into_any();
@@ -1216,15 +1329,104 @@ fn line_row(
             .background(theme::selection_bg())
             .apply_if(!marked(), |s| s.hide())
     });
-    Stack::new((cards::code_row(line), mark, plus))
+    let i = link.as_ref().map(|l| l.i);
+    let hand = link.as_ref().map(|l| l.hand);
+    let text = cards::code_row_with(line.clone(), move || {
+        hand.is_some_and(|hand| hand.get() == i)
+    });
+    let row = Stack::new((text, mark, plus))
         .on_event_cont(el::PointerEnter, move |_, _| hovered.set(Some(at)))
         .on_event_cont(el::PointerLeave, move |_, _| {
             if hovered.get_untracked() == Some(at) {
                 hovered.set(None);
             }
         })
-        .style(|s| s.width_full())
-        .into_any()
+        .style(|s| s.width_full());
+    match link {
+        Some(link) => linked_row(state, row, line, link),
+        None => row.into_any(),
+    }
+}
+
+/// A row whose names go to their definitions on a Cmd-click.
+fn linked_row(
+    state: ReviewState,
+    row: impl IntoView + 'static,
+    line: CodeLine,
+    Link {
+        links: (backend, path),
+        hand,
+        i,
+    }: Link,
+) -> floem::AnyView {
+    use crate::review::navigation::command_held;
+    use floem::event::EventPropagation;
+
+    let row = row.into_any();
+    let row_id = row.id();
+    // The name under a window point, in the row's text.
+    let symbol_at = move |window_point: floem::kurbo::Point| {
+        let origin = row_id.get_visual_rect_no_clip().origin();
+        let x = window_point.x - origin.x - cards::CODE_TEXT_INSET;
+        name_at(&path, &line, x)
+    };
+    let move_at = symbol_at.clone();
+    row.on_event_cont(el::PointerMove, move |cx, update| {
+        let at = cx.world_transform.inverse() * update.current.logical_point();
+        let over = command_held(&update.current.modifiers) && move_at(at).is_some();
+        let now = over.then_some(i);
+        if hand.get_untracked() != now {
+            hand.set(now);
+        }
+    })
+    .on_event_with_config(
+        el::PointerDown,
+        floem::context::EventCallbackConfig {
+            phases: floem::context::Phases::CAPTURE,
+        },
+        move |cx, e: &PointerButtonEvent| {
+            if e.button != Some(PointerButton::Primary) || !command_held(&e.state.modifiers) {
+                return EventPropagation::Continue;
+            }
+            let at = cx.world_transform.inverse() * e.state.logical_point();
+            match symbol_at(at) {
+                Some(symbol) => {
+                    crate::review::navigation::go_to_definition(state, &backend, &symbol);
+                    EventPropagation::Stop
+                }
+                None => EventPropagation::Continue,
+            }
+        },
+    )
+    .into_any()
+}
+
+/// The name `x` across a head line's text is on, as a symbol of the head
+/// file `path`. `None` on a removed line, which the server has no place
+/// for.
+fn name_at(path: &str, line: &CodeLine, x: f64) -> Option<Symbol> {
+    use crate::review::references::{identifier_at, is_identifier_char};
+
+    if line.tint == Tint::Removed {
+        return None;
+    }
+    let number = line.number?;
+    let byte = cards::code_byte_at(&line.text, x)?;
+    if !line.text[byte..]
+        .chars()
+        .next()
+        .is_some_and(is_identifier_char)
+    {
+        return None;
+    }
+    let (start, name) = identifier_at(&line.text, byte)?;
+    Some(Symbol {
+        path: path.to_string(),
+        line: number - 1,
+        column: start,
+        end: start + name.len(),
+        text: name.to_string(),
+    })
 }
 
 /// The head line a base line became, both 1-based: itself in a file the
@@ -1906,6 +2108,105 @@ mod tests {
         assert_eq!(
             anchor(state).map(|(_, start, line, side, _)| (start, line, side)),
             Some((2, 2, Side::Left))
+        );
+    }
+
+    /// A block opens on its lines and scrolls through the rest of its
+    /// file; once moved, the button in its header takes it back. A
+    /// Cmd-click on a name in a head line asks for its definition, which
+    /// opens on Code.
+    #[test]
+    fn a_block_scrolls_its_file_and_goes_to_definitions() {
+        // A click is turned into a name by the code's widths.
+        crate::theme::install_fonts_for_tests();
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_on_branch();
+        read_at(state, "head-7");
+        state.set_server_status(
+            perch_lsp::ServerKind::RustAnalyzer,
+            perch_lsp::Status::Ready,
+        );
+        state.tab.set(ItemTab::Walkthrough);
+        let (backend, mut commands) = Backend::recording();
+        let view = view(app, state, Rc::new(backend), Rc::new(|_: &str| {}));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1000.0, 1400.0);
+        apply(
+            state,
+            "item-7".into(),
+            WalkthroughOutcome::Written(walkthrough("head-7")),
+        );
+        settle(&mut harness);
+
+        // The block citing line 4, one row tall, on `delta`.
+        let cited = find(harness.root_id(), "lines 4\u{2013}4")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        let below = |name: &str| {
+            let mut ids = Vec::new();
+            all_named(harness.root_id(), name, &mut ids);
+            ids.into_iter()
+                .filter(|id| id.get_visual_rect_no_clip().y1 > cited.y0)
+                .min_by(|a, b| {
+                    let y = |id: &floem::ViewId| id.get_visual_rect_no_clip().y0;
+                    y(a).total_cmp(&y(b))
+                })
+                .unwrap()
+        };
+        let lines = below("walkthrough-lines");
+        // Hidden, it has no place to look for it by: it is in the block.
+        let block = lines.parent().and_then(|p| p.parent()).unwrap();
+        let back = named(block, "walkthrough-lines-back").unwrap();
+        let rect = lines.get_visual_rect_no_clip();
+        assert_eq!(
+            rect.height(),
+            theme::CODE_ROW_HEIGHT + 1.0,
+            "a row and its rule"
+        );
+        let on = |text: &str| {
+            find(lines, text).is_some_and(|id| rect.contains(id.get_visual_rect_no_clip().center()))
+        };
+        assert!(on("delta") && !on("gamma"));
+        assert!(back.is_hidden(), "nothing to go back to");
+
+        // Up a line, to `gamma`, and the button shows; it goes back.
+        harness.scroll_up(rect.center().x, rect.center().y, theme::CODE_ROW_HEIGHT);
+        settle(&mut harness);
+        assert!(on("gamma") && !on("delta"));
+        assert!(!back.is_hidden());
+        click_on(&mut harness, back);
+        settle(&mut harness);
+        assert!(on("delta"));
+        assert!(back.is_hidden());
+
+        // Cmd on `delta`, head line 4, asks where it is defined.
+        commands_of(&mut commands);
+        let at = rect.x0 + cards::CODE_TEXT_INSET + 4.0;
+        crate::review::navigation::tests::cmd_click_at(&mut harness, at, rect.center().y);
+        settle(&mut harness);
+        let asked: Vec<_> = commands_of(&mut commands)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Definition {
+                    token,
+                    path,
+                    line,
+                    character,
+                } => Some((token, path, line, character)),
+                _ => None,
+            })
+            .collect();
+        let [(token, path, line, character)] = asked.as_slice() else {
+            panic!("one definition asked: {asked:?}");
+        };
+        assert_eq!((path.as_str(), *line, *character), ("src/x.rs", 3, 0));
+        assert_eq!(state.tab.get_untracked(), ItemTab::Walkthrough);
+        let place = crate::review::code_refs::located("src/x.rs", 2, 0);
+        state.finish_goto(*token, Ok(vec![place]));
+        assert_eq!(state.tab.get_untracked(), ItemTab::Code);
+        assert_eq!(
+            state.pending_jump.get_untracked(),
+            Some(("src/x.rs".to_string(), 1, 0))
         );
     }
 

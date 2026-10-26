@@ -19,6 +19,7 @@
 //! picker. A click toggles the pill where it is and asks GitHub after.
 
 use std::cell::{Cell, RefCell};
+use std::ops::Range;
 use std::rc::Rc;
 
 use floem::context::VisualChanged;
@@ -1691,51 +1692,78 @@ pub fn anchored_lines(file: &LoadedFile, anchor: &Anchor, max: usize) -> (Vec<Co
     if anchor.side == perch_github::Side::Left {
         return anchored_base_lines(file, anchor, max);
     }
+    let Some((from, to)) = head_rows(file, anchor) else {
+        return (Vec::new(), 0);
+    };
+    let text: Vec<&str> = file.buffer.text.lines().collect();
+    let mut lines: Vec<CodeLine> = (from..=to).map(|d| head_row(file, &text, d)).collect();
+    let more = lines.len().saturating_sub(max);
+    lines.truncate(max);
+    (lines, more)
+}
+
+/// Every line of the side an anchor names, drawn as `anchored_lines`
+/// draws its own, and where the anchor's lines are among them: empty
+/// when none of them are there.
+pub fn file_lines(file: &LoadedFile, anchor: &Anchor) -> (Vec<CodeLine>, Range<usize>) {
+    if anchor.side == perch_github::Side::Left {
+        let Some(base) = file.base_buffer.as_ref() else {
+            return (Vec::new(), 0..0);
+        };
+        let text: Vec<&str> = base.text.lines().collect();
+        let removed = removed_base_lines(file);
+        let lines = (0..text.len())
+            .map(|b| base_line(file, &text, &removed, b))
+            .collect();
+        return (lines, base_range(anchor, text.len()));
+    }
+    let text: Vec<&str> = file.buffer.text.lines().collect();
+    let lines = (0..file.buffer.rows.len())
+        .map(|d| head_row(file, &text, d))
+        .collect();
+    let range = head_rows(file, anchor).map_or(0..0, |(from, to)| from..to + 1);
+    (lines, range)
+}
+
+/// The first and last of the buffer's rows a head anchor's lines span,
+/// the removed lines between them among them.
+fn head_rows(file: &LoadedFile, anchor: &Anchor) -> Option<(usize, usize)> {
     let first = anchor.start_line.saturating_sub(1) as usize;
     let last = anchor.line.saturating_sub(1) as usize;
     let rows = &file.buffer.rows;
     let from = rows
         .iter()
-        .position(|r| r.head_line().is_some_and(|h| h >= first));
+        .position(|r| r.head_line().is_some_and(|h| h >= first))?;
     let to = rows
         .iter()
-        .rposition(|r| r.head_line().is_some_and(|h| h <= last));
-    let (Some(from), Some(to)) = (from, to) else {
-        return (Vec::new(), 0);
+        .rposition(|r| r.head_line().is_some_and(|h| h <= last))?;
+    (from <= to).then_some((from, to))
+}
+
+/// One of the buffer's rows: a head line, or a removed line between two.
+fn head_row(file: &LoadedFile, text: &[&str], d: usize) -> CodeLine {
+    let (number, tint, spans) = match file.buffer.rows[d] {
+        Row::Head { head_line, status } => (
+            Some(head_line + 1),
+            match status {
+                LineStatus::Unchanged => Tint::Plain,
+                LineStatus::Added => Tint::Added,
+                LineStatus::Modified => Tint::Modified,
+            },
+            file.head_spans.line(head_line),
+        ),
+        Row::Deleted { base_line } => (
+            Some(base_line + 1),
+            Tint::Removed,
+            file.base_spans.line(base_line),
+        ),
     };
-    if from > to {
-        return (Vec::new(), 0);
+    CodeLine {
+        number,
+        tint,
+        text: text.get(d).copied().unwrap_or_default().to_string(),
+        spans: spans.to_vec(),
     }
-    let text: Vec<&str> = file.buffer.text.lines().collect();
-    let mut lines: Vec<CodeLine> = (from..=to)
-        .map(|d| {
-            let (number, tint, spans) = match rows[d] {
-                Row::Head { head_line, status } => (
-                    Some(head_line + 1),
-                    match status {
-                        LineStatus::Unchanged => Tint::Plain,
-                        LineStatus::Added => Tint::Added,
-                        LineStatus::Modified => Tint::Modified,
-                    },
-                    file.head_spans.line(head_line),
-                ),
-                Row::Deleted { base_line } => (
-                    Some(base_line + 1),
-                    Tint::Removed,
-                    file.base_spans.line(base_line),
-                ),
-            };
-            CodeLine {
-                number,
-                tint,
-                text: text.get(d).copied().unwrap_or_default().to_string(),
-                spans: spans.to_vec(),
-            }
-        })
-        .collect();
-    let more = lines.len().saturating_sub(max);
-    lines.truncate(max);
-    (lines, more)
 }
 
 fn anchored_base_lines(file: &LoadedFile, anchor: &Anchor, max: usize) -> (Vec<CodeLine>, usize) {
@@ -1743,36 +1771,53 @@ fn anchored_base_lines(file: &LoadedFile, anchor: &Anchor, max: usize) -> (Vec<C
         return (Vec::new(), 0);
     };
     let text: Vec<&str> = base.text.lines().collect();
+    let removed = removed_base_lines(file);
+    let mut lines: Vec<CodeLine> = base_range(anchor, text.len())
+        .map(|b| base_line(file, &text, &removed, b))
+        .collect();
+    let more = lines.len().saturating_sub(max);
+    lines.truncate(max);
+    (lines, more)
+}
+
+/// The base lines a base anchor names, cut to the `len` there are.
+fn base_range(anchor: &Anchor, len: usize) -> Range<usize> {
     let first = anchor.start_line.min(anchor.line).saturating_sub(1) as usize;
     let last = anchor.start_line.max(anchor.line).saturating_sub(1) as usize;
-    if first >= text.len() {
-        return (Vec::new(), 0);
+    if first >= len {
+        return 0..0;
     }
-    let last = last.min(text.len() - 1);
-    let removed: std::collections::HashSet<usize> = file
-        .buffer
+    first..last.min(len - 1) + 1
+}
+
+/// The base lines the change removes or changes.
+fn removed_base_lines(file: &LoadedFile) -> std::collections::HashSet<usize> {
+    file.buffer
         .rows
         .iter()
         .filter_map(|row| match row {
             Row::Deleted { base_line } => Some(*base_line),
             Row::Head { .. } => None,
         })
-        .collect();
-    let mut lines: Vec<CodeLine> = (first..=last)
-        .map(|base_line| CodeLine {
-            number: Some(base_line + 1),
-            tint: if removed.contains(&base_line) {
-                Tint::Removed
-            } else {
-                Tint::Plain
-            },
-            text: text[base_line].to_string(),
-            spans: file.base_spans.line(base_line).to_vec(),
-        })
-        .collect();
-    let more = lines.len().saturating_sub(max);
-    lines.truncate(max);
-    (lines, more)
+        .collect()
+}
+
+fn base_line(
+    file: &LoadedFile,
+    text: &[&str],
+    removed: &std::collections::HashSet<usize>,
+    base_line: usize,
+) -> CodeLine {
+    CodeLine {
+        number: Some(base_line + 1),
+        tint: if removed.contains(&base_line) {
+            Tint::Removed
+        } else {
+            Tint::Plain
+        },
+        text: text[base_line].to_string(),
+        spans: file.base_spans.line(base_line).to_vec(),
+    }
 }
 
 /// The lines, one row each, in the code font. Nothing when there are none.
@@ -1798,7 +1843,19 @@ pub(crate) fn code_lines(lines: Vec<CodeLine>) -> impl IntoView {
 /// text, as GitHub sets a diff's lines.
 const CODE_ROW_MARKER_WIDTH: f64 = 22.0;
 
+/// How far into a row its text starts: past the number and the marker.
+pub(crate) const CODE_TEXT_INSET: f64 = theme::CODE_ROW_NUMBER_WIDTH + CODE_ROW_MARKER_WIDTH;
+
 pub(crate) fn code_row(line: CodeLine) -> impl IntoView {
+    code_row_with(line, || false)
+}
+
+/// A row whose text shows the hand while `hand` says so, as a name the
+/// row links does.
+pub(crate) fn code_row_with(
+    line: CodeLine,
+    hand: impl Fn() -> bool + Copy + 'static,
+) -> impl IntoView {
     let tint = line.tint;
     let number = line.number.map(|n| n.to_string()).unwrap_or_default();
     let marker = match line.tint {
@@ -1806,7 +1863,7 @@ pub(crate) fn code_row(line: CodeLine) -> impl IntoView {
         Tint::Added | Tint::Modified => "+",
         Tint::Removed => "-",
     };
-    let text = code_text(line.text, line.spans, tint);
+    let text = code_text(line.text, line.spans, tint, hand);
     Stack::horizontal((
         Label::derived(move || number.clone()).style(|s| {
             s.width(theme::CODE_ROW_NUMBER_WIDTH)
@@ -1846,7 +1903,12 @@ pub(crate) fn code_row(line: CodeLine) -> impl IntoView {
 /// colours it, unless it was removed: the editor dims removed code, and
 /// so does a card. Rich text wraps, and a line must not; the clip is one
 /// row tall, so only the first line shows.
-fn code_text(text: String, spans: Vec<perch_syntax::Span>, tint: Tint) -> floem::AnyView {
+fn code_text(
+    text: String,
+    spans: Vec<perch_syntax::Span>,
+    tint: Tint,
+    hand: impl Fn() -> bool + Copy + 'static,
+) -> floem::AnyView {
     use floem::views::ClipExt;
 
     if spans.is_empty() || tint == Tint::Removed {
@@ -1858,13 +1920,17 @@ fn code_text(text: String, spans: Vec<perch_syntax::Span>, tint: Tint) -> floem:
                     .text_ellipsis()
                     .min_width(0.0)
                     .flex_grow(1.0_f32)
+                    .apply_if(hand(), |s| s.cursor(CursorStyle::Pointer))
             })
             .into_any();
     }
     // Laid out again when the appearance changes: the colours are in it.
     let (first, attrs) = code_layout(&text, &spans);
     floem::views::rich_text(first, attrs, move || code_layout(&text, &spans))
-        .style(|s| s.width_full())
+        .style(move |s| {
+            s.width_full()
+                .apply_if(hand(), |s| s.cursor(CursorStyle::Pointer))
+        })
         .clip()
         .style(|s| {
             s.height(theme::CODE_ROW_HEIGHT)
@@ -1872,6 +1938,38 @@ fn code_text(text: String, spans: Vec<perch_syntax::Span>, tint: Tint) -> floem:
                 .min_width(0.0)
         })
         .into_any()
+}
+
+/// A line laid out on one line as a row draws its text, to measure it or
+/// find what a point on it is over. Its spans change only its colours.
+pub(crate) fn code_line_layout(text: &str) -> floem::text::TextLayout {
+    let (_, attrs) = code_layout(text, &[]);
+    let mut layout = floem::text::TextLayout::new();
+    layout.set_text_wrap_mode(floem::text::TextWrapMode::NoWrap);
+    layout.set_text(text, attrs, None);
+    layout
+}
+
+/// The byte of a line's text the character `x` across its row's text is
+/// on. `None` before the text or past its end.
+pub(crate) fn code_byte_at(text: &str, x: f64) -> Option<usize> {
+    let layout = code_line_layout(text);
+    if x < 0.0 || x >= layout.size().width {
+        return None;
+    }
+    let cursor = layout.hit_test(floem::kurbo::Point::new(x, 0.0))?;
+    // The caret nearest the point is between two characters; the point is
+    // on whichever of them its side of the caret is.
+    let caret = layout.cursor_to_byte_index(&cursor).min(text.len());
+    let caret_x = layout
+        .cursor_point(caret, floem::text::Affinity::Downstream)
+        .x;
+    let byte = if x >= caret_x {
+        caret
+    } else {
+        caret - text[..caret].chars().next_back()?.len_utf8()
+    };
+    (byte < text.len()).then_some(byte)
 }
 
 fn code_layout(text: &str, spans: &[perch_syntax::Span]) -> (String, floem::text::AttrsList) {

@@ -3544,10 +3544,12 @@ impl ReviewState {
                 return;
             }
         };
-        match locations.as_slice() {
-            [] => self
-                .pending_notice
-                .set(Some(format!("No {} found for `{}`", ask.noun, ask.symbol))),
+        if locations.is_empty() {
+            self.pending_notice
+                .set(Some(format!("No {} found for `{}`", ask.noun, ask.symbol)));
+            return;
+        }
+        let open = || match locations.as_slice() {
             [one] => self.open_located(one),
             _ => self.open_references(References {
                 kind: ask.kind,
@@ -3558,6 +3560,16 @@ impl ReviewState {
                 failed: None,
                 asked: None,
             }),
+        };
+        // They open on Code: a Cmd-click on a walkthrough's lines asks from
+        // its own tab, which is left once, for Back.
+        if self.tab.get_untracked() == ItemTab::Code {
+            open();
+        } else {
+            self.one_move(|| {
+                self.show_tab(ItemTab::Code);
+                open();
+            });
         }
     }
 

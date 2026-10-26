@@ -602,7 +602,7 @@ thread_local! {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::rc::Rc;
     use std::sync::Arc;
 
@@ -947,7 +947,7 @@ mod tests {
 
     /// A primary button going down and up at a window point with the
     /// command key held, as the window receives a Cmd-click.
-    fn cmd_click_at(harness: &mut HeadlessHarness, x: f64, y: f64) {
+    pub(crate) fn cmd_click_at(harness: &mut HeadlessHarness, x: f64, y: f64) {
         let modifiers = if cfg!(target_os = "macos") {
             Modifiers::META
         } else {
