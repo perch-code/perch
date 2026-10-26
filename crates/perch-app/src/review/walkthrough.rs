@@ -1,7 +1,7 @@
 //! Walkthrough: the change told start to finish, as an agent wrote it and
 //! the backend's `walkthrough` checked it. One reading column, as
-//! Conversation's: a card with the change's summary that writes it, then
-//! the background and a card for each step, each its prose with the lines
+//! Conversation's: a card that writes it, then the change's summary, the
+//! background and a card for each step, each its prose with the lines
 //! it is about set in it, which Perch draws from the files as a thread's
 //! card draws its lines, and the threads it names, which open on
 //! Conversation. All of it is Perch's own, so all of it is grey.
@@ -257,11 +257,10 @@ pub fn view(
         .style(|s| s.size_full().min_height(0.0))
 }
 
-/// The card over the steps: the change's summary once there is one, and
-/// under it what a walkthrough is before there is one, that it is being
-/// written, why it could not be, or that it is of an older head. Under
-/// that the reader's guidance, the model and effort, and Write, or Write
-/// again, or Stop.
+/// The card over the steps: what a walkthrough is before there is one,
+/// that it is being written, why it could not be, or that it is of an
+/// older head. Under that the reader's guidance, the model and effort, and
+/// Write, or Write again, or Stop.
 fn head_card(
     app: AppState,
     state: ReviewState,
@@ -303,37 +302,12 @@ fn head_card(
             Some(_) => String::new(),
         }
     };
-    // What the change is, over whatever is being said about the walkthrough.
-    let summary = Memo::new(move |_| {
-        shown
-            .with(|w| w.as_ref().map(|w| w.summary.clone()))
-            .filter(|summary| !summary.trim().is_empty())
-    });
-    let text = Stack::vertical((
-        dyn_container(
-            move || summary.get(),
-            move |summary| match summary {
-                Some(summary) => crate::review::markdown::render_linked(&summary, state).into_any(),
-                None => Empty::new().into_any(),
-            },
-        )
-        .debug_name("walkthrough-summary")
-        .style(|s| s.width_full()),
-        Label::derived(words).style(move |s| {
-            s.font_size(theme::TEXT_BODY)
-                .color(theme::fg_muted())
-                .text_wrap()
-                .width_full()
-                .apply_if(words().is_empty(), |s| s.hide())
-        }),
-    ))
-    .style(move |s| {
-        s.flex_col()
-            .gap(8.0)
+    let text = Label::derived(words).style(move |s| {
+        s.font_size(theme::TEXT_BODY)
+            .color(theme::fg_muted())
+            .text_wrap()
             .width_full()
-            .apply_if(summary.with(Option::is_none) && words().is_empty(), |s| {
-                s.hide()
-            })
+            .apply_if(words().is_empty(), |s| s.hide())
     });
     let write_backend = backend.clone();
     let stop_backend = backend.clone();
@@ -610,7 +584,7 @@ fn guidance_box(
     .style(move |s| s.width_full().apply_if(writing.get(), |s| s.hide()))
 }
 
-/// The steps, each its own card.
+/// The summary, then the steps, each its own card.
 fn steps(
     state: ReviewState,
     backend: &Backend,
@@ -633,7 +607,9 @@ fn steps(
         )
         .collect();
     let count = cards.len();
-    dyn_stack(
+    let summary = (!walkthrough.summary.trim().is_empty())
+        .then(|| summary_card(state, &walkthrough.summary).into_any());
+    let steps = dyn_stack(
         move || 0..count,
         |i| *i,
         move |i| {
@@ -649,11 +625,32 @@ fn steps(
         },
     )
     .debug_name("walkthrough-steps")
-    .style(|s| {
+    .style(|s| s.flex_col().width_full().gap(theme::CARD_GAP));
+    Stack::vertical_from_iter(summary.into_iter().chain([steps.into_any()])).style(|s| {
         s.flex_col()
             .width_full()
             .gap(theme::CARD_GAP)
             .padding_top(theme::CARD_GAP)
+    })
+}
+
+/// What the change is, as the agent put it, in a card of its own.
+fn summary_card(state: ReviewState, summary: &str) -> impl IntoView {
+    Stack::vertical((
+        Label::derived(|| "Summary".to_string()).style(|s| {
+            s.font_size(theme::TEXT_SECTION_TITLE)
+                .font_weight(theme::weight_emphasis())
+                .color(theme::fg())
+        }),
+        crate::review::markdown::render_linked(summary, state),
+    ))
+    .debug_name("walkthrough-summary")
+    .style(|s| {
+        perch_surface(s)
+            .flex_col()
+            .width_full()
+            .gap(12.0)
+            .padding(theme::CARD_PADDING)
     })
 }
 
@@ -1409,12 +1406,19 @@ mod tests {
         );
         settle(&mut harness);
 
-        // The summary, as markdown, and nothing said under it.
+        // The summary, as markdown, in its own card under the one that
+        // writes, which says nothing.
+        let head = named(harness.root_id(), "walkthrough-head").unwrap();
         let summary = named(harness.root_id(), "walkthrough-summary").unwrap();
         assert!(find(summary, "Stores each request").is_some());
+        assert!(find(head, "Stores each request").is_none());
         assert!(find(harness.root_id(), "An agent reads the change").is_none());
-        // The background first, with its lines from before the change.
+        // The background next, with its lines from before the change.
         let background = named(harness.root_id(), "walkthrough-background").unwrap();
+        assert!(
+            head.get_visual_rect_no_clip().y1 < summary.get_visual_rect_no_clip().y0
+                && summary.get_visual_rect_no_clip().y1 < background.get_visual_rect_no_clip().y0
+        );
         assert!(find(background, "How requests are stored").is_some());
         assert!(find(background, "lines 1\u{2013}2, before").is_some());
         assert!(find(background, "alpha").is_some());
