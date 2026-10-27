@@ -336,7 +336,8 @@ impl Preparer {
             .resolve(&bare, &format!("refs/perch/pull/{number}/head"))
             .await;
         on_step(Step::Fetching);
-        self.fetch_pull(&bare, "origin", number, base_ref).await?;
+        self.fetch_pull(&bare, "origin", number, base_ref, None)
+            .await?;
         Ok(Prefetched { previous })
     }
 
@@ -372,7 +373,8 @@ impl Preparer {
         // but with the head where it was, the merge base has not.
         if !self.has_pull(&bare, number, head_sha, base_ref).await {
             on_step(Step::Fetching);
-            self.fetch_pull(&bare, "origin", number, base_ref).await?;
+            self.fetch_pull(&bare, "origin", number, base_ref, Some(head_sha))
+                .await?;
         }
         let base_local = format!("refs/perch/base/{number}");
 
@@ -1129,27 +1131,46 @@ impl Preparer {
     /// The base is also written under a ref that names the branch it came
     /// from, which is how `has_pull` knows a retargeted pull request needs
     /// fetching again.
+    ///
+    /// GitHub sometimes never publishes `refs/pull/N/head` for a pull
+    /// request, only its `merge` ref. With `head_sha` known, the head is
+    /// then fetched by commit, which GitHub serves from the base repository
+    /// whoever's fork it is on.
     pub async fn fetch_pull(
         &self,
         bare: &Path,
         from: &str,
         number: u64,
         base_ref: &str,
+        head_sha: Option<&str>,
     ) -> Result<(), Error> {
-        self.git
-            .run(
-                Some(bare),
-                [
-                    "fetch".to_string(),
-                    "--no-tags".to_string(),
-                    from.to_string(),
-                    format!("+refs/pull/{number}/head:refs/perch/pull/{number}/head"),
-                    format!("+refs/heads/{base_ref}:refs/perch/base/{number}"),
-                    format!("+refs/heads/{base_ref}:{}", base_of_ref(number, base_ref)),
-                ],
-                FETCH_TIMEOUT,
-            )
-            .await?;
+        let pull_ref = format!("refs/pull/{number}/head");
+        let fetch = |head: &str| {
+            [
+                "fetch".to_string(),
+                "--no-tags".to_string(),
+                from.to_string(),
+                format!("+{head}:refs/perch/pull/{number}/head"),
+                format!("+refs/heads/{base_ref}:refs/perch/base/{number}"),
+                format!("+refs/heads/{base_ref}:{}", base_of_ref(number, base_ref)),
+            ]
+        };
+        let fetched = self
+            .git
+            .run(Some(bare), fetch(&pull_ref), FETCH_TIMEOUT)
+            .await;
+        match (fetched, head_sha) {
+            (Err(Error::Git { stderr, .. }), Some(head_sha))
+                if stderr.contains(&format!("couldn't find remote ref {pull_ref}")) =>
+            {
+                self.git
+                    .run(Some(bare), fetch(head_sha), FETCH_TIMEOUT)
+                    .await?;
+            }
+            (fetched, _) => {
+                fetched?;
+            }
+        }
         Ok(())
     }
 

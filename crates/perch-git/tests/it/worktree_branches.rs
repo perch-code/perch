@@ -114,6 +114,25 @@ async fn a_fresh_worktree_is_created_on_its_own_branch() {
 }
 
 #[tokio::test]
+async fn a_head_github_never_published_is_fetched_by_commit() {
+    // GitHub sometimes serves only `refs/pull/N/merge` for a new pull
+    // request; the head is still reachable on its branch.
+    let f = Fixture::new();
+    git(&f.remote, &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(f.remote.join("pr.txt"), "pr").unwrap();
+    git(&f.remote, &["add", "."]);
+    git(&f.remote, &["commit", "-q", "-m", "pr"]);
+    let head = git(&f.remote, &["rev-parse", "HEAD"]);
+    git(&f.remote, &["checkout", "-q", "main"]);
+
+    let checkout = f.prepare(&head).await;
+
+    assert_eq!(checkout.head_sha, head);
+    assert!(checkout.worktree.join("pr.txt").is_file());
+    assert!(f.preparer.has_pull(&f.bare(), 7, &head, "main").await);
+}
+
+#[tokio::test]
 async fn opening_again_reuses_the_directory() {
     let f = Fixture::new();
     let head = f.push_commit("pr");

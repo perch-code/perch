@@ -12940,7 +12940,7 @@ async fn start_work_on_pull(ctx: &Ctx, id: &str, navigation_id: u64) -> Result<S
         // whoever's fork it is on.
         None => {
             ctx.preparer
-                .fetch_pull(&bare, "origin", pr.number, &pr.base_ref)
+                .fetch_pull(&bare, "origin", pr.number, &pr.base_ref, Some(&pr.head_sha))
                 .await
                 .map_err(|e| e.to_string())?;
             format!("refs/perch/pull/{}/head", pr.number)
@@ -15428,7 +15428,7 @@ async fn open_owned_branch_for_pull(
             upstream.clone_url()
         };
         ctx.preparer
-            .fetch_pull(&bare, &from, number, base_ref)
+            .fetch_pull(&bare, &from, number, base_ref, Some(pr_head_sha))
             .await?;
     }
     ctx.send_navigation_event(
@@ -16855,7 +16855,7 @@ async fn conflicts_base(ctx: &Ctx, item_id: &str) -> Result<String, String> {
         let fetched = match ctx.preparer.ensure_bare(&clone, |_| {}).await {
             Ok(bare) => ctx
                 .preparer
-                .fetch_pull(&bare, &from, pr.number, base)
+                .fetch_pull(&bare, &from, pr.number, base, Some(&pr.head_sha))
                 .await
                 .map_err(|e| e.to_string()),
             Err(e) => Err(e.to_string()),
