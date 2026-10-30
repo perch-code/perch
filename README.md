@@ -223,7 +223,7 @@ file your user can.
 
 ## Feedback
 
-The bug icon at the top right, or **Send Feedback…** in the Perch menu,
+The megaphone in the drawer's footer, or **Send Feedback…** in the Perch menu,
 files a bug report or an idea as an issue on `perch-code/perch`. An error
 or warning toast has **Report**, which starts one about it.
 

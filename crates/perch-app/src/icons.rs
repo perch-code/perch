@@ -329,17 +329,14 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                      stroke-linecap="round"/>
                <circle cx="8" cy="9.45" r="1.3" fill="{c}"/>"#
         ),
-        // A beetle from above: a capsule body with a seam, a domed head,
-        // two feelers and three legs a side. Report a bug.
-        SidebarIcon::Bug => format!(
-            r#"<path d="M5 8.5 A3 3 0 0 1 11 8.5 V10.5 A3 3 0 0 1 5 10.5 Z" fill="none"
-                     stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
-               <path d="M6.2 5.9 A1.8 1.8 0 0 1 9.8 5.9" fill="none" stroke="{c}"
-                     stroke-width="1.4" stroke-linecap="round"/>
-               <path d="M8 8.4 V13 M6.8 4.4 L5.9 2.9 M9.2 4.4 L10.1 2.9
-                        M5 9.5 H2.9 M11 9.5 H13.1 M5.3 7.2 L3.4 6 M10.7 7.2 L12.6 6
-                        M5.3 11.8 L3.4 13.1 M10.7 11.8 L12.6 13.1" fill="none" stroke="{c}"
-                     stroke-width="1.3" stroke-linecap="round"/>"#
+        // A megaphone: a cone widening to the right from a small back
+        // plate, with a grip under it. Send a bug report or an idea.
+        SidebarIcon::Feedback => format!(
+            r#"<path d="M2.4 6.3 A0.9 0.9 0 0 1 3.3 5.4 H5.3 L12.6 2.6 V13.4 L5.3 10.6 H3.3
+                       A0.9 0.9 0 0 1 2.4 9.7 Z" fill="none" stroke="{c}" stroke-width="1.4"
+                     stroke-linejoin="round"/>
+               <path d="M5.4 10.7 L6.5 13.6" fill="none" stroke="{c}" stroke-width="1.4"
+                     stroke-linecap="round"/>"#
         ),
         SidebarIcon::Thread => format!(
             r#"<path d="M2.4 3.4 h11.2 v7.1 h-5.5 l-3.1 2.6 v-2.6 h-2.6 z" fill="{c}"
@@ -688,8 +685,8 @@ pub enum SidebarIcon {
     Clock,
     /// A page with its corner turned down: a file an agent read.
     File,
-    /// A beetle: report a bug.
-    Bug,
+    /// A megaphone: send feedback, a bug or an idea.
+    Feedback,
 }
 
 impl SidebarIcon {
@@ -697,7 +694,7 @@ impl SidebarIcon {
     /// added without being drawn.
     #[cfg(test)]
     pub const ALL: [SidebarIcon; 73] = [
-        SidebarIcon::Bug,
+        SidebarIcon::Feedback,
         SidebarIcon::Waiting,
         SidebarIcon::File,
         SidebarIcon::Clock,

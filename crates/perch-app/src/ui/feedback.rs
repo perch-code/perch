@@ -1,4 +1,4 @@
-//! The bug icon in the bar, and Send Feedback's dropdown under it: a bug
+//! The feedback icon in the bar, and Send Feedback's dropdown under it: a bug
 //! report or an idea, filed as an issue on Perch's own repository.
 //!
 //! The dropdown has three pages. The form takes a title, what happened,
@@ -55,13 +55,13 @@ fn page_of(step: Step) -> Page {
     }
 }
 
-/// The bug icon in the drawer's footer, and the dropdown over it while it
+/// The feedback icon in the drawer's footer, and the dropdown over it while it
 /// is open.
 pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let color = move || theme::nav_muted();
     let button = Container::new(
         icon_in(
-            move || icons::sidebar_icon(SidebarIcon::Bug, color()),
+            move || icons::sidebar_icon(SidebarIcon::Feedback, color()),
             color,
         )
         .style(|s| s.pointer_events_none()),
@@ -81,7 +81,7 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
         .debug_name("feedback-button");
 
     let stack = Stack::new((
-        tip(button, "Report a bug".to_string()),
+        tip(button, "Report a bug or suggest an idea".to_string()),
         dyn_container(
             move || review.feedback_open.get(),
             move |open| {
@@ -450,7 +450,7 @@ fn header(
 ) -> impl IntoView {
     Stack::vertical((
         Stack::horizontal((
-            sidebar_glyph(SidebarIcon::Bug, theme::fg)
+            sidebar_glyph(SidebarIcon::Feedback, theme::fg)
                 .style(|s| s.size(15.0, 15.0).flex_shrink(0.0_f32)),
             Label::derived(title).style(|s| {
                 s.font_size(theme::TEXT_BODY)
@@ -1256,7 +1256,7 @@ fn similar_row(
         }),
     ))
     .on_event_stop(el::Click, move |_, _| {
-        // The draft stays; the bug icon brings it back.
+        // The draft stays; the feedback icon brings it back.
         close(review, false);
         let navigation_id = open_backend.open_subject(REPO, perch_github::ItemKind::Issue, number);
         app.begin_open("Reading the issue", navigation_id);

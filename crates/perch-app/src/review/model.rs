@@ -1484,7 +1484,7 @@ pub struct ReviewState {
     pub usage_open: RwSignal<bool>,
     pub usage_opener: RwSignal<Option<floem::ViewId>>,
     pub usage_anchor: RwSignal<Option<floem::ViewId>>,
-    /// Send Feedback's dropdown under the bar's bug icon, the same way.
+    /// Send Feedback's dropdown under the bar's feedback icon, the same way.
     /// The draft is the app's (`AppState::feedback`); only whether this
     /// window shows it is here.
     pub feedback_open: RwSignal<bool>,

@@ -207,7 +207,7 @@ pub enum ToastOpen {
         kind: perch_github::ItemKind,
         number: u64,
     },
-    /// Send Feedback's preview, dropped down from the bug icon.
+    /// Send Feedback's preview, dropped down from the feedback icon.
     FeedbackPreview,
 }
 
