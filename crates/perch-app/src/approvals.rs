@@ -36,47 +36,25 @@ pub fn one_line(request: &ApprovalRequest) -> String {
     }
 }
 
-/// Git subcommands that write the repository, which the commit grant
-/// covers.
-const GIT_WRITES: &[&str] = &[
-    "add",
-    "commit",
-    "stash",
-    "rm",
-    "mv",
-    "restore",
-    "reset",
-    "checkout",
-    "switch",
-    "merge",
-    "rebase",
-    "cherry-pick",
-    "revert",
-    "tag",
-];
+/// Git subcommands that record the worktree in the repository, which the
+/// commit grant covers. Nothing here writes the worktree: `checkout`,
+/// `restore`, `reset`, `stash`, `merge`, `rebase` and the like would
+/// write it outside the sandbox from objects and state the sandboxed run
+/// could make, the paths the sandbox protects (`.claude`, `.mcp.json`)
+/// among them, and `rebase --continue` runs the `exec` lines of a todo
+/// it could write. Those ask the reader.
+const GIT_WRITES: &[&str] = &["add", "commit", "tag"];
 
-/// Long options that run a program, read a file into the commit or
-/// reach into another repository. Git takes any unambiguous prefix of a
-/// long option, so a prefix of one of these is refused too.
-const GIT_REFUSED_LONG: &[&str] = &[
-    "config",
-    "exec",
-    "gpg-sign",
-    "local-user",
-    "recurse-submodules",
-    "sign",
-    "strategy",
-    "template",
-];
+/// Long options that run a program or read a file into the commit. Git
+/// takes any unambiguous prefix of a long option, so a prefix of one of
+/// these is refused too.
+const GIT_REFUSED_LONG: &[&str] = &["config", "gpg-sign", "local-user", "sign", "template"];
 
-/// The short options refused after `git <sub>`: `-c` everywhere, and
-/// those that sign (running `gpg.program`), pick a merge strategy
-/// program or run a command between rebased commits.
+/// The short options refused after `git <sub>`: `-c` everywhere, those
+/// that sign (running `gpg.program`), and `commit -t`, a template.
 fn git_refused_short(sub: &str) -> &'static str {
     match sub {
-        "commit" | "cherry-pick" | "revert" => "cS",
-        "merge" => "cSs",
-        "rebase" => "cSsx",
+        "commit" => "cSt",
         "tag" => "csu",
         _ => "c",
     }
@@ -255,9 +233,8 @@ mod tests {
             "git commit -m \"Add a README\"",
             "git add . && git commit -m x",
             "git add -u && git commit -s -m 'Fix the -c flag; && it'",
-            "git checkout -b feature",
             "git commit --no-gpg-sign -m x",
-            "git rebase main",
+            "git tag v1",
         ] {
             assert!(is_git_write(yes), "{yes}");
         }
@@ -312,7 +289,23 @@ mod tests {
             "git merge -s ../../tmp/x main",
             "git merge --strategy=x main",
             "git commit --template=./t",
+            "git commit -t ./t",
             "git checkout --recurse-submodules main",
+            // What writes the worktree, from objects or a todo the run
+            // could write.
+            "git checkout -- .claude/settings.json",
+            "git checkout -b feature",
+            "git restore --source=HEAD~1 .mcp.json",
+            "git reset --hard HEAD~1",
+            "git stash pop",
+            "git mv notes.md .mcp.json",
+            "git rm -r .claude",
+            "git switch main",
+            "git merge feature",
+            "git rebase main",
+            "git rebase --continue",
+            "git cherry-pick --continue",
+            "git revert --continue",
             // Quoting does not hide an option from git.
             "git commit '--gpg-sign' -m x",
             "git \"-c\" core.hooksPath=./h commit -m x",
