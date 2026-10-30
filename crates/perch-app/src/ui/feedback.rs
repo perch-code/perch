@@ -126,7 +126,6 @@ pub fn open(app: AppState, review: ReviewState, kind: FeedbackKind, opener: Opti
     crate::review::review_menu::close(review, false);
     crate::ui::agents::dropdown::close(review, false);
     crate::ui::usage::close(review, false);
-    crate::ui::invite::close(review, false);
     if app.feedback.with_untracked(Option::is_none) {
         app.feedback.set(Some(FeedbackDraft::new(kind)));
     }

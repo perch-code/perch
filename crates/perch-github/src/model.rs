@@ -362,9 +362,6 @@ pub struct UserPayload {
     pub login: String,
     #[serde(default)]
     pub avatar_url: String,
-    /// `User`, `Organization` or `Bot`, where GitHub says.
-    #[serde(default, rename = "type", skip_serializing_if = "String::is_empty")]
-    pub kind: String,
 }
 
 /// GitHub emits RFC 3339 with a `Z` suffix, which `jiff::Timestamp` parses.

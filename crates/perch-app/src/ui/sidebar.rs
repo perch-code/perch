@@ -133,8 +133,8 @@ fn toggle_button(state: AppState) -> impl IntoView {
 
 /// The strip along the drawer's foot, as tall as the bar over the main
 /// pane: who is signed in, or the restart for an update that's waiting,
-/// then what belongs to the app rather than to an item, invites, bug
-/// reports and plan usage.
+/// then what belongs to the app rather than to an item, bug reports
+/// and plan usage.
 fn footer(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     let login = move || {
         state
@@ -154,7 +154,6 @@ fn footer(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     .style(|s| s.flex_shrink(0.0_f32));
     let controls = match state.review.get_untracked() {
         Some(review) => Stack::horizontal((
-            crate::ui::invite::button(state, review, backend.clone()),
             crate::ui::feedback::button(state, review, backend.clone()),
             crate::ui::usage::button(state, review, backend.clone()),
         ))
@@ -2350,7 +2349,7 @@ mod tests {
         let footer = find(harness.root_id(), "drawer footer")
             .unwrap()
             .get_visual_rect_no_clip();
-        let invite = find(harness.root_id(), "invite-button")
+        let feedback = find(harness.root_id(), "feedback-button")
             .unwrap()
             .get_visual_rect_no_clip();
         assert!(button.width() > 60.0, "{button:?}");
@@ -2358,8 +2357,11 @@ mod tests {
             button.y0 >= footer.y0 && button.y1 <= footer.y1,
             "{button:?} in {footer:?}"
         );
-        assert!(button.x1 <= invite.x0, "{button:?} runs into {invite:?}");
-        assert!(invite.x1 <= theme::SIDEBAR_MIN_WIDTH, "{invite:?}");
+        assert!(
+            button.x1 <= feedback.x0,
+            "{button:?} runs into {feedback:?}"
+        );
+        assert!(feedback.x1 <= theme::SIDEBAR_MIN_WIDTH, "{feedback:?}");
 
         harness.click(button.center().x, button.center().y);
         assert_eq!(

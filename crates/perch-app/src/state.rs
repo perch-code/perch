@@ -2891,9 +2891,6 @@ impl AppState {
             | Event::FeedbackSent { .. }
             | Event::FeedbackCaught { .. }
             | Event::FeedbackFailed(_)) => crate::ui::feedback::apply(*self, review, event),
-            event @ (Event::InviteSent { .. } | Event::InviteFailed(_)) => {
-                crate::ui::invite::apply(*self, review, event)
-            }
             Event::IssueDraft { item_id, outcome } => {
                 if review.is_item(&item_id) {
                     review.issue_drafting.set(false);
@@ -3067,9 +3064,7 @@ impl AppState {
             | Event::FeedbackReady(_)
             | Event::FeedbackSent { .. }
             | Event::FeedbackCaught { .. }
-            | Event::FeedbackFailed(_)
-            | Event::InviteSent { .. }
-            | Event::InviteFailed(_) => {}
+            | Event::FeedbackFailed(_) => {}
             // The rest are about the open item, and wait for no one.
             Event::PullRequestReadiness { .. }
             | Event::PullRequestBases { .. }

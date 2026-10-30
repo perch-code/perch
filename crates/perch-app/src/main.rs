@@ -11,7 +11,6 @@ mod context;
 mod feedback;
 mod icons;
 mod inbox;
-mod invite;
 mod items;
 mod items_cli;
 mod log_file;

@@ -36,7 +36,6 @@ pub use windows::{EventSender, WindowId, NO_WINDOW};
 mod avatar;
 mod check_watch;
 mod feedback;
-mod invite;
 mod issue_draft;
 mod kept_servers;
 pub(crate) mod open_pull;
@@ -800,12 +799,6 @@ pub enum Command {
         node_id: String,
         react: bool,
     },
-    /// Ask for `login` to be added to Perch's repository. `InviteSent` or
-    /// `InviteFailed` answers.
-    Invite {
-        login: String,
-        note: String,
-    },
     /// Swap the downloaded `version` in for the running app and reopen it.
     /// `UpdateInstalled` or `Update(Failed)` answers.
     InstallUpdate {
@@ -1541,13 +1534,6 @@ pub enum Event {
         count: usize,
     },
     FeedbackFailed(crate::feedback::SendError),
-    /// The invite's issue: filed, or the one already open when `existing`.
-    InviteSent {
-        number: u64,
-        login: String,
-        existing: bool,
-    },
-    InviteFailed(crate::feedback::SendError),
     /// Where updating Perch stands, for every window.
     Update(crate::update::UpdateStatus),
     /// The new app is in place and opens once this one is gone: quit.
@@ -1734,8 +1720,6 @@ impl Event {
                 | Event::FeedbackSent { .. }
                 | Event::FeedbackCaught { .. }
                 | Event::FeedbackFailed(_)
-                | Event::InviteSent { .. }
-                | Event::InviteFailed(_)
         )
     }
 }
@@ -2992,13 +2976,6 @@ impl Backend {
             body: body.to_string(),
             kind,
             comment_on,
-        });
-    }
-
-    pub fn invite(&self, login: &str, note: &str) {
-        let _ = self.commands.send(Command::Invite {
-            login: login.to_string(),
-            note: note.to_string(),
         });
     }
 
@@ -5236,10 +5213,6 @@ async fn run(
                 tokio::spawn(
                     async move { feedback::plus_one(&ctx, number, &node_id, react).await },
                 );
-            }
-            Command::Invite { login, note } => {
-                let ctx = ctx.clone();
-                tokio::spawn(async move { invite::send(&ctx, &login, &note).await });
             }
             Command::InstallUpdate { version } => {
                 let ctx = ctx.clone();
@@ -26006,145 +25979,6 @@ read eof || true
         assert_eq!(ready.similar[0].number, 41);
         assert_eq!(ready.similar[0].thumbs_up, 3);
         assert!(ready.similar[0].viewer_thumbs_up);
-    }
-
-    /// GitHub for Invite: `login` is a user of `kind`, `open` is the title
-    /// of an open issue the search finds, and filing makes #77. Writes
-    /// down what was asked and what each POST sent.
-    #[allow(clippy::type_complexity)]
-    fn invite_github(
-        kind: &'static str,
-        open: Option<&'static str>,
-    ) -> (String, Arc<Mutex<Vec<(String, String)>>>) {
-        let asked = Arc::new(Mutex::new(Vec::new()));
-        let seen = asked.clone();
-        let (base, _) = serve_by_body(move |method, path, _, body| {
-            seen.lock()
-                .unwrap()
-                .push((format!("{method} {path}"), body.to_string()));
-            if path == "/users/octo-cat" {
-                let user =
-                    serde_json::json!({ "login": "Octo-Cat", "avatar_url": "", "type": kind });
-                ("200 OK", user.to_string())
-            } else if path.starts_with("/users/") {
-                ("404 Not Found", r#"{"message":"Not Found"}"#.to_string())
-            } else if path.starts_with("/search/issues") {
-                let items: Vec<_> = open
-                    .into_iter()
-                    .map(|title| {
-                        serde_json::json!({
-                            "number": 12,
-                            "title": title,
-                            "state": "open",
-                            "updated_at": "2026-10-01T12:00:00Z",
-                            "repository_url": "https://api.github.com/repos/perch-code/perch",
-                        })
-                    })
-                    .collect();
-                let page = serde_json::json!({ "total_count": items.len(), "items": items });
-                ("200 OK", page.to_string())
-            } else if method == "POST" && path == "/repos/perch-code/perch/issues" {
-                ("201 Created", created_issue_json(77))
-            } else {
-                ("404 Not Found", "{}".to_string())
-            }
-        });
-        (base, asked)
-    }
-
-    /// Invite files an issue titled for the person in GitHub's spelling,
-    /// with no label, after looking for one already open.
-    #[tokio::test]
-    async fn invite_files_an_issue_for_the_person() {
-        let dir = tempfile::tempdir().unwrap();
-        let (base, asked) = invite_github("User", Some("Why invite Octo-Cat?"));
-        let (ctx, received) = ctx(dir.path(), &base, &[]);
-        invite::send(&ctx, "octo-cat", "From SlateDB.").await;
-        let asked = asked.lock().unwrap().clone();
-        let paths: Vec<_> = asked.iter().map(|(path, _)| path.as_str()).collect();
-        assert_eq!(paths[0], "GET /users/octo-cat");
-        assert!(
-            paths[1].starts_with("GET /search/issues?q=repo%3Aperch%2Dcode%2Fperch"),
-            "{paths:?}"
-        );
-        assert_eq!(paths[2], "POST /repos/perch-code/perch/issues");
-        let issue: serde_json::Value = serde_json::from_str(&asked[2].1).unwrap();
-        assert_eq!(
-            issue,
-            serde_json::json!({
-                "title": "Invite @Octo-Cat",
-                "body": crate::invite::body("Octo-Cat", "From SlateDB."),
-            })
-        );
-        let events: Vec<Event> = received.try_iter().collect();
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                Event::InviteSent { number: 77, login, existing: false } if login == "Octo-Cat"
-            )),
-            "{events:?}"
-        );
-    }
-
-    /// An invite already open for them is the answer: nothing is filed.
-    #[tokio::test]
-    async fn invite_already_asked_for_files_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let (base, asked) = invite_github("User", Some("Invite @octo-cat"));
-        let (ctx, received) = ctx(dir.path(), &base, &[]);
-        invite::send(&ctx, "octo-cat", "").await;
-        assert!(
-            !asked
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|(path, _)| path.starts_with("POST")),
-            "filed a second one"
-        );
-        let events: Vec<Event> = received.try_iter().collect();
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                Event::InviteSent {
-                    number: 12,
-                    existing: true,
-                    ..
-                }
-            )),
-            "{events:?}"
-        );
-    }
-
-    /// Nobody by that name, or an organization: told why, nothing filed.
-    #[tokio::test]
-    async fn invite_for_no_one_or_an_organization_is_refused() {
-        for (kind, login, message) in [
-            (
-                "User",
-                "nobody-here",
-                "There's no GitHub user called nobody-here.",
-            ),
-            (
-                "Organization",
-                "octo-cat",
-                "Octo-Cat is an organization, not a person.",
-            ),
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            let (base, asked) = invite_github(kind, None);
-            let (ctx, received) = ctx(dir.path(), &base, &[]);
-            invite::send(&ctx, login, "").await;
-            assert_eq!(asked.lock().unwrap().len(), 1, "only the lookup");
-            let events: Vec<Event> = received.try_iter().collect();
-            assert!(
-                events.iter().any(|e| matches!(
-                    e,
-                    Event::InviteFailed(crate::feedback::SendError { message: m, forbidden: false })
-                        if m == message
-                )),
-                "{events:?}"
-            );
-        }
     }
 
     /// GitHub's GraphQL for +1: the reaction, the issue's state as given,
