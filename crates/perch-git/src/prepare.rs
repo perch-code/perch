@@ -1106,6 +1106,29 @@ impl Preparer {
             .filter(|s| !s.is_empty())
     }
 
+    /// Whether `repo` has `branch`. Unlike `branch_exists`, a git that
+    /// fails or takes too long is an error, not a no.
+    pub async fn has_branch(&self, repo: &Path, branch: &str) -> Result<bool, Error> {
+        let asked = self
+            .git
+            .run(
+                Some(repo),
+                [
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{branch}"),
+                ],
+                QUERY_TIMEOUT,
+            )
+            .await;
+        match asked {
+            Ok(_) => Ok(true),
+            Err(Error::Git { status: 1, .. }) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     async fn branch_exists(&self, bare: &Path, branch: &str) -> bool {
         self.git
             .run(
@@ -1258,7 +1281,9 @@ impl Preparer {
     /// tag, remote-tracking branch, or ref of Perch's own such as a pull
     /// request's fetched head. These are what deleting the branch loses.
     /// Worktrees' `HEAD`s are left out on purpose, since the branch's own
-    /// worktree would otherwise hold every one of them.
+    /// worktree would otherwise hold every one of them. So are a Work
+    /// run's records under `refs/perch/runs/`: each is a commit on top of
+    /// the branch's `HEAD`, and they go with the item.
     pub async fn commits_only_on(&self, repo: &Path, branch: &str) -> Result<u64, Error> {
         let out = self
             .git
@@ -1273,6 +1298,7 @@ impl Preparer {
                     "--branches".to_string(),
                     "--tags".to_string(),
                     "--remotes".to_string(),
+                    "--exclude=refs/perch/runs/*".to_string(),
                     "--glob=refs/perch/*".to_string(),
                     "--".to_string(),
                 ],

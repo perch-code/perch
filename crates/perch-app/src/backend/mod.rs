@@ -8071,12 +8071,21 @@ async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), Strin
         }
         if !accept_loss {
             let commits = match owned_repo(ctx.preparer.store(), &item) {
-                // No clone, or no such branch in it: nothing to lose.
-                Some(repo) => ctx
-                    .preparer
-                    .commits_only_on(&repo, &checkout.branch)
-                    .await
-                    .unwrap_or(0),
+                // No clone, or no such branch in it: nothing to lose. A
+                // count that fails for another reason is not a reason to
+                // think so.
+                Some(repo) => match ctx.preparer.commits_only_on(&repo, &checkout.branch).await {
+                    Ok(commits) => commits,
+                    Err(e) => match ctx.preparer.has_branch(&repo, &checkout.branch).await {
+                        Ok(false) => 0,
+                        _ => {
+                            return Err(format!(
+                                "couldn't tell what deleting {} loses: {e}",
+                                checkout.branch
+                            ))
+                        }
+                    },
+                },
                 None => 0,
             };
             if commits > 0 {

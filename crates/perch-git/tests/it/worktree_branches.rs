@@ -376,6 +376,20 @@ async fn commits_only_on_counts_what_deleting_the_branch_loses() {
         2,
         "the worktree's own HEAD does not count as holding them"
     );
+    // Nor does a Work run's record, a commit on top of HEAD that is
+    // dropped with the item.
+    f.preparer
+        .record_worktree(&cut.worktree, "refs/perch/runs/r1/after", "after r1")
+        .await
+        .unwrap();
+    assert_eq!(
+        f.preparer
+            .commits_only_on(&f.bare(), &cut.branch)
+            .await
+            .unwrap(),
+        2,
+        "a run's record does not count as holding them"
+    );
 
     // Another branch at the first commit keeps it.
     git(&cut.worktree, &["branch", "keep", "HEAD~1"]);
@@ -396,4 +410,6 @@ async fn commits_only_on_counts_what_deleting_the_branch_loses() {
             .unwrap(),
         0
     );
+    assert!(f.preparer.has_branch(&f.bare(), &cut.branch).await.unwrap());
+    assert!(!f.preparer.has_branch(&f.bare(), "nope").await.unwrap());
 }
