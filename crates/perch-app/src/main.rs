@@ -20,6 +20,7 @@ mod review;
 mod scrollers;
 mod snooze;
 mod state;
+mod swipes;
 mod theme;
 mod timefmt;
 mod ui;

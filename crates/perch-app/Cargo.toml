@@ -72,7 +72,7 @@ unicode-width = "0.1"
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSImage", "NSMenu", "NSMenuItem", "NSScroller", "NSControl", "NSResponder", "NSView", "NSWindow", "NSScreen"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "NSApplication", "NSEvent", "NSImage", "NSMenu", "NSMenuItem", "NSScroller", "NSControl", "NSResponder", "NSView", "NSWindow", "NSScreen"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSNotification", "NSString", "NSOperation", "NSGeometry", "NSArray", "block2"] }
 
 [dev-dependencies]

@@ -119,6 +119,19 @@ pub fn start(backend: Backend, events: std::sync::mpsc::Receiver<(WindowId, Even
                 Effect::untrack(|| deliver(window, event));
             }
         });
+        // A mouse's back and forward buttons as Logitech's Options+ sends
+        // them, as swipes. They go to the window that has the keyboard,
+        // which is the one under the pointer as a rule.
+        let swiped = floem::ext_event::create_trigger();
+        crate::swipes::watch(swiped);
+        Effect::new(move |_| {
+            swiped.track();
+            Effect::untrack(|| {
+                for back in crate::swipes::take() {
+                    travel_in_focused(back);
+                }
+            });
+        });
         APP.set(Some(Rc::new(App {
             backend,
             model,
@@ -128,6 +141,23 @@ pub fn start(backend: Backend, events: std::sync::mpsc::Receiver<(WindowId, Even
             feedback_on_open: Cell::new(false),
         })));
     });
+}
+
+/// Back, or forward, in the window that last had the keyboard.
+fn travel_in_focused(back: bool) {
+    let Some(app) = app() else {
+        return;
+    };
+    let focused = app.focused.get();
+    let to = app
+        .windows
+        .borrow()
+        .iter()
+        .find(|w| Some(w.id) == focused)
+        .cloned();
+    if let Some(to) = to {
+        crate::ui::history::travel(to.state, to.review, &to.backend, back);
+    }
 }
 
 fn new_state() -> AppState {
