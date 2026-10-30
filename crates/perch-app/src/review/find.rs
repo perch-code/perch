@@ -736,8 +736,7 @@ fn query_box(state: ReviewState) -> impl IntoView {
             "Match case",
             "alt+super+KeyC",
             "find-match-case",
-            |o| o.match_case,
-            |o| o.match_case = !o.match_case,
+            |o| &mut o.match_case,
         ),
         toggle_tile(
             state,
@@ -746,8 +745,7 @@ fn query_box(state: ReviewState) -> impl IntoView {
             "Match whole word",
             "alt+super+KeyW",
             "find-whole-word",
-            |o| o.whole_word,
-            |o| o.whole_word = !o.whole_word,
+            |o| &mut o.whole_word,
         ),
         toggle_tile(
             state,
@@ -756,8 +754,7 @@ fn query_box(state: ReviewState) -> impl IntoView {
             "Use regular expression",
             "alt+super+KeyR",
             "find-regex",
-            |o| o.regex,
-            |o| o.regex = !o.regex,
+            |o| &mut o.regex,
         ),
     ))
     .style(|s| {
@@ -778,7 +775,8 @@ enum Face {
     Code,
 }
 
-/// One of the toggles: its letters in a tile, lit while it is on.
+/// One of the toggles: its letters in a tile, lit while `flag` is on,
+/// which a click flips.
 fn toggle_tile(
     state: ReviewState,
     letters: &'static str,
@@ -786,10 +784,12 @@ fn toggle_tile(
     tip_text: &'static str,
     keys: &'static str,
     name: &'static str,
-    is_on: fn(&Options) -> bool,
-    flip: fn(&mut Options),
+    flag: fn(&mut Options) -> &mut bool,
 ) -> impl IntoView {
-    let on = move || state.find_options.with(is_on);
+    let on = move || {
+        let mut options = state.find_options.get();
+        *flag(&mut options)
+    };
     let color = move || if on() { theme::fg() } else { theme::fg_muted() };
     let label = Label::derived(move || letters.to_string()).style(move |s| {
         let s = s
@@ -804,7 +804,10 @@ fn toggle_tile(
     });
     let tile = Container::new(label)
         .on_event_stop(el::Click, move |_, _| {
-            state.find_options.update(flip);
+            state.find_options.update(|o| {
+                let flag = flag(o);
+                *flag = !*flag;
+            });
             keep_keyboard(state);
         })
         .debug_name(name)
