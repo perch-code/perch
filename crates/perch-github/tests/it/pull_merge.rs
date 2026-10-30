@@ -760,3 +760,39 @@ async fn assigning_posts_and_unassigning_deletes_and_github_answers_who_is_assig
         assert_eq!(body, serde_json::json!({ "assignees": ["criccomini"] }));
     }
 }
+
+/// A write GitHub may have carried out before failing is not sent again:
+/// a merge that went through and answered 502 would be retried into
+/// "not mergeable", and a review would post twice.
+#[tokio::test]
+async fn a_write_that_fails_with_a_5xx_is_sent_once() {
+    let (base, requests) = spawn(vec![
+        Response::new("502 Bad Gateway", r#"{"message":"Server Error"}"#),
+        Response::new(
+            "200 OK",
+            r#"{"sha":"merged123","merged":true,"message":"Pull Request successfully merged"}"#,
+        ),
+    ]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    assert!(github
+        .merge_pull_request("a/b", 42, "abc123", MergeMethod::Squash, None)
+        .await
+        .is_err());
+    assert_eq!(requests.lock().unwrap().len(), 1);
+
+    let (base, requests) = spawn(vec![
+        Response::new("502 Bad Gateway", r#"{"message":"Server Error"}"#),
+        Response::new(
+            "200 OK",
+            r#"{"data":{"resolveReviewThread":{"thread":{"isResolved":true}}}}"#,
+        ),
+    ]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    assert!(github
+        .set_review_thread_resolved("PRRT_1", true)
+        .await
+        .is_err());
+    assert_eq!(requests.lock().unwrap().len(), 1);
+}

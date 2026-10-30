@@ -19,6 +19,7 @@ use http::StatusCode;
 use http_body_util::combinators::BoxBody;
 use http_body_util::BodyExt;
 use jiff::Timestamp;
+use octocrab::service::middleware::retry::RetryConfig;
 use octocrab::Octocrab;
 
 use crate::commits::{
@@ -182,6 +183,11 @@ struct Fetched {
 #[derive(Clone)]
 pub struct GitHub {
     octo: Octocrab,
+    /// The same, sending each request once. Octocrab sends a request
+    /// again after a 5xx or a dropped connection, which for a write that
+    /// GitHub carried out before failing posts a review twice or answers
+    /// a merge that went through with "not mergeable".
+    writes: Octocrab,
     http: reqwest::Client,
     /// Bounds API requests across clones. Each is checked against the
     /// rate-limit window once it holds a permit, so a response that closes
@@ -229,13 +235,20 @@ impl GitHub {
         // Octocrab already pins the GitHub REST API version. Adding the same
         // header here produces two values, which GitHub joins with a comma and
         // rejects as an unsupported version.
-        let mut builder = Octocrab::builder().personal_token(token.to_string());
-        if let Some(base) = base_uri {
-            builder = builder
-                .base_uri(base)
-                .map_err(|e| Error::Network(e.to_string()))?;
-        }
-        let octo = builder.build().map_err(|e| Error::Network(e.to_string()))?;
+        let octocrab = |retry: RetryConfig| -> Result<Octocrab, Error> {
+            let mut builder = Octocrab::builder()
+                .add_retry_config(retry)
+                .personal_token(token.to_string());
+            if let Some(base) = base_uri {
+                builder = builder
+                    .base_uri(base)
+                    .map_err(|e| Error::Network(e.to_string()))?;
+            }
+            builder.build().map_err(|e| Error::Network(e.to_string()))
+        };
+        // Octocrab's own default for reads.
+        let octo = octocrab(RetryConfig::Simple(3))?;
+        let writes = octocrab(RetryConfig::None)?;
 
         let http = reqwest::Client::builder()
             .user_agent(concat!("perch/", env!("CARGO_PKG_VERSION")))
@@ -245,6 +258,7 @@ impl GitHub {
 
         Ok(Self {
             octo,
+            writes,
             http,
             api_requests: Arc::new(tokio::sync::Semaphore::new(API_CONCURRENCY)),
             rate_limit_until: Arc::new(AtomicI64::new(0)),
@@ -2359,10 +2373,15 @@ impl GitHub {
             Cow::Borrowed(payload)
         };
         let asked = matches!(payload, Cow::Owned(_));
+        // A query is a read, and can be sent again; a mutation is not.
+        let client = if is_mutation(&payload) {
+            &self.writes
+        } else {
+            &self.octo
+        };
         let _request_guard = self.api_permit().await;
         self.check_rate_limit()?;
-        let response = self
-            .octo
+        let response = client
             ._post("/graphql", Some(payload.as_ref()))
             .await
             .map_err(map_octocrab_error)?;
@@ -2468,10 +2487,10 @@ impl GitHub {
         let mut hops = 0;
         loop {
             let response = match verb {
-                Write::Post => self.octo._post(uri.as_str(), body).await,
-                Write::Patch => self.octo._patch(uri.as_str(), body).await,
-                Write::Put => self.octo._put(uri.as_str(), body).await,
-                Write::Delete => self.octo._delete(uri.as_str(), body).await,
+                Write::Post => self.writes._post(uri.as_str(), body).await,
+                Write::Patch => self.writes._patch(uri.as_str(), body).await,
+                Write::Put => self.writes._put(uri.as_str(), body).await,
+                Write::Delete => self.writes._delete(uri.as_str(), body).await,
             }
             .map_err(map_octocrab_error)?;
             let moved = matches!(
@@ -2750,12 +2769,20 @@ fn asking_cost(payload: &serde_json::Value) -> Cow<'_, serde_json::Value> {
         return Cow::Borrowed(payload);
     };
     let open = query.find('{');
-    let Some(open) = open.filter(|_| !query.trim_start().starts_with("mutation")) else {
+    let Some(open) = open.filter(|_| !is_mutation(payload)) else {
         return Cow::Borrowed(payload);
     };
     let mut asked = payload.clone();
     asked["query"] = format!("{} {COST_FIELD}{}", &query[..=open], &query[open + 1..]).into();
     Cow::Owned(asked)
+}
+
+/// Whether a GraphQL payload is a mutation.
+fn is_mutation(payload: &serde_json::Value) -> bool {
+    payload
+        .get("query")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|query| query.trim_start().starts_with("mutation"))
 }
 
 /// What a GraphQL answer says its query cost, when it was asked.
