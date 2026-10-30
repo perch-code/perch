@@ -1500,6 +1500,10 @@ fn next_address(text: &str) -> Option<(usize, usize)> {
             }
             end -= cut;
         }
+        // `www.` sheds its own dot when nothing follows it.
+        if end <= prefix.len() {
+            continue;
+        }
         let host_end = after[prefix.len()..end]
             .find(['/', '?', '#'])
             .map_or(end, |h| prefix.len() + h);
@@ -3181,6 +3185,16 @@ mod tests {
                 ("&amp; foo.com ahttps://x.com https://x/.", false),
             ]
         );
+        // A bare `www.` is prose, not an address.
+        for text in [
+            "strip the www. prefix",
+            "see www.",
+            "(www.)",
+            "www..",
+            "www.,",
+        ] {
+            assert_eq!(autolink(text), vec![(text, false)], "{text}");
+        }
         assert_eq!(superscript(12), "\u{b9}\u{b2}");
     }
 
