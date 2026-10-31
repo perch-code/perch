@@ -1395,10 +1395,12 @@ fn where_of(lines: &Lines) -> String {
 /// own is: a header with the lines and the chapter, then the note under
 /// the walkthrough's mark, which place of how many it is, and Perch only;
 /// the lines it cites, as links, and the threads it names. Its foot is
-/// the Follow up box, which asks about the lines in a thread of their
-/// own with the note quoted, and the way to the place before and after;
-/// going on marks it read. The place the reader is on is framed in the
-/// accent, and a click on another makes it the one.
+/// the Follow up box, which opens the composer in its place, as under a
+/// thread, and asks about the lines in a thread of their own with the
+/// note quoted, and the way to the place before and after, which waits
+/// while the composer is open; going on marks it read. The place the
+/// reader is on is framed in the accent, and a click on another makes it
+/// the one.
 pub fn step_card(
     app: AppState,
     state: ReviewState,
@@ -1506,36 +1508,38 @@ pub fn step_card(
     ))
     .style(|s| s.width_full().padding_horiz(theme::COLLAPSED_CARD_PADDING));
 
-    let quoted = quote(&step);
-    let follow_anchor = anchor.clone();
-    let follow_up = Label::derived(|| "Follow up\u{2026}".to_string())
-        .on_event_stop(el::Click, move |_, _| {
-            if let Some(anchor) = follow_anchor.clone() {
-                state.walkthrough_at.set(Some(index));
-                state.open_composer(None, Some(anchor), quoted.clone(), threads::defaults(app));
-            }
+    // The composer opened here, by which opening it is, so it is built
+    // afresh when opened again and not when its destination is picked.
+    let composing = Memo::new(move |_| {
+        state.composer.with(|c| {
+            c.as_ref()
+                .filter(|c| c.step == Some(index))
+                .map(|c| c.opening)
         })
-        .debug_name("walkthrough-follow-up")
-        .style(move |s| {
-            s.font_size(theme::TEXT_META)
-                .color(theme::fg_subtle())
-                .flex_grow(1.0_f32)
-                .flex_basis(0.0)
-                .min_width(0.0)
-                .height(theme::THREAD_CONTROL - 4.0)
-                .padding_horiz(12.0)
-                .items_center()
-                .background(theme::canvas())
-                .border(1.0)
-                .border_color(theme::border())
-                .border_radius(theme::RADIUS)
-                .selectable(false)
-                .hover(|s| {
-                    s.border_color(theme::fg_subtle())
-                        .cursor(floem::style::CursorStyle::Text)
-                })
-                .apply_if(anchor.is_none(), |s| s.hide())
-        });
+    });
+    let has_lines = anchor.is_some();
+    let reply_backend = backend.clone();
+    let follow_up = dyn_container(
+        move || composing.get(),
+        move |opening| match (opening, state.composer.get_untracked()) {
+            (Some(_), Some(composer)) => threads::composer_view(
+                app,
+                state,
+                reply_backend.clone(),
+                composer,
+                ThreadFace::Inline,
+            )
+            .style(|s| s.width_full())
+            .into_any(),
+            _ => follow_up_box(app, state, index, anchor.clone()).into_any(),
+        },
+    )
+    .style(move |s| {
+        s.flex_grow(1.0_f32)
+            .flex_basis(0.0)
+            .min_width(0.0)
+            .apply_if(!has_lines, |s| s.hide())
+    });
     let back = cards::tip(
         nav_button(
             SidebarIcon::ChevronLeft,
@@ -1576,7 +1580,9 @@ pub fn step_card(
             "Mark it read: it's the last".to_string()
         },
     );
-    let foot = Stack::horizontal((follow_up, back, next))
+    let way_on = Stack::horizontal((back, next))
+        .style(move |s| s.gap(6.0).apply_if(composing.get().is_some(), |s| s.hide()));
+    let foot = Stack::horizontal((follow_up, way_on))
         .debug_name("walkthrough-note-foot")
         .style(|s| {
             s.items_center()
@@ -1607,6 +1613,41 @@ pub fn step_card(
                 })
         })
         .into_any()
+}
+
+/// The Follow up box in a note's foot, as a thread's: a click opens the
+/// composer in its place, for a thread on the place's lines.
+fn follow_up_box(
+    app: AppState,
+    state: ReviewState,
+    index: usize,
+    anchor: Option<Anchor>,
+) -> impl IntoView {
+    Label::derived(|| "Follow up\u{2026}".to_string())
+        .on_event_stop(el::Click, move |_, _| {
+            if let Some(anchor) = anchor.clone() {
+                state.walkthrough_at.set(Some(index));
+                state.open_step_composer(index, anchor, threads::defaults(app));
+            }
+        })
+        .debug_name("walkthrough-follow-up")
+        .style(|s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::fg_subtle())
+                .width_full()
+                .height(theme::THREAD_CONTROL - 4.0)
+                .padding_horiz(12.0)
+                .items_center()
+                .background(theme::canvas())
+                .border(1.0)
+                .border_color(theme::border())
+                .border_radius(theme::RADIUS)
+                .selectable(false)
+                .hover(|s| {
+                    s.border_color(theme::fg_subtle())
+                        .cursor(floem::style::CursorStyle::Text)
+                })
+        })
 }
 
 /// A square button with a glyph, as the note's foot steps with.
@@ -1650,6 +1691,14 @@ fn lines_heading(anchor: Option<&Anchor>) -> impl IntoView {
             .selectable(false)
             .flex_shrink(0.0_f32)
     })
+}
+
+/// What a Follow up on place `index` sends ahead of what is typed: the
+/// note's words quoted, so the thread it starts says what it asks about.
+pub fn follow_up_preface(state: ReviewState, index: usize) -> String {
+    floem::reactive::Effect::untrack(|| shown(state))
+        .and_then(|w| w.steps.get(index).map(quote))
+        .unwrap_or_default()
 }
 
 /// The note's words quoted, for a follow-up about its lines to start
@@ -2557,8 +2606,9 @@ mod tests {
     /// chapter, Worth a close look, which place of how many, then its
     /// body in order, the lines it cites as a link and the thread it
     /// names, which opens on Conversation. Next marks it read and goes
-    /// on; there is no back from the first. Follow up asks about its
-    /// lines with the note quoted.
+    /// on; there is no back from the first. Follow up opens the composer
+    /// in its place, as a thread's does, empty, and the way on waits; what
+    /// is sent asks about its lines with the note quoted.
     #[test]
     fn a_note_draws_its_body_and_goes_on() {
         let state = state_on_branch();
@@ -2613,11 +2663,42 @@ mod tests {
         let follow = named(root, "walkthrough-follow-up").unwrap();
         click_on(&mut harness, follow);
         let composer = state.composer.get_untracked().expect("a composer");
-        assert_eq!(composer.thread_id, None);
-        let anchor = composer.anchor.unwrap();
+        assert_eq!((composer.thread_id.clone(), composer.step), (None, Some(0)));
+        let anchor = composer.anchor.clone().unwrap();
         assert_eq!((anchor.path.as_str(), anchor.line), ("src/x.rs", 2));
-        assert!(composer.draft.starts_with("> First it reads the request."));
-        state.composer.set(None);
+        assert_eq!(composer.draft, "");
+        let step = named(root, "walkthrough-step").unwrap();
+        assert!(named(step, "composer-box").is_some_and(showing));
+        assert!(named(step, "walkthrough-follow-up").is_none());
+        assert!(!showing(named(step, "walkthrough-note-next").unwrap()));
+        // Send starts the thread with the note quoted over what was typed.
+        state.composer_draft.set("Why?".into());
+        let composing_root = TestRoot::new();
+        let (backend, mut sent) = Backend::recording();
+        let view = threads::composer_view(
+            AppState::new(),
+            state,
+            Rc::new(backend),
+            composer,
+            ThreadFace::Inline,
+        );
+        let mut composing = HeadlessHarness::new_with_size(composing_root, view, 600.0, 300.0);
+        settle(&mut composing);
+        let send = named(composing.root_id(), "composer-send").unwrap();
+        click_on(&mut composing, send);
+        let asked = commands_of(&mut sent).into_iter().find_map(|c| match c {
+            Command::Ask { question, .. } => Some(question),
+            _ => None,
+        });
+        let asked = asked.expect("the question went");
+        assert!(
+            asked.starts_with("> First it reads the request."),
+            "{asked}"
+        );
+        assert!(asked.ends_with("\n\nWhy?"), "{asked}");
+        assert!(state.composer.get_untracked().is_none());
+        settle(&mut harness);
+        assert!(showing(named(step, "walkthrough-note-next").unwrap()));
 
         let next = named(root, "walkthrough-note-next").unwrap();
         click_on(&mut harness, next);

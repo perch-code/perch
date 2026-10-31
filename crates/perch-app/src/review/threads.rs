@@ -327,7 +327,8 @@ pub fn composer_view(
                 .with(|t| t.iter().find(|t| &t.id == id).map(|t| t.outdated))
         })
         .unwrap_or(false);
-    let follow_up = composer.thread_id.is_some();
+    // A walkthrough place's Follow up is a new thread, typed as a reply.
+    let follow_up = composer.thread_id.is_some() || composer.step.is_some();
     // Under a thread whose agent is at work, what is typed goes to that
     // run, which reads it after its current step. The box is built again
     // when the run ends, as a follow-up's. An edit is never a steer: it
@@ -432,6 +433,14 @@ pub fn composer_view(
             }
             let Some(composer) = state.composer.get() else {
                 return;
+            };
+            // A walkthrough place's Follow up starts its thread with the
+            // note it asks about.
+            let question = match composer.step {
+                Some(step) => {
+                    crate::review::walkthrough::follow_up_preface(state, step) + question.trim()
+                }
+                None => question,
             };
             let Some(item_id) = state.item.with(|i| i.as_ref().map(|i| i.id.clone())) else {
                 return;

@@ -1207,6 +1207,10 @@ pub struct ReviewLaunchDraft {
 pub struct Composer {
     /// `None` starts a thread; `Some` is a follow-up in that thread.
     pub thread_id: Option<String>,
+    /// The walkthrough place whose Follow up this is: a new thread on its
+    /// lines, typed in its note's foot as a reply is in a thread's, which
+    /// sends the note quoted ahead of what is typed.
+    pub step: Option<usize>,
     pub anchor: Option<Anchor>,
     /// Where the text goes: an agent, its model and effort together,
     /// since the picker lists models and config says whose each is, or
@@ -4347,7 +4351,7 @@ impl ReviewState {
         self.composer
             .with(|c| {
                 c.as_ref()
-                    .filter(|c| c.thread_id.is_none())
+                    .filter(|c| c.thread_id.is_none() && c.step.is_none())
                     .and_then(|c| c.anchor.clone())
             })
             .or_else(|| self.sent_composer.get())
@@ -4356,17 +4360,27 @@ impl ReviewState {
 
     /// Whether the open composer is drawn as a card in the code: it starts
     /// a thread on lines of the active file, which is loaded and has the
-    /// lines. Tracked.
+    /// lines, or in the note of a walkthrough place found there. Tracked.
     pub fn composer_is_inline(&self) -> bool {
         let Some(file) = self.active_file() else {
             return false;
         };
-        self.composer.with(|c| {
+        let (anchor, step) = match self.composer.with(|c| {
             c.as_ref()
                 .filter(|c| c.thread_id.is_none())
-                .and_then(|c| c.anchor.as_ref())
-                .is_some_and(|a| a.path == file.path && card_line(&file, a).is_some())
-        })
+                .map(|c| (c.anchor.clone(), c.step))
+        }) {
+            Some((Some(anchor), step)) => (anchor, step),
+            _ => return false,
+        };
+        // A place's Follow up is in its note, which is drawn where the
+        // place is found in the file.
+        match step {
+            Some(step) => crate::review::walkthrough::steps_in(*self, &file)
+                .iter()
+                .any(|(i, _)| *i == step),
+            None => anchor.path == file.path && card_line(&file, &anchor).is_some(),
+        }
     }
 
     /// Whether a follow-up on a thread is drawn inside the thread's card
@@ -4950,6 +4964,20 @@ impl ReviewState {
         self.open_composer_with(thread_id, anchor, draft, destination, None);
     }
 
+    /// Open the composer in walkthrough place `step`'s foot, for a new
+    /// thread on its lines at `anchor`.
+    pub fn open_step_composer(&self, step: usize, anchor: Anchor, defaults: AgentChoice) {
+        let destination = self.destination_for(None, Some(&anchor), defaults);
+        self.place_composer(
+            None,
+            Some(anchor),
+            String::new(),
+            destination,
+            None,
+            Some(step),
+        );
+    }
+
     /// Where a new composer about `thread_id` or `anchor` sends: the rules'
     /// pick, with GitHub only where a draft could go.
     fn destination_for(
@@ -5021,7 +5049,7 @@ impl ReviewState {
         destination: Destination,
         editing: Option<String>,
     ) {
-        self.place_composer(thread_id, anchor, draft, destination, editing);
+        self.place_composer(thread_id, anchor, draft, destination, editing, None);
     }
 
     /// Open a composer in the code when it has a card there, else on
@@ -5033,6 +5061,7 @@ impl ReviewState {
         draft: String,
         destination: Destination,
         editing: Option<String>,
+        step: Option<usize>,
     ) {
         self.composer_draft.set(draft.clone());
         // A confirm or a refusal was about the composer this replaces.
@@ -5052,6 +5081,7 @@ impl ReviewState {
             };
             self.composer.set(Some(Composer {
                 thread_id,
+                step,
                 anchor,
                 destination,
                 draft,
@@ -5131,12 +5161,16 @@ impl ReviewState {
     /// The composer's question went to the backend, and the composer is
     /// closed. A composer that was a card in the code leaves its rows
     /// where they are, under its anchor, for the thread's card to take
-    /// when the thread arrives; see `sent_composer`.
+    /// when the thread arrives; see `sent_composer`. One in a walkthrough
+    /// note had no rows of its own to leave.
     pub fn composer_sent(&self) {
         let card = floem::reactive::Effect::untrack(|| self.composer_is_inline())
             .then(|| {
-                self.composer
-                    .with_untracked(|c| c.as_ref().and_then(|c| c.anchor.clone()))
+                self.composer.with_untracked(|c| {
+                    c.as_ref()
+                        .filter(|c| c.step.is_none())
+                        .and_then(|c| c.anchor.clone())
+                })
             })
             .flatten();
         floem::reactive::Effect::batch(|| {
