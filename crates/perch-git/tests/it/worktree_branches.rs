@@ -236,6 +236,12 @@ async fn dirt_means_any_change_including_untracked_files() {
     assert!(!f.preparer.is_dirty(&checkout.worktree).await.unwrap());
     std::fs::write(checkout.worktree.join("new.txt"), "x").unwrap();
     assert!(f.preparer.is_dirty(&checkout.worktree).await.unwrap());
+    // Even where the reader's config hides untracked files from status.
+    git(
+        &checkout.worktree,
+        &["config", "status.showUntrackedFiles", "no"],
+    );
+    assert!(f.preparer.is_dirty(&checkout.worktree).await.unwrap());
 }
 
 #[tokio::test]

@@ -1236,7 +1236,11 @@ impl Preparer {
     pub async fn is_dirty(&self, worktree: &Path) -> Result<bool, Error> {
         let status = self
             .git
-            .run(Some(worktree), ["status", "--porcelain"], QUERY_TIMEOUT)
+            .run(
+                Some(worktree),
+                ["status", "--porcelain", "--untracked-files=normal"],
+                QUERY_TIMEOUT,
+            )
             .await?;
         if !status.trim().is_empty() {
             return Ok(true);
