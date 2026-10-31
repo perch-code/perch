@@ -329,14 +329,18 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                      stroke-linecap="round"/>
                <circle cx="8" cy="9.45" r="1.3" fill="{c}"/>"#
         ),
-        // A megaphone: a cone widening to the right from a small back
-        // plate, with a grip under it. Send a bug report or an idea.
+        // A megaphone: a back block, a cone out to an open oval mouth, and
+        // a handle under the block. The oval is what keeps it from reading
+        // as a speaker. Send a bug report or an idea.
         SidebarIcon::Feedback => format!(
-            r#"<path d="M2.4 6.3 A0.9 0.9 0 0 1 3.3 5.4 H5.3 L12.6 2.6 V13.4 L5.3 10.6 H3.3
-                       A0.9 0.9 0 0 1 2.4 9.7 Z" fill="none" stroke="{c}" stroke-width="1.4"
-                     stroke-linejoin="round"/>
-               <path d="M5.4 10.7 L6.5 13.6" fill="none" stroke="{c}" stroke-width="1.4"
-                     stroke-linecap="round"/>"#
+            r#"<ellipse cx="12.2" cy="7.4" rx="1.7" ry="4.8" fill="none" stroke="{c}"
+                        stroke-width="1.4"/>
+               <path d="M12.2 2.6 L5.3 5.5 H3.2 A1 1 0 0 0 2.2 6.5 V8.3 A1 1 0 0 0 3.2 9.3 H5.3
+                        L12.2 12.2 M5.3 5.5 V9.3" fill="none" stroke="{c}" stroke-width="1.4"
+                     stroke-linejoin="round" stroke-linecap="round"/>
+               <path d="M5.5 9.5 L6.2 12.9 A0.9 0.9 0 0 0 7.9 12.5 L7.6 10.4" fill="none"
+                     stroke="{c}" stroke-width="1.4" stroke-linecap="round"
+                     stroke-linejoin="round"/>"#
         ),
         SidebarIcon::Thread => format!(
             r#"<path d="M2.4 3.4 h11.2 v7.1 h-5.5 l-3.1 2.6 v-2.6 h-2.6 z" fill="{c}"
