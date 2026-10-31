@@ -2862,6 +2862,18 @@ impl AppState {
                     review.push_error.set(Some(message));
                 }
             }
+            Event::BranchUpdated { item_id } => {
+                if review.is_item(&item_id) {
+                    review.update_pending.set(false);
+                    review.update_error.set(None);
+                }
+            }
+            Event::BranchUpdateFailed { item_id, message } => {
+                if review.is_item(&item_id) {
+                    review.update_pending.set(false);
+                    review.update_error.set(Some(message));
+                }
+            }
             Event::ConflictsAsked { item_id } => {
                 if review.is_item(&item_id) {
                     review.resolving_conflicts.set(false);
@@ -3072,6 +3084,8 @@ impl AppState {
             | Event::OpenPullRequestFailed { .. }
             | Event::BranchPushed { .. }
             | Event::BranchPushFailed { .. }
+            | Event::BranchUpdated { .. }
+            | Event::BranchUpdateFailed { .. }
             | Event::ConflictsAsked { .. }
             | Event::DraftSet { .. }
             | Event::StateChanged { .. } => {}

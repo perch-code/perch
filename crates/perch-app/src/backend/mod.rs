@@ -205,6 +205,12 @@ pub enum Command {
     PushBranch {
         item_id: String,
     },
+    /// Fetch the open pull request's head into the item's worktree, and
+    /// fast-forward to it when the worktree has nothing the pull request
+    /// lacks. `BranchUpdated` or `BranchUpdateFailed` answers.
+    UpdateBranch {
+        item_id: String,
+    },
     /// Have an agent merge the pull request's base into its branch and
     /// resolve the conflicts, in a Work run. `ConflictsAsked` answers once
     /// the run ends or is refused.
@@ -1147,6 +1153,13 @@ pub enum Event {
         item_id: String,
     },
     BranchPushFailed {
+        item_id: String,
+        message: String,
+    },
+    BranchUpdated {
+        item_id: String,
+    },
+    BranchUpdateFailed {
         item_id: String,
         message: String,
     },
@@ -2878,6 +2891,12 @@ impl Backend {
         });
     }
 
+    pub fn update_branch(&self, item_id: &str) {
+        let _ = self.commands.send(Command::UpdateBranch {
+            item_id: item_id.to_string(),
+        });
+    }
+
     pub fn resolve_conflicts(
         &self,
         item_id: &str,
@@ -4556,6 +4575,10 @@ async fn run(
             Command::PushBranch { item_id } => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move { open_pull::push_to_pull(&ctx, &item_id).await });
+            }
+            Command::UpdateBranch { item_id } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { open_pull::update_from_pull(&ctx, &item_id).await });
             }
             Command::ResolveConflicts {
                 item_id,
@@ -29981,6 +30004,83 @@ read eof || true
         assert_eq!(git(&remote, &["rev-parse", "refs/heads/feature"]), new);
         assert_eq!(paths.lock().unwrap().len(), 1);
         assert_eq!(ctx.item(&item.id).unwrap().divergence(), None);
+    }
+
+    /// A branch whose pull request moved on elsewhere, and the commit it
+    /// moved to: pushed to the remote from another clone, so the worktree's
+    /// repository hasn't it.
+    fn moved_on_elsewhere(ctx: &Ctx, dir: &Path) -> (Item, std::path::PathBuf, String) {
+        let (mut item, worktree, remote) = pushable_branch(ctx, dir);
+        git(&worktree, &["push", "-q", "-u", "origin", "feature"]);
+        let other = dir.join("other");
+        git(
+            dir,
+            &[
+                "clone",
+                "-q",
+                "-b",
+                "feature",
+                remote.to_str().unwrap(),
+                other.to_str().unwrap(),
+            ],
+        );
+        git(
+            &other,
+            &["commit", "-q", "--allow-empty", "-m", "elsewhere"],
+        );
+        git(&other, &["push", "-q", "origin", "feature"]);
+        let moved = git(&other, &["rev-parse", "HEAD"]);
+        let mut pr = pull_request(12);
+        pr.head_sha = moved.clone();
+        pr.head_ref = "feature".into();
+        pr.head_repo_full_name = Some("a/b".into());
+        item.subject = Some(perch_github::ItemSubject::PullRequest(pr));
+        ctx.with_cache(|c| c.update_item(&item)).unwrap().unwrap();
+        (item, worktree, moved)
+    }
+
+    #[tokio::test]
+    async fn update_branch_fetches_the_pull_requests_head_and_fast_forwards() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), "http://127.0.0.1:9", &[]);
+        let (item, worktree, moved) = moved_on_elsewhere(&ctx, dir.path());
+        assert_eq!(
+            ctx.item(&item.id).unwrap().divergence().unwrap().label(),
+            "PR head not fetched"
+        );
+
+        open_pull::update_from_pull(&ctx, &item.id).await;
+
+        assert!(received
+            .try_iter()
+            .any(|e| matches!(e, Event::BranchUpdated { .. })));
+        assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), moved);
+        assert_eq!(git(&worktree, &["branch", "--show-current"]), "feature");
+        let row = ctx.item(&item.id).unwrap();
+        assert_eq!(row.checkout.unwrap().head_sha, moved);
+        assert_eq!(ctx.item(&item.id).unwrap().divergence(), None);
+    }
+
+    #[tokio::test]
+    async fn update_branch_leaves_a_worktree_with_its_own_commits_where_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), "http://127.0.0.1:9", &[]);
+        let (mut item, worktree, _) = moved_on_elsewhere(&ctx, dir.path());
+        git(&worktree, &["commit", "-q", "--allow-empty", "-m", "mine"]);
+        let mine = git(&worktree, &["rev-parse", "HEAD"]);
+        item.checkout.as_mut().unwrap().head_sha = mine.clone();
+        ctx.with_cache(|c| c.update_item(&item)).unwrap().unwrap();
+
+        open_pull::update_from_pull(&ctx, &item.id).await;
+
+        assert!(received
+            .try_iter()
+            .any(|e| matches!(e, Event::BranchUpdated { .. })));
+        assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), mine);
+        assert_eq!(
+            ctx.item(&item.id).unwrap().divergence().unwrap().label(),
+            "1 unpushed \u{b7} 1 behind PR"
+        );
     }
 
     #[tokio::test]

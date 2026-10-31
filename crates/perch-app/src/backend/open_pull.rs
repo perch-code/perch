@@ -15,7 +15,7 @@ use perch_github::{Item, ItemCheckout, PullLookup, PullRequest};
 
 use super::{
     configured_base, count_divergence, head_repo_of, install_pull_request_snapshot,
-    refresh_open_item, root_of, take_pull_request, Ctx, Event,
+    refresh_open_item, refresh_scope, root_of, take_pull_request, Ctx, Event,
 };
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -331,6 +331,156 @@ async fn push_to_pull_inner(ctx: &Ctx, item_id: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Bring the open pull request's head into the worktree's repository, and
+/// move the worktree to it when that loses nothing: when the worktree's
+/// head is one the pull request has. A worktree with commits of its own
+/// stays where it is, and the count says how the two stand.
+pub(super) async fn update_from_pull(ctx: &Ctx, item_id: &str) {
+    let outcome = update_from_pull_inner(ctx, item_id).await;
+    let event = match outcome {
+        Ok(()) => Event::BranchUpdated {
+            item_id: item_id.to_string(),
+        },
+        Err(message) => Event::BranchUpdateFailed {
+            item_id: item_id.to_string(),
+            message,
+        },
+    };
+    let _ = ctx.events.send(event);
+}
+
+async fn update_from_pull_inner(ctx: &Ctx, item_id: &str) -> Result<(), String> {
+    let item = ctx.item(item_id).ok_or("The item is gone")?;
+    let checkout = item
+        .checkout
+        .clone()
+        .filter(|c| c.on_disk)
+        .ok_or("The item has no worktree on disk")?;
+    let pr = item
+        .pull_request()
+        .filter(|pr| pr.is_open() && !pr.merged)
+        .cloned()
+        .ok_or("The pull request isn't open")?;
+    if ctx.runs.has_active_work(&checkout.path) {
+        return Err("A Work run is running here. Wait for the run to finish.".into());
+    }
+    let fetched = if in_perchs_clone(&checkout) {
+        let url = RepoId::parse(&pr.repo_full_name)
+            .ok_or_else(|| format!("{} is not a repository name", pr.repo_full_name))?
+            .clone_url();
+        ctx.preparer
+            .fetch_pull(
+                &checkout.path,
+                &url,
+                pr.number,
+                &pr.base_ref,
+                Some(&pr.head_sha),
+            )
+            .await
+    } else {
+        let head_repo = pr
+            .head_repo_full_name
+            .clone()
+            .unwrap_or_else(|| pr.repo_full_name.clone());
+        let remote = remote_for(ctx, &checkout, &head_repo).await;
+        ctx.preparer
+            .fetch_branch(&checkout.path, &remote, &pr.head_ref)
+            .await
+    };
+    fetched.map_err(|e| {
+        tracing::info!(item = item_id, error = %e, "the fetch failed");
+        format!("Couldn't fetch: {}", git_says(e))
+    })?;
+
+    let git = ctx.preparer.git();
+    let dir = checkout.path.as_path();
+    let pr_head = format!("{}^{{commit}}", pr.head_sha);
+    if git
+        .run(Some(dir), ["cat-file", "-e", &pr_head], QUERY_TIMEOUT)
+        .await
+        .is_err()
+    {
+        return Err(format!(
+            "Fetched {}, but the pull request's head wasn't on it.",
+            pr.head_ref
+        ));
+    }
+    let head = git
+        .run(Some(dir), ["rev-parse", "HEAD"], QUERY_TIMEOUT)
+        .await
+        .map(|s| s.trim().to_string())
+        .map_err(|e| format!("Couldn't read the worktree: {e}"))?;
+    let only_behind = head != pr.head_sha
+        && git
+            .run(
+                Some(dir),
+                ["merge-base", "--is-ancestor", &head, &pr.head_sha],
+                QUERY_TIMEOUT,
+            )
+            .await
+            .is_ok();
+    if only_behind {
+        git.run(
+            Some(dir),
+            ["merge", "--ff-only", &pr.head_sha],
+            COMMIT_TIMEOUT,
+        )
+        .await
+        .map_err(|e| {
+            tracing::info!(item = item_id, error = %e, "the fast-forward failed");
+            match &e {
+                perch_git::Error::Git { stderr, .. } if stderr.contains("would be overwritten") => {
+                    "Uncommitted changes here touch files the pull request changes. Commit or stash them, then try again.".to_string()
+                }
+                _ => format!("Couldn't update: {}", git_says(e)),
+            }
+        })?;
+    }
+
+    // The row follows the worktree's head, and counts it against the pull
+    // request's again; an open review reads the moved head.
+    if let Some(mut item) = ctx.item(item_id) {
+        if let Some(c) = item.checkout.as_mut() {
+            if let Ok(now) = git
+                .run(Some(dir), ["rev-parse", "HEAD"], QUERY_TIMEOUT)
+                .await
+            {
+                c.head_sha = now.trim().to_string();
+            }
+        }
+        count_divergence(git, &mut item).await;
+        ctx.with_cache(|c| c.update_item(&item));
+        ctx.send_items();
+    }
+    if only_behind {
+        let navigation_id = ctx.slot.lock().ok().and_then(|g| {
+            g.as_ref()
+                .filter(|open| open.item_id == item_id)
+                .map(|open| open.navigation_id)
+        });
+        if let (Some(navigation_id), Some(scope_revision)) =
+            (navigation_id, ctx.scope_requests.stable_revision())
+        {
+            refresh_scope(ctx, item_id, navigation_id, scope_revision).await;
+        }
+    }
+    Ok(())
+}
+
+/// What a failed git call said, by its first error line.
+fn git_says(e: perch_git::Error) -> String {
+    match e {
+        perch_git::Error::Git { stderr, .. } => stderr
+            .lines()
+            .map(str::trim)
+            .find(|l| l.starts_with("error:") || l.starts_with("fatal:"))
+            .or_else(|| stderr.lines().rev().map(str::trim).find(|l| !l.is_empty()))
+            .unwrap_or("git failed")
+            .to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// What a description run came to.

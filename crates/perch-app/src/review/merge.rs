@@ -63,6 +63,11 @@ struct MergeSnapshot {
     can_push: bool,
     push_pending: bool,
     push_error: Option<String>,
+    /// Whether Update branch can bring the worktree to the pull request,
+    /// which is what keeps Merge from a worktree behind it.
+    can_update: bool,
+    update_pending: bool,
+    update_error: Option<String>,
     /// Whether the reader may mark a draft ready for review, and a change
     /// to or from a draft under way.
     may_set_draft: bool,
@@ -693,6 +698,9 @@ fn merge_section(
             can_push: can_push.get(),
             push_pending: state.push_pending.get(),
             push_error: state.push_error.get(),
+            can_update: crate::review::summary::can_update(state),
+            update_pending: state.update_pending.get(),
+            update_error: state.update_error.get(),
             may_set_draft: may_set_draft.get(),
             draft_pending: state.draft_pending.get(),
             resolver: resolver
@@ -772,6 +780,7 @@ fn merge_content(
         error_line(snapshot.overview_error.clone(), "merge-overview-error"),
         error_line(snapshot.merge_error.clone(), "merge-error"),
         error_line(snapshot.push_error.clone(), "merge-push-error"),
+        error_line(snapshot.update_error.clone(), "merge-update-error"),
         controls,
     ))
     .style(|s| {
@@ -910,6 +919,25 @@ fn merge_controls(
                 true,
                 move || !pending,
                 move || crate::review::summary::push(state, &backend),
+            )
+            .into_any()
+        }
+        // The worktree is behind the pull request, or hasn't its head, and
+        // Update branch brings it there.
+        MergeDecision::Disabled(DisabledReason::StaleCheckout)
+            if snapshot.can_update || snapshot.update_pending =>
+        {
+            let pending = snapshot.update_pending;
+            let label = if pending {
+                "Updating…"
+            } else {
+                "Update branch"
+            };
+            merge_button(
+                label.to_string(),
+                true,
+                move || !pending,
+                move || crate::review::summary::update(state, &backend),
             )
             .into_any()
         }
@@ -2172,6 +2200,72 @@ mod tests {
         harness.paint();
         assert!(named(harness.root_id(), "merge-push-error").is_some());
         assert!(named(harness.root_id(), "merge-action:Push-2-commits").is_some());
+    }
+
+    /// A worktree whose pull request's head isn't here can't merge, and
+    /// the merge box updates the branch instead; one with commits of its
+    /// own as well doesn't offer it.
+    #[test]
+    fn a_pull_request_head_not_fetched_turns_merge_into_update_branch() {
+        use crate::backend::Command;
+
+        let root = TestRoot::new();
+        let state = review_state(MergeState::Clean, false);
+        state.item.update(|slot| {
+            let mut item = (**slot.as_ref().unwrap()).clone();
+            item.subject = Some(perch_github::ItemSubject::PullRequest(
+                (*pull_request("head-42")).clone(),
+            ));
+            item.checkout.as_mut().unwrap().head_sha = "head-41".into();
+            *slot = Some(Arc::new(item));
+        });
+        let (backend, mut commands) = Backend::recording();
+        let view = merge_section(
+            state,
+            Rc::new(backend),
+            RwSignal::new(MergeMethod::Squash),
+            RwSignal::new(false),
+            RwSignal::new(None::<MergeConfirmation>),
+            MessageDraft::new(),
+            Memo::new(|_| false),
+            Memo::new(|_| false),
+            no_resolver(),
+        );
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+
+        let update = named(harness.root_id(), "merge-action:Update-branch")
+            .expect("Update branch in the merge box");
+        update.request_focus();
+        harness.rebuild();
+        harness.dispatch_event(key(Code::Enter));
+        harness.rebuild();
+        harness.paint();
+
+        let sent: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+        assert!(
+            sent.iter()
+                .any(|c| matches!(c, Command::UpdateBranch { item_id } if item_id == "item-42")),
+            "{sent:?}"
+        );
+        assert!(named(harness.root_id(), "merge-action:Updating…").is_some());
+
+        state.update_pending.set(false);
+        state.item.update(|slot| {
+            let mut item = (**slot.as_ref().unwrap()).clone();
+            item.checkout.as_mut().unwrap().divergence = Some(perch_github::Divergence {
+                head: "head-41".into(),
+                pr_head: "head-42".into(),
+                ahead: 1,
+                behind: 1,
+            });
+            *slot = Some(Arc::new(item));
+        });
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "merge-action:Update-branch").is_none());
+        assert!(named(harness.root_id(), "merge-action:Merge-unavailable").is_some());
     }
 
     /// Conflicts go to an agent by default where one may work, held while

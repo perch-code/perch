@@ -129,6 +129,7 @@ pub fn summary(
                 churn(state),
                 divergence(state),
                 push_button(app, state, backend.clone()),
+                update_button(state, backend.clone()),
             ))
             .style(|s| s.items_center().min_width(0.0).col_gap(theme::SUMMARY_GAP)),
         ),
@@ -1125,32 +1126,99 @@ pub(crate) fn push(state: ReviewState, backend: &Backend) {
     backend.push_branch(&item_id);
 }
 
+/// Whether Update branch can bring the worktree to its pull request: the
+/// worktree is on the pull request's branch and has nothing the pull
+/// request lacks, or the pull request's head isn't here to tell.
+pub(crate) fn can_update(state: ReviewState) -> bool {
+    state.item.with(|item| {
+        item.as_ref().is_some_and(|item| {
+            let on_branch = item
+                .checkout
+                .as_ref()
+                .zip(item.pull_request())
+                .is_some_and(|(c, pr)| c.on_disk && c.branch == pr.head_ref);
+            on_branch
+                && item
+                    .divergence()
+                    .is_some_and(|d| d.ahead.is_none_or(|a| a == 0))
+        })
+    })
+}
+
+/// Fetch the pull request's head into the worktree and fast-forward to
+/// it, as Update branch does here and in the merge box.
+pub(crate) fn update(state: ReviewState, backend: &Backend) {
+    let Some(item_id) = state
+        .item
+        .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+    else {
+        return;
+    };
+    state.update_pending.set(true);
+    state.update_error.set(None);
+    backend.update_branch(&item_id);
+}
+
 /// Push, beside `3 unpushed`, and what stopped the last one.
 fn push_button(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    let shown = Memo::new(move |_| can_push(app, state) || state.push_pending.get());
+    branch_button(
+        state,
+        ("Push", "Pushing…", "push-branch"),
+        state.push_pending,
+        state.push_error,
+        move || can_push(app, state),
+        move || push(state, &backend),
+    )
+}
+
+/// Update branch, beside `PR head not fetched` or `2 behind PR`, and what
+/// stopped the last one.
+fn update_button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    branch_button(
+        state,
+        ("Update branch", "Updating…", "update-branch"),
+        state.update_pending,
+        state.update_error,
+        move || can_update(state),
+        move || update(state, &backend),
+    )
+}
+
+/// A button on the Branch row that brings the worktree and the pull
+/// request together, shown while it can or while it's at it, and the
+/// error it last ended in.
+fn branch_button(
+    state: ReviewState,
+    (label, pending_label, id): (&'static str, &'static str, &'static str),
+    pending: RwSignal<bool>,
+    error: RwSignal<Option<String>>,
+    can: impl Fn() -> bool + 'static,
+    act: impl Fn() + 'static,
+) -> impl IntoView {
+    let shown = Memo::new(move |_| can() || pending.get());
     Stack::horizontal((
         crate::ui::widgets::action_button(
             move || {
-                if state.push_pending.get() {
-                    "Pushing…".to_string()
+                if pending.get() {
+                    pending_label.to_string()
                 } else {
-                    "Push".to_string()
+                    label.to_string()
                 }
             },
-            "push-branch",
+            id,
             false,
-            move || !state.push_pending.get() && !state.offline.get(),
-            move || push(state, &backend),
+            move || !pending.get() && !state.offline.get(),
+            act,
         )
         .style(|s| s.height(22.0).padding_horiz(8.0)),
-        Label::derived(move || state.push_error.get().unwrap_or_default())
-            .debug_name("push-branch-error")
+        Label::derived(move || error.get().unwrap_or_default())
+            .debug_name(format!("{id}-error"))
             .style(move |s| {
                 s.font_size(theme::TEXT_BADGE)
                     .color(theme::closed())
                     .min_width(0.0)
                     .text_ellipsis()
-                    .apply_if(state.push_error.with(Option::is_none), |s| s.hide())
+                    .apply_if(error.with(Option::is_none), |s| s.hide())
             }),
     ))
     .style(move |s| {

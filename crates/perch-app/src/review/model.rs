@@ -1641,6 +1641,10 @@ pub struct ReviewState {
     /// A Push to the pull request under way, and what stopped the last.
     pub push_pending: RwSignal<bool>,
     pub push_error: RwSignal<Option<String>>,
+    /// An Update branch from the pull request under way, and what stopped
+    /// the last.
+    pub update_pending: RwSignal<bool>,
+    pub update_error: RwSignal<Option<String>>,
     /// An agent asked to resolve the pull request's conflicts, from the
     /// fetch of its base until the run ends or is refused.
     pub resolving_conflicts: RwSignal<bool>,
@@ -2144,6 +2148,8 @@ impl ReviewState {
             state_pending: RwSignal::new(None),
             push_pending: RwSignal::new(false),
             push_error: RwSignal::new(None),
+            update_pending: RwSignal::new(false),
+            update_error: RwSignal::new(None),
             resolving_conflicts: RwSignal::new(false),
             describing: RwSignal::new(false),
             description_error: RwSignal::new(None),
@@ -2372,6 +2378,8 @@ impl ReviewState {
         self.state_pending.set(None);
         self.push_pending.set(false);
         self.push_error.set(None);
+        self.update_pending.set(false);
+        self.update_error.set(None);
         self.resolving_conflicts.set(false);
         self.describing.set(false);
         self.description_error.set(None);

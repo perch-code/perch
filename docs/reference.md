@@ -580,6 +580,13 @@ A worktree made for work can hold the only copy of it.
   worktree's own repository at each scan and open and fetches nothing to do
   it. **Submit review** and **Merge** are unavailable while the heads differ,
   since what is on screen isn't what GitHub would review or merge.
+- **Update branch**, on the Branch row and in place of Merge, shows when the
+  pull request's head isn't fetched or the worktree is only behind it. It
+  fetches the pull request's branch, with your git credentials in one of your
+  clones and Perch's token in its own, and fast-forwards the worktree to its
+  head. A worktree with unpushed commits of its own isn't moved; the fetch
+  only lets the row count both sides. Uncommitted changes to files the pull
+  request changes stop the update.
 
 ## Opening a pull request
 
