@@ -1723,7 +1723,10 @@ fn block_hits<'a>(
     hits
 }
 
-fn diff_map_range(
+/// One-based lines `start_line` to `end_line` of `source` where they are
+/// in `target`: every one unchanged between the two, and still in a row.
+/// `None` when any of them changed, went, or came apart.
+pub fn diff_map_range(
     source: &str,
     target: &str,
     start_line: u32,

@@ -2669,6 +2669,16 @@ impl AppState {
                     review.settle_issue_comment(token, result);
                 }
             }
+            // The draft is in the threads sent out before this.
+            Event::DraftSaved {
+                item_id,
+                token,
+                result,
+            } => {
+                if review.is_item(&item_id) {
+                    review.settle_issue_comment(token, result);
+                }
+            }
             // The reply came in the threads before this.
             Event::ReplyPosted {
                 item_id,
@@ -3294,6 +3304,7 @@ impl AppState {
             | Event::PullRequestClosed { .. }
             | Event::IssueClosed { .. }
             | Event::SuggestionApplied { .. }
+            | Event::DraftSaved { .. }
             | Event::ReplyPosted { .. }
             | Event::SuggestionCommitted { .. }
             | Event::IssueUpdated { .. }

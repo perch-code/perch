@@ -530,6 +530,26 @@ pub fn composer_view(
                     );
                     state.agent_last.set(Some((*agent, model.clone(), *effort)));
                 }
+                // A new thread's lines picked under a scope other than
+                // Branch are numbered by its diff, which GitHub does not
+                // have: they are moved to GitHub's first, and the box
+                // waits for that.
+                Destination::GitHub
+                    if composer.editing.is_none()
+                        && composer.picked.is_some()
+                        && composer.anchor.is_some() =>
+                {
+                    let (Some(anchor), Some(picked)) =
+                        (composer.anchor.clone(), composer.picked.clone())
+                    else {
+                        return;
+                    };
+                    let body = question.trim().to_string();
+                    let token = backend.save_draft_in_scope(&item_id, anchor, &body, picked);
+                    state.last_destination[face.index()].set(Some(composer.destination.clone()));
+                    state.start_posting(token, body);
+                    return;
+                }
                 // A draft: written and shown, and nothing asked. The
                 // review form posts it.
                 Destination::GitHub => backend.save_draft(

@@ -22,11 +22,11 @@ pub use display::{DisplayBuffer, Row};
 pub use keyed::KeyedMutex;
 pub use prepare::{home_ref, BaseBranch, Checkout, Cut, Prefetched, Preparer, PushError, Step};
 pub use review_snapshot::{
-    map_anchor_between, AnchorMapping, CaptureOutcome, DiffSide, MappedAnchor, MappingCandidate,
-    MappingConfidence, MappingDocument, MappingEvidence, MappingMethod, MappingSnapshot, RangeDiff,
-    ResolvedReviewRange, ReviewSnapshot, ReviewSnapshotStore, SnapshotAnchor, SnapshotCapture,
-    SnapshotError, SnapshotFile, SnapshotManifest, UnmappedReason, BASE_TIP_REF, HEAD_REF,
-    MERGE_BASE_REF,
+    diff_map_range, map_anchor_between, AnchorMapping, CaptureOutcome, DiffSide, MappedAnchor,
+    MappingCandidate, MappingConfidence, MappingDocument, MappingEvidence, MappingMethod,
+    MappingSnapshot, RangeDiff, ResolvedReviewRange, ReviewSnapshot, ReviewSnapshotStore,
+    SnapshotAnchor, SnapshotCapture, SnapshotError, SnapshotFile, SnapshotManifest, UnmappedReason,
+    BASE_TIP_REF, HEAD_REF, MERGE_BASE_REF,
 };
 pub use scan::{
     branch_churn, branch_readiness, github_remote, head_commit_time, parse_remotes,

@@ -684,6 +684,15 @@ pub enum Command {
         body: String,
         editing: Option<String>,
     },
+    /// A draft opening a thread on lines picked under `scope`, moved to
+    /// the lines GitHub has for them first; see `github_anchor`.
+    SaveDraftInScope {
+        item_id: String,
+        token: u64,
+        anchor: Anchor,
+        body: String,
+        picked: crate::review::model::Picked,
+    },
     /// The reader's words for what a reviewer said in a finding's
     /// thread, in place of the reviewer's.
     EditReviewerMessage {
@@ -1471,6 +1480,13 @@ pub enum Event {
     /// GitHub took the reply under a thread, or said why not. On success
     /// the reply is already in the threads sent out before this.
     ReplyPosted {
+        item_id: String,
+        token: u64,
+        result: Result<(), String>,
+    },
+    /// A draft from `SaveDraftInScope` is saved, or why GitHub has no
+    /// lines for it.
+    DraftSaved {
         item_id: String,
         token: u64,
         result: Result<(), String>,
@@ -3646,6 +3662,26 @@ impl Backend {
         token
     }
 
+    /// Save a draft opening a thread on lines `picked` under a scope
+    /// other than Branch. The token comes back on `DraftSaved`.
+    pub fn save_draft_in_scope(
+        &self,
+        item_id: &str,
+        anchor: Anchor,
+        body: &str,
+        picked: crate::review::model::Picked,
+    ) -> u64 {
+        let token = next_posting_token();
+        let _ = self.commands.send(Command::SaveDraftInScope {
+            item_id: item_id.to_string(),
+            token,
+            anchor,
+            body: body.to_string(),
+            picked,
+        });
+        token
+    }
+
     /// Reply under `thread_id`, a thread on GitHub, now. The token comes
     /// back on `ReplyPosted`.
     pub fn reply_to_thread(&self, item_id: &str, thread_id: &str, body: &str) -> u64 {
@@ -5081,6 +5117,25 @@ async fn run(
                 editing,
             } => {
                 save_draft(&ctx, &item_id, thread_id, anchor, body, editing);
+            }
+            Command::SaveDraftInScope {
+                item_id,
+                token,
+                anchor,
+                body,
+                picked,
+            } => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let result = github_anchor(&ctx, &item_id, &picked, anchor)
+                        .await
+                        .map(|anchor| save_draft(&ctx, &item_id, None, Some(anchor), body, None));
+                    let _ = ctx.events.send(Event::DraftSaved {
+                        item_id,
+                        token,
+                        result,
+                    });
+                });
             }
             Command::EditReviewerMessage {
                 item_id,
@@ -17889,6 +17944,134 @@ async fn delete_private_messages(ctx: &Ctx, thread_id: &str) {
     ctx.send_threads(&item_id);
 }
 
+/// Lines `picked` under a scope as GitHub reads a review comment's: base
+/// lines are the merge base's and head lines the head's, whatever the
+/// diff on screen was between. Lines unchanged between the two are moved
+/// there. Base lines that are not, such as ones a later push removed,
+/// stay where they are, on the head side of the commit they are in, when
+/// that commit is one of the pull request's, as a comment on an older
+/// commit is on github.com. Head lines of a commit stay on that commit.
+/// Anything else, lines only in the working tree or the index, GitHub
+/// has nowhere for. A renamed file's base lines are read under its old
+/// name, on both sides, and lines that land are put under its name at
+/// the head, which GitHub keys the file by. The picked side is the text
+/// that was on screen, when it was kept.
+async fn github_anchor(
+    ctx: &Ctx,
+    item_id: &str,
+    picked: &crate::review::model::Picked,
+    mut anchor: Anchor,
+) -> Result<Anchor, String> {
+    let open = ctx.slot.lock().ok().and_then(|slot| {
+        slot.as_ref()
+            .filter(|open| open.item_id == item_id)
+            .map(|open| {
+                (
+                    open.checkout.worktree.clone(),
+                    open.checkout.merge_base.clone(),
+                    open.checkout.head_sha.clone(),
+                )
+            })
+    });
+    let (worktree, merge_base, head) = open.ok_or("The pull request is not open any more")?;
+    let (left, right) = picked.scope.sides(&merge_base, &head);
+    // The pull request's file the lines are in, which GitHub keys a
+    // comment by: under its head name, or under the name the scope's base
+    // side has, when the file is renamed after it.
+    let diff = perch_git::RangeDiff::read(&worktree, &merge_base, &head)
+        .await
+        .ok();
+    let file = diff.as_ref().and_then(|diff| {
+        diff.file(&anchor.path).or_else(|| {
+            diff.files()
+                .iter()
+                .find(|f| f.path_on(perch_git::DiffSide::Left) == Some(picked.base_path.as_str()))
+        })
+    });
+    let head_path = file.map_or_else(|| anchor.path.clone(), |f| f.path.clone());
+    let (from, from_path, to, to_path) = match anchor.side {
+        // GitHub's left of a renamed file is the merge base's under the
+        // name it had there.
+        perch_github::Side::Left => (
+            left,
+            picked.base_path.clone(),
+            merge_base.clone(),
+            file.and_then(|f| f.path_on(perch_git::DiffSide::Left))
+                .map_or_else(|| picked.base_path.clone(), str::to_string),
+        ),
+        perch_github::Side::Right => (right, anchor.path.clone(), head.clone(), head_path.clone()),
+    };
+    let git = ctx.preparer.git();
+    let read = |rev: perch_git::Rev, path: String| {
+        let worktree = &worktree;
+        async move {
+            perch_git::read_side(git, worktree, &rev, &path)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    };
+    let source = match &picked.source {
+        Some(text) => Some(text.to_string()),
+        None => read(from.clone(), from_path.clone()).await?,
+    };
+    let target = read(perch_git::Rev::Sha(to), to_path).await?;
+    let moved = source.zip(target).and_then(|(source, target)| {
+        perch_git::diff_map_range(&source, &target, anchor.start_line, anchor.line)
+    });
+    if let Some((start_line, line)) = moved {
+        anchor.path = head_path;
+        anchor.start_line = start_line;
+        anchor.line = line;
+        anchor.commit_sha = head;
+        return Ok(anchor);
+    }
+    let nowhere = || {
+        "GitHub doesn't have these lines in the pull request, so a comment there can't \
+         go on them. Pick them under Branch, or ask about them in Perch."
+            .to_string()
+    };
+    let perch_git::Rev::Sha(rev) = from else {
+        return Err(nowhere());
+    };
+    let ask = |args: Vec<String>| {
+        let worktree = &worktree;
+        async move { git.run(Some(worktree), args, Duration::from_secs(30)).await }
+    };
+    let commit = ask(vec![
+        "rev-parse".into(),
+        "--verify".into(),
+        "--quiet".into(),
+        format!("{rev}^{{commit}}"),
+    ])
+    .await
+    .map(|out| out.trim().to_string())
+    .map_err(|_| nowhere())?;
+    // GitHub has a commit of the pull request's, and not one of the base's
+    // or a Work run's record.
+    let is_ancestor = |of: &str| {
+        ask(vec![
+            "merge-base".into(),
+            "--is-ancestor".into(),
+            commit.clone(),
+            of.to_string(),
+        ])
+    };
+    if is_ancestor(&head).await.is_err() || is_ancestor(&merge_base).await.is_ok() {
+        return Err(nowhere());
+    }
+    match anchor.side {
+        // On its own commit already, which `anchor_on` named.
+        perch_github::Side::Right if commit == anchor.commit_sha => Ok(anchor),
+        perch_github::Side::Right => Err(nowhere()),
+        perch_github::Side::Left => {
+            anchor.path = from_path;
+            anchor.side = perch_github::Side::Right;
+            anchor.commit_sha = commit;
+            Ok(anchor)
+        }
+    }
+}
+
 /// Keep a message for GitHub. With `editing`, the draft's body is
 /// replaced and nothing else moves. Otherwise the message goes under
 /// `thread_id`, and a thread of Perch's own is turned towards GitHub with
@@ -23801,6 +23984,168 @@ while True:
             blob().unwrap(),
             git(&worktree, &["hash-object", "made.txt"])
         );
+    }
+
+    #[tokio::test]
+    async fn a_github_draft_picked_under_another_scope_takes_githubs_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("notes");
+        let worktree = root_with_branch(&root, "feature").canonicalize().unwrap();
+        let merge_base = git(&worktree, &["merge-base", "main", "HEAD"]);
+        let commit = |text: &str| {
+            std::fs::write(worktree.join("one.txt"), text).unwrap();
+            git(&worktree, &["commit", "-q", "-am", text]);
+            git(&worktree, &["rev-parse", "HEAD"])
+        };
+        // The push the reader last looked at added x and y; the next one
+        // took x out again.
+        let looked = commit("one\nx\ny\n");
+        let head = commit("one\ny\n");
+        let mut entry = rooted(None, &root);
+        entry.resolve(None);
+        let (ctx, _received) = ctx_declaring(dir.path(), &nowhere(), vec![entry]);
+        assert!(scan_roots(&ctx).await);
+        let item = ctx
+            .with_cache(|c| c.load_items().unwrap())
+            .unwrap()
+            .remove(0);
+        open_in_slot(&ctx, &item);
+        {
+            let mut slot = ctx.slot.lock().unwrap();
+            let open = slot.as_mut().unwrap();
+            open.checkout.worktree = worktree.clone();
+            open.checkout.merge_base = merge_base.clone();
+            open.checkout.head_sha = head.clone();
+        }
+        let anchor = |side, line| Anchor {
+            path: "one.txt".into(),
+            start_line: line,
+            line,
+            side,
+            commit_sha: head.clone(),
+        };
+        let since = crate::review::model::Picked {
+            scope: perch_git::Scope::SinceLastLooked {
+                from: looked.clone(),
+            },
+            base_path: "one.txt".into(),
+            source: None,
+        };
+
+        // A line the merge base has too is that line of it.
+        let moved = github_anchor(&ctx, &item.id, &since, anchor(perch_github::Side::Left, 1))
+            .await
+            .unwrap();
+        assert_eq!(moved, anchor(perch_github::Side::Left, 1));
+        // One only the earlier push had stays on that push's commit.
+        let kept = github_anchor(&ctx, &item.id, &since, anchor(perch_github::Side::Left, 2))
+            .await
+            .unwrap();
+        assert_eq!(
+            kept,
+            Anchor {
+                side: perch_github::Side::Right,
+                commit_sha: looked,
+                ..anchor(perch_github::Side::Right, 2)
+            }
+        );
+
+        // A working-tree line is the head's where the head has it, and
+        // GitHub has nowhere for one only on disk.
+        std::fs::write(worktree.join("one.txt"), "new\none\ny\n").unwrap();
+        let uncommitted = crate::review::model::Picked {
+            scope: perch_git::Scope::Uncommitted,
+            base_path: "one.txt".into(),
+            source: None,
+        };
+        let moved = github_anchor(
+            &ctx,
+            &item.id,
+            &uncommitted,
+            anchor(perch_github::Side::Right, 3),
+        )
+        .await
+        .unwrap();
+        assert_eq!(moved, anchor(perch_github::Side::Right, 2));
+        assert!(github_anchor(
+            &ctx,
+            &item.id,
+            &uncommitted,
+            anchor(perch_github::Side::Right, 1)
+        )
+        .await
+        .is_err());
+
+        // The working tree moving on after the lines were picked leaves
+        // them the lines that were on screen.
+        std::fs::write(worktree.join("one.txt"), "a\nb\nnew\none\ny\n").unwrap();
+        let shown = crate::review::model::Picked {
+            source: Some("new\none\ny".into()),
+            ..uncommitted
+        };
+        let moved = github_anchor(&ctx, &item.id, &shown, anchor(perch_github::Side::Right, 3))
+            .await
+            .unwrap();
+        assert_eq!(moved, anchor(perch_github::Side::Right, 2));
+    }
+
+    #[tokio::test]
+    async fn a_github_draft_in_a_file_renamed_later_takes_its_head_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("notes");
+        let worktree = root_with_branch(&root, "feature").canonicalize().unwrap();
+        let merge_base = git(&worktree, &["merge-base", "main", "HEAD"]);
+        // One commit edits one.txt and a later one renames it.
+        std::fs::write(worktree.join("one.txt"), "one\nx\n").unwrap();
+        git(&worktree, &["commit", "-q", "-am", "x"]);
+        let edited = git(&worktree, &["rev-parse", "HEAD"]);
+        git(&worktree, &["mv", "one.txt", "three.txt"]);
+        git(&worktree, &["commit", "-q", "-m", "rename"]);
+        let head = git(&worktree, &["rev-parse", "HEAD"]);
+        let mut entry = rooted(None, &root);
+        entry.resolve(None);
+        let (ctx, _received) = ctx_declaring(dir.path(), &nowhere(), vec![entry]);
+        assert!(scan_roots(&ctx).await);
+        let item = ctx
+            .with_cache(|c| c.load_items().unwrap())
+            .unwrap()
+            .remove(0);
+        open_in_slot(&ctx, &item);
+        {
+            let mut slot = ctx.slot.lock().unwrap();
+            let open = slot.as_mut().unwrap();
+            open.checkout.worktree = worktree.clone();
+            open.checkout.merge_base = merge_base.clone();
+            open.checkout.head_sha = head.clone();
+        }
+        let anchor = |path: &str, side, line| Anchor {
+            path: path.into(),
+            start_line: line,
+            line,
+            side,
+            commit_sha: head.clone(),
+        };
+        let picked = crate::review::model::Picked {
+            scope: perch_git::Scope::Commit { sha: edited },
+            base_path: "one.txt".into(),
+            source: None,
+        };
+
+        for side in [perch_github::Side::Left, perch_github::Side::Right] {
+            let moved = github_anchor(&ctx, &item.id, &picked, anchor("one.txt", side, 1))
+                .await
+                .unwrap();
+            assert_eq!(moved, anchor("three.txt", side, 1));
+        }
+        let moved = github_anchor(
+            &ctx,
+            &item.id,
+            &picked,
+            anchor("one.txt", perch_github::Side::Right, 2),
+        )
+        .await
+        .unwrap();
+        assert_eq!(moved, anchor("three.txt", perch_github::Side::Right, 2));
     }
 
     /// A suggestion put in the file under Branch, which shows the head

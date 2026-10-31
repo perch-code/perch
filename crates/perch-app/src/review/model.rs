@@ -1227,6 +1227,38 @@ pub struct Composer {
     /// The walkthrough block it was opened under, which draws it there;
     /// `None` for one opened anywhere else.
     pub block: Option<String>,
+    /// Where a new thread's lines were picked, when that was a diff GitHub
+    /// does not number them by; see `Picked`.
+    pub picked: Option<Picked>,
+}
+
+/// The head file a unified buffer shows, without the removed lines
+/// spliced into it.
+fn head_text(buffer: &DisplayBuffer) -> String {
+    buffer
+        .text
+        .lines()
+        .zip(&buffer.rows)
+        .filter(|(_, row)| row.head_line().is_some())
+        .map(|(line, _)| line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The diff a new thread's lines were picked in, when it is not Branch's:
+/// the scope its file was loaded under, the base side's path in it, which
+/// a rename makes another, and the text of the side they are on as it was
+/// shown. GitHub reads a comment's lines against the merge base and the
+/// head, so a draft for it from here is moved to those first. A
+/// walkthrough's lines are GitHub's already.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Picked {
+    pub scope: Scope,
+    pub base_path: String,
+    /// `None` when the file was not loaded, or not as text; the side is
+    /// read again then. The working tree and the index can move on after
+    /// the lines were picked, so they are mapped from what was on screen.
+    pub source: Option<Arc<str>>,
 }
 
 /// One open editor tab. The origin is here as well as on the loaded
@@ -5041,6 +5073,10 @@ impl ReviewState {
             }
             self.forget_composer_rows();
             let mode = self.composer_mode(thread_id.as_deref());
+            let picked = match (&thread_id, &anchor, &block) {
+                (None, Some(anchor), None) => self.picked_for(anchor),
+                _ => None,
+            };
             self.composer.set(Some(Composer {
                 thread_id,
                 anchor,
@@ -5050,6 +5086,7 @@ impl ReviewState {
                 editing,
                 mode,
                 block,
+                picked,
             }));
         });
         let in_code = self.composer_in_code_untracked();
@@ -5063,6 +5100,46 @@ impl ReviewState {
         {
             self.expand_card(&CardId::Thread(id));
         }
+    }
+
+    /// Where lines of `anchor`'s file were picked, when its file is loaded
+    /// under a scope other than Branch. The base path is the changed
+    /// list's, which is the open scope's, so it is only taken for a file
+    /// loaded under that scope.
+    fn picked_for(&self, anchor: &Anchor) -> Option<Picked> {
+        let loaded = self.files.with_untracked(|files| {
+            files.get(&anchor.path).map(|f| {
+                let source = (!f.truncated)
+                    .then(|| match anchor.side {
+                        perch_github::Side::Left => {
+                            f.base_buffer.as_ref().map(|b| Arc::from(b.text.as_str()))
+                        }
+                        perch_github::Side::Right => Some(head_text(&f.buffer).into()),
+                    })
+                    .flatten();
+                (f.scope.clone(), source)
+            })
+        });
+        let (scope, source) = loaded.unwrap_or_else(|| (self.scope.get_untracked(), None));
+        if scope == Scope::Branch {
+            return None;
+        }
+        let base_path = (scope == self.scope.get_untracked())
+            .then(|| {
+                self.changed_files.with_untracked(|files| {
+                    files
+                        .iter()
+                        .find(|f| f.path == anchor.path)
+                        .and_then(|f| f.old_path.clone())
+                })
+            })
+            .flatten()
+            .unwrap_or_else(|| anchor.path.clone());
+        Some(Picked {
+            scope,
+            base_path,
+            source,
+        })
     }
 
     /// Close the composer and forget its draft. A composer card's rows go
