@@ -245,7 +245,7 @@ Everything lives under `~/.perch` (or `$PERCH_HOME`): the config, a SQLite
 database, worktrees, clones, agent state, and in `servers/` the language
 servers Perch installed and jdtls's data for each checkout. Delete
 `servers/` to uninstall them. `walkthroughs/` holds the walkthroughs agents
-wrote, one file per item and head. Perch's log is in `logs/`, one file a day,
+wrote, the last 20 for each item. Perch's log is in `logs/`, one file a day,
 the last seven kept. A downloaded update waits in `updates/` until the
 restart that installs it. The database holds your local conversations, drafts
 and review history, so don't treat it as a cache.

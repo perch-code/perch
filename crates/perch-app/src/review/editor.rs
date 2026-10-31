@@ -141,8 +141,6 @@ pub fn editor_pane(
     let code_backend = backend.clone();
 
     Stack::vertical((
-        // While the reader takes the walkthrough, the bar that steps it.
-        crate::review::walkthrough::step_bar(state),
         Stack::new((
             dyn_container(
                 // The epoch changes whenever the active file or its content
@@ -1179,8 +1177,8 @@ fn records_hover(state: ReviewState, row: usize, part: impl IntoView + 'static) 
 enum CardItem {
     Thread(CommentThread),
     Composer(Composer),
-    /// A step of the walkthrough, by index, and the head it was written
-    /// for, so another walkthrough's step is another card.
+    /// A place of the walkthrough, by index, and the walkthrough's id, so
+    /// another walkthrough's place is another card.
     Step(usize, String),
 }
 
@@ -1214,7 +1212,7 @@ impl CardItem {
                 )
             }
             CardItem::Composer(c) => format!("composer:{}", c.opening),
-            CardItem::Step(i, head) => format!("step:{head}:{i}"),
+            CardItem::Step(i, id) => format!("step:{id}:{i}"),
         }
     }
 
@@ -1268,11 +1266,11 @@ fn card_layer(
                 })
                 .cloned()
         });
-        let head = crate::review::walkthrough::shown(state).map(|w| w.head.clone());
+        let walkthrough = crate::review::walkthrough::shown(state).map(|w| w.id.clone());
         state.comment_threads.with(|threads| {
             ids.into_iter()
                 .filter_map(|id| match &id {
-                    CardId::Step(i) => head.clone().map(|head| CardItem::Step(*i, head)),
+                    CardId::Step(i) => walkthrough.clone().map(|id| CardItem::Step(*i, id)),
                     CardId::Thread(thread_id) => threads
                         .iter()
                         .find(|t| t.id == *thread_id && state.thread_visible(t))
@@ -3463,14 +3461,17 @@ mod window {
     }
 
     /// The tiles sit at the strip's right end: 8 of padding, then the
-    /// tree's tile and its rule, then
+    /// tree's and the walkthrough's tiles, 2 apart, and their rule, then
     /// Split, Stacked and Word wrap reading leftwards, each `LAYOUT_TILE`
     /// square with 2 between, in a strip `TAB_HEIGHT` tall under the
     /// header's bar.
     fn tile_center(layout: Layout) -> (f64, f64) {
         let tile = crate::theme::LAYOUT_TILE;
-        let split_right =
-            1400.0 - 8.0 - tile - (crate::theme::TILE_RULE_GAP + 1.0 + crate::theme::TILE_RULE_GAP);
+        let split_right = 1400.0
+            - 8.0
+            - 2.0 * tile
+            - 2.0
+            - (crate::theme::TILE_RULE_GAP + 1.0 + crate::theme::TILE_RULE_GAP);
         let x = match layout {
             Layout::Split => split_right - tile / 2.0,
             Layout::Stacked => split_right - tile - 2.0 - tile / 2.0,
@@ -5093,13 +5094,24 @@ mod window {
         )
     }
 
-    /// A walkthrough taken on Code: the bar is over the code, the step's
-    /// card is in the layer under its lines with the rows its height
-    /// takes, its lines are a little below the top, and `.` goes on to
-    /// the next step. Put away, the card and the bar go.
+    /// A walkthrough of the branch whose places are `steps`, all in one
+    /// chapter.
+    fn walkthrough_of(steps: Vec<crate::backend::Step>) -> crate::backend::Walkthrough {
+        serde_json::from_value(serde_json::json!({
+            "id": "w1", "merge_base": "b", "head": "h", "summary": "",
+            "chapters": [{"title": "The change"}],
+            "steps": steps, "hunks": [],
+        }))
+        .unwrap()
+    }
+
+    /// A walkthrough taken on Code: while its pane is out each place's
+    /// note is in the layer under its lines with the rows its height
+    /// takes, its lines are a little below the top, and `.` marks it read
+    /// and goes on to the next place. With the pane in, the notes go.
     #[test]
-    fn a_walkthroughs_steps_are_cards_under_their_lines() {
-        use crate::backend::{CodeSide, Lines, Step, Walkthrough, WalkthroughOutcome};
+    fn a_walkthroughs_places_are_notes_under_their_lines() {
+        use crate::backend::{CodeSide, Lines, Step, WalkthroughOutcome};
         use crate::review::doc::CardId;
         let (mut harness, state) = harness();
         let step = |title: &str, start: u32, end: u32, text: &[&str]| Step {
@@ -5114,39 +5126,33 @@ mod window {
             body: vec![crate::backend::Part::Text {
                 text: format!("Why {title}."),
             }],
+            chapter: 0,
+            weigh: false,
             unplaced: false,
         };
         crate::review::walkthrough::apply(
             state,
             "wt".into(),
-            WalkthroughOutcome::Loaded(Some(Walkthrough {
-                merge_base: "b".into(),
-                head: "h".into(),
-                summary: String::new(),
-                background: None,
-                steps: vec![
-                    step("first", 5, 6, &["fn b() {}", "fn c() {}"]),
-                    step("second", 50, 50, &["fn b() {}"]),
-                ],
-                hunks: Vec::new(),
-                guidance: String::new(),
-            })),
+            WalkthroughOutcome::Loaded(vec![walkthrough_of(vec![
+                step("first", 5, 6, &["fn b() {}", "fn c() {}"]),
+                step("second", 50, 50, &["fn b() {}"]),
+            ])]),
         );
         harness.rebuild();
         harness.paint();
         assert!(find(harness.root_id(), "inline-card:step-").is_none());
-        let bar = find(harness.root_id(), "walkthrough-bar").unwrap();
-        assert!(bar.is_hidden());
 
+        // The drawer's pane being out, which the drawer says.
+        state.walkthrough_out.set(true);
         crate::review::walkthrough::go_to_step(state, 0);
         harness.rebuild();
         harness.paint();
         harness.rebuild();
         harness.paint();
-        assert!(!bar.is_hidden());
-        assert!(find(bar, "Step 1 of 2").is_some());
         let card = find(harness.root_id(), "inline-card:step-1").expect("the card is drawn");
         assert!(find(card, "Why first.").is_some());
+        assert!(find(card, "1 of 2").is_some());
+        assert!(find(card, "Perch only").is_some());
         let live = stacked(state);
         let doc = live.doc.get();
         let span = doc.card_span(&CardId::Step(0)).expect("rows for the card");
@@ -5187,22 +5193,25 @@ mod window {
         harness.rebuild();
         harness.paint();
         assert_eq!(state.walkthrough_at.get(), Some(1));
-        assert!(find(bar, "Step 2 of 2").is_some());
+        let read = crate::review::walkthrough::shown(state)
+            .unwrap()
+            .read
+            .clone();
+        assert_eq!(read, [0].into(), "going on marks the place read");
 
-        crate::review::walkthrough::close(state);
+        state.walkthrough_out.set(false);
         harness.rebuild();
         harness.paint();
         assert!(find(harness.root_id(), "inline-card:step-").is_none());
-        assert!(bar.is_hidden());
         assert_eq!(stacked(state).doc.get().card_span(&CardId::Step(0)), None);
     }
 
-    /// Go to step, pressed on Conversation, lands on the step's lines in
+    /// Going to a place from Conversation lands on its lines in
     /// the file already open on Code, however far down they are, the first
     /// time and after stepping elsewhere.
     #[test]
     fn going_to_a_step_from_conversation_scrolls_the_open_file_to_it() {
-        use crate::backend::{CodeSide, Lines, Step, Walkthrough, WalkthroughOutcome};
+        use crate::backend::{CodeSide, Lines, Step, WalkthroughOutcome};
         let (mut harness, state) = harness();
         let step = |title: &str, start: u32, end: u32| Step {
             title: title.into(),
@@ -5216,20 +5225,17 @@ mod window {
             body: vec![crate::backend::Part::Text {
                 text: format!("Why {title}."),
             }],
+            chapter: 0,
+            weigh: false,
             unplaced: false,
         };
         crate::review::walkthrough::apply(
             state,
             "wt".into(),
-            WalkthroughOutcome::Loaded(Some(Walkthrough {
-                merge_base: "b".into(),
-                head: "h".into(),
-                summary: String::new(),
-                background: None,
-                steps: vec![step("first", 82, 82), step("second", 4, 4)],
-                hunks: Vec::new(),
-                guidance: String::new(),
-            })),
+            WalkthroughOutcome::Loaded(vec![walkthrough_of(vec![
+                step("first", 82, 82),
+                step("second", 4, 4),
+            ])]),
         );
         let settle = |harness: &mut HeadlessHarness| {
             for _ in 0..3 {

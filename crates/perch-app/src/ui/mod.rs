@@ -831,9 +831,14 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         }
                         Code::Period | Code::Comma
                             if key.modifiers.is_empty()
-                                && review.walkthrough_at.get().is_some() =>
+                                && review.walkthrough_out.get()
+                                && crate::review::walkthrough::shown(review).is_some() =>
                         {
-                            crate::review::walkthrough::step_by(review, key.code == Code::Period);
+                            crate::review::walkthrough::step_by(
+                                review,
+                                key_backend,
+                                key.code == Code::Period,
+                            );
                             return EventPropagation::Stop;
                         }
                         Code::BracketRight | Code::BracketLeft if key.modifiers.is_empty() => {

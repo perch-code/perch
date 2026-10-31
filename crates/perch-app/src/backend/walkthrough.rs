@@ -1,29 +1,34 @@
 //! Walkthrough: a change told start to finish, in the order a reviewer
-//! would want to read it, as cards in Code that the reader steps through.
+//! would want to read it, as notes in Code that the reader steps through.
 //!
-//! An agent writes the story: how it is ordered, a summary and a
-//! background, which Conversation shows, and the steps. Each step is
-//! about one place in the code, a hunk, a few hunks close together in
-//! one file, or lines the change left alone, and its card sits under
-//! those lines in Code: its title, its prose, the lines elsewhere and the
-//! threads it needs, and maybe a Mermaid diagram, which Perch draws. One
-//! that doesn't parse is dropped, and asked about again. The agent never
-//! writes code; Perch draws the lines from the checkout. Perch lists the
-//! hunks for it and checks that some step is about each one. The ones
-//! left out, and steps about no place, are asked about once more, in the
-//! same session, and any hunk still left out gets a last step of Perch's
-//! own, so a smooth story never hides a hunk. Hunk and thread ids the
-//! item doesn't have are dropped, and lines are cut to the file they name.
-//! Each step keeps the text of its lines, so its card finds them again
-//! in a file that has moved on since.
+//! An agent writes the story for one scope of the change, as Code shows
+//! it: the branch, what came since the reader last looked, one commit,
+//! a run's changes, or the uncommitted work. It writes a summary and a
+//! background, which the walkthrough's pane shows, and chapters, each one
+//! idea of the change with a few places in the code. Each place is a
+//! hunk, a few hunks close together in one file, or lines the change left
+//! alone, and its note sits under those lines in Code, as a thread does:
+//! a few sentences, the lines elsewhere and the threads it needs, and
+//! maybe a Mermaid diagram, which Perch draws. One that doesn't parse is
+//! dropped, and asked about again. The last chapter is the follow-through:
+//! the hunks that only carry the change through, a line each. Perch lists
+//! the hunks for the agent and checks that some place is about each one.
+//! The ones left out, and places about no lines, are asked about once
+//! more, in the same session, and any hunk still left out gets a place of
+//! Perch's own in the follow-through, so a smooth story never hides a
+//! hunk. Hunk and thread ids the item doesn't have are dropped, and lines
+//! are cut to the file they name. Each place keeps the text of its lines,
+//! so its note finds them again in a file that has moved on since.
 //!
 //! The run is Ask's: it reads the worktree and changes nothing, and like
 //! Write with Claude it is not a run Perch records. What it does as it
-//! goes is sent as a run's steps, for Conversation to show while it writes. What it wrote is kept
-//! under Perch's data root by item and head, and nowhere else. One written
-//! for an older head is still shown, marked as such, until another is.
+//! goes is sent as a run's steps, for the pane to show while it writes.
+//! What it wrote is kept under Perch's data root by item, one file to a
+//! walkthrough, and nowhere else, with the places the reader has read.
+//! The uncommitted work is first recorded as a commit, kept under a ref
+//! of the walkthrough's own, so its lines can be read as a commit's are.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
@@ -42,50 +47,126 @@ const MAX_CITED_LINES: u32 = 60;
 /// How much of a thread's first comment goes into the prompt.
 const THREAD_EXCERPT_CHARS: usize = 300;
 
+/// How many walkthroughs an item keeps; writing one more drops the oldest.
+const MAX_KEPT: usize = 20;
+
 /// A walkthrough as Perch keeps and draws it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Walkthrough {
-    /// The commits the hunks are between.
+    /// Which of the item's walkthroughs it is: the name of its file, set
+    /// as it is read back.
+    #[serde(default)]
+    pub id: String,
+    /// The scope of the change it tells. One kept before there were
+    /// scopes is the branch's.
+    #[serde(default = "branch")]
+    pub scope: perch_git::Scope,
+    /// When it was written, and by which model, for the list of them.
+    #[serde(default)]
+    pub written_at: Option<jiff::Timestamp>,
+    #[serde(default)]
+    pub model: String,
+    /// The commits the hunks are between. For the uncommitted work the
+    /// head is the worktree recorded as a commit.
     pub merge_base: String,
     pub head: String,
+    /// The ref that keeps a recorded worktree, dropped with the
+    /// walkthrough.
+    #[serde(default)]
+    pub snapshot_ref: Option<String>,
     /// What the change is, what it changes and what a reviewer should
     /// weigh, in a few sentences of GitHub Markdown.
     pub summary: String,
-    /// What the reader needs to know before the steps: what the parts
+    /// What the reader needs to know before the places: what the parts
     /// the change touches are, how they work and how they are used, as
     /// they were. `None` when the agent gave none.
     #[serde(default)]
     pub background: Option<Background>,
+    /// The chapters the places are grouped in, in order. One kept before
+    /// there were chapters has one, holding every place.
+    #[serde(default)]
+    pub chapters: Vec<Chapter>,
+    /// The places, in reading order, each in its chapter, so chapter by
+    /// chapter.
     pub steps: Vec<Step>,
-    /// Every hunk of the change, which the steps cover.
+    /// Every hunk of the change, which the places cover.
     pub hunks: Vec<Hunk>,
     /// What the reader asked the agent to keep in mind, if anything, so
     /// writing it again starts from the same words.
     #[serde(default)]
     pub guidance: String,
+    /// The places the reader has read, by index.
+    #[serde(default)]
+    pub read: BTreeSet<usize>,
 }
 
-/// What the reader needs before the steps, about no place in the code.
+fn branch() -> perch_git::Scope {
+    perch_git::Scope::Branch
+}
+
+impl Walkthrough {
+    /// The places of chapter `chapter`, by index, in order.
+    pub fn places_of(&self, chapter: usize) -> impl Iterator<Item = (usize, &Step)> {
+        self.steps
+            .iter()
+            .enumerate()
+            .filter(move |(_, step)| step.chapter == chapter)
+    }
+
+    /// Give one kept before there were chapters the one that holds every
+    /// place.
+    fn with_chapters(mut self) -> Self {
+        if self.chapters.is_empty() {
+            self.chapters.push(Chapter {
+                title: "The change".into(),
+                follow_through: false,
+            });
+            for step in &mut self.steps {
+                step.chapter = 0;
+            }
+        }
+        self
+    }
+}
+
+/// One idea of the change, and the places that tell it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Chapter {
+    pub title: String,
+    /// The last chapter: the hunks that only carry the change through, a
+    /// line each.
+    #[serde(default)]
+    pub follow_through: bool,
+}
+
+/// What the reader needs before the places, about no place in the code.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Background {
     pub title: String,
     pub body: Vec<Part>,
 }
 
-/// One stop of the walkthrough: a place in the code, and what to say
-/// about it.
+/// One place of the walkthrough: lines in the code, and the note about
+/// them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
     pub title: String,
-    /// The lines the step is about, which its card sits under in Code.
+    /// The chapter it is in, by index.
+    #[serde(default)]
+    pub chapter: usize,
+    /// The lines the place is about, which its note sits under in Code.
     pub at: Lines,
-    /// Those lines as they were at the walkthrough's head, so the card
+    /// Those lines as they were at the walkthrough's head, so the note
     /// can find them again in a file that has moved.
     #[serde(default)]
     pub text: Vec<String>,
-    /// What the step says, in reading order.
+    /// What the note says, in reading order.
     pub body: Vec<Part>,
-    /// Perch's own step, for a hunk the agent never placed.
+    /// Lines a reviewer should weigh: a risk, a change in behaviour,
+    /// something that may be wrong.
+    #[serde(default)]
+    pub weigh: bool,
+    /// Perch's own place, for a hunk the agent never placed.
     #[serde(default)]
     pub unplaced: bool,
 }
@@ -185,9 +266,9 @@ impl Hunk {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WalkthroughOutcome {
-    /// What was kept for the item: for its head, or the last one written.
-    Loaded(Option<Walkthrough>),
-    Written(Walkthrough),
+    /// Every walkthrough kept for the item, the newest first.
+    Loaded(Vec<Walkthrough>),
+    Written(Box<Walkthrough>),
     Failed(String),
     /// The reader stopped it.
     Stopped,
@@ -217,50 +298,29 @@ pub(super) fn stop(item_id: &str) {
 
 /// Send what is kept for the item.
 pub(super) async fn load(ctx: &Ctx, item_id: &str) {
-    let head = range_of(ctx, item_id).await.ok().map(|range| range.head);
-    let kept = read_kept(&dir_of(ctx, item_id), head.as_deref());
+    let kept = read_kept(&dir_of(ctx, item_id));
     send(ctx, item_id, WalkthroughOutcome::Loaded(kept));
 }
 
-/// Read each path at the walkthrough's own commits, as Code reads a file
-/// at the branch's, and send it. The walkthrough's line numbers are that
-/// range's, so its lines come from it, whatever scope Code is on and
-/// however far the branch has moved since.
-pub(super) async fn load_files(
-    ctx: &Ctx,
-    item_id: &str,
-    merge_base: &str,
-    head: &str,
-    paths: Vec<String>,
-) {
-    let answer = |path: String, file: Result<Arc<crate::review::model::LoadedFile>, String>| {
-        let _ = ctx.events.send(Event::WalkthroughFile {
-            item_id: item_id.to_string(),
-            merge_base: merge_base.to_string(),
-            head: head.to_string(),
-            path,
-            file,
-        });
+/// Mark places of one of the item's walkthroughs read, or not, where it
+/// is kept.
+pub(super) fn mark_read(ctx: &Ctx, item_id: &str, id: &str, places: &[usize], read: bool) {
+    let path = dir_of(ctx, item_id).join(format!("{id}.json"));
+    let Some(mut kept) = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Walkthrough>(&bytes).ok())
+    else {
+        return;
     };
-    let diff = match worktree_of(ctx, item_id) {
-        Some(worktree) => perch_git::RangeDiff::read(&worktree, merge_base, head)
-            .await
-            .map(|diff| (worktree, diff))
-            .map_err(|e| e.to_string()),
-        None => Err("The item has no checkout".to_string()),
-    };
-    let (worktree, diff) = match diff {
-        Ok(read) => read,
-        Err(e) => {
-            for path in paths {
-                answer(path, Err(e.clone()));
-            }
-            return;
+    for place in places {
+        if read {
+            kept.read.insert(*place);
+        } else {
+            kept.read.remove(place);
         }
-    };
-    for path in paths {
-        let file = file_at(ctx, &worktree, &diff, merge_base, head, &path).await;
-        answer(path, file.map(Arc::new));
+    }
+    if let Err(error) = write_json(&path, &kept) {
+        tracing::warn!(%error, "could not keep the walkthrough's read places");
     }
 }
 
@@ -275,88 +335,12 @@ fn worktree_of(ctx: &Ctx, item_id: &str) -> Option<PathBuf> {
     open.or_else(|| Some(ctx.item(item_id)?.checkout.as_ref()?.path.clone()))
 }
 
-/// One file over `merge_base..head`. A file the range changed is diffed
-/// as Code diffs it; one it left alone is the same at both ends and has
-/// no diff, and one only the base has, a rename's old name, is shown as
-/// it was.
-async fn file_at(
-    ctx: &Ctx,
-    worktree: &Path,
-    diff: &perch_git::RangeDiff,
-    merge_base: &str,
-    head: &str,
-    path: &str,
-) -> Result<crate::review::model::LoadedFile, String> {
-    let git = ctx.preparer.git();
-    let read = |rev: &str, path: &str| {
-        let rev = perch_git::Rev::Sha(rev.to_string());
-        let path = path.to_string();
-        async move {
-            perch_git::read_side(git, worktree, &rev, &path)
-                .await
-                .map_err(|e| e.to_string())
-        }
-    };
-    let (head_text, base_text, status, binary, blob) = match diff.file(path) {
-        Some(file) if file.binary => (
-            String::new(),
-            String::new(),
-            Some(file.status),
-            true,
-            file.head_blob.clone().unwrap_or_default(),
-        ),
-        Some(file) => {
-            let head_text = match file.path_on(perch_git::DiffSide::Right) {
-                Some(path) => read(head, path).await?.unwrap_or_default(),
-                None => String::new(),
-            };
-            let base_text = match file.path_on(perch_git::DiffSide::Left) {
-                Some(path) => read(merge_base, path).await?.unwrap_or_default(),
-                None => String::new(),
-            };
-            (
-                head_text,
-                base_text,
-                Some(file.status),
-                false,
-                file.head_blob.clone().unwrap_or_default(),
-            )
-        }
-        None => {
-            let text = match read(head, path).await? {
-                Some(text) => text,
-                None => read(merge_base, path)
-                    .await?
-                    .ok_or_else(|| "file is not there".to_string())?,
-            };
-            (text, String::new(), None, false, String::new())
-        }
-    };
-    if head_text.len().max(base_text.len()) > super::MAX_FILE_BYTES {
-        return Err("file is too large to display".into());
-    }
-    let path = path.to_string();
-    // Its scope is the branch's: the merge base to a head, if not today's.
-    tokio::task::spawn_blocking(move || {
-        super::build_loaded_file(
-            path,
-            head_text,
-            base_text,
-            status,
-            binary,
-            perch_git::Scope::Branch,
-            blob,
-        )
-    })
-    .await
-    .map_err(|e| e.to_string())
-}
-
-/// Have an agent write the item's walkthrough, check it, keep it, and
-/// send it.
+/// Have an agent write a walkthrough of the item's change under `scope`,
+/// check it, keep it, and send it.
 pub(super) async fn write(
     ctx: &Ctx,
     item_id: &str,
+    scope: &perch_git::Scope,
     (backend, model, effort): (perch_agent::Backend, &str, perch_agent::Effort),
     guidance: &str,
 ) {
@@ -375,16 +359,51 @@ pub(super) async fn write(
         );
         return;
     }
-    let outcome = write_inner(ctx, item_id, backend, model, effort, guidance.trim()).await;
+    let id = format!("w{}", jiff::Timestamp::now().as_millisecond());
+    let outcome = write_inner(
+        ctx,
+        item_id,
+        &id,
+        scope,
+        (backend, model, effort),
+        guidance.trim(),
+    )
+    .await;
     if let Ok(mut writing) = WRITING.lock() {
         writing.remove(item_id);
     }
-    if let WalkthroughOutcome::Written(walkthrough) = &outcome {
-        if let Err(error) = keep(&dir_of(ctx, item_id), walkthrough) {
-            tracing::warn!(%error, "could not keep the walkthrough");
+    match &outcome {
+        WalkthroughOutcome::Written(walkthrough) => {
+            let dir = dir_of(ctx, item_id);
+            if let Err(error) = keep(&dir, walkthrough) {
+                tracing::warn!(%error, "could not keep the walkthrough");
+            }
+            let dropped = prune(&dir, MAX_KEPT);
+            drop_snapshots(ctx, item_id, dropped).await;
         }
+        // A worktree recorded for nothing is let go at once.
+        _ if *scope == perch_git::Scope::Uncommitted => {
+            drop_snapshots(ctx, item_id, vec![snapshot_ref(item_id, &id)]).await
+        }
+        _ => {}
     }
     send(ctx, item_id, outcome);
+}
+
+/// Let go of refs that kept recorded worktrees.
+async fn drop_snapshots(ctx: &Ctx, item_id: &str, refs: Vec<String>) {
+    if refs.is_empty() {
+        return;
+    }
+    if let Some(worktree) = worktree_of(ctx, item_id) {
+        ctx.preparer.drop_refs(&worktree, &refs).await;
+    }
+}
+
+/// The ref a walkthrough of the uncommitted work keeps its recorded
+/// worktree at.
+fn snapshot_ref(item_id: &str, id: &str) -> String {
+    format!("refs/perch/walkthroughs/{}/{id}", safe_name(item_id))
 }
 
 /// What the agent has done across the runs of one walkthrough, folded as
@@ -494,18 +513,18 @@ fn send(ctx: &Ctx, item_id: &str, outcome: WalkthroughOutcome) {
 async fn write_inner(
     ctx: &Ctx,
     item_id: &str,
-    backend: perch_agent::Backend,
-    model: &str,
-    effort: perch_agent::Effort,
+    id: &str,
+    scope: &perch_git::Scope,
+    (backend, model, effort): (perch_agent::Backend, &str, perch_agent::Effort),
     guidance: &str,
 ) -> WalkthroughOutcome {
-    let range = match range_of(ctx, item_id).await {
+    let range = match range_for(ctx, item_id, id, scope).await {
         Ok(range) => range,
         Err(message) => return WalkthroughOutcome::Failed(message),
     };
     let hunks = match hunks_of(&range).await {
         Ok(hunks) if hunks.is_empty() => {
-            return WalkthroughOutcome::Failed("The branch changes no lines".into())
+            return WalkthroughOutcome::Failed(format!("{} changes no lines", scope_phrase(scope)))
         }
         Ok(hunks) => hunks,
         Err(message) => return WalkthroughOutcome::Failed(message),
@@ -518,7 +537,7 @@ async fn write_inner(
         .item(item_id)
         .map(|item| item.title().to_string())
         .unwrap_or_default();
-    let prompt = match first_prompt(ctx, &range, &title, &hunks, &threads, guidance).await {
+    let prompt = match first_prompt(ctx, &range, scope, &title, &hunks, &threads, guidance).await {
         Ok(prompt) => prompt,
         Err(message) => return WalkthroughOutcome::Failed(message),
     };
@@ -565,6 +584,10 @@ async fn write_inner(
                         if again.faults() < placed.faults() {
                             placed = Placed {
                                 background: again.background.or(placed.background),
+                                summary: match again.summary.is_empty() {
+                                    true => placed.summary,
+                                    false => again.summary,
+                                },
                                 ..again
                             };
                         }
@@ -577,23 +600,40 @@ async fn write_inner(
     }
     let Placed {
         mut background,
+        mut chapters,
         mut steps,
         summary,
         missing,
         ..
     } = placed;
-    steps.extend(
-        missing
-            .iter()
-            .filter_map(|id| hunks.iter().find(|h| &h.id == id))
-            .map(|hunk| Step {
-                title: format!("Also changed in {}", file_name(&hunk.path)),
-                at: hunk.lines(),
-                text: Vec::new(),
-                body: Vec::new(),
-                unplaced: true,
-            }),
-    );
+    // What is still left out goes in the follow-through, a chapter of its
+    // own if the agent wrote none.
+    if !missing.is_empty() {
+        let follow = match chapters.iter().position(|c| c.follow_through) {
+            Some(follow) => follow,
+            None => {
+                chapters.push(Chapter {
+                    title: "Also changed".into(),
+                    follow_through: true,
+                });
+                chapters.len() - 1
+            }
+        };
+        steps.extend(
+            missing
+                .iter()
+                .filter_map(|id| hunks.iter().find(|h| &h.id == id))
+                .map(|hunk| Step {
+                    title: format!("Also changed in {}", file_name(&hunk.path)),
+                    chapter: follow,
+                    at: hunk.lines(),
+                    text: Vec::new(),
+                    body: Vec::new(),
+                    weigh: false,
+                    unplaced: true,
+                }),
+        );
+    }
     let mut files = Files::default();
     if let Some(background) = &mut background {
         background.body = files
@@ -607,15 +647,57 @@ async fn write_inner(
             kept.push(step);
         }
     }
-    WalkthroughOutcome::Written(Walkthrough {
+    let (chapters, steps) = tidy(chapters, kept);
+    WalkthroughOutcome::Written(Box::new(Walkthrough {
+        id: id.to_string(),
+        scope: scope.clone(),
+        written_at: Some(jiff::Timestamp::now()),
+        model: crate::review::threads::model_name(backend.name(), model),
         merge_base: range.merge_base,
         head: range.head,
+        snapshot_ref: range.snapshot_ref,
         summary,
         background,
-        steps: kept,
+        chapters,
+        steps,
         hunks,
         guidance: guidance.to_string(),
-    })
+        read: BTreeSet::new(),
+    }))
+}
+
+/// The chapters with places in them, in order, and the places chapter by
+/// chapter, the follow-through's last, each in its chapter's new place.
+fn tidy(chapters: Vec<Chapter>, steps: Vec<Step>) -> (Vec<Chapter>, Vec<Step>) {
+    let mut order: Vec<usize> = (0..chapters.len())
+        .filter(|&c| steps.iter().any(|s| s.chapter == c))
+        .collect();
+    // Stable, so the follow-through goes last and the rest keep theirs.
+    order.sort_by_key(|&c| chapters[c].follow_through);
+    let mut kept_steps = Vec::with_capacity(steps.len());
+    for (to, &from) in order.iter().enumerate() {
+        kept_steps.extend(
+            steps
+                .iter()
+                .filter(|s| s.chapter == from)
+                .cloned()
+                .map(|s| Step { chapter: to, ..s }),
+        );
+    }
+    let kept_chapters = order.iter().map(|&c| chapters[c].clone()).collect();
+    (kept_chapters, kept_steps)
+}
+
+/// How a failure names the scope: "The branch", "This commit".
+fn scope_phrase(scope: &perch_git::Scope) -> &'static str {
+    use perch_git::Scope;
+    match scope {
+        Scope::Branch => "The branch",
+        Scope::SinceLastLooked { .. } => "What came since you last looked",
+        Scope::Commit { .. } => "The commit",
+        Scope::Uncommitted | Scope::Unstaged | Scope::Staged => "The uncommitted work",
+        Scope::Run { .. } => "The run",
+    }
 }
 
 /// The last part of a path, for a title.
@@ -702,6 +784,73 @@ struct Range {
     worktree: PathBuf,
     merge_base: String,
     head: String,
+    /// Whether `head` is what the worktree has checked out, so its files
+    /// can be read from disk.
+    checked_out: bool,
+    /// The ref keeping `head`, when it is the worktree recorded.
+    snapshot_ref: Option<String>,
+}
+
+/// The commits `scope` is between, as Code diffs it. The uncommitted work
+/// is recorded as a commit first, kept at a ref named for walkthrough
+/// `id`. Unstaged and Staged are cuts of it that move as the reader
+/// stages, so they have no walkthrough of their own.
+async fn range_for(
+    ctx: &Ctx,
+    item_id: &str,
+    id: &str,
+    scope: &perch_git::Scope,
+) -> Result<Range, String> {
+    use perch_git::Scope;
+    if let Scope::Branch = scope {
+        return range_of(ctx, item_id).await;
+    }
+    let worktree = worktree_of(ctx, item_id).ok_or("The item has no checkout")?;
+    let git = ctx.preparer.git();
+    let ask = |args: Vec<String>| {
+        let worktree = worktree.clone();
+        async move {
+            git.run(Some(&worktree), args, QUERY_TIMEOUT)
+                .await
+                .map(|out| out.trim().to_string())
+                .map_err(|e| e.to_string())
+        }
+    };
+    let checkout_head = ask(vec!["rev-parse".into(), "HEAD".into()]).await?;
+    let range = |merge_base: String, head: String| Range {
+        worktree: worktree.clone(),
+        checked_out: head == checkout_head,
+        merge_base,
+        head,
+        snapshot_ref: None,
+    };
+    match scope {
+        Scope::Branch => unreachable!("taken above"),
+        Scope::SinceLastLooked { from } => Ok(range(from.clone(), checkout_head.clone())),
+        Scope::Commit { sha } => {
+            let parent = ask(vec!["rev-parse".into(), format!("{sha}^")]).await?;
+            Ok(range(parent, sha.clone()))
+        }
+        Scope::Run { before, after } => Ok(range(before.clone(), after.clone())),
+        Scope::Uncommitted => {
+            let reference = snapshot_ref(item_id, id);
+            let head = ctx
+                .preparer
+                .record_worktree(&worktree, &reference, "Perch: the work a walkthrough tells")
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(Range {
+                checked_out: true,
+                snapshot_ref: Some(reference),
+                ..range(checkout_head.clone(), head)
+            })
+        }
+        Scope::Unstaged | Scope::Staged => Err(
+            "Pick Uncommitted for a walkthrough of the work in the worktree; Unstaged and \
+             Staged move as you stage"
+                .into(),
+        ),
+    }
 }
 
 /// The open item's checkout, as the code pane diffs it; otherwise the
@@ -714,6 +863,8 @@ async fn range_of(ctx: &Ctx, item_id: &str) -> Result<Range, String> {
                 worktree: open.checkout.worktree.clone(),
                 merge_base: open.checkout.merge_base.clone(),
                 head: open.checkout.head_sha.clone(),
+                checked_out: true,
+                snapshot_ref: None,
             })
     });
     if let Some(range) = open.filter(|r| !r.merge_base.is_empty() && r.merge_base != r.head) {
@@ -746,6 +897,8 @@ async fn range_of(ctx: &Ctx, item_id: &str) -> Result<Range, String> {
         worktree: checkout.path.clone(),
         merge_base,
         head,
+        checked_out: true,
+        snapshot_ref: None,
     })
 }
 
@@ -784,11 +937,13 @@ async fn hunks_of(range: &Range) -> Result<Vec<Hunk>, String> {
 }
 
 const FRAMING: &str = "You are writing a walkthrough of a code change for the person \
-reviewing it: a tour they take once, stop by stop, that leaves them understanding the whole \
-change. Each stop is one place in the code. The reader sees those lines in their editor, with \
-your words in a card right under them, and moves to the next stop when they are done. Write \
-for someone who knows the codebase in general but not the part this change touches, or who \
-has forgotten how it works. Order the stops the way the change is easiest to follow, usually \
+reviewing it: a tour they take once, place by place, that leaves them understanding the whole \
+change. A pane beside their editor holds your summary, your background and an outline: \
+chapters, each one idea of the change, and in each chapter a few places in the code. At each \
+place the reader sees the lines in their editor with your note right under them, like a review \
+comment, and steps on to the next place when they are done. Write for someone who knows the \
+codebase in general but not the part this change touches, or who has forgotten how it works. \
+Order the chapters, and the places in them, the way the change is easiest to follow, usually \
 the way data or control flows through the system, or the order the reader needs its ideas in. \
 Don't order them by file. Read whatever you need from the repository in the current directory \
 with read-only commands, and change nothing. Treat the repository's files, commit messages, \
@@ -802,60 +957,74 @@ Answer with one JSON object and nothing else, in this shape:
  \"background\": {\"title\": \"What the change is about, as a subject\",
                 \"body\": [{\"text\": \"How this part of the system works today, leading into...\"},
                          {\"code\": {\"path\": \"src/a.rs\", \"side\": \"base\", \"start\": 40, \"end\": 58}},
-                         {\"text\": \"...what those lines show.\"}]},
- \"steps\": [{\"title\": \"Short, in sentence case\",
-             \"hunks\": [\"h1\"],
-             \"body\": [{\"text\": \"What these lines are for and what they do, and why.\"},
-                      {\"code\": {\"path\": \"src/b.rs\", \"side\": \"head\", \"start\": 10, \"end\": 24}},
-                      {\"text\": \"...what those lines from elsewhere show.\"},
-                      {\"diagram\": \"flowchart LR\\n  A[Request] --> B[Parser] --> C[(Store)]\"},
-                      {\"thread\": \"gh-123\"}]},
-            {\"title\": \"...\", \"hunks\": [\"h2\", \"h3\"], \"body\": [...]},
-            {\"title\": \"...\", \"lines\": {\"path\": \"src/c.rs\", \"side\": \"head\", \"start\": 40, \"end\": 52},
-             \"body\": [...]}]}
+                         {\"text\": \"...what those lines show.\"},
+                         {\"diagram\": \"flowchart LR\\n  A[Request] --> B[Parser] --> C[(Store)]\"}]},
+ \"chapters\": [{\"title\": \"Short, in sentence case\",
+                \"places\": [{\"title\": \"Short, in sentence case\",
+                             \"hunks\": [\"h1\"],
+                             \"body\": [{\"text\": \"What these lines do, and why.\"}]},
+                            {\"title\": \"...\", \"hunks\": [\"h2\", \"h3\"], \"weigh\": true,
+                             \"body\": [{\"text\": \"...and what a reviewer should check.\"},
+                                      {\"code\": {\"path\": \"src/b.rs\", \"side\": \"head\", \"start\": 10, \"end\": 24}},
+                                      {\"thread\": \"gh-123\"}]},
+                            {\"title\": \"...\", \"lines\": {\"path\": \"src/c.rs\", \"side\": \"head\", \"start\": 40, \"end\": 52},
+                             \"body\": [...]}]},
+               {\"title\": \"Follow-through\", \"follow_through\": true,
+                \"places\": [{\"title\": \"...\", \"hunks\": [\"h7\", \"h8\"], \"body\": [{\"text\": \"One sentence.\"}]}]}]}
 
 Rules:
 - `summary` comes first. In two to four sentences of GitHub Markdown, say what the change is: \
 the problem it fixes or what it adds, and why; what it changes, at a high level; and anything \
 a reviewer should weigh, such as a risk, a compatibility cost or a change in behaviour. Write \
 it for someone deciding how closely to read. Don't describe how the walkthrough is laid out.
-- `background` comes before the steps, and the reader reads it before they start. It explains \
-what they need to know to follow the change, as things were before it: what the parts the \
-change touches are for, how they work, and where the rest of the system uses them. Explain any \
-algorithm, data format, protocol or term the change relies on in plain words, and say where it \
-comes from when it is a known technique. Read the surrounding code to get this right, and show \
-the unchanged code that shows it with `code` parts. Don't describe the change there; the steps \
-do that. Name the subject in its title, such as \"How the cache evicts entries\". As long as \
-the change needs and no longer.
-- Each step is about exactly one place, given in one of two ways. `hunks` lists one hunk, or \
-a few hunks close together in one file that read as one idea. `lines` gives lines of one file \
-on one side: part of a long hunk, or lines the change left alone that the story needs to stop \
-at. The reader's editor shows the place, so a step's lines should fit on a screen, no more \
-than about 40. Split a long hunk into several steps with `lines`, each a piece of it.
-- Every hunk id listed below is covered by at least one step: listed in its `hunks`, or \
+- `background` comes before the chapters, and the reader reads it before they start. It \
+explains what they need to know to follow the change, as things were before it: what the parts \
+the change touches are for, how they work, and where the rest of the system uses them. Explain \
+any algorithm, data format, protocol or term the change relies on in plain words, and say where \
+it comes from when it is a known technique. Read the surrounding code to get this right, and \
+point at the unchanged code that shows it with `code` parts, which the reader can open. Don't \
+describe the change there; the places do that. Name the subject in its title, such as \"How \
+the cache evicts entries\". Keep it short: it sits in a narrow pane.
+- Group the places in chapters. A chapter is one idea of the change, such as \"Count a job's \
+attempts\" or \"Retry the worker's stores\", named in a few words. Most changes need three to \
+seven chapters; a small change can have one.
+- Each place is exactly one spot in the code, given in one of two ways. `hunks` lists one \
+hunk, or a few hunks close together in one file that read as one idea. `lines` gives lines of \
+one file on one side: part of a long hunk, or lines the change left alone that the story needs \
+to stop at. The reader's editor shows the place, so a place's lines should fit on a screen, no \
+more than about 40.
+- Stop only where there is something to say. Most changes need six to twenty places outside \
+the follow-through; a small change can have one or two.
+- The last chapter is the follow-through, marked `\"follow_through\": true`: the hunks that only \
+carry the change through, such as call sites passing a new argument, plumbing, renames, \
+imports, generated code, and tests that mirror the code. Each of its places is one short \
+sentence, and one place may list several hunks of one file. Leave it out when there is \
+nothing of the kind.
+- Every hunk id listed below is covered by at least one place: listed in its `hunks`, or \
 sharing lines with its `lines`.
-- A step's `body` is what the card under its lines says. Keep it short: a few sentences, a \
-short paragraph or two at most. `text` is GitHub Markdown. Don't quote code in `text` beyond \
-names in backticks; the reader sees the step's lines right above the card.
+- A place's `body` is its note, which sits under its lines like a review comment. Keep it to \
+one to three sentences: what the lines are for and why, not what each one does. Never more \
+than a short paragraph. `text` is GitHub Markdown. Don't quote code in `text` beyond names in \
+backticks; the reader sees the lines right above the note.
+- Set `\"weigh\": true` on a place a reviewer should look at closely: a risk, a change in \
+behaviour, a compatibility cost, or something that may be wrong. Say why in its note. Most \
+walkthroughs have none to three.
 - A `text` may hold a short fenced block of pseudocode or ASCII art where it explains better \
-than words or a diagram: the outline of an algorithm, a layout of bytes, a table of states, how \
-a buffer or tree looks before and after. Keep it to a few lines, at most 70 characters wide, \
-since Perch wraps longer lines. Pseudocode sketches the idea; it never stands in for the real \
-code.
-- A `code` part shows lines from somewhere other than the step's own place that the step \
+than words or a diagram: the outline of an algorithm, a layout of bytes, a table of states. \
+Keep it to a few lines, at most 60 characters wide. Pseudocode sketches the idea; it never \
+stands in for the real code.
+- A `code` part points at lines from somewhere other than the place itself that the note \
 needs, such as an unchanged caller, or what something looked like before (`\"side\": \
-\"base\"`, counted in the base commit's file). Only cite lines you have read; never guess line \
-numbers. Never cite the step's own lines.
-- A `thread` part puts a review thread listed below where the text discusses what it is about.
-- A `diagram` part is a Mermaid diagram, set where the text needs it like a piece of code. \
-Add one where a picture says more than words: how data moves between parts, the calls in a \
-sequence, states and the moves between them, or a layout of bytes or fields. Most walkthroughs \
-need one to three; a small change may need none. The background is often a good place for \
-one. Use `flowchart LR` (left to right; Perch draws its edges best that way), `sequenceDiagram`, \
-`stateDiagram-v2`, `classDiagram` or `erDiagram`. Keep each small, at most a dozen nodes, with \
-short labels in Simple English. Don't style it: no `style`, `classDef`, `linkStyle`, themes or \
-`%%{init}%%`; Perch colours it. No HTML in labels.
-- Most changes need four to fifteen steps. A small change can have one or two.
+\"base\"`, counted in the base commit's file). The reader sees it as a link to those lines. \
+Only cite lines you have read; never guess line numbers. Never cite the place's own lines.
+- A `thread` part puts a review thread listed below where the note discusses what it is about.
+- A `diagram` part is a Mermaid diagram. Add one where a picture says more than words: how \
+data moves between parts, the calls in a sequence, states and the moves between them. The \
+background is the best place for one; most walkthroughs need one or two, and a small change \
+none. Use `flowchart LR` (left to right; Perch draws its edges best that way), \
+`sequenceDiagram`, `stateDiagram-v2`, `classDiagram` or `erDiagram`. Keep each small, at most a \
+dozen nodes, with short labels in Simple English. Don't style it: no `style`, `classDef`, \
+`linkStyle`, themes or `%%{init}%%`; Perch colours it. No HTML in labels.
 
 How to write: all of it, titles and `summary` included, is in Simple English. Use short, common \
 words and short sentences, one idea to a sentence, in the active voice. Use a technical term \
@@ -874,6 +1043,7 @@ given to\" say nothing: leave them out, or use one word instead.
 async fn first_prompt(
     ctx: &Ctx,
     range: &Range,
+    scope: &perch_git::Scope,
     title: &str,
     hunks: &[Hunk],
     threads: &[CommentThread],
@@ -901,12 +1071,14 @@ async fn first_prompt(
     .await?;
     Ok(crate::ask::Prompt {
         system: Some(FRAMING.to_string()),
-        user: user_message(range, title, &log, &stat, hunks, threads, guidance),
+        user: user_message(range, scope, title, &log, &stat, hunks, threads, guidance),
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn user_message(
     range: &Range,
+    scope: &perch_git::Scope,
     title: &str,
     log: &str,
     stat: &str,
@@ -914,6 +1086,7 @@ fn user_message(
     threads: &[CommentThread],
     guidance: &str,
 ) -> String {
+    use perch_git::Scope;
     let mut out = String::new();
     if !title.trim().is_empty() {
         out.push_str(&crate::ask::untrusted_block(
@@ -922,9 +1095,31 @@ fn user_message(
         ));
         out.push('\n');
     }
+    let what = match scope {
+        Scope::Branch => "the whole branch",
+        Scope::SinceLastLooked { .. } => {
+            "only the commits since the reader last looked; they have read the rest"
+        }
+        Scope::Commit { .. } => "one commit of the branch",
+        Scope::Run { .. } => "what one agent run changed in the worktree",
+        Scope::Uncommitted | Scope::Unstaged | Scope::Staged => {
+            "the work in the worktree that is not committed yet"
+        }
+    };
+    let where_ = match scope {
+        Scope::Uncommitted | Scope::Unstaged | Scope::Staged => {
+            format!("{} records the worktree as it is on disk here", range.head)
+        }
+        _ if range.checked_out => format!("{} is checked out here", range.head),
+        _ => format!(
+            "{head} is not what is checked out here, so read its files with `git show \
+             {head}:<path>`",
+            head = range.head
+        ),
+    };
     out.push_str(&format!(
-        "The change is `git diff {base} {head}`: {base} is the base it is taken against, and \
-         {head} is checked out here.\n\n",
+        "The walkthrough tells {what}. The change is `git diff {base} {head}`: {base} is the \
+         base it is taken against, and {where_}.\n\n",
         base = range.merge_base,
         head = range.head,
     ));
@@ -999,8 +1194,9 @@ fn retry_message(placed: &Placed, hunks: &[Hunk]) -> String {
             .map(|hunk| format!("- {}", hunk.describe()))
             .collect();
         out.push_str(&format!(
-            "No step of your walkthrough covers these hunks:\n\n{}\n\nCover each with a step \
-             about it, or add it to the `hunks` of a step about lines close by in its file.\n\n",
+            "No place of your walkthrough covers these hunks:\n\n{}\n\nCover each with a place \
+             about it, add it to the `hunks` of a place about lines close by in its file, or \
+             put it in the follow-through.\n\n",
             listed.join("\n")
         ));
     }
@@ -1011,9 +1207,9 @@ fn retry_message(placed: &Placed, hunks: &[Hunk]) -> String {
             .map(|title| format!("- {title}"))
             .collect();
         out.push_str(&format!(
-            "These steps name no place in the code, through `hunks` or `lines`, so they were \
-             left out:\n\n{}\n\nGive each a place, or fold what it says into a step that has \
-             one.\n\n",
+            "These places name no lines in the code, through `hunks` or `lines`, so they were \
+             left out:\n\n{}\n\nGive each its lines, or fold what it says into a place that \
+             has them.\n\n",
             listed.join("\n")
         ));
     }
@@ -1031,12 +1227,46 @@ fn retry_message(placed: &Placed, hunks: &[Hunk]) -> String {
     out
 }
 
-/// What the agent answered, before it is checked.
+/// What the agent answered, before it is checked. Chapters of places, or
+/// places alone, which are one chapter.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct Answer {
     summary: String,
     background: Option<AnswerStep>,
+    chapters: Vec<AnswerChapter>,
+    #[serde(alias = "places")]
+    steps: Vec<AnswerStep>,
+}
+
+impl Answer {
+    /// Its chapters, the places given alone as one.
+    fn chapters(self) -> Vec<AnswerChapter> {
+        let mut chapters = self.chapters;
+        if !self.steps.is_empty() {
+            chapters.insert(
+                0,
+                AnswerChapter {
+                    title: "The change".into(),
+                    follow_through: false,
+                    steps: self.steps,
+                },
+            );
+        }
+        chapters
+    }
+
+    fn has_places(&self) -> bool {
+        !self.steps.is_empty() || self.chapters.iter().any(|c| !c.steps.is_empty())
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct AnswerChapter {
+    title: String,
+    follow_through: bool,
+    #[serde(alias = "places")]
     steps: Vec<AnswerStep>,
 }
 
@@ -1044,6 +1274,7 @@ struct Answer {
 #[serde(default)]
 struct AnswerStep {
     title: String,
+    weigh: bool,
     /// The hunks the step is about, as ids; one alone may be a string.
     hunks: serde_json::Value,
     hunk: serde_json::Value,
@@ -1168,13 +1399,14 @@ fn parse_answer(said: &str) -> Option<Answer> {
         return None;
     }
     let answer: Answer = serde_json::from_str(&text[start..=end]).ok()?;
-    (!answer.steps.is_empty()).then_some(answer)
+    answer.has_places().then_some(answer)
 }
 
 /// An answer as checked against the change.
 #[derive(Debug)]
 struct Placed {
     background: Option<Background>,
+    chapters: Vec<Chapter>,
     steps: Vec<Step>,
     summary: String,
     /// The hunks no step covers, in order.
@@ -1196,7 +1428,7 @@ impl Placed {
 /// and one with none goes. Threads the item doesn't have, or that a body
 /// names twice, go, and so do empty text and diagrams that don't parse.
 /// The background shows no threads, and goes when it says nothing.
-fn place(answer: Answer, hunks: &[Hunk], thread_ids: &HashSet<String>) -> Placed {
+fn place(mut answer: Answer, hunks: &[Hunk], thread_ids: &HashSet<String>) -> Placed {
     let mut broken: Vec<String> = Vec::new();
     let mut check = |parts: Vec<Part>, background: bool| -> Vec<Part> {
         let mut kept: Vec<Part> = Vec::new();
@@ -1229,7 +1461,7 @@ fn place(answer: Answer, hunks: &[Hunk], thread_ids: &HashSet<String>) -> Placed
         }
         kept
     };
-    let background = answer.background.and_then(|background| {
+    let background = answer.background.take().and_then(|background| {
         let body = check(background.parts(hunks), true);
         body.iter()
             .any(|part| matches!(part, Part::Text { .. }))
@@ -1241,25 +1473,40 @@ fn place(answer: Answer, hunks: &[Hunk], thread_ids: &HashSet<String>) -> Placed
                 body,
             })
     });
+    let summary = std::mem::take(&mut answer.summary).trim().to_string();
+    let mut chapters: Vec<Chapter> = Vec::new();
     let mut steps: Vec<Step> = Vec::new();
     let mut placeless = Vec::new();
-    for step in answer.steps {
-        let title = match step.title.trim() {
-            "" => format!("Step {}", steps.len() + 1),
-            title => title.to_string(),
-        };
-        let Some(at) = step.place(hunks) else {
-            placeless.push(title);
-            continue;
-        };
-        let body = check(step.parts(hunks), false);
-        steps.push(Step {
-            title,
-            at,
-            text: Vec::new(),
-            body,
-            unplaced: false,
+    for chapter in answer.chapters() {
+        let index = chapters.len();
+        chapters.push(Chapter {
+            title: match chapter.title.trim() {
+                "" if chapter.follow_through => "Follow-through".to_string(),
+                "" => format!("Chapter {}", index + 1),
+                title => title.to_string(),
+            },
+            follow_through: chapter.follow_through,
         });
+        for step in chapter.steps {
+            let title = match step.title.trim() {
+                "" => format!("Place {}", steps.len() + 1),
+                title => title.to_string(),
+            };
+            let Some(at) = step.place(hunks) else {
+                placeless.push(title);
+                continue;
+            };
+            let body = check(step.parts(hunks), false);
+            steps.push(Step {
+                title,
+                chapter: index,
+                at,
+                text: Vec::new(),
+                body,
+                weigh: step.weigh,
+                unplaced: false,
+            });
+        }
     }
     let missing = hunks
         .iter()
@@ -1268,8 +1515,9 @@ fn place(answer: Answer, hunks: &[Hunk], thread_ids: &HashSet<String>) -> Placed
         .collect();
     Placed {
         background,
+        chapters,
         steps,
-        summary: answer.summary.trim().to_string(),
+        summary,
         missing,
         placeless,
         broken,
@@ -1403,9 +1651,9 @@ impl Files {
     }
 }
 
-/// Where the item's walkthroughs are kept, one file to a head.
-fn dir_of(ctx: &Ctx, item_id: &str) -> PathBuf {
-    let name: String = item_id
+/// An item id as a file or ref name has it.
+fn safe_name(item_id: &str) -> String {
+    item_id
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
@@ -1414,36 +1662,68 @@ fn dir_of(ctx: &Ctx, item_id: &str) -> PathBuf {
                 '_'
             }
         })
-        .collect();
-    ctx.preparer.store().root().join("walkthroughs").join(name)
+        .collect()
+}
+
+/// Where the item's walkthroughs are kept, one file to a walkthrough.
+fn dir_of(ctx: &Ctx, item_id: &str) -> PathBuf {
+    ctx.preparer
+        .store()
+        .root()
+        .join("walkthroughs")
+        .join(safe_name(item_id))
 }
 
 fn keep(dir: &Path, walkthrough: &Walkthrough) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    let json = serde_json::to_vec_pretty(walkthrough).map_err(std::io::Error::other)?;
-    let path = dir.join(format!("{}.json", walkthrough.head));
-    let partial = path.with_extension("json.partial");
-    std::fs::write(&partial, json)?;
-    std::fs::rename(&partial, &path)
+    write_json(&dir.join(format!("{}.json", walkthrough.id)), walkthrough)
 }
 
-/// The walkthrough for `head`, else the one written last.
-fn read_kept(dir: &Path, head: Option<&str>) -> Option<Walkthrough> {
-    let read = |path: &Path| -> Option<Walkthrough> {
-        serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+/// Write a walkthrough whole, so a crash leaves the old one or the new.
+fn write_json(path: &Path, walkthrough: &Walkthrough) -> std::io::Result<()> {
+    let json = serde_json::to_vec_pretty(walkthrough).map_err(std::io::Error::other)?;
+    let partial = path.with_extension("json.partial");
+    std::fs::write(&partial, json)?;
+    std::fs::rename(&partial, path)
+}
+
+/// Every walkthrough kept in `dir`, the newest first, each with its id.
+/// One kept before walkthroughs said when they were written was written
+/// when its file was.
+fn read_kept(dir: &Path) -> Vec<Walkthrough> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
     };
-    if let Some(found) = head.and_then(|head| read(&dir.join(format!("{head}.json")))) {
-        return Some(found);
-    }
-    let mut kept: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)
-        .ok()?
+    let mut kept: Vec<Walkthrough> = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|e| e == "json"))
-        .filter_map(|path| Some((std::fs::metadata(&path).ok()?.modified().ok()?, path)))
+        .filter_map(|path| {
+            let mut walkthrough: Walkthrough =
+                serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+            walkthrough.id = path.file_stem()?.to_string_lossy().into_owned();
+            if walkthrough.written_at.is_none() {
+                let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+                walkthrough.written_at = jiff::Timestamp::try_from(modified).ok();
+            }
+            Some(walkthrough.with_chapters())
+        })
         .collect();
-    kept.sort();
-    kept.iter().rev().find_map(|(_, path)| read(path))
+    kept.sort_by(|a, b| b.written_at.cmp(&a.written_at).then(b.id.cmp(&a.id)));
+    kept
+}
+
+/// Drop all but the newest `most` walkthroughs in `dir`; the refs the
+/// dropped ones kept worktrees at.
+fn prune(dir: &Path, most: usize) -> Vec<String> {
+    read_kept(dir)
+        .into_iter()
+        .skip(most)
+        .filter_map(|old| {
+            let _ = std::fs::remove_file(dir.join(format!("{}.json", old.id)));
+            old.snapshot_ref
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1646,7 +1926,7 @@ mod tests {
         let threads: HashSet<String> = ["gh-1".to_string()].into();
         let placed = place(answer, &hunks(), &threads);
         assert_eq!(placed.steps.len(), 1);
-        assert_eq!(placed.steps[0].title, "Step 1");
+        assert_eq!(placed.steps[0].title, "Place 1");
         assert_eq!(
             parts(&placed.steps[0].body),
             vec!["text", "code src/a.rs head 1-2", "thread gh-1"]
@@ -1654,7 +1934,7 @@ mod tests {
         assert_eq!(placed.placeless, vec!["Gone"]);
         assert_eq!(placed.missing, vec!["h2", "h3"]);
         let message = retry_message(&placed, &hunks());
-        assert!(message.contains("name no place in the code"), "{message}");
+        assert!(message.contains("name no lines in the code"), "{message}");
         assert!(message.contains("- Gone"), "{message}");
         assert!(message.contains("- h2 src/a.rs head 40-52"), "{message}");
         assert!(!message.contains("- h1"), "{message}");
@@ -1736,6 +2016,8 @@ mod tests {
             worktree: PathBuf::from("/w"),
             merge_base: "b".repeat(40),
             head: "c".repeat(40),
+            checked_out: true,
+            snapshot_ref: None,
         };
         let thread = CommentThread {
             id: "gh-7".into(),
@@ -1771,6 +2053,7 @@ mod tests {
         };
         let message = user_message(
             &range,
+            &perch_git::Scope::Branch,
             "Add a cache",
             "- one\n",
             " 2 files\n",
@@ -1811,26 +2094,109 @@ mod tests {
         assert!(FRAMING.contains("Phrases like \"it is important to note that\""));
     }
 
-    /// The head's own walkthrough is read when there is one; otherwise the
-    /// one written last, for an older head.
+    /// Places come in their chapters, the follow-through last; a chapter
+    /// left with no place goes, and the places of the rest are numbered
+    /// again.
     #[test]
-    fn the_heads_walkthrough_is_kept_and_read_back_before_the_last_one() {
+    fn places_keep_their_chapters_and_the_follow_through_goes_last() {
+        let answer = parse_answer(
+            r#"{"summary": "s", "chapters": [
+                {"title": "Follow-through", "follow_through": true,
+                 "places": [{"title": "Rename", "hunk": "h3"}]},
+                {"title": "Empty", "places": [{"title": "Gone", "hunk": "h9"}]},
+                {"title": "The cache", "places": [
+                    {"title": "In", "hunks": ["h1"], "weigh": true},
+                    {"title": "Out", "hunk": "h2"}]}
+            ]}"#,
+        )
+        .unwrap();
+        let placed = place(answer, &hunks(), &HashSet::new());
+        let (chapters, steps) = tidy(placed.chapters, placed.steps);
+        let titles: Vec<_> = chapters.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, vec!["The cache", "Follow-through"]);
+        assert!(chapters[1].follow_through);
+        let places: Vec<_> = steps
+            .iter()
+            .map(|s| (s.chapter, s.title.as_str(), s.weigh))
+            .collect();
+        assert_eq!(
+            places,
+            vec![(0, "In", true), (0, "Out", false), (1, "Rename", false)]
+        );
+    }
+
+    /// The flat shape, places without chapters, reads as one chapter.
+    #[test]
+    fn places_without_chapters_are_one_chapter() {
+        let answer =
+            parse_answer(r#"{"places": [{"title": "Fix", "hunks": ["h1", "h2"]}]}"#).unwrap();
+        let placed = place(answer, &hunks(), &HashSet::new());
+        assert_eq!(placed.chapters.len(), 1);
+        assert_eq!(placed.steps[0].chapter, 0);
+        assert_eq!(placed.missing, vec!["h3"]);
+    }
+
+    /// A walkthrough kept before chapters reads as one chapter of the
+    /// branch, named by its file.
+    #[test]
+    fn a_walkthrough_kept_before_chapters_reads_as_one() {
         let dir = tempfile::tempdir().unwrap();
-        let walkthrough = |head: &str| Walkthrough {
+        std::fs::write(
+            dir.path().join("cafe.json"),
+            r#"{"merge_base": "b", "head": "cafe", "summary": "", "hunks": [],
+                "steps": [{"title": "t", "at": {"path": "a", "side": "head", "start": 1, "end": 2},
+                           "text": ["x", "y"], "body": []}]}"#,
+        )
+        .unwrap();
+        let kept = read_kept(dir.path());
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, "cafe");
+        assert_eq!(kept[0].scope, perch_git::Scope::Branch);
+        assert_eq!(kept[0].chapters.len(), 1);
+        assert!(kept[0].written_at.is_some());
+    }
+
+    /// Every walkthrough is kept, the newest first, up to the most; the
+    /// worktrees recorded for those let go are named, to drop.
+    #[test]
+    fn walkthroughs_are_kept_newest_first_up_to_the_most() {
+        let dir = tempfile::tempdir().unwrap();
+        let walkthrough = |id: &str, at: i64, scope: perch_git::Scope| Walkthrough {
+            id: id.into(),
+            scope,
+            written_at: Some(jiff::Timestamp::from_second(at).unwrap()),
+            model: "Sonnet".into(),
             merge_base: "b".into(),
-            head: head.into(),
+            head: "c".into(),
+            snapshot_ref: Some(format!("refs/perch/walkthroughs/x/{id}")),
             summary: String::new(),
             background: None,
+            chapters: vec![Chapter {
+                title: "c".into(),
+                follow_through: false,
+            }],
             steps: Vec::new(),
             hunks: hunks(),
             guidance: String::new(),
+            read: [1].into(),
         };
-        assert_eq!(read_kept(dir.path(), Some("x")), None);
-        keep(dir.path(), &walkthrough("old")).unwrap();
-        std::thread::sleep(Duration::from_millis(20));
-        keep(dir.path(), &walkthrough("new")).unwrap();
-        assert_eq!(read_kept(dir.path(), Some("old")).unwrap().head, "old");
-        assert_eq!(read_kept(dir.path(), Some("other")).unwrap().head, "new");
-        assert_eq!(read_kept(dir.path(), None).unwrap().head, "new");
+        assert!(read_kept(dir.path()).is_empty());
+        keep(dir.path(), &walkthrough("w1", 10, perch_git::Scope::Branch)).unwrap();
+        keep(
+            dir.path(),
+            &walkthrough("w3", 30, perch_git::Scope::Uncommitted),
+        )
+        .unwrap();
+        keep(dir.path(), &walkthrough("w2", 20, perch_git::Scope::Branch)).unwrap();
+        let ids =
+            |dir: &Path| -> Vec<String> { read_kept(dir).into_iter().map(|w| w.id).collect() };
+        assert_eq!(ids(dir.path()), vec!["w3", "w2", "w1"]);
+        assert_eq!(
+            read_kept(dir.path())[0].scope,
+            perch_git::Scope::Uncommitted
+        );
+        assert_eq!(read_kept(dir.path())[0].read, [1].into());
+        assert_eq!(prune(dir.path(), 2), vec!["refs/perch/walkthroughs/x/w1"]);
+        assert_eq!(ids(dir.path()), vec!["w3", "w2"]);
     }
 }

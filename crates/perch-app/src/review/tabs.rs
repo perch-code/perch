@@ -451,8 +451,8 @@ fn nav_button(state: ReviewState, forward: bool) -> impl IntoView {
 
 /// The tiles at the strip's right end: while a file shows, Source, when
 /// the file is a picture, then Show whole, then Word wrap, Stacked and
-/// Split, with a rule after each group; then the tree in the drawer on
-/// the right. A chosen tile is filled;
+/// Split, with a rule after each group; then the walkthrough and the
+/// tree, which take turns in the drawer on the right. A chosen tile is filled;
 /// the others are only a glyph until the pointer is over one. The last
 /// group is at the strip's end, so its tiles keep their place when the
 /// file's come and go.
@@ -481,7 +481,11 @@ fn tiles(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoVi
         ))
         .debug_name("file tiles")
         .style(move |s| s.items_center().apply_if(!on_file(state), |s| s.hide())),
-        Stack::horizontal((tree_tile(app, backend),)).style(|s| s.items_center().gap(2.0)),
+        Stack::horizontal((
+            walkthrough_tile(app, backend.clone()),
+            tree_tile(app, backend),
+        ))
+        .style(|s| s.items_center().gap(2.0)),
     ))
     .style(|s| {
         s.flex_shrink(0.0_f32)
@@ -609,6 +613,24 @@ fn tree_tile(app: AppState, backend: std::rc::Rc<Backend>) -> impl IntoView {
                 "Hide the files".to_string()
             } else {
                 "Show the files".to_string()
+            }
+        },
+    )
+}
+
+/// The walkthrough in the drawer, in the tree's place.
+fn walkthrough_tile(app: AppState, backend: std::rc::Rc<Backend>) -> impl IntoView {
+    let active = move || app.walkthrough_shown();
+    tip_with(
+        tile(SidebarIcon::Milestone, active, move || {
+            drawer::toggle_walkthrough(app, &backend)
+        })
+        .debug_name("walkthrough tile"),
+        move || {
+            if active() {
+                "Hide the walkthrough".to_string()
+            } else {
+                "Show the walkthrough".to_string()
             }
         },
     )

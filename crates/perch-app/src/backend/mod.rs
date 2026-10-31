@@ -29,9 +29,9 @@ pub(crate) use issue_draft::with_found_in;
 pub use open_pull::{DescriptionOutcome, OpenStep, PullRequestReadiness};
 #[cfg(test)]
 pub use walkthrough::Background;
-pub use walkthrough::{CodeSide, Part, Step, Walkthrough, WalkthroughOutcome};
 #[cfg(test)]
-pub use walkthrough::{Hunk, Lines};
+pub use walkthrough::{Chapter, Hunk};
+pub use walkthrough::{CodeSide, Lines, Part, Step, Walkthrough, WalkthroughOutcome};
 use windows::{CommandSender, View, Views};
 pub use windows::{EventSender, WindowId, NO_WINDOW};
 
@@ -235,14 +235,16 @@ pub enum Command {
     StopPullRequestDescription {
         item_id: String,
     },
-    /// Send the walkthrough kept for the item. `Walkthrough` answers.
+    /// Send the walkthroughs kept for the item. `Walkthrough` answers.
     LoadWalkthrough {
         item_id: String,
     },
-    /// Have an agent write the item's walkthrough, reading the change and
-    /// changing nothing. `Walkthrough` answers.
+    /// Have an agent write a walkthrough of the item's change under a
+    /// scope, reading the change and changing nothing. `Walkthrough`
+    /// answers.
     WriteWalkthrough {
         item_id: String,
+        scope: perch_git::Scope,
         backend: perch_agent::Backend,
         model: String,
         effort: perch_agent::Effort,
@@ -252,13 +254,12 @@ pub enum Command {
     StopWalkthrough {
         item_id: String,
     },
-    /// Read files at a walkthrough's own commits, whatever Code shows.
-    /// `WalkthroughFile` answers, one to a path.
-    LoadWalkthroughFiles {
+    /// Keep places of one of the item's walkthroughs read, or not.
+    MarkWalkthroughRead {
         item_id: String,
-        merge_base: String,
-        head: String,
-        paths: Vec<String>,
+        id: String,
+        places: Vec<usize>,
+        read: bool,
     },
     /// Submit a final review of the exact pull request head the reader saw,
     /// with the drafts in the cache: the backend reads them itself, so a
@@ -1192,14 +1193,6 @@ pub enum Event {
     WalkthroughProgress {
         item_id: String,
         steps: Vec<perch_github::RunStep>,
-    },
-    /// A file read at a walkthrough's commits, or why it couldn't be.
-    WalkthroughFile {
-        item_id: String,
-        merge_base: String,
-        head: String,
-        path: String,
-        file: Result<Arc<crate::review::model::LoadedFile>, String>,
     },
     /// The branches `repo` can start new work from, the base first, or why
     /// they could not be listed.
@@ -2958,11 +2951,13 @@ impl Backend {
     pub fn write_walkthrough(
         &self,
         item_id: &str,
+        scope: &perch_git::Scope,
         (backend, model, effort): crate::review::model::AgentChoice,
         guidance: &str,
     ) {
         let _ = self.commands.send(Command::WriteWalkthrough {
             item_id: item_id.to_string(),
+            scope: scope.clone(),
             backend,
             model,
             effort,
@@ -2976,18 +2971,12 @@ impl Backend {
         });
     }
 
-    pub fn load_walkthrough_files(
-        &self,
-        item_id: &str,
-        merge_base: &str,
-        head: &str,
-        paths: Vec<String>,
-    ) {
-        let _ = self.commands.send(Command::LoadWalkthroughFiles {
+    pub fn mark_walkthrough_read(&self, item_id: &str, id: &str, places: Vec<usize>, read: bool) {
+        let _ = self.commands.send(Command::MarkWalkthroughRead {
             item_id: item_id.to_string(),
-            merge_base: merge_base.to_string(),
-            head: head.to_string(),
-            paths,
+            id: id.to_string(),
+            places,
+            read,
         });
     }
 
@@ -4650,6 +4639,7 @@ async fn run(
             }
             Command::WriteWalkthrough {
                 item_id,
+                scope,
                 backend,
                 model,
                 effort,
@@ -4657,21 +4647,17 @@ async fn run(
             } => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    walkthrough::write(&ctx, &item_id, (backend, &model, effort), &guidance).await
+                    walkthrough::write(&ctx, &item_id, &scope, (backend, &model, effort), &guidance)
+                        .await
                 });
             }
             Command::StopWalkthrough { item_id } => walkthrough::stop(&item_id),
-            Command::LoadWalkthroughFiles {
+            Command::MarkWalkthroughRead {
                 item_id,
-                merge_base,
-                head,
-                paths,
-            } => {
-                let ctx = ctx.clone();
-                tokio::spawn(async move {
-                    walkthrough::load_files(&ctx, &item_id, &merge_base, &head, paths).await
-                });
-            }
+                id,
+                places,
+                read,
+            } => walkthrough::mark_read(&ctx, &item_id, &id, &places, read),
             Command::SubmitPullRequestReview {
                 attempt_id,
                 item_id,
@@ -30671,6 +30657,7 @@ read eof || true
         walkthrough::write(
             &ctx,
             &item.id,
+            &perch_git::Scope::Branch,
             (
                 perch_agent::Backend::ClaudeCode,
                 "sonnet",
@@ -30726,16 +30713,19 @@ read eof || true
         assert!(args.contains("--resume"), "{args}");
         assert!(args.contains("covers these hunks"), "{args}");
         assert!(args.contains("- h1 two.txt head 1-1"), "{args}");
-        assert!(args.contains("name no place in the code"), "{args}");
+        assert!(args.contains("name no lines in the code"), "{args}");
         assert!(
             !args.contains("--permission-prompt-tool"),
             "Ask's tools: {args}"
         );
 
+        assert_eq!(written.scope, perch_git::Scope::Branch);
+        assert_eq!(written.model, "Claude Sonnet");
+        assert!(written.snapshot_ref.is_none());
         walkthrough::load(&ctx, &item.id).await;
         assert_eq!(
             walkthrough_of(&received),
-            WalkthroughOutcome::Loaded(Some(written))
+            WalkthroughOutcome::Loaded(vec![*written])
         );
     }
 
@@ -30755,6 +30745,7 @@ read eof || true
         walkthrough::write(
             &ctx,
             &item.id,
+            &perch_git::Scope::Branch,
             (
                 perch_agent::Backend::ClaudeCode,
                 "sonnet",
@@ -30779,49 +30770,78 @@ read eof || true
         assert_eq!(written.steps[1].at.path, "two.txt");
         assert_eq!(written.steps[1].text, vec!["two".to_string()]);
         assert!(written.steps[1].body.is_empty());
+        // In a follow-through of their own, after the agent's chapter.
+        assert_eq!(written.chapters.len(), 2);
+        assert!(written.chapters[1].follow_through);
+        assert_eq!(written.steps[1].chapter, 1);
     }
 
-    /// A walkthrough's files are read at its own commits: a commit since
-    /// doesn't show, a file the range left alone has no diff, and a path
-    /// neither end has says so.
+    /// A walkthrough of the uncommitted work is of the worktree as it was,
+    /// recorded at a ref of its own, against the head. Unstaged has none.
     #[tokio::test]
-    async fn walkthrough_files_are_read_at_its_commits() {
+    async fn a_walkthrough_of_uncommitted_work_records_the_worktree() {
         let dir = tempfile::tempdir().unwrap();
-        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let (mut ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let mut config = Config::default();
+        let answer = r#"{"summary": "s", "chapters": [{"title": "Three", "places": [
+            {"title": "Add three", "hunks": ["h1"], "body": [{"text": "It adds three."}]}]}]}"#;
+        config.agent.binary = walking_claude(dir.path(), answer, answer);
+        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
         let (item, worktree, _remote) = pushable_branch(&ctx, dir.path());
-        let head = git(&worktree, &["rev-parse", "HEAD"]);
-        let merge_base = git(&worktree, &["merge-base", "main", "HEAD"]);
         std::fs::write(worktree.join("two.txt"), "two\nthree\n").unwrap();
-        git(&worktree, &["commit", "-q", "-am", "three"]);
 
-        walkthrough::load_files(
+        walkthrough::write(
             &ctx,
             &item.id,
-            &merge_base,
-            &head,
-            vec!["two.txt".into(), "one.txt".into(), "gone.txt".into()],
+            &perch_git::Scope::Uncommitted,
+            (
+                perch_agent::Backend::ClaudeCode,
+                "sonnet",
+                perch_agent::Effort::Medium,
+            ),
+            "",
         )
         .await;
 
-        let read: std::collections::HashMap<_, _> = received
-            .try_iter()
-            .filter_map(|event| match event {
-                Event::WalkthroughFile {
-                    path,
-                    file,
-                    head: read_head,
-                    ..
-                } if read_head == head => Some((path, file)),
-                _ => None,
-            })
-            .collect();
-        let two = read["two.txt"].as_ref().unwrap();
-        assert_eq!(two.buffer.text, "two\n");
-        assert_eq!(two.status, Some(perch_git::ChangeStatus::Added));
-        let one = read["one.txt"].as_ref().unwrap();
-        assert_eq!(one.buffer.text, "one\n");
-        assert_eq!(one.status, None);
-        assert_eq!(read["gone.txt"].as_ref().unwrap_err(), "file is not there");
+        let WalkthroughOutcome::Written(written) = walkthrough_of(&received) else {
+            panic!("not written");
+        };
+        assert_eq!(written.scope, perch_git::Scope::Uncommitted);
+        assert_eq!(written.merge_base, git(&worktree, &["rev-parse", "HEAD"]));
+        let snapshot = written
+            .snapshot_ref
+            .clone()
+            .expect("a ref for the worktree");
+        assert_eq!(git(&worktree, &["rev-parse", &snapshot]), written.head);
+        assert_eq!(
+            git(&worktree, &["show", &format!("{}:two.txt", written.head)]),
+            "two\nthree"
+        );
+        assert_eq!(
+            (written.hunks[0].path.as_str(), written.hunks[0].end),
+            ("two.txt", 2)
+        );
+        assert_eq!(
+            written.steps[0].text.last().map(String::as_str),
+            Some("three")
+        );
+
+        walkthrough::write(
+            &ctx,
+            &item.id,
+            &perch_git::Scope::Unstaged,
+            (
+                perch_agent::Backend::ClaudeCode,
+                "sonnet",
+                perch_agent::Effort::Medium,
+            ),
+            "",
+        )
+        .await;
+        assert!(matches!(
+            walkthrough_of(&received),
+            WalkthroughOutcome::Failed(_)
+        ));
     }
 
     #[tokio::test]
@@ -30836,6 +30856,7 @@ read eof || true
         walkthrough::write(
             &ctx,
             &item.id,
+            &perch_git::Scope::Branch,
             (
                 perch_agent::Backend::ClaudeCode,
                 "sonnet",
@@ -30850,7 +30871,10 @@ read eof || true
             WalkthroughOutcome::Failed(_)
         ));
         walkthrough::load(&ctx, &item.id).await;
-        assert_eq!(walkthrough_of(&received), WalkthroughOutcome::Loaded(None));
+        assert_eq!(
+            walkthrough_of(&received),
+            WalkthroughOutcome::Loaded(vec![])
+        );
     }
 
     /// A pull request whose open is slow, cloning a large repository, holds

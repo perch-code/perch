@@ -1224,9 +1224,6 @@ pub struct Composer {
     pub opening: u64,
     /// Ask or Work, where the item allows Work; see `composer_mode`.
     pub mode: perch_github::RunMode,
-    /// The walkthrough block it was opened under, which draws it there;
-    /// `None` for one opened anywhere else.
-    pub block: Option<String>,
     /// Where a new thread's lines were picked, when that was a diff GitHub
     /// does not number them by; see `Picked`.
     pub picked: Option<Picked>,
@@ -1683,12 +1680,13 @@ pub struct ReviewState {
     pub describing: RwSignal<bool>,
     pub description_error: RwSignal<Option<String>>,
     pub description_offer: RwSignal<Option<(String, String)>>,
-    /// Walkthroughs by item: the one kept for each item asked about,
-    /// `None` when it has none, the items one is being written for and
-    /// since when, and what stopped the last for each. By item and not reset with it, as a
-    /// walkthrough takes minutes and the reader may look elsewhere.
-    pub walkthroughs: RwSignal<HashMap<String, Option<Arc<crate::backend::Walkthrough>>>>,
-    pub walkthroughs_writing: RwSignal<HashMap<String, jiff::Timestamp>>,
+    /// Walkthroughs by item: every one kept for each item asked about,
+    /// the newest first, the items one is being written for, since when
+    /// and for which scope, and what stopped the last for each. By item
+    /// and not reset with it, as a walkthrough takes minutes and the
+    /// reader may look elsewhere.
+    pub walkthroughs: RwSignal<HashMap<String, Arc<Vec<Arc<crate::backend::Walkthrough>>>>>,
+    pub walkthroughs_writing: RwSignal<HashMap<String, (jiff::Timestamp, Scope)>>,
     /// What the agent writing each one has done so far.
     pub walkthrough_steps: RwSignal<HashMap<String, Vec<perch_github::RunStep>>>,
     pub walkthrough_errors: RwSignal<HashMap<String, String>>,
@@ -1697,12 +1695,17 @@ pub struct ReviewState {
     /// the one last asked here.
     pub walkthrough_guidance: RwSignal<HashMap<String, String>>,
     pub walkthrough_agent: RwSignal<Option<AgentChoice>>,
-    /// The files each item's walkthrough draws its lines from, read at
-    /// its own commits rather than Code's.
-    pub walkthrough_files: RwSignal<HashMap<String, crate::review::walkthrough::WalkthroughFiles>>,
-    /// The step of the open item's walkthrough the reader is on, while
-    /// they are taking it: its cards are in Code and the bar is over it.
-    /// `None` while it is put away.
+    /// The walkthrough picked from the pane's list, by item, when it is
+    /// not the newest of the scope.
+    pub walkthrough_picked: RwSignal<HashMap<String, String>>,
+    /// Whether the walkthrough's pane is out, which puts its notes in
+    /// Code; the drawer says so.
+    pub walkthrough_out: RwSignal<bool>,
+    /// Whether the pane shows the form to write one more, over one that
+    /// is written.
+    pub walkthrough_composing: RwSignal<bool>,
+    /// The place of the open item's walkthrough the reader is on, by
+    /// index, once they have started it.
     pub walkthrough_at: RwSignal<Option<usize>>,
     /// Close as issue under way, and what stopped the last.
     pub issue_closing: RwSignal<bool>,
@@ -2194,7 +2197,9 @@ impl ReviewState {
             walkthrough_errors: RwSignal::new(HashMap::new()),
             walkthrough_guidance: RwSignal::new(HashMap::new()),
             walkthrough_agent: RwSignal::new(None),
-            walkthrough_files: RwSignal::new(HashMap::new()),
+            walkthrough_picked: RwSignal::new(HashMap::new()),
+            walkthrough_out: RwSignal::new(false),
+            walkthrough_composing: RwSignal::new(false),
             walkthrough_at: RwSignal::new(None),
             issue_closing: RwSignal::new(false),
             issue_error: RwSignal::new(None),
@@ -2466,6 +2471,7 @@ impl ReviewState {
         // open is the reader's and stays, as `collapsed_cards` says.
         self.card_rows.set(HashMap::new());
         self.walkthrough_at.set(None);
+        self.walkthrough_composing.set(false);
         self.hovered_line.set(None);
         self.hovered_base.set(false);
         self.hovered_by.set(None);
@@ -4341,7 +4347,7 @@ impl ReviewState {
         self.composer
             .with(|c| {
                 c.as_ref()
-                    .filter(|c| c.thread_id.is_none() && c.block.is_none())
+                    .filter(|c| c.thread_id.is_none())
                     .and_then(|c| c.anchor.clone())
             })
             .or_else(|| self.sent_composer.get())
@@ -4357,7 +4363,7 @@ impl ReviewState {
         };
         self.composer.with(|c| {
             c.as_ref()
-                .filter(|c| c.thread_id.is_none() && c.block.is_none())
+                .filter(|c| c.thread_id.is_none())
                 .and_then(|c| c.anchor.as_ref())
                 .is_some_and(|a| a.path == file.path && card_line(&file, a).is_some())
         })
@@ -4944,36 +4950,6 @@ impl ReviewState {
         self.open_composer_with(thread_id, anchor, draft, destination, None);
     }
 
-    /// Open a composer for a new thread on lines a walkthrough's block
-    /// shows, under the block, where the block is. With `keep`,
-    /// one already under the block keeps what was typed and where it
-    /// goes, as a shift-click's range does.
-    pub fn open_composer_under(
-        &self,
-        block: String,
-        anchor: Anchor,
-        keep: bool,
-        defaults: AgentChoice,
-    ) {
-        let kept = keep
-            .then(|| {
-                self.composer.with_untracked(|c| {
-                    c.as_ref()
-                        .filter(|c| c.thread_id.is_none() && c.block.as_ref() == Some(&block))
-                        .map(|c| c.destination.clone())
-                })
-            })
-            .flatten();
-        let (draft, destination) = match kept {
-            Some(destination) => (self.composer_draft.get_untracked(), destination),
-            None => (
-                String::new(),
-                self.destination_for(None, Some(&anchor), defaults),
-            ),
-        };
-        self.place_composer(None, Some(anchor), draft, destination, None, Some(block));
-    }
-
     /// Where a new composer about `thread_id` or `anchor` sends: the rules'
     /// pick, with GitHub only where a draft could go.
     fn destination_for(
@@ -5009,7 +4985,7 @@ impl ReviewState {
 
     /// The face a composer about `thread_id` or `anchor` would take: inline
     /// when Files is showing and it has a card in the code, else a card,
-    /// on Conversation or under a walkthrough's block. Tracked, as the
+    /// on Conversation. Tracked, as the
     /// placement checks are.
     fn face_for(
         &self,
@@ -5045,12 +5021,11 @@ impl ReviewState {
         destination: Destination,
         editing: Option<String>,
     ) {
-        self.place_composer(thread_id, anchor, draft, destination, editing, None);
+        self.place_composer(thread_id, anchor, draft, destination, editing);
     }
 
-    /// Open a composer, under a walkthrough's block when `block` names
-    /// one, wherever that is; else in the code when it has a
-    /// card there, else on Conversation.
+    /// Open a composer in the code when it has a card there, else on
+    /// Conversation.
     fn place_composer(
         &self,
         thread_id: Option<String>,
@@ -5058,9 +5033,7 @@ impl ReviewState {
         draft: String,
         destination: Destination,
         editing: Option<String>,
-        block: Option<String>,
     ) {
-        let under_block = block.is_some();
         self.composer_draft.set(draft.clone());
         // A confirm or a refusal was about the composer this replaces.
         self.composer_confirming.set(false);
@@ -5073,8 +5046,8 @@ impl ReviewState {
             }
             self.forget_composer_rows();
             let mode = self.composer_mode(thread_id.as_deref());
-            let picked = match (&thread_id, &anchor, &block) {
-                (None, Some(anchor), None) => self.picked_for(anchor),
+            let picked = match (&thread_id, &anchor) {
+                (None, Some(anchor)) => self.picked_for(anchor),
                 _ => None,
             };
             self.composer.set(Some(Composer {
@@ -5085,14 +5058,11 @@ impl ReviewState {
                 opening,
                 editing,
                 mode,
-                block,
                 picked,
             }));
         });
         let in_code = self.composer_in_code_untracked();
-        if under_block {
-            // Drawn under its block, on whichever page shows the block.
-        } else if !in_code && self.tab.get_untracked() != ItemTab::Conversation {
+        if !in_code && self.tab.get_untracked() != ItemTab::Conversation {
             self.show_tab(ItemTab::Conversation);
         } else if let Some(id) = self
             .composer

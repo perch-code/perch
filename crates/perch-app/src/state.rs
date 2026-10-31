@@ -302,6 +302,10 @@ pub struct AppState {
     /// Whether the reader asked for the tree in the drawer on the right.
     /// Whether it shows is `tree_shown`: only on Code.
     pub tree_open: RwSignal<bool>,
+    /// Whether the reader asked for the walkthrough in the drawer instead.
+    /// It and the tree take turns; whether it shows is
+    /// `walkthrough_shown`.
+    pub walkthrough_open: RwSignal<bool>,
     /// How wide the drawer is. Dragged, so a signal rather than a constant;
     /// docked, it may be shown narrower than this to leave the main pane
     /// its minimum.
@@ -466,6 +470,7 @@ impl AppState {
             agent_run_events: RwSignal::new(HashMap::new()),
             agent_run_events_pages: RwSignal::new(HashMap::new()),
             tree_open: RwSignal::new(false),
+            walkthrough_open: RwSignal::new(false),
             drawer_width: RwSignal::new(crate::theme::DRAWER_WIDTH),
             drawer_resizing: RwSignal::new(false),
             window_width: RwSignal::new(0.0),
@@ -570,6 +575,7 @@ impl AppState {
         copy(self.new_work.prefix, data.new_work.prefix);
         copy(self.item_filters, settings.item_filters);
         copy(self.tree_open, settings.tree_open);
+        copy(self.walkthrough_open, settings.walkthrough_open);
         copy(self.drawer_width, settings.drawer_width);
         copy(self.sidebar_open, settings.sidebar_open);
         copy(self.sidebar_width, settings.sidebar_width);
@@ -1357,6 +1363,12 @@ impl AppState {
     /// for when there is a tree to show. Tracked.
     pub fn tree_shown(&self) -> bool {
         self.tree_open.get() && self.tree_available()
+    }
+
+    /// Whether the drawer shows the walkthrough: asked for, and on Code,
+    /// as the tree is. Tracked.
+    pub fn walkthrough_shown(&self) -> bool {
+        self.walkthrough_open.get() && self.tree_available()
     }
 
     pub fn active_agent_counts(&self) -> (usize, usize) {
@@ -2960,21 +2972,6 @@ impl AppState {
             Event::Walkthrough { item_id, outcome } => {
                 crate::review::walkthrough::apply(review, item_id, outcome);
             }
-            Event::WalkthroughFile {
-                item_id,
-                merge_base,
-                head,
-                path,
-                file,
-            } => {
-                crate::review::walkthrough::file_read(
-                    review,
-                    item_id,
-                    (merge_base, head),
-                    path,
-                    file,
-                );
-            }
             Event::WalkthroughProgress { item_id, steps } => {
                 crate::review::walkthrough::progress(review, item_id, steps);
             }
@@ -3059,9 +3056,7 @@ impl AppState {
             }
             Event::PullRequestDescription { .. } => {}
             // The window that asked draws it.
-            Event::Walkthrough { .. }
-            | Event::WalkthroughProgress { .. }
-            | Event::WalkthroughFile { .. } => {}
+            Event::Walkthrough { .. } | Event::WalkthroughProgress { .. } => {}
             // The issue is open, so what was typed for it is spent.
             Event::ClosedAsIssue {
                 item_id,
@@ -3164,7 +3159,13 @@ impl AppState {
                         review.wrap.set(value.trim() == "on");
                     }
                 }
-                "drawer.view" => self.tree_open.set(crate::ui::drawer::parse(&value)),
+                "drawer.view" => {
+                    let view = crate::ui::drawer::parse(&value);
+                    self.tree_open
+                        .set(view == crate::ui::drawer::DrawerView::Files);
+                    self.walkthrough_open
+                        .set(view == crate::ui::drawer::DrawerView::Walkthrough);
+                }
                 "drawer.width" => match value.parse::<f64>() {
                     Ok(width) => self.drawer_width.set(width.clamp(
                         crate::theme::DRAWER_MIN_WIDTH,

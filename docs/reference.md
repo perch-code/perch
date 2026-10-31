@@ -125,8 +125,8 @@ An item has two modes, the pills at the centre of its bar, as Codex has
 Summary and Code. **Conversation** is the item's summary, its timeline and its
 threads, with a composer at the foot. **Code** is the worktree: the open
 files as tabs over the editor, and the file tree in the drawer on the right
-(see [The file tree](#the-file-tree)). A walkthrough of the change starts on
-Conversation and is taken on Code (see [Walkthrough](#walkthrough)). An issue
+(see [The file tree](#the-file-tree)), or in its place the walkthrough of the
+change (see [Walkthrough](#walkthrough)). An issue
 with no checkout has no Code and no pills; Start work gives it a checkout,
 and the pills come. When the bar's
 controls take more than half of it, the pills give way to them rather than
@@ -148,68 +148,91 @@ cannot be closed.
 
 ## Walkthrough
 
-A walkthrough is the change told as a tour of the code, stop by stop, in the
-order that makes it easiest to follow: usually the way data or control flows
-through it, not file by file. It works for a pull request and for a branch
-with no pull request alike.
+A walkthrough is the change told as a story: a summary, the background, then
+chapters, each one idea of the change, and in each chapter the places in the
+code that tell it, in the order that makes it easiest to follow, usually the
+way data or control flows, not file by file. It works for a pull request and
+for a branch with no pull request alike.
 
-It starts from the **Walkthrough** card on Conversation, under the item's
-summary. Pick the model and effort there, as in the composer; they start on
-whichever the composer last used. The box above them takes guidance for the
-agent, such as what to dwell on or where to start, and is kept with the
-walkthrough so **Write again** starts from the same words. **Write**
-(Cmd-Enter in the box) has the agent read the change under Ask's rules (read
-only, no network, nothing reaches GitHub) and answer with a summary, a
-background and the steps.
+It lives on Code, in the drawer, in the file tree's place: the tile beside
+the tree's at the right end of Code's tabs opens it, and the two take turns.
+Conversation has a row under the summary that says whether there is one and
+opens it on Code.
 
-The card then shows the summary: in a few sentences, what the change is and
-why, what it changes, and anything a reviewer should weigh, such as a risk or
-a compatibility cost. Under it the background is folded under its title; a
-click opens it. It says what the parts the change touches are for, how they
-work and where the rest of the system uses them, as they were before it, with
-the unchanged code that shows it, for someone who knows the codebase but not
-this corner of it, or has forgotten it.
+### Writing one
 
-**Start** takes you to the first step on Code. Each step is about one place
-in the code: a hunk, a few hunks close together in one file, or a piece of a
-long hunk, or lines the change left alone that the story needs. Its card sits
-right under those lines, as a thread's does, with its title and a few
-sentences on what the lines are for and why. A card can also show other lines
-the story needs, such as an unchanged caller or what a function used to be,
-the review threads it discusses, and Mermaid diagrams where a picture says
-more than words: data moving between parts, a sequence of calls, states.
-Perch lays a diagram out and draws it in its own colours, light or dark; a
-diagram that isn't Mermaid Perch can draw is asked about again, and left out
-if it still isn't. Dashed lines are drawn solid. The agent never writes code
-into it: Perch draws the lines from the checkout. A file's name over cited
-lines opens it on Code at the first line, and a thread opens on Conversation.
+A walkthrough is of the scope Code shows, picked from the scope button at the
+top of the pane as in the tree: the branch, what came since you last looked,
+a commit, a run's changes, or the uncommitted work. For the uncommitted work
+Perch records the worktree as it is in a commit of its own, kept at a ref
+under `refs/perch/walkthroughs/`, so the walkthrough stays of what was there.
+Unstaged and Staged have none: they move as you stage.
 
-While you take the walkthrough, every step's card is in Code, in whichever
-file it belongs to, and a bar over the code says which step you are on. The
-step you are on is framed and ends in a button to the next; a click on
-another step's card makes it the one. Each step you go to is a place Back
-returns to. The **x** on the bar puts the walkthrough away and its cards
-leave Code; the card on Conversation then reads **Start** again, or **Go to
-step** while it is out.
+With none for the scope, the pane offers to write one. Pick the model and
+effort there, as in the composer; they start on whichever the composer last
+used. The box above them takes guidance for the agent, such as what to dwell
+on or where to start, and is kept with the walkthrough so the next one starts
+from the same words. **Write** (Cmd-Enter in the box) has the agent read the
+change under Ask's rules (read only, no network, nothing reaches GitHub). It
+takes a few minutes and goes on while you look elsewhere; the pane shows what
+the agent is doing, and **Stop** ends it. From a scope with none, the pane
+also offers the branch's walkthrough when there is one.
+
+### The pane
+
+The summary says in a few sentences what the change is and why, what it
+changes, and anything a reviewer should weigh. The background is folded
+under its title: what the parts the change touches are for, how they work and
+where the rest of the system uses them, as they were before it, for someone
+who knows the codebase but not this corner of it.
+
+Then the chapters, three to seven, each folded over its places, and last the
+**Follow-through**: the mechanical rest of the change, such as renames, call
+sites and tests, a place for each, with a sentence at most. A place has its
+title, where it is, a warning when it is one to weigh, and a check for read.
+A chapter's check marks all its places, and **Mark all** every place. What
+you have read is kept with the walkthrough.
+
+**Start** takes you to the first place on Code; a click on a place's row
+takes you to it. Each place you go to is a place Back returns to.
+
+### Notes
+
+While the pane is out, each place has a note in Code under its lines, drawn
+as a thread of Perch's own is: the lines and the chapter at its head, then
+the note, a sentence or three on what the lines are for and why, under the
+walkthrough's name with which place of how many it is. A note can cite other
+lines, which open on Code, name review threads, which open on Conversation,
+and hold a Mermaid diagram, though most diagrams are in the background.
+Perch lays a diagram out and draws it in its own colours, light or dark; one
+that isn't Mermaid Perch can draw is asked about again, and left out if it
+still isn't. Dashed lines are drawn solid.
+
+**Follow up** under a note opens the composer on its lines with the note
+quoted, for a thread of its own. The arrows beside it go to the place before
+and after; going on marks the place read. The place you are on is framed.
+Shutting the pane takes the notes out of Code.
 
 | Action | Key |
 |---|---|
-| Next step, previous step | `.`, `,` |
+| Next place, previous place | `.`, `,` |
 
-Perch gives the agent the list of hunks and checks that some step covers
-every one, and that every step names a place. What the answer leaves out is
+Perch gives the agent the list of hunks and checks that some place covers
+every one, and that every place names lines. What the answer leaves out is
 asked about once more, in the same session; a hunk still left out gets a
-step of Perch's own at the end, **Also changed in** its file, so nothing in
-the diff is out of sight. Hunks and threads the item doesn't have are
-dropped, and lines are cut to their file.
+place of Perch's own in the follow-through, **Also changed in** its file, so
+nothing in the diff is out of sight. Hunks and threads the item doesn't have
+are dropped, and lines are cut to their file.
 
-A walkthrough takes a few minutes and goes on while you look elsewhere;
-**Stop** ends it. It is kept for the head it was written at, under
-`walkthroughs/` in Perch's data directory, and never sent anywhere. Each step
-keeps the text of its lines, so after later commits its card follows them to
-where they are now; a step whose lines have changed has no card. The card on
-Conversation says when the walkthrough is of an older head, and **Write
-again** writes it for the head.
+### Kept walkthroughs
+
+Every walkthrough is kept, the last 20 for an item, under `walkthroughs/` in
+Perch's data directory, and never sent anywhere. The menu at the pane's top
+lists the scope's, newest first, with when, which model, and for the branch
+how many commits behind the head each is, and writes another. Each place
+keeps the text of its lines, so after later commits its note follows them to
+where they are now; a place whose lines have changed has no note. The pane
+says when the walkthrough is of an older head.
 
 ## Timeline
 

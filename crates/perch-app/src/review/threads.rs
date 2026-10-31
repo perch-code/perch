@@ -2894,7 +2894,7 @@ const COMMENT_BODY_GAP: f64 = 6.0;
 /// The first is laid out as the rest are, in the code too: set flush, as
 /// Files changed sets the comment a thread opens with, it sat apart from
 /// the replies and from a grey band under it.
-fn comment_frame(
+pub(crate) fn comment_frame(
     face: ThreadFace,
     place: Place,
     avatar: floem::AnyView,
@@ -2945,7 +2945,7 @@ fn connector(shown: bool) -> impl IntoView {
 
 /// A comment's byline: the `name`, then what comes `after` it, when it
 /// was said and its labels, and at the end what can be done with it.
-fn byline_row(
+pub(crate) fn byline_row(
     name: impl IntoView + 'static,
     after: Vec<floem::AnyView>,
     trailing: floem::AnyView,
@@ -2967,7 +2967,7 @@ fn byline_row(
 
 /// A name as a comment's byline sets it: GitHub's semibold, a step down
 /// in the code.
-fn name_style(s: floem::style::Style, face: ThreadFace) -> floem::style::Style {
+pub(crate) fn name_style(s: floem::style::Style, face: ThreadFace) -> floem::style::Style {
     let size = match face {
         ThreadFace::Card => theme::TEXT_BODY,
         ThreadFace::Inline => theme::TEXT_META,
@@ -3039,7 +3039,7 @@ fn author_label(state: ReviewState, login: impl Fn() -> Option<String> + 'static
 
 /// Perch only, in the byline of a message nobody on GitHub can see, in a
 /// thread where they can see the rest.
-fn perch_only_label() -> impl IntoView {
+pub(crate) fn perch_only_label() -> impl IntoView {
     cards::tip(
         byline_label("Perch only", "perch-only"),
         "Only Perch shows this; nothing here is on GitHub.".to_string(),

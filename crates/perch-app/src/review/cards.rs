@@ -1702,29 +1702,6 @@ pub fn anchored_lines(file: &LoadedFile, anchor: &Anchor, max: usize) -> (Vec<Co
     (lines, more)
 }
 
-/// Every line of the side an anchor names, drawn as `anchored_lines`
-/// draws its own, and where the anchor's lines are among them: empty
-/// when none of them are there.
-pub fn file_lines(file: &LoadedFile, anchor: &Anchor) -> (Vec<CodeLine>, Range<usize>) {
-    if anchor.side == perch_github::Side::Left {
-        let Some(base) = file.base_buffer.as_ref() else {
-            return (Vec::new(), 0..0);
-        };
-        let text: Vec<&str> = base.text.lines().collect();
-        let removed = removed_base_lines(file);
-        let lines = (0..text.len())
-            .map(|b| base_line(file, &text, &removed, b))
-            .collect();
-        return (lines, base_range(anchor, text.len()));
-    }
-    let text: Vec<&str> = file.buffer.text.lines().collect();
-    let lines = (0..file.buffer.rows.len())
-        .map(|d| head_row(file, &text, d))
-        .collect();
-    let range = head_rows(file, anchor).map_or(0..0, |(from, to)| from..to + 1);
-    (lines, range)
-}
-
 /// The first and last of the buffer's rows a head anchor's lines span,
 /// the removed lines between them among them.
 fn head_rows(file: &LoadedFile, anchor: &Anchor) -> Option<(usize, usize)> {
@@ -1843,19 +1820,7 @@ pub(crate) fn code_lines(lines: Vec<CodeLine>) -> impl IntoView {
 /// text, as GitHub sets a diff's lines.
 const CODE_ROW_MARKER_WIDTH: f64 = 22.0;
 
-/// How far into a row its text starts: past the number and the marker.
-pub(crate) const CODE_TEXT_INSET: f64 = theme::CODE_ROW_NUMBER_WIDTH + CODE_ROW_MARKER_WIDTH;
-
 pub(crate) fn code_row(line: CodeLine) -> impl IntoView {
-    code_row_with(line, || false)
-}
-
-/// A row whose text shows the hand while `hand` says so, as a name the
-/// row links does.
-pub(crate) fn code_row_with(
-    line: CodeLine,
-    hand: impl Fn() -> bool + Copy + 'static,
-) -> impl IntoView {
     let tint = line.tint;
     let number = line.number.map(|n| n.to_string()).unwrap_or_default();
     let marker = match line.tint {
@@ -1863,7 +1828,7 @@ pub(crate) fn code_row_with(
         Tint::Added | Tint::Modified => "+",
         Tint::Removed => "-",
     };
-    let text = code_text(line.text, line.spans, tint, hand);
+    let text = code_text(line.text, line.spans, tint);
     Stack::horizontal((
         Label::derived(move || number.clone()).style(|s| {
             s.width(theme::CODE_ROW_NUMBER_WIDTH)
@@ -1903,12 +1868,7 @@ pub(crate) fn code_row_with(
 /// colours it, unless it was removed: the editor dims removed code, and
 /// so does a card. Rich text wraps, and a line must not; the clip is one
 /// row tall, so only the first line shows.
-fn code_text(
-    text: String,
-    spans: Vec<perch_syntax::Span>,
-    tint: Tint,
-    hand: impl Fn() -> bool + Copy + 'static,
-) -> floem::AnyView {
+fn code_text(text: String, spans: Vec<perch_syntax::Span>, tint: Tint) -> floem::AnyView {
     use floem::views::ClipExt;
 
     if spans.is_empty() || tint == Tint::Removed {
@@ -1920,17 +1880,13 @@ fn code_text(
                     .text_ellipsis()
                     .min_width(0.0)
                     .flex_grow(1.0_f32)
-                    .apply_if(hand(), |s| s.cursor(CursorStyle::Pointer))
             })
             .into_any();
     }
     // Laid out again when the appearance changes: the colours are in it.
     let (first, attrs) = code_layout(&text, &spans);
     floem::views::rich_text(first, attrs, move || code_layout(&text, &spans))
-        .style(move |s| {
-            s.width_full()
-                .apply_if(hand(), |s| s.cursor(CursorStyle::Pointer))
-        })
+        .style(|s| s.width_full())
         .clip()
         .style(|s| {
             s.height(theme::CODE_ROW_HEIGHT)
@@ -1938,38 +1894,6 @@ fn code_text(
                 .min_width(0.0)
         })
         .into_any()
-}
-
-/// A line laid out on one line as a row draws its text, to measure it or
-/// find what a point on it is over. Its spans change only its colours.
-pub(crate) fn code_line_layout(text: &str) -> floem::text::TextLayout {
-    let (_, attrs) = code_layout(text, &[]);
-    let mut layout = floem::text::TextLayout::new();
-    layout.set_text_wrap_mode(floem::text::TextWrapMode::NoWrap);
-    layout.set_text(text, attrs, None);
-    layout
-}
-
-/// The byte of a line's text the character `x` across its row's text is
-/// on. `None` before the text or past its end.
-pub(crate) fn code_byte_at(text: &str, x: f64) -> Option<usize> {
-    let layout = code_line_layout(text);
-    if x < 0.0 || x >= layout.size().width {
-        return None;
-    }
-    let cursor = layout.hit_test(floem::kurbo::Point::new(x, 0.0))?;
-    // The caret nearest the point is between two characters; the point is
-    // on whichever of them its side of the caret is.
-    let caret = layout.cursor_to_byte_index(&cursor).min(text.len());
-    let caret_x = layout
-        .cursor_point(caret, floem::text::Affinity::Downstream)
-        .x;
-    let byte = if x >= caret_x {
-        caret
-    } else {
-        caret - text[..caret].chars().next_back()?.len_utf8()
-    };
-    (byte < text.len()).then_some(byte)
 }
 
 fn code_layout(text: &str, spans: &[perch_syntax::Span]) -> (String, floem::text::AttrsList) {
