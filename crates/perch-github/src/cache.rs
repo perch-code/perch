@@ -41,10 +41,12 @@ mod review_store;
 /// snooze, which lapses at a time. Version 34 keeps the reader's answer on
 /// running an item's code in a language server, and starts the branches
 /// already cut from a pull request untrusted. Version 35 keeps the servers
-/// the reader trusts on everything in a repository. Schemas 13 through 23
+/// the reader trusts on everything in a repository. Version 36 drops the
+/// copies of tool calls an update wrote into a run's history as legacy
+/// steps. Schemas 13 through 23
 /// migrate in place so local conversations and agent history are never
 /// discarded.
-pub const SCHEMA_VERSION: u32 = 35;
+pub const SCHEMA_VERSION: u32 = 36;
 
 /// Metadata key holding the validator for the cached notifications snapshot.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
@@ -537,6 +539,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             32 => add_snoozed_until_column(&tx)?,
             33 => add_code_trust_table(&tx)?,
             34 => tx.execute_batch(REPO_LSP_TRUST_SCHEMA)?,
+            35 => drop_repeated_legacy_steps(&tx)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -550,6 +553,18 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
         from: version,
         to: SCHEMA_VERSION,
     })
+}
+
+/// Legacy steps a run with step events of its own was given by
+/// `sync_legacy_steps`, which copied those events' steps again on each
+/// update. Only a run from before events has legacy steps of its own.
+fn drop_repeated_legacy_steps(tx: &Transaction<'_>) -> Result<(), CacheError> {
+    tx.execute(
+        "DELETE FROM run_events WHERE kind='legacy_step' AND run_id IN (
+             SELECT run_id FROM run_events WHERE kind IN ('tool_call','steer','steer_landed'))",
+        [],
+    )?;
+    Ok(())
 }
 
 /// A Done mark keeps the thread it hides. The marks already made have
@@ -2342,7 +2357,20 @@ fn truncate_event_strings(event: &mut RunEvent, max: usize) {
 }
 
 /// Bridge for the pre-event app while it is moved to `append_run_event`.
+///
+/// A run whose steps come from its own events is left alone: a record
+/// read back from it carries those steps, and writing them again as
+/// legacy steps would show each one twice, and once more per update.
 fn sync_legacy_steps(conn: &Connection, run: &RunRecord) -> Result<(), CacheError> {
+    let evented: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM run_events
+         WHERE run_id=?1 AND kind IN ('tool_call','steer','steer_landed'))",
+        params![run.id],
+        |row| row.get(0),
+    )?;
+    if evented {
+        return Ok(());
+    }
     conn.execute(
         "DELETE FROM run_events WHERE run_id=?1 AND kind='legacy_step'",
         params![run.id],
@@ -5130,6 +5158,99 @@ mod tests {
             event,
             truncated: false,
         }
+    }
+
+    #[test]
+    fn updating_a_run_read_back_does_not_repeat_its_tool_calls() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut running = run("work-r1", "thread", RunStatus::Running);
+        running.steps.clear();
+        c.insert_run(&running).unwrap();
+        for (n, at) in ["2026-09-18T10:00:01Z", "2026-09-18T10:00:02Z"]
+            .into_iter()
+            .enumerate()
+        {
+            c.append_run_event(
+                &running.id,
+                &event(
+                    &format!("call-{n}"),
+                    at,
+                    RunEvent::ToolCall {
+                        id: format!("t{n}"),
+                        name: "Read".into(),
+                        summary: format!("Read f{n}"),
+                        parent_id: None,
+                    },
+                ),
+            )
+            .unwrap();
+        }
+        let loaded = c.load_run(&running.id).unwrap().unwrap();
+        assert_eq!(loaded.steps.len(), 2);
+
+        // As record_work does at a Work run's start and end.
+        c.update_run(&loaded).unwrap();
+        c.update_run(&c.load_run(&running.id).unwrap().unwrap())
+            .unwrap();
+        let again = c.load_run(&running.id).unwrap().unwrap();
+        assert_eq!(again.steps, loaded.steps);
+        assert_eq!(again.last_event_sequence, loaded.last_event_sequence);
+    }
+
+    #[test]
+    fn schema_36_drops_only_the_legacy_steps_events_repeat() {
+        let c = Cache::open_in_memory().unwrap();
+        // One run from before events, with legacy steps of its own, and
+        // one with a tool call that an update copied as a legacy step.
+        let mut old = run("old-r1", "thread", RunStatus::Completed);
+        old.steps = vec![RunStep {
+            summary: "Ran git log".into(),
+            ok: true,
+            note: false,
+            pending: false,
+            user: false,
+        }];
+        c.insert_run(&old).unwrap();
+        let mut new = run("new-r1", "thread", RunStatus::Running);
+        new.steps.clear();
+        c.insert_run(&new).unwrap();
+        c.append_run_event(
+            &new.id,
+            &event(
+                "call",
+                "2026-09-18T10:00:01Z",
+                RunEvent::ToolCall {
+                    id: "t1".into(),
+                    name: "Read".into(),
+                    summary: "Read f".into(),
+                    parent_id: None,
+                },
+            ),
+        )
+        .unwrap();
+        insert_event_row(
+            &c.conn,
+            &RunEventRecord {
+                run_id: new.id.clone(),
+                sequence: 2,
+                event_id: "compat-step-2-0".into(),
+                occurred_at: "2026-09-18T10:00:02Z".parse().unwrap(),
+                event: RunEvent::LegacyStep {
+                    summary: "Read f".into(),
+                    ok: true,
+                },
+                truncated: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(c.load_run("new-r1").unwrap().unwrap().steps.len(), 2);
+
+        let tx = c.conn.unchecked_transaction().unwrap();
+        drop_repeated_legacy_steps(&tx).unwrap();
+        tx.commit().unwrap();
+
+        assert_eq!(c.load_run("new-r1").unwrap().unwrap().steps.len(), 1);
+        assert_eq!(c.load_run("old-r1").unwrap().unwrap().steps, old.steps);
     }
 
     #[test]
