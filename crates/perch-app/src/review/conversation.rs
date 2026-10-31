@@ -77,6 +77,12 @@ pub fn view(
         Stack::vertical((
             conversation_title(state),
             crate::review::summary::summary(app, state, summary_backend.clone(), open_item),
+            crate::review::walkthrough::conversation_card(
+                app,
+                state,
+                backend.clone(),
+                open_file.clone(),
+            ),
             finding_filters(app, state),
             dyn_stack(
                 rows,

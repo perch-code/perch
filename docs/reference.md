@@ -121,14 +121,14 @@ closed history is never backfilled.
 
 ## Conversation and Code
 
-An item has three modes, the pills at the centre of its bar, as Codex has
+An item has two modes, the pills at the centre of its bar, as Codex has
 Summary and Code. **Conversation** is the item's summary, its timeline and its
-threads, with a composer at the foot. **Walkthrough** tells the change start
-to finish (see [Walkthrough](#walkthrough)). **Code** is the worktree: the open
+threads, with a composer at the foot. **Code** is the worktree: the open
 files as tabs over the editor, and the file tree in the drawer on the right
-(see [The file tree](#the-file-tree)). An issue with no checkout has no
-Walkthrough or Code and no pills; Start work gives it a checkout, and the
-pills come. When the bar's
+(see [The file tree](#the-file-tree)). A walkthrough of the change starts on
+Conversation and is taken on Code (see [Walkthrough](#walkthrough)). An issue
+with no checkout has no Code and no pills; Start work gives it a checkout,
+and the pills come. When the bar's
 controls take more than half of it, the pills give way to them rather than
 sit at the centre.
 
@@ -148,50 +148,68 @@ cannot be closed.
 
 ## Walkthrough
 
-**Walkthrough** is the change told as a story, in the order that makes it
-easiest to follow: usually the way data or control flows through it, not file
-by file. It works for a pull request and for a branch with no pull request
-alike.
+A walkthrough is the change told as a tour of the code, stop by stop, in the
+order that makes it easiest to follow: usually the way data or control flows
+through it, not file by file. It works for a pull request and for a branch
+with no pull request alike.
 
-Pick the model and effort under the card, as in the composer; they start
-on whichever the composer last used. The box above them takes guidance for
-the agent, such as what to dwell on or where to start, and is kept with the
+It starts from the **Walkthrough** card on Conversation, under the item's
+summary. Pick the model and effort there, as in the composer; they start on
+whichever the composer last used. The box above them takes guidance for the
+agent, such as what to dwell on or where to start, and is kept with the
 walkthrough so **Write again** starts from the same words. **Write**
-(Cmd-Enter in the box) has the agent read the change under Ask's rules (read only, no network, nothing
-reaches GitHub) and answer with a summary, a background and the steps. The
-summary sits at the top: in a few sentences, what the change is and why,
-what it changes, and anything a reviewer should weigh, such as a risk or a
-compatibility cost. The background comes next: what the parts the change touches are for, how they work and
-where the rest of the system uses them, as they were before it, with the
-unchanged code that shows it. It is written for someone who knows the
-codebase but not this corner of it, or has forgotten it. Each step has a
-title and a body that reads like an article with its figures in place: a
-few sentences, then the hunk of the diff they lead into, then what it shows,
-then the next piece. A long hunk can be shown in pieces with words between
-them. Besides hunks, a body can show other lines the story needs, such as an
-unchanged caller or what a function used to be, the review threads it
-discusses, where it discusses them, and Mermaid diagrams where a picture says
-more than words: data moving between parts, a sequence of calls, states. Perch
-lays a diagram out and draws it in its own colours, light or dark; a diagram
-that isn't Mermaid Perch can draw is asked about again, and left out if it
-still isn't. Dashed lines are drawn solid. The agent never writes code into
-it. Perch draws each step's lines from
-the checkout, as a thread's card draws its lines, numbered and tinted as the
-diff tints them. A file's name over its lines opens it on Code at the first
-line, and a thread opens on Conversation.
+(Cmd-Enter in the box) has the agent read the change under Ask's rules (read
+only, no network, nothing reaches GitHub) and answer with a summary, a
+background and the steps.
 
-Perch gives the agent the list of hunks and checks that every one is shown,
-and that no whole hunk is shown twice. Hunks the answer leaves out are asked
-about once more, in the same session; any still left out go into a last
-step, **Also changed**, so nothing in the diff is out of sight. Hunks and
-threads the item doesn't have are dropped, a piece of a hunk is cut to the
-hunk, and other lines are cut to their file.
+The card then shows the summary: in a few sentences, what the change is and
+why, what it changes, and anything a reviewer should weigh, such as a risk or
+a compatibility cost. Under it the background is folded under its title; a
+click opens it. It says what the parts the change touches are for, how they
+work and where the rest of the system uses them, as they were before it, with
+the unchanged code that shows it, for someone who knows the codebase but not
+this corner of it, or has forgotten it.
+
+**Start** takes you to the first step on Code. Each step is about one place
+in the code: a hunk, a few hunks close together in one file, or a piece of a
+long hunk, or lines the change left alone that the story needs. Its card sits
+right under those lines, as a thread's does, with its title and a few
+sentences on what the lines are for and why. A card can also show other lines
+the story needs, such as an unchanged caller or what a function used to be,
+the review threads it discusses, and Mermaid diagrams where a picture says
+more than words: data moving between parts, a sequence of calls, states.
+Perch lays a diagram out and draws it in its own colours, light or dark; a
+diagram that isn't Mermaid Perch can draw is asked about again, and left out
+if it still isn't. Dashed lines are drawn solid. The agent never writes code
+into it: Perch draws the lines from the checkout. A file's name over cited
+lines opens it on Code at the first line, and a thread opens on Conversation.
+
+While you take the walkthrough, every step's card is in Code, in whichever
+file it belongs to, and a bar over the code says which step you are on. The
+step you are on is framed and ends in a button to the next; a click on
+another step's card makes it the one. Each step you go to is a place Back
+returns to. The **x** on the bar puts the walkthrough away and its cards
+leave Code; the card on Conversation then reads **Start** again, or **Go to
+step** while it is out.
+
+| Action | Key |
+|---|---|
+| Next step, previous step | `.`, `,` |
+
+Perch gives the agent the list of hunks and checks that some step covers
+every one, and that every step names a place. What the answer leaves out is
+asked about once more, in the same session; a hunk still left out gets a
+step of Perch's own at the end, **Also changed in** its file, so nothing in
+the diff is out of sight. Hunks and threads the item doesn't have are
+dropped, and lines are cut to their file.
 
 A walkthrough takes a few minutes and goes on while you look elsewhere;
 **Stop** ends it. It is kept for the head it was written at, under
-`walkthroughs/` in Perch's data directory, and never sent anywhere. One
-written before the latest commits is still shown, without its lines, whose
-numbers were the old head's, and **Write again** writes it for the head.
+`walkthroughs/` in Perch's data directory, and never sent anywhere. Each step
+keeps the text of its lines, so after later commits its card follows them to
+where they are now; a step whose lines have changed has no card. The card on
+Conversation says when the walkthrough is of an older head, and **Write
+again** writes it for the head.
 
 ## Timeline
 
@@ -1100,8 +1118,7 @@ stacked layout.
 | Match case, whole word, regular expression | `Alt-Cmd-C`, `Alt-Cmd-W`, `Alt-Cmd-R` |
 | Close the bar | `Escape` |
 
-`Page Up` and `Page Down` scroll the open file, Conversation or the
-Walkthrough by a page, keeping a line of the last in sight, and leave the
+`Page Up` and `Page Down` scroll the open file or Conversation by a page, keeping a line of the last in sight, and leave the
 caret where it is. They work from the code, the page or a composer. `Cmd-Up` and `Cmd-Down` go to the
 top and the end, the caret with them in the code; a composer keeps them for
 its own text. The find bar and the other boxes keep all four.

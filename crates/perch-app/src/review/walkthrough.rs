@@ -1,14 +1,18 @@
-//! Walkthrough: the change told start to finish, as an agent wrote it and
-//! the backend's `walkthrough` checked it. One reading column, as
-//! Conversation's: a card that writes it, then the change's summary, the
-//! background and a card for each step, each its prose with the lines
-//! it is about set in it, which Perch draws from the files as a thread's
-//! card draws its lines, and the threads it names, which open on
+//! Walkthrough: the change told as a tour of the code, as an agent wrote
+//! it and the backend's `walkthrough` checked it. Conversation has a card
+//! that writes it and says what it is about: the change's summary, and
+//! the background to unfold. Start takes the reader to Code, where each
+//! step is a card under the lines it is about, as a thread's is, and a
+//! bar over the code steps from one to the next. A step's card draws the
+//! lines from elsewhere it cites, which Perch reads from the files as a
+//! thread's card draws its lines, and the threads it names, which open on
 //! Conversation. All of it is Perch's own, so all of it is grey.
 //!
-//! The lines are read at the commits the walkthrough was written for, not
-//! taken from Code, so they are its lines whatever Code shows. One written
-//! for an older head still shows them, as they were, and says so.
+//! The lines a step cites are read at the commits the walkthrough was
+//! written for, not taken from Code, so they are its lines whatever Code
+//! shows. A step's own lines are found in Code's file by their text, so
+//! its card follows a file that moved on since, and has none where the
+//! lines are gone.
 
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
@@ -26,7 +30,7 @@ use crate::backend::{Backend, CodeSide, Part, Step, Walkthrough, WalkthroughOutc
 use crate::icons::SidebarIcon;
 use crate::review::cards::{self, perch_surface, CodeLine, Tint};
 use crate::review::doc::CardId;
-use crate::review::model::{AgentChoice, ItemTab, LoadedFile, Paging, ReviewState, Symbol};
+use crate::review::model::{AgentChoice, ItemTab, LoadedFile, ReviewState, Symbol};
 use crate::review::threads::{self, ThreadFace};
 use crate::review::OpenFile;
 use crate::state::AppState;
@@ -136,7 +140,352 @@ fn write(app: AppState, state: ReviewState, backend: &Backend) {
     backend.write_walkthrough(&item_id, choice, &guidance);
 }
 
-pub fn view(
+/// The open item's walkthrough, when one is kept for it. Tracked.
+pub fn shown(state: ReviewState) -> Option<Arc<Walkthrough>> {
+    let id = state.item.with(|i| i.as_ref().map(|i| i.id.clone()))?;
+    state
+        .walkthroughs
+        .with(|kept| kept.get(&id).cloned().flatten())
+}
+
+/// Ask for what is kept for the open item, the first time it is wanted.
+fn load_kept(state: ReviewState, backend: &Backend) {
+    let Some(id) = state
+        .item
+        .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+    else {
+        return;
+    };
+    if !state
+        .walkthroughs
+        .with_untracked(|kept| kept.contains_key(&id))
+    {
+        backend.load_walkthrough(&id);
+    }
+}
+
+/// Take the reader to step `index`: Code, its file, its lines a little
+/// below the top with its card under them. One move, for Back. The cards
+/// come into Code with the first step the reader goes to.
+pub fn go_to_step(state: ReviewState, index: usize) {
+    let Some(walkthrough) = floem::reactive::Effect::untrack(|| shown(state)) else {
+        return;
+    };
+    let Some(step) = walkthrough.steps.get(index) else {
+        return;
+    };
+    if state.walkthrough_at.get_untracked().is_none() {
+        // The rows a card was laid out at on another walkthrough are not
+        // this one's.
+        state
+            .card_rows
+            .update(|rows| rows.retain(|id, _| !matches!(id, CardId::Step(_))));
+    }
+    state.walkthrough_at.set(Some(index));
+    // Where its lines are now, if the file is open; else as written.
+    let file = state
+        .files
+        .with_untracked(|files| files.get(&step.at.path).cloned());
+    let (first, last) = file
+        .as_deref()
+        .and_then(|file| Some((file, locate(file, step)?)))
+        .map(|(file, anchor)| head_range(file, &anchor))
+        .unwrap_or_else(|| match step.at.side {
+            CodeSide::Head => (step.at.start as usize, step.at.end as usize),
+            CodeSide::Base => (1, 1),
+        });
+    state.one_move(|| {
+        // Through first: an editor already open takes the jump as it is
+        // written.
+        state.jump_through.set(Some(last.saturating_sub(1)));
+        state.go_to_file(&step.at.path, Some((first.saturating_sub(1), 0)));
+    });
+}
+
+/// The step after the one the reader is on, or before it, if there is
+/// one.
+pub fn step_by(state: ReviewState, forward: bool) {
+    let Some(at) = state.walkthrough_at.get_untracked() else {
+        return;
+    };
+    let count = floem::reactive::Effect::untrack(|| shown(state)).map_or(0, |w| w.steps.len());
+    let to = if forward {
+        at + 1
+    } else {
+        match at.checked_sub(1) {
+            Some(to) => to,
+            None => return,
+        }
+    };
+    if to < count {
+        go_to_step(state, to);
+    }
+}
+
+/// Put the walkthrough away: its cards leave Code, and the bar goes.
+pub fn close(state: ReviewState) {
+    state.walkthrough_at.set(None);
+}
+
+/// The head lines, one-based, an anchor's lines are on or beside: a base
+/// line counts as the head line it became.
+fn head_range(file: &LoadedFile, anchor: &Anchor) -> (usize, usize) {
+    let (start, end) = (anchor.start_line as usize, anchor.line as usize);
+    match anchor.side {
+        Side::Right => (start, end),
+        Side::Left => (head_line_of(file, start), head_line_of(file, end)),
+    }
+}
+
+/// The lines of one side of a file, in order: the head's, with the
+/// removed lines the buffer splices in left out, or the base's. A file
+/// the change leaves alone is its head on both sides.
+fn side_lines(file: &LoadedFile, side: Side) -> Option<Vec<&str>> {
+    match side {
+        Side::Right => Some(
+            file.buffer
+                .text
+                .lines()
+                .zip(&file.buffer.rows)
+                .filter(|(_, row)| !row.is_deleted())
+                .map(|(line, _)| line)
+                .collect(),
+        ),
+        Side::Left => Some(file.base_buffer.as_ref()?.text.lines().collect()),
+    }
+}
+
+/// Where a step's lines are in a file as Code has it: where it says, when
+/// they are still there, else the same lines nearest to there, so a step
+/// follows a file that moved on since it was written. `None` when the
+/// file no longer has them.
+pub fn locate(file: &LoadedFile, step: &Step) -> Option<Anchor> {
+    let side = side_of(file, step);
+    locate_in(file, step, side, &side_lines(file, side)?)
+}
+
+/// The side a step's lines are on in a file: its own, but the head's in
+/// a file the change leaves alone.
+fn side_of(file: &LoadedFile, step: &Step) -> Side {
+    if file.status.is_none() {
+        Side::Right
+    } else {
+        step.at.side.github()
+    }
+}
+
+/// `locate`, over the lines of the side they are on.
+fn locate_in(file: &LoadedFile, step: &Step, side: Side, lines: &[&str]) -> Option<Anchor> {
+    if step.at.path != file.path {
+        return None;
+    }
+    let (start, end) = (step.at.start as usize, step.at.end as usize);
+    let len = end.checked_sub(start)? + 1;
+    let same = |at: usize| {
+        lines
+            .get(at..at + len)
+            .is_some_and(|here| here.iter().zip(&step.text).all(|(a, b)| *a == b))
+    };
+    let found = if step.text.len() != len || same(start - 1) {
+        (end <= lines.len()).then_some(start)
+    } else {
+        (0..=lines.len().saturating_sub(len))
+            .filter(|&at| same(at))
+            .min_by_key(|&at| at.abs_diff(start - 1))
+            .map(|at| at + 1)
+    }?;
+    Some(Anchor {
+        path: file.path.clone(),
+        start_line: u32::try_from(found).ok()?,
+        line: u32::try_from(found + len - 1).ok()?,
+        side,
+        commit_sha: String::new(),
+    })
+}
+
+/// The steps whose cards are in `file`, by index, each with the lines
+/// it is under there; none unless the reader is taking the walkthrough.
+/// Tracked.
+pub fn steps_in(state: ReviewState, file: &LoadedFile) -> Vec<(usize, Anchor)> {
+    if state.walkthrough_at.with(Option::is_none) {
+        return Vec::new();
+    }
+    let Some(walkthrough) = shown(state) else {
+        return Vec::new();
+    };
+    // Each side's lines once, however many steps are in the file.
+    let head = std::cell::OnceCell::new();
+    let base = std::cell::OnceCell::new();
+    walkthrough
+        .steps
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| step.at.path == file.path)
+        .filter_map(|(i, step)| {
+            let side = side_of(file, step);
+            let lines = match side {
+                Side::Right => &head,
+                Side::Left => &base,
+            }
+            .get_or_init(|| side_lines(file, side));
+            Some((i, locate_in(file, step, side, lines.as_deref()?)?))
+        })
+        .collect()
+}
+
+/// The steps' cards in `file`, each under the last of its lines, with
+/// the rows it was laid out at, else an estimate. Tracked.
+pub fn step_cards(state: ReviewState, file: &LoadedFile) -> Vec<crate::review::doc::Card> {
+    let Some(walkthrough) = shown(state) else {
+        return Vec::new();
+    };
+    steps_in(state, file)
+        .into_iter()
+        .filter_map(|(i, anchor)| {
+            let after_display_line = crate::review::model::card_line(file, &anchor)?;
+            let id = CardId::Step(i);
+            let rows = state
+                .card_rows
+                .with(|rows| rows.get(&id).copied())
+                .unwrap_or_else(|| estimate_rows(&walkthrough.steps[i]));
+            Some(crate::review::doc::Card {
+                id,
+                after_display_line,
+                rows,
+                side: anchor.side,
+            })
+        })
+        .collect()
+}
+
+/// About how many code rows a step's card is, before it is laid out:
+/// the header, the room round the body, and the body's parts, prose at
+/// eighty columns. The layout corrects it.
+fn estimate_rows(step: &Step) -> usize {
+    let body: usize = step
+        .body
+        .iter()
+        .map(|part| match part {
+            Part::Text { text } => {
+                text.lines()
+                    .map(|l| l.chars().count().div_ceil(80).max(1))
+                    .sum::<usize>()
+                    + 1
+            }
+            Part::Code(lines) => {
+                ((lines.end.saturating_sub(lines.start) + 1) as usize).min(BLOCK_ROWS) + 3
+            }
+            Part::Thread { .. } => 1,
+            Part::Diagram { .. } => 12,
+        })
+        .sum();
+    body + 5
+}
+
+/// Step through the walkthrough from Code: where the reader is in it and
+/// what the step is, Back and Next, and the way out. Over the code while
+/// the reader is taking it; grey, as it is Perch's.
+pub fn step_bar(state: ReviewState) -> impl IntoView {
+    let count = Memo::new(move |_| shown(state).map_or(0, |w| w.steps.len()));
+    let at = Memo::new(move |_| {
+        let at = state.walkthrough_at.get()?;
+        (at < count.get()).then_some(at)
+    });
+    let title = Memo::new(move |_| {
+        let at = at.get()?;
+        shown(state).and_then(|w| w.steps.get(at).map(|s| s.title.clone()))
+    });
+    let here = Label::derived(move || match at.get() {
+        Some(at) => format!("Step {} of {}", at + 1, count.get()),
+        None => String::new(),
+    })
+    .style(|s| {
+        s.font_size(theme::TEXT_META)
+            .font_weight(theme::weight_emphasis())
+            .color(theme::fg_muted())
+            .flex_shrink(0.0_f32)
+            .selectable(false)
+    });
+    let name = Label::derived(move || title.get().unwrap_or_default())
+        .on_event_stop(el::Click, move |_, _| {
+            if let Some(at) = at.get_untracked() {
+                go_to_step(state, at);
+            }
+        })
+        .debug_name("walkthrough-bar-title")
+        .style(|s| {
+            clickable(s)
+                .font_size(theme::TEXT_META)
+                .color(theme::fg())
+                .text_ellipsis()
+                .min_width(0.0)
+                .flex_grow(1.0_f32)
+                .flex_basis(0.0)
+        });
+    let back = cards::tip(
+        icon_action(
+            SidebarIcon::ChevronUp,
+            "walkthrough-back",
+            move || at.get().is_some_and(|at| at > 0),
+            move || step_by(state, false),
+        ),
+        format!(
+            "Previous step ({})",
+            crate::ui::menu::Shortcut::label_of("Comma")
+        ),
+    );
+    let next = cards::tip(
+        icon_action(
+            SidebarIcon::ChevronDown,
+            "walkthrough-next",
+            move || at.get().is_some_and(|at| at + 1 < count.get()),
+            move || step_by(state, true),
+        ),
+        format!(
+            "Next step ({})",
+            crate::ui::menu::Shortcut::label_of("Period")
+        ),
+    );
+    let done = cards::tip(
+        icon_action(
+            SidebarIcon::Close,
+            "walkthrough-close",
+            || true,
+            move || close(state),
+        ),
+        "Put the walkthrough away".to_string(),
+    );
+    Stack::horizontal((
+        sidebar_glyph(SidebarIcon::Milestone, theme::fg_muted)
+            .style(|s| s.size(14.0, 14.0).flex_shrink(0.0_f32)),
+        here,
+        name,
+        back,
+        next,
+        done,
+    ))
+    .debug_name("walkthrough-bar")
+    .style(move |s| {
+        s.items_center()
+            .width_full()
+            .height(36.0)
+            .gap(8.0)
+            .padding_left(theme::CODE_GUTTER_GAP + 4.0)
+            .padding_right(6.0)
+            .background(theme::perch_bg())
+            .border_bottom(1.0)
+            .border_color(theme::border_muted())
+            .apply_if(at.get().is_none(), |s| s.hide())
+    })
+}
+
+/// The card on Conversation that writes the walkthrough and starts it:
+/// what a walkthrough is before there is one, that it is being written,
+/// why it could not be, or that it is of an older head; once written, the
+/// summary, the background to unfold, and Start. Under that the reader's
+/// guidance, the model and effort, and Write, or Write again, or Stop.
+/// Only for an item with files.
+pub fn conversation_card(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
@@ -147,23 +496,12 @@ pub fn view(
     {
         let backend = backend.clone();
         floem::reactive::Effect::new(move |_| {
-            let Some(id) = item.get() else {
-                return;
-            };
-            if !state
-                .walkthroughs
-                .with_untracked(|kept| kept.contains_key(&id))
-            {
-                backend.load_walkthrough(&id);
+            if item.get().is_some() {
+                load_kept(state, &backend);
             }
         });
     }
-    let shown = Memo::new(move |_| {
-        let id = item.get()?;
-        state
-            .walkthroughs
-            .with(|kept| kept.get(&id).cloned().flatten())
-    });
+    let shown = Memo::new(move |_| shown(state));
     // Whether it was written for a head other than the checkout's.
     let stale = Memo::new(move |_| {
         let head = state.item.with(|i| {
@@ -173,106 +511,6 @@ pub fn view(
         });
         shown.with(|w| w.as_ref().zip(head).is_some_and(|(w, head)| w.head != head))
     });
-
-    let page_id: RwSignal<Option<floem::ViewId>> = RwSignal::new(None);
-    let steps_backend = backend.clone();
-    let page = Container::new(
-        Stack::vertical((
-            Label::derived(|| "Walkthrough".to_string()).style(|s| {
-                s.width_full()
-                    .font_size(theme::TEXT_PAGE_TITLE)
-                    .font_weight(theme::weight_emphasis())
-                    .line_height(theme::PAGE_TITLE_LINE_HEIGHT)
-                    .color(theme::fg())
-                    .padding_bottom(theme::CONVERSATION_TITLE_GAP)
-            }),
-            head_card(app, state, backend, item, shown, stale),
-            dyn_container(
-                move || shown.get(),
-                move |shown| match (shown, item.get_untracked()) {
-                    (Some(walkthrough), Some(item_id)) => steps(
-                        app,
-                        state,
-                        steps_backend.clone(),
-                        open_file.clone(),
-                        item_id,
-                        walkthrough,
-                    )
-                    .into_any(),
-                    _ => Empty::new().into_any(),
-                },
-            )
-            .style(|s| s.width_full()),
-        ))
-        // A definite width cut to the page's, as Conversation's column
-        // has, so wrapped prose is measured at the width it is drawn at.
-        .style(|s| {
-            s.flex_col()
-                .width(theme::CONVERSATION_WIDTH)
-                .max_width_full()
-        }),
-    )
-    .style(|s| {
-        s.width_full()
-            .items_start()
-            .justify_center()
-            .padding(theme::CONVERSATION_PADDING)
-    })
-    .scroll()
-    // Page Up and Page Down, and Cmd-Up and Cmd-Down, as on Conversation.
-    .scroll_delta(move || {
-        let Some(paging) = state.paging.get() else {
-            return floem::kurbo::Vec2::ZERO;
-        };
-        state.paging.set(None);
-        let page = || {
-            let height = page_id
-                .get_untracked()
-                .map_or(0.0, |id| id.get_content_rect_local().height());
-            (height - theme::code_line_height() as f64).max(0.0)
-        };
-        let y = match paging {
-            Paging::Up => -page(),
-            Paging::Down => page(),
-            Paging::Top => -f64::MAX,
-            Paging::End => f64::MAX,
-        };
-        floem::kurbo::Vec2::new(0.0, y)
-    })
-    .debug_name("walkthrough")
-    .style(|s| {
-        s.size_full()
-            .min_height(0.0)
-            .background(theme::canvas())
-            .focusable()
-    });
-    page_id.set(Some(page.id()));
-    // The page takes the keyboard when it comes up with nothing else
-    // holding it, so Page Down reaches the window's handler.
-    let asked = Rc::new(std::cell::Cell::new(false));
-    let focus_id = page.id();
-    Container::new(page)
-        .on_event_cont(el::UpdatePhaseLayout, move |cx, _| {
-            if !asked.replace(true) && crate::ui::focused_descendant(cx, focus_id.root()).is_none()
-            {
-                focus_id.request_focus();
-            }
-        })
-        .style(|s| s.size_full().min_height(0.0))
-}
-
-/// The card over the steps: what a walkthrough is before there is one,
-/// that it is being written, why it could not be, or that it is of an
-/// older head. Under that the reader's guidance, the model and effort, and
-/// Write, or Write again, or Stop.
-fn head_card(
-    app: AppState,
-    state: ReviewState,
-    backend: Rc<Backend>,
-    item: Memo<Option<String>>,
-    shown: Memo<Option<Arc<Walkthrough>>>,
-    stale: Memo<bool>,
-) -> impl IntoView {
     let started = Memo::new(move |_| {
         let id = item.get()?;
         state
@@ -294,18 +532,55 @@ fn head_card(
             return format!("The walkthrough couldn't be written: {error}");
         }
         match shown.get() {
-            None => "An agent reads the change and tells it start to finish, in the order \
-                     that's easiest to follow. Perch draws the code under each step, and \
-                     checks that every hunk is in one."
+            None => "An agent reads the change and tells it as a tour of the code, stop by \
+                     stop, in the order that's easiest to follow. Each stop is a card under \
+                     its lines in Code, and Perch checks that every hunk has one."
                 .to_string(),
             Some(w) if stale.get() => format!(
-                "Written for {}, before the latest commits, and its code is as it was then. \
-                 Write it again to see the change as it is.",
+                "Written for {}, before the latest commits. Steps whose lines have changed \
+                 since have no card. Write it again to see the change as it is.",
                 crate::review::timeline::short_sha(&w.head)
             ),
             Some(_) => String::new(),
         }
     };
+    let title = Stack::horizontal((
+        sidebar_glyph(SidebarIcon::Milestone, theme::fg_muted)
+            .style(|s| s.size(14.0, 14.0).flex_shrink(0.0_f32)),
+        Label::derived(|| "Walkthrough".to_string()).style(|s| {
+            s.font_size(theme::TEXT_SECTION_TITLE)
+                .font_weight(theme::weight_emphasis())
+                .color(theme::fg())
+                .selectable(false)
+        }),
+        Label::derived(move || {
+            shown
+                .get()
+                .map(|w| match w.steps.len() {
+                    1 => "1 step".to_string(),
+                    n => format!("{n} steps"),
+                })
+                .unwrap_or_default()
+        })
+        .style(|s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::fg_subtle())
+                .selectable(false)
+        }),
+        Empty::new().style(|s| s.flex_grow(1.0_f32)),
+        action_button(
+            move || match state.walkthrough_at.get() {
+                Some(at) => format!("Go to step {}", at + 1),
+                None => "Start".to_string(),
+            },
+            "walkthrough-start",
+            true,
+            || true,
+            move || go_to_step(state, state.walkthrough_at.get_untracked().unwrap_or(0)),
+        )
+        .style(move |s| s.apply_if(shown.with(Option::is_none), |s| s.hide())),
+    ))
+    .style(|s| s.items_center().width_full().gap(8.0));
     let text = Label::derived(words).style(move |s| {
         s.font_size(theme::TEXT_BODY)
             .color(theme::fg_muted())
@@ -313,11 +588,54 @@ fn head_card(
             .width_full()
             .apply_if(words().is_empty(), |s| s.hide())
     });
+    let story = {
+        let backend = backend.clone();
+        dyn_container(
+            move || shown.get(),
+            move |shown| match (shown, item.get_untracked()) {
+                (Some(walkthrough), Some(item_id)) => story(
+                    app,
+                    state,
+                    backend.clone(),
+                    open_file.clone(),
+                    item_id,
+                    walkthrough,
+                )
+                .into_any(),
+                _ => Empty::new().into_any(),
+            },
+        )
+        .style(|s| s.width_full())
+    };
+    // The guidance box is folded away until asked for, or until there is
+    // guidance in it, so the card stays short on every item.
+    let asked = RwSignal::new(false);
+    let guided = Memo::new(move |_| {
+        let Some(id) = item.get() else {
+            return false;
+        };
+        asked.get()
+            || state
+                .walkthrough_guidance
+                .with(|drafts| drafts.get(&id).is_some_and(|g| !g.trim().is_empty()))
+    });
+    let add_guidance = Label::derived(|| "Add guidance".to_string())
+        .on_event_stop(el::Click, move |_, _| asked.set(true))
+        .debug_name("walkthrough-add-guidance")
+        .style(move |s| {
+            clickable(s)
+                .font_size(theme::TEXT_META)
+                .color(theme::fg_muted())
+                .selectable(false)
+                .hover(|s| s.color(theme::fg()))
+                .apply_if(guided.get(), |s| s.hide())
+        });
     let write_backend = backend.clone();
     let stop_backend = backend.clone();
     let controls = Stack::horizontal((
         agent_picker(app, state, writing),
         effort_picker(app, state, writing),
+        add_guidance,
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
         action_button(
             move || {
@@ -341,18 +659,95 @@ fn head_card(
             .apply_if(writing.get(), |s| s.hide())
     });
     Stack::vertical((
+        title,
         text,
-        guidance_box(app, state, backend, item, writing),
+        story,
+        Container::new(guidance_box(app, state, backend, item, writing))
+            .style(move |s| s.width_full().apply_if(!guided.get(), |s| s.hide())),
         controls,
         writing_bar(state, item, started, stop_backend),
     ))
-    .debug_name("walkthrough-head")
-    .style(|s| {
+    .debug_name("walkthrough-card")
+    .style(move |s| {
         perch_surface(s)
             .flex_col()
             .width_full()
             .gap(12.0)
             .padding(theme::CARD_PADDING)
+            .margin_bottom(theme::CARD_GAP)
+            .apply_if(!state.has_files(), |s| s.hide())
+    })
+}
+
+/// What a written walkthrough says before its steps: the summary, then
+/// the background folded under its title, which a click opens.
+fn story(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    open_file: OpenFile,
+    item_id: String,
+    walkthrough: Arc<Walkthrough>,
+) -> impl IntoView {
+    ask_files(state, &backend, &item_id, &walkthrough);
+    let summary = (!walkthrough.summary.trim().is_empty())
+        .then(|| crate::review::markdown::render_linked(&walkthrough.summary, state).into_any());
+    let background = walkthrough.background.clone().map(|background| {
+        let open = RwSignal::new(false);
+        let title = background.title.clone();
+        let toggle = Stack::horizontal((
+            sidebar_glyph_dyn(move || {
+                if open.get() {
+                    SidebarIcon::ChevronDown
+                } else {
+                    SidebarIcon::ChevronRight
+                }
+            }),
+            Label::derived(move || format!("Background: {title}")).style(|s| {
+                s.font_size(theme::TEXT_BODY)
+                    .font_weight(theme::weight_emphasis())
+                    .color(theme::fg())
+                    .text_wrap()
+                    .min_width(0.0)
+                    .flex_grow(1.0_f32)
+                    .flex_basis(0.0)
+                    .selectable(false)
+            }),
+        ))
+        .on_event_stop(el::Click, move |_, _| open.update(|o| *o = !*o))
+        .debug_name("walkthrough-background-toggle")
+        .style(|s| clickable(s).items_center().width_full().gap(6.0));
+        let key = format!("{}/background", walkthrough.head);
+        let body = body_view(
+            app,
+            state,
+            backend.clone(),
+            open_file.clone(),
+            item_id.clone(),
+            walkthrough.head.clone(),
+            key,
+            &background.body,
+        )
+        .debug_name("walkthrough-background")
+        .style(move |s| s.apply_if(!open.get(), |s| s.hide()));
+        Stack::vertical((toggle, body))
+            .style(|s| s.flex_col().width_full().gap(10.0))
+            .into_any()
+    });
+    Stack::vertical_from_iter(summary.into_iter().chain(background))
+        .debug_name("walkthrough-story")
+        .style(|s| s.flex_col().width_full().gap(12.0))
+}
+
+/// A chevron that turns as `icon` says.
+fn sidebar_glyph_dyn(icon: impl Fn() -> SidebarIcon + Copy + 'static) -> impl IntoView {
+    crate::ui::widgets::icon_in(
+        move || crate::icons::sidebar_icon(icon(), theme::fg_muted()),
+        theme::fg_muted,
+    )
+    .style(|s| {
+        s.size(theme::CHEVRON_GLYPH, theme::CHEVRON_GLYPH)
+            .flex_shrink(0.0_f32)
     })
 }
 
@@ -588,79 +983,6 @@ fn guidance_box(
     .style(move |s| s.width_full().apply_if(writing.get(), |s| s.hide()))
 }
 
-/// The summary, then the steps, each its own card.
-fn steps(
-    app: AppState,
-    state: ReviewState,
-    backend: Rc<Backend>,
-    open_file: OpenFile,
-    item_id: String,
-    walkthrough: Arc<Walkthrough>,
-) -> impl IntoView {
-    ask_files(state, &backend, &item_id, &walkthrough);
-    // The background first, unnumbered, then the steps from 1.
-    let cards: Vec<(Option<usize>, Step)> = walkthrough
-        .background
-        .iter()
-        .map(|background| (None, background.clone()))
-        .chain(
-            walkthrough
-                .steps
-                .iter()
-                .enumerate()
-                .map(|(i, step)| (Some(i + 1), step.clone())),
-        )
-        .collect();
-    let count = cards.len();
-    let summary = (!walkthrough.summary.trim().is_empty())
-        .then(|| summary_card(state, &walkthrough.summary).into_any());
-    let steps = dyn_stack(
-        move || 0..count,
-        |i| *i,
-        move |i| {
-            let (number, step) = cards[i].clone();
-            step_card(
-                app,
-                state,
-                backend.clone(),
-                open_file.clone(),
-                item_id.clone(),
-                walkthrough.clone(),
-                step,
-                number,
-            )
-        },
-    )
-    .debug_name("walkthrough-steps")
-    .style(|s| s.flex_col().width_full().gap(theme::CARD_GAP));
-    Stack::vertical_from_iter(summary.into_iter().chain([steps.into_any()])).style(|s| {
-        s.flex_col()
-            .width_full()
-            .gap(theme::CARD_GAP)
-            .padding_top(theme::CARD_GAP)
-    })
-}
-
-/// What the change is, as the agent put it, in a card of its own.
-fn summary_card(state: ReviewState, summary: &str) -> impl IntoView {
-    Stack::vertical((
-        Label::derived(|| "Summary".to_string()).style(|s| {
-            s.font_size(theme::TEXT_SECTION_TITLE)
-                .font_weight(theme::weight_emphasis())
-                .color(theme::fg())
-        }),
-        crate::review::markdown::render_linked(summary, state),
-    ))
-    .debug_name("walkthrough-summary")
-    .style(|s| {
-        perch_surface(s)
-            .flex_col()
-            .width_full()
-            .gap(12.0)
-            .padding(theme::CARD_PADDING)
-    })
-}
-
 /// Files an item's walkthrough draws its lines from, read at its commits.
 /// Another walkthrough of other commits starts them over.
 #[derive(Default)]
@@ -677,10 +999,10 @@ fn ask_files(state: ReviewState, backend: &Backend, item_id: &str, walkthrough: 
     let paths: BTreeSet<&str> = walkthrough
         .background
         .iter()
-        .chain(&walkthrough.steps)
-        .flat_map(|step| &step.body)
+        .map(|background| &background.body)
+        .chain(walkthrough.steps.iter().map(|step| &step.body))
+        .flatten()
         .filter_map(|part| match part {
-            Part::Hunk { id, .. } => walkthrough.hunk(id).map(|hunk| hunk.path.as_str()),
             Part::Code(lines) => Some(lines.path.as_str()),
             _ => None,
         })
@@ -729,133 +1051,185 @@ pub fn file_read(
     }
 }
 
-/// A step: its number and title, then its body in order, prose with the
-/// lines and threads it is about where it set them. The background has
-/// no number, and says it is the background over its title.
-#[allow(clippy::too_many_arguments)]
-fn step_card(
+/// A step's card in Code, under its lines: which step it is and its
+/// title, then its body, prose with the lines from elsewhere and the
+/// threads it needs where it set them. The step the reader is on is
+/// framed in the accent and ends in the way to the next; a click on
+/// another makes it the one. Grey, as all of the walkthrough is Perch's.
+pub fn step_card(
     app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
-    open_file: OpenFile,
-    item_id: String,
-    walkthrough: Arc<Walkthrough>,
-    step: Step,
-    number: Option<usize>,
+    index: usize,
 ) -> impl IntoView {
+    let walkthrough = floem::reactive::Effect::untrack(|| shown(state));
+    let item_id = state
+        .item
+        .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+        .unwrap_or_default();
+    let (Some(walkthrough), false) = (walkthrough, item_id.is_empty()) else {
+        return Empty::new().into_any();
+    };
+    let Some(step) = walkthrough.steps.get(index).cloned() else {
+        return Empty::new().into_any();
+    };
+    ask_files(state, &backend, &item_id, &walkthrough);
+    let count = walkthrough.steps.len();
+    let current = Memo::new(move |_| state.walkthrough_at.get() == Some(index));
     let title = step.title.clone();
-    let eyebrow = Label::derived(|| "Background".to_string()).style(move |s| {
-        s.font_size(theme::TEXT_BADGE)
-            .font_weight(theme::weight_emphasis())
-            .color(theme::fg_subtle())
-            .selectable(false)
-            .apply_if(number.is_some(), |s| s.hide())
-    });
     let header = Stack::horizontal((
-        Label::derived(move || number.map(|n| n.to_string()).unwrap_or_default()).style(move |s| {
-            s.font_size(theme::TEXT_SECTION_TITLE)
+        Label::derived(move || format!("{} of {count}", index + 1)).style(|s| {
+            s.font_size(theme::TEXT_META)
                 .font_weight(theme::weight_emphasis())
                 .color(theme::fg_subtle())
-                .min_width(22.0)
                 .flex_shrink(0.0_f32)
                 .selectable(false)
-                .apply_if(number.is_none(), |s| s.hide())
         }),
         Label::derived(move || title.clone()).style(|s| {
-            s.font_size(theme::TEXT_SECTION_TITLE)
+            s.font_size(theme::TEXT_BODY)
                 .font_weight(theme::weight_emphasis())
                 .color(theme::fg())
-                .text_wrap()
+                .text_ellipsis()
                 .min_width(0.0)
                 .flex_grow(1.0_f32)
                 .flex_basis(0.0)
         }),
     ))
-    .style(|s| s.items_start().width_full());
+    .style(|s| {
+        s.items_center()
+            .width_full()
+            .gap(8.0)
+            .height(theme::INLINE_THREAD_HEADER)
+            .padding_horiz(theme::COLLAPSED_CARD_PADDING)
+            .border_bottom(1.0)
+            .border_color(theme::border_muted())
+    });
     let note = step.unplaced.then(|| {
-        Label::derived(|| "The agent didn't place these in its story.".to_string())
+        Label::derived(|| "The agent didn't place these lines in its story.".to_string())
             .style(|s| s.font_size(theme::TEXT_BODY).color(theme::fg_muted()))
             .into_any()
     });
-    // The threads the step names have rows of their own, so a block
+    let open_file = crate::review::open_file(state, backend.clone());
+    let body = body_view(
+        app,
+        state,
+        backend,
+        open_file,
+        item_id,
+        walkthrough.head.clone(),
+        format!("{}/{index}", walkthrough.head),
+        &step.body,
+    );
+    // Where to go from here: the next step, by its title, or the end.
+    let next_title = walkthrough.steps.get(index + 1).map(|s| s.title.clone());
+    let last = next_title.is_none();
+    let foot = Stack::horizontal((
+        Empty::new().style(|s| s.flex_grow(1.0_f32)),
+        action_button(
+            move || match &next_title {
+                Some(title) => format!("Next: {title}"),
+                None => "Done".to_string(),
+            },
+            "walkthrough-step-next",
+            false,
+            || true,
+            move || {
+                if last {
+                    close(state);
+                } else {
+                    go_to_step(state, index + 1);
+                }
+            },
+        )
+        .style(|s| s.max_width_full().text_ellipsis()),
+    ))
+    .debug_name("walkthrough-step-foot")
+    .style(move |s| {
+        s.items_center()
+            .width_full()
+            .apply_if(!current.get(), |s| s.hide())
+    });
+    let inside =
+        Stack::vertical_from_iter(note.into_iter().chain([body.into_any(), foot.into_any()]))
+            .style(|s| {
+                s.flex_col()
+                    .width_full()
+                    .gap(10.0)
+                    .padding(theme::COLLAPSED_CARD_PADDING)
+            });
+    Stack::vertical((header, inside))
+        .on_event_cont(el::PointerDown, move |_, _| {
+            if !current.get_untracked() {
+                state.walkthrough_at.set(Some(index));
+            }
+        })
+        .debug_name("walkthrough-step")
+        .style(move |s| {
+            s.flex_col()
+                .width_full()
+                .background(theme::perch_bg())
+                .border(1.0)
+                .border_radius(theme::RADIUS)
+                .border_color(if current.get() {
+                    theme::accent()
+                } else {
+                    theme::border_muted()
+                })
+        })
+        .into_any()
+}
+
+/// A body in order: prose, the lines it cites, the threads it names and
+/// its diagrams. `key` names it among the walkthrough's bodies, for a
+/// composer opened under one of its blocks.
+#[allow(clippy::too_many_arguments)]
+fn body_view(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    open_file: OpenFile,
+    item_id: String,
+    head: String,
+    key: String,
+    body: &[Part],
+) -> Stack {
+    // The threads the body names have rows of their own, so a block
     // under them leaves them out.
     let named: Rc<BTreeSet<String>> = Rc::new(
-        step.body
-            .iter()
+        body.iter()
             .filter_map(|part| match part {
                 Part::Thread { id } => Some(id.clone()),
                 _ => None,
             })
             .collect(),
     );
-    let key = |i: usize| format!("{}/{}/{i}", walkthrough.head, number.unwrap_or(0));
-    let view_of = |block: Block| {
-        block_view(
+    let parts = body.iter().enumerate().map(|(i, part)| match part {
+        Part::Text { text } => crate::review::markdown::render_linked(text, state).into_any(),
+        Part::Code(lines) => block_view(
             app,
             state,
             backend.clone(),
             open_file.clone(),
             item_id.clone(),
             named.clone(),
-            block,
-        )
-        .into_any()
-    };
-    let parts = step
-        .body
-        .iter()
-        .enumerate()
-        .filter_map(|(i, part)| match part {
-            Part::Text { text } => {
-                Some(crate::review::markdown::render_linked(text, state).into_any())
-            }
-            Part::Hunk { id, start, end } => {
-                let hunk = walkthrough.hunk(id)?;
-                Some(view_of(Block {
-                    key: key(i),
-                    head: walkthrough.head.clone(),
-                    path: hunk.path.clone(),
-                    side: hunk.side,
-                    start: start.unwrap_or(hunk.start),
-                    end: end.unwrap_or(hunk.end),
-                    context: false,
-                }))
-            }
-            Part::Code(lines) => Some(view_of(Block {
-                key: key(i),
-                head: walkthrough.head.clone(),
+            Block {
+                key: format!("{key}/{i}"),
+                head: head.clone(),
                 path: lines.path.clone(),
                 side: lines.side,
                 start: lines.start,
                 end: lines.end,
-                context: true,
-            })),
-            Part::Thread { id } => Some(thread_row(state, id.clone()).into_any()),
-            Part::Diagram { source } => {
-                Some(crate::review::diagram::view(source.clone()).into_any())
-            }
-        });
-    let body = Stack::vertical_from_iter(note.into_iter().chain(parts))
-        .style(|s| s.flex_col().width_full().gap(10.0));
-    Stack::vertical((
-        Stack::vertical((eyebrow, header)).style(|s| s.flex_col().width_full().gap(2.0)),
-        body,
-    ))
-    .debug_name(if number.is_some() {
-        "walkthrough-step"
-    } else {
-        "walkthrough-background"
-    })
-    .style(|s| {
-        perch_surface(s)
-            .flex_col()
-            .width_full()
-            .gap(12.0)
-            .padding(theme::CARD_PADDING)
-    })
+            },
+        )
+        .into_any(),
+        Part::Thread { id } => thread_row(state, id.clone()).into_any(),
+        Part::Diagram { source } => crate::review::diagram::view(source.clone()).into_any(),
+    });
+    Stack::vertical_from_iter(parts.collect::<Vec<_>>())
+        .style(|s| s.flex_col().width_full().gap(10.0))
 }
 
-/// Lines a step shows: a hunk of the change, or lines it cites.
+/// Lines a step cites.
 #[derive(Debug, Clone)]
 struct Block {
     /// Which block of the walkthrough this is, for a composer opened
@@ -867,8 +1241,6 @@ struct Block {
     side: CodeSide,
     start: u32,
     end: u32,
-    /// Cited lines rather than a hunk.
-    context: bool,
 }
 
 /// A block: the file and lines over them, the file opening Code at the
@@ -892,10 +1264,9 @@ fn block_view(
     let home = RwSignal::new(0_u64);
     let moved = RwSignal::new(false);
     let path = block.path.clone();
-    let where_ = match (block.side, block.context) {
-        (CodeSide::Base, _) => format!("lines {}\u{2013}{}, before", block.start, block.end),
-        (CodeSide::Head, true) => format!("lines {}\u{2013}{}", block.start, block.end),
-        (CodeSide::Head, false) => format!("lines {}\u{2013}{} changed", block.start, block.end),
+    let where_ = match block.side {
+        CodeSide::Base => format!("lines {}\u{2013}{}, before", block.start, block.end),
+        CodeSide::Head => format!("lines {}\u{2013}{}", block.start, block.end),
     };
     let header = Stack::horizontal((
         Label::derived({
@@ -1525,7 +1896,8 @@ fn thread_words(thread: &CommentThread) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{Command, Hunk, Lines};
+    use crate::backend::{Background, Command, Hunk, Lines};
+    use crate::review::model::History;
     use floem::headless::{HeadlessHarness, TestRoot};
     use perch_github::{Item, ItemCheckout};
 
@@ -1586,7 +1958,7 @@ mod tests {
             merge_base: "base-7".into(),
             head: head.into(),
             summary: "Stores each request **once**.".into(),
-            background: Some(Step {
+            background: Some(Background {
                 title: "How requests are stored".into(),
                 body: vec![
                     Part::Text {
@@ -1605,27 +1977,29 @@ mod tests {
                         end: 2,
                     }),
                 ],
-                unplaced: false,
             }),
             steps: vec![
                 Step {
                     title: "Parse the request".into(),
+                    at: Lines {
+                        path: "src/x.rs".into(),
+                        side: CodeSide::Head,
+                        start: 2,
+                        end: 2,
+                    },
+                    text: vec!["beta2".into()],
                     body: vec![
                         Part::Text {
                             text: "First it reads the request.".into(),
                         },
-                        Part::Hunk {
-                            id: "h1".into(),
-                            start: Some(1),
-                            end: Some(2),
-                        },
+                        Part::Code(Lines {
+                            path: "src/x.rs".into(),
+                            side: CodeSide::Head,
+                            start: 1,
+                            end: 3,
+                        }),
                         Part::Text {
                             text: "Then the line after.".into(),
-                        },
-                        Part::Hunk {
-                            id: "h1".into(),
-                            start: Some(3),
-                            end: Some(3),
                         },
                         Part::Code(Lines {
                             path: "src/x.rs".into(),
@@ -1639,6 +2013,13 @@ mod tests {
                 },
                 Step {
                     title: "Store it".into(),
+                    at: Lines {
+                        path: "src/y.rs".into(),
+                        side: CodeSide::Head,
+                        start: 2,
+                        end: 2,
+                    },
+                    text: vec!["fn caller() {}".into()],
                     body: vec![
                         Part::Text {
                             text: "Then it keeps it.".into(),
@@ -1739,18 +2120,50 @@ mod tests {
         }
     }
 
-    /// The tab asks for what is kept; with nothing kept it offers to
+    /// Conversation's card, over a recording backend.
+    fn card_harness(
+        state: ReviewState,
+        height: f64,
+    ) -> (
+        HeadlessHarness,
+        tokio::sync::mpsc::UnboundedReceiver<Command>,
+    ) {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let (backend, commands) = Backend::recording();
+        let view = conversation_card(app, state, Rc::new(backend), Rc::new(|_: &str| {}));
+        let harness = HeadlessHarness::new_with_size(root, view, 1000.0, height);
+        (harness, commands)
+    }
+
+    /// The steps' cards, one over the other, as Code would draw them
+    /// under their lines.
+    fn steps_harness(
+        state: ReviewState,
+    ) -> (
+        HeadlessHarness,
+        tokio::sync::mpsc::UnboundedReceiver<Command>,
+    ) {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let (backend, commands) = Backend::recording();
+        let backend = Rc::new(backend);
+        let view = Stack::vertical((
+            step_card(app, state, backend.clone(), 0),
+            step_card(app, state, backend, 1),
+        ))
+        .style(|s| s.flex_col().width_full().gap(20.0));
+        let harness = HeadlessHarness::new_with_size(root, view, 1000.0, 1400.0);
+        (harness, commands)
+    }
+
+    /// The card asks for what is kept; with nothing kept it offers to
     /// write, writes with the agent picked and the reader's guidance, and
     /// offers Stop while it does.
     #[test]
-    fn the_tab_asks_for_whats_kept_then_writes_and_can_stop() {
-        let root = TestRoot::new();
-        let app = AppState::new();
+    fn the_card_asks_for_whats_kept_then_writes_and_can_stop() {
         let state = state_on_branch();
-        let (backend, mut commands) = Backend::recording();
-        let open_file: OpenFile = Rc::new(|_: &str| {});
-        let view = view(app, state, Rc::new(backend), open_file);
-        let mut harness = HeadlessHarness::new_with_size(root, view, 1000.0, 800.0);
+        let (mut harness, mut commands) = card_harness(state, 800.0);
         settle(&mut harness);
         assert!(commands_of(&mut commands)
             .iter()
@@ -1758,8 +2171,19 @@ mod tests {
 
         apply(state, "item-7".into(), WalkthroughOutcome::Loaded(None));
         settle(&mut harness);
-        assert!(named(harness.root_id(), "walkthrough-guidance").is_some());
         assert!(named(harness.root_id(), "walkthrough-model").is_some());
+        // The guidance box is folded away until asked for.
+        let guidance = named(harness.root_id(), "walkthrough-guidance").unwrap();
+        let shown = |id: floem::ViewId| id.get_visual_rect_no_clip().height() > 0.0;
+        assert!(!shown(guidance));
+        let add = named(harness.root_id(), "walkthrough-add-guidance").unwrap();
+        click_on(&mut harness, add);
+        assert!(shown(guidance));
+        assert!(add.is_hidden());
+        assert!(find(harness.root_id(), "An agent reads the change").is_some());
+        assert!(named(harness.root_id(), "walkthrough-start")
+            .unwrap()
+            .is_hidden());
 
         // The model picked here and the guidance written go with it.
         state.walkthrough_agent.set(Some((
@@ -1853,20 +2277,16 @@ mod tests {
         assert_eq!(drafts.get("b").map(String::as_str), Some("Mine."));
     }
 
-    /// Each step is drawn with its prose, the hunk's lines as the diff
-    /// tints them, the cited lines, and its thread, which opens on
-    /// Conversation.
+    /// Written, the card on Conversation says how many steps, shows the
+    /// summary, and folds the background under its title until a click
+    /// opens it, with its lines from before the change. Start takes the
+    /// reader to the first step's lines on Code, as one move, and then
+    /// reads as the way back to the step they are on.
     #[test]
-    fn steps_draw_their_lines_and_link_their_threads() {
-        let root = TestRoot::new();
-        let app = AppState::new();
+    fn the_card_shows_the_summary_and_background_and_starts() {
         let state = state_on_branch();
         read_at(state, "head-7");
-        state.comment_threads.set(Arc::new(vec![thread_on_x()]));
-        state.tab.set(ItemTab::Walkthrough);
-        let (backend, _commands) = Backend::recording();
-        let view = view(app, state, Rc::new(backend), Rc::new(|_: &str| {}));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 1000.0, 1400.0);
+        let (mut harness, _commands) = card_harness(state, 1400.0);
         apply(
             state,
             "item-7".into(),
@@ -1874,26 +2294,56 @@ mod tests {
         );
         settle(&mut harness);
 
-        // The summary, as markdown, in its own card under the one that
-        // writes, which says nothing.
-        let head = named(harness.root_id(), "walkthrough-head").unwrap();
-        let summary = named(harness.root_id(), "walkthrough-summary").unwrap();
-        assert!(find(summary, "Stores each request").is_some());
-        assert!(find(head, "Stores each request").is_none());
+        assert!(find(harness.root_id(), "2 steps").is_some());
+        assert!(find(harness.root_id(), "Stores each request").is_some());
         assert!(find(harness.root_id(), "An agent reads the change").is_none());
-        // The background next, with its lines from before the change.
+        assert!(find(harness.root_id(), "Write again").is_some());
         let background = named(harness.root_id(), "walkthrough-background").unwrap();
-        assert!(
-            head.get_visual_rect_no_clip().y1 < summary.get_visual_rect_no_clip().y0
-                && summary.get_visual_rect_no_clip().y1 < background.get_visual_rect_no_clip().y0
-        );
-        assert!(find(background, "How requests are stored").is_some());
+        assert!(background.is_hidden());
+        let toggle = named(harness.root_id(), "walkthrough-background-toggle").unwrap();
+        assert!(find(toggle, "Background: How requests are stored").is_some());
+        click_on(&mut harness, toggle);
+        assert!(!background.is_hidden());
         assert!(find(background, "lines 1\u{2013}2, before").is_some());
         assert!(find(background, "alpha").is_some());
         // An unchanged file's base lines are its head's.
         assert!(find(background, "fn caller() {}").is_some());
+
+        let start = named(harness.root_id(), "walkthrough-start").unwrap();
+        assert!(find(start, "Start").is_some());
+        click_on(&mut harness, start);
+        assert_eq!(state.walkthrough_at.get_untracked(), Some(0));
+        assert_eq!(state.tab.get_untracked(), ItemTab::Code);
+        assert_eq!(
+            state.pending_jump.get_untracked(),
+            Some(("src/x.rs".to_string(), 1, 0))
+        );
+        assert_eq!(state.jump_through.get_untracked(), Some(1));
+        assert!(state.history.with_untracked(History::can_go_back));
+        assert!(find(start, "Go to step 1").is_some());
+    }
+
+    /// A step's card says which step it is, then its body in order: the
+    /// prose, the lines it cites and the thread it names, which opens on
+    /// Conversation. The step the reader is on ends in the way to the
+    /// next; the last's puts the walkthrough away. A press on another
+    /// step's card makes it the one.
+    #[test]
+    fn a_step_card_draws_its_body_and_goes_on() {
+        let state = state_on_branch();
+        read_at(state, "head-7");
+        state.comment_threads.set(Arc::new(vec![thread_on_x()]));
+        apply(
+            state,
+            "item-7".into(),
+            WalkthroughOutcome::Written(walkthrough("head-7")),
+        );
+        state.walkthrough_at.set(Some(0));
+        let (mut harness, _commands) = steps_harness(state);
+        settle(&mut harness);
+
+        assert!(find(harness.root_id(), "1 of 2").is_some());
         assert!(find(harness.root_id(), "Parse the request").is_some());
-        assert!(find(harness.root_id(), "Store it").is_some());
         // Text, then the lines it leads into, then text, in that order.
         let top = |text: &str| {
             find(harness.root_id(), text)
@@ -1903,24 +2353,35 @@ mod tests {
         };
         let order = [
             top("First it reads the request."),
-            top("lines 1\u{2013}2 changed"),
+            top("lines 1\u{2013}3"),
             top("Then the line after."),
-            top("lines 3\u{2013}3 changed"),
             top("lines 4\u{2013}4"),
             top("Thread on src/x.rs:2"),
+            top("2 of 2"),
         ];
         assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
-        // The hunk's lines, the removed one among them, and the cited one.
+        // The cited lines, the removed one among them.
         assert!(find(harness.root_id(), "beta2").is_some());
         assert!(find(harness.root_id(), "delta").is_some());
-        assert!(find(harness.root_id(), "lines 4\u{2013}4").is_some());
-        assert!(find(harness.root_id(), "Write again").is_some());
-        // The diagram is drawn as a figure, in the column's width at most.
+        // The diagram is drawn as a figure, in the card's width at most.
         let diagram = named(harness.root_id(), "walkthrough-diagram").unwrap();
         let figure = named(diagram, "figure").expect("drawn, not an error");
         let drawn = figure.children()[0].get_visual_rect_no_clip();
         assert!(drawn.width() > 0.0 && drawn.height() > 0.0, "{drawn:?}");
         assert!(drawn.width() <= figure.get_visual_rect_no_clip().width() + 0.5);
+
+        // Only the step the reader is on has the way on.
+        let mut feet = Vec::new();
+        all_named(harness.root_id(), "walkthrough-step-foot", &mut feet);
+        let shown = |feet: &[floem::ViewId]| -> Vec<floem::ViewId> {
+            feet.iter()
+                .filter(|id| !id.is_hidden())
+                .map(|id| named(*id, "walkthrough-step-next").unwrap())
+                .collect()
+        };
+        let next = shown(&feet);
+        assert_eq!(next.len(), 1);
+        assert!(find(next[0], "Next: Store it").is_some());
 
         let thread = find(
             harness.root_id(),
@@ -1934,13 +2395,30 @@ mod tests {
             Some(CardId::Thread("gh-9".into()))
         );
 
-        // A block's file opens Code on all its lines, these from before
-        // the change at the head lines they became.
-        let path = named(harness.root_id(), "walkthrough-path").unwrap();
-        click_on(&mut harness, path);
+        // Next goes to the second step's lines, in the file it is in.
+        click_on(&mut harness, next[0]);
+        assert_eq!(state.walkthrough_at.get_untracked(), Some(1));
         assert_eq!(state.tab.get_untracked(), ItemTab::Code);
-        assert_eq!(state.jump_to_line.get_untracked(), Some(0));
-        assert_eq!(state.jump_through.get_untracked(), Some(1));
+        assert_eq!(
+            state.pending_jump.get_untracked(),
+            Some(("src/y.rs".to_string(), 1, 0))
+        );
+        let done = shown(&feet);
+        assert_eq!(done.len(), 1, "the second step's");
+        let done = done[0];
+        assert!(find(done, "Done").is_some());
+
+        // A press on the first card makes it the one, with no move.
+        state.pending_jump.set(None);
+        let first = find(harness.root_id(), "First it reads the request.").unwrap();
+        click_on(&mut harness, first);
+        assert_eq!(state.walkthrough_at.get_untracked(), Some(0));
+        assert_eq!(state.pending_jump.get_untracked(), None);
+
+        state.walkthrough_at.set(Some(1));
+        settle(&mut harness);
+        click_on(&mut harness, done);
+        assert_eq!(state.walkthrough_at.get_untracked(), None);
     }
 
     /// The primary button going down at a point, with Shift held or not.
@@ -2014,26 +2492,28 @@ mod tests {
     }
 
     /// A block's line offers a `+` under the pointer, which opens a
-    /// composer on it under the block, Walkthrough staying up. Shift on
-    /// another widens it to both and keeps what was typed. The thread it
-    /// starts is listed under the block; one the step names already is
-    /// not listed twice.
+    /// composer on it under the block, Code staying up, and no card for
+    /// it in the code. Shift on another widens it to both and keeps what
+    /// was typed. The thread it starts is listed under the block; one the
+    /// step names already is not listed twice.
     #[test]
     fn a_blocks_lines_are_asked_about_under_the_block() {
-        let root = TestRoot::new();
-        let app = AppState::new();
         let state = state_on_branch();
         read_at(state, "head-7");
+        let (x, _) = files();
+        state.files.update(|files| {
+            files.insert("src/x.rs".into(), x);
+        });
+        state.active.set(Some("src/x.rs".into()));
         state.comment_threads.set(Arc::new(vec![thread_on_x()]));
-        state.tab.set(ItemTab::Walkthrough);
-        let (backend, _commands) = Backend::recording();
-        let view = view(app, state, Rc::new(backend), Rc::new(|_: &str| {}));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 1000.0, 1400.0);
+        state.tab.set(ItemTab::Code);
         apply(
             state,
             "item-7".into(),
             WalkthroughOutcome::Written(walkthrough("head-7")),
         );
+        state.walkthrough_at.set(Some(0));
+        let (mut harness, _commands) = steps_harness(state);
         settle(&mut harness);
         assert!(named(harness.root_id(), "composer-box").is_none());
 
@@ -2055,7 +2535,12 @@ mod tests {
                 "head-7".to_string()
             ))
         );
-        assert_eq!(state.tab.get_untracked(), ItemTab::Walkthrough);
+        assert_eq!(state.tab.get_untracked(), ItemTab::Code);
+        assert!(!state.composer_is_inline());
+        assert!(!state
+            .cards_in("src/x.rs")
+            .iter()
+            .any(|card| card.id == CardId::Composer));
         let composer = open_composer(&harness);
         assert!(find(composer, "src/x.rs:2").is_some());
 
@@ -2119,23 +2604,19 @@ mod tests {
     fn a_block_scrolls_its_file_and_goes_to_definitions() {
         // A click is turned into a name by the code's widths.
         crate::theme::install_fonts_for_tests();
-        let root = TestRoot::new();
-        let app = AppState::new();
         let state = state_on_branch();
         read_at(state, "head-7");
         state.set_server_status(
             perch_lsp::ServerKind::RustAnalyzer,
             perch_lsp::Status::Ready,
         );
-        state.tab.set(ItemTab::Walkthrough);
-        let (backend, mut commands) = Backend::recording();
-        let view = view(app, state, Rc::new(backend), Rc::new(|_: &str| {}));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 1000.0, 1400.0);
         apply(
             state,
             "item-7".into(),
             WalkthroughOutcome::Written(walkthrough("head-7")),
         );
+        state.walkthrough_at.set(Some(0));
+        let (mut harness, mut commands) = steps_harness(state);
         settle(&mut harness);
 
         // The block citing line 4, one row tall, on `delta`.
@@ -2200,7 +2681,7 @@ mod tests {
             panic!("one definition asked: {asked:?}");
         };
         assert_eq!((path.as_str(), *line, *character), ("src/x.rs", 3, 0));
-        assert_eq!(state.tab.get_untracked(), ItemTab::Walkthrough);
+        assert_eq!(state.tab.get_untracked(), ItemTab::Conversation);
         let place = crate::review::code_refs::located("src/x.rs", 2, 0);
         state.finish_goto(*token, Ok(vec![place]));
         assert_eq!(state.tab.get_untracked(), ItemTab::Code);
@@ -2233,17 +2714,172 @@ mod tests {
         assert_eq!(head_line_of(&untouched, 2), 2);
     }
 
-    /// One written for another head says so, and draws its lines as they
-    /// were at that head.
+    /// A step's lines are where it says while they are still there; in a
+    /// file that has moved on, the same lines nearest to there; and
+    /// nowhere once they are gone. Removed lines are found on the base,
+    /// and an unchanged file's base is its head.
     #[test]
-    fn a_walkthrough_of_an_older_head_shows_its_lines_as_they_were() {
+    fn a_step_finds_its_lines_in_a_file_that_moved() {
+        let (x, y) = files();
+        let step = &walkthrough("head-7").steps[0];
+        let at = |file: &LoadedFile, step: &Step| {
+            locate(file, step).map(|a| (a.start_line, a.line, a.side))
+        };
+        assert_eq!(at(&x, step), Some((2, 2, Side::Right)));
+        assert_eq!(at(&y, step), None, "another file");
+
+        let moved = crate::backend::build_loaded_file(
+            "src/x.rs".into(),
+            "x\nx\nx\nalpha\nbeta2\ngamma\nx\nx\nx\nbeta2\n".into(),
+            "alpha\nbeta\ngamma\n".into(),
+            Some(perch_git::ChangeStatus::Modified),
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        );
+        assert_eq!(at(&moved, step), Some((5, 5, Side::Right)), "the nearer");
+        let gone = crate::backend::build_loaded_file(
+            "src/x.rs".into(),
+            "alpha\nbeta3\n".into(),
+            "alpha\nbeta\n".into(),
+            Some(perch_git::ChangeStatus::Modified),
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        );
+        assert_eq!(at(&gone, step), None);
+
+        let removed = Step {
+            at: Lines {
+                path: "src/x.rs".into(),
+                side: CodeSide::Base,
+                start: 2,
+                end: 2,
+            },
+            text: vec!["beta".into()],
+            ..step.clone()
+        };
+        assert_eq!(at(&x, &removed), Some((2, 2, Side::Left)));
+        let unchanged = Step {
+            at: Lines {
+                path: "src/y.rs".into(),
+                side: CodeSide::Base,
+                start: 1,
+                end: 1,
+            },
+            text: vec!["use x;".into()],
+            ..step.clone()
+        };
+        assert_eq!(at(&y, &unchanged), Some((1, 1, Side::Right)));
+    }
+
+    /// While the reader takes the walkthrough, each file has a card for
+    /// each step in it, right under the step's lines and over a thread's
+    /// there, and the folds keep its lines in view; put away, none.
+    #[test]
+    fn steps_have_cards_in_code_while_the_walkthrough_is_out() {
+        let _root = TestRoot::new();
+        let state = state_on_branch();
+        let (x, y) = files();
+        state.files.update(|files| {
+            files.insert("src/x.rs".into(), x.clone());
+            files.insert("src/y.rs".into(), y);
+        });
+        state.comment_threads.set(Arc::new(vec![thread_on_x()]));
+        apply(
+            state,
+            "item-7".into(),
+            WalkthroughOutcome::Written(walkthrough("head-7")),
+        );
+        let ids = |path: &str| -> Vec<CardId> {
+            state.cards_in(path).into_iter().map(|c| c.id).collect()
+        };
+        assert_eq!(ids("src/x.rs"), vec![CardId::Thread("gh-9".into())]);
+        assert!(ids("src/y.rs").is_empty());
+        assert!(!state.anchors_in("src/y.rs").contains(&(1, 1)));
+
+        state.walkthrough_at.set(Some(0));
+        assert_eq!(
+            ids("src/x.rs"),
+            vec![CardId::Step(0), CardId::Thread("gh-9".into())]
+        );
+        assert_eq!(ids("src/y.rs"), vec![CardId::Step(1)]);
+        assert!(state.anchors_in("src/y.rs").contains(&(1, 1)));
+        let card = state.cards_in("src/x.rs").remove(0);
+        assert_eq!(
+            Some(card.after_display_line),
+            crate::review::model::card_line(
+                &x,
+                &Anchor {
+                    path: "src/x.rs".into(),
+                    start_line: 2,
+                    line: 2,
+                    side: Side::Right,
+                    commit_sha: String::new(),
+                }
+            )
+        );
+        assert_eq!(card.side, Side::Right);
+        assert!(card.rows >= 5);
+
+        close(state);
+        assert_eq!(ids("src/x.rs"), vec![CardId::Thread("gh-9".into())]);
+    }
+
+    /// The bar over the code says where the reader is and what the step
+    /// is; it steps on and back, with no back from the first step and no
+    /// next from the last, and puts the walkthrough away. Hidden while
+    /// it is away.
+    #[test]
+    fn the_bar_steps_through_the_walkthrough() {
         let root = TestRoot::new();
-        let app = AppState::new();
+        let state = state_on_branch();
+        apply(
+            state,
+            "item-7".into(),
+            WalkthroughOutcome::Written(walkthrough("head-7")),
+        );
+        let mut harness = HeadlessHarness::new_with_size(root, step_bar(state), 1000.0, 40.0);
+        settle(&mut harness);
+        let bar = named(harness.root_id(), "walkthrough-bar").unwrap();
+        assert!(bar.is_hidden());
+
+        go_to_step(state, 0);
+        settle(&mut harness);
+        assert!(!bar.is_hidden());
+        assert!(find(bar, "Step 1 of 2").is_some());
+        assert!(find(bar, "Parse the request").is_some());
+        let back = named(bar, "walkthrough-back").unwrap();
+        let next = named(bar, "walkthrough-next").unwrap();
+        click_on(&mut harness, back);
+        assert_eq!(state.walkthrough_at.get_untracked(), Some(0));
+        click_on(&mut harness, next);
+        assert_eq!(state.walkthrough_at.get_untracked(), Some(1));
+        assert!(find(bar, "Step 2 of 2").is_some());
+        assert!(find(bar, "Store it").is_some());
+        click_on(&mut harness, next);
+        assert_eq!(state.walkthrough_at.get_untracked(), Some(1));
+        click_on(&mut harness, back);
+        assert_eq!(state.walkthrough_at.get_untracked(), Some(0));
+
+        // Each step is a place to come back to.
+        assert_eq!(
+            state.pending_jump.get_untracked(),
+            Some(("src/x.rs".to_string(), 1, 0))
+        );
+        let close = named(bar, "walkthrough-close").unwrap();
+        click_on(&mut harness, close);
+        assert_eq!(state.walkthrough_at.get_untracked(), None);
+        assert!(bar.is_hidden());
+    }
+
+    /// One written for another head says so, and finds its steps' lines
+    /// where they are now.
+    #[test]
+    fn a_walkthrough_of_an_older_head_says_so() {
         let state = state_on_branch();
         read_at(state, "old-head");
-        let (backend, _commands) = Backend::recording();
-        let view = view(app, state, Rc::new(backend), Rc::new(|_: &str| {}));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 1000.0, 1400.0);
+        let (mut harness, _commands) = card_harness(state, 1400.0);
         apply(
             state,
             "item-7".into(),
@@ -2252,11 +2888,8 @@ mod tests {
         settle(&mut harness);
 
         assert!(find(harness.root_id(), "Written for old-hea").is_some());
-        assert!(find(harness.root_id(), "code is as it was then").is_some());
+        assert!(find(harness.root_id(), "have no card").is_some());
         assert!(find(harness.root_id(), "Stores each request").is_some());
-        assert!(find(harness.root_id(), "Parse the request").is_some());
-        assert!(find(harness.root_id(), "beta2").is_some());
-        assert!(find(harness.root_id(), "delta").is_some());
     }
 
     /// Blocks ask for their files at the walkthrough's commits, once, and
@@ -2264,21 +2897,18 @@ mod tests {
     /// other commits is dropped, and one that failed says why.
     #[test]
     fn blocks_read_their_files_at_the_walkthroughs_commits() {
-        let root = TestRoot::new();
-        let app = AppState::new();
         let state = state_on_branch();
         let (x, _) = files();
         state.files.update(|files| {
             files.insert("src/x.rs".into(), x.clone());
         });
-        let (backend, mut commands) = Backend::recording();
-        let view = view(app, state, Rc::new(backend), Rc::new(|_: &str| {}));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 1000.0, 1400.0);
         apply(
             state,
             "item-7".into(),
             WalkthroughOutcome::Written(walkthrough("head-7")),
         );
+        state.walkthrough_at.set(Some(0));
+        let (mut harness, mut commands) = steps_harness(state);
         settle(&mut harness);
 
         let asked: Vec<_> = commands_of(&mut commands)
@@ -2321,16 +2951,8 @@ mod tests {
             "src/x.rs".into(),
             Ok(x),
         );
-        file_read(
-            state,
-            "item-7".into(),
-            ("base-7".into(), "head-7".into()),
-            "src/y.rs".into(),
-            Err("file is not there".into()),
-        );
         settle(&mut harness);
         assert!(find(harness.root_id(), "beta2").is_some());
-        assert!(find(harness.root_id(), "couldn't be read: file is not there").is_some());
         assert!(commands_of(&mut commands)
             .iter()
             .all(|c| !matches!(c, Command::LoadWalkthroughFiles { .. })));

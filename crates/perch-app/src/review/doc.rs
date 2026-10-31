@@ -84,6 +84,8 @@ pub enum CardId {
     Thread(String),
     /// The one being written.
     Composer,
+    /// A step of the open item's walkthrough, by its index.
+    Step(usize),
     /// Another card on Conversation, a comment, a review or an event,
     /// by `cards::card_id`. It has no place in the code.
     Entry(String),

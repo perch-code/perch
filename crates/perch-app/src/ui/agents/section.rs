@@ -1015,7 +1015,10 @@ mod tests {
         });
         review.agents_unfolded.set(true);
         settle(&mut harness);
-        assert!(named(harness.root_id(), "\"Load older runs\"").is_some());
+        let older = named(harness.root_id(), "\"Load older runs\"").unwrap();
+        // Under the page's fold, past the walkthrough's card.
+        older.scroll_to(None);
+        settle(&mut harness);
         click(&mut harness, "\"Load older runs\"");
         assert!(app.item_runs.with(|pages| pages["pr"].loading));
         assert!(named(harness.root_id(), "\"Loading…\"").is_some());

@@ -1,5 +1,5 @@
-//! The switch in the middle of the bar: Conversation, Walkthrough and
-//! Code, as Codex has Summary and Code. Drawn only while the item has a checkout, since
+//! The switch in the middle of the bar: Conversation and Code, as Codex
+//! has Summary and Code. Drawn only while the item has a checkout, since
 //! without one there is no code to switch to; Start work gives an issue
 //! one, and the switch comes.
 //!
@@ -17,7 +17,6 @@ use crate::theme;
 pub fn switch(state: ReviewState) -> impl IntoView {
     Stack::horizontal((
         segment(state, ItemTab::Conversation, "Conversation"),
-        segment(state, ItemTab::Walkthrough, "Walkthrough"),
         segment(state, ItemTab::Code, "Code"),
     ))
     .debug_name("item switch")

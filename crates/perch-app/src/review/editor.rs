@@ -141,6 +141,8 @@ pub fn editor_pane(
     let code_backend = backend.clone();
 
     Stack::vertical((
+        // While the reader takes the walkthrough, the bar that steps it.
+        crate::review::walkthrough::step_bar(state),
         Stack::new((
             dyn_container(
                 // The epoch changes whenever the active file or its content
@@ -1160,6 +1162,9 @@ fn records_hover(state: ReviewState, row: usize, part: impl IntoView + 'static) 
 enum CardItem {
     Thread(CommentThread),
     Composer(Composer),
+    /// A step of the walkthrough, by index, and the head it was written
+    /// for, so another walkthrough's step is another card.
+    Step(usize, String),
 }
 
 impl CardItem {
@@ -1167,6 +1172,7 @@ impl CardItem {
         match self {
             CardItem::Thread(t) => CardId::Thread(t.id.clone()),
             CardItem::Composer(_) => CardId::Composer,
+            CardItem::Step(i, _) => CardId::Step(*i),
         }
     }
 
@@ -1191,6 +1197,7 @@ impl CardItem {
                 )
             }
             CardItem::Composer(c) => format!("composer:{}", c.opening),
+            CardItem::Step(i, head) => format!("step:{head}:{i}"),
         }
     }
 
@@ -1199,6 +1206,7 @@ impl CardItem {
         match self {
             CardItem::Thread(t) => format!("inline-card:{}", t.id),
             CardItem::Composer(_) => "inline-card:composer".to_string(),
+            CardItem::Step(i, _) => format!("inline-card:step-{}", i + 1),
         }
     }
 }
@@ -1243,9 +1251,11 @@ fn card_layer(
                 })
                 .cloned()
         });
+        let head = crate::review::walkthrough::shown(state).map(|w| w.head.clone());
         state.comment_threads.with(|threads| {
             ids.into_iter()
                 .filter_map(|id| match &id {
+                    CardId::Step(i) => head.clone().map(|head| CardItem::Step(*i, head)),
                     CardId::Thread(thread_id) => threads
                         .iter()
                         .find(|t| t.id == *thread_id && state.thread_visible(t))
@@ -1343,6 +1353,9 @@ fn inline_card(
         CardItem::Thread(thread) => threads::thread_card(app, state, backend, thread).into_any(),
         CardItem::Composer(composer) => {
             threads::composer_view(app, state, backend, composer, ThreadFace::Inline).into_any()
+        }
+        CardItem::Step(index, _) => {
+            crate::review::walkthrough::step_card(app, state, backend, index).into_any()
         }
     };
     let measured_id = card_id.clone();
@@ -5059,6 +5072,110 @@ mod window {
             crate::theme::code_line_height() as f64,
             crate::theme::CARD_INSET,
         )
+    }
+
+    /// A walkthrough taken on Code: the bar is over the code, the step's
+    /// card is in the layer under its lines with the rows its height
+    /// takes, its lines are a little below the top, and `.` goes on to
+    /// the next step. Put away, the card and the bar go.
+    #[test]
+    fn a_walkthroughs_steps_are_cards_under_their_lines() {
+        use crate::backend::{CodeSide, Lines, Step, Walkthrough, WalkthroughOutcome};
+        use crate::review::doc::CardId;
+        let (mut harness, state) = harness();
+        let step = |title: &str, start: u32, end: u32, text: &[&str]| Step {
+            title: title.into(),
+            at: Lines {
+                path: "src/x.rs".into(),
+                side: CodeSide::Head,
+                start,
+                end,
+            },
+            text: text.iter().map(|t| t.to_string()).collect(),
+            body: vec![crate::backend::Part::Text {
+                text: format!("Why {title}."),
+            }],
+            unplaced: false,
+        };
+        crate::review::walkthrough::apply(
+            state,
+            "wt".into(),
+            WalkthroughOutcome::Loaded(Some(Walkthrough {
+                merge_base: "b".into(),
+                head: "h".into(),
+                summary: String::new(),
+                background: None,
+                steps: vec![
+                    step("first", 5, 6, &["fn b() {}", "fn c() {}"]),
+                    step("second", 50, 50, &["fn b() {}"]),
+                ],
+                hunks: Vec::new(),
+                guidance: String::new(),
+            })),
+        );
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "inline-card:step-").is_none());
+        let bar = find(harness.root_id(), "walkthrough-bar").unwrap();
+        assert!(bar.is_hidden());
+
+        crate::review::walkthrough::go_to_step(state, 0);
+        harness.rebuild();
+        harness.paint();
+        harness.rebuild();
+        harness.paint();
+        assert!(!bar.is_hidden());
+        assert!(find(bar, "Step 1 of 2").is_some());
+        let card = find(harness.root_id(), "inline-card:step-1").expect("the card is drawn");
+        assert!(find(card, "Why first.").is_some());
+        let live = stacked(state);
+        let doc = live.doc.get();
+        let span = doc.card_span(&CardId::Step(0)).expect("rows for the card");
+        // Under head line 6, display line 7 with the ghost before it.
+        assert_eq!(
+            doc.rows[span.start - 1],
+            doc.rows[doc.row_of_head(5).unwrap()]
+        );
+        let rect = harness.get_layout_rect(card);
+        assert_eq!(
+            span.len(),
+            super::rows_for_height(
+                rect.height(),
+                crate::theme::code_line_height() as f64,
+                crate::theme::CARD_INSET,
+            ),
+            "the rows its height takes"
+        );
+        let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).unwrap();
+        let line_height = crate::theme::code_line_height() as f64;
+        let top = doc.row_of_head(4).unwrap() as f64 * line_height;
+        assert!(
+            viewport.get().y0 <= top && top < viewport.get().y1,
+            "its lines are in view"
+        );
+
+        // The keys reach the window from the editor, as a click leaves it.
+        let (left, pane_top) = pane_origin();
+        harness.click(
+            left + gutter_width() - 14.0,
+            pane_top + 3.0 * line_height + line_height / 2.0,
+        );
+        harness.rebuild();
+        harness.dispatch_event(key_press(
+            floem::prelude::Code::Period,
+            floem::prelude::Key::Character(".".into()),
+        ));
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.walkthrough_at.get(), Some(1));
+        assert!(find(bar, "Step 2 of 2").is_some());
+
+        crate::review::walkthrough::close(state);
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "inline-card:step-").is_none());
+        assert!(bar.is_hidden());
+        assert_eq!(stacked(state).doc.get().card_span(&CardId::Step(0)), None);
     }
 
     #[test]

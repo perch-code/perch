@@ -27,6 +27,8 @@ use tokio::sync::Semaphore;
 
 pub(crate) use issue_draft::with_found_in;
 pub use open_pull::{DescriptionOutcome, OpenStep, PullRequestReadiness};
+#[cfg(test)]
+pub use walkthrough::Background;
 pub use walkthrough::{CodeSide, Part, Step, Walkthrough, WalkthroughOutcome};
 #[cfg(test)]
 pub use walkthrough::{Hunk, Lines};
@@ -30300,10 +30302,11 @@ read eof || true
             .expect("the walkthrough ends with an outcome")
     }
 
-    /// The first answer leaves the branch's one hunk out, so the session
-    /// is asked again, naming it; the second answer places it, and the
-    /// thread it names that the item doesn't have is dropped. What was
-    /// written is kept, and read back for the head.
+    /// The first answer's one step names no place and so covers no hunk,
+    /// so the session is asked again, naming both; the second answer
+    /// places it on the branch's one hunk, and the thread it names that
+    /// the item doesn't have is dropped. The step keeps its lines' text.
+    /// What was written is kept, and read back for the head.
     #[tokio::test]
     async fn a_walkthrough_asks_again_for_the_hunks_it_left_out_and_is_kept() {
         let dir = tempfile::tempdir().unwrap();
@@ -30312,8 +30315,8 @@ read eof || true
         config.agent.binary = walking_claude(
             dir.path(),
             r#"{"summary": "o", "steps": [{"title": "Why", "body": [{"text": "Because."}]}]}"#,
-            r#"{"summary": "Two first.", "steps": [{"title": "Add two", "body": [
-                {"text": "It adds two."}, {"hunk": "h1"}, {"thread": "gh-404"},
+            r#"{"summary": "Two first.", "steps": [{"title": "Add two", "hunks": ["h1"], "body": [
+                {"text": "It adds two."}, {"thread": "gh-404"},
                 {"text": "Beside one."},
                 {"code": {"path": "one.txt", "side": "base", "start": 1, "end": 30}}]}]}"#,
         );
@@ -30343,18 +30346,24 @@ read eof || true
             ("two.txt", 1)
         );
         assert_eq!(written.steps.len(), 1);
+        let step = &written.steps[0];
+        assert_eq!(
+            step.at,
+            walkthrough::Lines {
+                path: "two.txt".into(),
+                side: walkthrough::CodeSide::Head,
+                start: 1,
+                end: 1
+            }
+        );
+        assert_eq!(step.text, vec!["two".to_string()]);
         // In its order, without the thread the item doesn't have, and the
         // lines cut to the base's one line.
         assert_eq!(
-            written.steps[0].body,
+            step.body,
             vec![
                 walkthrough::Part::Text {
                     text: "It adds two.".into()
-                },
-                walkthrough::Part::Hunk {
-                    id: "h1".into(),
-                    start: None,
-                    end: None
                 },
                 walkthrough::Part::Text {
                     text: "Beside one.".into()
@@ -30370,8 +30379,9 @@ read eof || true
         let args = std::fs::read_to_string(dir.path().join("args")).unwrap();
         assert!(args.contains("h1 two.txt head 1-1"), "{args}");
         assert!(args.contains("--resume"), "{args}");
-        assert!(args.contains("didn't show these hunks"), "{args}");
+        assert!(args.contains("covers these hunks"), "{args}");
         assert!(args.contains("- h1 two.txt head 1-1"), "{args}");
+        assert!(args.contains("name no place in the code"), "{args}");
         assert!(
             !args.contains("--permission-prompt-tool"),
             "Ask's tools: {args}"
@@ -30384,14 +30394,15 @@ read eof || true
         );
     }
 
-    /// Hunks the agent never places, asked twice, go in a last step of
-    /// Perch's own rather than out of sight.
+    /// A hunk the agent never places, asked twice, gets a last step of
+    /// Perch's own on its lines rather than going out of sight.
     #[tokio::test]
-    async fn hunks_never_placed_go_in_a_last_step_of_their_own() {
+    async fn hunks_never_placed_get_a_last_step_of_their_own() {
         let dir = tempfile::tempdir().unwrap();
         let (mut ctx, received) = ctx(dir.path(), &nowhere(), &[]);
         let mut config = Config::default();
-        let answer = r#"{"summary": "o", "steps": [{"title": "Why", "prose": "Because."}]}"#;
+        let answer = r#"{"summary": "o", "steps": [{"title": "Why", "prose": "Because.",
+            "lines": {"path": "one.txt", "start": 1}}]}"#;
         config.agent.binary = walking_claude(dir.path(), answer, answer);
         ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
         let (item, _worktree, _remote) = pushable_branch(&ctx, dir.path());
@@ -30416,15 +30427,13 @@ read eof || true
             .iter()
             .map(|s| (s.title.as_str(), s.unplaced))
             .collect();
-        assert_eq!(titles, vec![("Why", false), ("Also changed", true)]);
         assert_eq!(
-            written.steps[1].body,
-            vec![walkthrough::Part::Hunk {
-                id: "h1".into(),
-                start: None,
-                end: None
-            }]
+            titles,
+            vec![("Why", false), ("Also changed in two.txt", true)]
         );
+        assert_eq!(written.steps[1].at.path, "two.txt");
+        assert_eq!(written.steps[1].text, vec!["two".to_string()]);
+        assert!(written.steps[1].body.is_empty());
     }
 
     /// A walkthrough's files are read at its own commits: a commit since

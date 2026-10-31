@@ -141,14 +141,13 @@ pub enum Paging {
     End,
 }
 
-/// What the item view shows: Conversation, the Walkthrough of the change,
-/// or Code, the open file and the tabs over it. The three are the switch
-/// in the bar; Conversation cannot be closed.
+/// What the item view shows: Conversation, or Code, the open file and
+/// the tabs over it. The two are the switch in the bar; Conversation
+/// cannot be closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ItemTab {
     #[default]
     Conversation,
-    Walkthrough,
     Code,
 }
 
@@ -727,12 +726,11 @@ pub struct Place {
     pub spot: Spot,
 }
 
-/// Where on an item: Conversation, the Walkthrough, Code with no file
-/// open, or a head line of a file.
+/// Where on an item: Conversation, Code with no file open, or a head
+/// line of a file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Spot {
     Conversation,
-    Walkthrough,
     Code,
     Line { path: String, line: usize },
 }
@@ -1670,6 +1668,10 @@ pub struct ReviewState {
     /// The files each item's walkthrough draws its lines from, read at
     /// its own commits rather than Code's.
     pub walkthrough_files: RwSignal<HashMap<String, crate::review::walkthrough::WalkthroughFiles>>,
+    /// The step of the open item's walkthrough the reader is on, while
+    /// they are taking it: its cards are in Code and the bar is over it.
+    /// `None` while it is put away.
+    pub walkthrough_at: RwSignal<Option<usize>>,
     /// Close as issue under way, and what stopped the last.
     pub issue_closing: RwSignal<bool>,
     pub issue_error: RwSignal<Option<String>>,
@@ -2161,6 +2163,7 @@ impl ReviewState {
             walkthrough_guidance: RwSignal::new(HashMap::new()),
             walkthrough_agent: RwSignal::new(None),
             walkthrough_files: RwSignal::new(HashMap::new()),
+            walkthrough_at: RwSignal::new(None),
             issue_closing: RwSignal::new(false),
             issue_error: RwSignal::new(None),
             issue_body_height: RwSignal::new(None),
@@ -2430,6 +2433,7 @@ impl ReviewState {
         // The rows are the next item's cards' to fill; whether a card is
         // open is the reader's and stays, as `collapsed_cards` says.
         self.card_rows.set(HashMap::new());
+        self.walkthrough_at.set(None);
         self.hovered_line.set(None);
         self.hovered_base.set(false);
         self.hovered_by.set(None);
@@ -2549,9 +2553,9 @@ impl ReviewState {
         self.historical_review_rollback.set(None);
     }
 
-    /// Show Conversation, the Walkthrough or Code. Code with no file open
-    /// opens none, and the pane says so; the item's first visit to Code
-    /// asks for the tree beside it, to pick one from.
+    /// Show Conversation or Code. Code with no file open opens none, and
+    /// the pane says so; the item's first visit to Code asks for the tree
+    /// beside it, to pick one from.
     pub fn show_tab(&self, tab: ItemTab) {
         if tab == ItemTab::Code && !self.code_seen.get_untracked() {
             self.code_seen.set(true);
@@ -3226,7 +3230,6 @@ impl ReviewState {
             let item = self.item.with(|i| i.as_ref().map(|i| i.id.clone()));
             let spot = match self.tab.get() {
                 ItemTab::Conversation => Spot::Conversation,
-                ItemTab::Walkthrough => Spot::Walkthrough,
                 ItemTab::Code => match self.active.get() {
                     Some(path) => {
                         // The file's own caret first: `last_position` can
@@ -3331,11 +3334,6 @@ impl ReviewState {
             Spot::Conversation => {
                 if self.tab.get_untracked() != ItemTab::Conversation {
                     self.tab.set(ItemTab::Conversation);
-                }
-            }
-            Spot::Walkthrough => {
-                if self.tab.get_untracked() != ItemTab::Walkthrough {
-                    self.tab.set(ItemTab::Walkthrough);
                 }
             }
             Spot::Code => {
@@ -4230,6 +4228,16 @@ impl ReviewState {
                 .collect::<Vec<_>>();
             let mut out = anchors_of(&visible, path);
             if let Some(file) = file.as_deref() {
+                // A step's lines stay in view as a thread's do.
+                for (_, anchor) in crate::review::walkthrough::steps_in(*self, file) {
+                    match anchor.side {
+                        perch_github::Side::Right => out.push((
+                            anchor.start_line.saturating_sub(1) as usize,
+                            anchor.line.saturating_sub(1) as usize,
+                        )),
+                        perch_github::Side::Left => out.extend(aligned_head_ranges(file, &anchor)),
+                    }
+                }
                 out.extend(
                     visible
                         .iter()
@@ -4283,8 +4291,13 @@ impl ReviewState {
                 .map(|thread| CardId::Thread(thread.id.clone()))
                 .filter(|card| self.is_collapsed(card))
                 .collect();
-            self.card_rows
-                .with(|rows| cards_of(&visible, composer.as_ref(), &file, &collapsed, rows))
+            let threads = self
+                .card_rows
+                .with(|rows| cards_of(&visible, composer.as_ref(), &file, &collapsed, rows));
+            // A step's card goes right under its lines, over any thread's.
+            let mut out = crate::review::walkthrough::step_cards(*self, &file);
+            out.extend(threads);
+            out
         })
     }
 
@@ -4296,7 +4309,7 @@ impl ReviewState {
         self.composer
             .with(|c| {
                 c.as_ref()
-                    .filter(|c| c.thread_id.is_none())
+                    .filter(|c| c.thread_id.is_none() && c.block.is_none())
                     .and_then(|c| c.anchor.clone())
             })
             .or_else(|| self.sent_composer.get())
@@ -4312,7 +4325,7 @@ impl ReviewState {
         };
         self.composer.with(|c| {
             c.as_ref()
-                .filter(|c| c.thread_id.is_none())
+                .filter(|c| c.thread_id.is_none() && c.block.is_none())
                 .and_then(|c| c.anchor.as_ref())
                 .is_some_and(|a| a.path == file.path && card_line(&file, a).is_some())
         })
@@ -4900,7 +4913,7 @@ impl ReviewState {
     }
 
     /// Open a composer for a new thread on lines a walkthrough's block
-    /// shows, under the block, with Walkthrough staying up. With `keep`,
+    /// shows, under the block, where the block is. With `keep`,
     /// one already under the block keeps what was typed and where it
     /// goes, as a shift-click's range does.
     pub fn open_composer_under(
@@ -4972,7 +4985,7 @@ impl ReviewState {
         anchor: Option<&Anchor>,
     ) -> crate::review::threads::ThreadFace {
         use crate::review::threads::ThreadFace;
-        if matches!(self.tab.get(), ItemTab::Conversation | ItemTab::Walkthrough) {
+        if self.tab.get() == ItemTab::Conversation {
             return ThreadFace::Card;
         }
         let in_code = match thread_id {
@@ -5004,7 +5017,7 @@ impl ReviewState {
     }
 
     /// Open a composer, under a walkthrough's block when `block` names
-    /// one, where Walkthrough stays up; else in the code when it has a
+    /// one, wherever that is; else in the code when it has a
     /// card there, else on Conversation.
     fn place_composer(
         &self,
@@ -5041,7 +5054,7 @@ impl ReviewState {
         });
         let in_code = self.composer_in_code_untracked();
         if under_block {
-            self.show_tab(ItemTab::Walkthrough);
+            // Drawn under its block, on whichever page shows the block.
         } else if !in_code && self.tab.get_untracked() != ItemTab::Conversation {
             self.show_tab(ItemTab::Conversation);
         } else if let Some(id) = self
@@ -5495,7 +5508,7 @@ pub fn cards_of(
 /// left-side card goes after the exact base row: its ghost when changed or
 /// removed, or the aligned head row when unchanged. `None` when the file
 /// does not have the line on that side.
-fn card_line(file: &LoadedFile, anchor: &Anchor) -> Option<usize> {
+pub(crate) fn card_line(file: &LoadedFile, anchor: &Anchor) -> Option<usize> {
     let last = anchor.start_line.max(anchor.line);
     match anchor.side {
         perch_github::Side::Left => {

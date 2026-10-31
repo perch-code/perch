@@ -563,8 +563,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 .filter(|_| !boxed && review.is_open());
                 if let Some(paging) = paging {
                     let showing = match review.tab.get() {
-                        crate::review::model::ItemTab::Conversation
-                        | crate::review::model::ItemTab::Walkthrough => true,
+                        crate::review::model::ItemTab::Conversation => true,
                         crate::review::model::ItemTab::Code => {
                             review.active_file().is_some_and(|f| !f.truncated)
                                 && review.drawn_picture().is_none()
@@ -597,7 +596,6 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         crate::review::model::ItemTab::Conversation => {
                             Some(crate::review::find::Pane::Conversation)
                         }
-                        crate::review::model::ItemTab::Walkthrough => None,
                     }
                 };
                 let find_open = match finding {
@@ -817,9 +815,11 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 // Cmd-W closes the open file, as in any editor, then the
                 // item, then the window; `v` checks it
                 // as viewed, `]` and `[` go to the next and previous change,
-                // `}` and `{` open the next and previous unviewed file. Files
-                // only. The braces are shifted brackets: the physical codes
-                // with Shift alone, so Cmd-{ steps through the tabs.
+                // `}` and `{` open the next and previous unviewed file, and
+                // `.` and `,` go to the next and previous step while the
+                // walkthrough is out. Files only. The braces are shifted
+                // brackets: the physical codes with Shift alone, so Cmd-{
+                // steps through the tabs.
                 if review.tab.get() == crate::review::model::ItemTab::Code {
                     let shifted = key.modifiers == Modifiers::SHIFT;
                     match key.code {
@@ -828,6 +828,13 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                                 review.close_tab(&path);
                                 return EventPropagation::Stop;
                             }
+                        }
+                        Code::Period | Code::Comma
+                            if key.modifiers.is_empty()
+                                && review.walkthrough_at.get().is_some() =>
+                        {
+                            crate::review::walkthrough::step_by(review, key.code == Code::Period);
+                            return EventPropagation::Stop;
                         }
                         Code::BracketRight | Code::BracketLeft if key.modifiers.is_empty() => {
                             crate::review::tabs::jump_to_change(
@@ -1880,7 +1887,6 @@ mod tests {
         };
         let showing = |review: &ReviewState| match review.tab.get() {
             ItemTab::Conversation => "conversation".to_string(),
-            ItemTab::Walkthrough => "walkthrough".to_string(),
             ItemTab::Code => review.active.get().unwrap_or_default(),
         };
 
