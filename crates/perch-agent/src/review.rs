@@ -216,6 +216,7 @@ pub fn assess_review_capability(
                 "--disallowedTools",
                 "--permission-prompts",
                 "--safe-mode",
+                "--setting-sources",
                 "--strict-mcp-config",
                 "--no-session-persistence",
             ],
@@ -607,6 +608,11 @@ fn claude_isolation_args(
         // provides a second fail-closed boundary for process spawning,
         // and the sandbox settings keep the shell offline and read-only.
         "--safe-mode".into(),
+        // Safe mode still merges the repository's own settings files
+        // (`permissions`, `env`, sandbox exclusions) beside `--settings`,
+        // and a pull request is a stranger's.
+        "--setting-sources".into(),
+        "user".into(),
         "--strict-mcp-config".into(),
         "--no-session-persistence".into(),
         "--settings".into(),
@@ -1909,7 +1915,7 @@ mod tests {
         assert!(!cap.available);
         assert!(cap.reason.unwrap().contains("--ignore-rules"));
 
-        let claude_help = "--print --output-format --effort --allowedTools --disallowedTools --permission-prompts --safe-mode --strict-mcp-config --no-session-persistence";
+        let claude_help = "--print --output-format --effort --allowedTools --disallowedTools --permission-prompts --safe-mode --setting-sources --strict-mcp-config --no-session-persistence";
         assert!(
             assess_review_capability(Backend::ClaudeCode, "2.1.269 (Claude Code)", claude_help)
                 .available
@@ -1942,12 +1948,13 @@ mod tests {
             assert!(!capability.available, "missing {required} must fail closed");
         }
 
-        let claude_help = "--print --output-format --effort --allowedTools --disallowedTools --permission-prompts --safe-mode --strict-mcp-config --no-session-persistence";
+        let claude_help = "--print --output-format --effort --allowedTools --disallowedTools --permission-prompts --safe-mode --setting-sources --strict-mcp-config --no-session-persistence";
         for required in [
             "--allowedTools",
             "--disallowedTools",
             "--permission-prompts",
             "--safe-mode",
+            "--setting-sources",
             "--strict-mcp-config",
             "--no-session-persistence",
         ] {
@@ -2012,6 +2019,8 @@ mod tests {
         let mut expected = vec![
             "--print".to_string(),
             "--safe-mode".into(),
+            "--setting-sources".into(),
+            "user".into(),
             "--strict-mcp-config".into(),
             "--no-session-persistence".into(),
             "--settings".into(),
@@ -2226,6 +2235,7 @@ mod tests {
         let args = review_spec(Backend::ClaudeCode, dir.path().into()).args();
         for flag in [
             "--safe-mode",
+            "--setting-sources",
             "--strict-mcp-config",
             "--no-session-persistence",
         ] {
