@@ -458,12 +458,13 @@ fn stacked_view(
     // row to scroll to.
     wire_highlights(state, &live, live_file);
     let columns = wrap_columns(state, viewport, Layout::Stacked);
+    let heading = heading(viewport, scroll_to);
     wire_folds(state, live_file, memos, columns, epoch, {
         move |file: &LoadedFile, inputs: &Inputs, reloaded: bool| {
             apply(
                 &live,
                 inputs.stacked(file),
-                viewport,
+                heading,
                 scroll_to,
                 cursor,
                 shifted,
@@ -650,6 +651,22 @@ fn wire_folds(
     });
 }
 
+/// Where an editor's view is headed: its viewport, or, while a scroll
+/// asked of it has not landed yet, the viewport moved to that scroll. The
+/// scroll lands on the next update pass, and an edit before then, such as
+/// a card's rows arriving under a jump, moves the view from where the
+/// jump put it rather than back to where it was.
+fn heading(viewport: RwSignal<Rect>, scroll_to: RwSignal<Option<Vec2>>) -> RwSignal<Rect> {
+    let heading = RwSignal::new(viewport.get_untracked());
+    Effect::new(move |_| heading.set(viewport.get()));
+    Effect::new(move |_| {
+        if let Some(at) = scroll_to.get() {
+            heading.set(viewport.get_untracked().with_origin(at.to_point()));
+        }
+    });
+    heading
+}
+
 /// Turns what the editor shows into `new`, in place.
 ///
 /// The one region that differs between the two documents is replaced in
@@ -674,7 +691,7 @@ fn wire_folds(
 fn apply(
     live: &LiveDoc,
     new: Doc,
-    viewport: RwSignal<Rect>,
+    heading: RwSignal<Rect>,
     scroll_to: RwSignal<Option<Vec2>>,
     cursor: RwSignal<Cursor>,
     shifted: RwSignal<Option<usize>>,
@@ -720,7 +737,7 @@ fn apply(
     // what the editor does last. Setting it also clamps the offset to the
     // new height, which a document that shrank under the scroll needs.
     let line_height = theme::code_line_height() as f64;
-    let vp = viewport.get_untracked();
+    let vp = heading.get_untracked();
     let first_visible = (vp.y0 / line_height).floor() as usize;
     let y = if reloaded {
         if region.old_rows.end <= first_visible {
@@ -1527,6 +1544,8 @@ fn split_view(
     wire_highlights(state, &left_live, live_file);
     // The two sides are the same width, so the head's says for both.
     let columns = wrap_columns(state, right_viewport, Layout::Split);
+    let right_heading = heading(right_viewport, right_scroll_to);
+    let left_heading = heading(left_viewport, left_scroll_to);
     wire_folds(state, live_file, memos, columns, epoch, {
         move |file: &LoadedFile, inputs: &Inputs, reloaded: bool| {
             let Some((new_left, new_right)) = inputs.split(file) else {
@@ -1535,7 +1554,7 @@ fn split_view(
             apply(
                 &right_live,
                 new_right,
-                right_viewport,
+                right_heading,
                 right_scroll_to,
                 right_cursor,
                 right_shifted,
@@ -1544,7 +1563,7 @@ fn split_view(
             apply(
                 &left_live,
                 new_left,
-                left_viewport,
+                left_heading,
                 left_scroll_to,
                 left_cursor,
                 left_shifted,
@@ -5176,6 +5195,73 @@ mod window {
         assert!(find(harness.root_id(), "inline-card:step-").is_none());
         assert!(bar.is_hidden());
         assert_eq!(stacked(state).doc.get().card_span(&CardId::Step(0)), None);
+    }
+
+    /// Go to step, pressed on Conversation, lands on the step's lines in
+    /// the file already open on Code, however far down they are, the first
+    /// time and after stepping elsewhere.
+    #[test]
+    fn going_to_a_step_from_conversation_scrolls_the_open_file_to_it() {
+        use crate::backend::{CodeSide, Lines, Step, Walkthrough, WalkthroughOutcome};
+        let (mut harness, state) = harness();
+        let step = |title: &str, start: u32, end: u32| Step {
+            title: title.into(),
+            at: Lines {
+                path: "src/x.rs".into(),
+                side: CodeSide::Head,
+                start,
+                end,
+            },
+            text: vec!["fn a() {}".into()],
+            body: vec![crate::backend::Part::Text {
+                text: format!("Why {title}."),
+            }],
+            unplaced: false,
+        };
+        crate::review::walkthrough::apply(
+            state,
+            "wt".into(),
+            WalkthroughOutcome::Loaded(Some(Walkthrough {
+                merge_base: "b".into(),
+                head: "h".into(),
+                summary: String::new(),
+                background: None,
+                steps: vec![step("first", 82, 82), step("second", 4, 4)],
+                hunks: Vec::new(),
+                guidance: String::new(),
+            })),
+        );
+        let settle = |harness: &mut HeadlessHarness| {
+            for _ in 0..3 {
+                harness.rebuild();
+                harness.paint();
+            }
+        };
+        settle(&mut harness);
+        let line_height = crate::theme::code_line_height() as f64;
+        let in_view = |head_line: usize| {
+            let doc = stacked(state).doc.get();
+            let top = doc.row_of_head(head_line).unwrap() as f64 * line_height;
+            let viewport = super::STACKED_VIEWPORT.with(|v| v.get()).unwrap().get();
+            viewport.y0 <= top && top < viewport.y1
+        };
+        assert!(!in_view(81), "the file starts at its top");
+
+        state.tab.set(ItemTab::Conversation);
+        settle(&mut harness);
+        crate::review::walkthrough::go_to_step(state, 0);
+        settle(&mut harness);
+        assert_eq!(state.tab.get(), ItemTab::Code);
+        assert!(in_view(81), "the first step's lines are in view");
+
+        crate::review::walkthrough::go_to_step(state, 1);
+        settle(&mut harness);
+        assert!(in_view(3), "the second step's lines are in view");
+        state.tab.set(ItemTab::Conversation);
+        settle(&mut harness);
+        crate::review::walkthrough::go_to_step(state, 0);
+        settle(&mut harness);
+        assert!(in_view(81), "back on the first step's lines");
     }
 
     #[test]
