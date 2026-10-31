@@ -72,31 +72,18 @@ impl DisplayBuffer {
 
     /// Splice the removed lines of `diff` into `head`.
     ///
-    /// `base` supplies the text of the removed lines; when it is empty the
-    /// ghost lines are still placed, just blank.
+    /// `diff` carries the removed lines and where they were; `base`, the
+    /// file it was taken against, only sizes the buffer.
     pub fn unified(head: &str, base: &str, diff: &FileDiff) -> Self {
         let head_lines: Vec<&str> = head.lines().collect();
-        let base_lines: Vec<&str> = base.lines().collect();
 
         // Where each removed run was anchored, and which base line it began
         // at, so ghost lines can be highlighted with the base file's spans.
         let mut deletions_at: Vec<Vec<(usize, &str)>> = vec![Vec::new(); head_lines.len() + 1];
-        let mut consumed = 0usize;
         for run in &diff.deleted {
             let anchor = run.before_line.min(head_lines.len());
-            // Find where this run sits in the base file so the ghost lines
-            // can carry real base line numbers.
-            let base_start = base_lines
-                .windows(run.lines.len().max(1))
-                .enumerate()
-                .skip(consumed)
-                .find(|(_, w)| w.iter().zip(&run.lines).all(|(a, b)| a == b))
-                .map(|(i, _)| i)
-                .unwrap_or(consumed);
-            consumed = base_start + run.lines.len();
-
             for (offset, line) in run.lines.iter().enumerate() {
-                deletions_at[anchor].push((base_start + offset, line.as_str()));
+                deletions_at[anchor].push((run.base_line + offset, line.as_str()));
             }
         }
 
@@ -257,6 +244,17 @@ mod tests {
             "the ghost carries the old text"
         );
         assert_eq!(b.text.lines().nth(2), Some("B"));
+    }
+
+    #[test]
+    fn a_removed_line_keeps_its_own_base_line_when_its_text_repeats() {
+        let base = "fn a() {\n    x\n}\nfn b() {\n    y\n}\n";
+        let head = "fn a() {\n    x\n}\nfn b() {\n    y\n";
+        let d = file_diff(base, head);
+        let b = DisplayBuffer::unified(head, base, &d);
+
+        let ghost = b.rows.iter().position(|r| r.is_deleted()).unwrap();
+        assert_eq!(b.row(ghost), Some(Row::Deleted { base_line: 5 }));
     }
 
     #[test]

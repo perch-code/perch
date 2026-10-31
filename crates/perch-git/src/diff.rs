@@ -106,6 +106,8 @@ pub struct DeletedRun {
     /// The head line these lines sit above. Equal to the head line count when
     /// the removal was at the end of the file.
     pub before_line: usize,
+    /// The base line the first of them was, zero-based.
+    pub base_line: usize,
     pub lines: Vec<String>,
 }
 
@@ -176,6 +178,7 @@ pub fn file_diff(base: &str, head: &str) -> FileDiff {
             if removed > 0 {
                 deleted.push(DeletedRun {
                     before_line: start.min(head_line_count),
+                    base_line: before.start as usize,
                     lines: base_lines[(before.start as usize).min(base_lines.len())
                         ..(before.end as usize).min(base_lines.len())]
                         .iter()
