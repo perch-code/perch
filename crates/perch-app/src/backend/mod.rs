@@ -521,7 +521,8 @@ pub enum Command {
     },
 
     /// Remove Worktree: an owned checkout's directory goes, refused when
-    /// there is uncommitted work in it. The row moves to Recent.
+    /// there is uncommitted work in it. The row moves to Recent. Hide, on a
+    /// root's checkout: only the row moves.
     ArchiveItem {
         id: String,
         suspended_navigation: SuspendedNavigation,
@@ -530,6 +531,11 @@ pub enum Command {
     RestoreItem {
         id: String,
         navigation_id: u64,
+    },
+    /// Back to Active without opening: a root's checkout the reader hid,
+    /// which is theirs and has nothing to put back.
+    UnhideItem {
+        id: String,
     },
     /// Remove the row and its threads. An owned checkout's directory and
     /// branch go too; anything under a root is not touched.
@@ -3423,6 +3429,12 @@ impl Backend {
         navigation_id
     }
 
+    pub fn unhide_item(&self, id: &str) {
+        let _ = self
+            .commands
+            .send(Command::UnhideItem { id: id.to_string() });
+    }
+
     pub fn delete_item(&self, id: &str, accept_loss: bool) {
         self.scope_requests.clear_item(id);
         let _ = self.commands.send(Command::DeleteItem {
@@ -4972,6 +4984,11 @@ async fn run(
                         let _ = ctx.events.send(Event::Notice(message));
                     }
                 });
+            }
+            Command::UnhideItem { id } => {
+                ctx.clear_notice();
+                let ctx = ctx.clone();
+                tokio::spawn(async move { unhide_item(&ctx, &id).await });
             }
             Command::DeleteItem { id, accept_loss } => {
                 ctx.clear_notice();
@@ -8209,6 +8226,11 @@ async fn archive_item(
     // manager and work arriving after it is rejected.
     let mut item = ctx.item(id).unwrap_or(item);
     item.archived_at = Some(Timestamp::now());
+    // A root's checkout the reader hides may never have been opened, and
+    // Recent lists only what was. It goes to the top there, by Unhide.
+    if item.checkout.as_ref().is_some_and(|c| !c.owned) {
+        item.last_opened_at = Timestamp::now();
+    }
     if let Err(error) = ctx
         .with_cache(|c| c.update_item(&item))
         .transpose()
@@ -8245,6 +8267,28 @@ async fn archive_item(
         }
         Ok(())
     }
+}
+
+/// Clear a hidden root checkout's archive. The scan that follows takes the
+/// row out again if its directory or branch went while it was hidden.
+async fn unhide_item(ctx: &Ctx, id: &str) {
+    {
+        let _lifecycle = ctx.lock_item(id).await;
+        let Some(mut item) = ctx.item(id) else {
+            ctx.notice("That item is gone");
+            return;
+        };
+        if !item.is_archived() || item.checkout.as_ref().is_none_or(|c| c.owned) {
+            return;
+        }
+        item.archived_at = None;
+        if let Some(Err(e)) = ctx.with_cache(|c| c.update_item(&item)) {
+            ctx.notice(format!("Could not save the change: {e}"));
+            return;
+        }
+        ctx.send_items();
+    }
+    refresh_items(ctx).await;
 }
 
 /// Remove an archived owned checkout once no process can still be using it.
@@ -29378,6 +29422,44 @@ read eof || true
             !scan_roots(&ctx).await,
             "a second scan over the same tree changes nothing"
         );
+    }
+
+    #[tokio::test]
+    async fn a_hidden_root_checkout_stays_hidden_until_unhidden() {
+        // Issue 31: deleting a root's row only lasts until the next scan,
+        // which finds the checkout and makes a new row. Hide archives it,
+        // and the scan leaves an archived row alone.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("notes");
+        root_with_branch(&root, "feature");
+        let mut entry = rooted(None, &root);
+        entry.resolve(None);
+        let (ctx, _received) = ctx_declaring(dir.path(), &nowhere(), vec![entry]);
+        assert!(scan_roots(&ctx).await);
+        let items = || ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
+        let found = items().remove(0);
+
+        archive_item(&ctx, &found.id, None).await.unwrap();
+        assert!(
+            !scan_roots(&ctx).await,
+            "the scan leaves a hidden row alone"
+        );
+        let hidden = items();
+        assert_eq!(hidden.len(), 1, "{hidden:?}");
+        assert!(hidden[0].is_archived());
+        assert!(hidden[0].checkout.as_ref().unwrap().on_disk);
+        assert!(root.join(".git").exists(), "nothing on disk is touched");
+        assert!(
+            hidden[0].last_opened_at > hidden[0].created_at,
+            "listed under Recent, where Unhide is"
+        );
+
+        unhide_item(&ctx, &found.id).await;
+        let shown = items();
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].id, found.id);
+        assert!(!shown[0].is_archived());
+        assert!(crate::items::in_worktrees(&shown[0]));
     }
 
     #[tokio::test]

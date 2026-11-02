@@ -541,11 +541,39 @@ pub fn item_menu(state: AppState, backend: Rc<Backend>, item: Item) -> Menu {
     }
     menu = menu.separator();
 
-    {
+    if let Some(c) = item.checkout.as_ref().filter(|c| !c.owned) {
+        // One the root scan found is the reader's own checkout, which Perch
+        // never touches. Hide archives the row, and the scan leaves an
+        // archived row alone, so it stays out of Worktrees for as long as
+        // the checkout is there. Unhide only clears the flag. A row the
+        // scan put away itself, because the branch left its directory,
+        // comes back with the branch, and is not the reader's to unhide.
+        let (b, i) = (backend.clone(), id.clone());
+        let hidden = item.is_archived();
+        let enabled = !hidden || c.on_disk;
+        menu = menu.item(if hidden { "Unhide" } else { "Hide" }, move |m| {
+            let (b, i) = (b.clone(), i.clone());
+            let icon = if hidden {
+                SidebarIcon::Undo
+            } else {
+                SidebarIcon::Archive
+            };
+            m.icon(icon)
+                .enabled(enabled)
+                .accelerator(key(Code::KeyA))
+                .action(move || {
+                    if hidden {
+                        b.unhide_item(&i);
+                    } else {
+                        state.confirm_loss.set(None);
+                        b.archive_item(&i);
+                    }
+                })
+        });
+    } else {
         let (b, i) = (backend.clone(), id.clone());
         // A worktree Perch made can be removed, and put back once it has
-        // gone. One the root scan found is the reader's own checkout, and
-        // comes and goes with it.
+        // gone.
         let on_disk = crate::items::in_worktrees(&item);
         let owned = item.checkout.as_ref().is_some_and(|c| c.owned);
         menu = menu.item(
@@ -656,6 +684,12 @@ fn delete_confirmation(state: AppState, backend: Rc<Backend>, item: Item) -> imp
         ),
         Some(c) if c.owned => format!(
             "Removes the row and its threads, and the branch {}.",
+            c.branch
+        ),
+        // The scan finds the checkout again and makes a new row for it.
+        Some(c) if c.on_disk => format!(
+            "Removes the row and its threads. Nothing on disk is touched, so {} comes back \
+             while it is checked out. Hide keeps it out of the list.",
             c.branch
         ),
         Some(_) => "Removes the row and its threads. Nothing on disk is touched.".to_string(),

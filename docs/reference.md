@@ -465,6 +465,10 @@ branches and worktrees. Neither setting causes a repository-wide GitHub crawl.
 A worktree with no pull request is yours, so it is in **Authored**, whether Perch
 made it or found it under a root; the base branch never becomes a row. Once
 someone else's pull request attaches to it, the row goes by that author.
+Perch never removes a worktree it found under a root, so deleting its row
+lasts only until the next scan finds it again. **Hide** in the row's menu
+keeps it out of Worktrees without touching it; it's listed under Recent,
+where **Unhide** brings it back.
 A repository with a root and no GitHub remote is `local/<name>`: it has no pull
 requests or issues, and everything else works.
 
