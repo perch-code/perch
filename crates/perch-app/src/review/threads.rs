@@ -1301,8 +1301,12 @@ pub(crate) fn pull_request_close_offered(app: AppState, state: ReviewState) -> b
 /// review` for a draft, `Comment` for an issue comment that posts at
 /// once. Tracked over the composer.
 /// Whether the open item takes Work runs: a worktree of the reader's own,
-/// or a pull request they opened, on disk.
+/// or a pull request they opened, on disk, and not a past review's
+/// snapshot, which is read-only.
 fn work_offered(app: AppState, state: ReviewState) -> bool {
+    if state.historical_review.with(Option::is_some) {
+        return false;
+    }
     let viewer = app
         .viewer
         .with(|v| v.as_ref().map(|(login, _)| login.clone()));
@@ -4715,6 +4719,78 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert!(find(harness.root_id(), "composer-approvals").is_none());
+    }
+
+    #[test]
+    fn a_past_review_s_snapshot_offers_no_work() {
+        let _root = TestRoot::new();
+        let app = AppState::new();
+        let state = ReviewState::new();
+        let mut item =
+            perch_github::Item::new("acme/repo", "2026-09-20T09:00:00Z".parse().unwrap());
+        item.id = "item-1".into();
+        item.checkout = Some(perch_github::ItemCheckout {
+            branch: "chris/work".into(),
+            base_ref: "main".into(),
+            head_sha: "h".into(),
+            path: "/tmp/nowhere".into(),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            divergence: None,
+            source: None,
+        });
+        state.item.set(Some(Arc::new(item)));
+        assert!(work_offered(app, state));
+        assert_eq!(
+            sending_mode(app, state, perch_github::RunMode::Work),
+            perch_github::RunMode::Work
+        );
+
+        let created_at = "2026-09-19T12:00:00Z".parse().unwrap();
+        state
+            .historical_review
+            .set(Some(crate::review::model::ReviewGroupSummary {
+                group: perch_github::ReviewGroup {
+                    id: "group".into(),
+                    item_id: "item-1".into(),
+                    snapshot_id: "snapshot".into(),
+                    number: 1,
+                    status: perch_github::ReviewGroupStatus::Completed,
+                    new_findings: 0,
+                    still_present: 0,
+                    verified_fixed: 0,
+                    not_verified: 0,
+                    created_at,
+                    started_at: Some(created_at),
+                    ended_at: Some(created_at),
+                    instructions: None,
+                },
+                snapshot: perch_github::ReviewSnapshot {
+                    id: "snapshot".into(),
+                    item_id: "item-1".into(),
+                    repository: "acme/repo".into(),
+                    branch_label: Some("chris/work".into()),
+                    requested_base_ref: "main".into(),
+                    base_tip_sha: "base".into(),
+                    merge_base_sha: "base".into(),
+                    head_sha: "h".into(),
+                    dirty_edits_excluded: false,
+                    retention_key: "snapshot".into(),
+                    retained_ref: None,
+                    manifest_path: None,
+                    diff_path: None,
+                    created_at,
+                    worktree_parent_sha: None,
+                },
+                attempts: Vec::new(),
+            }));
+        assert!(!work_offered(app, state), "the snapshot is read-only");
+        assert_eq!(
+            sending_mode(app, state, perch_github::RunMode::Work),
+            perch_github::RunMode::Ask
+        );
     }
 
     #[test]

@@ -7139,7 +7139,11 @@ impl Ctx {
     }
 
     fn notice(&self, message: impl Into<String>) {
-        let _ = self.events.send(Event::Notice(message.into()));
+        let message = message.into();
+        // A toast leaves no trace otherwise, and feedback reports quote
+        // the log.
+        tracing::info!(notice = %message, "notice shown");
+        let _ = self.events.send(Event::Notice(message));
     }
 
     fn done(&self, message: impl Into<String>) {
@@ -16146,13 +16150,17 @@ struct ReviewFindingFollowup {
     anchor: Option<Anchor>,
     outdated: bool,
     context: String,
-    checkout: perch_git::Checkout,
+    /// The retained snapshot's checkout the run goes in, or `None` for a
+    /// Work run, which goes in the live worktree.
+    checkout: Option<perch_git::Checkout>,
 }
 
 /// Build a finding follow-up from durable review identities rather than the
 /// public thread's numeric anchor. The original blob always comes from its
 /// retained snapshot, while a displayed anchor is used only when an
 /// observation or newest mapping explicitly targets that exact snapshot.
+/// `in_snapshot` is false for Work, which quotes the snapshot but edits
+/// the live worktree.
 async fn review_finding_followup(
     ctx: &Ctx,
     item_id: &str,
@@ -16160,6 +16168,7 @@ async fn review_finding_followup(
     displayed_checkout: &perch_git::Checkout,
     displayed_snapshot_id: Option<&str>,
     displayed_group_id: Option<&str>,
+    in_snapshot: bool,
 ) -> Result<Option<ReviewFindingFollowup>, String> {
     let loaded = ctx
         .with_cache(|cache| -> Result<_, CacheError> {
@@ -16268,28 +16277,37 @@ async fn review_finding_followup(
     let original_anchor = original
         .as_ref()
         .and_then(|observation| observation.anchor.as_ref());
+    // A question reads the retained source, so it must be there; Work
+    // reads the live files and only quotes it where it can.
+    let best_effort = |excerpt: Result<Option<String>, String>| match excerpt {
+        Err(error) if !in_snapshot => {
+            tracing::info!(finding = %finding.id, %error, "finding quoted without its code");
+            Ok(None)
+        }
+        other => other,
+    };
     let original_code = match (original_anchor, original_snapshot.as_ref()) {
-        (Some(anchor), Some(snapshot)) => {
+        (Some(anchor), Some(snapshot)) => best_effort(
             retained_excerpt(ctx, &snapshot.id, anchor, || {
                 format!(
                     "The retained source for finding {} is unavailable",
                     finding.id
                 )
             })
-            .await?
-        }
+            .await,
+        )?,
         _ => None,
     };
     let mapped_code = match (target_anchor.as_ref(), target_snapshot.as_ref()) {
-        (Some(anchor), Some(snapshot)) => {
+        (Some(anchor), Some(snapshot)) => best_effort(
             retained_excerpt(ctx, &snapshot.id, anchor, || {
                 format!(
                     "The retained mapped source for finding {} is unavailable",
                     finding.id
                 )
             })
-            .await?
-        }
+            .await,
+        )?,
         _ => None,
     };
 
@@ -16344,8 +16362,25 @@ async fn review_finding_followup(
         context.push_str("\n```");
     }
 
-    // Finding follow-ups run against retained immutable source as well as
-    // quoting it. Prefer the exact displayed snapshot when one exists; if
+    let outdated = target_anchor.is_none();
+    let anchor = target_anchor.map(|anchor| Anchor {
+        path: anchor.path,
+        start_line: anchor.start_line,
+        line: anchor.end_line,
+        side: anchor.side,
+        commit_sha: anchor.commit_sha,
+    });
+    if !in_snapshot {
+        return Ok(Some(ReviewFindingFollowup {
+            anchor,
+            outdated,
+            context,
+            checkout: None,
+        }));
+    }
+
+    // Questions on a finding run against retained immutable source as well
+    // as quoting it. Prefer the exact displayed snapshot when one exists; if
     // the live checkout moved beyond captured history, use the finding's
     // original snapshot and state explicitly that there is no current map.
     let mut run_source = None;
@@ -16384,18 +16419,11 @@ async fn review_finding_followup(
         stale: None,
     };
 
-    let outdated = target_anchor.is_none();
     Ok(Some(ReviewFindingFollowup {
-        anchor: target_anchor.map(|anchor| Anchor {
-            path: anchor.path,
-            start_line: anchor.start_line,
-            line: anchor.end_line,
-            side: anchor.side,
-            commit_sha: anchor.commit_sha,
-        }),
+        anchor,
         outdated,
         context,
-        checkout: immutable_checkout,
+        checkout: Some(immutable_checkout),
     }))
 }
 
@@ -16567,6 +16595,13 @@ async fn ask_as(
         }
     }
 
+    // Work is checked here, not only by the switch that offers it: a past
+    // review's snapshot is read-only. A finding on the live view is worked
+    // on in the live worktree, with the finding quoted.
+    if mode == RunMode::Work && snapshot_id.is_some() {
+        ctx.notice("Work runs only in the live worktree, not a review's snapshot");
+        return;
+    }
     let finding_followup = if is_new {
         None
     } else {
@@ -16577,6 +16612,7 @@ async fn ask_as(
             &checkout,
             snapshot_id.as_deref(),
             group_id.as_deref(),
+            mode != RunMode::Work,
         )
         .await
         {
@@ -16589,20 +16625,17 @@ async fn ask_as(
             }
         }
     };
-    if let Some(context) = finding_followup.as_ref() {
-        checkout = context.checkout.clone();
+    let in_snapshot = finding_followup
+        .as_ref()
+        .is_some_and(|context| context.checkout.is_some());
+    if let Some(retained) = finding_followup.as_ref().and_then(|c| c.checkout.clone()) {
+        checkout = retained;
     }
     if !checkout.worktree.join(".git").exists() {
         ctx.notice("There is no checkout to ask in");
         return;
     }
-    // Work is checked here, not only by the switch that offers it: a
-    // finding's snapshot and a retained review are never worked in.
     let work = if mode == RunMode::Work {
-        if finding_followup.is_some() || snapshot_id.is_some() {
-            ctx.notice("Work runs only in the live worktree, not a review's snapshot");
-            return;
-        }
         match work_setup(ctx, &item, backend, committer) {
             Ok(work) => Some(work),
             Err(message) => {
@@ -16650,7 +16683,7 @@ async fn ask_as(
         original_request: question.clone(),
         prompt_snapshot: None,
         working_directory: Some(checkout.worktree.to_string_lossy().into_owned()),
-        revision: if finding_followup.is_some() {
+        revision: if in_snapshot {
             RevisionContext::Snapshot {
                 base_sha: checkout.merge_base.clone(),
                 head_sha: checkout.head_sha.clone(),
@@ -24022,6 +24055,193 @@ while True:
         assert!(
             args.contains("--resume"),
             "the Work session is resumed: {args}"
+        );
+    }
+
+    /// Work on a review finding goes in the live worktree with the finding
+    /// quoted, not in the review's snapshot; on a past review's snapshot it
+    /// is refused.
+    #[tokio::test]
+    async fn work_on_a_finding_goes_in_the_live_worktree() {
+        use perch_github::{
+            FindingSeverity, FindingTarget, NewFinding, NewObservation, NewReviewerAttempt,
+            ObservationKind, ReconciledObservation, ReviewAdmission, ReviewAnchor, ReviewEvidence,
+            ReviewIngestion, ReviewResultKind, ReviewSnapshot, ReviewThreadMessage,
+            ReviewVerificationInput, ReviewerPhase, StoredReviewerOutput,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let mut config = Config::default();
+        config.agent.binary = recording_claude(dir.path());
+        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(worktree.join(".git")).unwrap();
+        let mut branch = Item::new("a/b", "2026-09-10T00:00:00Z".parse().unwrap());
+        branch.checkout = Some(ItemCheckout {
+            branch: "chris/readme".into(),
+            base_ref: "main".into(),
+            head_sha: "h".into(),
+            path: worktree.clone(),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            divergence: None,
+            source: None,
+        });
+        ctx.with_cache(|c| c.insert_item(&branch)).unwrap().unwrap();
+
+        let now = Timestamp::now();
+        let admission = ReviewAdmission {
+            group_id: "g1".into(),
+            snapshot: ReviewSnapshot {
+                id: "s1".into(),
+                item_id: branch.id.clone(),
+                repository: "a/b".into(),
+                branch_label: Some("chris/readme".into()),
+                requested_base_ref: "main".into(),
+                base_tip_sha: "b".into(),
+                merge_base_sha: "m".into(),
+                head_sha: "h".into(),
+                dirty_edits_excluded: false,
+                retention_key: "k".into(),
+                retained_ref: None,
+                manifest_path: None,
+                diff_path: None,
+                created_at: now,
+                worktree_parent_sha: None,
+            },
+            attempts: vec![NewReviewerAttempt {
+                id: "a1".into(),
+                run_id: None,
+                backend: "claude-code".into(),
+                executable: None,
+                executable_version: None,
+                model: "m".into(),
+                effort: "medium".into(),
+                adapter_version: "a".into(),
+                output_format_version: "o".into(),
+                created_at: now,
+            }],
+            admitted_at: now,
+            instructions: None,
+        };
+        ctx.with_cache(|c| {
+            c.admit_review_group(&admission).unwrap();
+            c.transition_reviewer_attempt("a1", ReviewerPhase::Reviewing, now)
+                .unwrap();
+            c.save_reviewer_output(&StoredReviewerOutput {
+                attempt_id: "a1".into(),
+                output_id: "out-1".into(),
+                raw_result: "bug".into(),
+                diagnostics: None,
+                verification_input: ReviewVerificationInput::default(),
+                saved_at: now,
+            })
+            .unwrap();
+            c.ingest_review_output(&ReviewIngestion {
+                attempt_id: "a1".into(),
+                output_id: "out-1".into(),
+                result_kind: ReviewResultKind::Findings,
+                observations: vec![ReconciledObservation {
+                    finding: FindingTarget::New(Box::new(NewFinding {
+                        id: "f1".into(),
+                        stable_key: "stable".into(),
+                        thread_id: "t1".into(),
+                        initial_message: ReviewThreadMessage {
+                            id: "m1".into(),
+                            body: "The freeze flag can drift".into(),
+                        },
+                        draft: false,
+                        possible_duplicate_of: None,
+                        possible_duplicate_evidence: ReviewEvidence::default(),
+                    })),
+                    observation: NewObservation {
+                        id: "o1".into(),
+                        source_output_id: "source-1".into(),
+                        kind: ObservationKind::Reported,
+                        title: "The freeze flag can drift".into(),
+                        body: "It always equals result_tx.is_none().".into(),
+                        severity: FindingSeverity::Medium,
+                        anchor: Some(ReviewAnchor {
+                            snapshot_id: "s1".into(),
+                            path: "src/writer.rs".into(),
+                            side: perch_github::comments::Side::Right,
+                            start_line: 464,
+                            end_line: 464,
+                            commit_sha: "h".into(),
+                            blob_sha: "blob".into(),
+                        }),
+                        evidence: ReviewEvidence::default(),
+                        additional_message: None,
+                        created_at: now,
+                    },
+                }],
+                anchor_mappings: vec![],
+                completed_at: now,
+            })
+            .unwrap();
+        });
+
+        let ask_it = || {
+            ask(
+                &ctx,
+                branch.id.clone(),
+                Some("t1".into()),
+                None,
+                "Go back to Option".to_string(),
+                perch_agent::Backend::ClaudeCode,
+                "sonnet".into(),
+                perch_agent::Effort::Medium,
+                RunMode::Work,
+            )
+        };
+
+        // On the review's snapshot: refused, and nothing runs.
+        open_in_slot(&ctx, &branch);
+        {
+            let mut slot = ctx.slot.lock().unwrap();
+            let open = slot.as_mut().unwrap();
+            open.checkout.worktree = worktree.clone();
+            open.review_snapshot_id = Some("s1".into());
+            open.review_group_id = Some("g1".into());
+        }
+        ask_it().await;
+        assert!(notices(&received)
+            .iter()
+            .any(|n| n == "Work runs only in the live worktree, not a review's snapshot"));
+        assert!(!dir.path().join("args-1").exists(), "no agent ran");
+
+        // On the live view: it runs in the worktree, with the finding.
+        {
+            let mut slot = ctx.slot.lock().unwrap();
+            let open = slot.as_mut().unwrap();
+            open.review_snapshot_id = None;
+            open.review_group_id = None;
+        }
+        ask_it().await;
+        assert_eq!(notices(&received), Vec::<String>::new());
+        let runs = ctx
+            .with_cache(|c| c.runs_for_discussion("t1").unwrap())
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].mode, RunMode::Work);
+        assert_eq!(runs[0].status, RunStatus::Completed, "{:?}", runs[0].error);
+        assert_eq!(
+            runs[0].working_directory.as_deref(),
+            Some(worktree.to_string_lossy().as_ref())
+        );
+        assert!(matches!(
+            runs[0].revision,
+            RevisionContext::LiveCheckout { .. }
+        ));
+        let prompt = runs[0].prompt_snapshot.clone().unwrap();
+        assert!(prompt.contains("The freeze flag can drift"), "{prompt}");
+        assert!(prompt.contains("src/writer.rs:464"), "{prompt}");
+        let args = std::fs::read_to_string(dir.path().join("args-1")).unwrap();
+        assert!(
+            args.contains("Commit only when the reader asks you to"),
+            "{args}"
         );
     }
 
