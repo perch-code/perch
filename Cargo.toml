@@ -202,5 +202,5 @@ incremental = true
 # perch-app's own dependency on it resolves to the checkout floem's does,
 # and there is one `usvg::Tree` for a picture to be parsed into and drawn.
 [patch."https://github.com/lapce/floem"]
-floem = { git = "https://github.com/criccomini/floem", branch = "perch" }
-floem_renderer = { git = "https://github.com/criccomini/floem", branch = "perch" }
+floem = { git = "https://github.com/perch-code/floem", branch = "perch" }
+floem_renderer = { git = "https://github.com/perch-code/floem", branch = "perch" }
