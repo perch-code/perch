@@ -1759,7 +1759,23 @@ pub fn render_in(text: &str, repo: &str) -> impl IntoView {
 /// The blocks, stacked, at the body size, with the files, lines and
 /// symbols of the review's worktree they name linked to Code. The same
 /// as `render_in` for an item with no checkout.
-pub fn render_linked(text: &str, state: ReviewState) -> impl IntoView {
+///
+/// Text drawn before the files are known, as an issue's is before the
+/// default branch it reads is here, is drawn again once they are, so the
+/// paths in it link then.
+pub fn render_linked(text: &str, state: ReviewState) -> AnyView {
+    let linkable = move || state.files_root().is_some() && state.tree.with(|t| !t.is_empty());
+    if floem::reactive::Effect::untrack(linkable) {
+        return linked_body(text, state);
+    }
+    let text = text.to_string();
+    let known = Memo::new(move |_| linkable());
+    floem::views::dyn_container(move || known.get(), move |_| linked_body(&text, state))
+        .style(|s| s.width_full())
+        .into_any()
+}
+
+fn linked_body(text: &str, state: ReviewState) -> AnyView {
     let ctx = Ctx {
         size: theme::TEXT_BODY,
         color: theme::fg,
@@ -1767,7 +1783,7 @@ pub fn render_linked(text: &str, state: ReviewState) -> impl IntoView {
         refs: Refs::of(state),
         foot: None,
     };
-    passage(review_body(text, state, move |blocks| stack(blocks, ctx)))
+    passage(review_body(text, state, move |blocks| stack(blocks, ctx))).into_any()
 }
 
 /// `text` parsed in the review's repository and drawn by `draw`, with
@@ -4494,6 +4510,45 @@ mod tests {
                 state.pending_names.get().is_empty(),
                 "nothing here is a name"
             );
+        }
+
+        /// An issue's text is drawn before the default branch it reads is
+        /// there, with nothing to link to; its paths link once it comes.
+        #[test]
+        fn an_issues_paths_link_once_its_default_branch_is_here() {
+            let root = TestRoot::new();
+            let state = ReviewState::new();
+            let mut item =
+                perch_github::Item::new("acme/repo", "2026-09-20T09:00:00Z".parse().unwrap());
+            item.id = "issue".into();
+            state.item.set(Some(std::sync::Arc::new(item)));
+            let view = Container::new(render_linked("Look at `manifest.rs:12` first.", state))
+                .style(|s| s.width(WIDTH).padding(0.0));
+            let mut h = HeadlessHarness::new_with_size(root, view, WIDTH, 2000.0);
+            h.rebuild();
+            h.paint();
+            assert!(
+                links_on_first_line(&mut h, 0).is_empty(),
+                "nothing to link to yet"
+            );
+
+            state
+                .home
+                .set(Some(std::sync::Arc::new(crate::backend::HomeCode {
+                    path: "/tmp/home".into(),
+                    branch: "main".into(),
+                    head_sha: "0".repeat(40),
+                    fetched_at: None,
+                })));
+            state
+                .tree
+                .set(std::sync::Arc::new(vec![perch_git::TreeEntry::new(
+                    "src/manifest.rs",
+                    false,
+                )]));
+            h.rebuild();
+            h.paint();
+            assert_eq!(links_on_first_line(&mut h, 0).len(), 1);
         }
 
         /// A commit named by its SHA links once the review knows it: one

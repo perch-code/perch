@@ -77,7 +77,19 @@ pub fn button(app: AppState, state: ReviewState) -> impl IntoView {
 /// From an issue or a pull request, a prompt to work on it waits in the
 /// new branch's composer: see `draft`.
 pub fn start_work(app: AppState, backend: &Backend, item_id: &str) {
-    let navigation_id = backend.start_work(item_id);
+    start_work_with(app, backend, item_id, None);
+}
+
+/// Start work with what the reader wrote for the agent, from an issue's
+/// composer set to Work: the new branch's composer asks for that, after
+/// the issue.
+pub fn start_work_with(
+    app: AppState,
+    backend: &Backend,
+    item_id: &str,
+    instructions: Option<String>,
+) {
+    let navigation_id = backend.start_work_with(item_id, instructions);
     app.begin_open("Cutting a branch", navigation_id);
 }
 
@@ -265,9 +277,16 @@ pub fn thread_open_for_work(thread: &Thread) -> bool {
 
 /// What waits in the composer of a branch cut from `source`: a prompt to
 /// work on its issue or to continue its pull request. None from a worktree.
-pub fn draft(source: &Item) -> Option<String> {
+/// `instructions`, what the reader wrote in an issue's composer set to
+/// Work, take the place of the issue prompt's own last line.
+pub fn draft(source: &Item, instructions: Option<&str>) -> Option<String> {
     match source.subject.as_ref()? {
-        ItemSubject::Issue(issue) => Some(work_prompt(issue)),
+        ItemSubject::Issue(issue) => Some(match instructions {
+            Some(instructions) if !instructions.trim().is_empty() => {
+                format!("{}{}", issue_head(issue), instructions.trim())
+            }
+            _ => work_prompt(issue),
+        }),
         ItemSubject::PullRequest(pr) => Some(pull_prompt(pr)),
     }
 }
@@ -275,6 +294,16 @@ pub fn draft(source: &Item) -> Option<String> {
 /// What to ask an agent on a branch cut for `issue`: the issue by number,
 /// title and link, its body quoted, and what to do with it.
 pub fn work_prompt(issue: &Issue) -> String {
+    let mut prompt = issue_head(issue);
+    prompt.push_str(
+        "Read the issue and its comments, make the change on this branch, and add tests where they fit.",
+    );
+    prompt
+}
+
+/// The issue by number, title and link, and its body quoted: what every
+/// prompt to work on it opens with.
+fn issue_head(issue: &Issue) -> String {
     let mut prompt = format!(
         "Work on #{}: {}\nhttps://github.com/{}/issues/{}\n\n",
         issue.number, issue.title, issue.repo_full_name, issue.number
@@ -283,9 +312,6 @@ pub fn work_prompt(issue: &Issue) -> String {
     if !body.trim().is_empty() {
         prompt.push_str(&crate::ask::quote_reply(body.trim()));
     }
-    prompt.push_str(
-        "Read the issue and its comments, make the change on this branch, and add tests where they fit.",
-    );
     prompt
 }
 
@@ -351,12 +377,39 @@ mod tests {
     fn the_draft_is_the_sources_prompt() {
         let now = "2026-09-20T12:00:00Z".parse().unwrap();
         let mut item = Item::new("slatedb/slatedb", now);
-        assert_eq!(draft(&item), None, "a worktree has nothing to ask about");
+        assert_eq!(
+            draft(&item, None),
+            None,
+            "a worktree has nothing to ask about"
+        );
         item.subject = Some(ItemSubject::Issue(issue("Fence them.")));
-        assert_eq!(draft(&item), Some(work_prompt(&issue("Fence them."))));
+        assert_eq!(draft(&item, None), Some(work_prompt(&issue("Fence them."))));
         let pr = crate::review::header::tests::pull_request(812);
         item.subject = Some(ItemSubject::PullRequest(pr.clone()));
-        assert_eq!(draft(&item), Some(pull_prompt(&pr)));
+        assert_eq!(draft(&item, None), Some(pull_prompt(&pr)));
+    }
+
+    /// Work picked in an issue's composer: what the reader wrote is the
+    /// ask, after the issue itself.
+    #[test]
+    fn the_readers_words_replace_the_issue_prompts_ask() {
+        let now = "2026-09-20T12:00:00Z".parse().unwrap();
+        let mut item = Item::new("slatedb/slatedb", now);
+        item.subject = Some(ItemSubject::Issue(issue("Fence them.")));
+        assert_eq!(
+            draft(&item, Some("  Use a CAS on the manifest.\n")).as_deref(),
+            Some(
+                "Work on #7: Fence the manifest\n\
+                 https://github.com/slatedb/slatedb/issues/7\n\n\
+                 > Fence them.\n\n\
+                 Use a CAS on the manifest."
+            )
+        );
+        assert_eq!(
+            draft(&item, Some(" ")),
+            Some(work_prompt(&issue("Fence them."))),
+            "nothing written is the usual prompt"
+        );
     }
 
     #[test]

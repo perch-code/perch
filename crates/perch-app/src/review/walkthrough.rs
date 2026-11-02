@@ -562,7 +562,10 @@ pub fn conversation_row(app: AppState, state: ReviewState, backend: Rc<Backend>)
             .padding_horiz(theme::CARD_PADDING)
             .padding_vert(10.0)
             .margin_bottom(theme::CARD_GAP)
-            .apply_if(!state.has_files(), |s| s.hide())
+            .apply_if(
+                !state.has_files() || state.issue.with(Option::is_some),
+                |s| s.hide(),
+            )
     })
 }
 

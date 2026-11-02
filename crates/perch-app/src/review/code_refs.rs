@@ -585,10 +585,7 @@ thread_local! {
 fn index_of(state: ReviewState) -> Rc<PathIndex> {
     let tree = state.tree.get_untracked();
     let changed = state.changed_files.get_untracked();
-    let root = state.item.with_untracked(|i| {
-        i.as_ref()
-            .and_then(|i| i.checkout.as_ref().map(|c| c.path.clone()))
-    });
+    let root = floem::reactive::Effect::untrack(|| state.files_root());
     INDEX.with(|cell| {
         let mut cell = cell.borrow_mut();
         if let Some((t, c, r, index)) = cell.as_ref() {
@@ -784,9 +781,7 @@ pub struct FileLink {
 
 impl Refs {
     pub fn of(state: ReviewState) -> Option<Refs> {
-        let has_files = state
-            .item
-            .with_untracked(|i| i.as_ref().is_some_and(|i| i.checkout.is_some()));
+        let has_files = floem::reactive::Effect::untrack(|| state.files_root().is_some());
         has_files.then_some(Refs { state })
     }
 

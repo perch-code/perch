@@ -1360,15 +1360,25 @@ impl AppState {
 
     /// Whether the drawer shows the tree: asked for, and on Code. Asked
     /// for on Conversation, or on an item with no files, the wish is kept
-    /// for when there is a tree to show. Tracked.
+    /// for when there is a tree to show. An issue has no walkthrough, so
+    /// one asked for shows the tree there. Tracked.
     pub fn tree_shown(&self) -> bool {
-        self.tree_open.get() && self.tree_available()
+        (self.tree_open.get() || (self.walkthrough_open.get() && self.on_issue()))
+            && self.tree_available()
     }
 
     /// Whether the drawer shows the walkthrough: asked for, and on Code,
-    /// as the tree is. Tracked.
+    /// as the tree is, and not on an issue, whose code is no change.
+    /// Tracked.
     pub fn walkthrough_shown(&self) -> bool {
-        self.walkthrough_open.get() && self.tree_available()
+        self.walkthrough_open.get() && self.tree_available() && !self.on_issue()
+    }
+
+    /// Whether the open item is an issue. Tracked.
+    fn on_issue(&self) -> bool {
+        self.review
+            .get()
+            .is_some_and(|review| review.issue.with(Option::is_some))
     }
 
     pub fn active_agent_counts(&self) -> (usize, usize) {
@@ -1702,12 +1712,45 @@ impl AppState {
                 review.issue_comments.set(comments);
                 review.issue_events.set(events);
                 review.comment_threads.set(Arc::new(Vec::new()));
-                // An issue has no files, so its pane has nothing to load.
+                // The tabs open last time come back now, and load once the
+                // default branch they read is here.
                 if fresh {
-                    review.restore_pane();
+                    review.files_reload.set(review.restore_pane());
                 }
                 review.ready.set(true);
                 review.set_phase(Phase::Issue);
+            }
+            // The default branch an open issue's Code reads, as the issue
+            // opens and each time it is fetched again.
+            Event::IssueHome {
+                navigation_id,
+                item_id,
+                home,
+                tree,
+            } => {
+                if !self.accepts_open_item(navigation_id, &item_id)
+                    || !review.is_item(&item_id)
+                    || review.issue.with_untracked(Option::is_none)
+                {
+                    return;
+                }
+                let moved = review
+                    .home
+                    .with_untracked(|h| h.as_ref().map(|h| h.head_sha != home.head_sha));
+                review.tree.set(tree);
+                review.home_refreshing.set(false);
+                review.home.set(Some(home));
+                let paths = match moved {
+                    None => review
+                        .files_reload
+                        .try_update(std::mem::take)
+                        .unwrap_or_default(),
+                    Some(true) => review.reload_all(),
+                    Some(false) => Vec::new(),
+                };
+                if !paths.is_empty() {
+                    self.reload.update(|reload| reload.extend(paths));
+                }
             }
             Event::CommentThreads {
                 item_id,
@@ -3269,7 +3312,8 @@ impl AppState {
             | Event::HistoricalReviewReady { .. }
             | Event::HistoricalReviewFailed { .. }
             | Event::OpenItemChanged { .. }
-            | Event::IssueReady { .. } => {}
+            | Event::IssueReady { .. }
+            | Event::IssueHome { .. } => {}
             Event::ReviewProgress { .. }
             | Event::ReviewReady { .. }
             | Event::PullRequestReady { .. }

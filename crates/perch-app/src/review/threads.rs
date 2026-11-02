@@ -521,6 +521,25 @@ pub fn composer_view(
                     return;
                 }
             }
+            // Work on an issue is Start work: a branch of the reader's own
+            // from the default branch, whose composer waits with what was
+            // written here.
+            if composer.mode == perch_github::RunMode::Work
+                && Effect::untrack(|| start_work_offered(state))
+            {
+                let mut instructions = question.trim().to_string();
+                if let Some(anchor) = &composer.anchor {
+                    instructions = format!("About `{}`:\n\n{instructions}", anchor.label());
+                }
+                state.composer_sent();
+                crate::review::start_work::start_work_with(
+                    app,
+                    &backend,
+                    &item_id,
+                    Some(instructions),
+                );
+                return;
+            }
             match &composer.destination {
                 Destination::Agent {
                     backend: agent,
@@ -1281,6 +1300,23 @@ fn work_offered(app: AppState, state: ReviewState) -> bool {
     })
 }
 
+/// Whether the composer's Work is Start work: a new question to an agent
+/// on an issue there is a branch to cut for. Tracked.
+fn start_work_offered(state: ReviewState) -> bool {
+    let issue = state.item.with(|item| {
+        item.as_ref().is_some_and(|item| {
+            matches!(item.subject, Some(perch_github::ItemSubject::Issue(_)))
+                && crate::review::start_work::can_start_work(item)
+        })
+    });
+    issue
+        && state.composer.with(|c| {
+            c.as_ref().is_some_and(|c| {
+                !c.destination.is_github() && c.thread_id.is_none() && c.editing.is_none()
+            })
+        })
+}
+
 /// The mode a send goes with: the composer's, where the item takes Work.
 fn sending_mode(
     app: AppState,
@@ -1295,16 +1331,17 @@ fn sending_mode(
 }
 
 /// Ask or Work, before the model, on an item that takes Work and while
-/// the text is bound for an agent. Absent anywhere else, where every
-/// message is a question.
+/// the text is bound for an agent. On an issue, Work is Start work, for a
+/// new question. Absent anywhere else, where every message is a question.
 fn mode_switch(app: AppState, state: ReviewState) -> impl IntoView {
     use perch_github::RunMode;
 
     let shown = move || {
-        work_offered(app, state)
+        (work_offered(app, state)
             && state
                 .composer
-                .with(|c| c.as_ref().is_some_and(|c| !c.destination.is_github()))
+                .with(|c| c.as_ref().is_some_and(|c| !c.destination.is_github())))
+            || start_work_offered(state)
     };
     let segment = move |mode: RunMode| {
         let current = move || {
@@ -1448,6 +1485,9 @@ fn send_label(state: ReviewState) -> String {
             } else {
                 "Add to review".to_string()
             }
+        }
+        Some(c) if c.mode == perch_github::RunMode::Work && start_work_offered(state) => {
+            "Start work".to_string()
         }
         _ => "Send".to_string(),
     })
@@ -7046,6 +7086,56 @@ mod tests {
             "the question and the answer are labelled"
         );
         assert!(find(root_id, "draft-pill").is_some());
+    }
+
+    /// On an issue a new question offers Ask and Work, and Work is Start
+    /// work: its button says so, and sending cuts the branch with the
+    /// question for the agent instead of asking it here. The issue's next
+    /// question is a question again.
+    #[test]
+    fn work_on_an_issue_starts_work_with_the_question() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_item();
+        let mut item = (*state.item.get_untracked().unwrap()).clone();
+        item.subject = Some(perch_github::ItemSubject::Issue(issue()));
+        state.item.set(Some(Arc::new(item)));
+        state.open_composer(None, None, "Use a CAS.".into(), sonnet_medium());
+        let composer = state.composer.get().unwrap();
+        assert_eq!(composer.mode, perch_github::RunMode::Ask);
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Card);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "composer-mode").is_some());
+        assert!(find(harness.root_id(), "Label: \"Send\"").is_some());
+
+        click(&mut harness, "composer-mode:work");
+        assert!(find(harness.root_id(), "Label: \"Start work\"").is_some());
+        // The click took the keyboard; the box has it back to send from.
+        state.composer_box.get().unwrap().request_focus();
+        harness.rebuild();
+        harness.dispatch_event(enter(crate::ui::OS_MOD));
+        harness.rebuild();
+        match commands.try_recv() {
+            Ok(Command::StartWork {
+                item_id,
+                instructions,
+                ..
+            }) => {
+                assert_eq!(item_id, "item-1");
+                assert_eq!(instructions.as_deref(), Some("Use a CAS."));
+            }
+            other => panic!("Work did not start work: {other:?}"),
+        }
+        assert!(state.composer.get().is_none(), "the text went with it");
+
+        state.open_composer(None, None, String::new(), sonnet_medium());
+        assert_eq!(
+            state.composer.get().unwrap().mode,
+            perch_github::RunMode::Ask
+        );
     }
 
     fn issue() -> perch_github::Issue {

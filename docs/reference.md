@@ -126,11 +126,22 @@ Summary and Code. **Conversation** is the item's summary, its timeline and its
 threads, with a composer at the foot. **Code** is the worktree: the open
 files as tabs over the editor, and the file tree in the drawer on the right
 (see [The file tree](#the-file-tree)), or in its place the walkthrough of the
-change (see [Walkthrough](#walkthrough)). An issue
-with no checkout has no Code and no pills; Start work gives it a checkout,
-and the pills come. When the bar's
+change (see [Walkthrough](#walkthrough)). When the bar's
 controls take more than half of it, the pills give way to them rather than
 sit at the centre.
+
+An issue's Code is the repository's default branch, read-only: the home
+checkout questions about its issues run in (see [Agents](#agents)).
+Its pills come once that checkout exists, which the first issue opened in a
+repository makes. The top of the file tree names the branch and its commit
+in place of the scope, says when Perch last fetched it, and has a refresh
+that fetches it again; opening an issue fetches it too, at most once a
+minute per repository. Files the issue names open there, and Cmd-P finds
+any file on the branch. There is no change to fold, split or walk through,
+so Code's tabs have Word wrap and the tree alone, and an issue has no
+walkthrough. Since every issue of a repository reads one checkout, a fetch
+moves the files under all of them, and open files reload. To change the
+code, Start work: see [Work](#work).
 
 Each item comes back on the mode it was left in, with its tabs, until Perch
 quits; it opens on Conversation the first time. Code with no file open says
@@ -830,7 +841,16 @@ it reads can reach you only through its answer.
 A composer on your own work, a worktree with no pull request or a pull
 request you opened, has an **Ask / Work** switch before the model. Anything
 else, someone else's pull request, an issue, a review's snapshot, is Ask-only,
-and the backend refuses Work there whatever the switch says. A new question
+and the backend refuses Work there whatever the switch says.
+
+On an issue the switch is there for a new question, but Work does not run
+there: the default branch the issue reads is shared by every issue of the
+repository, and has no branch to commit to. Its send reads **Start work**,
+and cuts `perch/issue-<n>` as the bar's Start work does, with what you wrote
+in the new worktree's composer in place of the usual last line of the prompt
+(after the issue's number, title, link and body, and the lines you asked
+about, if any), to send or edit. The issue's next question starts on Ask
+again. A new question
 starts on what you last picked on the item, else Work on a worktree Perch made
 and Ask elsewhere; a follow-up starts on its thread's last run. A session is
 resumed only by a run of its own kind: a switch starts over with the thread

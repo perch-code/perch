@@ -1002,13 +1002,12 @@ impl GoTo {
     }
 }
 
-/// Whether Cmd-P has anything to go to: an item open with a checkout.
+/// Whether Cmd-P has anything to go to: an item open with a checkout,
+/// or an issue with the default branch to read.
 pub fn available(state: ReviewState) -> bool {
     state.is_open()
-        && state.phase.get_untracked() == Phase::Ready
-        && state
-            .item
-            .with_untracked(|i| i.as_ref().is_some_and(|i| i.checkout.is_some()))
+        && matches!(state.phase.get_untracked(), Phase::Ready | Phase::Issue)
+        && floem::reactive::Effect::untrack(|| state.files_root().is_some())
 }
 
 /// Cmd-P: the palette up, empty, with the keyboard, which goes back to

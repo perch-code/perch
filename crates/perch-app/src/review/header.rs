@@ -640,6 +640,38 @@ pub(crate) mod tests {
         assert!((switch.center().x - bar.center().x).abs() <= 1.0);
     }
 
+    /// An issue reading the default branch has Code: the switch comes
+    /// with the home, and Code's rail names the branch, its commit and a
+    /// refresh in place of a scope.
+    #[test]
+    fn an_issue_with_its_home_has_code_on_the_default_branch() {
+        let (mut harness, app, state) = issue_harness();
+        assert_eq!(rect(&harness, "item switch").width(), 0.0);
+
+        state.home.set(Some(Arc::new(crate::backend::HomeCode {
+            path: "/tmp/home".into(),
+            branch: "main".into(),
+            head_sha: "0123456789abcdef0123456789abcdef01234567".into(),
+            fetched_at: Some(app.now.get_untracked()),
+        })));
+        state.tree.set(Arc::new(vec![perch_git::TreeEntry::new(
+            "README.md",
+            false,
+        )]));
+        harness.rebuild();
+        harness.paint();
+        assert!(rect(&harness, "item switch").width() > 0.0, "no switch");
+
+        state.show_tab(ItemTab::Code);
+        app.tree_open.set(true);
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "home-row").is_some());
+        assert!(named(harness.root_id(), "Label: \"main\"").is_some());
+        assert!(named(harness.root_id(), "Label: \"0123456\"").is_some());
+        assert!(named(harness.root_id(), "Label: \"fetched just now\"").is_some());
+    }
+
     #[test]
     fn the_bar_drags_beside_the_title_and_its_controls_keep_their_clicks() {
         let (mut harness, app, _) = pull_request_harness();

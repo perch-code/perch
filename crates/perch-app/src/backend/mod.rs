@@ -359,6 +359,11 @@ pub enum Command {
     RefreshOpenItem {
         item_id: String,
     },
+    /// Fetch the default branch again behind the open issue `item_id`,
+    /// whenever it was last fetched, as its Code's refresh asks.
+    RefreshIssueHome {
+        item_id: String,
+    },
     /// Look at the checkout again: its head, its dirt and its commits, and
     /// the changed list if the head moved. Sent as the scope menu is about
     /// to open, and on every poll, so terminal work shows up.
@@ -572,6 +577,10 @@ pub enum Command {
     StartWork {
         item_id: String,
         navigation_id: u64,
+        /// What the reader wrote for the agent, on an issue's composer
+        /// set to Work: the new worktree's prompt asks for it in place of
+        /// the usual last line.
+        instructions: Option<String>,
     },
     /// Start work from a notification's pull request or issue: its item,
     /// made from GitHub's answer if it has none yet, is cut from as
@@ -1290,6 +1299,15 @@ pub enum Event {
         navigation_id: u64,
         message: String,
     },
+    /// What an open issue's Code reads: the repository's home checkout,
+    /// on the default branch, and its files. Sent as the issue opens and
+    /// again each time the home is fetched behind it.
+    IssueHome {
+        navigation_id: u64,
+        item_id: String,
+        home: Arc<HomeCode>,
+        tree: Arc<Vec<perch_git::TreeEntry>>,
+    },
     /// What Start work leaves in its new worktree's composer: a prompt to
     /// work on the issue or the pull request it was cut from. Sent before
     /// the worktree opens.
@@ -1709,6 +1727,7 @@ impl Event {
                 | Event::ReviewFailed { .. }
                 | Event::StartWorkDraft { .. }
                 | Event::IssueReady { .. }
+                | Event::IssueHome { .. }
                 | Event::FileLoaded { .. }
                 | Event::FileFailed { .. }
                 | Event::CommitsReady { .. }
@@ -2722,6 +2741,12 @@ impl Backend {
         });
     }
 
+    pub fn refresh_issue_home(&self, item_id: &str) {
+        let _ = self.commands.send(Command::RefreshIssueHome {
+            item_id: item_id.to_string(),
+        });
+    }
+
     /// Open a pull request or an issue by number, making its item if it has
     /// none yet. The launch hooks and the review header's "Closes #N" chip
     /// come through here; a sidebar row has an id and uses `open_item`.
@@ -3360,12 +3385,15 @@ impl Backend {
         });
     }
 
-    pub fn start_work(&self, item_id: &str) -> u64 {
+    /// Start work, with the reader's own words for the agent when they
+    /// were written in an issue's composer set to Work.
+    pub fn start_work_with(&self, item_id: &str, instructions: Option<String>) -> u64 {
         let navigation_id = self.navigation_requests.begin_item(item_id);
         self.scope_requests.clear();
         let _ = self.commands.send(Command::StartWork {
             item_id: item_id.to_string(),
             navigation_id,
+            instructions,
         });
         navigation_id
     }
@@ -4194,6 +4222,7 @@ async fn run(
         refreshing: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         reading_notifications: Default::default(),
         homes_refreshed: Default::default(),
+        homes_fetched: Default::default(),
         notifications: Arc::new(std::sync::Mutex::new(initial_notifications.clone())),
         asked_subjects: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         rechecked_subjects: Default::default(),
@@ -4864,11 +4893,12 @@ async fn run(
             Command::StartWork {
                 item_id,
                 navigation_id,
+                instructions,
             } => {
                 ctx.clear_notice();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    start_work_and_open(ctx, Ok(item_id), navigation_id).await;
+                    start_work_and_open(ctx, Ok(item_id), navigation_id, instructions).await;
                 });
             }
             Command::StartWorkOnSubject {
@@ -4882,7 +4912,7 @@ async fn run(
                 tokio::spawn(async move {
                     let source =
                         subject_item(&ctx, &repo_full_name, kind, number, navigation_id).await;
-                    start_work_and_open(ctx, source, navigation_id).await;
+                    start_work_and_open(ctx, source, navigation_id, None).await;
                 });
             }
             Command::AddRepository { path } => {
@@ -5423,6 +5453,19 @@ async fn run(
             Command::RefreshOpenItem { item_id } => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move { refresh_open_item(&ctx, &item_id).await });
+            }
+            Command::RefreshIssueHome { item_id } => {
+                let repo = ctx.slot.lock().ok().and_then(|guard| {
+                    guard
+                        .as_ref()
+                        .filter(|open| open.item_id == item_id)
+                        .and_then(|open| open.issue.as_ref())
+                        .and_then(|issue| RepoId::parse(&issue.0.repo_full_name))
+                });
+                if let Some(repo) = repo {
+                    let ctx = ctx.clone();
+                    tokio::spawn(async move { prepare_issue_home(&ctx, &repo, true).await });
+                }
             }
             Command::RefreshScope {
                 item_id,
@@ -6093,6 +6136,9 @@ struct Ctx {
     /// When each repository's home checkout was last brought up to date
     /// behind an open issue, by repository.
     homes_refreshed: Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    /// When each repository's home checkout was last fetched, this run,
+    /// for an issue's Code to say how fresh its code is.
+    homes_fetched: Arc<std::sync::Mutex<std::collections::HashMap<String, Timestamp>>>,
     /// Requests Work runs are waiting on the reader for, by run and
     /// request id.
     approvals: Arc<std::sync::Mutex<std::collections::HashMap<(String, String), PendingApproval>>>,
@@ -12236,7 +12282,12 @@ async fn start_work(ctx: &Ctx, item_id: &str, navigation_id: u64) -> Result<Stri
 /// Start work from the item `source` names and open what it cut. An
 /// issue or a pull request leaves a prompt to work on it for the new
 /// worktree's composer first.
-async fn start_work_and_open(ctx: Ctx, source: Result<String, String>, navigation_id: u64) {
+async fn start_work_and_open(
+    ctx: Ctx,
+    source: Result<String, String>,
+    navigation_id: u64,
+    instructions: Option<String>,
+) {
     let cut = match source {
         Ok(source) => start_work(&ctx, &source, navigation_id)
             .await
@@ -12256,7 +12307,10 @@ async fn start_work_and_open(ctx: Ctx, source: Result<String, String>, navigatio
             return;
         }
     };
-    if let Some(prompt) = source.as_ref().and_then(crate::review::start_work::draft) {
+    let draft = source
+        .as_ref()
+        .and_then(|source| crate::review::start_work::draft(source, instructions.as_deref()));
+    if let Some(prompt) = draft {
         ctx.send_navigation_event(
             navigation_id,
             Event::StartWorkDraft {
@@ -14775,12 +14829,70 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
             }
         });
     }
-    if let Some(repo) = repo.filter(|_| !offline) {
+    // Code shows the home as it stands at once, and again once it has
+    // been brought up to date.
+    if let Some(repo) = repo {
         let ctx = ctx.clone();
-        tokio::spawn(async move { prepare_issue_home(&ctx, &repo).await });
+        let item_id = item.id.clone();
+        tokio::spawn(async move {
+            if let Some(checkout) = home_checkout(&ctx, &repo).await {
+                send_issue_home(&ctx, navigation_id, &item_id, &repo, &checkout).await;
+            }
+            if !offline {
+                prepare_issue_home(&ctx, &repo, false).await;
+            }
+        });
     }
 
     false
+}
+
+/// What an issue's Code reads: the repository's home checkout, on its
+/// default branch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HomeCode {
+    pub path: PathBuf,
+    pub branch: String,
+    pub head_sha: String,
+    /// When Perch last fetched the branch into it, this run. `None` until
+    /// it has: the home is as an earlier run left it.
+    pub fetched_at: Option<Timestamp>,
+}
+
+/// Tell the window showing issue `item_id` in `navigation_id` what its
+/// Code reads: `checkout`, the home of `repo`, and its files.
+async fn send_issue_home(
+    ctx: &Ctx,
+    navigation_id: u64,
+    item_id: &str,
+    repo: &RepoId,
+    checkout: &perch_git::Checkout,
+) {
+    let worktree = checkout.worktree.clone();
+    let tree = tokio::task::spawn_blocking(move || {
+        perch_git::list_tree(&worktree, 50_000).unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default();
+    let fetched_at = ctx
+        .homes_fetched
+        .lock()
+        .ok()
+        .and_then(|fetched| fetched.get(&repo.full_name().to_lowercase()).copied());
+    ctx.send_navigation_event(
+        navigation_id,
+        Event::IssueHome {
+            navigation_id,
+            item_id: item_id.to_string(),
+            home: Arc::new(HomeCode {
+                path: checkout.worktree.clone(),
+                branch: checkout.branch.clone(),
+                head_sha: checkout.head_sha.clone(),
+                fetched_at,
+            }),
+            tree: Arc::new(tree),
+        },
+    );
 }
 
 /// The repository's home checkout as it is on disk, which questions about
@@ -14822,13 +14934,15 @@ const HOME_REFRESH: Duration = Duration::from_secs(60);
 /// branch, behind an issue that is already showing, and hand it to the
 /// view if an issue of the repository is still open there. One brought
 /// up to date in the last minute is taken as it is, so paging through a
-/// repository's issues fetches once.
-async fn prepare_issue_home(ctx: &Ctx, repo: &RepoId) {
+/// repository's issues fetches once, unless `force`d, as Code's refresh
+/// is.
+async fn prepare_issue_home(ctx: &Ctx, repo: &RepoId, force: bool) {
     let key = repo.full_name().to_lowercase();
     let due = ctx.homes_refreshed.lock().is_ok_and(|mut refreshed| {
-        let due = refreshed
-            .get(&key)
-            .is_none_or(|at| at.elapsed() >= HOME_REFRESH);
+        let due = force
+            || refreshed
+                .get(&key)
+                .is_none_or(|at| at.elapsed() >= HOME_REFRESH);
         if due {
             refreshed.insert(key.clone(), std::time::Instant::now());
         }
@@ -14842,19 +14956,33 @@ async fn prepare_issue_home(ctx: &Ctx, repo: &RepoId) {
             ctx.preparer.ensure_home(repo, &default).await
         }
         .await;
-        if let Err(e) = prepared {
-            tracing::warn!(repo = %key, error = %e, "no home checkout for the issue");
-            // The next issue opened asks again, not the next after a minute.
-            if let Ok(mut refreshed) = ctx.homes_refreshed.lock() {
-                refreshed.remove(&key);
+        match prepared {
+            Ok(_) => {
+                if let Ok(mut fetched) = ctx.homes_fetched.lock() {
+                    fetched.insert(key.clone(), Timestamp::now());
+                }
             }
-            return;
+            Err(e) => {
+                tracing::warn!(repo = %key, error = %e, "no home checkout for the issue");
+                // The next issue opened asks again, not the next after a
+                // minute.
+                if let Ok(mut refreshed) = ctx.homes_refreshed.lock() {
+                    refreshed.remove(&key);
+                }
+                if force {
+                    ctx.notice(format!("Could not fetch the default branch: {e}"));
+                }
+                // A refresh still hears back, with the home as it is.
+                if !force {
+                    return;
+                }
+            }
         }
     }
     let Some(checkout) = home_checkout(ctx, repo).await else {
         return;
     };
-    if let Ok(mut guard) = ctx.slot.lock() {
+    let open = ctx.slot.lock().ok().and_then(|mut guard| {
         let open = guard.as_mut().filter(|open| {
             open.issue.as_ref().is_some_and(|issue| {
                 issue
@@ -14862,10 +14990,14 @@ async fn prepare_issue_home(ctx: &Ctx, repo: &RepoId) {
                     .repo_full_name
                     .eq_ignore_ascii_case(&repo.full_name())
             })
-        });
-        if let Some(open) = open {
-            open.checkout = checkout;
-        }
+        })?;
+        open.checkout = checkout.clone();
+        Some((open.navigation_id, open.item_id.clone()))
+    });
+    // What was fetched, for the issue showing; one taken as it is was
+    // sent as the issue opened.
+    if let Some((navigation_id, item_id)) = open.filter(|_| due) {
+        send_issue_home(ctx, navigation_id, &item_id, repo, &checkout).await;
     }
 }
 
@@ -20301,6 +20433,7 @@ mod tests {
             refreshing: Default::default(),
             reading_notifications: Default::default(),
             homes_refreshed: Default::default(),
+            homes_fetched: Default::default(),
             notifications: Default::default(),
             asked_subjects: Default::default(),
             rechecked_subjects: Default::default(),
@@ -29982,7 +30115,7 @@ read eof || true
         let issue = store_issue(&ctx, 5);
         let navigation_id = ctx.navigation_requests.begin_current();
 
-        start_work_and_open(ctx.clone(), Ok(issue.id.clone()), navigation_id).await;
+        start_work_and_open(ctx.clone(), Ok(issue.id.clone()), navigation_id, None).await;
 
         let events: Vec<Event> = received.try_iter().collect();
         let draft = events.iter().position(|event| {
@@ -31016,6 +31149,73 @@ read eof || true
         assert!(asked
             .iter()
             .any(|p| p.starts_with("/repos/a/b/issues/5/timeline")));
+    }
+
+    /// An issue's Code reads the home: its branch, head and files come
+    /// once it is made, saying when it was fetched. A refresh fetches
+    /// again inside the minute that would otherwise take the home as it
+    /// is, and says so again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_issue_hears_the_home_it_reads_and_a_refresh_fetches_it_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, _paths) = serve_by_path(|path| {
+            if path.starts_with("/repos/a/b/issues/5/") {
+                ("200 OK", "[]".into())
+            } else if path.starts_with("/repos/a/b/issues/5") {
+                (
+                    "200 OK",
+                    r#"{"number":5,"title":"t","updated_at":"2026-09-20T00:00:00Z"}"#.into(),
+                )
+            } else {
+                ("404 Not Found", r#"{"message":"Not Found"}"#.into())
+            }
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &["a/b"]);
+        owned_clone(&ctx, dir.path());
+        let item = store_issue(&ctx, 5);
+        let repo = RepoId::parse("a/b").unwrap();
+        let navigation_id = ctx.navigation_requests.begin_current();
+
+        open_issue(&ctx, "a/b".into(), 5, navigation_id).await;
+
+        let mut heard = None;
+        for _ in 0..500 {
+            heard = received.try_iter().find_map(|event| match event {
+                Event::IssueHome {
+                    item_id,
+                    home,
+                    tree,
+                    ..
+                } => Some((item_id, home, tree)),
+                _ => None,
+            });
+            if heard.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let (item_id, home, tree) = heard.expect("the issue heard its home");
+        assert_eq!(item_id, item.id);
+        assert_eq!(home.path, ctx.preparer.store().home_path(&repo));
+        assert_eq!(home.head_sha.len(), 40);
+        assert!(!home.branch.is_empty());
+        assert!(home.fetched_at.is_some(), "fetched behind the issue");
+        assert!(tree.iter().any(|entry| entry.path == "one.txt"));
+
+        prepare_issue_home(&ctx, &repo, false).await;
+        assert!(
+            !received
+                .try_iter()
+                .any(|event| matches!(event, Event::IssueHome { .. })),
+            "inside the minute the home is taken as it is"
+        );
+        prepare_issue_home(&ctx, &repo, true).await;
+        let again = received.try_iter().find_map(|event| match event {
+            Event::IssueHome { home, .. } => Some(home),
+            _ => None,
+        });
+        let again = again.expect("a refresh is heard");
+        assert!(again.fetched_at >= home.fetched_at);
     }
 
     /// A pull request read before, with its checkout on disk, as a row

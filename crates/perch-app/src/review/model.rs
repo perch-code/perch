@@ -1456,6 +1456,13 @@ pub struct ReviewState {
     /// Whether GitHub says the reader may reopen the issue, as
     /// `issue_closable` says whether they may close it.
     pub issue_reopenable: RwSignal<Option<bool>>,
+    /// What an issue's Code reads: the repository's home checkout, on the
+    /// default branch. `None` on anything else, and on an issue until the
+    /// home is there.
+    pub home: RwSignal<Option<Arc<crate::backend::HomeCode>>>,
+    /// The reader asked for the default branch again, and the answer is
+    /// not in.
+    pub home_refreshing: RwSignal<bool>,
     /// The head the pull request moved to while the worktree had work in
     /// it. The files on screen are the older ones.
     pub stale_head: RwSignal<Option<String>>,
@@ -2110,6 +2117,8 @@ impl ReviewState {
             issue_events: RwSignal::new(Arc::new(Vec::new())),
             issue_closable: RwSignal::new(None),
             issue_reopenable: RwSignal::new(None),
+            home: RwSignal::new(None),
+            home_refreshing: RwSignal::new(false),
             stale_head: RwSignal::new(None),
             offline: RwSignal::new(false),
             upstream_changed: RwSignal::new(false),
@@ -2376,6 +2385,8 @@ impl ReviewState {
         self.issue_events.set(Arc::new(Vec::new()));
         self.issue_closable.set(None);
         self.issue_reopenable.set(None);
+        self.home.set(None);
+        self.home_refreshing.set(false);
         self.composer_close_reason.set(Default::default());
         self.close_menu.set(None);
         self.stale_head.set(None);
@@ -2612,12 +2623,25 @@ impl ReviewState {
     }
 
     /// Whether the open item has a checkout, and so files to open, or
-    /// is a pull request whose checkout is on its way. Tracked.
+    /// is a pull request whose checkout is on its way, or is an issue
+    /// reading the default branch. Tracked.
     pub fn has_files(&self) -> bool {
         self.files_pending.with(Option::is_some)
+            || self.home.with(Option::is_some)
             || self
                 .item
                 .with(|i| i.as_ref().is_some_and(|i| i.checkout.is_some()))
+    }
+
+    /// Where the open item's files are on disk: its checkout, or the home
+    /// an issue reads. Tracked.
+    pub fn files_root(&self) -> Option<std::path::PathBuf> {
+        self.item
+            .with(|i| {
+                i.as_ref()
+                    .and_then(|i| i.checkout.as_ref().map(|c| c.path.clone()))
+            })
+            .or_else(|| self.home.with(|h| h.as_ref().map(|h| h.path.clone())))
     }
 
     /// Keep the open item's pane for the next time it opens.
@@ -5258,17 +5282,19 @@ impl ReviewState {
     }
 
     /// Switch the open composer between Ask and Work, and remember it for
-    /// the item.
+    /// the item. Not on an issue, whose Work is Start work, done once: its
+    /// next question is a question again.
     pub fn set_composer_mode(&self, mode: perch_github::RunMode) {
         self.composer.update(|c| {
             if let Some(c) = c {
                 c.mode = mode;
             }
         });
-        if let Some(id) = self
-            .item
-            .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
-        {
+        if let Some(id) = self.item.with_untracked(|i| {
+            i.as_ref()
+                .filter(|i| !matches!(i.subject, Some(perch_github::ItemSubject::Issue(_))))
+                .map(|i| i.id.clone())
+        }) {
             self.work_modes.update(|m| {
                 m.insert(id, mode);
             });

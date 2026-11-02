@@ -1,6 +1,7 @@
 //! The file rail: the scope, then the worktree as a tree, cut down to the
-//! changed files until the filter is turned off. It is what the drawer on
-//! the right holds while it holds the files.
+//! changed files until the filter is turned off. On an issue, the default
+//! branch it reads in place of the scope, and its tree whole. It is what
+//! the drawer on the right holds while it holds the files.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -47,13 +48,18 @@ pub fn drawer_view(app: AppState, state: ReviewState, backend: Rc<Backend>) -> i
             Empty::new(),
             drawer::close_button(app, backend.clone(), "files-close Close files"),
         ),
-        rail(state, on_open, backend),
+        rail(app, state, on_open, backend),
     ))
     .style(|s| s.size_full().flex_col().min_height(0.0))
     .debug_name("files-panel")
 }
 
-pub fn rail(state: ReviewState, on_open: OpenFile, backend: Rc<Backend>) -> impl IntoView {
+pub fn rail(
+    app: AppState,
+    state: ReviewState,
+    on_open: OpenFile,
+    backend: Rc<Backend>,
+) -> impl IntoView {
     let changed: ChangedByPath = Memo::new(move |_| {
         state
             .changed_files
@@ -63,13 +69,21 @@ pub fn rail(state: ReviewState, on_open: OpenFile, backend: Rc<Backend>) -> impl
     let controls_backend = backend.clone();
     Stack::vertical((
         dyn_container(
-            move || state.historical_review.with(Option::is_some),
+            move || {
+                (
+                    state.historical_review.with(Option::is_some),
+                    state.home.with(Option::is_some),
+                )
+            },
             // A retained snapshot has no scope to pick and nothing to mark
             // viewed, so neither row is there; the tab bar says what the
-            // files are, and holds the way back.
-            move |historical| {
+            // files are, and holds the way back. An issue has no change
+            // either: its row is the branch it reads.
+            move |(historical, home)| {
                 if historical {
                     Empty::new().into_any()
+                } else if home {
+                    home_row(app, state, controls_backend.clone()).into_any()
                 } else {
                     Stack::vertical((
                         scope::button(state, controls_backend.clone()),
@@ -88,6 +102,81 @@ pub fn rail(state: ReviewState, on_open: OpenFile, backend: Rc<Backend>) -> impl
             .min_height(0.0)
             .flex_col()
             .background(theme::rail_bg())
+    })
+}
+
+/// The branch an issue's Code reads, its commit, how long ago it was
+/// fetched, and a button to fetch it again.
+fn home_row(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    let home = move || state.home.get();
+    let fetched = move || {
+        if state.home_refreshing.get() {
+            return "Fetching…".to_string();
+        }
+        match home().and_then(|h| h.fetched_at) {
+            Some(at) => format!("fetched {}", crate::timefmt::relative(at, app.now.get())),
+            None => String::new(),
+        }
+    };
+    let refresh = icon_button(
+        || SidebarIcon::Refresh,
+        theme::fg_muted,
+        move || {
+            if state.home_refreshing.get_untracked() {
+                return;
+            }
+            if let Some(id) = state
+                .item
+                .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+            {
+                state.home_refreshing.set(true);
+                backend.refresh_issue_home(&id);
+            }
+        },
+    )
+    .debug_name("home-refresh");
+    let branch = move || home().map(|h| h.branch.clone()).unwrap_or_default();
+    Stack::horizontal((
+        Label::derived(branch).style(|s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::fg())
+                .text_ellipsis()
+                .min_width(0.0)
+                .flex_shrink(1.0_f32)
+        }),
+        Label::derived(move || {
+            home()
+                .map(|h| h.head_sha.chars().take(7).collect::<String>())
+                .unwrap_or_default()
+        })
+        .style(|s| {
+            s.font_size(theme::TEXT_BADGE)
+                .font_family(theme::CODE_FONT_STACK.to_string())
+                .color(theme::fg_muted())
+                .margin_left(7.0)
+                .flex_shrink(0.0_f32)
+        }),
+        Empty::new().style(|s| s.flex_grow(1.0_f32)),
+        Label::derived(fetched).style(|s| {
+            s.font_size(theme::TEXT_BADGE)
+                .color(theme::fg_subtle())
+                .text_ellipsis()
+                .min_width(0.0)
+                .margin_right(2.0)
+        }),
+        cards::tip_with(refresh, move || format!("Fetch {} again", branch())),
+    ))
+    .debug_name("home-row")
+    .style(|s| {
+        s.height(theme::SCOPE_BUTTON_HEIGHT)
+            .width_full()
+            .flex_shrink(0.0_f32)
+            .items_center()
+            .padding_left(10.0)
+            .padding_right(4.0)
+            .border_bottom(1.0)
+            .border_color(theme::border())
+            .selectable(false)
     })
 }
 

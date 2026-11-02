@@ -1,7 +1,7 @@
 //! The switch in the middle of the bar: Conversation and Code, as Codex
-//! has Summary and Code. Drawn only while the item has a checkout, since
-//! without one there is no code to switch to; Start work gives an issue
-//! one, and the switch comes.
+//! has Summary and Code. Drawn only while the item has files, since
+//! without them there is no code to switch to: an issue's are the default
+//! branch, once the repository's home checkout is there.
 //!
 //! Drawn as the quiet segmented switch in Codex's toolbar: this one picks
 //! what the item view is about, while Code's tabs pick a file.

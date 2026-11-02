@@ -181,11 +181,7 @@ fn tab_view(
 /// A tab's file as a full path: a worktree file's is under the checkout,
 /// and an outside file's is absolute already.
 fn on_disk(state: ReviewState, path: &str) -> String {
-    let root = state.item.with(|i| {
-        i.as_ref()
-            .and_then(|i| i.checkout.as_ref().map(|c| c.path.clone()))
-    });
-    match root {
+    match state.files_root() {
         Some(root) => root.join(path).display().to_string(),
         None => path.to_string(),
     }
@@ -455,7 +451,9 @@ fn nav_button(state: ReviewState, forward: bool) -> impl IntoView {
 /// tree, which take turns in the drawer on the right. A chosen tile is filled;
 /// the others are only a glyph until the pointer is over one. The last
 /// group is at the strip's end, so its tiles keep their place when the
-/// file's come and go.
+/// file's come and go. An issue's default branch has no change to fold
+/// to, set beside its base or walk through, so it has Word wrap and the
+/// tree alone.
 ///
 /// The rules are there because the groups are kinds of preference. The
 /// layout and Word wrap outlive the item: they are ways of reading, not
@@ -466,15 +464,17 @@ fn nav_button(state: ReviewState, forward: bool) -> impl IntoView {
 /// reader wants the markup of this SVG, not of SVGs. The drawer is the
 /// window's, and comes back at the next launch as the layout does.
 fn tiles(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    let issue = move || state.issue.with(Option::is_some);
+    let change_only = move |s: floem::style::Style| s.apply_if(issue(), |s| s.hide());
     Stack::horizontal((
         Stack::horizontal((
             source_group(state),
-            fold_tile(state),
-            tile_rule(),
+            Stack::horizontal((fold_tile(state), tile_rule()))
+                .style(move |s| change_only(s.items_center())),
             Stack::horizontal((
                 wrap_tile(app, state),
-                layout_tile(app, state, Layout::Stacked, SidebarIcon::Stacked),
-                layout_tile(app, state, Layout::Split, SidebarIcon::Split),
+                layout_tile(app, state, Layout::Stacked, SidebarIcon::Stacked).style(change_only),
+                layout_tile(app, state, Layout::Split, SidebarIcon::Split).style(change_only),
             ))
             .style(|s| s.items_center().gap(2.0)),
             tile_rule(),
@@ -482,7 +482,7 @@ fn tiles(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoVi
         .debug_name("file tiles")
         .style(move |s| s.items_center().apply_if(!on_file(state), |s| s.hide())),
         Stack::horizontal((
-            walkthrough_tile(app, backend.clone()),
+            Container::new(walkthrough_tile(app, backend.clone())).style(change_only),
             tree_tile(app, backend),
         ))
         .style(|s| s.items_center().gap(2.0)),
