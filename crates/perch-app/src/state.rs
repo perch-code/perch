@@ -232,6 +232,9 @@ pub struct AppState {
     /// Declared repository identities and display names, also offered by
     /// the sidebar's Repository filter when they have no cached items.
     pub repos: RwSignal<Vec<DeclaredRepo>>,
+    /// Whether the backend has sent `repos` yet: until it has, an empty
+    /// list says nothing about the config.
+    pub repos_known: RwSignal<bool>,
     /// The hosts a pull request's or an issue's URL is read on.
     pub github_hosts: RwSignal<Vec<String>>,
     /// Open…'s box.
@@ -458,6 +461,7 @@ impl AppState {
             avatars: RwSignal::new(HashMap::new()),
             participants: RwSignal::new(HashMap::new()),
             repos: RwSignal::new(Vec::new()),
+            repos_known: RwSignal::new(false),
             github_hosts: RwSignal::new(vec!["github.com".to_string()]),
             open_box: crate::ui::open_box::OpenBox::new(),
             browse: RwSignal::new(HashMap::new()),
@@ -3199,7 +3203,10 @@ impl AppState {
                     self.apply(Event::Notifications(notifications));
                 }
             }
-            Event::Repos(repos) => self.repos.set(repos),
+            Event::Repos(repos) => {
+                self.repos.set(repos);
+                self.repos_known.set(true);
+            }
             Event::TrustedServers(trusted) => self.trusted_servers.set(trusted),
             Event::GithubHosts(hosts) => self.github_hosts.set(hosts),
             Event::OpenReferenceResolved {

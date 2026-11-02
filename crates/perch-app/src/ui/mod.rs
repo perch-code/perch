@@ -236,6 +236,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             review.is_showing(),
             state.status.with(|s| matches!(s, Status::NoToken { .. })),
             state.new_work.open.get(),
+            state.repos_known.get() && state.repos.with(Vec::is_empty),
         )
     });
     // A repository Add repository put in the config is chosen for new
@@ -262,7 +263,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     let empty_backend = backend.clone();
     let pane = dyn_container(
         move || main_pane.get(),
-        move |(open, no_token, new_work)| {
+        move |(open, no_token, new_work, no_repos)| {
             if new_work {
                 pane_with_bar(
                     state,
@@ -288,14 +289,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     state,
                     review,
                     empty_backend.clone(),
-                    widgets::centered_message(
-                        SidebarIcon::Branch,
-                        || "Nothing open".to_string(),
-                        || {
-                            "Pick a pull request, an issue, or a worktree from the sidebar."
-                                .to_string()
-                        },
-                    ),
+                    nothing_open(empty_backend.clone(), no_repos),
                 )
                 .into_any()
             }
@@ -1152,6 +1146,39 @@ fn text_box_focused(cx: &floem::context::EventCx<'_>, root: floem::ViewId) -> bo
             .any(|id| id.debug_name().contains("tinted editor"))
 }
 
+/// The main area with nothing open. With no repository in the config,
+/// Add repository under the words: the inbox needs none, but new work
+/// does, and this is the first screen a new install shows.
+fn nothing_open(backend: Rc<Backend>, no_repos: bool) -> impl IntoView {
+    let under = if no_repos {
+        Stack::vertical((
+            Label::derived(|| "Add a repository to start new work.".to_string()).style(|s| {
+                s.font_size(theme::TEXT_BODY)
+                    .color(theme::fg_muted())
+                    .margin_top(2.0)
+                    .margin_bottom(16.0)
+            }),
+            widgets::action_button(
+                || "Add repository…".to_string(),
+                "empty-add-repository",
+                false,
+                || true,
+                move || new_work::add_repository(backend.clone()),
+            ),
+        ))
+        .style(|s| s.items_center())
+        .into_any()
+    } else {
+        Empty::new().into_any()
+    };
+    widgets::centered_message_with(
+        SidebarIcon::Branch,
+        || "Nothing open".to_string(),
+        || "Pick a pull request, an issue, or a worktree from the sidebar.".to_string(),
+        under,
+    )
+}
+
 /// What to do when no token resolved, in the main area's empty state. Built
 /// the way `centered_message` is, so it reads as the same screen as
 /// "Nothing open", with the two ways of signing in under the words.
@@ -1231,6 +1258,36 @@ mod tests {
     /// The window with nothing open has a bar like an item's with the
     /// Agents button at its end; with the drawer shut, the lights and the
     /// drawer control sit in it too.
+    /// A config with no repositories puts Add repository under "Nothing
+    /// open"; one with a repository, or a window the backend has not told
+    /// yet, has the words alone.
+    #[test]
+    fn with_no_repository_nothing_open_offers_to_add_one() {
+        let state = AppState::new();
+        let review = ReviewState::new();
+        let root = TestRoot::new();
+        let view = app_view(state, review, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+        let offered =
+            |harness: &HeadlessHarness| named(harness.root_id(), "empty-add-repository").is_some();
+        assert!(!offered(&harness), "not before the backend says");
+
+        state.repos_known.set(true);
+        harness.rebuild();
+        harness.paint();
+        assert!(offered(&harness), "none in the config");
+
+        state.repos.set(vec![perch_github::DeclaredRepo {
+            identity: "slatedb/slatedb".into(),
+            name: "slatedb".into(),
+        }]);
+        harness.rebuild();
+        harness.paint();
+        assert!(!offered(&harness), "one in the config");
+    }
+
     #[test]
     fn with_nothing_open_the_bar_has_the_agents_and_with_the_drawer_shut_the_lights() {
         let state = AppState::new();

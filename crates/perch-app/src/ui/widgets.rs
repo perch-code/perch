@@ -852,6 +852,16 @@ pub fn centered_message(
     title: impl Fn() -> String + 'static,
     body: impl Fn() -> String + 'static,
 ) -> impl IntoView {
+    centered_message_with(glyph, title, body, Empty::new())
+}
+
+/// `centered_message` with something under the words, such as a button.
+pub fn centered_message_with(
+    glyph: SidebarIcon,
+    title: impl Fn() -> String + 'static,
+    body: impl Fn() -> String + 'static,
+    under: impl IntoView + 'static,
+) -> impl IntoView {
     Container::new(
         Stack::vertical((
             Container::new(sidebar_glyph(glyph, theme::fg_subtle)).style(|s| {
@@ -873,6 +883,7 @@ pub fn centered_message(
                     .color(theme::fg_muted())
                     .max_width(420.0)
             }),
+            under,
         ))
         .style(|s| s.items_center()),
     )

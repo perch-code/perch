@@ -606,7 +606,7 @@ fn repo_chip(state: AppState, backend: Rc<Backend>) -> impl IntoView {
 }
 
 /// The system folder chooser, then the backend adds what was picked.
-fn add_repository(backend: Rc<Backend>) {
+pub(crate) fn add_repository(backend: Rc<Backend>) {
     use floem::platform::file::FileDialogOptions;
 
     floem::action::open_file(
