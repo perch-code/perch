@@ -1,7 +1,5 @@
 # Perch
 
-![Perch showing a pull request's code with a review thread, find references, and the inbox](docs/screenshot.png)
-
 I got tired of flipping between github.com, VS Code, and Claude/Codex, so I
 made Perch to combine them into one native application.
 
@@ -15,6 +13,8 @@ Features:
 * Threaded GitHub-style conversations with humans and agents.
 * Code walkthroughs for PRs.
 * Fully integrated client-side Claude/Codex reviews.
+
+<img src="docs/screenshot.png" width="720" alt="Perch showing a pull request's code with a review thread, find references, and the inbox">
 
 ## Install
 
