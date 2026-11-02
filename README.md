@@ -1,277 +1,184 @@
 # Perch
 
-Perch is a native macOS app for reviewing pull requests and doing work with
-coding agents. It puts your GitHub notifications, a code browser with
-language servers, and Claude Code and Codex in one window, with a git
-worktree behind every item.
+I got tired of flipping between github.com, VS Code, and Claude/Codex, so I
+made Perch to combine them into one native application.
 
-## Requirements
+Features:
 
-- macOS
-- A GitHub token (the easiest way is `gh auth login`)
-- Optional: [Claude Code](https://claude.com/claude-code) 2.1.223+ and/or
-  [Codex CLI](https://github.com/openai/codex) 0.155.1+ for agents and reviews
-- Optional, for code navigation in Rust, Go, TypeScript, JavaScript, Java
-  and Python: a language server for each (see [Language servers](#language-servers)).
-  Perch offers to install one that's missing.
+* Uses `gh`, `claude`, and `codex` CLIs for everything.
+* Fully integrated with GitHub's inbox, PRs, and issues.
+* Completely browsable codebase for each PR and code review.
+* Language server protocol (LSP) support, so you can "find references",
+  "open call hierarchy", and so on.
+* Threaded GitHub-style conversations with humans and agents.
+* Code walkthroughs for PRs.
+* Fully integrated client-side Claude/Codex reviews.
 
 ## Install
 
-Perch runs on Apple Silicon and Intel Macs. With `gh` signed in to an account
-that can read this repository, install the latest release with:
+You need:
+
+- An Apple Silicon or Intel Mac, with git
+- The [GitHub CLI](https://cli.github.com/), signed in with `gh auth login`
+- For agents: [Claude Code](https://claude.com/claude-code) 2.1.223+ and/or
+  [Codex CLI](https://github.com/openai/codex) 0.155.1+, signed in
+
+Then install the latest release:
 
 ```bash
 gh release download --repo perch-code/perch --pattern Perch-macos-arm64.tar.gz -O - | tar -xz -C /Applications
 ```
 
-On an Intel Mac, download `Perch-macos-x86_64.tar.gz` instead.
-
-Downloading through `gh` rather than a browser keeps macOS from quarantining
-the app, which isn't notarized.
-
-After that, Perch updates itself. Every six hours it asks GitHub, with the
-same token it reads notifications with, whether there's a newer release.
-When there is, it downloads and unpacks it under `~/.perch/updates`, and
-**Restart to update** takes the login's place in the drawer's footer. A
-restart swaps the new app in where the old one was and reopens it. A Perch
-run from source (`cargo run`) never updates itself.
-
-To build from source instead:
-
-```bash
-./scripts/bundle.sh
-```
-
-This builds a release binary and wraps it in `Perch.app` under the cargo
-target directory. Copy it to `/Applications`, or run it directly:
-
-```bash
-cargo run --release -p perch-app
-```
-
-If you change Perch and run it often, use the `local` profile. It skips
-link-time optimization, which takes most of the time of a release build, and
-it builds incrementally. The app runs a little slower than a release build.
-
-```bash
-cargo run --profile local -p perch-app
-```
+On an Intel Mac, download `Perch-macos-x86_64.tar.gz` instead. Perch isn't
+notarized yet, and downloading with `gh` rather than a browser keeps macOS
+from quarantining it. After that, Perch checks for new releases. Click
+"Restart to update" to upgrade when one is detected.
 
 ## Setup
+
+Configure Perch with `~/.perch/config.toml`. See
+[docs/configuration.md](docs/configuration.md) for all settings.
 
 ### GitHub
 
 Perch looks for a GitHub token in this order: `GITHUB_TOKEN`, `GH_TOKEN`,
-`gh auth token`, then `token` in `~/.perch/config.toml`. Apps launched from
-Finder don't see your shell's environment, so `gh auth login` is the simplest
-route.
-
-The token needs to read and update notifications and read the repositories
-you open. Writes also need:
-
-| To | Permission |
-|---|---|
-| Comment, review, resolve threads, react on a PR, open a PR | Pull requests: write |
-| Merge, push a branch | Contents: write |
-| React on an issue, Close as issue | Issues: write |
-| Send feedback | Issues: write on `perch-code/perch` |
-
-A fine-grained token can only write to repositories its owner picked, so it
-can't file feedback on Perch's repository unless it was made for `perch-code`.
-When filing is refused, Perch copies the report to your clipboard and opens
-GitHub's new-issue page instead.
-
+`gh auth token`, then `token` in the config. Apps launched from Finder don't
+see your shell's environment, so `gh auth login` is the simplest route.
 ### Repositories
-
-The inbox works with no config at all. Add repositories to
-`~/.perch/config.toml` when you want Perch to find your local branches and
-worktrees, or to start new work there:
 
 ```toml
 [[repo]]
 github = "slatedb/slatedb"
-roots = ["~/Code/slatedb"]     # your local clone(s)
+roots = ["~/Code/slatedb"]      # your local clone(s)
 
 [[repo]]
 roots = ["~/Code/side-project"] # a local-only repo works too
 ```
 
-You can also add one from the new-work (the `+`) view with **Add repository…**.
-Hover a repository in that menu and click its × to take its `[[repo]]` back out;
-its checkouts and Perch's worktrees stay on disk.
+`roots` is where Perch finds your branches and worktrees. Removing a
+repository leaves its checkouts and worktrees on disk.
 
-### Agents
+## Language servers
 
-Perch finds the `claude` and `codex` CLIs on its own. To change the defaults:
+Perch starts language servers when you browse a codebase. The following LSPs
+are currently supported:
 
-```toml
-[agent]
-model = "opus"
-effort = "high"
-max_concurrent_runs = 4
+| Language | Server | Perch installs it with |
+|---|---|---|
+| Rust | rust-analyzer | rustup, into the checkout's toolchain |
+| Go | gopls | `go install` (needs Go) |
+| TypeScript, JavaScript | typescript-language-server | `npm install` (needs Node) |
+| Java | jdtls | a checksummed download from Eclipse (needs JDK 21+) |
+| Python | ty | a checksummed download from GitHub |
 
-[agent.codex]
-models = ["gpt-6-astra"]
+Servers other than rust-analyzer go in `~/.perch/servers`. Perch never
+installs Go, Node or a JDK, and never runs `npm install` in a checkout, so a
+TypeScript checkout without `node_modules` can't resolve its packages' types.
 
-[work]
-branch_prefix = "chris/"
-approvals = "auto"             # or "ask"
-```
-
-### Language servers
-
-Perch starts the server for each language a pull request changes, and
-others as you open their files:
-
-| Language | Server | Perch looks for it | Perch can install it with |
-|---|---|---|---|
-| Rust | rust-analyzer | the checkout's rustup toolchain | `rustup component add` (needs rustup) |
-| Go | gopls | `PATH`, `~/go/bin` | `go install` (needs Go) |
-| TypeScript, JavaScript | typescript-language-server | `PATH`, with the TypeScript installed with it | `npm install` (needs Node) |
-| Java | jdtls | `PATH` (Homebrew's, or a distribution's) | a checksummed download from Eclipse (needs a JDK 21+) |
-| Python | ty | `PATH` | a checksummed download from GitHub (needs nothing else) |
-
-When a server is missing, a toast says so with an **Install** button; its
-tooltip is the command it runs. Perch downloads nothing without that click,
-or **Update** on an install of its own that's older than the version it
-pins. rust-analyzer goes into the checkout's toolchain, where it matches
-the compiler; the others go in `~/.perch/servers`. Perch never installs Go,
-Node or a JDK, and never runs `npm install` in a checkout, so a TypeScript
-checkout without `node_modules` can't resolve its packages' types.
-
-The download runs on a JDK 21 or later. On macOS that is the one
-`/usr/libexec/java_home` picks, else `JAVA_HOME`. Elsewhere it is
-`JAVA_HOME`, else the JDK the `java` on `PATH` belongs to, else the newest
-in `/usr/lib/jvm`.
-
-rust-analyzer and jdtls run the checkout's own code as they load it:
-rust-analyzer its build scripts and proc macros, jdtls its Gradle or Maven
-build. Perch starts them by itself only on your own work in a repository in
-your config: your branches, the default branch, and your pull requests whose
-branch is in that repository or your fork. On anything else, such as someone
-else's pull request, a branch you cut from one, or a repository not in your
-config, a toast says what would run, with **Trust and start**. Perch
-remembers that for the item, commits pushed to it later included; deleting
-the item forgets it. Tick **Always trust rust-analyzer in slatedb/slatedb**
-under the toast's line before pressing it, and that server starts on
-everything in the repository from then on without asking; each server has
-its own box. While they wait, the Worktree row on Conversation has a
-warning, and its menu has **Trust and Start** and **Always Trust** once the
-toast is closed. The same menu, on any item in the repository, has **Stop
-Trusting** for a server trusted there. After upgrading, a branch you had
-already cut from a pull request, your own included, asks once. gopls,
-typescript-language-server and ty start either way. To trust every server on
-everything in a repository, pull requests from anyone included:
+rust-analyzer and jdtls run a checkout's own code as they load it: build
+scripts and proc macros, or a Gradle or Maven build. Perch starts them on its
+own only for your own work in a configured repository. For anything else,
+such as someone else's pull request, it asks first with **Trust and start**.
+You can trust a server for one item, which covers commits pushed to it
+later, or for a whole repository. To trust
+every server on everything in a repository:
 
 ```toml
 [[repo]]
 github = "slatedb/slatedb"
-
-[repo.lsp]
-trust = true
+lsp.trust = true
 ```
-
-Perch never lets typescript-language-server run a checkout's own TypeScript,
-which a pull request could replace; a server on `PATH` older than 2.1, or
-without a TypeScript of its own, gives way to Perch's.
-
-### Look
-
-On macOS code is set in SF Mono. Elsewhere Perch takes the first installed
-of JetBrains Mono, DejaVu Sans Mono, Noto Sans Mono and Liberation Mono,
-or another family you name:
-
-```toml
-[ui]
-code_font = "Fira Code"
-```
-
-Perch is light or dark as the system is. To keep it one or the other, set
-`appearance` to `"light"` or `"dark"` (`"system"` is the default):
-
-```toml
-[ui]
-appearance = "dark"
-```
-
-On Linux the system's setting doesn't reach Perch under X11, so there it
-is light unless `appearance` says otherwise.
 
 ## Agent safety
 
 Agents read pull requests, comments and code that anyone could have written,
 so Perch assumes any of it might try to steer them.
 
-- **Ask** runs are read-only. Claude Code's shell is sandboxed with no network
-  and no writes; Codex runs in its `read-only` sandbox.
-- **Work** runs can edit their worktree (and any paths you list under
-  `[repo.work]`), and can't push or reach GitHub. Anything outside the sandbox (a network host, a command, a
-  commit) goes to the CLI's auto-reviewer or to you as an approval card with
-  Allow once, Always, and Deny. `approvals = "never"` under a repository's
-  `[repo.work]` allows all activity without ever asking for approval. The
-  composer's approvals picker (Ask me, Auto-review, Allow all) changes it for
-  one item until Perch quits.
+- **Ask** runs are read-only. Claude Code's shell is sandboxed with no
+  network and no writes; Codex runs in its `read-only` sandbox.
+- **Work** runs can edit their worktree and any paths listed under
+  `[repo.work] write`, and reach only the hosts listed under
+  `[repo.work] network`. Anything else, such as another host, a command or
+  a commit, goes to the CLI's auto-reviewer or to you as an approval card.
+  What gets approved runs outside the sandbox.
+- `approvals = "never"` under `[repo.work]` approves every request without
+  asking. The composer's approvals picker changes this for one item until
+  Perch quits.
 - A repository's own `.claude/`, `.mcp.json` and `.codex/` config is ignored
-  unless you set `trust = true` for it.
-- Agents don't get your GitHub token or other `*_TOKEN`/`*_SECRET`-style
-  variables.
-- Nothing an agent writes reaches GitHub unless you post it.
-- The agent that looks into a bug report is an Ask run in the open checkout
-  (or `~/.perch`), and its notes go into the report's preview, not to
-  GitHub, until you file it.
+  unless `[repo.work] trust = true`.
+- GitHub tokens and variables named like secrets (`*_TOKEN`, `*_KEY`,
+  `*_SECRET` and so on) are removed from an agent's environment, except the
+  keys Claude Code and Codex sign in with.
+- Perch posts nothing an agent writes to GitHub until you post it.
 
-The CLIs still read `CLAUDE.md` and `AGENTS.md`, and an agent can read any
-file your user can.
+Ask and Work runs still read `CLAUDE.md` and `AGENTS.md`; reviews don't. An
+agent can read any file your user can.
 
 ## Feedback
 
-The megaphone in the drawer's footer, or **Send Feedback…** in the Perch menu,
-files a bug report or an idea as an issue on `perch-code/perch`. An error
-or warning toast has **Report**, which starts one about it.
+**Send Feedback…** in the Perch menu, or the feedback button at the bottom
+of the sidebar, files a bug report or an idea as an issue on
+`perch-code/perch`. Error and warning toasts have a **Report** button that
+starts one.
 
-A report carries what Perch knows about itself: its version and commit,
-the operating system (on macOS its version and your screens, on Linux the
-distribution, kernel and session), the agent CLIs it found, its language servers (which
-binary, from where, how much memory), where the token came from, your config
-with the token and repository names left out, the session's recent errors,
-and the end of its log. For a bug, Claude or Codex can look into it first,
-read-only and offline, and add notes. Tokens and secret-looking values,
-emails, your home directory and user name, and every repository but Perch's
-are redacted. You see the whole issue, and can edit it, before anything is
-sent. If it's already been reported, you can comment on that issue instead,
-or +1 it, which also subscribes you.
+A report includes Perch's version, your OS, the agent CLIs and language
+servers it found, your config without the token, recent errors and the end
+of the log. Perch redacts tokens and secret-looking values, most email addresses, your
+home directory and user name in paths, and the other repositories it knows
+about. You see
+the whole issue, and can edit it, before anything is sent. For a bug, Claude
+or Codex can look into it first, read-only, and add notes.
+
+If your token can't file issues, **Open on GitHub** copies the report and
+opens GitHub's new-issue page.
 
 ## Data
 
-Everything lives under `~/.perch` (or `$PERCH_HOME`): the config, a SQLite
-database, worktrees, clones, agent state, and in `servers/` the language
-servers Perch installed and jdtls's data for each checkout. Delete
-`servers/` to uninstall them. `walkthroughs/` holds the walkthroughs agents
-wrote, the last 20 for each item. Perch's log is in `logs/`, one file a day,
-the last seven kept. A downloaded update waits in `updates/` until the
-restart that installs it. The database holds your local conversations, drafts
-and review history, so don't treat it as a cache.
+Perch keeps its data under `~/.perch` (or `$PERCH_HOME`): the config, a
+SQLite database, clones, worktrees, agent state, installed language servers,
+and a log file a day, the newest seven kept. The database holds your local
+conversations, drafts and review history, so it isn't a cache.
 
-Perch removes the worktrees it made under `~/.perch` once they're done
-with: when nothing in one is modified or untracked, its branch has no
-commit that isn't somewhere else, and its pull request has merged or
-closed or you haven't opened it in 14 days. The branch stays, and Restore
-Worktree brings the directory back. Like `git worktree remove`, it counts
-files git ignores, such as `.env`, as disposable. Worktrees under your
+Perch removes the worktrees it made once they're done with: nothing modified
+or untracked, no commit that isn't somewhere else, and the pull request
+merged or closed, or the item not opened in 14 days. The branch stays, and
+**Restore Worktree** brings the directory back. Like `git worktree remove`,
+it treats ignored files such as `.env` as disposable. Worktrees under your
 `roots` are yours, and Perch never removes them.
+
+## Building from source
+
+You need rustup (the repository pins the toolchain), Python 3 and Xcode's
+command-line tools.
+
+```bash
+./scripts/bundle.sh
+```
+
+This builds `Perch.app` under the cargo target directory. Copy it to
+`/Applications`, or run Perch directly:
+
+```bash
+cargo run --release -p perch-app
+```
+
+If you change Perch and run it often, use the `local` profile. It skips
+link-time optimization and builds incrementally, for a slightly slower app.
+
+```bash
+cargo run --profile local -p perch-app
+```
 
 ## Releasing
 
-Bump `version` under `[workspace.package]` in `Cargo.toml`, commit, then push
-a matching tag:
+Bump `version` under `[workspace.package]` in `Cargo.toml`, run `cargo check`
+to update `Cargo.lock`, commit both, then push a matching tag:
 
 ```bash
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
-The release workflow builds `Perch.app` on an Apple Silicon runner, once
-natively and once cross-compiled for Intel, and publishes
-`Perch-macos-arm64.tar.gz` and `Perch-macos-x86_64.tar.gz` to a GitHub
-release. A running Perch finds the one for its processor within six hours.
-A release without it is skipped. A tag with a hyphen, like `v0.2.0-beta.1`, becomes
-a prerelease, which neither the updater nor `gh release download` picks up.
+The release workflow builds `Perch.app` for Apple Silicon and Intel and
+publishes both tarballs to a GitHub release. A tag with a hyphen, like
+`v0.2.0-beta.1`, becomes a prerelease, which neither the updater nor
+`gh release download` picks up.
