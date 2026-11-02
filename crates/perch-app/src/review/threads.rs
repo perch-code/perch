@@ -9078,7 +9078,15 @@ mod tests {
         assert!(end > 0.0, "the question is longer than its box");
         assert_eq!(at, end, "the box opens on the caret");
 
-        let offsets = type_into(&mut harness, lines, " and then some more");
+        // Where a row ends depends on the font's widths, so words go in
+        // until one wraps.
+        let mut offsets = Vec::new();
+        for i in 1..=40 {
+            offsets.extend(type_into(&mut harness, lines, &format!(" more{i}")));
+            if scrolled(lines).1 > end {
+                break;
+            }
+        }
         let (_, end_now) = scrolled(lines);
         assert!(end_now > end, "the words went onto a new row");
         assert!(

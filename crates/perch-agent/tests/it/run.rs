@@ -8,11 +8,35 @@ use perch_agent::{
     Transcript,
 };
 
+/// Writes a script for a run to spawn, and returns once it can be.
+///
+/// On Linux a file open for writing can't be executed ("Text file busy"),
+/// and a process another test forks while the script is being written
+/// holds the write handle until it execs. So the script is run once with
+/// `PERCH_FAKE_PROBE` set, which ends it at once, until that works.
 fn fake_agent(dir: &std::path::Path, body: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let path = dir.join("fake-claude");
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::write(
+        &path,
+        format!("#!/bin/sh\n[ -n \"$PERCH_FAKE_PROBE\" ] && exit 0\n{body}\n"),
+    )
+    .unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for _ in 0..200 {
+        match std::process::Command::new(&path)
+            .env("PERCH_FAKE_PROBE", "1")
+            .status()
+        {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            result => {
+                result.unwrap();
+                break;
+            }
+        }
+    }
     path
 }
 

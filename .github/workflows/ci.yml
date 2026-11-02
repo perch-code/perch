@@ -14,3 +14,25 @@ jobs:
       # rustup installs the toolchain rust-toolchain.toml pins, rustfmt included.
       - name: Check formatting
         run: cargo fmt --all --check
+
+  # Perch is built and run on a Mac, so this keeps its Linux paths compiling
+  # and their tests passing.
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      # muda's menus link GTK 3 and fontique links fontconfig; wayland and
+      # xkbcommon are loaded at runtime and need no headers.
+      - name: Install GTK and fontconfig headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libfontconfig1-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --locked --workspace --all-targets
+
+      - name: Test
+        run: cargo test --locked --workspace

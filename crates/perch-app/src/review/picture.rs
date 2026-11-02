@@ -127,9 +127,49 @@ fn fonts() -> Arc<fontdb::Database> {
         .get_or_init(|| {
             let mut fonts = fontdb::Database::new();
             fonts.load_system_fonts();
+            #[cfg(not(target_os = "macos"))]
+            use_system_generics(&mut fonts);
             Arc::new(fonts)
         })
         .clone()
+}
+
+/// fontdb takes `serif`, `sans-serif` and `monospace` for Times New Roman,
+/// Arial and Courier New, and usvg falls back to `serif`, so on a Linux
+/// desktop without Microsoft's fonts every label was dropped. Off macOS
+/// the generics are the families fontconfig names for them, as fontique
+/// has them, else whatever family is installed.
+#[cfg(not(target_os = "macos"))]
+fn use_system_generics(fonts: &mut fontdb::Database) {
+    use floem::text::FONT_CONTEXT;
+    use fontique::GenericFamily;
+
+    let Some(any) = fonts.faces().find_map(|face| face.families.first()) else {
+        return;
+    };
+    let any = any.0.clone();
+    let mut context = FONT_CONTEXT.lock();
+    let collection = &mut context.collection;
+    let mut named = |generic| -> String {
+        let installed = |name: &str| {
+            fonts
+                .faces()
+                .any(|f| f.families.iter().any(|(n, _)| n == name))
+        };
+        collection
+            .generic_families(generic)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .filter_map(|id| collection.family_name(id).map(str::to_owned))
+            .find(|name| installed(name))
+            .unwrap_or_else(|| any.clone())
+    };
+    let serif = named(GenericFamily::Serif);
+    let sans_serif = named(GenericFamily::SansSerif);
+    let monospace = named(GenericFamily::Monospace);
+    fonts.set_serif_family(serif);
+    fonts.set_sans_serif_family(sans_serif);
+    fonts.set_monospace_family(monospace);
 }
 
 /// `24 × 24`, with a fraction only when a side has one.
