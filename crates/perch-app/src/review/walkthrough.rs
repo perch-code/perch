@@ -233,7 +233,7 @@ fn mark_read(
     };
     let changed: Vec<usize> = places
         .into_iter()
-        .filter(|p| walkthrough.read.contains(p) != read)
+        .filter(|p| *p < walkthrough.steps.len() && walkthrough.read.contains(p) != read)
         .collect();
     if changed.is_empty() {
         return;
@@ -300,7 +300,11 @@ pub fn step_by(state: ReviewState, backend: &Backend, forward: bool) {
         return;
     };
     let count = walkthrough.steps.len();
-    match state.walkthrough_at.get_untracked() {
+    match state
+        .walkthrough_at
+        .get_untracked()
+        .filter(|at| *at < count)
+    {
         None if forward && count > 0 => go_to_step(state, 0),
         None => {}
         Some(at) if forward => {
@@ -705,7 +709,7 @@ fn runs_button(app: AppState, state: ReviewState) -> impl IntoView {
                     "" => when,
                     model => format!("{when} \u{b7} {model}"),
                 };
-                let detail = match behind(state, &run) {
+                let detail = match floem::reactive::Effect::untrack(|| behind(state, &run)) {
                     Some(behind) => behind,
                     None => crate::review::timeline::short_sha(&run.head),
                 };
@@ -739,7 +743,7 @@ fn behind(state: ReviewState, walkthrough: &Walkthrough) -> Option<String> {
     if walkthrough.scope != Scope::Branch {
         return None;
     }
-    let head = state.item.with_untracked(|i| {
+    let head = state.item.with(|i| {
         i.as_ref()
             .and_then(|i| i.checkout.as_ref())
             .map(|c| c.head_sha.clone())
@@ -749,7 +753,7 @@ fn behind(state: ReviewState, walkthrough: &Walkthrough) -> Option<String> {
     }
     let newer = state
         .commits
-        .with_untracked(|commits| commits.iter().position(|c| c.sha == walkthrough.head));
+        .with(|commits| commits.iter().position(|c| c.sha == walkthrough.head));
     Some(match newer {
         Some(1) => "1 commit behind".to_string(),
         Some(n) => format!("{n} commits behind"),
@@ -943,21 +947,24 @@ fn outline(
         live.with(|w| w.as_ref().map(|w| w.read.clone()))
             .unwrap_or_default()
     });
-    let behind_words = behind(state, &walkthrough);
+    // The head moves, and the commits arrive, after the outline is built.
+    let behind_words = {
+        let walkthrough = walkthrough.clone();
+        Memo::new(move |_| behind(state, &walkthrough))
+    };
     let stale = pane_text({
         let head = crate::review::timeline::short_sha(&walkthrough.head);
-        let behind_words = behind_words.clone();
         move || {
             format!(
                 "Written for {head}, {}. A note whose lines have changed since isn't shown.",
-                behind_words.clone().unwrap_or_default()
+                behind_words.get().unwrap_or_default()
             )
         }
     })
     .style(move |s| {
         s.padding_horiz(12.0)
             .padding_top(10.0)
-            .apply_if(behind_words.is_none(), |s| s.hide())
+            .apply_if(behind_words.with(Option::is_none), |s| s.hide())
     });
 
     let summary = (!walkthrough.summary.trim().is_empty()).then(|| {
@@ -1510,10 +1517,16 @@ pub fn step_card(
 
     // The composer opened here, by which opening it is, so it is built
     // afresh when opened again and not when its destination is picked.
+    let walkthrough_id = walkthrough.id.clone();
+    let place = (walkthrough_id.clone(), index);
     let composing = Memo::new(move |_| {
         state.composer.with(|c| {
             c.as_ref()
-                .filter(|c| c.step == Some(index))
+                .filter(|c| {
+                    c.step
+                        .as_ref()
+                        .is_some_and(|(id, at)| *id == walkthrough_id && *at == index)
+                })
                 .map(|c| c.opening)
         })
     });
@@ -1531,7 +1544,7 @@ pub fn step_card(
             )
             .style(|s| s.width_full())
             .into_any(),
-            _ => follow_up_box(app, state, index, anchor.clone()).into_any(),
+            _ => follow_up_box(app, state, place.clone(), anchor.clone()).into_any(),
         },
     )
     .style(move |s| {
@@ -1620,14 +1633,14 @@ pub fn step_card(
 fn follow_up_box(
     app: AppState,
     state: ReviewState,
-    index: usize,
+    step: (String, usize),
     anchor: Option<Anchor>,
 ) -> impl IntoView {
     Label::derived(|| "Follow up\u{2026}".to_string())
         .on_event_stop(el::Click, move |_, _| {
             if let Some(anchor) = anchor.clone() {
-                state.walkthrough_at.set(Some(index));
-                state.open_step_composer(index, anchor, threads::defaults(app));
+                state.walkthrough_at.set(Some(step.1));
+                state.open_step_composer(step.clone(), anchor, threads::defaults(app));
             }
         })
         .debug_name("walkthrough-follow-up")
@@ -1695,9 +1708,11 @@ fn lines_heading(anchor: Option<&Anchor>) -> impl IntoView {
 
 /// What a Follow up on place `index` sends ahead of what is typed: the
 /// note's words quoted, so the thread it starts says what it asks about.
-pub fn follow_up_preface(state: ReviewState, index: usize) -> String {
-    floem::reactive::Effect::untrack(|| shown(state))
-        .and_then(|w| w.steps.get(index).map(quote))
+pub fn follow_up_preface(state: ReviewState, (id, index): &(String, usize)) -> String {
+    floem::reactive::Effect::untrack(|| kept(state))
+        .iter()
+        .find(|w| w.id == *id)
+        .and_then(|w| w.steps.get(*index).map(quote))
         .unwrap_or_default()
 }
 
@@ -2663,7 +2678,13 @@ mod tests {
         let follow = named(root, "walkthrough-follow-up").unwrap();
         click_on(&mut harness, follow);
         let composer = state.composer.get_untracked().expect("a composer");
-        assert_eq!((composer.thread_id.clone(), composer.step), (None, Some(0)));
+        assert_eq!(
+            (
+                composer.thread_id.clone(),
+                composer.step.as_ref().map(|(_, at)| *at)
+            ),
+            (None, Some(0))
+        );
         let anchor = composer.anchor.clone().unwrap();
         assert_eq!((anchor.path.as_str(), anchor.line), ("src/x.rs", 2));
         assert_eq!(composer.draft, "");

@@ -1170,6 +1170,9 @@ pub enum Event {
     },
     BranchUpdated {
         item_id: String,
+        /// The open review had been left at an older head, and now
+        /// follows the worktree's.
+        caught_up: bool,
     },
     BranchUpdateFailed {
         item_id: String,
@@ -8140,6 +8143,7 @@ async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), Strin
                 // No clone, or no such branch in it: nothing to lose. A
                 // count that fails for another reason is not a reason to
                 // think so.
+                Some(repo) if !is_repo(&repo) => 0,
                 Some(repo) => match ctx.preparer.commits_only_on(&repo, &checkout.branch).await {
                     Ok(commits) => commits,
                     Err(e) => match ctx.preparer.has_branch(&repo, &checkout.branch).await {
@@ -8172,6 +8176,7 @@ async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), Strin
         .and_then(Result::ok)
         .unwrap_or_default();
     drop_work_refs(ctx, &runs).await;
+    walkthrough::drop_all(ctx, id).await;
     if let Some(checkout) = item.checkout.as_ref().filter(|c| c.owned) {
         let bare = owned_repo(ctx.preparer.store(), &item);
         let present = bare.is_some() && checkout.path.join(".git").exists();
@@ -8202,7 +8207,7 @@ async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), Strin
                 forget_server_data(&checkout.path);
             }
             // The bare clone, or a root with its `.git`.
-            if bare.join("HEAD").is_file() || bare.join(".git").exists() {
+            if is_repo(&bare) {
                 // A branch that is already gone is not a reason to keep the row.
                 if let Err(e) = ctx.preparer.delete_branch(&bare, &checkout.branch).await {
                     tracing::info!(id, error = %e, "branch was not there to delete");
@@ -12176,6 +12181,12 @@ async fn set_scope(
 /// The repository an owned checkout's branch lives in, where adding,
 /// pruning and deleting it happen: the root it was cut from, else the
 /// store's bare clone.
+/// Whether `path` is a repository, bare or not, that git can be asked
+/// about.
+fn is_repo(path: &Path) -> bool {
+    path.join("HEAD").is_file() || path.join(".git").exists()
+}
+
 fn owned_repo(store: &perch_git::Store, item: &Item) -> Option<PathBuf> {
     if let Some(source) = item.checkout.as_ref().and_then(|c| c.source.clone()) {
         return Some(source);
@@ -16533,7 +16544,15 @@ async fn on_approval(
         );
         return;
     }
-    if crate::approvals::covering(&grants, request).is_some() {
+    // A commit outside the sandbox that would run hooks is asked about,
+    // grant or not: they may be what the sandboxed run wrote.
+    let hooked = matches!(request.kind, perch_agent::ApprovalKind::Command)
+        && crate::approvals::is_git_write(&request.subject)
+        && match run.working_directory.as_deref() {
+            Some(dir) => crate::approvals::runs_hooks(Path::new(dir)).await,
+            None => true,
+        };
+    if !hooked && crate::approvals::covering(&grants, request).is_some() {
         handle.answer(id, perch_agent::Decision::Allow);
         record_approval_step(
             ctx,

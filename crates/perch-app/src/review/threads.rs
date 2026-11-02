@@ -436,7 +436,7 @@ pub fn composer_view(
             };
             // A walkthrough place's Follow up starts its thread with the
             // note it asks about.
-            let question = match composer.step {
+            let question = match &composer.step {
                 Some(step) => {
                     crate::review::walkthrough::follow_up_preface(state, step) + question.trim()
                 }

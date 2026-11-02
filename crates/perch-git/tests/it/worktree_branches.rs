@@ -396,6 +396,19 @@ async fn commits_only_on_counts_what_deleting_the_branch_loses() {
         2,
         "a run's record does not count as holding them"
     );
+    // Nor does a walkthrough's recorded worktree, kept the same way.
+    f.preparer
+        .record_worktree(&cut.worktree, "refs/perch/walkthroughs/x/w1", "walkthrough")
+        .await
+        .unwrap();
+    assert_eq!(
+        f.preparer
+            .commits_only_on(&f.bare(), &cut.branch)
+            .await
+            .unwrap(),
+        2,
+        "a walkthrough's record does not count as holding them"
+    );
 
     // Another branch at the first commit keeps it.
     git(&cut.worktree, &["branch", "keep", "HEAD~1"]);

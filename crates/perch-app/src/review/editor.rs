@@ -1543,6 +1543,16 @@ fn split_view(
     // The two sides are the same width, so the head's says for both.
     let columns = wrap_columns(state, right_viewport, Layout::Split);
     let right_heading = heading(right_viewport, right_scroll_to);
+    // The left follows the right down the file, so a scroll the right is
+    // asked for is asked of the left as it is asked, not once it lands:
+    // else the left can land first somewhere else, which the sync below
+    // takes for a move of its own, and it sends the right back there.
+    Effect::new(move |_| {
+        if let Some(at) = right_scroll_to.get() {
+            let x0 = left_viewport.get_untracked().x0;
+            left_scroll_to.set(Some(Vec2::new(x0, at.y)));
+        }
+    });
     let left_heading = heading(left_viewport, left_scroll_to);
     wire_folds(state, live_file, memos, columns, epoch, {
         move |file: &LoadedFile, inputs: &Inputs, reloaded: bool| {
@@ -4914,6 +4924,46 @@ mod window {
         harness.paint();
         assert_eq!(live.doc.get().len(), 84);
         assert_eq!(laid_out_text(&live), live.doc.get().text);
+    }
+
+    /// In the split, a jump into a fold above the view lands both sides on
+    /// the target: the left, made to keep its place by the fold opening,
+    /// does not land first and pull the right back with it.
+    #[test]
+    fn a_split_jump_into_a_fold_above_lands_both_sides_on_it() {
+        let (mut harness, state) = one_long_run();
+        state.layout.set(Layout::Split);
+        harness.rebuild();
+        harness.paint();
+        let line_height = crate::theme::code_line_height() as f64;
+        let (left_viewport, right_viewport) = super::SPLIT_VIEWPORTS.with(|v| v.get()).unwrap();
+        let (left, top) = pane_origin();
+        let x_right = left + (1400.0 - left - 1.0) * 0.75;
+        harness.scroll_down(x_right, top + 100.0, 60.0 * line_height);
+        harness.rebuild();
+        harness.paint();
+        let scrolled = right_viewport.get().y0;
+        assert!(scrolled > 20.0 * line_height, "scrolled down to {scrolled}");
+        assert_eq!(left_viewport.get().y0, scrolled);
+
+        state.jump_to_line.set(Some(30));
+        for _ in 0..3 {
+            harness.rebuild();
+            harness.paint();
+        }
+        let (_, right) = sides(state);
+        let row = right
+            .doc
+            .get()
+            .row_of_head(30)
+            .expect("head line 30 is shown");
+        let target = (row as f64 - 4.0) * line_height;
+        assert_eq!(
+            right_viewport.get().y0,
+            target,
+            "the right is on the target"
+        );
+        assert_eq!(left_viewport.get().y0, target, "the left is on the target");
     }
 
     // Cards.

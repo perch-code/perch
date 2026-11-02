@@ -1286,8 +1286,9 @@ impl Preparer {
     /// request's fetched head. These are what deleting the branch loses.
     /// Worktrees' `HEAD`s are left out on purpose, since the branch's own
     /// worktree would otherwise hold every one of them. So are a Work
-    /// run's records under `refs/perch/runs/`: each is a commit on top of
-    /// the branch's `HEAD`, and they go with the item.
+    /// run's records under `refs/perch/runs/`, and a walkthrough's recorded
+    /// worktree under `refs/perch/walkthroughs/`: each is a commit on top
+    /// of the branch's `HEAD`, and they go with the item.
     pub async fn commits_only_on(&self, repo: &Path, branch: &str) -> Result<u64, Error> {
         let out = self
             .git
@@ -1303,6 +1304,7 @@ impl Preparer {
                     "--tags".to_string(),
                     "--remotes".to_string(),
                     "--exclude=refs/perch/runs/*".to_string(),
+                    "--exclude=refs/perch/walkthroughs/*".to_string(),
                     "--glob=refs/perch/*".to_string(),
                     "--".to_string(),
                 ],

@@ -199,6 +199,43 @@ pub fn covering<'a>(
     grants.iter().find(|grant| grant.key == key)
 }
 
+/// Whether git in `worktree` would run a hook on a commit: anything but
+/// a `.sample` in the hooks directory git resolves there (with
+/// `core.hooksPath` from any level of config), or a hooks directory
+/// inside the worktree. The commit grant runs `git commit` outside the
+/// sandbox, so it must not answer for one that runs what the sandboxed
+/// run wrote: hooks under the worktree (husky's `.husky/_`), or hooks
+/// that read the worktree for what to run (pre-commit, lefthook). Not
+/// knowing counts as yes.
+pub async fn runs_hooks(worktree: &std::path::Path) -> bool {
+    let Ok(out) = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["rev-parse", "--git-path", "hooks"])
+        .output()
+        .await
+    else {
+        return true;
+    };
+    if !out.status.success() {
+        return true;
+    }
+    // Relative to the directory git was run in when not absolute. One
+    // that isn't there yet can't be made real, so the worktree is, first.
+    let real = |path: &std::path::Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let worktree = real(worktree);
+    let dir = real(&worktree.join(String::from_utf8_lossy(&out.stdout).trim()));
+    if dir.starts_with(&worktree) && !dir.starts_with(worktree.join(".git")) {
+        return true;
+    }
+    match std::fs::read_dir(&dir) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .any(|entry| !entry.file_name().to_string_lossy().ends_with(".sample")),
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
 /// Whether the repository lets Work commit.
 pub fn commits_granted(grants: &[WorkGrantRecord]) -> bool {
     grants.iter().any(|grant| grant.key == "commit")
@@ -390,5 +427,37 @@ mod tests {
         assert!(covering(&grants, &request(ApprovalKind::Command, "git push")).is_none());
         assert!(commits_granted(&grants));
         assert!(!commits_granted(&grants[..1]));
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    /// A commit runs hooks if git's hooks directory holds one, or if it
+    /// is in the worktree, where the run could write one.
+    #[tokio::test]
+    async fn runs_hooks_looks_where_git_would() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path();
+        git(worktree, &["init", "-q"]);
+        let hooks = worktree.join(".git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(hooks.join("pre-commit.sample"), "").unwrap();
+        assert!(!runs_hooks(worktree).await, "samples don't run");
+
+        std::fs::write(hooks.join("pre-commit"), "").unwrap();
+        assert!(runs_hooks(worktree).await);
+        std::fs::remove_file(hooks.join("pre-commit")).unwrap();
+
+        git(worktree, &["config", "core.hooksPath", ".husky/_"]);
+        assert!(runs_hooks(worktree).await, "hooks the run could write");
     }
 }

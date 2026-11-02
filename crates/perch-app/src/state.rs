@@ -2884,10 +2884,13 @@ impl AppState {
                     review.push_error.set(Some(message));
                 }
             }
-            Event::BranchUpdated { item_id } => {
+            Event::BranchUpdated { item_id, caught_up } => {
                 if review.is_item(&item_id) {
                     review.update_pending.set(false);
                     review.update_error.set(None);
+                    if caught_up {
+                        review.stale_head.set(None);
+                    }
                 }
             }
             Event::BranchUpdateFailed { item_id, message } => {

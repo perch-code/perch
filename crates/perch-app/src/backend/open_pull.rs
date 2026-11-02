@@ -340,8 +340,9 @@ async fn push_to_pull_inner(ctx: &Ctx, item_id: &str) -> Result<(), String> {
 pub(super) async fn update_from_pull(ctx: &Ctx, item_id: &str) {
     let outcome = update_from_pull_inner(ctx, item_id).await;
     let event = match outcome {
-        Ok(()) => Event::BranchUpdated {
+        Ok(caught_up) => Event::BranchUpdated {
             item_id: item_id.to_string(),
+            caught_up,
         },
         Err(message) => Event::BranchUpdateFailed {
             item_id: item_id.to_string(),
@@ -351,7 +352,9 @@ pub(super) async fn update_from_pull(ctx: &Ctx, item_id: &str) {
     let _ = ctx.events.send(event);
 }
 
-async fn update_from_pull_inner(ctx: &Ctx, item_id: &str) -> Result<(), String> {
+/// Whether an open review that was left behind at an older head has
+/// caught up with the worktree.
+async fn update_from_pull_inner(ctx: &Ctx, item_id: &str) -> Result<bool, String> {
     let item = ctx.item(item_id).ok_or("The item is gone")?;
     let checkout = item
         .checkout
@@ -454,11 +457,18 @@ async fn update_from_pull_inner(ctx: &Ctx, item_id: &str) -> Result<(), String> 
         ctx.with_cache(|c| c.update_item(&item));
         ctx.send_items();
     }
+    let mut caught_up = false;
     if only_behind {
-        let navigation_id = ctx.slot.lock().ok().and_then(|g| {
-            g.as_ref()
+        let navigation_id = ctx.slot.lock().ok().and_then(|mut g| {
+            g.as_mut()
                 .filter(|open| open.item_id == item_id)
-                .map(|open| open.navigation_id)
+                .map(|open| {
+                    // A review left at an older head because the worktree
+                    // couldn't move: it has moved now, with nothing of its own
+                    // to lose, so the review follows it as for a commit.
+                    caught_up = open.checkout.stale.take().is_some();
+                    open.navigation_id
+                })
         });
         if let (Some(navigation_id), Some(scope_revision)) =
             (navigation_id, ctx.scope_requests.stable_revision())
@@ -466,7 +476,7 @@ async fn update_from_pull_inner(ctx: &Ctx, item_id: &str) -> Result<(), String> 
             refresh_scope(ctx, item_id, navigation_id, scope_revision).await;
         }
     }
-    Ok(())
+    Ok(caught_up)
 }
 
 /// What a failed git call said, by its first error line.

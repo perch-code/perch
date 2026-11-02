@@ -312,6 +312,14 @@ pub(super) fn mark_read(ctx: &Ctx, item_id: &str, id: &str, places: &[usize], re
     else {
         return;
     };
+    // One kept before walkthroughs said when they were written is dated
+    // by its file, which rewriting it would make new.
+    if kept.written_at.is_none() {
+        kept.written_at = std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| jiff::Timestamp::try_from(modified).ok());
+    }
     for place in places {
         if read {
             kept.read.insert(*place);
@@ -388,6 +396,19 @@ pub(super) async fn write(
         _ => {}
     }
     send(ctx, item_id, outcome);
+}
+
+/// Let go of every walkthrough kept for an item that is going, and the
+/// refs that kept their recorded worktrees. Called while its worktree is
+/// still there to reach its repository through.
+pub(super) async fn drop_all(ctx: &Ctx, item_id: &str) {
+    let dir = dir_of(ctx, item_id);
+    let refs = read_kept(&dir)
+        .into_iter()
+        .filter_map(|kept| kept.snapshot_ref)
+        .collect();
+    drop_snapshots(ctx, item_id, refs).await;
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Let go of refs that kept recorded worktrees.

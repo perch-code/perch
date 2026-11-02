@@ -1209,8 +1209,9 @@ pub struct Composer {
     pub thread_id: Option<String>,
     /// The walkthrough place whose Follow up this is: a new thread on its
     /// lines, typed in its note's foot as a reply is in a thread's, which
-    /// sends the note quoted ahead of what is typed.
-    pub step: Option<usize>,
+    /// sends the note quoted ahead of what is typed. The walkthrough's id
+    /// and the place's index in it.
+    pub step: Option<(String, usize)>,
     pub anchor: Option<Anchor>,
     /// Where the text goes: an agent, its model and effort together,
     /// since the picker lists models and config says whose each is, or
@@ -4130,6 +4131,11 @@ impl ReviewState {
     /// editor repaints from the new sides rather than the stale ones.
     /// Returns the paths to ask the backend for.
     pub fn change_scope(&self, scope: Scope, files: Arc<Vec<ChangedFile>>) -> Vec<String> {
+        if self.scope.with_untracked(|held| *held != scope) {
+            // The place is one of the old scope's walkthrough.
+            self.walkthrough_at.set(None);
+            self.walkthrough_composing.set(false);
+        }
         self.scope.set(scope);
         self.set_changed_files(files);
         let paths = self.reload_loaded(|_| true);
@@ -4351,7 +4357,7 @@ impl ReviewState {
         self.composer
             .with(|c| {
                 c.as_ref()
-                    .filter(|c| c.thread_id.is_none() && c.step.is_none())
+                    .filter(|c| c.thread_id.is_none() && !self.note_drawn(c.step.as_ref()))
                     .and_then(|c| c.anchor.clone())
             })
             .or_else(|| self.sent_composer.get())
@@ -4368,19 +4374,31 @@ impl ReviewState {
         let (anchor, step) = match self.composer.with(|c| {
             c.as_ref()
                 .filter(|c| c.thread_id.is_none())
-                .map(|c| (c.anchor.clone(), c.step))
+                .map(|c| (c.anchor.clone(), c.step.clone()))
         }) {
             Some((Some(anchor), step)) => (anchor, step),
             _ => return false,
         };
         // A place's Follow up is in its note, which is drawn where the
-        // place is found in the file.
+        // place is found in the file; with the note not drawn, it is a
+        // card under the lines as any new thread's.
         match step {
-            Some(step) => crate::review::walkthrough::steps_in(*self, &file)
-                .iter()
-                .any(|(i, _)| *i == step),
-            None => anchor.path == file.path && card_line(&file, &anchor).is_some(),
+            Some(step) if self.note_drawn(Some(&step)) => {
+                crate::review::walkthrough::steps_in(*self, &file)
+                    .iter()
+                    .any(|(i, _)| *i == step.1)
+            }
+            _ => anchor.path == file.path && card_line(&file, &anchor).is_some(),
         }
+    }
+
+    /// Whether the note of walkthrough place `step` is drawn: the pane is
+    /// out and shows its walkthrough. Tracked.
+    fn note_drawn(&self, step: Option<&(String, usize)>) -> bool {
+        step.is_some_and(|(id, _)| {
+            self.walkthrough_out.get()
+                && crate::review::walkthrough::shown(*self).is_some_and(|w| w.id == *id)
+        })
     }
 
     /// Whether a follow-up on a thread is drawn inside the thread's card
@@ -4922,22 +4940,27 @@ impl ReviewState {
         start: usize,
         end: usize,
     ) -> Option<Anchor> {
-        let head = self.item.with(|i| {
-            i.as_ref()
-                .and_then(|i| i.checkout.as_ref())
-                .map(|c| c.head_sha.clone())
-        })?;
-        let commit_sha = match self.scope.get_untracked() {
-            Scope::Commit { sha } => sha,
-            Scope::Run { after, .. } => after,
-            _ => head,
-        };
         Some(Anchor {
             path: file.path.clone(),
             start_line: start as u32 + 1,
             line: end as u32 + 1,
             side,
-            commit_sha,
+            commit_sha: self.lines_commit()?,
+        })
+    }
+
+    /// The commit lines of a file as Code has it are lines of: the one
+    /// the scope shows, else the head.
+    fn lines_commit(&self) -> Option<String> {
+        let head = self.item.with(|i| {
+            i.as_ref()
+                .and_then(|i| i.checkout.as_ref())
+                .map(|c| c.head_sha.clone())
+        })?;
+        Some(match self.scope.get_untracked() {
+            Scope::Commit { sha } => sha,
+            Scope::Run { after, .. } => after,
+            _ => head,
         })
     }
 
@@ -4966,7 +4989,18 @@ impl ReviewState {
 
     /// Open the composer in walkthrough place `step`'s foot, for a new
     /// thread on its lines at `anchor`.
-    pub fn open_step_composer(&self, step: usize, anchor: Anchor, defaults: AgentChoice) {
+    pub fn open_step_composer(
+        &self,
+        step: (String, usize),
+        mut anchor: Anchor,
+        defaults: AgentChoice,
+    ) {
+        // A place is located in the file without naming a commit; its
+        // lines are of the one Code shows, as lines picked there are.
+        if anchor.commit_sha.is_empty() {
+            anchor.commit_sha =
+                floem::reactive::Effect::untrack(|| self.lines_commit()).unwrap_or_default();
+        }
         let destination = self.destination_for(None, Some(&anchor), defaults);
         self.place_composer(
             None,
@@ -5061,7 +5095,7 @@ impl ReviewState {
         draft: String,
         destination: Destination,
         editing: Option<String>,
-        step: Option<usize>,
+        step: Option<(String, usize)>,
     ) {
         self.composer_draft.set(draft.clone());
         // A confirm or a refusal was about the composer this replaces.
