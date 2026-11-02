@@ -4888,6 +4888,50 @@ mod tests {
         assert_eq!(header(&harness), before, "the message was built again");
     }
 
+    /// A queued run's line says what it waits for when the scheduler
+    /// says so, without the threads loading again.
+    #[test]
+    fn a_queued_run_s_line_says_what_it_waits_for() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_item();
+        let mut thread = github_thread_with_private_messages();
+        thread.messages[2].body = String::new();
+        let queued = RunRecord {
+            id: "run-1".into(),
+            status: RunStatus::Queued,
+            ..RunRecord::default()
+        };
+        thread.messages[2].run = Some(queued.clone());
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = messages_view(
+            app,
+            state,
+            Rc::new(backend),
+            thread.id.clone(),
+            ThreadFace::Card,
+        )
+        .style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "Label: \"Queued\"").is_some());
+
+        state.apply_queue_activity(&RunRecord {
+            latest_activity: Some("Waiting for the Work run in this worktree".into()),
+            ..queued
+        });
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "Label: \"Waiting\"").is_some());
+        assert!(find(
+            harness.root_id(),
+            "Label: \"for the Work run in this worktree\""
+        )
+        .is_some());
+    }
+
     /// A run on the reader's question draws as the agent's comment under
     /// it, with the agent's mark and the model, as its answer will.
     #[test]

@@ -174,11 +174,18 @@ fn is_code(kind: StepKind) -> bool {
 
 /// What the run is doing now, as its line says it: the verb, what it is
 /// on, and whether that is code. The latest call still waiting on its
-/// result, or thinking between calls.
+/// result, or thinking between calls. A queued run says what it waits for.
 pub fn doing_now(run: &RunRecord) -> (String, String, bool) {
     let word = |w: &str| (w.to_string(), String::new(), false);
     match run.status {
-        RunStatus::Queued => word("Queued"),
+        RunStatus::Queued => match run
+            .latest_activity
+            .as_deref()
+            .and_then(|activity| activity.strip_prefix("Waiting "))
+        {
+            Some(what) => ("Waiting".to_string(), what.to_string(), false),
+            None => word("Queued"),
+        },
         RunStatus::Starting => word("Starting"),
         RunStatus::Stopping => word("Stopping"),
         _ => doing_step(&run.steps).unwrap_or_else(|| word("Thinking")),
@@ -980,6 +987,15 @@ mod tests {
         assert_eq!(doing_now(&run).0, "Thinking", "nothing waiting, it thinks");
         run.status = RunStatus::Queued;
         assert_eq!(doing_now(&run).0, "Queued");
+        run.latest_activity = Some("Waiting for the Work run in this worktree".into());
+        assert_eq!(
+            doing_now(&run),
+            (
+                "Waiting".into(),
+                "for the Work run in this worktree".into(),
+                false
+            )
+        );
     }
 
     #[test]

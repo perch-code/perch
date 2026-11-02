@@ -4850,6 +4850,19 @@ impl ReviewState {
         });
     }
 
+    /// What a queued run now waits for, as the thread holding it shows it.
+    /// The scheduler says so without reloading the threads.
+    pub fn apply_queue_activity(&self, update: &perch_github::RunRecord) {
+        if update.status != perch_github::RunStatus::Queued {
+            return;
+        }
+        self.change_run(&update.id, |run| {
+            if run.status == perch_github::RunStatus::Queued {
+                run.latest_activity = update.latest_activity.clone();
+            }
+        });
+    }
+
     /// The reader told run `run_id` something while it worked.
     pub fn apply_steer(&self, run_id: &str, text: &str) {
         self.change_run(run_id, |run| crate::ask::apply_steer(run, text));

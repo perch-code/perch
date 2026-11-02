@@ -1842,7 +1842,10 @@ impl AppState {
                 runs,
                 has_more,
             } => self.merge_item_runs(item_id, runs, has_more),
-            Event::AgentRunUpdated { run } => self.update_agent_run(&run),
+            Event::AgentRunUpdated { run } => {
+                review.apply_queue_activity(&run);
+                self.update_agent_run(&run);
+            }
             Event::AgentRunDetail {
                 run,
                 events,
