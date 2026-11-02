@@ -311,6 +311,7 @@ pub fn composer_view(
     use floem::views::editor::core::cursor::{Cursor, CursorAffinity, CursorMode};
     use floem::views::editor::core::selection::Selection;
 
+    let footer_backend = backend.clone();
     let anchor_label = match &composer.anchor {
         Some(a) => a.label(),
         None => state
@@ -788,7 +789,15 @@ pub fn composer_view(
             theme::COMPOSER_MAX_HEIGHT,
         ),
         composer_error_line(state),
-        composer_footer(app, state, send, posting_here, steering, save_label),
+        composer_footer(
+            app,
+            state,
+            footer_backend,
+            send,
+            posting_here,
+            steering,
+            save_label,
+        ),
         resize_cursor_sheet(Grip::composer(state)),
     ))
     .debug_name("composer-box")
@@ -1032,7 +1041,8 @@ enum FooterMode {
     Posting,
 }
 
-/// The line under the box: the destination, the effort and Send. When
+/// The line under the box: the destination, the effort, a Work run's
+/// approvals and Send. When
 /// Comment was clicked once, the same line asks `Post to
 /// github.com/owner/repo/pull/12?` (or `.../issues/12`) with Post and
 /// Cancel, and after Close
@@ -1043,6 +1053,7 @@ enum FooterMode {
 fn composer_footer(
     app: AppState,
     state: ReviewState,
+    backend: Rc<Backend>,
     send: Rc<dyn Fn()>,
     posting: impl Fn() -> bool + Copy + 'static,
     steering: bool,
@@ -1105,6 +1116,7 @@ fn composer_footer(
                     }
                 },
             ),
+            approvals_picker(app, state, backend.clone()),
             Empty::new().style(|s| s.flex_grow(1.0_f32)),
             crate::review::close_menu::split_button(app, state),
             send_button(move || send_label(state), send.clone()).debug_name("composer-send"),
@@ -1722,15 +1734,126 @@ fn effort_picker(app: AppState, state: ReviewState) -> impl IntoView {
     .debug_name("composer-effort")
 }
 
+/// Who decides a Work run's requests to leave its sandbox, beside the
+/// effort while the composer is on Work: config's level for the
+/// repository, until the reader picks one for the item, which holds
+/// until Perch quits. Allow all reads in the caution colour, here and in
+/// the menu, so it is not on unseen.
+fn approvals_picker(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    use crate::ui::menu::Menu;
+    use perch_github::Approvals;
+
+    // A memo, so a write to the composer that leaves this alone does not
+    // build the picker again.
+    let shown = Memo::new(move |_| {
+        work_offered(app, state)
+            && state.composer.with(|c| {
+                c.as_ref().is_some_and(|c| {
+                    !c.destination.is_github() && c.mode == perch_github::RunMode::Work
+                })
+            })
+    });
+    let item = move || {
+        state.item.with(|item| {
+            item.as_ref()
+                .map(|item| (item.id.clone(), item.repo_full_name.clone()))
+        })
+    };
+    let current = move || {
+        let (id, repo) = item()?;
+        Some(app.work_approvals.with(|a| a.for_item(&id, &repo)))
+    };
+    let menu = move || {
+        let Some((id, repo)) = floem::reactive::Effect::untrack(item) else {
+            return Menu::new();
+        };
+        let selected = app
+            .work_approvals
+            .with_untracked(|a| a.for_item(&id, &repo));
+        let agent = state
+            .composer
+            .with_untracked(|c| c.as_ref().and_then(|c| c.destination.agent_choice()));
+        let mut menu = Menu::new();
+        for approvals in Approvals::ALL {
+            let id = id.clone();
+            let backend = backend.clone();
+            let note = approvals_note(approvals, agent.as_ref());
+            menu = menu.item(approvals.label(), move |item| {
+                let item = item
+                    .checked(approvals == selected)
+                    .note(note)
+                    .action(move || {
+                        app.work_approvals.update(|a| {
+                            a.items.insert(id.clone(), approvals);
+                        });
+                        backend.set_approvals(&id, approvals);
+                    });
+                if approvals == Approvals::Never {
+                    item.tint(theme::alert_caution)
+                } else {
+                    item
+                }
+            });
+        }
+        menu.return_focus(state.composer_box.get_untracked())
+    };
+    dyn_container(
+        move || shown.get(),
+        move |shown| {
+            if !shown {
+                return Empty::new().into_any();
+            }
+            tinted_menu_button(
+                move || current().map(|a| a.label().to_string()).unwrap_or_default(),
+                move || {
+                    if current() == Some(Approvals::Never) {
+                        theme::alert_caution()
+                    } else {
+                        theme::fg()
+                    }
+                },
+                menu.clone(),
+            )
+            .debug_name("composer-approvals")
+            .into_any()
+        },
+    )
+}
+
+/// What an approvals level does, under its name in the picker. Claude
+/// Code's auto mode needs a model that has it, and Haiku does not.
+fn approvals_note(approvals: perch_github::Approvals, agent: Option<&AgentChoice>) -> String {
+    use perch_github::Approvals;
+    let haiku = agent.is_some_and(|(backend, model, _)| {
+        *backend == perch_agent::Backend::ClaudeCode && model.to_ascii_lowercase().contains("haiku")
+    });
+    match approvals {
+        Approvals::Ask => "Every request to leave the sandbox comes to you",
+        Approvals::Auto if haiku => "Haiku has no auto mode, so every request comes to you",
+        Approvals::Auto => "The agent's reviewer decides; what it won't comes to you",
+        Approvals::Never => "Perch allows every request without asking",
+    }
+    .to_string()
+}
+
 /// A small pop-up button, like the toolbar's, sized for the composer.
 fn menu_button(
     label: impl Fn() -> String + 'static,
     menu: impl Fn() -> crate::ui::menu::Menu + 'static,
 ) -> impl IntoView {
+    tinted_menu_button(label, theme::fg, menu)
+}
+
+/// `menu_button` with its face in a colour of its own.
+fn tinted_menu_button(
+    label: impl Fn() -> String + 'static,
+    color: impl Fn() -> floem::peniko::Color + 'static,
+    menu: impl Fn() -> crate::ui::menu::Menu + 'static,
+) -> impl IntoView {
     Stack::horizontal((
-        Label::derived(label).style(|s| {
+        Label::derived(label).style(move |s| {
             s.font_size(theme::TEXT_BADGE)
-                .color(theme::fg())
+                .color(color())
                 .selectable(false)
                 .pointer_events_none()
                 .margin_right(5.0)
@@ -4509,6 +4632,103 @@ mod tests {
             harness.is_focused(text_box),
             "the box has the keyboard back"
         );
+    }
+
+    /// On Work the approvals picker sits beside the effort, on config's
+    /// level until a pick, which goes to the backend and holds for the
+    /// item. Ask has nothing to approve, and no picker.
+    #[test]
+    fn the_approvals_picker_shows_on_work_and_sends_a_pick() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = ReviewState::new();
+        let mut item =
+            perch_github::Item::new("acme/repo", "2026-09-20T09:00:00Z".parse().unwrap());
+        item.id = "item-1".into();
+        item.checkout = Some(perch_github::ItemCheckout {
+            branch: "chris/work".into(),
+            base_ref: "main".into(),
+            head_sha: "h".into(),
+            path: "/tmp/nowhere".into(),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            divergence: None,
+            source: None,
+        });
+        state.item.set(Some(Arc::new(item)));
+        app.work_approvals
+            .update(|a| a.config.default = perch_github::Approvals::Ask);
+        state.open_composer(
+            None,
+            None,
+            "fix it".into(),
+            (
+                perch_agent::Backend::ClaudeCode,
+                "sonnet".into(),
+                perch_agent::Effort::Medium,
+            ),
+        );
+        state.set_composer_mode(perch_github::RunMode::Work);
+        let composer = state.composer.get().unwrap();
+        let (backend, mut commands) = crate::backend::Backend::recording();
+        let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Card);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+
+        let effort = find(harness.root_id(), "composer-effort")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        let chip = find(harness.root_id(), "composer-approvals")
+            .expect("a picker on Work")
+            .get_visual_rect_no_clip();
+        assert!(chip.x0 > effort.x1, "after the effort");
+
+        let at = chip.center();
+        harness.pointer_down(at.x, at.y);
+        harness.rebuild();
+        harness.paint();
+        assert!(crate::ui::menu::is_open());
+        let all = find(harness.root_id(), "menu-row:Allow all")
+            .unwrap()
+            .get_visual_rect_no_clip()
+            .center();
+        harness.click(all.x, all.y);
+        harness.rebuild();
+        harness.paint();
+        match commands.try_recv() {
+            Ok(Command::SetApprovals { item_id, approvals }) => {
+                assert_eq!(item_id, "item-1");
+                assert_eq!(approvals, perch_github::Approvals::Never);
+            }
+            other => panic!("no pick sent: {other:?}"),
+        }
+        assert_eq!(
+            app.work_approvals
+                .with(|a| a.for_item("item-1", "acme/repo")),
+            perch_github::Approvals::Never
+        );
+
+        state.set_composer_mode(perch_github::RunMode::Ask);
+        harness.rebuild();
+        harness.paint();
+        assert!(find(harness.root_id(), "composer-approvals").is_none());
+    }
+
+    #[test]
+    fn haiku_is_told_it_has_no_auto_mode() {
+        use perch_github::Approvals;
+        let haiku = (
+            perch_agent::Backend::ClaudeCode,
+            "haiku".to_string(),
+            perch_agent::Effort::Medium,
+        );
+        let sonnet = (haiku.0, "sonnet".to_string(), haiku.2);
+        assert!(approvals_note(Approvals::Auto, Some(&haiku)).contains("no auto mode"));
+        assert!(!approvals_note(Approvals::Auto, Some(&sonnet)).contains("no auto mode"));
+        assert!(!approvals_note(Approvals::Ask, Some(&haiku)).contains("no auto mode"));
     }
 
     /// The first view whose debug name contains `text`.

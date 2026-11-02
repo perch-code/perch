@@ -601,6 +601,11 @@ pub enum Command {
         url: String,
     },
 
+    /// Who decides an item's Work requests from now on, over config.
+    SetApprovals {
+        item_id: String,
+        approvals: perch_github::Approvals,
+    },
     /// Ask the agent a question in an item's checkout. `thread_id` of `None`
     /// starts a thread; the anchor is ignored on a follow-up.
     Ask {
@@ -944,6 +949,24 @@ impl LastRun {
     }
 }
 
+/// Who decides a Work run's requests: config.toml's level for each
+/// repository, and the reader's pick for an item, which stands over it
+/// until Perch quits.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct WorkApprovals {
+    pub config: perch_github::ApprovalsTable,
+    pub items: std::collections::HashMap<String, perch_github::Approvals>,
+}
+
+impl WorkApprovals {
+    pub fn for_item(&self, item_id: &str, repo: &str) -> perch_github::Approvals {
+        self.items
+            .get(item_id)
+            .copied()
+            .unwrap_or_else(|| self.config.for_repo(repo))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Event {
     Avatar {
@@ -1057,6 +1080,8 @@ pub enum Event {
     Done(String),
     /// What config.toml says about the agent, for the pickers.
     AgentConfig(perch_github::AgentConfig),
+    /// Who decides Work requests, whenever config or a pick changes it.
+    WorkApprovals(WorkApprovals),
     /// How much of each CLI's plan limits is used, whenever that changes.
     Usage(perch_agent::usage::Board),
     /// Every thread on an item. Whole, like `Items`.
@@ -3482,6 +3507,13 @@ impl Backend {
         });
     }
 
+    pub fn set_approvals(&self, item_id: &str, approvals: perch_github::Approvals) {
+        let _ = self.commands.send(Command::SetApprovals {
+            item_id: item_id.to_string(),
+            approvals,
+        });
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn ask(
         &self,
@@ -4056,6 +4088,10 @@ async fn run(
         let _ = events.send(Event::Notice(warning.clone()));
     }
     let _ = events.send(Event::Repos(config.declared_repos()));
+    let _ = events.send(Event::WorkApprovals(WorkApprovals {
+        config: config.approvals_table(),
+        items: Default::default(),
+    }));
     let _ = events.send(Event::WorkDefaults(config.work.clone()));
     let _ = events.send(Event::GithubHosts(config.github_hosts()));
     send_trusted_servers(&cache, &events);
@@ -4230,6 +4266,7 @@ async fn run(
         asked_participants: Default::default(),
         approvals: Default::default(),
         approval_timeout: crate::approvals::APPROVAL_TIMEOUT,
+        approval_picks: Default::default(),
         window: NO_WINDOW,
         views: Default::default(),
     };
@@ -4945,6 +4982,7 @@ async fn run(
                     if let Err(message) = remove_repository(&ctx, &identity, &config).await {
                         // The list took it out before asking; put it back.
                         let _ = ctx.events.send(Event::Repos(ctx.config().declared_repos()));
+                        ctx.send_work_approvals();
                         let _ = ctx.events.send(Event::Notice(message));
                     }
                 });
@@ -5032,6 +5070,12 @@ async fn run(
                 ctx.with_cache(|c| c.set_meta(&key, &value));
             }
             Command::WantPicture { url } => ctx.want_picture(url),
+            Command::SetApprovals { item_id, approvals } => {
+                if let Ok(mut picks) = ctx.approval_picks.lock() {
+                    picks.insert(item_id, approvals);
+                }
+                ctx.send_work_approvals();
+            }
             Command::Ask {
                 mode,
                 item_id,
@@ -6144,6 +6188,10 @@ struct Ctx {
     approvals: Arc<std::sync::Mutex<std::collections::HashMap<(String, String), PendingApproval>>>,
     /// How long a request waits before it is denied.
     approval_timeout: Duration,
+    /// Who the reader picked to decide each item's Work requests, by item
+    /// id, over config. Kept until Perch quits.
+    approval_picks:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, perch_github::Approvals>>>,
     /// GitHub's inbox as the last successful poll saw it. This is distinct
     /// from durable items and remains usable when the SQLite cache cannot
     /// be opened.
@@ -6198,6 +6246,31 @@ type ClientBuilder = dyn Fn(&str) -> Result<GitHub, perch_github::Error> + Send 
 
 impl Ctx {
     /// The config as it is now.
+    /// Who decides Work requests, config's levels and the reader's picks.
+    fn work_approvals(&self) -> WorkApprovals {
+        WorkApprovals {
+            config: self.config().approvals_table(),
+            items: self
+                .approval_picks
+                .lock()
+                .map(|picks| picks.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Who decides a Work request on an item: the reader's pick for it,
+    /// else config's for its repository.
+    fn approvals_for(&self, item_id: &str, repo: &str) -> perch_github::Approvals {
+        self.work_approvals().for_item(item_id, repo)
+    }
+
+    /// Tell every window who decides Work requests.
+    fn send_work_approvals(&self) {
+        let _ = self
+            .events
+            .send(Event::WorkApprovals(self.work_approvals()));
+    }
+
     fn config(&self) -> Arc<Config> {
         self.config
             .read()
@@ -12599,6 +12672,7 @@ async fn take_up_config(ctx: &Ctx, path: &Path) -> Config {
     crate::repos::resolve(&mut reloaded, &perch_git::cmd::Git::new(None)).await;
     ctx.replace_repos(reloaded.repo.clone());
     let _ = ctx.events.send(Event::Repos(ctx.config().declared_repos()));
+    ctx.send_work_approvals();
     let held = ctx.clone();
     tokio::spawn(async move { start_held_servers_everywhere(&held).await });
     reloaded
@@ -16642,11 +16716,12 @@ async fn ask_as(
     .await;
 }
 
-/// A Work run asks. A repository set to `approvals = "never"`, or a
-/// grant of its that covers the request, answers it at once; otherwise
-/// the reader is asked, and the request is denied if they have not
-/// answered in `approval_timeout`. The setting is read now, not when the
-/// run started, so turning it off holds for the next request.
+/// A Work run asks. An item set to Allow all (`approvals = "never"`, or
+/// the reader's pick), or a grant of its repository's that covers the
+/// request, answers it at once; otherwise the reader is asked, and the
+/// request is denied if they have not answered in `approval_timeout`.
+/// The setting is read now, not when the run started, so turning it on
+/// or off holds for the next request.
 async fn on_approval(
     ctx: &Ctx,
     run: &RunRecord,
@@ -16665,7 +16740,7 @@ async fn on_approval(
         .and_then(Result::ok)
         .unwrap_or_default();
     let line = crate::approvals::one_line(request);
-    if ctx.config().approvals_for(&repo) == perch_github::Approvals::Never {
+    if ctx.approvals_for(item_id, &repo) == perch_github::Approvals::Never {
         handle.answer(id, perch_agent::Decision::Allow);
         record_approval_step(
             ctx,
@@ -16952,7 +17027,7 @@ fn work_setup(
         .with_cache(|c| c.grants_for(&item.repo_full_name))
         .and_then(Result::ok)
         .unwrap_or_default();
-    let approvals = config.approvals_for(&item.repo_full_name);
+    let approvals = ctx.approvals_for(&item.id, &item.repo_full_name);
     let grant = perch_agent::WorkGrant {
         write: repo.map(|r| r.work.write_paths()).unwrap_or_default(),
         network: repo.map(|r| r.work.network.clone()).unwrap_or_default(),
@@ -20441,6 +20516,7 @@ mod tests {
             asked_participants: Default::default(),
             approvals: Default::default(),
             approval_timeout: crate::approvals::APPROVAL_TIMEOUT,
+            approval_picks: Default::default(),
             window: NO_WINDOW,
             views: Default::default(),
         };
@@ -24605,6 +24681,73 @@ read eof || true
             .with_cache(|c| c.grants_for("a/b").unwrap())
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_items_pick_stands_over_its_repositorys_approvals() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let mut config = Config::default();
+        config.agent.binary = asking_claude(
+            dir.path(),
+            r#"{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"git push","dangerouslyDisableSandbox":true}}"#,
+        );
+        let mut repo = perch_github::RepoConfig::default();
+        repo.github = Some("a/b".into());
+        repo.work.approvals = Some(perch_github::Approvals::Never);
+        config.repo.push(repo);
+        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
+        ctx.approval_timeout = Duration::from_millis(200);
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(worktree.join(".git")).unwrap();
+        let item = work_branch(&ctx, &worktree);
+        assert_eq!(
+            ctx.approvals_for(&item.id, "a/b"),
+            perch_github::Approvals::Never
+        );
+
+        // Ask me on the item, over the repository's never: the request
+        // comes to the reader, and every window hears of the pick.
+        ctx.approval_picks
+            .lock()
+            .unwrap()
+            .insert(item.id.clone(), perch_github::Approvals::Ask);
+        ctx.send_work_approvals();
+        let heard = received.try_iter().find_map(|e| match e {
+            Event::WorkApprovals(a) => Some(a),
+            _ => None,
+        });
+        assert_eq!(
+            heard.map(|a| a.for_item(&item.id, "a/b")),
+            Some(perch_github::Approvals::Ask)
+        );
+        ask(
+            &ctx,
+            item.id.clone(),
+            None,
+            None,
+            "Push it".into(),
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".into(),
+            perch_agent::Effort::Medium,
+            RunMode::Work,
+        )
+        .await;
+        assert!(
+            received
+                .try_iter()
+                .any(|e| matches!(e, Event::ApprovalRequested(_))),
+            "the reader was asked"
+        );
+        assert!(!step_summaries(&ctx, &item)
+            .iter()
+            .any(|s| s.starts_with("Allowed without asking")));
+
+        // Another item in the repository keeps config's level.
+        assert_eq!(
+            ctx.approvals_for("another", "a/b"),
+            perch_github::Approvals::Never
+        );
     }
 
     #[tokio::test]

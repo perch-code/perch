@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use floem::event::EventPropagation;
 use floem::kurbo::{Point, Rect, Size};
-use floem::peniko::Brush;
+use floem::peniko::{Brush, Color};
 use floem::prelude::*;
 use floem::reactive::{Effect, RwSignal, Scope, SignalGet, SignalTrack, SignalUpdate, SignalWith};
 use floem::ui_events::pointer::PointerButton;
@@ -75,6 +75,12 @@ pub struct Item {
     /// Words at the row's end in the shortcut's place, such as when a
     /// snooze ends.
     detail: Option<String>,
+    /// A line under the name saying what the row does, for a set whose
+    /// names alone do not.
+    note: Option<String>,
+    /// The name's and note's colour in place of the usual, for a row
+    /// that warns.
+    tint: Option<fn() -> Color>,
     action: Option<Rc<dyn Fn()>>,
     /// What picking a row that toggles does in place of `action`, with
     /// the check's new state.
@@ -111,6 +117,8 @@ impl Menu {
             enabled: true,
             shortcut: None,
             detail: None,
+            note: None,
+            tint: None,
             action: None,
             toggle: None,
             remove: None,
@@ -320,6 +328,19 @@ impl Item {
         self
     }
 
+    /// A line under the name, in a smaller, fainter face, which makes
+    /// the row taller.
+    pub fn note(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
+        self
+    }
+
+    /// Draw the name and note in `color`, while the row can be picked.
+    pub fn tint(mut self, color: fn() -> Color) -> Self {
+        self.tint = Some(color);
+        self
+    }
+
     pub fn action(mut self, action: impl Fn() + 'static) -> Self {
         self.action = Some(Rc::new(action));
         self
@@ -353,6 +374,14 @@ impl Entry {
             Entry::Item(i) => &i.label,
             Entry::Submenu { label, .. } => label,
             Entry::Separator => "",
+        }
+    }
+
+    /// How tall its row is: taller with a note under the name.
+    fn height(&self) -> f64 {
+        match self {
+            Entry::Item(Item { note: Some(_), .. }) => NOTE_ROW_HEIGHT,
+            _ => ROW_HEIGHT,
         }
     }
 }
@@ -464,6 +493,8 @@ impl Shortcut {
 pub const GUTTER: f64 = 4.0;
 pub const RADIUS: f64 = 16.0;
 const ROW_HEIGHT: f64 = 30.0;
+/// A row with a note under its name, as Codex's approvals menu has.
+const NOTE_ROW_HEIGHT: f64 = 46.0;
 pub const ROW_RADIUS: f64 = 12.0;
 const ROW_PADDING: f64 = 8.0;
 const SEPARATOR_HEIGHT: f64 = 9.0;
@@ -718,7 +749,7 @@ impl Level {
         let height = |i: usize| match &self.menu.entries[i] {
             Entry::Separator if self.line_shown(i, &typed) => SEPARATOR_HEIGHT,
             Entry::Separator => 0.0,
-            _ if self.shown(i, &typed) => ROW_HEIGHT,
+            entry if self.shown(i, &typed) => entry.height(),
             _ => 0.0,
         };
         GUTTER + (0..index).map(height).sum::<f64>()
@@ -1043,7 +1074,8 @@ fn panel(host: Rc<Host>, level: Level) -> impl IntoView {
         .ensure_visible(move || match highlight.get() {
             Some(i) => {
                 let top = scroll_level.row_top(i);
-                Rect::new(0.0, top - GUTTER, 1.0, top + ROW_HEIGHT + GUTTER)
+                let height = scroll_level.menu.entries[i].height();
+                Rect::new(0.0, top - GUTTER, 1.0, top + height + GUTTER)
             }
             None => Rect::ZERO,
         })
@@ -1286,13 +1318,17 @@ fn row(
             .style(|s| s.width(16.0).flex_shrink(0.0_f32))
             .into_any(),
     });
+    let (note, tint) = match entry {
+        Entry::Item(i) => (i.note.clone(), i.tint),
+        _ => (None, None),
+    };
     let name_level = level.clone();
     let name = Label::derived(move || label.clone()).style(move |s| {
         name_level.changed.track();
-        let fg = if name_level.menu.live(index) {
-            theme::fg()
-        } else {
-            theme::fg_subtle()
+        let fg = match tint {
+            _ if !name_level.menu.live(index) => theme::fg_subtle(),
+            Some(tint) => tint(),
+            None => theme::fg(),
         };
         s.color(fg)
             .text_ellipsis()
@@ -1300,6 +1336,27 @@ fn row(
             .flex_grow(1.0_f32)
             .selectable(false)
     });
+    let name = match note {
+        Some(note) => {
+            let note_level = level.clone();
+            let note = Label::derived(move || note.clone()).style(move |s| {
+                note_level.changed.track();
+                let fg = match tint {
+                    Some(tint) if note_level.menu.live(index) => tint(),
+                    _ => theme::fg_subtle(),
+                };
+                s.font_size(theme::TEXT_BADGE)
+                    .color(fg)
+                    .text_ellipsis()
+                    .min_width(0.0)
+                    .selectable(false)
+            });
+            Stack::vertical((name, note))
+                .style(|s| s.min_width(0.0).flex_grow(1.0_f32).gap(2.0))
+                .into_any()
+        }
+        None => name.into_any(),
+    };
     let keys = shortcut.map(|shortcut| {
         let text = shortcut.label();
         Label::derived(move || text.clone()).style(|s| {
@@ -1410,7 +1467,7 @@ fn row(
     .style(move |s| {
         let typed = style_level.typed();
         let lit = menu.live(index) && highlight.get() == Some(index);
-        s.height(ROW_HEIGHT)
+        s.height(menu.entries[index].height())
             .flex_shrink(0.0_f32)
             .items_center()
             .padding_horiz(ROW_PADDING)
@@ -1630,6 +1687,41 @@ mod tests {
         assert_eq!(parse("alt+super+KeyR").label(), "Ctrl+Alt+R");
         assert_eq!(Shortcut::label_of("super+BracketLeft"), "Ctrl+[");
         assert!(Shortcut::parse("hyper+KeyA").is_none());
+    }
+
+    #[test]
+    fn a_row_with_a_note_is_taller_and_picks_like_any_other() {
+        let (mut harness, log) = window_with((40.0, 30.0), (600.0, 400.0), |log| {
+            Menu::new()
+                .item("Ask me", |i| {
+                    i.checked(true)
+                        .note("Every request comes to you")
+                        .action(logs(&log, "ask"))
+                })
+                .item("Allow all", |i| {
+                    i.note("Perch allows every request")
+                        .tint(theme::alert_caution)
+                        .action(logs(&log, "all"))
+                })
+                .item("Plain", |i| i.action(logs(&log, "plain")))
+        });
+        open_it(&mut harness);
+        let ask = rect(&harness, "menu-row:Ask me");
+        let all = rect(&harness, "menu-row:Allow all");
+        let plain = rect(&harness, "menu-row:Plain");
+        assert_eq!(ask.height(), NOTE_ROW_HEIGHT);
+        assert_eq!(all.y0, ask.y1, "rows stack with no gap");
+        assert_eq!(plain.height(), ROW_HEIGHT);
+        let panel = rect(&harness, "menu-panel:0");
+        assert_eq!(
+            panel.height(),
+            2.0 * NOTE_ROW_HEIGHT + ROW_HEIGHT + 2.0 * GUTTER + 2.0
+        );
+        let all = all.center();
+        harness.click(all.x, all.y);
+        settle(&mut harness);
+        assert!(!is_open());
+        assert_eq!(*log.borrow(), vec!["all".to_string()]);
     }
 
     #[test]

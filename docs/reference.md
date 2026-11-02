@@ -459,6 +459,7 @@ approvals = "auto"             # or "ask"; see Approvals
 roots = ["~/Code/perch"]
 
 [repo.work]                    # what a Work run here may reach
+approvals = "never"            # over [work]'s, for this repository only
 write = ["~/.cargo/registry", "~/.cargo/git", "~/.cargo/.package-cache"]
 network = ["index.crates.io", "static.crates.io"]
 trust = false                  # true loads the repository's own agent config
@@ -895,7 +896,19 @@ Claude Code's as the command itself, `Ran outside the sandbox: …` or `Ran …
 (network: example.com)`. Claude Code's auto mode needs a model that has it: Fable, Opus and Sonnet do
 (checked with Claude Code 2.1.280); Haiku does not, and with it every request
 comes to you. Anything the reviewer passes on comes to you, and so does everything when
-`approvals = "ask"`.
+`approvals = "ask"`. A repository's `[repo.work] approvals` stands over
+`[work]`'s, and only there can it be `"never"`: Perch allows every request
+without asking, and each shows in the run's steps as `Allowed without asking:
+…`. The run still starts in its sandbox, and the protected paths (`.git`,
+`.claude`, `.codex`, `.mcp.json`) stay denied.
+
+While the composer is on Work, a picker beside the effort shows who decides
+for the item: **Ask me** (`"ask"`), **Auto-review** (`"auto"`) or **Allow
+all** (`"never"`, in red). It starts on config's level. A pick holds for that
+item until Perch quits and changes nothing in config.toml. Allow all, on or
+off, applies to the next request, even one from a run already going; the
+switch between Ask me and Auto-review applies from the next run, since the
+CLI is started with it.
 
 What comes to you: Claude Code asks
 for a host a command wants to reach, for a command it wants to run outside the

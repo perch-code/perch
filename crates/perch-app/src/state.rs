@@ -267,6 +267,9 @@ pub struct AppState {
     /// The agent section of config.toml: binary, defaults, and the models
     /// the picker offers.
     pub agent: RwSignal<AgentConfig>,
+    /// Who decides each item's Work requests: config's level for its
+    /// repository, or what the reader picked for it.
+    pub work_approvals: RwSignal<crate::backend::WorkApprovals>,
     /// How much of each agent CLI's plan limits is used, as last heard.
     pub usage: RwSignal<perch_agent::usage::Board>,
     /// Where updating Perch stands: a newer release waiting for a
@@ -503,6 +506,7 @@ impl AppState {
             review_dashboard_loading: RwSignal::new(HashSet::new()),
             review_launching: RwSignal::new(HashMap::new()),
             agent: RwSignal::new(AgentConfig::default()),
+            work_approvals: RwSignal::new(Default::default()),
             usage: RwSignal::new(Default::default()),
             update: RwSignal::new(crate::update::UpdateStatus::Current),
             hovered_item: RwSignal::new(None),
@@ -543,6 +547,7 @@ impl AppState {
         copy(self.notifications, data.notifications);
         copy(self.notifications_polled, data.notifications_polled);
         copy(self.agent, data.agent);
+        copy(self.work_approvals, data.work_approvals);
         copy(self.usage, data.usage);
         copy(self.update, data.update);
         copy(self.viewer, data.viewer);
@@ -3290,6 +3295,7 @@ impl AppState {
                 self.confirm_loss.set(Some(prompt));
             }
             Event::AgentConfig(agent) => self.agent.set(agent),
+            Event::WorkApprovals(approvals) => self.work_approvals.set(approvals),
             Event::Usage(board) => self.usage.set(board),
             Event::Update(status) => self.apply_update(status),
             Event::UpdateInstalled => floem::quit_app(),

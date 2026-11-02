@@ -373,6 +373,40 @@ pub enum Approvals {
     Never,
 }
 
+impl Approvals {
+    pub const ALL: [Approvals; 3] = [Approvals::Ask, Approvals::Auto, Approvals::Never];
+
+    /// What the composer's picker calls it. Not "Ask", which the mode
+    /// beside it already is.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto-review",
+            Self::Ask => "Ask me",
+            Self::Never => "Allow all",
+        }
+    }
+}
+
+/// Who decides Work requests in each repository, as config.toml says:
+/// `[work] approvals`, and each `[repo.work] approvals` over it. What the
+/// window needs to show the level a repository starts on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApprovalsTable {
+    pub default: Approvals,
+    /// By identity, lowercased.
+    pub repos: std::collections::HashMap<String, Approvals>,
+}
+
+impl ApprovalsTable {
+    /// `Config::approvals_for`, from the table.
+    pub fn for_repo(&self, identity: &str) -> Approvals {
+        self.repos
+            .get(&identity.to_ascii_lowercase())
+            .copied()
+            .unwrap_or(self.default)
+    }
+}
+
 /// `[repo.work]`: what a Work run may reach outside its worktree, in one
 /// repository. Both lists are empty unless the file fills them.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -719,6 +753,20 @@ impl Config {
     /// Whether `[repo.lsp] trust` is set for the repository with an identity.
     pub fn lsp_trusted(&self, identity: &str) -> bool {
         self.entry(identity).is_some_and(|r| r.lsp.trust)
+    }
+
+    /// `approvals_for` for every repository at once.
+    pub fn approvals_table(&self) -> ApprovalsTable {
+        let mut repos = std::collections::HashMap::new();
+        for r in &self.repo {
+            if let (Some(id), Some(approvals)) = (r.identity(), r.work.approvals) {
+                repos.entry(id.to_ascii_lowercase()).or_insert(approvals);
+            }
+        }
+        ApprovalsTable {
+            default: self.work.approvals,
+            repos,
+        }
     }
 
     /// The declared roots of the repository with an identity, `~` expanded.
@@ -1112,6 +1160,10 @@ mod tests {
         assert_eq!(config.approvals_for("A/One"), Approvals::Never);
         assert_eq!(config.approvals_for("a/two"), Approvals::Ask);
         assert_eq!(config.approvals_for("a/undeclared"), Approvals::Ask);
+        let table = config.approvals_table();
+        for repo in ["a/one", "A/One", "a/two", "a/undeclared"] {
+            assert_eq!(table.for_repo(repo), config.approvals_for(repo), "{repo}");
+        }
         assert!(config.warnings.is_empty(), "{:?}", config.warnings);
 
         let global = Config::parse("[work]\napprovals = \"never\"\n").unwrap();
