@@ -121,6 +121,7 @@ pub(super) struct View {
     pub(super) navigation_requests: Arc<NavigationRequests>,
     pub(super) scope_requests: Arc<ScopeRequests>,
     pub(super) review_navigation: Arc<tokio::sync::Mutex<()>>,
+    pub(super) window_key: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl View {
@@ -136,6 +137,8 @@ impl View {
             navigation_requests,
             scope_requests,
             review_navigation: Default::default(),
+            // A window is made to be looked at.
+            window_key: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
 

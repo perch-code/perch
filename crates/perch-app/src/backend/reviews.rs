@@ -3677,6 +3677,28 @@ pub(super) fn settle_group(ctx: &Ctx, group_id: &str) {
         return;
     }
     export_item(ctx, &group.item_id);
+    // Once for the review, however many reviewers it had. One the reader
+    // stopped, or that Perch's quitting cut off, isn't news.
+    let activity = match outcome {
+        ReviewGroupStatus::Completed => Some(perch_github::ActivityOutcome::Completed),
+        ReviewGroupStatus::Failed => Some(perch_github::ActivityOutcome::Failed),
+        _ => None,
+    };
+    if let Some(activity) = activity {
+        let findings = cache(ctx, |cache| cache.load_review_group(group_id))
+            .ok()
+            .flatten()
+            .map(|group| (group.new_findings + group.still_present) as u32)
+            .unwrap_or(0);
+        ctx.record_activity(
+            &group.item_id,
+            perch_github::ActivityEvent::Review {
+                group_id: group_id.to_string(),
+                outcome: activity,
+                findings,
+            },
+        );
+    }
 }
 
 fn send_group(ctx: &Ctx, group_id: &str) {

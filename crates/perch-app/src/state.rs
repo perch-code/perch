@@ -259,6 +259,12 @@ pub struct AppState {
     pub pending_items: RwSignal<Option<Vec<Item>>>,
     /// The same for the notification list.
     pub pending_notifications: RwSignal<Option<Vec<Thread>>>,
+    /// Each item's latest local activity, by item id: the run or review
+    /// that last ended there.
+    pub item_activity: RwSignal<HashMap<String, perch_github::ItemActivity>>,
+    /// Activity that happened on its own and would move the inbox's rows,
+    /// held back as a poll's notifications are.
+    pub pending_item_activity: RwSignal<Option<HashMap<String, perch_github::ItemActivity>>>,
     /// Whether a poll's notifications have arrived since launch. The first
     /// replaces the cached list outright rather than waiting to be asked.
     notifications_polled: RwSignal<bool>,
@@ -462,6 +468,8 @@ impl AppState {
             snoozed_notifications: RwSignal::new(Vec::new()),
             pending_items: RwSignal::new(None),
             pending_notifications: RwSignal::new(None),
+            item_activity: RwSignal::new(HashMap::new()),
+            pending_item_activity: RwSignal::new(None),
             notifications_polled: RwSignal::new(false),
             open_item: RwSignal::new(None),
             review: RwSignal::new(None),
@@ -545,6 +553,7 @@ impl AppState {
         copy(self.browse, data.browse);
         copy(self.items, data.items);
         copy(self.notifications, data.notifications);
+        copy(self.item_activity, data.item_activity);
         copy(self.notifications_polled, data.notifications_polled);
         copy(self.agent, data.agent);
         copy(self.work_approvals, data.work_approvals);
@@ -3161,9 +3170,23 @@ impl AppState {
                     self.apply(Event::Items(items));
                 }
             }
+            // What the reader did sends the whole inbox, so whatever a
+            // poll or a run's end was holding back goes up with it.
             Event::Notifications(notifications) => {
                 self.notifications.set(notifications);
                 self.pending_notifications.set(None);
+                if let Some(activity) = self.pending_item_activity.get_untracked() {
+                    self.set_item_activity(activity);
+                }
+            }
+            Event::ItemActivity(activity) => self.set_item_activity(by_item(activity)),
+            Event::ItemActivityPolled(activity) => {
+                let activity = by_item(activity);
+                if self.holds_item_activity(&activity) {
+                    self.pending_item_activity.set(Some(activity));
+                } else {
+                    self.set_item_activity(activity);
+                }
             }
             Event::DoneNotifications(threads) => self.done_notifications.set(threads),
             Event::SnoozedNotifications(threads) => self.snoozed_notifications.set(threads),
@@ -3589,15 +3612,36 @@ impl AppState {
     fn holds_notifications(&self, incoming: &[Thread]) -> bool {
         self.item_filters.with_untracked(|f| f.tab) == SidebarTab::Inbox
             && !self.notifications.with_untracked(Vec::is_empty)
-            && self
-                .notifications
-                .with_untracked(|shown| self.visible_thread_ids(shown))
-                != self.visible_thread_ids(incoming)
+            && self.item_activity.with_untracked(|activity| {
+                self.notifications
+                    .with_untracked(|shown| self.visible_inbox_keys(shown, activity))
+                    != self.visible_inbox_keys(incoming, activity)
+            })
     }
 
-    /// GitHub's threads under the drawer's filters: the inbox's, or under
-    /// View › Done and View › Snoozed the ones put away so.
-    pub fn visible_inbox(&self) -> Vec<Thread> {
+    /// Whether activity that happened on its own would add, remove or
+    /// move rows of the inbox on screen.
+    fn holds_item_activity(&self, incoming: &HashMap<String, perch_github::ItemActivity>) -> bool {
+        self.item_filters.with_untracked(|f| f.tab) == SidebarTab::Inbox
+            && self.notifications.with_untracked(|threads| {
+                let shown = self
+                    .item_activity
+                    .with_untracked(|activity| self.visible_inbox_keys(threads, activity));
+                !shown.is_empty() && shown != self.visible_inbox_keys(threads, incoming)
+            })
+    }
+
+    fn set_item_activity(&self, activity: HashMap<String, perch_github::ItemActivity>) {
+        self.pending_item_activity.set(None);
+        if self.item_activity.with_untracked(|now| *now != activity) {
+            self.item_activity.set(activity);
+        }
+    }
+
+    /// The inbox's rows under the drawer's filters: GitHub's threads and
+    /// the local rows among them, or under View › Done and View › Snoozed
+    /// the threads put away so.
+    pub fn visible_inbox(&self) -> Vec<crate::inbox::InboxRow> {
         let (inbox, repository) = self
             .item_filters
             .with(|f| (f.inbox.clone(), f.repository.clone()));
@@ -3605,14 +3649,31 @@ impl AppState {
         let viewer = self
             .viewer
             .with(|viewer| viewer.as_ref().map(|(login, _)| login.clone()));
-        self.inbox_source(inbox.view).with(|threads| {
-            crate::inbox::filter(
-                threads,
-                &inbox,
-                viewer.as_deref(),
-                repository.as_deref(),
-                &query,
-            )
+        crate::inbox::filter_rows(
+            &self.inbox_rows(inbox.view),
+            &inbox,
+            viewer.as_deref(),
+            repository.as_deref(),
+            &query,
+        )
+    }
+
+    /// Every row of View's list, filters aside: what its menu offers.
+    pub fn inbox_rows(&self, view: InboxView) -> Vec<crate::inbox::InboxRow> {
+        if view.is_put_away() {
+            return self.inbox_source(view).with(|threads| {
+                threads
+                    .iter()
+                    .cloned()
+                    .map(crate::inbox::InboxRow::Thread)
+                    .collect()
+            });
+        }
+        self.notifications.with(|threads| {
+            self.item_activity.with(|activity| {
+                self.items
+                    .with(|items| crate::inbox::rows(threads, activity, items))
+            })
         })
     }
 
@@ -3625,10 +3686,14 @@ impl AppState {
         }
     }
 
-    /// The ids of the threads `threads` would give under the drawer's
-    /// filters, in order. None under View › Done or Snoozed, which a poll
-    /// of the inbox does not move.
-    fn visible_thread_ids(&self, threads: &[Thread]) -> Vec<String> {
+    /// The keys of the rows `threads` and `activity` would give under the
+    /// drawer's filters, in order. None under View › Done or Snoozed,
+    /// which a poll of the inbox does not move.
+    fn visible_inbox_keys(
+        &self,
+        threads: &[Thread],
+        activity: &HashMap<String, perch_github::ItemActivity>,
+    ) -> Vec<String> {
         let (inbox, repository) = self
             .item_filters
             .with_untracked(|f| (f.inbox.clone(), f.repository.clone()));
@@ -3639,26 +3704,39 @@ impl AppState {
         let viewer = self
             .viewer
             .with_untracked(|viewer| viewer.as_ref().map(|(login, _)| login.clone()));
-        crate::inbox::filter(
-            threads,
+        let rows = self
+            .items
+            .with_untracked(|items| crate::inbox::rows(threads, activity, items));
+        crate::inbox::filter_rows(
+            &rows,
             &inbox,
             viewer.as_deref(),
             repository.as_deref(),
             &query,
         )
-        .into_iter()
-        .map(|thread| thread.id)
+        .iter()
+        .map(crate::inbox::InboxRow::key)
         .collect()
     }
 
+    /// Whether the item has local activity the reader hasn't opened it
+    /// since, with no pull request to have notifications instead.
+    pub fn activity_unread(&self, item: &Item) -> bool {
+        item.pull_request().is_none()
+            && self
+                .item_activity
+                .with(|all| all.get(&item.id).is_some_and(|a| a.is_unread()))
+    }
+
     /// Whether the inbox has an unread notification about the item's pull
-    /// request or issue: what bolds its title, draws its dot, and keeps it
-    /// under Unread Only. A branch with no subject has nothing to be
-    /// unread.
+    /// request or issue, or the item has local activity it hasn't been
+    /// opened since: what bolds its title, draws its dot, and keeps it
+    /// under Unread Only.
     pub fn item_unread(&self, item: &Item) -> bool {
-        item.subject.as_ref().is_some_and(|subject| {
-            self.subject_unread(subject.repo_full_name(), subject.kind(), subject.number())
-        })
+        self.activity_unread(item)
+            || item.subject.as_ref().is_some_and(|subject| {
+                self.subject_unread(subject.repo_full_name(), subject.kind(), subject.number())
+            })
     }
 
     /// The ids of the rows `items` would give on the drawer's tab, in
@@ -3705,13 +3783,22 @@ impl AppState {
             if self.item_filters.with(|f| f.inbox.view).is_put_away() {
                 return None;
             }
-            let incoming = self.pending_notifications.get()?;
+            let threads = self.pending_notifications.get();
+            let activity = self.pending_item_activity.get();
+            if threads.is_none() && activity.is_none() {
+                return None;
+            }
             let shown: HashSet<String> = self
                 .notifications
-                .with_untracked(|shown| self.visible_thread_ids(shown))
+                .with_untracked(|shown| {
+                    self.item_activity
+                        .with_untracked(|now| self.visible_inbox_keys(shown, now))
+                })
                 .into_iter()
                 .collect();
-            let ids = self.visible_thread_ids(&incoming);
+            let threads = threads.unwrap_or_else(|| self.notifications.get_untracked());
+            let activity = activity.unwrap_or_else(|| self.item_activity.get_untracked());
+            let ids = self.visible_inbox_keys(&threads, &activity);
             (
                 ids.iter().filter(|id| !shown.contains(*id)).count(),
                 "notification",
@@ -3760,10 +3847,14 @@ impl AppState {
         }
     }
 
-    /// Put up the notifications a poll was holding back.
+    /// Put up the notifications a poll, and the activity a run's end,
+    /// was holding back.
     fn show_pending_notifications(&self) {
         if let Some(threads) = self.pending_notifications.get_untracked() {
             self.apply(Event::Notifications(threads));
+        }
+        if let Some(activity) = self.pending_item_activity.get_untracked() {
+            self.set_item_activity(activity);
         }
     }
 
@@ -3858,6 +3949,16 @@ impl BrowsePage {
 /// A search result's identity: its repository and number.
 fn hit_key(hit: &perch_github::SearchHit) -> (String, u64) {
     (hit.repo_full_name.to_lowercase(), hit.number)
+}
+
+/// Activity as the backend sends it, by item.
+fn by_item(
+    activity: Vec<perch_github::ItemActivity>,
+) -> HashMap<String, perch_github::ItemActivity> {
+    activity
+        .into_iter()
+        .map(|a| (a.item_id.clone(), a))
+        .collect()
 }
 
 #[cfg(test)]

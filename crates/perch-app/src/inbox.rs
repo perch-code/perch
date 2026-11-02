@@ -1,50 +1,199 @@
-//! The Inbox list's filters: GitHub's threads under the View, repository,
-//! State, Unread Only and search the sidebar has picked. GitHub's
-//! order is kept, or turned over for Oldest first; filtering only removes
+//! The Inbox list: GitHub's threads, and a row for each worktree without
+//! a pull request where an agent run or a review ended, under the View,
+//! repository, State, Unread Only and search the sidebar has picked.
+//! GitHub's order is kept and the local rows are fitted in by time, or
+//! the whole list turned over for Oldest first; filtering only removes
 //! rows from it.
 
 use std::collections::HashMap;
 
 use jiff::Timestamp;
-use perch_github::{Reason, SubjectState, Thread};
+use perch_github::{
+    ActivityEvent, ActivityOutcome, Item, ItemActivity, Reason, RunMode, SubjectState, Thread,
+};
 
 use crate::items::{BrowseView, Direction, InboxFilters};
 
-/// The threads under the menu's narrowing and the search, in order.
-/// The view's list, which the threads come from, is the caller's.
-/// `viewer` is the signed-in login, for Yours.
-pub fn filter(
+/// A row of the inbox: a GitHub thread, or what last happened on one of
+/// the reader's worktrees.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a list of a few hundred rows, rebuilt as the inbox changes; a box per row buys nothing"
+)]
+pub enum InboxRow {
+    Thread(Thread),
+    Local { activity: ItemActivity, item: Item },
+}
+
+impl InboxRow {
+    /// What the row is known by across lists.
+    pub fn key(&self) -> String {
+        match self {
+            InboxRow::Thread(thread) => format!("thread:{}", thread.id),
+            InboxRow::Local { item, .. } => format!("item:{}", item.id),
+        }
+    }
+
+    pub fn thread(&self) -> Option<&Thread> {
+        match self {
+            InboxRow::Thread(thread) => Some(thread),
+            InboxRow::Local { .. } => None,
+        }
+    }
+}
+
+/// The inbox: `threads` in GitHub's order, with the visible activity of
+/// items that have no pull request fitted in by time. An item with a
+/// pull request has GitHub's notifications instead, so a row it had
+/// before one was opened goes. `threads` is the whole list, before any
+/// filter, so a row's place doesn't depend on what is hidden.
+pub fn rows(
     threads: &[Thread],
+    activity: &HashMap<String, ItemActivity>,
+    items: &[Item],
+) -> Vec<InboxRow> {
+    let items: HashMap<&str, &Item> = items.iter().map(|item| (item.id.as_str(), item)).collect();
+    let mut local: Vec<(&ItemActivity, &Item)> = activity
+        .values()
+        .filter(|a| a.is_visible())
+        .filter_map(|a| items.get(a.item_id.as_str()).map(|item| (a, *item)))
+        .filter(|(_, item)| item.pull_request().is_none())
+        .collect();
+    // Newest first; ties by item id so the order is stable.
+    local.sort_by(|a, b| b.0.at.cmp(&a.0.at).then_with(|| a.1.id.cmp(&b.1.id)));
+
+    // Before each thread, whatever happened locally after the time its
+    // row shows.
+    let listed = listed_at(threads);
+    let mut out = Vec::with_capacity(threads.len() + local.len());
+    let mut local = local.into_iter().peekable();
+    for thread in threads {
+        let at = listed.get(&thread.id).copied().unwrap_or(thread.updated_at);
+        while let Some((activity, item)) = local.next_if(|(a, _)| a.at > at) {
+            out.push(InboxRow::Local {
+                activity: activity.clone(),
+                item: item.clone(),
+            });
+        }
+        out.push(InboxRow::Thread(thread.clone()));
+    }
+    out.extend(local.map(|(activity, item)| InboxRow::Local {
+        activity: activity.clone(),
+        item: item.clone(),
+    }));
+    out
+}
+
+/// The rows under the menu's narrowing and the search, in order. The
+/// view's list, which the rows come from, is the caller's. `viewer` is
+/// the signed-in login, for Yours. A local row is the reader's own work,
+/// so it is under Yours and All, and its search reads the item as a
+/// Worktrees row's does, and what the chip says.
+pub fn filter_rows(
+    rows: &[InboxRow],
     filters: &InboxFilters,
     viewer: Option<&str>,
     repository: Option<&str>,
     query: &str,
-) -> Vec<Thread> {
-    let query = query.trim().to_lowercase();
-    let mut rows: Vec<Thread> = threads
+) -> Vec<InboxRow> {
+    let needle = query.trim().to_lowercase();
+    let mut out: Vec<InboxRow> = rows
         .iter()
-        .filter(|thread| !filters.unread_only || thread.unread)
-        .filter(|thread| involves(filters.whose, thread, viewer))
-        .filter(|thread| {
-            repository.is_none_or(|repo| thread.repository.full_name.eq_ignore_ascii_case(repo))
-        })
-        .filter(|thread| filters.state.admits(closed(thread)))
-        .filter(|thread| {
-            query.is_empty()
-                || thread.subject.title.to_lowercase().contains(&query)
-                || thread.repository.full_name.to_lowercase().contains(&query)
-                || thread.reason.label().to_lowercase().contains(&query)
-                || thread.subject.kind.wire().to_lowercase().contains(&query)
-                || thread
-                    .number_hint()
-                    .is_some_and(|number| number.to_string().contains(&query))
+        .filter(|row| match row {
+            InboxRow::Thread(thread) => admits_thread(thread, filters, viewer, repository, &needle),
+            InboxRow::Local { activity, item } => {
+                (!filters.unread_only || activity.is_unread())
+                    && matches!(filters.whose, BrowseView::Yours | BrowseView::All)
+                    && repository.is_none_or(|repo| item.repo_full_name.eq_ignore_ascii_case(repo))
+                    && filters.state.admits(item.is_closed())
+                    && (crate::items::matches_query(item, &needle)
+                        || chip(&activity.event).to_lowercase().contains(&needle))
+            }
         })
         .cloned()
         .collect();
     if filters.direction == Direction::Oldest {
-        rows.reverse();
+        out.reverse();
     }
-    rows
+    out
+}
+
+/// Whether the thread passes the menu's narrowing and `query`, already
+/// trimmed and lowercased.
+fn admits_thread(
+    thread: &Thread,
+    filters: &InboxFilters,
+    viewer: Option<&str>,
+    repository: Option<&str>,
+    query: &str,
+) -> bool {
+    (!filters.unread_only || thread.unread)
+        && involves(filters.whose, thread, viewer)
+        && repository.is_none_or(|repo| thread.repository.full_name.eq_ignore_ascii_case(repo))
+        && filters.state.admits(closed(thread))
+        && (query.is_empty()
+            || thread.subject.title.to_lowercase().contains(query)
+            || thread.repository.full_name.to_lowercase().contains(query)
+            || thread.reason.label().to_lowercase().contains(query)
+            || thread.subject.kind.wire().to_lowercase().contains(query)
+            || thread
+                .number_hint()
+                .is_some_and(|number| number.to_string().contains(query)))
+}
+
+/// What a local row's chip says happened: `Claude · Work · 3 files`,
+/// `Codex · Ask`, `Claude · Work · failed`, `Review · 2 findings`.
+pub fn chip(event: &ActivityEvent) -> String {
+    let plural = |n: u32, one: &str, many: &str| {
+        if n == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{n} {many}")
+        }
+    };
+    match event {
+        ActivityEvent::Run {
+            backend,
+            mode,
+            outcome,
+            files,
+            ..
+        } => {
+            let agent = match perch_agent::Backend::parse(backend) {
+                Some(perch_agent::Backend::ClaudeCode) => "Claude",
+                Some(perch_agent::Backend::Codex) => "Codex",
+                None => "Agent",
+            };
+            let mode_label = match mode {
+                RunMode::Ask => "Ask",
+                RunMode::Work => "Work",
+            };
+            let tail = match (outcome, mode, files) {
+                (ActivityOutcome::Failed, _, _) => Some("failed".to_string()),
+                (ActivityOutcome::Interrupted, _, _) => Some("interrupted".to_string()),
+                (ActivityOutcome::Completed, RunMode::Work, Some(0)) => {
+                    Some("no changes".to_string())
+                }
+                (ActivityOutcome::Completed, RunMode::Work, Some(n)) => {
+                    Some(plural(*n, "file", "files"))
+                }
+                _ => None,
+            };
+            match tail {
+                Some(tail) => format!("{agent} \u{b7} {mode_label} \u{b7} {tail}"),
+                None => format!("{agent} \u{b7} {mode_label}"),
+            }
+        }
+        ActivityEvent::Review {
+            outcome, findings, ..
+        } => match outcome {
+            ActivityOutcome::Completed => {
+                format!("Review \u{b7} {}", plural(*findings, "finding", "findings"))
+            }
+            _ => "Review \u{b7} failed".to_string(),
+        },
+    }
 }
 
 /// Whether the thread is under View › Review requested, Yours, Assigned
@@ -104,9 +253,18 @@ pub fn listed_at(threads: &[Thread]) -> HashMap<String, Timestamp> {
 
 /// Repository choices for the filter: every thread's, once, by name.
 pub fn repository_options(threads: &[Thread]) -> Vec<String> {
-    let mut repos: Vec<String> = threads
+    let rows: Vec<InboxRow> = threads.iter().cloned().map(InboxRow::Thread).collect();
+    row_repository_options(&rows)
+}
+
+/// The same over the inbox's rows, local ones included.
+pub fn row_repository_options(rows: &[InboxRow]) -> Vec<String> {
+    let mut repos: Vec<String> = rows
         .iter()
-        .map(|thread| thread.repository.full_name.clone())
+        .map(|row| match row {
+            InboxRow::Thread(thread) => thread.repository.full_name.clone(),
+            InboxRow::Local { item, .. } => item.repo_full_name.clone(),
+        })
         .collect();
     repos.sort_by_key(|repo| repo.to_lowercase());
     repos.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
@@ -116,6 +274,21 @@ pub fn repository_options(threads: &[Thread]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`filter_rows`] over threads alone.
+    fn filter(
+        threads: &[Thread],
+        filters: &InboxFilters,
+        viewer: Option<&str>,
+        repository: Option<&str>,
+        query: &str,
+    ) -> Vec<Thread> {
+        let rows: Vec<InboxRow> = threads.iter().cloned().map(InboxRow::Thread).collect();
+        filter_rows(&rows, filters, viewer, repository, query)
+            .into_iter()
+            .filter_map(|row| row.thread().cloned())
+            .collect()
+    }
     use perch_github::{Reason, Repository, Subject, SubjectKind};
 
     fn thread(
@@ -429,5 +602,178 @@ mod tests {
         assert_eq!(ids(BrowseView::Assigned, Some("reader")), ["4"]);
         assert_eq!(ids(BrowseView::Mentioned, Some("reader")), ["6", "5"]);
         assert_eq!(ids(BrowseView::All, Some("reader")).len(), 6);
+    }
+
+    fn ran(item_id: &str, at: &str, outcome: ActivityOutcome) -> ItemActivity {
+        ItemActivity {
+            item_id: item_id.into(),
+            at: at.parse().unwrap(),
+            event: ActivityEvent::Run {
+                run_id: "r".into(),
+                backend: "codex".into(),
+                mode: RunMode::Ask,
+                outcome,
+                files: None,
+            },
+            read_at: None,
+            done_at: None,
+            local_unread: false,
+        }
+    }
+
+    fn branch(id: &str) -> Item {
+        let mut item = Item::new("org/one", "2026-09-19T12:00:00Z".parse().unwrap());
+        item.id = id.into();
+        item.checkout = Some(perch_github::ItemCheckout {
+            branch: format!("fix-{id}"),
+            base_ref: "main".into(),
+            head_sha: "h".into(),
+            path: "/x".into(),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            divergence: None,
+            source: None,
+        });
+        item
+    }
+
+    fn keys(rows: &[InboxRow]) -> Vec<String> {
+        rows.iter().map(InboxRow::key).collect()
+    }
+
+    /// A local row goes above the first thread it is newer than, by the
+    /// time that thread's row shows, and GitHub's order is left alone.
+    /// Activity put away with Done has no row.
+    #[test]
+    fn local_rows_fit_in_by_time_among_github_s() {
+        let mut newer = thread(
+            "2",
+            "org/one",
+            "Newer",
+            SubjectKind::Issue,
+            Reason::Mention,
+            true,
+        );
+        newer.updated_at = "2026-09-20T12:00:00Z".parse().unwrap();
+        // Edited after the row above it: its row shows the one above's time.
+        let mut edited = thread(
+            "1",
+            "org/one",
+            "Edited",
+            SubjectKind::Issue,
+            Reason::Mention,
+            true,
+        );
+        edited.updated_at = "2026-09-21T12:00:00Z".parse().unwrap();
+        let mut older = thread(
+            "0",
+            "org/one",
+            "Older",
+            SubjectKind::Issue,
+            Reason::Mention,
+            true,
+        );
+        older.updated_at = "2026-09-18T12:00:00Z".parse().unwrap();
+        let threads = vec![newer, edited, older];
+
+        let items = vec![branch("a"), branch("b"), branch("done")];
+        let mut done = ran("done", "2026-09-22T00:00:00Z", ActivityOutcome::Completed);
+        done.done_at = Some(done.at);
+        let activity: HashMap<String, ItemActivity> = [
+            ran("a", "2026-09-20T06:00:00Z", ActivityOutcome::Completed),
+            ran("b", "2026-09-17T00:00:00Z", ActivityOutcome::Failed),
+            done,
+        ]
+        .into_iter()
+        .map(|a| (a.item_id.clone(), a))
+        .collect();
+        let rows = rows(&threads, &activity, &items);
+        assert_eq!(
+            keys(&rows),
+            ["thread:2", "thread:1", "item:a", "thread:0", "item:b"]
+        );
+
+        // Mentioned is GitHub's; Unread Only reads the run; Oldest first
+        // turns the whole list over.
+        let mentioned = InboxFilters {
+            whose: BrowseView::Mentioned,
+            ..Default::default()
+        };
+        assert_eq!(
+            keys(&filter_rows(&rows, &mentioned, None, None, "")),
+            ["thread:2", "thread:1", "thread:0"]
+        );
+        let oldest = InboxFilters {
+            direction: Direction::Oldest,
+            ..Default::default()
+        };
+        assert_eq!(
+            keys(&filter_rows(&rows, &oldest, None, None, ""))[0],
+            "item:b"
+        );
+        assert_eq!(
+            keys(&filter_rows(
+                &rows,
+                &InboxFilters::default(),
+                None,
+                None,
+                "fix-a"
+            )),
+            ["item:a"],
+            "the search reads the branch"
+        );
+        assert_eq!(
+            keys(&filter_rows(
+                &rows,
+                &InboxFilters::default(),
+                None,
+                None,
+                "failed"
+            )),
+            ["item:b"],
+            "and the chip"
+        );
+    }
+
+    #[test]
+    fn the_chip_says_who_ran_what_and_how_it_ended() {
+        let run = |mode, outcome, files| ActivityEvent::Run {
+            run_id: "r".into(),
+            backend: "claude-code".into(),
+            mode,
+            outcome,
+            files,
+        };
+        use ActivityOutcome::*;
+        assert_eq!(
+            chip(&run(RunMode::Work, Completed, Some(3))),
+            "Claude \u{b7} Work \u{b7} 3 files"
+        );
+        assert_eq!(
+            chip(&run(RunMode::Work, Completed, Some(1))),
+            "Claude \u{b7} Work \u{b7} 1 file"
+        );
+        assert_eq!(
+            chip(&run(RunMode::Work, Completed, Some(0))),
+            "Claude \u{b7} Work \u{b7} no changes"
+        );
+        assert_eq!(
+            chip(&run(RunMode::Ask, Completed, None)),
+            "Claude \u{b7} Ask"
+        );
+        assert_eq!(
+            chip(&run(RunMode::Ask, Failed, None)),
+            "Claude \u{b7} Ask \u{b7} failed"
+        );
+        assert_eq!(
+            chip(&ActivityEvent::Review {
+                group_id: "g".into(),
+                outcome: Completed,
+                findings: 2,
+            }),
+            "Review \u{b7} 2 findings"
+        );
     }
 }

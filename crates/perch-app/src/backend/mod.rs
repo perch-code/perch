@@ -142,6 +142,19 @@ pub enum Command {
     RestoreNotification {
         thread_id: String,
     },
+    /// Put an item's latest local activity away until a newer event.
+    ItemActivityDone {
+        item_id: String,
+    },
+    /// Make an item's latest local activity unread again.
+    MarkItemActivityUnread {
+        item_id: String,
+    },
+    /// Whether the window is the key window. A run that ends on its open
+    /// item isn't recorded while it is: the reader watched it happen.
+    WindowKey {
+        key: bool,
+    },
     /// Hide a notification in Perch until `until`, or until newer unread
     /// activity. GitHub has no snooze, so github.com still lists it.
     SnoozeNotification {
@@ -1037,6 +1050,12 @@ pub enum Event {
     /// The items again, as a poll found them rather than something the
     /// reader did. The drawer may hold these back until asked.
     ItemsPolled(Vec<Item>),
+    /// Every item's latest local activity: the runs and reviews that
+    /// ended there. Whole, with the items.
+    ItemActivity(Vec<perch_github::ItemActivity>),
+    /// The same, after something the reader didn't do: a run ended. The
+    /// drawer may hold these back until asked.
+    ItemActivityPolled(Vec<perch_github::ItemActivity>),
     /// Perch's visible notification list, in GitHub response order. Read
     /// threads remain; revisions marked Done in Perch stay hidden until newer
     /// activity arrives.
@@ -2854,6 +2873,22 @@ impl Backend {
         });
     }
 
+    pub fn done_item_activity(&self, item_id: &str) {
+        let _ = self.commands.send(Command::ItemActivityDone {
+            item_id: item_id.to_string(),
+        });
+    }
+
+    pub fn mark_item_activity_unread(&self, item_id: &str) {
+        let _ = self.commands.send(Command::MarkItemActivityUnread {
+            item_id: item_id.to_string(),
+        });
+    }
+
+    pub fn set_window_key(&self, key: bool) {
+        let _ = self.commands.send(Command::WindowKey { key });
+    }
+
     pub fn mark_notification_unread(&self, thread_id: &str) {
         let _ = self.commands.send(Command::MarkNotificationUnread {
             thread_id: thread_id.to_string(),
@@ -4108,6 +4143,12 @@ async fn run(
                 Err(e) => tracing::warn!(error = %e, "could not reconcile runs"),
             }
             initial_faces = send_items(&guard, &events, Event::Items).unwrap_or_default();
+            match guard.load_item_activity() {
+                Ok(activity) => {
+                    let _ = events.send(Event::ItemActivity(activity));
+                }
+                Err(e) => tracing::warn!(error = %e, "could not read item activity"),
+            }
             match guard.load_threads() {
                 Ok(threads) => {
                     initial_notifications = threads.clone();
@@ -4267,6 +4308,7 @@ async fn run(
         approvals: Default::default(),
         approval_timeout: crate::approvals::APPROVAL_TIMEOUT,
         approval_picks: Default::default(),
+        window_key: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         window: NO_WINDOW,
         views: Default::default(),
     };
@@ -4534,6 +4576,30 @@ async fn run(
             }
             Command::RestoreNotification { thread_id } => {
                 ctx.restore_notification(&thread_id);
+            }
+            Command::ItemActivityDone { item_id } => {
+                if let Some(Ok(true)) = ctx.with_cache(|c| c.done_item_activity(&item_id)) {
+                    ctx.send_item_activity(Event::ItemActivity);
+                }
+            }
+            Command::MarkItemActivityUnread { item_id } => {
+                if let Some(Ok(true)) = ctx.with_cache(|c| c.mark_item_activity_unread(&item_id)) {
+                    ctx.send_item_activity(Event::ItemActivity);
+                }
+            }
+            Command::WindowKey { key } => {
+                ctx.window_key
+                    .store(key, std::sync::atomic::Ordering::Relaxed);
+                // Back at a window whose item had a run end while the
+                // reader was away: it is in front of them now.
+                let open = ctx
+                    .slot
+                    .lock()
+                    .ok()
+                    .and_then(|slot| slot.as_ref().map(|open| open.item_id.clone()));
+                if let Some(item_id) = open.filter(|_| key) {
+                    ctx.read_activity(&item_id);
+                }
             }
             Command::SnoozeNotification { thread_id, until } => {
                 ctx.snooze_notification(&thread_id, until);
@@ -6215,8 +6281,10 @@ struct Ctx {
     /// about for an item or a search hit, by repository, number and when
     /// each last moved.
     asked_participants: Arc<std::sync::Mutex<std::collections::HashSet<(String, u64, Timestamp)>>>,
-    /// The window whose view `slot`, `language_servers` and the request
-    /// sequences are, and whose events these
+    /// Whether this window is the key window, as the UI last said.
+    window_key: Arc<std::sync::atomic::AtomicBool>,
+    /// The window whose view `slot`, `language_servers`, the request
+    /// sequences and `window_key` are, and whose events these
     /// are. `NO_WINDOW` for the worker's own work, whose slot stays empty.
     window: WindowId,
     /// Every window's view.
@@ -6594,6 +6662,7 @@ impl Ctx {
             self.want_avatars(faces.avatars);
             self.look_at_participants(faces.subjects);
         }
+        self.send_item_activity(Event::ItemActivity);
     }
 
     /// The same, for what a poll found rather than what the reader did.
@@ -6604,6 +6673,59 @@ impl Ctx {
         {
             self.want_avatars(faces.avatars);
             self.look_at_participants(faces.subjects);
+        }
+        self.send_item_activity(Event::ItemActivityPolled);
+    }
+
+    /// Every item's latest activity, as `event`: `Event::ItemActivity`
+    /// after something the reader did, `Event::ItemActivityPolled` after
+    /// something that happened on its own.
+    fn send_item_activity(&self, event: fn(Vec<perch_github::ItemActivity>) -> Event) {
+        match self.with_cache(Cache::load_item_activity) {
+            Some(Ok(activity)) => {
+                let _ = self.events.send(event(activity));
+            }
+            Some(Err(e)) => tracing::warn!(error = %e, "could not read item activity"),
+            None => {}
+        }
+    }
+
+    /// Record the latest thing that happened on an item, unless it has a
+    /// pull request, whose notifications say what happens there, or the
+    /// reader is looking at it: open in a window that is key. Whether it
+    /// was recorded.
+    fn record_activity(&self, item_id: &str, event: perch_github::ActivityEvent) -> bool {
+        let Some(item) = self.item(item_id) else {
+            return false;
+        };
+        if item.pull_request().is_some() {
+            return false;
+        }
+        let watched = self.views().iter().any(|ctx| {
+            ctx.is_open(item_id) && ctx.window_key.load(std::sync::atomic::Ordering::Relaxed)
+        });
+        if watched {
+            return false;
+        }
+        match self.with_cache(|c| c.record_item_activity(item_id, Timestamp::now(), &event)) {
+            Some(Ok(())) => {
+                tracing::info!(item = item_id, ?event, "recorded item activity");
+                self.send_item_activity(Event::ItemActivityPolled);
+                true
+            }
+            Some(Err(e)) => {
+                tracing::warn!(item = item_id, error = %e, "could not record item activity");
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Opening an item reads its local activity, whichever row it was
+    /// opened from.
+    fn read_activity(&self, item_id: &str) {
+        if let Some(Ok(true)) = self.with_cache(|c| c.read_item_activity(item_id)) {
+            self.send_item_activity(Event::ItemActivity);
         }
     }
 
@@ -7056,6 +7178,7 @@ impl Ctx {
             navigation_requests: view.navigation_requests.clone(),
             scope_requests: view.scope_requests.clone(),
             review_navigation: view.review_navigation.clone(),
+            window_key: view.window_key.clone(),
             events: self.events.for_window(view.window),
             window: view.window,
             ..self.clone()
@@ -8390,6 +8513,7 @@ async fn open_item(ctx: &Ctx, id: &str, navigation_id: u64) -> bool {
         });
         return false;
     };
+    ctx.read_activity(&item.id);
     let source_checkout_missing = item
         .checkout
         .as_ref()
@@ -14626,6 +14750,13 @@ async fn open_subject(
             read_subject_notifications(&ctx, &repo_full_name, kind, number).await;
         });
     }
+    // An issue's worktree, opened from the issue's notification, is read
+    // too.
+    if let Some(Ok(Some(item))) =
+        ctx.with_cache(|c| c.find_item_by_subject(&repo_full_name, kind, number))
+    {
+        ctx.read_activity(&item.id);
+    }
     match kind {
         ItemKind::PullRequest => {
             open_pull_request(ctx, repo_full_name, number, navigation_id).await
@@ -16968,6 +17099,45 @@ async fn record_work(ctx: &Ctx, run: &RunRecord, side: WorkSide) {
     }
 }
 
+/// A run that ended on an item goes in the inbox: finished, failed or
+/// cut off, but not one the reader stopped or cancelled, or one Perch's
+/// quitting ended. A Work run says how many files it changed.
+async fn record_run_activity(ctx: &Ctx, item_id: &str, run: &RunRecord) {
+    use perch_github::{ActivityEvent, ActivityOutcome};
+    let outcome = match run.status {
+        RunStatus::Completed => ActivityOutcome::Completed,
+        RunStatus::Failed => ActivityOutcome::Failed,
+        RunStatus::Interrupted => ActivityOutcome::Interrupted,
+        _ => return,
+    };
+    if matches!(
+        run.terminal_reason,
+        Some(
+            TerminalReason::UserStopped
+                | TerminalReason::QueueCancelled
+                | TerminalReason::AppShutdown
+                | TerminalReason::AppRestart
+        )
+    ) {
+        return;
+    }
+    let files = if run.mode == RunMode::Work {
+        run_changes(ctx, &run.id).await.map(|(files, _, _)| files)
+    } else {
+        None
+    };
+    ctx.record_activity(
+        item_id,
+        ActivityEvent::Run {
+            run_id: run.id.clone(),
+            backend: run.backend.clone(),
+            mode: run.mode,
+            outcome,
+            files,
+        },
+    );
+}
+
 /// Files changed, lines added and removed by a Work run, for its card.
 async fn run_changes(ctx: &Ctx, run_id: &str) -> Option<(u32, u32, u32)> {
     let run = ctx.runs.load(run_id)?;
@@ -17408,6 +17578,9 @@ async fn execute_question(
             ctx.runs.finish(lease);
             ctx.send_threads(&item_id);
             send_agent_runs(ctx, 50);
+            if let Some(run) = ctx.runs.load(&run.id) {
+                record_run_activity(ctx, &item_id, &run).await;
+            }
             return;
         }
     };
@@ -17671,6 +17844,7 @@ async fn execute_question(
     });
     ctx.runs.finish(lease);
     tracing::info!(thread = %thread.id, run = %final_run.id, status = final_run.status.name(), steps = final_run.steps.len(), "run ended");
+    record_run_activity(ctx, &item_id, &final_run).await;
     ctx.send_threads(&item_id);
     // What the reader said that the agent finished without reading is
     // the next question. A run that failed or was stopped keeps it, for
@@ -20517,6 +20691,7 @@ mod tests {
             approvals: Default::default(),
             approval_timeout: crate::approvals::APPROVAL_TIMEOUT,
             approval_picks: Default::default(),
+            window_key: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             window: NO_WINDOW,
             views: Default::default(),
         };
@@ -31754,6 +31929,181 @@ read eof || true
         let mut item = Item::new("a/b", Timestamp::now());
         item.id = name.into();
         item
+    }
+
+    /// A worktree of the reader's own, with no pull request.
+    fn worktree_item(name: &str) -> Item {
+        let mut item = branch_item(name);
+        item.checkout = Some(perch_github::ItemCheckout {
+            branch: name.into(),
+            base_ref: "main".into(),
+            head_sha: "h".into(),
+            path: format!("/x/{name}").into(),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            divergence: None,
+            source: None,
+        });
+        item
+    }
+
+    fn activity(ctx: &Ctx, item_id: &str) -> Option<perch_github::ItemActivity> {
+        ctx.with_cache(|c| c.item_activity(item_id).unwrap())
+            .unwrap()
+    }
+
+    /// Only a run that ended on its own is news: not one the reader
+    /// stopped or cancelled, or one quitting cut off. Nor is one on an
+    /// item with a pull request, whose notifications say so, or one on the
+    /// item the reader is looking at.
+    #[tokio::test]
+    async fn only_runs_that_ended_on_their_own_on_a_branch_are_recorded() {
+        use perch_github::{ActivityEvent, ActivityOutcome};
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let item = worktree_item("feature");
+        ctx.with_cache(|c| c.insert_item(&item).unwrap());
+        let ended = |status, reason| RunRecord {
+            id: "run-1".into(),
+            backend: "codex".into(),
+            status,
+            terminal_reason: Some(reason),
+            ..RunRecord::default()
+        };
+        for (status, reason) in [
+            (RunStatus::Stopped, TerminalReason::UserStopped),
+            (RunStatus::Stopped, TerminalReason::QueueCancelled),
+            (RunStatus::Interrupted, TerminalReason::AppShutdown),
+            (RunStatus::Interrupted, TerminalReason::AppRestart),
+        ] {
+            record_run_activity(&ctx, &item.id, &ended(status, reason)).await;
+            assert_eq!(activity(&ctx, &item.id), None, "{reason:?}");
+        }
+        record_run_activity(
+            &ctx,
+            &item.id,
+            &ended(RunStatus::Failed, TerminalReason::SpawnFailed),
+        )
+        .await;
+        assert_eq!(
+            activity(&ctx, &item.id).unwrap().event,
+            ActivityEvent::Run {
+                run_id: "run-1".into(),
+                backend: "codex".into(),
+                mode: RunMode::Ask,
+                outcome: ActivityOutcome::Failed,
+                files: None,
+            }
+        );
+
+        // The open item, in front of the reader, isn't news.
+        ctx.with_cache(|c| c.done_item_activity(&item.id).unwrap());
+        open_in_slot(&ctx, &item);
+        record_run_activity(
+            &ctx,
+            &item.id,
+            &ended(RunStatus::Completed, TerminalReason::Completed),
+        )
+        .await;
+        assert!(!activity(&ctx, &item.id).unwrap().is_visible());
+        // It is once the reader has gone to another app.
+        ctx.window_key
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        record_run_activity(
+            &ctx,
+            &item.id,
+            &ended(RunStatus::Completed, TerminalReason::Completed),
+        )
+        .await;
+        assert!(activity(&ctx, &item.id).unwrap().is_visible());
+
+        // A pull request's run isn't recorded at all.
+        let mut pull = worktree_item("pull");
+        pull.subject = Some(ItemSubject::PullRequest(pull_request(7)));
+        ctx.with_cache(|c| c.insert_item(&pull).unwrap());
+        record_run_activity(
+            &ctx,
+            &pull.id,
+            &ended(RunStatus::Completed, TerminalReason::Completed),
+        )
+        .await;
+        assert_eq!(activity(&ctx, &pull.id), None);
+    }
+
+    /// A review is news once, when its last reviewer ends.
+    #[tokio::test]
+    async fn a_review_is_recorded_once_when_its_last_reviewer_ends() {
+        use perch_github::{
+            ActivityEvent, ActivityOutcome, NewReviewerAttempt, ReviewAdmission, ReviewSnapshot,
+            ReviewerPhase,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let item = worktree_item("feature");
+        ctx.with_cache(|c| c.insert_item(&item).unwrap());
+        let now = Timestamp::now();
+        let attempt = |id: &str, backend: &str| NewReviewerAttempt {
+            id: id.into(),
+            run_id: None,
+            backend: backend.into(),
+            executable: None,
+            executable_version: None,
+            model: "m".into(),
+            effort: "medium".into(),
+            adapter_version: "a".into(),
+            output_format_version: "o".into(),
+            created_at: now,
+        };
+        let admission = ReviewAdmission {
+            group_id: "g1".into(),
+            snapshot: ReviewSnapshot {
+                id: "s1".into(),
+                item_id: item.id.clone(),
+                repository: "a/b".into(),
+                branch_label: Some("feature".into()),
+                requested_base_ref: "main".into(),
+                base_tip_sha: "b".into(),
+                merge_base_sha: "m".into(),
+                head_sha: "h".into(),
+                dirty_edits_excluded: true,
+                retention_key: "k".into(),
+                retained_ref: None,
+                manifest_path: None,
+                diff_path: None,
+                created_at: now,
+                worktree_parent_sha: None,
+            },
+            attempts: vec![attempt("a1", "claude-code"), attempt("a2", "codex")],
+            admitted_at: now,
+            instructions: None,
+        };
+        ctx.with_cache(|c| c.admit_review_group(&admission).unwrap());
+        let phase = |id: &str, next| {
+            ctx.with_cache(|c| {
+                c.transition_reviewer_attempt(id, next, Timestamp::now())
+                    .unwrap()
+            });
+        };
+        phase("a1", ReviewerPhase::Reviewing);
+        phase("a2", ReviewerPhase::Reviewing);
+        phase("a1", ReviewerPhase::Completed);
+        reviews::settle_group(&ctx, "g1");
+        assert_eq!(activity(&ctx, &item.id), None, "a reviewer is still going");
+        phase("a2", ReviewerPhase::Failed);
+        reviews::settle_group(&ctx, "g1");
+        let recorded = activity(&ctx, &item.id).unwrap();
+        assert_eq!(
+            recorded.event,
+            ActivityEvent::Review {
+                group_id: "g1".into(),
+                outcome: ActivityOutcome::Completed,
+                findings: 0,
+            }
+        );
+        reviews::settle_group(&ctx, "g1");
+        assert_eq!(activity(&ctx, &item.id).unwrap().at, recorded.at, "once");
     }
 
     fn removed(ctx: &Ctx, item: &Item, worktree: &Path) -> bool {

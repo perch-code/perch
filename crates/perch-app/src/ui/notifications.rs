@@ -1,8 +1,8 @@
-//! GitHub notification rows.
+//! The Inbox's rows: GitHub's notifications, and a row for each worktree
+//! without a pull request where an agent run or a review ended.
 //!
-//! Notifications are their own list, not a view over local items. The order
-//! is the order from GitHub; filtering (`crate::inbox`) only removes rows
-//! from that order.
+//! The order is the order from GitHub, with the local rows fitted in by
+//! time; filtering (`crate::inbox`) only removes rows from that order.
 
 use std::rc::Rc;
 
@@ -12,24 +12,29 @@ use floem::views::{
     dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack,
 };
 use jiff::Timestamp;
-use perch_github::{CheckRunState, SubjectKind, SubjectState, Thread};
+use perch_github::{CheckRunState, Item, ItemActivity, SubjectKind, SubjectState, Thread};
 
 use crate::backend::Backend;
 use crate::icons::{self, SidebarIcon};
-use crate::inbox;
+use crate::inbox::{self, InboxRow};
 use crate::items::InboxView;
 use crate::review::start_work;
 use crate::snooze;
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
+use crate::ui::items::OpenItem;
 use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::nav_row;
 use crate::ui::widgets::{icon_button, open_in_browser, sidebar_glyph, state_glyph};
 
 /// The notification list under the current search, repository, and reason
 /// filters. GitHub's ordering is retained.
-pub fn notification_list(state: AppState, backend: Rc<Backend>) -> impl IntoView {
+pub fn notification_list(
+    state: AppState,
+    backend: Rc<Backend>,
+    on_open: OpenItem,
+) -> impl IntoView {
     let show = move || state.item_filters.with(|f| f.inbox.view);
     Stack::vertical((
         dyn_container(
@@ -58,16 +63,19 @@ pub fn notification_list(state: AppState, backend: Rc<Backend>) -> impl IntoView
                 // Done and Snoozed are Perch's lists, not in GitHub's
                 // order, so their rows keep their own times.
                 let listed = (!away).then(|| state.notifications.with(|t| inbox::listed_at(t)));
-                visible_notifications(state).into_iter().map(move |thread| {
-                    let at = listed
-                        .as_ref()
-                        .and_then(|listed| listed.get(&thread.id).copied())
-                        .unwrap_or(thread.updated_at);
-                    (thread, away, at)
+                visible_notifications(state).into_iter().map(move |row| {
+                    let at = match &row {
+                        InboxRow::Thread(thread) => listed
+                            .as_ref()
+                            .and_then(|listed| listed.get(&thread.id).copied())
+                            .unwrap_or(thread.updated_at),
+                        InboxRow::Local { activity, .. } => activity.at,
+                    };
+                    (row, away, at)
                 })
             },
-            |(thread, away, at): &(Thread, bool, Timestamp)| {
-                (
+            |(row, away, at): &(InboxRow, bool, Timestamp)| match row {
+                InboxRow::Thread(thread) => RowKey::Thread(
                     thread.id.clone(),
                     *away,
                     thread.unread,
@@ -77,9 +85,23 @@ pub fn notification_list(state: AppState, backend: Rc<Backend>) -> impl IntoView
                     thread.snoozed_until,
                     // The face and the state arrive after the row does.
                     thread.subject_snapshot.clone(),
-                )
+                ),
+                // A new run, a read, or a rename redraws it.
+                InboxRow::Local { activity, item } => RowKey::Local(
+                    item.id.clone(),
+                    activity.at.to_string(),
+                    activity.is_unread(),
+                    item.title().to_string(),
+                ),
             },
-            move |(thread, away, at)| notification_row(state, backend.clone(), thread, away, at),
+            move |(row, away, at)| match row {
+                InboxRow::Thread(thread) => {
+                    notification_row(state, backend.clone(), thread, away, at).into_any()
+                }
+                InboxRow::Local { activity, item } => {
+                    local_row(state, backend.clone(), on_open.clone(), item, activity).into_any()
+                }
+            },
         )
         .style(|s| s.flex_col().width_full().gap(1.0)),
     ))
@@ -88,10 +110,134 @@ pub fn notification_list(state: AppState, backend: Rc<Backend>) -> impl IntoView
     .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0))
 }
 
+/// What a row of the list is drawn again on.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum RowKey {
+    Thread(
+        String,
+        bool,
+        bool,
+        String,
+        String,
+        Option<Timestamp>,
+        Option<perch_github::SubjectSnapshot>,
+    ),
+    Local(String, String, bool, String),
+}
+
 /// The rows visible under the shared sidebar controls. Item-only settings
 /// such as status, saved, and sort deliberately have no effect here.
-pub fn visible_notifications(state: AppState) -> Vec<Thread> {
+pub fn visible_notifications(state: AppState) -> Vec<InboxRow> {
     state.visible_inbox()
+}
+
+/// The row for an item without a pull request where a run or a review
+/// ended: its glyph and title as Worktrees draws them, the branch and what
+/// happened in the byline. Opening it opens the item, which reads it.
+fn local_row(
+    state: AppState,
+    backend: Rc<Backend>,
+    on_open: OpenItem,
+    item: Item,
+    activity: ItemActivity,
+) -> impl IntoView {
+    let hovered = RwSignal::new(false);
+    let unread = activity.is_unread();
+    let open_item = item.clone();
+    let menu_item = item.clone();
+    let menu_backend = backend.clone();
+    let content = Stack::horizontal((
+        nav_row::glyph_box(crate::ui::items::glyph(&item)),
+        nav_row::lines(
+            nav_row::title_label(item.title().to_string(), false, move || unread),
+            local_trailing(state, hovered, backend, item.clone(), unread, activity.at)
+                .style(|s| s.pointer_events_auto()),
+            crate::ui::items::inbox_byline(state, &item, &activity.event),
+        ),
+    ))
+    .style(|s| {
+        s.items_center()
+            .width_full()
+            .min_width(0.0)
+            .pointer_events_none()
+    });
+    let row = Container::new(content)
+        .debug_name(format!("notification row:item:{}", item.id))
+        .on_event_stop(el::Click, move |_, _| on_open(&open_item))
+        .on_event_cont(el::PointerEnter, move |_, _| hovered.set(true))
+        .on_event_cont(el::PointerLeave, move |_, _| hovered.set(false))
+        .right_click_menu(move || local_menu(menu_backend.clone(), &menu_item, unread))
+        .style(|s| nav_row::row_style(s, false));
+    Container::new(row).style(nav_row::row_gutter)
+}
+
+/// A local row's right end: the unread dot and the age, or while the
+/// pointer is over it, Done and the menu.
+fn local_trailing(
+    state: AppState,
+    hovered: RwSignal<bool>,
+    backend: Rc<Backend>,
+    item: Item,
+    unread: bool,
+    at: Timestamp,
+) -> impl IntoView {
+    dyn_container(
+        move || hovered.get(),
+        move |hovered| {
+            if !hovered {
+                return Stack::horizontal((
+                    nav_row::unread_dot(move || unread),
+                    nav_row::age(state, at),
+                ))
+                .style(|s| s.items_center().flex_shrink(0.0_f32))
+                .into_any();
+            }
+            let done_backend = backend.clone();
+            let done_item = item.clone();
+            let menu_backend = backend.clone();
+            let menu_item = item.clone();
+            Stack::horizontal((
+                icon_button(
+                    || SidebarIcon::Check,
+                    theme::fg_subtle,
+                    move || local_done(&done_backend, &done_item),
+                )
+                .debug_name("mark done"),
+                nav_row::more_button(move || local_menu(menu_backend.clone(), &menu_item, unread)),
+            ))
+            .style(|s| s.items_center().flex_shrink(0.0_f32).margin_left(4.0))
+            .into_any()
+        },
+    )
+    .style(|s| s.flex_shrink(0.0_f32))
+}
+
+fn local_menu(backend: Rc<Backend>, item: &Item, unread: bool) -> Menu {
+    let done_backend = backend.clone();
+    let done_item = item.clone();
+    let id = item.id.clone();
+    Menu::new()
+        .item("Done", move |entry| {
+            let backend = done_backend.clone();
+            let item = done_item.clone();
+            entry
+                .icon(SidebarIcon::Check)
+                .action(move || local_done(&backend, &item))
+        })
+        .item("Mark Unread", move |entry| {
+            let backend = backend.clone();
+            let id = id.clone();
+            entry
+                .icon(SidebarIcon::Unread)
+                .enabled(!unread)
+                .action(move || backend.mark_item_activity_unread(&id))
+        })
+}
+
+/// Done on a local row: it goes until the next run ends there. The item
+/// and its worktree stay, and so does the item if it is open.
+fn local_done(backend: &Backend, item: &Item) {
+    backend.done_item_activity(&item.id);
 }
 
 /// A row of the inbox, or with `away` of View › Done or Snoozed, where
@@ -331,9 +477,15 @@ fn done(state: AppState, backend: &Backend, thread: &Thread) {
     close_if_viewing(state, backend, thread);
 }
 
-/// Mark N Done: every thread given, as each row's Done would, in one
-/// request to the backend so a failure is told once.
-pub(crate) fn done_all(state: AppState, backend: &Backend, threads: &[Thread]) {
+/// Mark N Done: every row given, as each row's Done would, the threads in
+/// one request to the backend so a failure is told once.
+pub(crate) fn done_all(state: AppState, backend: &Backend, rows: &[InboxRow]) {
+    let threads: Vec<&Thread> = rows.iter().filter_map(InboxRow::thread).collect();
+    for row in rows {
+        if let InboxRow::Local { item, .. } = row {
+            backend.done_item_activity(&item.id);
+        }
+    }
     backend.done_notifications(threads.iter().map(|thread| thread.id.clone()).collect());
     if let Some(viewing) = threads
         .iter()

@@ -1,5 +1,5 @@
 //! What happened on an item while the reader was looking elsewhere: an
-//! agent run or a review that ended, or a worktree whose head moved.
+//! agent run or a review that ended.
 //!
 //! One record per item, replaced by each new event. It is read and put
 //! away the way a GitHub notification is, keyed on the event's time
@@ -32,9 +32,6 @@ pub enum ActivityEvent {
         outcome: ActivityOutcome,
         /// Files a Work run changed, when that was counted.
         files: Option<u32>,
-        /// The worktree's head as the run ended, so the scan doesn't
-        /// report a commit the run made as a second event.
-        head: Option<String>,
     },
     /// A worktree review ended, once for all its reviewers.
     Review {
@@ -42,17 +39,6 @@ pub enum ActivityEvent {
         outcome: ActivityOutcome,
         findings: u32,
     },
-    /// The root scan found the worktree's head somewhere new.
-    HeadMoved {
-        from: String,
-        to: String,
-        /// Commits on the new head that the old one didn't have, when
-        /// both were there to count.
-        commits: Option<u32>,
-    },
-    /// The root scan found a worktree that already had commits past its
-    /// base.
-    NewWorktree { head: String, commits: u32 },
 }
 
 impl ActivityEvent {
@@ -109,10 +95,10 @@ mod tests {
         ItemActivity {
             item_id: "i".into(),
             at: at("2026-09-23T10:00:00Z"),
-            event: ActivityEvent::HeadMoved {
-                from: "a".into(),
-                to: "b".into(),
-                commits: Some(1),
+            event: ActivityEvent::Review {
+                group_id: "g".into(),
+                outcome: ActivityOutcome::Completed,
+                findings: 1,
             },
             read_at: None,
             done_at: None,
@@ -146,7 +132,6 @@ mod tests {
             mode: RunMode::Work,
             outcome: ActivityOutcome::Failed,
             files: Some(3),
-            head: None,
         };
         assert!(event.failed());
         let json = serde_json::to_string(&event).unwrap();

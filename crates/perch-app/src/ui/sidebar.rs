@@ -645,7 +645,6 @@ fn pr_status_toggle(menu: Menu, f: &ItemFilters, set: SetFilters) -> Menu {
 fn inbox_menu(state: AppState, backend: Rc<Backend>) -> Menu {
     let f = state.item_filters.get_untracked();
     let set = setter(state);
-    let source = state.inbox_source(f.inbox.view);
 
     // View is two choices, as Sort By is: the list, then whose threads
     // in it, as Browse's View offers.
@@ -667,7 +666,9 @@ fn inbox_menu(state: AppState, backend: Rc<Backend>) -> Menu {
         )
     });
     menu = menu.separator();
-    let repositories = source.with_untracked(|threads| crate::inbox::repository_options(threads));
+    let repositories = floem::reactive::Effect::untrack(|| {
+        crate::inbox::row_repository_options(&state.inbox_rows(f.inbox.view))
+    });
     menu = repository_submenu(menu, f.repository.clone(), repositories, set.clone());
 
     menu = state_submenu(menu, f.inbox.state, set.clone(), |f, value| {
@@ -714,7 +715,7 @@ fn bulk_item(menu: Menu, state: AppState, backend: Rc<Backend>, view: InboxView)
         .enabled(n > 0)
         .action(move || {
             if view.is_put_away() {
-                for thread in &shown {
+                for thread in shown.iter().filter_map(crate::inbox::InboxRow::thread) {
                     backend.restore_notification(&thread.id);
                 }
             } else {
@@ -822,9 +823,12 @@ fn item_list(state: AppState, backend: Rc<Backend>, on_open: OpenItem) -> impl I
         dyn_container(
             move || tab.get(),
             move |tab| match tab {
-                SidebarTab::Inbox => {
-                    crate::ui::notifications::notification_list(state, backend.clone()).into_any()
-                }
+                SidebarTab::Inbox => crate::ui::notifications::notification_list(
+                    state,
+                    backend.clone(),
+                    on_open.clone(),
+                )
+                .into_any(),
                 SidebarTab::Worktrees => {
                     local_item_list(state, backend.clone(), on_open.clone()).into_any()
                 }
@@ -1286,6 +1290,110 @@ mod tests {
     fn repaint(harness: &mut HeadlessHarness) {
         harness.rebuild();
         harness.paint();
+    }
+
+    fn ran(item_id: &str, at: &str) -> perch_github::ItemActivity {
+        perch_github::ItemActivity {
+            item_id: item_id.into(),
+            at: at.parse().unwrap(),
+            event: perch_github::ActivityEvent::Run {
+                run_id: "r".into(),
+                backend: "claude-code".into(),
+                mode: perch_github::RunMode::Work,
+                outcome: perch_github::ActivityOutcome::Completed,
+                files: Some(3),
+            },
+            read_at: None,
+            done_at: None,
+            local_unread: false,
+        }
+    }
+
+    /// A run that ends on a worktree with no pull request is a row of its
+    /// own, newest first among GitHub's, and bolds the worktree's row
+    /// until it is read. A pull request's runs never make one: GitHub's
+    /// notifications are its signal.
+    #[test]
+    fn a_run_that_ends_on_a_branch_is_an_inbox_row_and_a_pull_request_s_is_not() {
+        use floem::style::FontWeight;
+
+        let (mut harness, state) = harness();
+        state.item_activity.update(|all| {
+            all.insert("quiet".into(), ran("quiet", "2026-09-20T11:00:00Z"));
+            all.insert("pr".into(), ran("pr", "2026-09-20T11:30:00Z"));
+        });
+        repaint(&mut harness);
+        let worktree = find(harness.root_id(), "item row:quiet").unwrap();
+        assert_eq!(
+            harness
+                .get_computed_style(find(worktree, "Branch quiet").unwrap())
+                .get(FontWeight),
+            Some(theme::weight_emphasis()),
+            "its worktree's row is unread too"
+        );
+
+        click_tab(&mut harness, SidebarTab::Inbox);
+        let local = find(harness.root_id(), "notification row:item:quiet").expect("a row");
+        assert!(find(local, "Branch quiet").is_some());
+        assert!(find(local, "row note").is_some(), "it says what happened");
+        assert_eq!(
+            find(local, "unread dot")
+                .unwrap()
+                .get_visual_rect_no_clip()
+                .width(),
+            7.0
+        );
+        assert!(
+            find(harness.root_id(), "notification row:item:pr").is_none(),
+            "a pull request's run makes no row"
+        );
+        let thread = find(harness.root_id(), "notification row:12").unwrap();
+        assert!(local.get_visual_rect_no_clip().y0 < thread.get_visual_rect_no_clip().y0);
+
+        // Under Mentioned, which is GitHub's word, it isn't.
+        set_filters(state, |f| f.inbox.whose = BrowseView::Mentioned);
+        repaint(&mut harness);
+        assert!(find(harness.root_id(), "notification row:item:quiet").is_none());
+        set_filters(state, |f| f.inbox.whose = BrowseView::All);
+
+        // Done: the row goes, the item stays.
+        state.item_activity.update(|all| {
+            let a = all.get_mut("quiet").unwrap();
+            a.done_at = Some(a.at);
+        });
+        repaint(&mut harness);
+        assert!(find(harness.root_id(), "notification row:item:quiet").is_none());
+        assert!(state.item("quiet").is_some());
+    }
+
+    /// A run that ends while the inbox is up waits behind the pill, as a
+    /// poll's notifications do; reading it only changes the row, so that
+    /// goes straight in.
+    #[test]
+    fn a_run_that_ends_while_the_inbox_is_up_waits_behind_the_pill() {
+        let (mut harness, state) = harness();
+        click_tab(&mut harness, SidebarTab::Inbox);
+        state.apply(crate::backend::Event::ItemActivityPolled(vec![ran(
+            "quiet",
+            "2026-09-20T11:00:00Z",
+        )]));
+        repaint(&mut harness);
+        assert!(find(harness.root_id(), "notification row:item:quiet").is_none());
+        assert_eq!(
+            state.held_back_news().as_deref(),
+            Some("1 new notification")
+        );
+
+        state.show_held_back();
+        repaint(&mut harness);
+        assert!(find(harness.root_id(), "notification row:item:quiet").is_some());
+        assert!(state.pending_item_activity.get().is_none());
+
+        let mut read = ran("quiet", "2026-09-20T11:00:00Z");
+        read.read_at = Some(read.at);
+        state.apply(crate::backend::Event::ItemActivityPolled(vec![read]));
+        assert!(state.pending_item_activity.get().is_none());
+        assert!(!state.item_activity.with(|all| all["quiet"].is_unread()));
     }
 
     /// Inbox's Unread Only leaves the read threads out.

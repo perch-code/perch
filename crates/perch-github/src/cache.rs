@@ -43,10 +43,11 @@ mod review_store;
 /// already cut from a pull request untrusted. Version 35 keeps the servers
 /// the reader trusts on everything in a repository. Version 36 drops the
 /// copies of tool calls an update wrote into a run's history as legacy
-/// steps. Schemas 13 through 23
+/// steps. Version 37 clears the activity the inbox stopped showing, so
+/// what comes back to it starts empty. Schemas 13 through 23
 /// migrate in place so local conversations and agent history are never
 /// discarded.
-pub const SCHEMA_VERSION: u32 = 36;
+pub const SCHEMA_VERSION: u32 = 37;
 
 /// Metadata key holding the validator for the cached notifications snapshot.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
@@ -540,6 +541,8 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             33 => add_code_trust_table(&tx)?,
             34 => tx.execute_batch(REPO_LSP_TRUST_SCHEMA)?,
             35 => drop_repeated_legacy_steps(&tx)?,
+            // Old enough that none of it is news.
+            36 => tx.execute_batch("DELETE FROM item_activity")?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -6914,10 +6917,10 @@ mod tests {
         let c = Cache::open_in_memory().unwrap();
         let item = branch_item("feature");
         c.insert_item(&item).unwrap();
-        let moved = |to: &str| ActivityEvent::HeadMoved {
-            from: "abc".into(),
-            to: to.into(),
-            commits: Some(1),
+        let moved = |group: &str| ActivityEvent::Review {
+            group_id: group.into(),
+            outcome: crate::activity::ActivityOutcome::Completed,
+            findings: 1,
         };
         c.record_item_activity(&item.id, stamp_of("2026-09-23T10:00:00Z"), &moved("b1"))
             .unwrap();
@@ -6971,6 +6974,39 @@ mod tests {
         assert!(
             cache.load_item_activity().unwrap().is_empty(),
             "nothing is backfilled"
+        );
+    }
+
+    #[test]
+    fn schema_37_clears_the_activity_left_from_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("perch.db");
+        let item = branch_item("feature");
+        {
+            let cache = Cache::open(&path, None).unwrap();
+            cache.insert_item(&item).unwrap();
+            cache
+                .conn
+                .execute(
+                    "INSERT INTO item_activity (item_id, at, event_json) VALUES (?1, ?2, ?3)",
+                    params![
+                        item.id,
+                        "2026-09-27T18:25:05Z",
+                        r#"{"kind":"head_moved","from":"a","to":"b","commits":1}"#
+                    ],
+                )
+                .unwrap();
+            cache.set_meta("schema_version", "36").unwrap();
+        }
+        let (cache, _) = Cache::open_with_outcome(&path, None).unwrap();
+        let rows: i64 = cache
+            .conn
+            .query_row("SELECT COUNT(*) FROM item_activity", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+        assert!(
+            cache.load_item(&item.id).unwrap().is_some(),
+            "the item stays"
         );
     }
 

@@ -369,6 +369,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         drawer::resize_cursor_sheet(state),
     ));
     let root_id = root.view_id();
+    let focus_backend = backend.clone();
+    let blur_backend = backend.clone();
     // macOS's scroll bar setting, read again whenever it changes.
     let scroller_style = floem::ext_event::create_trigger();
     crate::scrollers::watch(scroller_style);
@@ -392,6 +394,14 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
             if state.main_pane.get_untracked() != (pane.x0, pane.x1) {
                 state.main_pane.set((pane.x0, pane.x1));
             }
+        })
+        // Whether the reader can see the window: a run that ends on the
+        // open item isn't news while they can.
+        .on_event_cont(el::WindowGainedFocus, move |_, _| {
+            focus_backend.set_window_key(true)
+        })
+        .on_event_cont(el::WindowLostFocus, move |_, _| {
+            blur_backend.set_window_key(false)
         })
         // A press outside the Agents dropdown or the usage popover shuts
         // it, and goes on to whatever it landed on. Caught on the way down,

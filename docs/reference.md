@@ -110,9 +110,29 @@ mirror Done or Restore actions performed on github.com.
 These actions affect only the notification or its local reminder. They do not
 archive or delete a Perch item, worktree, or local conversation.
 
-The inbox holds GitHub's threads and nothing else. Something that happens in
-Perch, such as an agent run or a worktree review ending, never adds a row or
-makes one unread.
+### Finished runs on your own work
+
+A worktree with no pull request has no one on GitHub to notify you, so Perch
+does. When an Ask or Work run, or a worktree review, ends on it, the item gets
+a row in the inbox: its glyph and title as Worktrees draws them, then the
+repository, the branch, and what happened: `Claude · Work · 3 files`,
+`Codex · Ask`, `Review · 2 findings`, in the failure colour when it failed. A
+run you stopped or cancelled, or that ended because Perch quit, doesn't count,
+and neither does one on the item open in a window that's in front: you watched
+it. A Claude Code or Codex session you started yourself, outside Perch, isn't
+seen.
+
+The item has one row, for the last run that ended there. It fits in among
+GitHub's rows by time, and waits behind the pill as a poll does. It is unread
+until you open the item, from any row, and the item's row in Worktrees is bold
+with the dot until then too. Opening it opens the item. **Mark Unread** puts
+the dot back. **Done** puts it away until the next run ends there; it never
+archives the item or touches its worktree. Local rows are under View › Inbox
+with Yours or All, not under GitHub's own reasons, and have no Snooze.
+
+Once the item has a pull request, GitHub's notifications are its signal: its
+row goes, and a run that ends there makes none, only the notice a run leaves
+as it finishes.
 
 Perch does not crawl a repository's open items or history. A pull request or
 issue is fetched when a notification is opened or when the user opens it by

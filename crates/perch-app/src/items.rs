@@ -794,7 +794,7 @@ impl ItemFilters {
 /// the title as shown, the title before any Rename, the number, the
 /// branch, and the repository's `owner/repo`, so a renamed pull request
 /// is found by either name and `#57` finds number 57.
-fn matches_query(item: &Item, query: &str) -> bool {
+pub(crate) fn matches_query(item: &Item, query: &str) -> bool {
     let needle = query.trim().to_lowercase();
     if needle.is_empty() {
         return true;
