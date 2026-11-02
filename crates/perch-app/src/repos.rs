@@ -1,12 +1,12 @@
 //! Giving each `[[repo]]` its identity.
 //!
 //! An entry with `github` knows what it is from the file. One with only
-//! roots is whatever its first root turns out to be: a checkout with a
+//! a root is whatever its root turns out to be: a checkout with a
 //! GitHub remote is that repository, and one with none lives on this
 //! machine alone and is `local/<name>`. What decides is the root's
 //! remotes, one git command over one directory, so it runs once, at
 //! startup before the sidebar is told its repositories, and again in every
-//! harness command that reads the file. Until it has run, a roots-only
+//! harness command that reads the file. Until it has run, a root-only
 //! entry has no identity and nothing lists it, which is why every reader
 //! of `[[repo]]` loads through here rather than through `Config::load`
 //! alone.
@@ -14,24 +14,24 @@
 use perch_git::cmd::Git;
 use perch_github::Config;
 
-/// Give each `[[repo]]` with roots and no `github` its identity from its
-/// first root's remotes: a GitHub remote makes it that repository, none
+/// Give each `[[repo]]` with a root and no `github` its identity from its
+/// root's remotes: a GitHub remote makes it that repository, none
 /// makes it `local/<name>`. The remotes alone, not the whole scan: which
 /// repository a root is does not depend on whether a base branch can be
 /// found in it, and a root missing its base is the scan's notice, every
 /// time it runs, not a reason to call a GitHub checkout local. A root
 /// whose remotes cannot be read is a warning and the entry is local, so
 /// the entry is still there to be named in the sidebar and the reason is
-/// in the popup. Then repeated identities are dropped: a roots-only
+/// in the popup. Then repeated identities are dropped: a root-only
 /// entry may have turned out to be a repository declared above it.
 pub async fn resolve(config: &mut Config, git: &Git) {
     let hosts = config.github_hosts();
     let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
     for entry in config.repo.iter_mut().filter(|r| !r.is_resolved()) {
-        // `parse` keeps no entry with neither `github` nor roots, so an
-        // unresolved entry has a first root; were one to get here anyway,
+        // `parse` keeps no entry with neither `github` nor root, so an
+        // unresolved entry has a root; were one to get here anyway,
         // local is the answer that asks nothing of the network.
-        let Some(root) = entry.root_paths().into_iter().next() else {
+        let Some(root) = entry.root_path() else {
             entry.resolve(None);
             continue;
         };
@@ -105,7 +105,7 @@ mod tests {
     /// the struct cannot be spelled out from here.
     fn roots_only(root: &Path) -> RepoConfig {
         let mut repo = RepoConfig::default();
-        repo.roots = vec![root.to_string_lossy().into_owned()];
+        repo.root = Some(root.to_string_lossy().into_owned());
         repo
     }
 
@@ -202,7 +202,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_roots_only_entry_that_turns_out_to_be_a_declared_repository_is_dropped() {
+    async fn a_root_only_entry_that_turns_out_to_be_a_declared_repository_is_dropped() {
         let tmp = tempfile::tempdir().unwrap();
         let clone = tmp.path().join("project");
         init_repo(&clone);

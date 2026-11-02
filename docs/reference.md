@@ -449,7 +449,7 @@ requires `Issues: write`, as do Close as issue and closing an issue.
 ## Configuration
 
 Perch reads `~/.perch/config.toml` (or `$PERCH_HOME/config.toml`). A repository
-can have a GitHub identity, local roots, or both:
+can have a GitHub identity, a local root, or both:
 
 ```toml
 poll_interval_secs = 60
@@ -457,15 +457,15 @@ poll_interval_secs = 60
 [[repo]]
 github = "slatedb/slatedb"
 name = "slatedb"
-roots = ["~/Code/slatedb"]
+root = "~/Code/slatedb"
 ```
 
-`name` is only the sidebar label. `roots` lets Perch discover existing local
+`name` is only the sidebar label. `root` lets Perch discover existing local
 branches and worktrees. Neither setting causes a repository-wide GitHub crawl.
 A worktree with no pull request is yours, so it is in **Authored**, whether Perch
 made it or found it under a root; the base branch never becomes a row. Once
 someone else's pull request attaches to it, the row goes by that author.
-A repository with roots and no GitHub remote is `local/<name>`: it has no pull
+A repository with a root and no GitHub remote is `local/<name>`: it has no pull
 requests or issues, and everything else works.
 
 New work (see [Starting work](#starting-work)) reads two more tables:
@@ -476,7 +476,7 @@ branch_prefix = "chris/"       # before a branch name Perch fills in
 approvals = "auto"             # or "ask"; see Approvals
 
 [[repo]]
-roots = ["~/Code/perch"]
+root = "~/Code/perch"
 
 [repo.work]                    # what a Work run here may reach
 approvals = "never"            # over [work]'s, for this repository only
@@ -519,13 +519,27 @@ code in Code, sticky headers, hovers and references, before the zoom; the
 line height follows it. The UI's own text, and code inside a comment or an
 answer, change only with `zoom`.
 
+`[ui]` sets the look:
+
+```toml
+[ui]
+appearance = "dark"            # "light", "dark" or "system", the default
+code_font = "Fira Code"        # off macOS only
+```
+
+Perch is light or dark as the system is unless `appearance` says otherwise.
+On Linux under X11 the system's setting doesn't reach Perch, so there it is
+light. On macOS code is set in SF Mono. Elsewhere it is `code_font`, else
+the first installed of JetBrains Mono, DejaVu Sans Mono, Noto Sans Mono,
+Liberation Mono, Adwaita Mono and Droid Sans Mono.
+
 rust-analyzer and jdtls run a checkout's own code as they load it:
 rust-analyzer its build scripts and proc macros, following the checkout's
 `.cargo/config.toml` and `rust-toolchain.toml`, and jdtls its Gradle or Maven
 build. Perch starts them by itself only on your own work in a repository in
 your config: a branch, the default branch an issue reads, and a pull request
 you opened whose head is in that repository or your fork of it. A branch in
-one of your roots counts as your own, so one you check out there from
+your root counts as your own, so one you check out there from
 someone else's fork, as `gh pr checkout` does, starts them too. On anything
 else, such as someone else's pull request, a branch you cut from one, or a
 repository not in your config, they wait, and a toast names the item with

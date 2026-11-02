@@ -24,7 +24,7 @@ Perch reads `~/.perch/config.toml`, or `$PERCH_HOME/config.toml` when
 | `[lsp] max_memory_mb` | `8192` | Memory all language servers may use before idle ones are stopped |
 | `[[repo]] github` | none | The repository's `owner/repo` on GitHub; leave out for a local-only repository |
 | `[[repo]] name` | the repo's name | Name shown in the sidebar |
-| `[[repo]] roots` | `[]` | Your local clones, where Perch finds branches and worktrees and cuts new ones |
+| `[[repo]] root` | none | Your local clone, where Perch finds branches and worktrees and cuts new ones |
 | `[[repo]] base` | the remote's default | Base branch, when the remote doesn't say |
 | `[repo.work] write` | `[]` | Extra directories Work runs may write, such as a package cache |
 | `[repo.work] network` | `[]` | Hosts Work runs may reach, such as `index.crates.io` |

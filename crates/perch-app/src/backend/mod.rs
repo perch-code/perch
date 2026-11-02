@@ -4086,7 +4086,7 @@ async fn run(
 ) {
     tracing::info!("backend started");
     let mut config = Config::load();
-    // A `[[repo]]` with roots and no `github` is whatever its first root
+    // A `[[repo]]` with a root and no `github` is whatever its root
     // is, which takes a look at the directory before anything reads the
     // declared list. No token is needed: the scan reads the root's own
     // config and fetches nothing.
@@ -12441,17 +12441,16 @@ fn owned_repo(store: &perch_git::Store, item: &Item) -> Option<PathBuf> {
     RepoId::parse(&item.repo_full_name).map(|repo| store.bare_path(&repo))
 }
 
-/// The first of a repository's roots that is a checkout, where a branch
-/// of the reader's own clone is cut.
+/// A repository's root, when it is a checkout, where a branch of the
+/// reader's own clone is cut.
 fn root_of(ctx: &Ctx, identity: &str) -> Option<PathBuf> {
     ctx.config()
-        .roots_for(identity)
-        .into_iter()
-        .find(|root| root.join(".git").exists())
+        .root_for(identity)
+        .filter(|root| root.join(".git").exists())
 }
 
 /// A repository that lives only on this machine has no clone in the
-/// store to cut from, so a cut there needs one of its roots.
+/// store to cut from, so a cut there needs its root.
 fn no_root_for_local(ctx: &Ctx, repo_full_name: &str) -> Option<String> {
     (perch_github::is_local(repo_full_name) && root_of(ctx, repo_full_name).is_none()).then(|| {
         format!(
@@ -12723,11 +12722,11 @@ async fn add_repository(ctx: &Ctx, folder: &Path, path: &Path) -> Result<String,
     let root = root.canonicalize().unwrap_or(root);
     let config = ctx.config();
     for entry in &config.repo {
-        for existing in entry.root_paths() {
+        if let Some(existing) = entry.root_path() {
             let existing = existing.canonicalize().unwrap_or(existing);
             if existing == root {
                 return Err(format!(
-                    "{} is already a root of {}",
+                    "{} is already the root of {}",
                     root.display(),
                     entry.display_name()
                 ));
@@ -12743,9 +12742,8 @@ async fn add_repository(ctx: &Ctx, folder: &Path, path: &Path) -> Result<String,
         .iter()
         .find(|entry| {
             entry
-                .root_paths()
-                .into_iter()
-                .any(|r| r.canonicalize().unwrap_or(r) == root)
+                .root_path()
+                .is_some_and(|r| r.canonicalize().unwrap_or(r) == root)
         })
         .and_then(|entry| entry.identity().map(str::to_string))
         .ok_or_else(|| {
@@ -14203,7 +14201,7 @@ async fn refresh_items(ctx: &Ctx) {
     }
 }
 
-/// Every worktree under a declared repository's roots is an item, and one
+/// Every worktree under a declared repository's root is an item, and one
 /// whose directory has gone is deleted, or archived when it has threads.
 /// Returns whether anything changed.
 async fn scan_roots(ctx: &Ctx) -> bool {
@@ -14231,7 +14229,7 @@ async fn scan_roots(ctx: &Ctx) -> bool {
         };
         let local = perch_github::is_local(identity);
         let name = declared.display_name();
-        for root in declared.root_paths() {
+        if let Some(root) = declared.root_path() {
             let scan =
                 match perch_git::scan_root(git, &root, declared.base.as_deref(), &hosts).await {
                     Ok(s) => s,
@@ -20653,11 +20651,11 @@ mod tests {
         repo
     }
 
-    /// A `[[repo]]` with roots and no GitHub remote, resolved the way the
+    /// A `[[repo]]` with a root and no GitHub remote, resolved the way the
     /// startup scan resolves one: `local/<name>`.
     fn local_repo(name: &str) -> perch_github::RepoConfig {
         let mut repo = perch_github::RepoConfig::default();
-        repo.roots = vec![format!("/x/{name}")];
+        repo.root = Some(format!("/x/{name}"));
         repo.resolve(None);
         repo
     }
@@ -29321,7 +29319,7 @@ read eof || true
     fn rooted(github: Option<&str>, root: &Path) -> perch_github::RepoConfig {
         let mut repo = perch_github::RepoConfig::default();
         repo.github = github.map(str::to_string);
-        repo.roots = vec![root.to_string_lossy().into_owned()];
+        repo.root = Some(root.to_string_lossy().into_owned());
         repo
     }
 
@@ -29660,7 +29658,7 @@ read eof || true
         assert_eq!(identity, "local/notes");
         let text = std::fs::read_to_string(&config).unwrap();
         assert!(
-            text.starts_with("# mine\npoll_interval_secs = 30\n\n[[repo]]\nroots = ["),
+            text.starts_with("# mine\npoll_interval_secs = 30\n\n[[repo]]\nroot = "),
             "{text}"
         );
         assert!(
@@ -29680,7 +29678,7 @@ read eof || true
         assert_eq!(items.len(), 1, "the root was scanned: {items:?}");
 
         let again = add_repository(&ctx, &notes, &config).await.unwrap_err();
-        assert!(again.contains("is already a root of notes"), "{again}");
+        assert!(again.contains("is already the root of notes"), "{again}");
         let elsewhere = add_repository(&ctx, dir.path(), &config).await.unwrap_err();
         assert!(
             elsewhere.contains("is not in a git repository"),

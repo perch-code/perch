@@ -375,7 +375,7 @@ fn secrets(ctx: &Ctx) -> Secrets {
                 .as_deref()
                 .is_some_and(|g| g.eq_ignore_ascii_case(REPO))
         })
-        .flat_map(|r| r.roots.iter().map(|root| expand(root, home.as_deref())))
+        .filter_map(|r| r.root.as_deref().map(|root| expand(root, home.as_deref())))
         .collect();
     if let Some(items) = ctx.with_cache(|cache| cache.load_items().unwrap_or_default()) {
         for item in items {
@@ -945,21 +945,22 @@ fn repo_summary(value: &toml::Value) -> String {
     };
     let tables: Vec<&toml::Table> = repos.iter().filter_map(|r| r.as_table()).collect();
     let on_github = tables.iter().filter(|t| t.contains_key("github")).count();
-    let roots: usize = tables
+    let rooted = tables
         .iter()
-        .map(|t| {
-            t.get("roots")
-                .and_then(|r| r.as_array())
-                .map_or(0, Vec::len)
+        .filter(|t| {
+            t.contains_key("root")
+                || t.get("roots")
+                    .and_then(|r| r.as_array())
+                    .is_some_and(|r| !r.is_empty())
         })
-        .sum();
+        .count();
     let trusted = tables
         .iter()
         .filter(|t| t.get("trust").and_then(|v| v.as_bool()) == Some(true))
         .count();
     let work = tables.iter().filter(|t| t.contains_key("work")).count();
     format!(
-        "repo: {} entries, {on_github} on GitHub, {roots} roots in all, {trusted} with trust, {work} with [repo.work]",
+        "repo: {} entries, {on_github} on GitHub, {rooted} with a root, {trusted} with trust, {work} with [repo.work]",
         tables.len()
     )
 }
@@ -1034,7 +1035,7 @@ token = "ghp_secret"
 model = "sonnet"
 [[repo]]
 github = "acme/rocket"
-roots = ["~/Code/rocket", "~/Code/rocket-2"]
+root = "~/Code/rocket"
 trust = true
 [[repo]]
 roots = ["~/Code/side"]
@@ -1051,7 +1052,7 @@ paths = ["/tmp"]
         assert!(lines.contains("`agent.model = \"sonnet\"`"), "{lines}");
         assert!(
             lines.contains(
-                "repo: 2 entries, 1 on GitHub, 3 roots in all, 1 with trust, 1 with [repo.work]"
+                "repo: 2 entries, 1 on GitHub, 2 with a root, 1 with trust, 1 with [repo.work]"
             ),
             "{lines}"
         );

@@ -445,10 +445,10 @@ pub struct RepoLsp {
 }
 
 /// Why a `[repo.work] write` entry is refused, if it is: it is, or holds,
-/// the home directory or Perch's own, or it is in or holds a root's git
+/// the home directory or Perch's own, or it is in or holds the root's git
 /// directory. A run that could write any of those could change what runs
 /// outside its sandbox: a shell profile, Perch's database, a hook.
-fn refused_write(path: &Path, roots: &[PathBuf]) -> Option<String> {
+fn refused_write(path: &Path, root: Option<&Path>) -> Option<String> {
     let path = normalize(path);
     let covers = |other: &Path| other.starts_with(&path);
     let home = home_dir();
@@ -459,7 +459,7 @@ fn refused_write(path: &Path, roots: &[PathBuf]) -> Option<String> {
     if covers(&perch) || path.starts_with(&perch) {
         return Some(format!("it is or is in {}", perch.display()));
     }
-    for root in roots {
+    if let Some(root) = root {
         let git = root.join(".git");
         if covers(&git) || path.starts_with(&git) {
             return Some(format!("it is or is in {}", git.display()));
@@ -498,7 +498,7 @@ pub fn append_repo(config: &Path, root: &Path) -> std::io::Result<()> {
         Ok(rest) => format!("~/{}", rest.display()),
         Err(_) => root.display().to_string(),
     };
-    let roots = toml::Value::Array(vec![toml::Value::String(shown)]);
+    let root = toml::Value::String(shown);
     let existing = match std::fs::read_to_string(config) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -511,7 +511,7 @@ pub fn append_repo(config: &Path, root: &Path) -> std::io::Result<()> {
         }
         add.push('\n');
     }
-    add.push_str(&format!("[[repo]]\nroots = {roots}\n"));
+    add.push_str(&format!("[[repo]]\nroot = {root}\n"));
     if let Some(parent) = config.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -611,7 +611,7 @@ fn repo_table(text: &str, entry: &RepoConfig) -> Option<std::ops::Range<usize>> 
             [r] => {
                 r.github.as_deref().map(str::to_lowercase)
                     == entry.github.as_deref().map(str::to_lowercase)
-                    && r.roots == entry.roots
+                    && r.root == entry.root
                     && r.name == entry.name
             }
             _ => false,
@@ -638,10 +638,15 @@ pub struct RepoConfig {
     /// else the first root's basename.
     #[serde(default)]
     pub name: Option<String>,
-    /// Directories that are checkouts of the repository, or worktrees of
-    /// one. A leading `~` is the home directory.
+    /// Your checkout of the repository, where Perch finds its branches
+    /// and worktrees and cuts new ones. A leading `~` is the home
+    /// directory.
     #[serde(default)]
-    pub roots: Vec<String>,
+    pub root: Option<String>,
+    /// The old `roots` list. `parse` takes its first entry as `root` and
+    /// empties it, so nothing past `parse` reads it.
+    #[serde(default)]
+    roots: Vec<String>,
     /// The base branch, used when no remote HEAD says which it is.
     #[serde(default)]
     pub base: Option<String>,
@@ -660,12 +665,12 @@ pub struct RepoConfig {
 }
 
 impl RepoConfig {
-    pub fn root_paths(&self) -> Vec<PathBuf> {
-        self.roots.iter().map(|r| expand_home(r)).collect()
+    pub fn root_path(&self) -> Option<PathBuf> {
+        self.root.as_deref().map(expand_home)
     }
 
     /// The identity, once there is one: `github` when the file gave it,
-    /// else what `resolve` settled on. None for a roots-only entry the
+    /// else what `resolve` settled on. None for a root-only entry the
     /// scan has not reached yet.
     pub fn identity(&self) -> Option<&str> {
         self.github.as_deref().or(self.identity.as_deref())
@@ -676,8 +681,8 @@ impl RepoConfig {
     }
 
     /// What the sidebar shows: `name`, else the repo half of `github`,
-    /// else the first root's basename. Empty only for an entry `parse`
-    /// would not have kept.
+    /// else the root's basename. Empty only for an entry `parse` would
+    /// not have kept.
     pub fn display_name(&self) -> String {
         if let Some(name) = &self.name {
             return name.clone();
@@ -685,14 +690,14 @@ impl RepoConfig {
         if let Some((_, repo)) = self.github.as_deref().and_then(|g| g.split_once('/')) {
             return repo.to_string();
         }
-        self.root_paths()
-            .first()
-            .and_then(|root| root.file_name())
+        self.root_path()
+            .as_deref()
+            .and_then(Path::file_name)
             .map(|base| base.to_string_lossy().into_owned())
             .unwrap_or_default()
     }
 
-    /// Give a roots-only entry its identity: `Some(slug)` from a GitHub
+    /// Give a root-only entry its identity: `Some(slug)` from a GitHub
     /// remote makes it that repository, `None` makes it `local/<name>`.
     pub fn resolve(&mut self, github: Option<String>) {
         self.identity = Some(match github {
@@ -701,13 +706,13 @@ impl RepoConfig {
         });
     }
 
-    /// How a warning names the entry: by its `github`, else its roots,
+    /// How a warning names the entry: by its `github`, else its root,
     /// else its `name`, else as the bare table.
     fn label(&self) -> String {
         if let Some(github) = &self.github {
             format!("[[repo]] github = {github:?}")
-        } else if !self.roots.is_empty() {
-            format!("[[repo]] roots = {:?}", self.roots)
+        } else if let Some(root) = &self.root {
+            format!("[[repo]] root = {root:?}")
         } else if let Some(name) = &self.name {
             format!("[[repo]] name = {name:?}")
         } else {
@@ -769,16 +774,14 @@ impl Config {
         }
     }
 
-    /// The declared roots of the repository with an identity, `~` expanded.
-    /// Empty when nothing declares it, or the entry has none.
-    pub fn roots_for(&self, identity: &str) -> Vec<PathBuf> {
-        self.entry(identity)
-            .map(RepoConfig::root_paths)
-            .unwrap_or_default()
+    /// The declared root of the repository with an identity, `~` expanded.
+    /// None when nothing declares it, or the entry has none.
+    pub fn root_for(&self, identity: &str) -> Option<PathBuf> {
+        self.entry(identity).and_then(RepoConfig::root_path)
     }
 
     /// The identities in config order, which is the order the sidebar uses.
-    /// A roots-only entry is left out until `resolve` has given it one.
+    /// A root-only entry is left out until `resolve` has given it one.
     pub fn declared(&self) -> Vec<String> {
         self.repo
             .iter()
@@ -811,7 +814,7 @@ impl Config {
     /// After every entry is resolved: a later entry whose identity repeats
     /// an earlier one's is dropped with a warning naming both. `parse`
     /// already refused a repeated `github`, so what lands here is a
-    /// roots-only entry whose checkout turned out to be of a repository
+    /// root-only entry whose checkout turned out to be of a repository
     /// declared above it.
     pub fn drop_repeated_identities(&mut self) {
         let mut kept: Vec<RepoConfig> = Vec::new();
@@ -925,7 +928,7 @@ impl Config {
     /// that is not `owner/repo` would not split the way everything
     /// downstream splits an identity; the owner `local` is kept for
     /// repositories with no GitHub remote; an entry with neither `github`
-    /// nor roots has nothing to identify and nothing to scan; and two entries
+    /// nor root has nothing to identify and nothing to scan; and two entries
     /// with the same `github`, or two the sidebar would call the same
     /// thing, are one repository or an ambiguity, so the later one goes.
     ///
@@ -934,10 +937,27 @@ impl Config {
     /// nothing breaks on upgrade.
     ///
     /// An entry with `github` has its identity from here on. One with only
-    /// roots waits for the scan to say whether its checkout is on GitHub.
+    /// a root waits for the scan to say whether its checkout is on GitHub.
+    ///
+    /// A file from before `root` said `roots = [..]`. Its first entry reads
+    /// as `root`, with a notice when there were more, which are not read.
     fn keep_well_formed_repos(&mut self) {
         let mut kept: Vec<RepoConfig> = Vec::new();
         for mut r in std::mem::take(&mut self.repo) {
+            let roots = std::mem::take(&mut r.roots);
+            match (&r.root, roots.as_slice()) {
+                (_, []) => {}
+                (Some(root), _) => self.warnings.push(format!(
+                    "config.toml: [[repo]] root = {root:?} also has roots = {roots:?}, which was not read"
+                )),
+                (None, [only]) => r.root = Some(only.clone()),
+                (None, [first, ..]) => {
+                    self.warnings.push(format!(
+                        "config.toml: [[repo]] roots = {roots:?} was read as root = {first:?}; a repository has one root now"
+                    ));
+                    r.root = Some(first.clone());
+                }
+            }
             if r.github.is_none() && r.name.as_deref().is_some_and(|n| n.contains('/')) {
                 let old = r.name.take().unwrap_or_default();
                 self.warnings.push(format!(
@@ -958,9 +978,9 @@ impl Config {
                 ));
                 continue;
             }
-            if r.github.is_none() && r.roots.is_empty() {
+            if r.github.is_none() && r.root.is_none() {
                 self.warnings.push(format!(
-                    "config.toml: {} has neither github nor roots, so there is nothing to identify or scan; the entry was skipped",
+                    "config.toml: {} has neither github nor root, so there is nothing to identify or scan; the entry was skipped",
                     r.label()
                 ));
                 continue;
@@ -990,12 +1010,11 @@ impl Config {
                 ));
                 continue;
             }
-            let roots = r.root_paths();
+            let root = r.root_path();
             let label = r.label();
             let warnings = &mut self.warnings;
-            r.work
-                .write
-                .retain(|entry| match refused_write(&expand_home(entry), &roots) {
+            r.work.write.retain(|entry| {
+                match refused_write(&expand_home(entry), root.as_deref()) {
                     Some(why) => {
                         warnings.push(format!(
                         "config.toml: {label} [repo.work] write = {entry:?} was left out: {why}"
@@ -1003,7 +1022,8 @@ impl Config {
                         false
                     }
                     None => true,
-                });
+                }
+            });
             kept.push(r);
         }
         self.repo = kept;
@@ -1070,7 +1090,7 @@ mod tests {
 
         append_repo(&path, Path::new("/srv/notes")).unwrap();
         let first = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(first, "[[repo]]\nroots = [\"/srv/notes\"]\n");
+        assert_eq!(first, "[[repo]]\nroot = \"/srv/notes\"\n");
 
         let mine = "# mine\npoll_interval_secs = 30\n\n[agent]\nmodel = \"opus\"";
         std::fs::write(&path, mine).unwrap();
@@ -1078,7 +1098,7 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with(mine), "{text}");
         assert!(
-            text.ends_with("\n\n[[repo]]\nroots = ['~/Code/wid\"gets']\n"),
+            text.ends_with("\n\n[[repo]]\nroot = '~/Code/wid\"gets'\n"),
             "{text}"
         );
         let config = Config::parse(&text).unwrap();
@@ -1086,8 +1106,8 @@ mod tests {
         assert_eq!(config.agent.model, "opus");
         assert_eq!(config.repo.len(), 1);
         assert_eq!(
-            config.repo[0].root_paths(),
-            [home_dir().join("Code").join("wid\"gets")]
+            config.repo[0].root_path(),
+            Some(home_dir().join("Code").join("wid\"gets"))
         );
     }
 
@@ -1095,7 +1115,7 @@ mod tests {
     fn a_repository_is_taken_out_with_its_tables_and_comments_and_the_rest_kept() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let text = "# mine\npoll_interval_secs = 30\n\n[[repo]]\ngithub = \"a/one\"\n\n# the notes\n[[repo]]\nroots = [\"/srv/notes\"]\n[repo.work]\napprovals = \"ask\"\n\n# about two\n[[repo]]\ngithub = \"a/two\"\n\n[agent]\nmodel = \"opus\"\n";
+        let text = "# mine\npoll_interval_secs = 30\n\n[[repo]]\ngithub = \"a/one\"\n\n# the notes\n[[repo]]\nroot = \"/srv/notes\"\n[repo.work]\napprovals = \"ask\"\n\n# about two\n[[repo]]\ngithub = \"a/two\"\n\n[agent]\nmodel = \"opus\"\n";
         std::fs::write(&path, text).unwrap();
         let notes = Config::parse(text).unwrap().repo[1].clone();
 
@@ -1194,7 +1214,7 @@ mod tests {
 branch_prefix = "chris/"
 
 [[repo]]
-roots = ["/srv/notes"]
+root = "/srv/notes"
 
 [repo.work]
 write = ["~/.cargo/registry", "~", "/", "/srv/notes/.git/hooks", "/srv/notes/.git/..", "~/Code/../.perch"]
@@ -1406,12 +1426,12 @@ network = ["index.crates.io"]
     }
 
     #[test]
-    fn a_repository_parses_with_and_without_roots() {
+    fn a_repository_parses_with_and_without_a_root() {
         let c = Config::parse(
             r#"
             [[repo]]
             github = "criccomini/perch"
-            roots = ["~/Code/perch", "/tmp/perch-2"]
+            root = "~/Code/perch"
             base = "trunk"
 
             [[repo]]
@@ -1420,16 +1440,50 @@ network = ["index.crates.io"]
         )
         .unwrap();
         assert_eq!(c.repo.len(), 2);
-        assert_eq!(
-            c.repo[0].root_paths(),
-            vec![home_dir().join("Code/perch"), PathBuf::from("/tmp/perch-2")]
-        );
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+        assert_eq!(c.repo[0].root_path(), Some(home_dir().join("Code/perch")));
         assert_eq!(c.repo[0].base.as_deref(), Some("trunk"));
-        assert_eq!(c.roots_for("Criccomini/Perch"), c.repo[0].root_paths());
-        assert!(c.repo[1].roots.is_empty());
+        assert_eq!(c.root_for("Criccomini/Perch"), c.repo[0].root_path());
+        assert_eq!(c.repo[1].root, None);
         assert_eq!(c.repo[1].base, None);
-        assert!(c.roots_for("slatedb/slatedb").is_empty());
-        assert!(c.roots_for("nobody/declared").is_empty());
+        assert_eq!(c.root_for("slatedb/slatedb"), None);
+        assert_eq!(c.root_for("nobody/declared"), None);
+    }
+
+    #[test]
+    fn the_old_roots_list_reads_as_its_first_root() {
+        let c = Config::parse(
+            r#"
+            [[repo]]
+            roots = ["~/Code/notes"]
+
+            [[repo]]
+            github = "criccomini/perch"
+            roots = ["~/Code/perch", "/tmp/perch-2"]
+
+            [[repo]]
+            github = "slatedb/slatedb"
+            root = "~/Code/slatedb"
+            roots = ["/tmp/slatedb-2"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.repo[0].root.as_deref(), Some("~/Code/notes"));
+        assert_eq!(c.repo[1].root.as_deref(), Some("~/Code/perch"));
+        assert_eq!(c.repo[2].root.as_deref(), Some("~/Code/slatedb"));
+        assert_eq!(c.warnings.len(), 2, "{:?}", c.warnings);
+        assert!(
+            c.warnings[0].contains(
+                "roots = [\"~/Code/perch\", \"/tmp/perch-2\"] was read as root = \"~/Code/perch\""
+            ),
+            "{}",
+            c.warnings[0]
+        );
+        assert!(
+            c.warnings[1].contains("root = \"~/Code/slatedb\" also has roots = [\"/tmp/slatedb-2\"], which was not read"),
+            "{}",
+            c.warnings[1]
+        );
     }
 
     #[test]
@@ -1468,14 +1522,14 @@ network = ["index.crates.io"]
     }
 
     #[test]
-    fn a_roots_only_entry_is_named_after_its_first_root() {
+    fn a_root_only_entry_is_named_after_its_root() {
         let c = Config::parse(
             r#"
             [[repo]]
-            roots = ["~/Code/notes", "/tmp/notes-2"]
+            root = "~/Code/notes"
 
             [[repo]]
-            roots = ["/srv/scratch/"]
+            root = "/srv/scratch/"
             name = "Scratch"
             "#,
         )
@@ -1491,17 +1545,17 @@ network = ["index.crates.io"]
     }
 
     #[test]
-    fn a_roots_only_entry_is_declared_once_resolved() {
+    fn a_root_only_entry_is_declared_once_resolved() {
         let mut c = Config::parse(
             r#"
             [[repo]]
             github = "slatedb/slatedb"
 
             [[repo]]
-            roots = ["~/Code/notes"]
+            root = "~/Code/notes"
 
             [[repo]]
-            roots = ["~/Code/perch"]
+            root = "~/Code/perch"
             "#,
         )
         .unwrap();
@@ -1515,7 +1569,7 @@ network = ["index.crates.io"]
             "not declared until the scan says what it is"
         );
         assert!(!c.is_declared("local/notes"));
-        assert!(c.roots_for("local/notes").is_empty());
+        assert_eq!(c.root_for("local/notes"), None);
 
         c.repo[1].resolve(None);
         assert_eq!(c.repo[1].identity(), Some("local/notes"));
@@ -1529,12 +1583,12 @@ network = ["index.crates.io"]
         );
         assert!(c.is_declared("Local/Notes"));
         assert_eq!(
-            c.roots_for("local/notes"),
-            vec![home_dir().join("Code/notes")]
+            c.root_for("local/notes"),
+            Some(home_dir().join("Code/notes"))
         );
         assert_eq!(
-            c.roots_for("criccomini/perch"),
-            vec![home_dir().join("Code/perch")]
+            c.root_for("criccomini/perch"),
+            Some(home_dir().join("Code/perch"))
         );
         assert_eq!(
             c.declared_repos(),
@@ -1563,10 +1617,10 @@ network = ["index.crates.io"]
             github = "slatedb/slatedb"
 
             [[repo]]
-            roots = ["~/Code/slatedb-checkout"]
+            root = "~/Code/slatedb-checkout"
 
             [[repo]]
-            roots = ["~/Code/notes"]
+            root = "~/Code/notes"
             "#,
         )
         .unwrap();
@@ -1576,13 +1630,13 @@ network = ["index.crates.io"]
         c.drop_repeated_identities();
         assert_eq!(c.declared(), vec!["slatedb/slatedb", "local/notes"]);
         assert_eq!(
-            c.roots_for("slatedb/slatedb"),
-            Vec::<PathBuf>::new(),
-            "the first entry's roots, which are none"
+            c.root_for("slatedb/slatedb"),
+            None,
+            "the first entry's root, which it has none of"
         );
         assert_eq!(c.warnings.len(), 1);
         assert!(
-            c.warnings[0].contains("[[repo]] roots = [\"~/Code/slatedb-checkout\"]"),
+            c.warnings[0].contains("[[repo]] root = \"~/Code/slatedb-checkout\""),
             "{}",
             c.warnings[0]
         );
@@ -1610,7 +1664,7 @@ network = ["index.crates.io"]
             github = "criccomini/perch"
 
             [[repo]]
-            roots = ["~/Code/notes"]
+            root = "~/Code/notes"
             "#,
         )
         .unwrap();
@@ -1696,7 +1750,7 @@ network = ["index.crates.io"]
             r#"
             [[repo]]
             github = "slatedb"
-            roots = ["~/Code/slatedb"]
+            root = "~/Code/slatedb"
 
             [[repo]]
             github = "slatedb/slatedb"
@@ -1738,7 +1792,7 @@ network = ["index.crates.io"]
             r#"
             [[repo]]
             github = "slatedb/slatedb"
-            roots = ["~/Code/slatedb"]
+            root = "~/Code/slatedb"
 
             [[repo]]
             github = "slatedb/slatedb-go"
@@ -1746,7 +1800,7 @@ network = ["index.crates.io"]
             [[repo]]
             github = "SlateDB/slatedb"
             name = "fork"
-            roots = ["~/Code/slatedb", "~/Code/slatedb-fork"]
+            root = "~/Code/slatedb-fork"
 
             [[repo]]
             github = "slatedb/slatedb-go"
@@ -1759,12 +1813,15 @@ network = ["index.crates.io"]
             "the first spelling, once"
         );
         assert_eq!(
-            c.repo[0].roots,
-            vec!["~/Code/slatedb"],
-            "the later entry's roots do not join the first's"
+            c.repo[0].root.as_deref(),
+            Some("~/Code/slatedb"),
+            "the later entry's root does not replace the first's"
         );
-        assert!(c.repo[1].roots.is_empty());
-        assert_eq!(c.roots_for("SLATEDB/SLATEDB").len(), 1);
+        assert_eq!(c.repo[1].root, None);
+        assert_eq!(
+            c.root_for("SLATEDB/SLATEDB"),
+            Some(home_dir().join("Code/slatedb"))
+        );
         assert_eq!(c.warnings.len(), 2);
         assert!(
             c.warnings[0].contains("[[repo]] github = \"SlateDB/slatedb\" repeats [[repo]] github = \"slatedb/slatedb\""),
@@ -1796,7 +1853,7 @@ network = ["index.crates.io"]
             github = "criccomini/slatedb"
 
             [[repo]]
-            roots = ["~/Code/SlateDB"]
+            root = "~/Code/SlateDB"
 
             [[repo]]
             github = "criccomini/perch"
@@ -1816,7 +1873,7 @@ network = ["index.crates.io"]
         assert_eq!(
             c.repo.len(),
             2,
-            "the roots-only entry went too, not just the GitHub ones"
+            "the root-only entry went too, not just the GitHub ones"
         );
         assert_eq!(c.display_name("criccomini/slatedb"), "my slatedb");
         assert_eq!(c.warnings.len(), 3, "{:?}", c.warnings);
@@ -1841,7 +1898,7 @@ network = ["index.crates.io"]
             c.warnings[0]
         );
         assert!(
-            c.warnings[1].contains("[[repo]] roots = [\"~/Code/SlateDB\"]"),
+            c.warnings[1].contains("[[repo]] root = \"~/Code/SlateDB\""),
             "case does not tell them apart: {}",
             c.warnings[1]
         );
@@ -1858,7 +1915,7 @@ network = ["index.crates.io"]
             r#"
             [[repo]]
             github = "local/notes"
-            roots = ["~/Code/notes"]
+            root = "~/Code/notes"
 
             [[repo]]
             github = "Local/scratch"
@@ -1895,7 +1952,7 @@ network = ["index.crates.io"]
     }
 
     #[test]
-    fn an_entry_with_neither_github_nor_roots_is_skipped_with_a_warning() {
+    fn an_entry_with_neither_github_nor_root_is_skipped_with_a_warning() {
         let c = Config::parse(
             r#"
             [[repo]]
@@ -1914,12 +1971,12 @@ network = ["index.crates.io"]
         assert_eq!(c.warnings.len(), 2);
         assert!(
             c.warnings[0]
-                .starts_with("config.toml: [[repo]] name = \"notes\" has neither github nor roots"),
+                .starts_with("config.toml: [[repo]] name = \"notes\" has neither github nor root"),
             "{}",
             c.warnings[0]
         );
         assert!(
-            c.warnings[1].starts_with("config.toml: [[repo]] has neither github nor roots"),
+            c.warnings[1].starts_with("config.toml: [[repo]] has neither github nor root"),
             "{}",
             c.warnings[1]
         );
@@ -1938,7 +1995,7 @@ network = ["index.crates.io"]
             r#"
             [[repo]]
             name = "slatedb/slatedb"
-            roots = ["~/Code/slatedb"]
+            root = "~/Code/slatedb"
 
             [[repo]]
             name = "criccomini/perch"
@@ -1961,8 +2018,8 @@ network = ["index.crates.io"]
         );
         assert_eq!(c.repo[0].display_name(), "slatedb");
         assert_eq!(
-            c.roots_for("slatedb/slatedb"),
-            vec![home_dir().join("Code/slatedb")]
+            c.root_for("slatedb/slatedb"),
+            Some(home_dir().join("Code/slatedb"))
         );
         assert_eq!(
             c.repo[1].name.as_deref(),

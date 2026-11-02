@@ -1695,7 +1695,7 @@ mod tests {
         slatedb.github = Some("slatedb/slatedb".into());
         slatedb.lsp.trust = true;
         let mut notes = perch_github::RepoConfig::default();
-        notes.roots = vec!["/x/notes".into()];
+        notes.root = Some("/x/notes".into());
         notes.resolve(None); // local/notes, as the startup scan resolves it
         config.repo = vec![perch, slatedb, notes];
         let trusted = |item: &Item, viewer: Option<&str>, granted: Option<bool>| {

@@ -7,7 +7,7 @@
 //! against the base. Reads only; nothing is written to the cache or to
 //! disk. How the scan is checked without a window.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use perch_git::cmd::Git;
 use perch_git::{branch_churn, scan_root, WorktreeEntry};
@@ -48,18 +48,15 @@ async fn scan(args: &[String]) {
     let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
 
     for repo in &config.repo {
-        let roots: Vec<PathBuf> = repo.root_paths();
+        let root = repo.root_path();
         println!(
             "repo {} ({})",
             repo.display_name(),
             repo.identity().unwrap_or("unresolved")
         );
-        if roots.is_empty() {
-            println!("  no roots");
-            continue;
-        }
-        for root in &roots {
-            print_root(&git, root, repo.base.as_deref(), &hosts).await;
+        match root {
+            Some(root) => print_root(&git, &root, repo.base.as_deref(), &hosts).await,
+            None => println!("  no root"),
         }
     }
 }
