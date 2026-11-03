@@ -284,8 +284,11 @@ async fn the_agent_does_not_inherit_secrets() {
 async fn cancel_hard_kills_a_stubborn_descendant_and_reaps_the_run() {
     let tmp = tempfile::tempdir().unwrap();
     let pid_file = tmp.path().join("descendant.pid");
+    // The descendant writes its own pid once it ignores SIGTERM. Written by
+    // the parent from `$!`, the pid could arrive before the trap, and a
+    // cancel in that gap ended the run without needing SIGKILL.
     let body = format!(
-        "echo '{INIT}'\n(trap '' TERM; while :; do sleep 1; done) &\necho $! > '{}'\nwait",
+        "echo '{INIT}'\nsh -c \"trap '' TERM; echo \\$\\$ > '{}'; while :; do sleep 1; done\" &\nwait",
         pid_file.display()
     );
     let bin = fake_agent(tmp.path(), &body);
