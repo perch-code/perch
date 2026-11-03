@@ -1099,7 +1099,6 @@ fn composer_footer(
     };
     dyn_container(mode, move |mode| match mode {
         FooterMode::Ready => Stack::horizontal((
-            mode_switch(app, state),
             destination_picker(app, state),
             // No effort to pick for GitHub.
             dyn_container(
@@ -1116,7 +1115,7 @@ fn composer_footer(
                     }
                 },
             ),
-            approvals_picker(app, state, backend.clone()),
+            access_picker(app, state, backend.clone()),
             Empty::new().style(|s| s.flex_grow(1.0_f32)),
             crate::review::close_menu::split_button(app, state),
             send_button(move || send_label(state), send.clone()).debug_name("composer-send"),
@@ -1344,64 +1343,6 @@ fn sending_mode(
     } else {
         perch_github::RunMode::Ask
     }
-}
-
-/// Ask or Work, before the model, on an item that takes Work and while
-/// the text is bound for an agent. On an issue, Work is Start work, for a
-/// new question. Absent anywhere else, where every message is a question.
-fn mode_switch(app: AppState, state: ReviewState) -> impl IntoView {
-    use perch_github::RunMode;
-
-    let shown = move || {
-        (work_offered(app, state)
-            && state
-                .composer
-                .with(|c| c.as_ref().is_some_and(|c| !c.destination.is_github())))
-            || start_work_offered(state)
-    };
-    let segment = move |mode: RunMode| {
-        let current = move || {
-            state
-                .composer
-                .with(|c| c.as_ref().map(|c| c.mode) == Some(mode))
-        };
-        Label::derived(move || mode.label().to_string())
-            .on_event_stop(el::Click, move |_, _| state.set_composer_mode(mode))
-            .debug_name(format!("composer-mode:{}", mode.name()))
-            .style(move |s| {
-                let on = current();
-                clickable(s)
-                    .height(24.0)
-                    .padding_horiz(9.0)
-                    .items_center()
-                    .font_size(theme::TEXT_BADGE)
-                    .border_radius(6.0)
-                    .color(if on { theme::fg() } else { theme::fg_muted() })
-                    .apply_if(on, |s| {
-                        s.background(theme::canvas())
-                            .font_weight(theme::weight_emphasis())
-                    })
-                    .apply_if(!on, |s| s.hover(|s| s.color(theme::fg())))
-            })
-    };
-    dyn_container(shown, move |shown| {
-        if shown {
-            Stack::horizontal((segment(RunMode::Ask), segment(RunMode::Work)))
-                .debug_name("composer-mode")
-                .style(|s| {
-                    s.items_center()
-                        .padding(2.0)
-                        .gap(2.0)
-                        .background(theme::canvas_subtle())
-                        .border(1.0)
-                        .border_color(theme::border())
-                        .border_radius(8.0)
-                })
-                .into_any()
-        } else {
-            Empty::new().into_any()
-        }
-    })
 }
 
 /// What a composer with `editing` set is editing.
@@ -1738,24 +1679,26 @@ fn effort_picker(app: AppState, state: ReviewState) -> impl IntoView {
     .debug_name("composer-effort")
 }
 
-/// Who decides a Work run's requests to leave its sandbox, beside the
-/// effort while the composer is on Work: config's level for the
-/// repository, until the reader picks one for the item, which holds
-/// until Perch quits. Allow all reads in the caution colour, here and in
-/// the menu, so it is not on unseen.
-fn approvals_picker(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+/// What the run may do, after the effort, on an item that takes Work and
+/// while the text is bound for an agent: Read only, which is Ask, or
+/// Work with who decides its requests to leave the sandbox. A level is
+/// config's for the repository until the reader picks one for the item,
+/// which holds until Perch quits; Read only keeps it for the next Work.
+/// Allow all reads in the caution colour, here and in the menu, so it is
+/// not on unseen. On an issue the choice is Read only or a new branch,
+/// which is Start work.
+fn access_picker(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     use crate::ui::menu::Menu;
-    use perch_github::Approvals;
+    use perch_github::{Approvals, RunMode};
 
     // A memo, so a write to the composer that leaves this alone does not
     // build the picker again.
     let shown = Memo::new(move |_| {
-        work_offered(app, state)
-            && state.composer.with(|c| {
-                c.as_ref().is_some_and(|c| {
-                    !c.destination.is_github() && c.mode == perch_github::RunMode::Work
-                })
-            })
+        (work_offered(app, state)
+            && state
+                .composer
+                .with(|c| c.as_ref().is_some_and(|c| !c.destination.is_github())))
+            || start_work_offered(state)
     });
     let item = move || {
         state.item.with(|item| {
@@ -1763,30 +1706,65 @@ fn approvals_picker(app: AppState, state: ReviewState, backend: Rc<Backend>) -> 
                 .map(|item| (item.id.clone(), item.repo_full_name.clone()))
         })
     };
+    let mode = move || {
+        state
+            .composer
+            .with(|c| c.as_ref().map_or(RunMode::Ask, |c| c.mode))
+    };
+    // The level a Work send goes with, None on Read only.
     let current = move || {
+        if mode() == RunMode::Ask {
+            return None;
+        }
         let (id, repo) = item()?;
         Some(app.work_approvals.with(|a| a.for_item(&id, &repo)))
     };
+    let face = move || {
+        if mode() == RunMode::Ask {
+            READ_ONLY.to_string()
+        } else if start_work_offered(state) {
+            NEW_BRANCH.to_string()
+        } else {
+            current().map(|a| a.label().to_string()).unwrap_or_default()
+        }
+    };
     let menu = move || {
+        let read_only = floem::reactive::Effect::untrack(mode) == RunMode::Ask;
+        let menu = Menu::new().item(READ_ONLY, move |item| {
+            item.checked(read_only)
+                .note("Reads and answers; changes nothing")
+                .action(move || state.set_composer_mode(RunMode::Ask))
+        });
+        if floem::reactive::Effect::untrack(|| start_work_offered(state)) {
+            return menu
+                .item(NEW_BRANCH, move |item| {
+                    item.checked(!read_only)
+                        .note("Cuts a branch for the issue and starts the work there")
+                        .action(move || state.set_composer_mode(RunMode::Work))
+                })
+                .return_focus(state.composer_box.get_untracked());
+        }
         let Some((id, repo)) = floem::reactive::Effect::untrack(item) else {
-            return Menu::new();
+            return menu;
         };
-        let selected = app
-            .work_approvals
-            .with_untracked(|a| a.for_item(&id, &repo));
+        let selected = (!read_only).then(|| {
+            app.work_approvals
+                .with_untracked(|a| a.for_item(&id, &repo))
+        });
         let agent = state
             .composer
             .with_untracked(|c| c.as_ref().and_then(|c| c.destination.agent_choice()));
-        let mut menu = Menu::new();
+        let mut menu = menu;
         for approvals in Approvals::ALL {
             let id = id.clone();
             let backend = backend.clone();
             let note = approvals_note(approvals, agent.as_ref());
             menu = menu.item(approvals.label(), move |item| {
                 let item = item
-                    .checked(approvals == selected)
+                    .checked(Some(approvals) == selected)
                     .note(note)
                     .action(move || {
+                        state.set_composer_mode(RunMode::Work);
                         app.work_approvals.update(|a| {
                             a.items.insert(id.clone(), approvals);
                         });
@@ -1808,7 +1786,7 @@ fn approvals_picker(app: AppState, state: ReviewState, backend: Rc<Backend>) -> 
                 return Empty::new().into_any();
             }
             tinted_menu_button(
-                move || current().map(|a| a.label().to_string()).unwrap_or_default(),
+                face,
                 move || {
                     if current() == Some(Approvals::Never) {
                         theme::alert_caution()
@@ -1818,11 +1796,17 @@ fn approvals_picker(app: AppState, state: ReviewState, backend: Rc<Backend>) -> 
                 },
                 menu.clone(),
             )
-            .debug_name("composer-approvals")
+            .debug_name("composer-access")
             .into_any()
         },
     )
 }
+
+/// The access picker's Ask.
+const READ_ONLY: &str = "Read only";
+
+/// The access picker's Work on an issue, which is Start work.
+const NEW_BRANCH: &str = "New branch";
 
 /// What an approvals level does, under its name in the picker. Claude
 /// Code's auto mode needs a model that has it, and Haiku does not.
@@ -4638,11 +4622,11 @@ mod tests {
         );
     }
 
-    /// On Work the approvals picker sits beside the effort, on config's
+    /// The access picker sits beside the effort. On Work it shows config's
     /// level until a pick, which goes to the backend and holds for the
-    /// item. Ask has nothing to approve, and no picker.
+    /// item. Read only is Ask, and a level picked from it is Work again.
     #[test]
-    fn the_approvals_picker_shows_on_work_and_sends_a_pick() {
+    fn the_access_picker_holds_read_only_and_the_approval_levels() {
         let root = TestRoot::new();
         let app = AppState::new();
         let state = ReviewState::new();
@@ -4685,10 +4669,11 @@ mod tests {
         let effort = find(harness.root_id(), "composer-effort")
             .unwrap()
             .get_visual_rect_no_clip();
-        let chip = find(harness.root_id(), "composer-approvals")
+        let chip = find(harness.root_id(), "composer-access")
             .expect("a picker on Work")
             .get_visual_rect_no_clip();
         assert!(chip.x0 > effort.x1, "after the effort");
+        assert!(find(harness.root_id(), "Label: \"Ask me\"").is_some());
 
         let at = chip.center();
         harness.pointer_down(at.x, at.y);
@@ -4715,10 +4700,40 @@ mod tests {
             perch_github::Approvals::Never
         );
 
-        state.set_composer_mode(perch_github::RunMode::Ask);
-        harness.rebuild();
-        harness.paint();
-        assert!(find(harness.root_id(), "composer-approvals").is_none());
+        let pick = |harness: &mut HeadlessHarness, row: &str| {
+            let at = find(harness.root_id(), "composer-access")
+                .unwrap()
+                .get_visual_rect_no_clip()
+                .center();
+            harness.pointer_down(at.x, at.y);
+            harness.rebuild();
+            harness.paint();
+            let at = find(harness.root_id(), &format!("menu-row:{row}"))
+                .unwrap()
+                .get_visual_rect_no_clip()
+                .center();
+            harness.click(at.x, at.y);
+            harness.rebuild();
+            harness.paint();
+        };
+        let mode = || state.composer.get().unwrap().mode;
+
+        pick(&mut harness, "Read only");
+        assert_eq!(mode(), perch_github::RunMode::Ask);
+        assert!(find(harness.root_id(), "Label: \"Read only\"").is_some());
+        assert!(
+            commands.try_recv().is_err(),
+            "Read only leaves the level alone"
+        );
+
+        pick(&mut harness, "Ask me");
+        assert_eq!(mode(), perch_github::RunMode::Work);
+        match commands.try_recv() {
+            Ok(Command::SetApprovals { approvals, .. }) => {
+                assert_eq!(approvals, perch_github::Approvals::Ask);
+            }
+            other => panic!("no pick sent: {other:?}"),
+        }
     }
 
     #[test]
@@ -7428,10 +7443,10 @@ mod tests {
         assert!(find(root_id, "draft-pill").is_some());
     }
 
-    /// On an issue a new question offers Ask and Work, and Work is Start
-    /// work: its button says so, and sending cuts the branch with the
-    /// question for the agent instead of asking it here. The issue's next
-    /// question is a question again.
+    /// On an issue a new question offers Read only and a new branch, which
+    /// is Start work: its button says so, and sending cuts the branch with
+    /// the question for the agent instead of asking it here. The issue's
+    /// next question is a question again.
     #[test]
     fn work_on_an_issue_starts_work_with_the_question() {
         let root = TestRoot::new();
@@ -7448,10 +7463,22 @@ mod tests {
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
         harness.rebuild();
         harness.paint();
-        assert!(find(harness.root_id(), "composer-mode").is_some());
+        assert!(find(harness.root_id(), "composer-access").is_some());
+        assert!(find(harness.root_id(), "Label: \"Read only\"").is_some());
         assert!(find(harness.root_id(), "Label: \"Send\"").is_some());
 
-        click(&mut harness, "composer-mode:work");
+        let at = find(harness.root_id(), "composer-access")
+            .unwrap()
+            .get_visual_rect_no_clip()
+            .center();
+        harness.pointer_down(at.x, at.y);
+        harness.rebuild();
+        harness.paint();
+        assert!(
+            find(harness.root_id(), "menu-row:Ask me").is_none(),
+            "no levels on an issue"
+        );
+        click(&mut harness, "menu-row:New branch");
         assert!(find(harness.root_id(), "Label: \"Start work\"").is_some());
         // The click took the keyboard; the box has it back to send from.
         state.composer_box.get().unwrap().request_focus();

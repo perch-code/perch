@@ -878,13 +878,15 @@ it reads can reach you only through its answer.
 ### Work
 
 A composer on your own work, a worktree with no pull request or a pull
-request you opened, has an **Ask / Work** switch before the model. Anything
+request you opened, has an access picker after the effort: **Read only**,
+which is Ask, then the Work levels under [Approvals](#approvals). Anything
 else, someone else's pull request, an issue, a review's snapshot, is Ask-only,
-and the backend refuses Work there whatever the switch says.
+and the backend refuses Work there whatever the picker says.
 
-On an issue the switch is there for a new question, but Work does not run
-there: the default branch the issue reads is shared by every issue of the
-repository, and has no branch to commit to. Its send reads **Start work**,
+On an issue the picker is there for a new question, with **Read only** and
+**New branch**, but Work does not run there: the default branch the issue
+reads is shared by every issue of the repository, and has no branch to commit
+to. New branch's send reads **Start work**,
 and cuts `perch/issue-<n>` as the bar's Start work does, with what you wrote
 in the new worktree's composer in place of the usual last line of the prompt
 (after the issue's number, title, link and body, and the lines you asked
@@ -892,8 +894,8 @@ about, if any), to send or edit. The issue's next question starts on Ask
 again. A new question
 starts on what you last picked on the item, else Work on a worktree Perch made
 and Ask elsewhere; a follow-up starts on its thread's last run. A session is
-resumed only by a run of its own kind: a switch starts over with the thread
-folded in, as a switch of agent does.
+resumed only by a run of its own kind: a move between Read only and Work
+starts over with the thread folded in, as a switch of agent does.
 
 A Work run edits files and runs commands in the worktree, and is told it may.
 It keeps everything under [What the agent can and cannot do](#what-the-agent-can-and-cannot-do)
@@ -940,10 +942,11 @@ without asking, and each shows in the run's steps as `Allowed without asking:
 …`. The run still starts in its sandbox, and the protected paths (`.git`,
 `.claude`, `.codex`, `.mcp.json`) stay denied.
 
-While the composer is on Work, a picker beside the effort shows who decides
-for the item: **Ask me** (`"ask"`), **Auto-review** (`"auto"`) or **Allow
-all** (`"never"`, in red). It starts on config's level. A pick holds for that
-item until Perch quits and changes nothing in config.toml. Allow all, on or
+The access picker beside the effort shows who decides for the item, after
+Read only: **Ask me** (`"ask"`), **Auto-review** (`"auto"`) or **Allow all**
+(`"never"`, in red). It starts on config's level. A pick holds for that item
+until Perch quits and changes nothing in config.toml; picking Read only keeps
+it for the next Work. Allow all, on or
 off, applies to the next request, even one from a run already going; the
 switch between Ask me and Auto-review applies from the next run, since the
 CLI is started with it.

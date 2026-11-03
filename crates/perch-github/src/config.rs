@@ -376,8 +376,7 @@ pub enum Approvals {
 impl Approvals {
     pub const ALL: [Approvals; 3] = [Approvals::Ask, Approvals::Auto, Approvals::Never];
 
-    /// What the composer's picker calls it. Not "Ask", which the mode
-    /// beside it already is.
+    /// What the composer's picker calls it, after Read only.
     pub fn label(self) -> &'static str {
         match self {
             Self::Auto => "Auto-review",
