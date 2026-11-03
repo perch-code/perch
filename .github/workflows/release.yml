@@ -4,10 +4,8 @@
 # release. A tag with a hyphen (v0.2.0-beta.1) becomes a prerelease, which
 # `releases/latest` skips.
 #
-# Install or update from the latest release (Perch-macos-x86_64.tar.gz on Intel):
-#   gh release download --repo perch-code/perch --pattern Perch-macos-arm64.tar.gz -O - | tar -xz -C /Applications
-# On Linux (Perch-linux-arm64.tar.gz on arm64):
-#   gh release download --repo perch-code/perch --pattern Perch-linux-x86_64.tar.gz -O - | tar -xz -C ~/.local/share
+# install.sh downloads the latest release's tarball for its platform, so
+# keep the Perch-<os>-<arch>.tar.gz names in step with it.
 
 name: Release
 

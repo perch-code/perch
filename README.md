@@ -26,28 +26,16 @@ You need:
 - For agents: [Claude Code](https://claude.com/claude-code) 2.1.223+ and/or
   [Codex CLI](https://github.com/openai/codex) 0.155.1+, signed in
 
-Then install the latest release. On a Mac:
+Then install the latest release:
 
 ```bash
-gh release download --repo perch-code/perch --pattern Perch-macos-arm64.tar.gz -O - | tar -xz -C /Applications
+curl -fsSL https://raw.githubusercontent.com/perch-code/perch/main/install.sh | sh
 ```
 
-On an Intel Mac, download `Perch-macos-x86_64.tar.gz` instead. Perch isn't
-notarized yet, and downloading with `gh` rather than a browser keeps macOS
-from quarantining it.
-
-On Linux, unpack it into `~/.local/share/perch` and link the binary onto
-your PATH:
-
-```bash
-gh release download --repo perch-code/perch --pattern Perch-linux-x86_64.tar.gz -O - | tar -xz -C ~/.local/share
-```
-
-```bash
-ln -sf ~/.local/share/perch/perch ~/.local/bin/perch
-```
-
-On arm64, download `Perch-linux-arm64.tar.gz` instead.
+On a Mac, install.sh puts Perch.app in `/Applications`. On Linux, it unpacks Perch
+into `~/.local/share/perch` and links `~/.local/bin/perch` to it. Perch isn't
+notarized yet, so download the tarball with curl or `gh`, not a browser,
+which would quarantine it.
 
 After that, Perch checks for new releases. Click "Restart to update" to
 upgrade when one is detected.
