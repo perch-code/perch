@@ -4,12 +4,15 @@
 //! The order is the order from GitHub, with the local rows fitted in by
 //! time; filtering (`crate::inbox`) only removes rows from that order.
 
+use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use floem::prelude::*;
 use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate};
 use floem::views::{
-    dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack,
+    dyn_container, virtual_stack, Container, Decorators, Empty, Label, ScrollExt, Stack,
+    VirtualVector,
 };
 use jiff::Timestamp;
 use perch_github::{CheckRunState, Item, ItemActivity, SubjectKind, SubjectState, Thread};
@@ -30,15 +33,21 @@ use crate::ui::widgets::{icon_button, open_in_browser, sidebar_glyph, state_glyp
 
 /// The notification list under the current search, repository, and reason
 /// filters. GitHub's ordering is retained.
+///
+/// Only the rows in view are built: an inbox can hold thousands, and every
+/// row is a stack of labels, faces and a glyph.
 pub fn notification_list(
     state: AppState,
     backend: Rc<Backend>,
     on_open: OpenItem,
 ) -> impl IntoView {
     let show = move || state.item_filters.with(|f| f.inbox.view);
+    // The virtual stack reads its rows again at every step of a scroll, so
+    // they are filtered once here, not there.
+    let rows = Memo::new(move |_| Rows(Arc::new(placed_rows(state, show()))));
     Stack::vertical((
         dyn_container(
-            move || (visible_notifications(state).is_empty(), show()),
+            move || (rows.with(|r| r.0.is_empty()), show()),
             |(empty, show)| {
                 if empty {
                     Label::new(match show {
@@ -57,24 +66,9 @@ pub fn notification_list(
                 }
             },
         ),
-        dyn_stack(
-            move || {
-                let away = show().is_put_away();
-                // Done and Snoozed are Perch's lists, not in GitHub's
-                // order, so their rows keep their own times.
-                let listed = (!away).then(|| state.notifications.with(|t| inbox::listed_at(t)));
-                visible_notifications(state).into_iter().map(move |row| {
-                    let at = match &row {
-                        InboxRow::Thread(thread) => listed
-                            .as_ref()
-                            .and_then(|listed| listed.get(&thread.id).copied())
-                            .unwrap_or(thread.updated_at),
-                        InboxRow::Local { activity, .. } => activity.at,
-                    };
-                    (row, away, at)
-                })
-            },
-            |(row, away, at): &(InboxRow, bool, Timestamp)| match row {
+        virtual_stack(
+            move || rows.get(),
+            |(row, away, at): &PlacedRow| match row {
                 InboxRow::Thread(thread) => RowKey::Thread(
                     thread.id.clone(),
                     *away,
@@ -94,20 +88,75 @@ pub fn notification_list(
                     item.title().to_string(),
                 ),
             },
-            move |(row, away, at)| match row {
-                InboxRow::Thread(thread) => {
-                    notification_row(state, backend.clone(), thread, away, at).into_any()
-                }
-                InboxRow::Local { activity, item } => {
-                    local_row(state, backend.clone(), on_open.clone(), item, activity).into_any()
-                }
+            move |(row, away, at)| {
+                let row = match row {
+                    InboxRow::Thread(thread) => {
+                        notification_row(state, backend.clone(), thread, away, at).into_any()
+                    }
+                    InboxRow::Local { activity, item } => {
+                        local_row(state, backend.clone(), on_open.clone(), item, activity)
+                            .into_any()
+                    }
+                };
+                // A virtual stack places rows by their size alone and takes
+                // no gap, so the hairline between rows is part of each.
+                Container::new(row).style(|s| {
+                    s.width_full()
+                        .height(ROW_PITCH)
+                        .padding_bottom(ROW_PITCH - theme::ROW_HEIGHT)
+                        .flex_shrink(0.0_f32)
+                })
             },
         )
-        .style(|s| s.flex_col().width_full().gap(1.0)),
+        .item_size_fixed(|| ROW_PITCH)
+        .style(|s| s.flex_col().width_full()),
     ))
-    .style(nav_row::list_style)
+    // The last row's hairline is part of the padding below the list.
+    .style(|s| nav_row::list_style(s).padding_bottom(16.0 - (ROW_PITCH - theme::ROW_HEIGHT)))
     .scroll()
     .style(|s| s.width_full().flex_grow(1.0_f32).min_height(0.0))
+}
+
+/// A row and the gap below it, as the list's `gap` spaced them before it
+/// was virtual.
+const ROW_PITCH: f64 = theme::ROW_HEIGHT + 1.0;
+
+/// A visible row, whether it is in Done or Snoozed, and the time its age
+/// shows.
+type PlacedRow = (InboxRow, bool, Timestamp);
+
+/// The visible rows with their times. Done and Snoozed are Perch's lists,
+/// not in GitHub's order, so their rows keep their own times.
+fn placed_rows(state: AppState, show: InboxView) -> Vec<PlacedRow> {
+    let away = show.is_put_away();
+    let listed = (!away).then(|| state.notifications.with(|t| inbox::listed_at(t)));
+    visible_notifications(state)
+        .into_iter()
+        .map(|row| {
+            let at = match &row {
+                InboxRow::Thread(thread) => listed
+                    .as_ref()
+                    .and_then(|listed| listed.get(&thread.id).copied())
+                    .unwrap_or(thread.updated_at),
+                InboxRow::Local { activity, .. } => activity.at,
+            };
+            (row, away, at)
+        })
+        .collect()
+}
+
+/// The rows as the virtual stack reads them, a slice at a time.
+#[derive(Clone, PartialEq)]
+struct Rows(Arc<Vec<PlacedRow>>);
+
+impl VirtualVector<PlacedRow> for Rows {
+    fn total_len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn slice(&self, range: Range<usize>) -> impl Iterator<Item = PlacedRow> {
+        self.0[range].iter().cloned()
+    }
 }
 
 /// What a row of the list is drawn again on.

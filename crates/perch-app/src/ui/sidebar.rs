@@ -1410,6 +1410,57 @@ mod tests {
         assert!(find(harness.root_id(), "Unread pull request").is_some());
     }
 
+    /// A long inbox builds only the rows in view, a pixel apart as ever,
+    /// and builds the rest as they scroll in.
+    #[test]
+    fn a_long_inbox_builds_only_the_rows_in_view() {
+        fn rows(id: floem::ViewId, out: &mut Vec<floem::ViewId>) {
+            if id.debug_name().contains("notification row:") {
+                out.push(id);
+            }
+            for child in id.children() {
+                rows(child, out);
+            }
+        }
+        let (mut harness, state) = harness();
+        state.notifications.set(
+            (0..1000)
+                .map(|n| {
+                    notification(
+                        &format!("{}", 1000 + n),
+                        "org/one",
+                        &format!("Thread {n}"),
+                        SubjectKind::Issue,
+                        false,
+                    )
+                })
+                .collect(),
+        );
+        click_tab(&mut harness, SidebarTab::Inbox);
+        let mut built = Vec::new();
+        rows(harness.root_id(), &mut built);
+        assert!(
+            (2..30).contains(&built.len()),
+            "{} rows built for a 600px sidebar",
+            built.len()
+        );
+        let first = find(harness.root_id(), "notification row:1000").unwrap();
+        let second = find(harness.root_id(), "notification row:1001").unwrap();
+        assert_eq!(
+            second.get_visual_rect_no_clip().y0 - first.get_visual_rect_no_clip().y0,
+            theme::ROW_HEIGHT + 1.0
+        );
+        assert!(find(harness.root_id(), "notification row:1999").is_none());
+
+        let rect = first.get_visual_rect_no_clip();
+        for _ in 0..20 {
+            harness.scroll_down(rect.center().x, rect.center().y, 10_000.0);
+            repaint(&mut harness);
+        }
+        assert!(find(harness.root_id(), "notification row:1999").is_some());
+        assert!(find(harness.root_id(), "notification row:1000").is_none());
+    }
+
     /// View › Done lists the threads marked Done instead of the inbox's,
     /// and a row's action there moves it back rather than marking it Done.
     #[test]
