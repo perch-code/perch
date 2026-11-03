@@ -62,6 +62,11 @@ Configure Perch with `~/.perch/config.toml`. See
 Perch looks for a GitHub token in this order: `GITHUB_TOKEN`, `GH_TOKEN`,
 `gh auth token`, then `token` in the config. Apps launched from Finder don't
 see your shell's environment, so `gh auth login` is the simplest route.
+
+GitHub rate-limits each account to 5,000 REST requests an hour, plus a
+separate GraphQL budget. Run `gh api rate_limit` to see what's left, and
+raise `poll_interval_secs` in the config if Perch is using too much.
+
 ### Repositories
 
 ```toml
