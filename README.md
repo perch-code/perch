@@ -108,8 +108,8 @@ lsp.trust = true
 
 Agents run sandboxed.
 
-- Agents run in "ask" mode (read-only, no network) or "work" mode
-  (writable worktree with configurable permissions).
+- You choose each agent's permission level: Read only, Ask me, Auto-review,
+  or Allow all.
 - Agents never get your GitHub token or other secrets from the environment.
 - Nothing is posted to GitHub unless you trigger it.
 
