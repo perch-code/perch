@@ -597,14 +597,15 @@ fn writer(
 fn offer(app: AppState, state: ReviewState, item_id: String) -> impl IntoView {
     let shown = move || state.description_offer.with(Option::is_some);
     Stack::horizontal((
-        Label::derived(|| "The description is written. Replace what you wrote?".to_string()).style(
-            |s| {
-                s.font_size(theme::TEXT_META)
-                    .color(theme::fg())
-                    .min_width(0.0)
-                    .flex_grow(1.0_f32)
-            },
-        ),
+        Label::derived(|| {
+            "The title and description are written. Replace what you wrote?".to_string()
+        })
+        .style(|s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::fg())
+                .min_width(0.0)
+                .flex_grow(1.0_f32)
+        }),
         action_button(
             || "Keep mine".to_string(),
             "open-pull-request-keep",
