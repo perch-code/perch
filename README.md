@@ -33,9 +33,7 @@ curl -fsSL https://raw.githubusercontent.com/perch-code/perch/main/install.sh | 
 ```
 
 On a Mac, install.sh puts Perch.app in `/Applications`. On Linux, it unpacks Perch
-into `~/.local/share/perch` and links `~/.local/bin/perch` to it. Perch isn't
-notarized yet, so download the tarball with curl or `gh`, not a browser,
-which would quarantine it.
+into `~/.local/share/perch` and links `~/.local/bin/perch` to it.
 
 After that, Perch checks for new releases. Click "Restart to update" to
 upgrade when one is detected.
