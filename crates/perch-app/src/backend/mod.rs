@@ -15776,7 +15776,8 @@ async fn open_pull_request_at(
             reopen_from_disk(ctx, &clone, number, &branch, path).await
         }
         // Cut for something else, an issue most likely, and since pushed
-        // as this pull request. Read as it is: its commits are the reader's.
+        // as this pull request. Read as it is, or fast-forwarded when that
+        // loses nothing: its commits are the reader's.
         Some(owned) if owned.branch != pr_branch => {
             open_owned_branch_for_pull(
                 ctx,
@@ -15960,8 +15961,9 @@ fn refetch_opened_pull_request<'a>(
 /// A branch Perch cut, read against a pull request that was opened from
 /// it. The pull request's refs are fetched so the base is known, the
 /// directory comes back if it was archived, and nothing is reset: the
-/// commits on it are the reader's, pushed or not. When the pull request
-/// has moved past what is here, the review says so.
+/// commits on it are the reader's, pushed or not. A clean branch the pull
+/// request is simply ahead of is fast-forwarded; when it has moved past
+/// what is here any other way, the review says so.
 ///
 /// `clone` is the repository the checkout was cut in, and `upstream` the
 /// one the pull request is on; when they differ the pull request's refs
@@ -16012,6 +16014,11 @@ async fn open_owned_branch_for_pull(
         },
     );
     let mut checkout = open_owned_branch(ctx, clone, owned).await?;
+    if checkout.head_sha != pr_head_sha
+        && catch_up_owned_branch(ctx, &checkout.worktree, &checkout.branch, pr_head_sha).await
+    {
+        checkout.head_sha = pr_head_sha.to_string();
+    }
     let base = format!("refs/perch/base/{number}");
     checkout.merge_base = ctx
         .preparer
@@ -16028,6 +16035,49 @@ async fn open_owned_branch_for_pull(
         checkout.stale = Some(pr_head_sha.to_string());
     }
     Ok(checkout)
+}
+
+/// Fast-forward a branch Perch cut to its pull request's head when that
+/// loses nothing: the head is ahead of it (a suggestion committed on
+/// GitHub, a push from another clone), the worktree is clean and on the
+/// branch, and no Work run is in it. Anything else is left for the reader
+/// and the review says it is behind. Whether it moved.
+async fn catch_up_owned_branch(ctx: &Ctx, worktree: &Path, branch: &str, pr_head: &str) -> bool {
+    if ctx.runs.has_active_work(worktree) {
+        return false;
+    }
+    let git = ctx.preparer.git();
+    let on_branch = git
+        .run(
+            Some(worktree),
+            ["symbolic-ref", "-q", "HEAD"],
+            Duration::from_secs(30),
+        )
+        .await
+        .is_ok_and(|r| r.trim() == format!("refs/heads/{branch}"));
+    if !on_branch
+        || !ctx.preparer.is_ancestor(worktree, "HEAD", pr_head).await
+        || !matches!(ctx.preparer.is_dirty(worktree).await, Ok(false))
+    {
+        return false;
+    }
+    match git
+        .run(
+            Some(worktree),
+            ["merge", "--ff-only", "-q", pr_head],
+            Duration::from_secs(60),
+        )
+        .await
+    {
+        Ok(_) => {
+            tracing::info!(worktree = %worktree.display(), head = pr_head, "fast-forwarded a kept branch to its pull request");
+            true
+        }
+        Err(e) => {
+            tracing::info!(worktree = %worktree.display(), error = %e, "could not fast-forward a kept branch");
+            false
+        }
+    }
 }
 
 /// Count the item's checkout head against its open pull request's, when
@@ -31495,6 +31545,53 @@ read eof || true
         let row = ctx.item(&item.id).unwrap();
         assert_eq!(row.checkout.unwrap().head_sha, moved);
         assert_eq!(ctx.item(&item.id).unwrap().divergence(), None);
+    }
+
+    /// A kept branch one commit behind its pull request, as after a
+    /// suggestion committed on GitHub: the worktree, its head, and the
+    /// pull request's head, already in the object store.
+    fn kept_branch_behind(dir: &Path) -> (std::path::PathBuf, String, String) {
+        let worktree = root_with_branch(&dir.join("widgets"), "feature")
+            .canonicalize()
+            .unwrap();
+        let mine = git(&worktree, &["rev-parse", "HEAD"]);
+        git(
+            &worktree,
+            &["commit", "-q", "--allow-empty", "-m", "suggestion"],
+        );
+        let pr_head = git(&worktree, &["rev-parse", "HEAD"]);
+        git(&worktree, &["reset", "-q", "--hard", &mine]);
+        (worktree, mine, pr_head)
+    }
+
+    #[tokio::test]
+    async fn a_clean_kept_branch_behind_its_pull_request_catches_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(dir.path(), "http://127.0.0.1:9", &[]);
+        let (worktree, _, pr_head) = kept_branch_behind(dir.path());
+
+        assert!(catch_up_owned_branch(&ctx, &worktree, "feature", &pr_head).await);
+        assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), pr_head);
+        assert_eq!(git(&worktree, &["branch", "--show-current"]), "feature");
+    }
+
+    #[tokio::test]
+    async fn a_kept_branch_with_work_of_its_own_stays_where_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(dir.path(), "http://127.0.0.1:9", &[]);
+        let (worktree, mine, pr_head) = kept_branch_behind(dir.path());
+
+        std::fs::write(worktree.join("one.txt"), "edited\n").unwrap();
+        assert!(!catch_up_owned_branch(&ctx, &worktree, "feature", &pr_head).await);
+        assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), mine);
+
+        git(&worktree, &["commit", "-q", "-am", "mine"]);
+        let ahead = git(&worktree, &["rev-parse", "HEAD"]);
+        assert!(!catch_up_owned_branch(&ctx, &worktree, "feature", &pr_head).await);
+        assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), ahead);
+
+        git(&worktree, &["checkout", "-q", "--detach", &mine]);
+        assert!(!catch_up_owned_branch(&ctx, &worktree, "feature", &pr_head).await);
     }
 
     #[tokio::test]
