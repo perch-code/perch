@@ -156,10 +156,16 @@ pub struct EditedComment {
 /// Outcome of a notifications poll.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListResult {
-    /// The complete API result when `unchanged` is false. Empty when the
-    /// conditional probe returned 304 and the cached result still stands.
+    /// The complete API result when `unchanged` and `changed_only` are
+    /// false. Empty when the conditional probe returned 304 and the cached
+    /// result still stands.
     pub threads: Vec<Thread>,
     pub unchanged: bool,
+    /// `threads` holds only the threads updated since the validator, in
+    /// GitHub's order, to be merged into the cached result. A thread that
+    /// left the list, or was read on github.com without new activity, is
+    /// not among them; the next full read finds it.
+    pub changed_only: bool,
     /// The validator to use for the next poll.
     pub last_modified: Option<String>,
     pub poll_interval: Duration,
@@ -283,8 +289,9 @@ impl GitHub {
     /// Done history because the payload has no Inbox/Done membership field.
     /// `last_modified` is used only for a conditional request. A 304 keeps the
     /// cached result. A 200 is not the inbox: GitHub answers it with only the
-    /// threads updated since `If-Modified-Since`, so the list is fetched again
-    /// without the validator.
+    /// threads updated since `If-Modified-Since`. Short of a page, those are
+    /// the result, with `changed_only` set; a full page may not be all of
+    /// them, so the list is fetched again without the validator.
     pub async fn list_threads_since(
         &self,
         last_modified: Option<&str>,
@@ -296,6 +303,20 @@ impl GitHub {
                 return Ok(ListResult {
                     threads: Vec::new(),
                     unchanged: true,
+                    changed_only: false,
+                    last_modified: probe
+                        .last_modified
+                        .or_else(|| Some(last_modified.to_string())),
+                    poll_interval: probe.poll_interval,
+                });
+            }
+            let changed: Vec<Thread> =
+                serde_json::from_str(&probe.body).map_err(|e| Error::Decode(e.to_string()))?;
+            if changed.len() < PER_PAGE {
+                return Ok(ListResult {
+                    threads: changed,
+                    unchanged: false,
+                    changed_only: true,
                     last_modified: probe
                         .last_modified
                         .or_else(|| Some(last_modified.to_string())),
@@ -336,6 +357,7 @@ impl GitHub {
         Ok(ListResult {
             threads,
             unchanged: false,
+            changed_only: false,
             last_modified: response_last_modified,
             poll_interval,
         })

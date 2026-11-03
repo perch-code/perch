@@ -228,16 +228,55 @@ async fn a_304_probe_keeps_the_cached_list_and_validator() {
 }
 
 #[tokio::test]
-async fn a_changed_conditional_response_refetches_the_whole_inbox() {
+async fn a_changed_conditional_response_is_the_changed_threads() {
     // GitHub answers a changed conditional request with only the threads
     // updated since If-Modified-Since, not the inbox.
+    let responses = vec![Response::new("200 OK", list_json([3]))
+        .header("Last-Modified", NEW_LAST_MODIFIED)
+        .header("X-Poll-Interval", "90")];
+    let (base, requests) = spawn(responses);
+    let gh = GitHub::with_base_uri("token", &base).expect("client");
+
+    let result = gh
+        .list_threads_since(Some(OLD_LAST_MODIFIED))
+        .await
+        .expect("list threads");
+
+    assert!(!result.unchanged);
+    assert!(
+        result.changed_only,
+        "to be merged, not to replace the inbox"
+    );
+    assert_eq!(
+        result
+            .threads
+            .iter()
+            .map(|thread| thread.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["3"]
+    );
+    assert_eq!(result.last_modified.as_deref(), Some(NEW_LAST_MODIFIED));
+    assert_eq!(result.poll_interval, std::time::Duration::from_secs(90));
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "the probe's answer is the change");
+    assert_eq!(
+        requests[0].header("if-modified-since"),
+        Some(OLD_LAST_MODIFIED)
+    );
+}
+
+#[tokio::test]
+async fn a_full_page_of_changes_refetches_the_whole_inbox() {
+    // A page of changed threads may not be all of them.
     let responses = vec![
-        Response::new("200 OK", list_json([3]))
+        Response::new("200 OK", list_json(1..=50))
             .header("Last-Modified", NEW_LAST_MODIFIED)
             .header("X-Poll-Interval", "90"),
-        Response::new("200 OK", list_json(1..=3))
+        Response::new("200 OK", list_json(1..=50))
             .header("Last-Modified", NEW_LAST_MODIFIED)
             .header("X-Poll-Interval", "60"),
+        Response::new("200 OK", list_json(51..=53)).header("X-Poll-Interval", "60"),
     ];
     let (base, requests) = spawn(responses);
     let gh = GitHub::with_base_uri("token", &base).expect("client");
@@ -248,14 +287,11 @@ async fn a_changed_conditional_response_refetches_the_whole_inbox() {
         .expect("list threads");
 
     assert!(!result.unchanged);
+    assert!(!result.changed_only);
     assert_eq!(
-        result
-            .threads
-            .iter()
-            .map(|thread| thread.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["1", "2", "3"],
-        "the whole inbox replaces the cached one, not the changed rows"
+        result.threads.len(),
+        53,
+        "the whole inbox replaces the cached one"
     );
     assert_eq!(result.last_modified.as_deref(), Some(NEW_LAST_MODIFIED));
     assert_eq!(
@@ -265,7 +301,7 @@ async fn a_changed_conditional_response_refetches_the_whole_inbox() {
     );
 
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     assert_eq!(
         requests[0].header("if-modified-since"),
         Some(OLD_LAST_MODIFIED)

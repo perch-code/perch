@@ -6805,8 +6805,46 @@ impl Ctx {
     /// retain GitHub's response order.
     fn replace_notifications(
         &self,
+        threads: Vec<Thread>,
+        last_modified: Option<&str>,
+    ) -> Vec<Thread> {
+        self.publish_notifications(threads, last_modified, true)
+    }
+
+    /// Fit the threads GitHub says changed into the visible list, newest
+    /// first, in place of what was there of them. The Done list stays as
+    /// the last full read left it: a merge cannot say what left GitHub's
+    /// list. Returns the changed threads that are visible.
+    fn merge_notifications(
+        &self,
+        changed: Vec<Thread>,
+        last_modified: Option<&str>,
+    ) -> Vec<Thread> {
+        let ids: std::collections::HashSet<String> =
+            changed.iter().map(|thread| thread.id.clone()).collect();
+        let rest = self
+            .notifications
+            .lock()
+            .map(|current| {
+                current
+                    .iter()
+                    .filter(|thread| !ids.contains(&thread.id))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut threads = changed;
+        threads.extend(rest);
+        let mut visible = self.publish_notifications(threads, last_modified, false);
+        visible.retain(|thread| ids.contains(&thread.id));
+        visible
+    }
+
+    fn publish_notifications(
+        &self,
         mut threads: Vec<Thread>,
         last_modified: Option<&str>,
+        snapshot: bool,
     ) -> Vec<Thread> {
         // A local mark-unread reminder belongs to this exact notification
         // revision. Carry it across a full GitHub snapshot, but let newer
@@ -6878,9 +6916,13 @@ impl Ctx {
                 thread.run_snapshot = runs.get(&thread.id).cloned();
             }
         }
-        if let Some(result) =
-            self.with_cache(|c| c.store_notification_snapshot(&threads, last_modified))
-        {
+        if let Some(result) = self.with_cache(|c| {
+            if snapshot {
+                c.store_notification_snapshot(&threads, last_modified)
+            } else {
+                c.store_threads(&threads, last_modified)
+            }
+        }) {
             match result {
                 Ok(visible) => threads = visible,
                 Err(e) => tracing::warn!(error = %e, "could not cache notifications"),
@@ -13539,9 +13581,13 @@ async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
             if result.unchanged {
                 tracing::info!("notifications unchanged");
             } else {
-                tracing::info!(count = result.threads.len(), "notifications polled");
-                let visible =
-                    ctx.replace_notifications(result.threads, result.last_modified.as_deref());
+                let visible = if result.changed_only {
+                    tracing::info!(count = result.threads.len(), "notifications changed");
+                    ctx.merge_notifications(result.threads, result.last_modified.as_deref())
+                } else {
+                    tracing::info!(count = result.threads.len(), "notifications polled");
+                    ctx.replace_notifications(result.threads, result.last_modified.as_deref())
+                };
                 attend(ctx, &visible).await;
             }
             // Off the poll, which the command loop waits on: the rows
@@ -21063,6 +21109,65 @@ mod tests {
         assert!(!opened.unread);
         assert!(!opened.local_unread);
         assert_eq!(opened.last_read_at, Some(last_read_at));
+    }
+
+    /// A poll that found a few threads changed fits them in at the top in
+    /// place of what was there, and leaves the rest and the Done list as
+    /// the last full read had them. A Done revision among them stays Done.
+    #[tokio::test]
+    async fn changed_threads_are_merged_into_the_inbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let mut older = thread("7", "seven");
+        older.subject_snapshot = Some(perch_github::SubjectSnapshot {
+            author_login: "someone".into(),
+            author_avatar_url: String::new(),
+            state: perch_github::SubjectState::PrOpen,
+            churn: None,
+            review_requested: false,
+            participants: None,
+            closed_at: None,
+            at: older.updated_at,
+        });
+        ctx.replace_notifications(
+            vec![thread("8", "eight"), older.clone(), thread("9", "nine")],
+            Some("first"),
+        );
+        ctx.dismiss_notification("9");
+
+        let mut moved = thread("8", "eight, again");
+        moved.updated_at = "2026-09-18T09:00:00Z".parse().unwrap();
+        let mut new = thread("10", "ten");
+        new.updated_at = "2026-09-18T10:00:00Z".parse().unwrap();
+        let changed = ctx.merge_notifications(
+            vec![new.clone(), moved.clone(), thread("9", "nine")],
+            Some("second"),
+        );
+
+        let ids = |threads: &[Thread]| threads.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            ids(&changed),
+            ["10", "8"],
+            "the changed threads, Done aside"
+        );
+        let threads = ctx.notifications.lock().unwrap().clone();
+        assert_eq!(ids(&threads), ["10", "8", "7"]);
+        assert_eq!(threads[1].subject.title, "eight, again");
+        assert_eq!(
+            threads[2], older,
+            "an unchanged thread keeps what was found of it"
+        );
+        assert_eq!(
+            ctx.with_cache(|cache| cache.load_threads().unwrap())
+                .unwrap(),
+            threads,
+            "the merge survives a restart"
+        );
+        assert_eq!(ctx.notifications_last_modified().as_deref(), Some("second"));
+        let done = ctx
+            .with_cache(|cache| cache.load_done_threads().unwrap())
+            .unwrap();
+        assert_eq!(ids(&done), ["9"]);
     }
 
     /// Opening a pull request from All or Authored reads the notification
