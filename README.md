@@ -91,3 +91,7 @@ Agents run sandboxed.
   (writable worktree with configurable permissions).
 - Agents never get your GitHub token or other secrets from the environment.
 - Nothing is posted to GitHub unless you trigger it.
+
+## License
+
+Apache 2.0. See [LICENSE](LICENSE).
