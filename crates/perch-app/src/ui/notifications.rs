@@ -709,6 +709,7 @@ mod tests {
             "not looked at yet: the backend judges"
         );
         let look = |state| SubjectSnapshot {
+            closed_at: None,
             author_login: "rohan".into(),
             author_avatar_url: String::new(),
             state,

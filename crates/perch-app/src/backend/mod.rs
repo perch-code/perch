@@ -4315,6 +4315,7 @@ async fn run(
         notifications: Arc::new(std::sync::Mutex::new(initial_notifications.clone())),
         asked_subjects: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         rechecked_subjects: Default::default(),
+        closed_done_refused: Default::default(),
         run_misses: Default::default(),
         asked_participants: Default::default(),
         approvals: Default::default(),
@@ -6290,6 +6291,10 @@ struct Ctx {
     /// once, for what happened while Perch was closed.
     rechecked_subjects:
         Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    /// Closed subjects' notifications GitHub would not mark Done, by
+    /// id and time, so one is not tried again at every poll until the
+    /// thread moves on.
+    closed_done_refused: Arc<std::sync::Mutex<std::collections::HashSet<(String, Timestamp)>>>,
     /// Workflow run notifications a look did not find the run of, by id
     /// and time, with how many looks missed. Looked for again at the next
     /// poll until [`RUN_LOOKS`] have.
@@ -6898,6 +6903,9 @@ impl Ctx {
         if let Ok(mut misses) = self.run_misses.lock() {
             misses.retain(|key, _| current_keys.contains(key));
         }
+        if let Ok(mut refused) = self.closed_done_refused.lock() {
+            refused.retain(|key| current_keys.contains(key));
+        }
         if let Ok(mut current) = self.notifications.lock() {
             *current = threads.clone();
         }
@@ -6943,7 +6951,9 @@ impl Ctx {
     /// GitHub just said what state a pull request or an issue is in: a
     /// notification about it draws that state. The reader's own merge or
     /// close moves no thread, so the look that set the row's state would
-    /// not be taken again until someone else acts there.
+    /// not be taken again until someone else acts there. A row it finds
+    /// closed is looked at again, for when it closed, which
+    /// [`done_closed_notifications`] goes by.
     fn settle_notification_state(
         &self,
         repo_full_name: &str,
@@ -6965,13 +6975,21 @@ impl Ctx {
         if !any_stale {
             return;
         }
+        let mut settled = Vec::new();
         self.edit_polled_notifications(|threads| {
             for thread in threads.iter_mut().filter(|thread| stale(thread)) {
                 if let Some(snapshot) = thread.subject_snapshot.as_mut() {
                     snapshot.state = state;
+                    snapshot.closed_at = None;
                 }
+                settled.push((thread.id.clone(), thread.updated_at));
             }
         });
+        if let Ok(mut asked) = self.asked_subjects.lock() {
+            for key in &settled {
+                asked.remove(key);
+            }
+        }
     }
 
     /// GitHub has taken the thread as read: its row follows, and stays
@@ -13534,6 +13552,7 @@ async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     look_at_subjects(&ctx).await;
+                    done_closed_notifications(&ctx).await;
                     look_for_runs(&ctx).await;
                 });
             }
@@ -14712,6 +14731,71 @@ async fn done_notifications(ctx: &Ctx, github: &GitHub, thread_ids: &[String]) {
             "notifications"
         };
         ctx.notice(format!("Could not mark {left} {noun} done: {e}"));
+    }
+}
+
+/// How long after a merge or a close GitHub may still stamp the thread
+/// for it: the notification comes a moment after the event itself.
+const CLOSE_NOTICE_SLACK: jiff::SignedDuration = jiff::SignedDuration::from_secs(60);
+
+/// Whether a look found the thread's pull request merged or closed, or
+/// its issue closed, with nothing on the thread since: the close is the
+/// last word, and the thread is done with. A comment after the close
+/// moves the thread past it and keeps it.
+fn closed_and_quiet(thread: &Thread) -> bool {
+    crate::inbox::closed(thread)
+        && thread
+            .subject_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.closed_at)
+            .is_some_and(|closed_at| thread.updated_at <= closed_at + CLOSE_NOTICE_SLACK)
+}
+
+/// Mark Done on GitHub each notification whose pull request or issue was
+/// merged or closed with nothing after, so it leaves github.com's inbox as
+/// it leaves Perch's. One GitHub refuses is not tried again until the
+/// thread moves on; once GitHub is out of reach or out of requests the
+/// rest wait for the next poll.
+async fn done_closed_notifications(ctx: &Ctx) {
+    let Some(github) = ctx.github() else {
+        return;
+    };
+    let refused = ctx
+        .closed_done_refused
+        .lock()
+        .map(|refused| refused.clone())
+        .unwrap_or_default();
+    let due: Vec<(String, Timestamp)> = ctx
+        .notifications
+        .lock()
+        .map(|threads| {
+            threads
+                .iter()
+                .filter(|thread| closed_and_quiet(thread))
+                .map(|thread| (thread.id.clone(), thread.updated_at))
+                .filter(|key| !refused.contains(key))
+                .collect()
+        })
+        .unwrap_or_default();
+    for (thread_id, updated_at) in due {
+        match github.mark_thread_done(&thread_id).await {
+            Ok(()) => {
+                tracing::info!(thread = %thread_id, "marked a closed subject's notification done");
+                ctx.dismiss_notification(&thread_id);
+            }
+            Err(
+                e @ (perch_github::Error::RateLimited { .. } | perch_github::Error::Network(_)),
+            ) => {
+                tracing::info!(thread = %thread_id, error = %e, "could not mark a closed subject's notification done");
+                break;
+            }
+            Err(e) => {
+                tracing::warn!(thread = %thread_id, error = %e, "could not mark a closed subject's notification done");
+                if let Ok(mut refused) = ctx.closed_done_refused.lock() {
+                    refused.insert((thread_id, updated_at));
+                }
+            }
+        }
     }
 }
 
@@ -20764,6 +20848,7 @@ mod tests {
             notifications: Default::default(),
             asked_subjects: Default::default(),
             rechecked_subjects: Default::default(),
+            closed_done_refused: Default::default(),
             run_misses: Default::default(),
             asked_participants: Default::default(),
             approvals: Default::default(),
@@ -21966,6 +22051,7 @@ mod tests {
         let item = store_pull(&ctx, 7);
         let looked = |mut thread: Thread| {
             thread.subject_snapshot = Some(perch_github::SubjectSnapshot {
+                closed_at: None,
                 author_login: "someone".into(),
                 author_avatar_url: String::new(),
                 state: perch_github::SubjectState::PrOpen,
@@ -21984,6 +22070,11 @@ mod tests {
         merged.state = "closed".into();
         merged.merged = true;
         merged.updated_at = Some(Timestamp::now());
+        let seven = ctx.notifications.lock().unwrap()[0].clone();
+        ctx.asked_subjects
+            .lock()
+            .unwrap()
+            .insert((seven.id.clone(), seven.updated_at));
 
         install_pull_request_snapshot(&ctx, &item.id, merged, Some(1)).unwrap();
 
@@ -22001,6 +22092,9 @@ mod tests {
         };
         assert_eq!(state("7"), perch_github::SubjectState::PrMerged);
         assert_eq!(state("8"), perch_github::SubjectState::PrOpen);
+        // The next look asks when, for marking it Done on GitHub.
+        assert!(ctx.notifications.lock().unwrap()[0].wants_snapshot());
+        assert!(ctx.asked_subjects.lock().unwrap().is_empty());
         let cached = ctx.with_cache(|c| c.load_threads().unwrap()).unwrap();
         assert_eq!(
             cached
@@ -22028,6 +22122,7 @@ mod tests {
         about.subject.kind = SubjectKind::Issue;
         about.subject.url = Some("https://api.github.com/repos/a/b/issues/7".into());
         about.subject_snapshot = Some(perch_github::SubjectSnapshot {
+            closed_at: None,
             author_login: "rohan".into(),
             author_avatar_url: String::new(),
             state: perch_github::SubjectState::IssueOpen,
@@ -28122,6 +28217,7 @@ read eof || true
         let (ctx, received) = ctx(dir.path(), &base, &[]);
         let open = |mut thread: Thread| {
             thread.subject_snapshot = Some(perch_github::SubjectSnapshot {
+                closed_at: None,
                 author_login: "someone".into(),
                 author_avatar_url: String::new(),
                 state: perch_github::SubjectState::PrOpen,
@@ -28182,6 +28278,133 @@ read eof || true
         )));
     }
 
+    /// A pull request merged or closed, or an issue closed, with nothing
+    /// after leaves github.com's inbox as well as Perch's. One with a
+    /// comment after the close stays, an open one stays, and one GitHub
+    /// won't mark Done is not asked again until it moves.
+    #[tokio::test]
+    async fn a_closed_subject_with_nothing_after_is_marked_done() {
+        let dir = tempfile::tempdir().unwrap();
+        // Every thread is stamped 18:00. 6 was merged then, 7 closed and
+        // 8 is an issue closed; 9 was merged too, but GitHub refuses it;
+        // 10 was merged an hour before a comment; 11 is open.
+        let pull = |state: &str, at: &str| {
+            format!(
+                r#"{{
+                  "__typename": "PullRequest",
+                  "author": {{ "login": "someone", "avatar_url": "" }},
+                  "pull_state": "{state}",
+                  "is_draft": false,
+                  "closed_at": {at},
+                  "additions": 1,
+                  "deletions": 1,
+                  "review_requests": {{ "total_count": 0 }}
+                }}"#
+            )
+        };
+        let issue = r#"{
+          "__typename": "Issue",
+          "author": { "login": "someone", "avatar_url": "" },
+          "issue_state": "CLOSED",
+          "state_reason": "COMPLETED",
+          "closed_at": "2026-09-17T18:00:00Z"
+        }"#;
+        let answer = format!(
+            r#"{{ "data": {{ "r0": {{ "n6": {}, "n7": {}, "n8": {}, "n9": {}, "n10": {}, "n11": {} }} }} }}"#,
+            pull("MERGED", r#""2026-09-17T17:59:58Z""#),
+            pull("CLOSED", r#""2026-09-17T18:00:00Z""#),
+            issue,
+            pull("MERGED", r#""2026-09-17T18:00:00Z""#),
+            pull("MERGED", r#""2026-09-17T17:00:00Z""#),
+            pull("OPEN", "null"),
+        );
+        let (base, paths) = serve_by_method(move |method, path, _| match (method, path) {
+            ("POST", "/graphql") => ("200 OK", answer.clone()),
+            ("DELETE", "/notifications/threads/9") => ("403 Forbidden", "{}".to_string()),
+            ("DELETE", _) => ("204 No Content", String::new()),
+            _ => ("404 Not Found", "{}".to_string()),
+        });
+        let (ctx, _received) = ctx(dir.path(), &base, &[]);
+        let mut eight = thread("8", "eight");
+        eight.subject.kind = SubjectKind::Issue;
+        eight.subject.url = Some("https://api.github.com/repos/a/b/issues/8".into());
+        ctx.replace_notifications(
+            vec![
+                thread("6", "six"),
+                thread("7", "seven"),
+                eight,
+                thread("9", "nine"),
+                thread("10", "ten"),
+                thread("11", "eleven"),
+            ],
+            Some("first"),
+        );
+
+        look_at_subjects(&ctx).await;
+        done_closed_notifications(&ctx).await;
+
+        let ids = || -> Vec<String> {
+            ctx.notifications
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|t| t.id.clone())
+                .collect()
+        };
+        assert_eq!(ids(), ["9", "10", "11"]);
+        assert_eq!(
+            paths.lock().unwrap().as_slice(),
+            [
+                "/graphql",
+                "/notifications/threads/6",
+                "/notifications/threads/7",
+                "/notifications/threads/8",
+                "/notifications/threads/9",
+            ]
+        );
+        let mut done: Vec<String> = ctx
+            .with_cache(|cache| cache.load_done_threads().unwrap())
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        done.sort();
+        assert_eq!(done, ["6", "7", "8"]);
+
+        // 9 isn't asked again while it stands.
+        done_closed_notifications(&ctx).await;
+        assert_eq!(paths.lock().unwrap().len(), 5);
+    }
+
+    /// A closed snapshot from before the look asked when is taken again,
+    /// so a close already in the inbox gets its time.
+    #[test]
+    fn a_closed_snapshot_without_its_time_wants_a_look() {
+        for state in [
+            perch_github::SubjectState::PrMerged,
+            perch_github::SubjectState::PrClosed,
+            perch_github::SubjectState::IssueClosed,
+            perch_github::SubjectState::IssueNotPlanned,
+        ] {
+            let mut closed = thread("7", "seven");
+            closed.subject_snapshot = Some(perch_github::SubjectSnapshot {
+                author_login: "someone".into(),
+                author_avatar_url: String::new(),
+                state,
+                churn: Some((1, 1)),
+                review_requested: false,
+                participants: Some(vec![]),
+                closed_at: None,
+                at: closed.updated_at,
+            });
+            assert!(closed.wants_snapshot(), "{state:?}");
+            assert!(!closed_and_quiet(&closed), "{state:?}");
+            closed.subject_snapshot.as_mut().unwrap().closed_at = Some(closed.updated_at);
+            assert!(!closed.wants_snapshot(), "{state:?}");
+            assert!(closed_and_quiet(&closed), "{state:?}");
+        }
+    }
+
     #[tokio::test]
     async fn a_look_gives_the_rows_their_faces_and_states_once_per_revision() {
         let dir = tempfile::tempdir().unwrap();
@@ -28218,6 +28441,7 @@ read eof || true
         assert_eq!(
             threads[0].subject_snapshot,
             Some(perch_github::SubjectSnapshot {
+                closed_at: None,
                 author_login: "someone".into(),
                 author_avatar_url: String::new(),
                 state: perch_github::SubjectState::PrMerged,

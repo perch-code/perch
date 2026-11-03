@@ -1173,6 +1173,7 @@ mod tests {
             true,
         );
         looked.subject_snapshot = Some(SubjectSnapshot {
+            closed_at: None,
             author_login: "someone".into(),
             author_avatar_url: String::new(),
             state: SubjectState::PrMerged,

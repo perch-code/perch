@@ -8,9 +8,7 @@
 use std::collections::HashMap;
 
 use jiff::Timestamp;
-use perch_github::{
-    ActivityEvent, ActivityOutcome, Item, ItemActivity, Reason, RunMode, SubjectState, Thread,
-};
+use perch_github::{ActivityEvent, ActivityOutcome, Item, ItemActivity, Reason, RunMode, Thread};
 
 use crate::items::{BrowseView, Direction, InboxFilters};
 
@@ -223,15 +221,10 @@ pub fn involves(whose: BrowseView, thread: &Thread, viewer: Option<&str>) -> boo
 /// or its issue closed. A thread not yet looked at, or with nothing to
 /// look at, is open.
 pub fn closed(thread: &Thread) -> bool {
-    thread.subject_snapshot.as_ref().is_some_and(|snapshot| {
-        matches!(
-            snapshot.state,
-            SubjectState::PrMerged
-                | SubjectState::PrClosed
-                | SubjectState::IssueClosed
-                | SubjectState::IssueNotPlanned
-        )
-    })
+    thread
+        .subject_snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.state.is_closed())
 }
 
 /// The time each thread's age shows: its `updated_at`, held no newer
@@ -289,7 +282,7 @@ mod tests {
             .filter_map(|row| row.thread().cloned())
             .collect()
     }
-    use perch_github::{Reason, Repository, Subject, SubjectKind};
+    use perch_github::{Reason, Repository, Subject, SubjectKind, SubjectState};
 
     fn thread(
         id: &str,
@@ -428,6 +421,7 @@ mod tests {
     fn state_narrows_on_the_look_and_oldest_first_turns_the_order_over() {
         use crate::items::StateFilter;
         let snapshot = |state| perch_github::SubjectSnapshot {
+            closed_at: None,
             author_login: String::new(),
             author_avatar_url: String::new(),
             state,
@@ -535,6 +529,7 @@ mod tests {
             true,
         );
         mentioned_on_mine.subject_snapshot = Some(perch_github::SubjectSnapshot {
+            closed_at: None,
             author_login: "Reader".into(),
             author_avatar_url: String::new(),
             state: SubjectState::PrOpen,

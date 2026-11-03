@@ -77,7 +77,8 @@ impl Thread {
     /// Whether the subject wants looking at: a pull request or an issue
     /// with a number, whose snapshot is missing or was taken before the
     /// thread's latest activity. A pull request's snapshot from before
-    /// the look asked for its churn is taken again too.
+    /// the look asked for its churn is taken again too, and a closed one's
+    /// from before it asked when it closed.
     pub fn wants_snapshot(&self) -> bool {
         matches!(
             self.subject.kind,
@@ -87,6 +88,7 @@ impl Thread {
                 snapshot.at < self.updated_at
                     || snapshot.participants.is_none()
                     || (self.subject.kind == SubjectKind::PullRequest && snapshot.churn.is_none())
+                    || (snapshot.state.is_closed() && snapshot.closed_at.is_none())
             })
     }
 
@@ -129,6 +131,11 @@ pub struct SubjectSnapshot {
     /// `None` on a snapshot taken before this was asked for.
     #[serde(default)]
     pub participants: Option<Vec<Participant>>,
+    /// When a pull request was merged or closed, or an issue closed. `None`
+    /// while it is open, and on a snapshot taken before this was asked for
+    /// or whose state Perch settled without a look.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "ts_opt")]
+    pub closed_at: Option<Timestamp>,
     /// The thread's `updated_at` when the look was taken. Activity since
     /// can have changed the state, so a thread newer than this is looked
     /// at again.
@@ -354,6 +361,19 @@ pub enum SubjectState {
     PrClosed,
 }
 
+impl SubjectState {
+    /// Merged or closed, or an issue closed either way.
+    pub fn is_closed(self) -> bool {
+        matches!(
+            self,
+            SubjectState::PrMerged
+                | SubjectState::PrClosed
+                | SubjectState::IssueClosed
+                | SubjectState::IssueNotPlanned
+        )
+    }
+}
+
 /// A user as GitHub nests one. Public because a workflow run carries its
 /// actor and the run is stored as it came.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -449,6 +469,7 @@ mod tests {
 
         // A look taken for this revision of the thread settles it.
         t.subject_snapshot = Some(SubjectSnapshot {
+            closed_at: None,
             author_login: "someone".into(),
             author_avatar_url: "https://avatars/2".into(),
             state: SubjectState::IssueOpen,
@@ -476,6 +497,7 @@ mod tests {
         let mut t = thread_with_url(Some("https://api.github.com/repos/a/b/pulls/9"));
         t.subject.kind = SubjectKind::PullRequest;
         let mut snapshot = SubjectSnapshot {
+            closed_at: None,
             author_login: "someone".into(),
             author_avatar_url: "https://avatars/2".into(),
             state: SubjectState::PrOpen,
@@ -502,6 +524,7 @@ mod tests {
     fn a_snapshot_without_its_participants_is_taken_again() {
         let mut t = thread_with_url(Some("https://api.github.com/repos/a/b/issues/9"));
         let mut snapshot = SubjectSnapshot {
+            closed_at: None,
             author_login: "someone".into(),
             author_avatar_url: "https://avatars/2".into(),
             state: SubjectState::IssueOpen,
@@ -523,6 +546,7 @@ mod tests {
     fn a_snapshot_round_trips_through_the_cache_and_is_absent_from_the_wire() {
         let mut t = thread_with_url(Some("https://api.github.com/repos/a/b/pulls/9"));
         t.subject_snapshot = Some(SubjectSnapshot {
+            closed_at: None,
             author_login: "someone".into(),
             author_avatar_url: "https://avatars/2".into(),
             state: SubjectState::PrMerged,

@@ -49,6 +49,8 @@ pub(crate) struct SubjectNode {
     pull_state: Option<String>,
     #[serde(default)]
     is_draft: bool,
+    #[serde(default)]
+    closed_at: Option<Timestamp>,
     /// A pull request's counts; an issue has none.
     #[serde(default)]
     additions: Option<u32>,
@@ -131,6 +133,7 @@ fragment subject on IssueOrPullRequest {
     created_at: createdAt
     issue_state: state
     state_reason: stateReason
+    closed_at: closedAt
     comments(last: 10) { nodes { author { login avatar_url: avatarUrl } at: createdAt } }
   }
   ... on PullRequest {
@@ -138,6 +141,7 @@ fragment subject on IssueOrPullRequest {
     created_at: createdAt
     pull_state: state
     is_draft: isDraft
+    closed_at: closedAt
     additions
     deletions
     review_requests: reviewRequests { total_count: totalCount }
@@ -322,6 +326,7 @@ impl SubjectLook {
                         churn,
                         review_requested,
                         participants: Some(participants.clone()),
+                        closed_at: node.closed_at,
                         at: *at,
                     },
                 ));
@@ -582,6 +587,7 @@ mod tests {
                 (
                     "1".to_string(),
                     SubjectSnapshot {
+                        closed_at: None,
                         author_login: "someone".into(),
                         author_avatar_url: "https://avatars/2".into(),
                         state: SubjectState::PrMerged,
@@ -594,6 +600,7 @@ mod tests {
                 (
                     "2".to_string(),
                     SubjectSnapshot {
+                        closed_at: None,
                         author_login: String::new(),
                         author_avatar_url: String::new(),
                         state: SubjectState::IssueNotPlanned,
@@ -606,6 +613,7 @@ mod tests {
                 (
                     "4".to_string(),
                     SubjectSnapshot {
+                        closed_at: None,
                         author_login: "me".into(),
                         author_avatar_url: "https://avatars/1".into(),
                         state: SubjectState::PrDraft,
