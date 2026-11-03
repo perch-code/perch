@@ -384,6 +384,19 @@ impl Approvals {
             Self::Never => "Allow all",
         }
     }
+
+    /// As config.toml and the runs table spell it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Ask => "ask",
+            Self::Never => "never",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|a| a.name() == value)
+    }
 }
 
 /// Who decides Work requests in each repository, as config.toml says:

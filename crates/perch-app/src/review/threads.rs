@@ -135,6 +135,49 @@ pub fn run_agent_name(run: &RunRecord) -> String {
     )
 }
 
+/// What an agent run may do past reading, as its byline says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunPermission {
+    /// An Ask run: it reads the worktree and writes nowhere.
+    ReadOnly,
+    /// A Work run, and who approves its requests to leave the sandbox.
+    Work(perch_github::Approvals),
+}
+
+impl RunPermission {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ReadOnly => READ_ONLY,
+            Self::Work(approvals) => approvals.label(),
+        }
+    }
+}
+
+/// A run's [`RunPermission`]: the approvals it was admitted with, while
+/// it goes, under the item's `pick` as `on_approval` reads it. Allow all
+/// reaches a run already going, and a run admitted on Allow all, its
+/// CLI's own reviewer off, asks the reader once the item leaves it.
+/// `None` for a Work run from before runs kept their approvals.
+pub fn run_permission(
+    run: &RunRecord,
+    pick: Option<perch_github::Approvals>,
+) -> Option<RunPermission> {
+    use perch_github::Approvals;
+    if run.mode == perch_github::RunMode::Ask {
+        return Some(RunPermission::ReadOnly);
+    }
+    let admitted = run.approvals?;
+    let now = match pick {
+        Some(pick) if run.status.is_active() => match (admitted, pick) {
+            (_, Approvals::Never) => Approvals::Never,
+            (Approvals::Never, _) => Approvals::Ask,
+            (admitted, _) => admitted,
+        },
+        _ => admitted,
+    };
+    Some(RunPermission::Work(now))
+}
+
 /// Whether the command a box's keymap resolved a key to is Cmd-Enter
 /// (Ctrl-Enter off macOS), which sends. floem binds Cmd-Enter to
 /// `NewLineBelow`, and Ctrl-Enter on Linux and Windows to `NewLineAbove`,
@@ -3206,6 +3249,53 @@ pub(crate) fn perch_only_label() -> impl IntoView {
     )
 }
 
+/// The [`RunPermission`] of the run that wrote an agent's message, after
+/// its name: Allow all in the approvals picker's red. Nothing for a Work
+/// run from before runs kept their approvals.
+fn permission_label(app: AppState, state: ReviewState, run: Memo<RunRecord>) -> impl IntoView {
+    let permission = Memo::new(move |_| {
+        let pick = state.item.with(|item| {
+            let item = item.as_ref()?;
+            Some(
+                app.work_approvals
+                    .with(|a| a.for_item(&item.id, &item.repo_full_name)),
+            )
+        });
+        run.with(|run| run_permission(run, pick))
+    });
+    let allow_all =
+        move || permission.get() == Some(RunPermission::Work(perch_github::Approvals::Never));
+    cards::tip_with(
+        badge(
+            move || {
+                permission
+                    .get()
+                    .map(|p| p.label().to_string())
+                    .unwrap_or_default()
+            },
+            move || {
+                if allow_all() {
+                    theme::alert_caution()
+                } else {
+                    theme::fg_muted()
+                }
+            },
+            || floem::peniko::Color::TRANSPARENT,
+            Some(theme::border),
+        )
+        .debug_name("run-permission")
+        .style(move |s| {
+            s.margin_left(6.0)
+                .apply_if(permission.get().is_none(), |s| s.hide())
+        }),
+        move || match permission.get_untracked() {
+            Some(RunPermission::ReadOnly) => "Reads and answers; changes nothing".to_string(),
+            Some(RunPermission::Work(approvals)) => approvals_note(approvals, None),
+            None => String::new(),
+        },
+    )
+}
+
 /// After Review #N, in the byline of a message said after the past review
 /// the item shows had ended. A mark rather than words in the text, so an
 /// edit never carries it into the message.
@@ -3309,6 +3399,9 @@ fn local_message_view(
     let author = message.author.clone();
     let author_run = message.run.clone();
     let mut after = vec![when_label(app, message.created_at, face, "comment-when").into_any()];
+    if let (Author::Agent { .. }, Some(run)) = (&author, &author_run) {
+        after.push(permission_label(app, state, live_run(state, run.clone())).into_any());
+    }
     if private {
         after.push(perch_only_label().into_any());
     }
@@ -3357,7 +3450,10 @@ fn pending_answer_view(
     // The model the CLI reports can land after the run starts.
     let live = live_run(state, run.clone());
     let model = move || live.with(|run| Name::Plain(run_agent_name(run)));
-    let mut after = vec![when_label(app, at, face, "comment-when").into_any()];
+    let mut after = vec![
+        when_label(app, at, face, "comment-when").into_any(),
+        permission_label(app, state, live).into_any(),
+    ];
     if private {
         after.push(perch_only_label().into_any());
     }
@@ -4498,6 +4594,51 @@ mod tests {
             run_agent_name(&run),
             "Claude Opus 5.5 (medium)",
             "what it ran with"
+        );
+    }
+
+    #[test]
+    fn a_run_s_permission_follows_allow_all_while_it_goes() {
+        use perch_github::{Approvals, RunMode};
+        let ask = RunRecord::default();
+        assert_eq!(
+            run_permission(&ask, Some(Approvals::Never)),
+            Some(RunPermission::ReadOnly)
+        );
+        let work = |approvals, status| RunRecord {
+            mode: RunMode::Work,
+            approvals,
+            status,
+            ..RunRecord::default()
+        };
+        let going = |admitted, pick| {
+            run_permission(&work(Some(admitted), RunStatus::Running), Some(pick))
+                .map(RunPermission::label)
+        };
+        assert_eq!(going(Approvals::Auto, Approvals::Auto), Some("Auto-review"));
+        assert_eq!(
+            going(Approvals::Auto, Approvals::Ask),
+            Some("Auto-review"),
+            "the CLI's reviewer stays on until the next run"
+        );
+        assert_eq!(going(Approvals::Ask, Approvals::Never), Some("Allow all"));
+        assert_eq!(
+            going(Approvals::Never, Approvals::Auto),
+            Some("Ask me"),
+            "admitted with no reviewer of its own"
+        );
+        assert_eq!(
+            run_permission(
+                &work(Some(Approvals::Ask), RunStatus::Completed),
+                Some(Approvals::Never)
+            ),
+            Some(RunPermission::Work(Approvals::Ask)),
+            "a finished run keeps what it ran with"
+        );
+        assert_eq!(
+            run_permission(&work(None, RunStatus::Completed), None),
+            None,
+            "from before runs kept it"
         );
     }
 

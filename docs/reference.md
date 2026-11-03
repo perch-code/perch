@@ -949,7 +949,8 @@ until Perch quits and changes nothing in config.toml; picking Read only keeps
 it for the next Work. Allow all, on or
 off, applies to the next request, even one from a run already going; the
 switch between Ask me and Auto-review applies from the next run, since the
-CLI is started with it.
+CLI is started with it. An agent's byline says the level its run has, after
+the time: the same four.
 
 What comes to you: Claude Code asks
 for a host a command wants to reach, for a command it wants to run outside the

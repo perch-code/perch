@@ -1010,6 +1010,7 @@ async fn queue_attempt(
         mode: perch_github::RunMode::Ask,
         work_before: None,
         work_after: None,
+        approvals: None,
     };
     let admission = match ctx.runs.admit(run.clone()) {
         Ok(admission) => admission,

@@ -797,6 +797,9 @@ pub struct RunRecord {
     /// and as it ended; `None` until then, and for Ask.
     pub work_before: Option<String>,
     pub work_after: Option<String>,
+    /// Who approved a Work run's requests as it was admitted; `None` for
+    /// Ask, and for Work runs from before Perch kept it.
+    pub approvals: Option<crate::Approvals>,
 }
 
 impl RunRecord {
@@ -844,6 +847,7 @@ impl Default for RunRecord {
             mode: crate::comments::RunMode::Ask,
             work_before: None,
             work_after: None,
+            approvals: None,
         }
     }
 }
@@ -1168,6 +1172,7 @@ mod tests {
             mode: crate::comments::RunMode::Ask,
             work_before: None,
             work_after: None,
+            approvals: None,
         }
     }
 

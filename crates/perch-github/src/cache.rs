@@ -44,10 +44,11 @@ mod review_store;
 /// the reader trusts on everything in a repository. Version 36 drops the
 /// copies of tool calls an update wrote into a run's history as legacy
 /// steps. Version 37 clears the activity the inbox stopped showing, so
-/// what comes back to it starts empty. Schemas 13 through 23
+/// what comes back to it starts empty. Version 38 keeps who approved a
+/// Work run's requests as it was admitted. Schemas 13 through 23
 /// migrate in place so local conversations and agent history are never
 /// discarded.
-pub const SCHEMA_VERSION: u32 = 37;
+pub const SCHEMA_VERSION: u32 = 38;
 
 /// Metadata key holding the validator for the cached notifications snapshot.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
@@ -397,6 +398,7 @@ CREATE TABLE runs (
     mode                   TEXT NOT NULL DEFAULT 'ask',
     work_before            TEXT,
     work_after             TEXT,
+    approvals              TEXT,
     CHECK (owner_kind IN ('discussion', 'review', 'unavailable')),
     CHECK (
         (owner_kind = 'discussion' AND owner_item_id IS NOT NULL AND owner_thread_id IS NOT NULL
@@ -543,6 +545,7 @@ fn initialize_schema(conn: &mut Connection) -> Result<CacheOpen, CacheError> {
             35 => drop_repeated_legacy_steps(&tx)?,
             // Old enough that none of it is news.
             36 => tx.execute_batch("DELETE FROM item_activity")?,
+            37 => add_run_approvals_column(&tx)?,
             other => return Err(CacheError::UnsupportedSchema { found: other }),
         }
         from += 1;
@@ -589,6 +592,19 @@ fn add_dismissed_thread_column(tx: &Transaction<'_>) -> Result<(), CacheError> {
         "DELETE FROM meta WHERE key = ?1",
         params![NOTIFICATIONS_LAST_MODIFIED_KEY],
     )?;
+    Ok(())
+}
+
+/// A Work run keeps who approved its requests. The runs before have none.
+fn add_run_approvals_column(tx: &Transaction<'_>) -> Result<(), CacheError> {
+    let present: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('runs') WHERE name='approvals')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !present {
+        tx.execute("ALTER TABLE runs ADD COLUMN approvals TEXT", [])?;
+    }
     Ok(())
 }
 
@@ -1390,6 +1406,7 @@ fn migrate_13_to_14(tx: &Transaction<'_>) -> Result<(), CacheError> {
             mode: crate::comments::RunMode::Ask,
             work_before: None,
             work_after: None,
+            approvals: None,
         };
         insert_run_row(tx, &record)?;
         for (index, step) in steps.into_iter().enumerate() {
@@ -1430,7 +1447,7 @@ const RUN_COLUMNS: &str = "id, owner_kind, owner_item_id, owner_thread_id, owner
     prompt_snapshot, working_directory, revision_json, repository_label, item_label, branch_label,
     status, terminal_reason, cost_usd, duration_ms, usage_json, retry_of_id, error, queued_at,
     started_at, ended_at, final_result, final_result_truncated, latest_activity,
-    last_event_sequence, mode, work_before, work_after";
+    last_event_sequence, mode, work_before, work_after, approvals";
 
 #[derive(Debug)]
 struct RunDbRow {
@@ -1473,6 +1490,7 @@ struct RunDbRow {
     mode: String,
     work_before: Option<String>,
     work_after: Option<String>,
+    approvals: Option<String>,
 }
 
 fn read_run_db_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunDbRow> {
@@ -1516,6 +1534,7 @@ fn read_run_db_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunDbRow> {
         mode: row.get(36)?,
         work_before: row.get(37)?,
         work_after: row.get(38)?,
+        approvals: row.get(39)?,
     })
 }
 
@@ -1628,6 +1647,13 @@ fn run_from_db(row: RunDbRow, steps: Vec<RunStep>) -> Result<RunRecord, CacheErr
         mode: RunMode::parse(&row.mode).ok_or_else(|| CacheError::Corrupt("run mode".into()))?,
         work_before: row.work_before,
         work_after: row.work_after,
+        approvals: row
+            .approvals
+            .map(|a| {
+                crate::Approvals::parse(&a)
+                    .ok_or_else(|| CacheError::Corrupt("run approvals".into()))
+            })
+            .transpose()?,
     })
 }
 
@@ -1800,10 +1826,10 @@ fn insert_run_row(conn: &Connection, run: &RunRecord) -> Result<(), CacheError> 
           working_directory, revision_json, repository_label, item_label, branch_label, status,
           terminal_reason, cost_usd, duration_ms, usage_json, retry_of_id, error, queued_at,
           started_at, ended_at, final_result, final_result_truncated, latest_activity,
-          last_event_sequence, mode, work_before, work_after)
+          last_event_sequence, mode, work_before, work_after, approvals)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,
                  ?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,
-                 ?35,?36,?37,?38,?39)",
+                 ?35,?36,?37,?38,?39,?40)",
         params![
             run.id,
             owner_kind,
@@ -1844,6 +1870,7 @@ fn insert_run_row(conn: &Connection, run: &RunRecord) -> Result<(), CacheError> 
             run.mode.name(),
             run.work_before,
             run.work_after,
+            run.approvals.map(crate::Approvals::name),
         ],
     )?;
     Ok(())
@@ -4991,6 +5018,7 @@ mod tests {
             mode: crate::comments::RunMode::Ask,
             work_before: None,
             work_after: None,
+            approvals: None,
         }
     }
 
@@ -5152,6 +5180,28 @@ mod tests {
             c.load_run("r-done").unwrap().unwrap().status,
             RunStatus::Completed
         );
+    }
+
+    #[test]
+    fn a_work_run_keeps_its_approvals() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut t = comment_thread("t1", "w");
+        t.messages[1].run = None;
+        c.insert_comment_thread(&t).unwrap();
+        let work = RunRecord {
+            mode: RunMode::Work,
+            approvals: Some(crate::Approvals::Never),
+            ..run("r-work", "t1", RunStatus::Running)
+        };
+        c.insert_run(&work).unwrap();
+        c.update_run(&work).unwrap();
+        assert_eq!(
+            c.load_run("r-work").unwrap().unwrap().approvals,
+            Some(crate::Approvals::Never)
+        );
+        c.insert_run(&run("r-ask", "t1", RunStatus::Completed))
+            .unwrap();
+        assert_eq!(c.load_run("r-ask").unwrap().unwrap().approvals, None);
     }
 
     fn event(id: &str, at: &str, event: RunEvent) -> NewRunEvent {

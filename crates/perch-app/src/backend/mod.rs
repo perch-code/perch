@@ -16756,6 +16756,7 @@ async fn ask_as(
         mode,
         work_before: None,
         work_after: None,
+        approvals: work.as_ref().map(|(_, _, approvals)| *approvals),
     };
     // The request is one durable message. Each retry points a new run at
     // this same id rather than adding another copy of what the reader asked.
@@ -16869,7 +16870,7 @@ async fn ask_as(
     } else {
         crate::ask::follow_up_prompt(&input)
     };
-    if let (Some((_, framing)), Some(system)) = (&work, prompt.system.as_mut()) {
+    if let (Some((_, framing, _)), Some(system)) = (&work, prompt.system.as_mut()) {
         *system = framing.clone();
     }
     // `original_request` stays suitable for a compact row label. The full
@@ -16884,7 +16885,7 @@ async fn ask_as(
         checkout.worktree.clone(),
         &prompt,
         resume,
-        work.map(|(mode, _)| mode).unwrap_or_default(),
+        work.map(|(mode, _, _)| mode).unwrap_or_default(),
     );
     // Queue time begins at admission, after local prompt preparation. This
     // keeps the displayed FIFO order aligned with the scheduler's order.
@@ -17259,7 +17260,7 @@ fn work_setup(
     item: &Item,
     backend: perch_agent::Backend,
     committer: bool,
-) -> Result<(perch_agent::Mode, String), String> {
+) -> Result<(perch_agent::Mode, String, perch_github::Approvals), String> {
     if !committer && !crate::items::work_allowed(item, viewer_login(ctx).as_deref()) {
         return Err("Work runs only on your own worktrees and pull requests".into());
     }
@@ -17302,7 +17303,7 @@ fn work_setup(
         grant.commit,
         approvals,
     );
-    Ok((perch_agent::Mode::Work(grant), framing))
+    Ok((perch_agent::Mode::Work(grant), framing, approvals))
 }
 
 /// Ask an agent, in a Work run, to merge the pull request's base into the
@@ -18209,6 +18210,7 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
     } else {
         None
     };
+    let approvals = work.as_ref().map(|(_, _, approvals)| *approvals);
     let Some((history, resume)) =
         retry_conversation_context(&thread, &request_id, backend.name(), old.purpose, old.mode)
     else {
@@ -18236,7 +18238,7 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         crate::ask::follow_up_prompt(&input)
     };
     let mut prompt = captured_retry_prompt(reconstructed_prompt, old.prompt_snapshot.as_deref());
-    if let (Some((_, framing)), Some(system)) = (&work, prompt.system.as_mut()) {
+    if let (Some((_, framing, _)), Some(system)) = (&work, prompt.system.as_mut()) {
         *system = framing.clone();
     }
     let spec = crate::ask::run_spec(
@@ -18247,7 +18249,7 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         directory.to_path_buf(),
         &prompt,
         resume,
-        work.map(|(mode, _)| mode).unwrap_or_default(),
+        work.map(|(mode, _, _)| mode).unwrap_or_default(),
     );
     let now = Timestamp::now();
     let run = RunRecord {
@@ -18293,6 +18295,7 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         mode: old.mode,
         work_before: None,
         work_after: None,
+        approvals,
     };
     let admission = match ctx.runs.admit(run.clone()) {
         Ok(admission) => admission,
@@ -24056,6 +24059,7 @@ while True:
             .unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].mode, RunMode::Work);
+        assert_eq!(runs[0].approvals, Some(perch_github::Approvals::Auto));
         assert_eq!(runs[0].status, RunStatus::Completed, "{:?}", runs[0].error);
         let args = std::fs::read_to_string(dir.path().join("args-1")).unwrap();
         assert!(args.contains("\"autoAllowBashIfSandboxed\":true"), "{args}");
