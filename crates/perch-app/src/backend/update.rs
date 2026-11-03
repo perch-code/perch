@@ -27,7 +27,7 @@ const TICK: Duration = Duration::from_secs(15 * 60);
 /// it can replace.
 pub(super) fn spawn(ctx: Ctx) {
     if update::running_bundle().is_none() {
-        tracing::info!("not running from Perch.app, so not looking for updates");
+        tracing::info!("not running from a release, so not looking for updates");
         return;
     }
     tokio::spawn(async move {

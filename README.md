@@ -20,12 +20,13 @@ Features:
 
 You need:
 
-- An Apple Silicon or Intel Mac, with git
+- A Mac (Apple Silicon or Intel) or Linux (x86_64 or arm64, glibc 2.35+,
+  GTK 3), with git
 - The [GitHub CLI](https://cli.github.com/), signed in with `gh auth login`
 - For agents: [Claude Code](https://claude.com/claude-code) 2.1.223+ and/or
   [Codex CLI](https://github.com/openai/codex) 0.155.1+, signed in
 
-Then install the latest release:
+Then install the latest release. On a Mac:
 
 ```bash
 gh release download --repo perch-code/perch --pattern Perch-macos-arm64.tar.gz -O - | tar -xz -C /Applications
@@ -33,8 +34,23 @@ gh release download --repo perch-code/perch --pattern Perch-macos-arm64.tar.gz -
 
 On an Intel Mac, download `Perch-macos-x86_64.tar.gz` instead. Perch isn't
 notarized yet, and downloading with `gh` rather than a browser keeps macOS
-from quarantining it. After that, Perch checks for new releases. Click
-"Restart to update" to upgrade when one is detected.
+from quarantining it.
+
+On Linux, unpack it into `~/.local/share/perch` and link the binary onto
+your PATH:
+
+```bash
+gh release download --repo perch-code/perch --pattern Perch-linux-x86_64.tar.gz -O - | tar -xz -C ~/.local/share
+```
+
+```bash
+ln -sf ~/.local/share/perch/perch ~/.local/bin/perch
+```
+
+On arm64, download `Perch-linux-arm64.tar.gz` instead.
+
+After that, Perch checks for new releases. Click "Restart to update" to
+upgrade when one is detected.
 
 ## Setup
 
