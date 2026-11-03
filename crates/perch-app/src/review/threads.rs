@@ -432,6 +432,11 @@ pub fn composer_view(
     let focus_mentioner = mentioner.clone();
     let blur_mentioner = mentioner.clone();
     let key_mentioner = mentioner.clone();
+    // Whether this box has the keyboard. A box taken down with its page,
+    // Conversation going for Code, is never told it lost focus, and the
+    // flag would stand the code's keys down with no composer there.
+    let focused = std::rc::Rc::new(std::cell::Cell::new(false));
+    let (gained, lost, gone) = (focused.clone(), focused.clone(), focused);
     // A draft the box starts with, a retried question or a quoted comment,
     // is typed under, not into.
     if !draft.is_empty() {
@@ -681,12 +686,19 @@ pub fn composer_view(
             }
         })
         .on_event_cont(el::FocusGained, move |_, _| {
+            gained.set(true);
             state.composer_focused.set(true);
             focus_mentioner.focus(true);
         })
         .on_event_cont(el::FocusLost, move |_, _| {
+            lost.set(false);
             state.composer_focused.set(false);
             blur_mentioner.focus(false);
+        })
+        .on_cleanup(move || {
+            if gone.get() {
+                state.composer_focused.set(false);
+            }
         })
         // Escape closes an empty composer, or one editing a draft: the
         // draft's saved words come back as the message row, and whatever

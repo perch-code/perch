@@ -635,6 +635,10 @@ fn rename_box(state: AppState, backend: Rc<Backend>, item: Item) -> impl IntoVie
     let text = RwSignal::new(item.title().to_string());
     let id = item.id.clone();
     let commit_backend = backend.clone();
+    // Whether the box has the keyboard. Enter and Escape take it down
+    // while it does, and a view taken down is never told it lost focus.
+    let focused = std::rc::Rc::new(std::cell::Cell::new(false));
+    let (gained, lost, gone) = (focused.clone(), focused.clone(), focused);
     let input = TextInput::new(text)
         .placeholder(item.given_title())
         .on_enter(move || {
@@ -643,8 +647,19 @@ fn rename_box(state: AppState, backend: Rc<Backend>, item: Item) -> impl IntoVie
             commit_backend.rename_item(&id, (!name.is_empty()).then(|| name.to_string()));
             state.renaming.set(None);
         })
-        .on_event_cont(el::FocusGained, move |_, _| state.search_focused.set(true))
-        .on_event_cont(el::FocusLost, move |_, _| state.search_focused.set(false))
+        .on_event_cont(el::FocusGained, move |_, _| {
+            gained.set(true);
+            state.search_focused.set(true);
+        })
+        .on_event_cont(el::FocusLost, move |_, _| {
+            lost.set(false);
+            state.search_focused.set(false);
+        })
+        .on_cleanup(move || {
+            if gone.get() {
+                state.search_focused.set(false);
+            }
+        })
         // A click in the box must not open the item.
         .on_event_stop(el::Click, |_, _| {})
         .style(|s| {

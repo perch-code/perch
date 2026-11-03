@@ -1655,6 +1655,41 @@ mod window {
         assert!(state.composer.get().is_none());
     }
 
+    /// Conversation's composer had the keyboard when the page went for
+    /// Code: the box went with it, never told it lost focus, and Cmd-F
+    /// still finds in the code.
+    #[test]
+    fn cmd_f_finds_in_the_code_after_a_composer_left_with_its_page() {
+        let (mut harness, state) = harness();
+        state.show_tab(ItemTab::Conversation);
+        harness.rebuild();
+        harness.paint();
+        harness.dispatch_event(key(
+            Code::KeyA,
+            Key::Character("a".into()),
+            Modifiers::empty(),
+        ));
+        harness.rebuild();
+        harness.paint();
+        let text_box = state.composer_box.get().expect("`a` opened a composer");
+        text_box.request_focus();
+        harness.rebuild();
+        assert!(
+            state.composer_focused.get(),
+            "the composer has the keyboard"
+        );
+
+        state.show_tab(ItemTab::Code);
+        harness.rebuild();
+        harness.paint();
+        harness.dispatch_event(cmd(Code::KeyF, "f"));
+        harness.rebuild();
+        harness.paint();
+        assert!(state.find_open.get(), "the bar is up");
+        let text_box = named(harness.root_id(), "find-box").expect("the bar is up");
+        assert!(harness.is_focused(text_box), "the box took the keyboard");
+    }
+
     #[test]
     fn a_selection_taken_for_a_pattern_stands_for_itself() {
         let (mut harness, state) =

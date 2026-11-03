@@ -1963,6 +1963,23 @@ mod tests {
         assert_eq!(state.renaming.get().as_deref(), Some("pr"));
     }
 
+    /// The rename box goes, as Enter and Escape take it down, while it
+    /// has the keyboard, and the keys it stood down are back.
+    #[test]
+    fn a_rename_put_away_gives_the_keys_back() {
+        let (mut harness, state) = harness();
+        state.renaming.set(Some("pr".into()));
+        harness.rebuild();
+        harness.paint();
+        harness.rebuild();
+        assert!(state.search_focused.get(), "the box has the keyboard");
+
+        state.renaming.set(None);
+        harness.rebuild();
+        harness.paint();
+        assert!(!state.search_focused.get());
+    }
+
     /// The `...` on a hovered row opens the same menu, under it.
     #[test]
     fn a_rows_more_button_opens_its_menu_under_it() {
