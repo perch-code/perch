@@ -31642,6 +31642,10 @@ read eof || true
         let dir = tempfile::tempdir().unwrap();
         let (ctx, received) = ctx(dir.path(), "http://127.0.0.1:9", &[]);
         let (mut item, worktree, moved) = moved_on_elsewhere(&ctx, dir.path());
+        // The rebase commits as the reader. An identity of its own, so it
+        // doesn't lean on the machine's: Linux runners have none to guess.
+        git(&worktree, &["config", "user.name", "t"]);
+        git(&worktree, &["config", "user.email", "t@t"]);
         std::fs::write(worktree.join("mine.txt"), "mine\n").unwrap();
         git(&worktree, &["add", "."]);
         git(&worktree, &["commit", "-q", "-m", "mine"]);
