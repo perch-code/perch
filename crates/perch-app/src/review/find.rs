@@ -298,9 +298,7 @@ pub fn wire(state: ReviewState) {
         let epoch = state.editor_epoch.get();
         // A picture has no editor to find anything in, unless its markup
         // is shown.
-        let file = state
-            .active_file()
-            .filter(|_| state.drawn_picture().is_none());
+        let file = state.active_file().filter(|_| !state.drawn());
         let made = Made {
             open,
             query: query.clone(),
@@ -608,11 +606,7 @@ fn go_to(state: ReviewState, m: Match) {
 /// page, it is there while it is up.
 pub fn bar(state: ReviewState, pane: Pane) -> impl IntoView {
     let shown = Memo::new(move |_| match pane {
-        Pane::Code => {
-            state.find_open.get()
-                && state.active.with(Option::is_some)
-                && state.drawn_picture().is_none()
-        }
+        Pane::Code => state.find_open.get() && state.active.with(Option::is_some) && !state.drawn(),
         Pane::Conversation => state.conversation_find_open.get(),
     });
     dyn_container(
@@ -1931,7 +1925,7 @@ mod window {
         );
         harness.rebuild();
         harness.paint();
-        assert!(state.drawn_picture().is_some(), "the file draws");
+        assert!(state.drawn(), "the file draws");
         harness.dispatch_event(cmd(Code::KeyF, "f"));
         harness.rebuild();
         assert!(!state.find_open.get());

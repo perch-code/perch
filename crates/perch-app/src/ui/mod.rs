@@ -569,8 +569,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     let showing = match review.tab.get() {
                         crate::review::model::ItemTab::Conversation => true,
                         crate::review::model::ItemTab::Code => {
-                            review.active_file().is_some_and(|f| !f.truncated)
-                                && review.drawn_picture().is_none()
+                            review.active_file().is_some_and(|f| !f.truncated) && !review.drawn()
                         }
                     };
                     if showing {
@@ -593,9 +592,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 } else {
                     match review.tab.get() {
                         crate::review::model::ItemTab::Code => {
-                            (review.active.with(Option::is_some)
-                                && review.drawn_picture().is_none())
-                            .then_some(crate::review::find::Pane::Code)
+                            (review.active.with(Option::is_some) && !review.drawn())
+                                .then_some(crate::review::find::Pane::Code)
                         }
                         crate::review::model::ItemTab::Conversation => {
                             Some(crate::review::find::Pane::Conversation)

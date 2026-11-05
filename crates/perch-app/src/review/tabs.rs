@@ -358,7 +358,7 @@ fn close_button(on_close: impl Fn() + 'static) -> impl IntoView {
 /// this until it is shown as markup, and neither does Conversation.
 fn change_nav(state: ReviewState) -> impl IntoView {
     let count = move || {
-        if !on_file(state) || state.drawn_picture().is_some() {
+        if !on_file(state) || state.drawn() {
             return 0;
         }
         state.active_file().map(|f| f.change_count()).unwrap_or(0)
@@ -398,7 +398,7 @@ fn change_nav(state: ReviewState) -> impl IntoView {
 /// jump left waiting would land in the next editor built, on some other
 /// file.
 pub fn jump_to_change(state: ReviewState, forward: bool) {
-    if state.drawn_picture().is_some() {
+    if state.drawn() {
         return;
     }
     let Some(file) = state.active_file() else {
@@ -446,7 +446,7 @@ fn nav_button(state: ReviewState, forward: bool) -> impl IntoView {
 }
 
 /// The tiles at the strip's right end: while a file shows, Source, when
-/// the file is a picture, then Show whole, then Word wrap, Stacked and
+/// the file is a picture, or Preview, when it is markdown, then Show whole, then Word wrap, Stacked and
 /// Split, with a rule after each group; then the walkthrough and the
 /// tree, which take turns in the drawer on the right. A chosen tile is filled;
 /// the others are only a glyph until the pointer is over one. The last
@@ -461,7 +461,7 @@ fn nav_button(state: ReviewState, forward: bool) -> impl IntoView {
 /// at the next launch. Show whole is the open tab's: a reader unfolds the
 /// file they are reading and not the others, so it lasts as long as the
 /// tab and every file opens folded. Source is the file's, for the app's life: a
-/// reader wants the markup of this SVG, not of SVGs. The drawer is the
+/// reader wants the markup of this SVG, not of SVGs. Preview is too. The drawer is the
 /// window's, and comes back at the next launch as the layout does.
 fn tiles(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let issue = move || state.issue.with(Option::is_some);
@@ -469,6 +469,7 @@ fn tiles(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoVi
     Stack::horizontal((
         Stack::horizontal((
             source_group(state),
+            preview_group(state),
             Stack::horizontal((fold_tile(state), tile_rule()))
                 .style(move |s| change_only(s.items_center())),
             Stack::horizontal((
@@ -531,6 +532,47 @@ fn source_group(state: ReviewState) -> impl IntoView {
         },
     )
     .style(|s| s.items_center().flex_shrink(0.0_f32))
+}
+
+/// The Preview tile and its rule, while the open file is markdown that
+/// loaded whole, and nothing otherwise.
+fn preview_group(state: ReviewState) -> impl IntoView {
+    let markdown = floem::reactive::Memo::new(move |_| {
+        state
+            .active_file()
+            .is_some_and(|f| crate::review::preview::can_preview(&f))
+    });
+    dyn_container(
+        move || markdown.get(),
+        move |markdown| {
+            if markdown {
+                Stack::horizontal((preview_tile(state), tile_rule()))
+                    .debug_name("preview group")
+                    .style(|s| s.items_center())
+                    .into_any()
+            } else {
+                Empty::new().into_any()
+            }
+        },
+    )
+    .style(|s| s.items_center().flex_shrink(0.0_f32))
+}
+
+/// A markdown file drawn as it reads, filled while it is what shows; the
+/// source is the default, as on GitHub, and is only the glyph.
+fn preview_tile(state: ReviewState) -> impl IntoView {
+    let previewed = move || state.previewed();
+    tip_with(
+        tile(SidebarIcon::File, previewed, move || state.toggle_preview())
+            .debug_name("preview tile"),
+        move || {
+            if previewed() {
+                "Shown rendered. Click to show the source.".to_string()
+            } else {
+                "Shown as source. Click to show it rendered.".to_string()
+            }
+        },
+    )
 }
 
 /// The markup of a picture, filled while it is what shows; the picture

@@ -49,7 +49,6 @@
 //! not coloured, and a cell's wrapped lines all start at the left.
 
 use std::collections::{HashMap, VecDeque};
-use std::iter::Peekable;
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -64,7 +63,8 @@ use floem::text::{
 use floem::views::{Container, Decorators, Empty, Label, Stack};
 use floem::AnyView;
 use pulldown_cmark::{
-    Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
+    Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, OffsetIter, Options, Parser,
+    Tag, TagEnd,
 };
 
 use crate::icons::{self, SidebarIcon};
@@ -211,36 +211,109 @@ pub fn parse_in(text: &str, repo: Option<&str>) -> Vec<Block> {
 
 /// [`parse_in`], with a bare SHA linked to the commit of `repo`'s it
 /// names among `commits`, written in full.
-fn parse_naming(text: &str, repo: Option<&str>, commits: &[String]) -> Vec<Block> {
+pub(crate) fn parse_naming(text: &str, repo: Option<&str>, commits: &[String]) -> Vec<Block> {
+    parse_sourced(text, repo, commits)
+        .into_iter()
+        .map(|(block, _)| block)
+        .collect()
+}
+
+/// [`parse_naming`], with where in `text` each block at the top was
+/// written: the byte ranges it was built from. The footnotes are built
+/// from their definitions, wherever those were, so theirs are several.
+pub fn parse_sourced(
+    text: &str,
+    repo: Option<&str>,
+    commits: &[String],
+) -> Vec<(Block, Vec<Range<usize>>)> {
     let repo = repo.filter(|r| r.contains('/') && !perch_github::config::is_local(r));
     let mut builder = Builder {
         repo,
         commits,
-        events: Parser::new_ext(text, OPTIONS).peekable(),
+        events: Events::new(text),
         numbers: Vec::new(),
         definitions: HashMap::new(),
         task: None,
         loose: false,
         text: String::new(),
         pending: VecDeque::new(),
+        sources: Vec::new(),
+        from: 0,
+        pending_from: 0,
+        note_sources: HashMap::new(),
     };
-    let mut blocks = builder.blocks(Closer::Document);
+    let blocks = builder.blocks(Closer::Document);
+    let mut sourced: Vec<(Block, Vec<Range<usize>>)> = blocks
+        .into_iter()
+        .zip(std::mem::take(&mut builder.sources))
+        .map(|(block, range)| (block, vec![range]))
+        .collect();
     // GitHub numbers footnotes by first reference and drops a definition
     // nothing refers to. A reference with no definition never reaches
     // here: the parser leaves it as text.
-    let notes: Vec<Vec<Block>> = builder
-        .numbers
-        .iter()
-        .filter_map(|label| builder.definitions.remove(label))
-        .collect();
-    if !notes.is_empty() {
-        blocks.push(Block::Footnotes(notes));
+    let mut notes = Vec::new();
+    let mut ranges = Vec::new();
+    for label in &builder.numbers {
+        if let Some(note) = builder.definitions.remove(label) {
+            notes.push(note);
+            ranges.extend(builder.note_sources.remove(label));
+        }
     }
-    blocks
+    if !notes.is_empty() {
+        sourced.push((Block::Footnotes(notes), ranges));
+    }
+    sourced
+}
+
+/// The parser's events, one looked ahead at as [`std::iter::Peekable`]
+/// would, keeping how far into the text those taken reach.
+struct Events<'a> {
+    inner: OffsetIter<'a>,
+    peeked: Option<Option<(Event<'a>, Range<usize>)>>,
+    /// The end of the furthest-reaching event taken.
+    reach: usize,
+}
+
+impl<'a> Events<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            inner: Parser::new_ext(text, OPTIONS).into_offset_iter(),
+            peeked: None,
+            reach: 0,
+        }
+    }
+
+    fn look(&mut self) -> Option<&(Event<'a>, Range<usize>)> {
+        let inner = &mut self.inner;
+        self.peeked.get_or_insert_with(|| inner.next()).as_ref()
+    }
+
+    fn peek(&mut self) -> Option<&Event<'a>> {
+        self.look().map(|(event, _)| event)
+    }
+
+    /// Where the next event starts, or the reach when there is none.
+    fn next_start(&mut self) -> usize {
+        let reach = self.reach;
+        self.look().map_or(reach, |(_, range)| range.start)
+    }
+}
+
+impl<'a> Iterator for Events<'a> {
+    type Item = Event<'a>;
+
+    fn next(&mut self) -> Option<Event<'a>> {
+        let (event, range) = match self.peeked.take() {
+            Some(taken) => taken,
+            None => self.inner.next(),
+        }?;
+        self.reach = self.reach.max(range.end);
+        Some(event)
+    }
 }
 
 struct Builder<'a> {
-    events: Peekable<Parser<'a>>,
+    events: Events<'a>,
     /// The repository a bare `#12` is an issue of.
     repo: Option<&'a str>,
     /// The commits a bare SHA may name, in full.
@@ -263,6 +336,14 @@ struct Builder<'a> {
     /// `<details>` opens a run of blocks that the rest of its HTML block,
     /// or a later one, closes.
     pending: VecDeque<Piece>,
+    /// Where each block at the top so far was written, in the text.
+    sources: Vec<Range<usize>>,
+    /// Where the block at the top being built began.
+    from: usize,
+    /// Where the HTML block that left `pending` began.
+    pending_from: usize,
+    /// Where each footnote was defined, by label.
+    note_sources: HashMap<String, Range<usize>>,
 }
 
 /// A piece of an HTML block, cut where a `<details>` opens or closes.
@@ -411,8 +492,17 @@ fn push_text(spans: &mut Vec<Span>, style: &Span, text: &str) {
 impl<'a> Builder<'a> {
     fn blocks(&mut self, closer: Closer) -> Vec<Block> {
         let mut out = Vec::new();
+        let top = closer == Closer::Document;
         loop {
+            // The blocks the last turn made were written from where it
+            // began to as far as it read.
+            if top {
+                self.settle(out.len());
+            }
             if let Some(piece) = self.pending.pop_front() {
+                if top {
+                    self.from = self.pending_from;
+                }
                 match piece {
                     Piece::Html(text) => out.push(Block::Paragraph(vec![Span {
                         text,
@@ -427,6 +517,9 @@ impl<'a> Builder<'a> {
                     Piece::Close => {}
                 }
                 continue;
+            }
+            if top {
+                self.from = self.events.next_start();
             }
             let Some(event) = self.events.peek() else {
                 break;
@@ -484,9 +577,16 @@ impl<'a> Builder<'a> {
                 Event::Start(Tag::Table(aligns)) => out.push(self.table(aligns)),
                 Event::Start(Tag::FootnoteDefinition(label)) => {
                     let blocks = self.blocks(Closer::Footnote);
+                    if top {
+                        let range = self.from..self.events.reach;
+                        self.note_sources.insert(label.to_string(), range);
+                    }
                     self.definitions.insert(label.to_string(), blocks);
                 }
                 Event::Start(Tag::HtmlBlock) => {
+                    if top {
+                        self.pending_from = self.from;
+                    }
                     let pieces = html_pieces(&self.html_block());
                     self.pending.extend(pieces);
                 }
@@ -500,7 +600,18 @@ impl<'a> Builder<'a> {
                 _ => {}
             }
         }
+        if top {
+            self.settle(out.len());
+        }
         out
+    }
+
+    /// Give each block at the top made since the last call its source:
+    /// from where the turn that made it began to as far as it read.
+    fn settle(&mut self, made: usize) {
+        while self.sources.len() < made {
+            self.sources.push(self.from..self.events.reach);
+        }
     }
 
     fn inlines(&mut self, closer: InlineCloser) -> Vec<Span> {
@@ -1823,6 +1934,128 @@ fn review_body(
     )
     .style(|s| s.width_full())
     .into_any()
+}
+
+/// How a block of a markdown file's preview stands against the base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    Same,
+    /// Written new: every line of it was added.
+    Added,
+    /// Edited: some of it was added, changed or taken out.
+    Changed,
+    /// Taken out, drawn from the base's lines.
+    Removed,
+}
+
+/// A markdown file's preview: the blocks `build` makes, each with how it
+/// changed, stacked with a bar beside the changed ones, as GitHub's rich
+/// diff marks them. `text` is all the markdown `build` reads, for the
+/// commits it names by SHA, which link once the review knows them.
+pub fn render_marked(
+    text: &str,
+    state: ReviewState,
+    build: impl Fn(Option<&str>, &[String]) -> Vec<(Block, Mark)> + 'static,
+) -> AnyView {
+    let ctx = Ctx {
+        size: theme::TEXT_BODY,
+        color: theme::fg,
+        depth: 0,
+        refs: Refs::of(state),
+        foot: None,
+    };
+    let repo = state
+        .item
+        .with_untracked(|i| i.as_ref().map(|i| i.repo_full_name.clone()));
+    let written: Vec<String> = sha_words(text)
+        .into_iter()
+        .map(|w| text[w].to_string())
+        .collect();
+    let body = if written.is_empty() {
+        marked_stack(build(repo.as_deref(), &[]), ctx)
+    } else {
+        let named = Memo::new(move |_| {
+            let known = state.known_commits();
+            let mut named: Vec<String> = written
+                .iter()
+                .filter_map(|w| named_commit(w, &known).map(str::to_string))
+                .collect();
+            named.sort_unstable();
+            named.dedup();
+            named
+        });
+        floem::views::dyn_container(
+            move || named.get(),
+            move |named| marked_stack(build(repo.as_deref(), &named), ctx),
+        )
+        .style(|s| s.width_full())
+        .into_any()
+    };
+    passage(body).into_any()
+}
+
+/// How far a marked block's text sits in from its bar.
+const MARK_INSET: f64 = 12.0;
+
+/// [`stack`], each block in a band: plain for one that is the same, and
+/// tinted with a bar on its left for one that changed, in the editor's
+/// colours for an addition, an edit and a removal. A removed block's
+/// text is dimmed, as a removed line's is.
+fn marked_stack(blocks: Vec<(Block, Mark)>, ctx: Ctx) -> AnyView {
+    let unit = space(ctx.size);
+    let gaps: Vec<f64> = std::iter::once(0.0)
+        .chain(
+            blocks
+                .windows(2)
+                .map(|pair| gap_before(&pair[0].0, &pair[1].0) * unit),
+        )
+        .collect();
+    let children: Vec<AnyView> = blocks
+        .into_iter()
+        .zip(gaps)
+        .map(|((block, mark), gap)| {
+            let ctx = match mark {
+                Mark::Removed => Ctx {
+                    color: theme::diff_deleted_fg,
+                    ..ctx
+                },
+                _ => ctx,
+            };
+            Container::new(block_view(block, ctx))
+                .debug_name(match mark {
+                    Mark::Same => "preview block",
+                    Mark::Added => "preview block:added",
+                    Mark::Changed => "preview block:changed",
+                    Mark::Removed => "preview block:removed",
+                })
+                .style(move |s| {
+                    let s = s
+                        .width_full()
+                        .margin_top(gap)
+                        .padding_left(MARK_INSET)
+                        .padding_right(MARK_INSET)
+                        .padding_vert(2.0)
+                        .border_left(3.0)
+                        .border_color(Color::TRANSPARENT);
+                    match mark {
+                        Mark::Same => s,
+                        Mark::Added => s
+                            .border_color(theme::diff_added_bar())
+                            .background(theme::diff_added_bg()),
+                        Mark::Changed => s
+                            .border_color(theme::diff_modified_bar())
+                            .background(theme::diff_modified_bg()),
+                        Mark::Removed => s
+                            .border_color(theme::diff_deleted_bar())
+                            .background(theme::diff_deleted_bg()),
+                    }
+                })
+                .into_any()
+        })
+        .collect();
+    Stack::vertical_from_iter(children)
+        .style(|s| s.flex_col().width_full())
+        .into_any()
 }
 
 /// What a suggested change has under it, such as Apply suggestion: a

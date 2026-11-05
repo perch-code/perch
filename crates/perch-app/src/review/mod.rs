@@ -30,6 +30,7 @@ pub mod navigation;
 pub mod notified;
 pub mod open_pull;
 pub mod picture;
+pub mod preview;
 pub mod rail;
 pub mod references;
 pub mod review_launch;

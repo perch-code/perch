@@ -1601,6 +1601,10 @@ pub struct ReviewState {
     /// by path. A picture is drawn until they ask, and the strip's Source
     /// tile asks and unasks; the choice lives as long as the app.
     pub as_source: RwSignal<HashSet<String>>,
+    /// The markdown files the reader asked to see rendered, by path. A
+    /// markdown file shows its source, as every file does, until they
+    /// ask; the strip's Preview tile asks and unasks, for the app's life.
+    pub as_preview: RwSignal<HashSet<String>>,
     /// What the diff is over. Per item; Branch when the item opens.
     pub scope: RwSignal<Scope>,
     /// Identity of the backend file context currently rendered. File and
@@ -2173,6 +2177,7 @@ impl ReviewState {
             wrap: RwSignal::new(false),
             wrap_columns: RwSignal::new([None; 2]),
             as_source: RwSignal::new(HashSet::new()),
+            as_preview: RwSignal::new(HashSet::new()),
             scope: RwSignal::new(Scope::Branch),
             scope_gen: RwSignal::new(None),
             commits: RwSignal::new(Arc::new(Vec::new())),
@@ -3828,6 +3833,34 @@ impl ReviewState {
         file.picture.clone()
     }
 
+    /// Whether the active file is markdown drawn as it reads, rather than
+    /// its source: only when the reader asked, and only for a file whose
+    /// text loaded whole.
+    pub fn previewed(&self) -> bool {
+        self.active_file().is_some_and(|file| {
+            crate::review::preview::can_preview(&file)
+                && self.as_preview.with(|paths| paths.contains(&file.path))
+        })
+    }
+
+    /// Flip the active file between its source and its preview.
+    pub fn toggle_preview(&self) {
+        let Some(path) = self.active.get_untracked() else {
+            return;
+        };
+        self.as_preview.update(|paths| {
+            if !paths.remove(&path) {
+                paths.insert(path);
+            }
+        });
+    }
+
+    /// Whether the active file is drawn, a picture or a preview, in place
+    /// of the editor: no lines to jump between, find in or page through.
+    pub fn drawn(&self) -> bool {
+        self.drawn_picture().is_some() || self.previewed()
+    }
+
     /// Flip the active file between its picture and its markup.
     pub fn toggle_source(&self) {
         let Some(path) = self.active.get_untracked() else {
@@ -4107,11 +4140,14 @@ impl ReviewState {
         // New sides of a file already loaded, as an agent's edit brings,
         // are edited into its editor in place when they can be: a new
         // editor draws a frame at the top of the file before the reader's
-        // place is put back.
-        let in_place = self.files.with_untracked(|m| {
-            m.get(path)
-                .is_some_and(|old| crate::review::editor::edits_in_place(old, &file))
-        });
+        // place is put back. A preview has no editor to edit, and is
+        // drawn again.
+        let previewed = self.as_preview.with_untracked(|p| p.contains(path));
+        let in_place = !previewed
+            && self.files.with_untracked(|m| {
+                m.get(path)
+                    .is_some_and(|old| crate::review::editor::edits_in_place(old, &file))
+            });
         self.files.update(|m| {
             m.insert(path.to_string(), file);
         });

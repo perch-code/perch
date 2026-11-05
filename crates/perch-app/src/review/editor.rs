@@ -66,6 +66,7 @@ use crate::review::model::{
 };
 use crate::review::navigation;
 use crate::review::picture;
+use crate::review::preview;
 use crate::review::references;
 use crate::review::sticky;
 use crate::review::styling::PerchStyling;
@@ -150,13 +151,17 @@ pub fn editor_pane(
                 // keeping. What changes under the one file is for editing the
                 // document in place, through the live documents held below.
                 // A picture flipped to its markup, or back, is another view
-                // of the file the same way.
+                // of the file the same way, and so is markdown flipped to
+                // its preview.
                 move || {
                     let path = state.active.get();
                     let source = path.as_deref().is_some_and(|path| state.shows_source(path));
-                    (path, state.editor_epoch.get(), state.layout.get(), source)
+                    let preview = path
+                        .as_deref()
+                        .is_some_and(|path| state.as_preview.with(|p| p.contains(path)));
+                    (path, state.editor_epoch.get(), state.layout.get(), source, preview)
                 },
-                move |(path, epoch, layout, source)| {
+                move |(path, epoch, layout, source, preview)| {
                     // Whatever editor stood here is going with its documents;
                     // the one built below registers its own.
                     state.docs.set(None);
@@ -180,6 +185,12 @@ pub fn editor_pane(
                                 // A file that draws is drawn, unless the reader
                                 // asked for its markup.
                                 let drawn = if source { None } else { file.picture.clone() };
+                                let previewed = preview && preview::can_preview(&file);
+                                if previewed {
+                                    state.selection.set(None);
+                                    state.selection_base.set(None);
+                                    return preview::pane(&file, state).into_any();
+                                }
                                 match drawn {
                                     Some(picture) => {
                                         // No editor, no selection: `a` would

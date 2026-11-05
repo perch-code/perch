@@ -1138,7 +1138,7 @@ pub fn key(state: ReviewState, open_file: &OpenFile, key: &KeyboardEvent) -> Eve
 /// screen, for `:42`.
 fn active_lines(state: ReviewState) -> Option<(String, usize)> {
     let file = state.active_file()?;
-    if file.truncated || state.drawn_picture().is_some() {
+    if file.truncated || state.drawn() {
         return None;
     }
     let lines = file.buffer.rows.iter().filter(|r| !r.is_deleted()).count();
