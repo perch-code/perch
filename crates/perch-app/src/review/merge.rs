@@ -68,6 +68,10 @@ struct MergeSnapshot {
     can_update: bool,
     update_pending: bool,
     update_error: Option<String>,
+    /// Whether Rebase can bring the two together when each has commits
+    /// the other lacks.
+    can_rebase: bool,
+    rebase_pending: bool,
     /// Whether the reader may mark a draft ready for review, and a change
     /// to or from a draft under way.
     may_set_draft: bool,
@@ -701,6 +705,8 @@ fn merge_section(
             can_update: crate::review::summary::can_update(state),
             update_pending: state.update_pending.get(),
             update_error: state.update_error.get(),
+            can_rebase: crate::review::summary::can_rebase(state),
+            rebase_pending: state.rebase_pending.get(),
             may_set_draft: may_set_draft.get(),
             draft_pending: state.draft_pending.get(),
             resolver: resolver
@@ -938,6 +944,21 @@ fn merge_controls(
                 true,
                 move || !pending,
                 move || crate::review::summary::update(state, &backend),
+            )
+            .into_any()
+        }
+        // Each has commits the other lacks, and Rebase puts the worktree's
+        // on top; Push is offered after.
+        MergeDecision::Disabled(DisabledReason::StaleCheckout)
+            if snapshot.can_rebase || snapshot.rebase_pending =>
+        {
+            let pending = snapshot.rebase_pending;
+            let label = if pending { "Rebasing…" } else { "Rebase" };
+            merge_button(
+                label.to_string(),
+                true,
+                move || !pending,
+                move || crate::review::summary::rebase(state, &backend),
             )
             .into_any()
         }
@@ -2204,7 +2225,7 @@ mod tests {
 
     /// A worktree whose pull request's head isn't here can't merge, and
     /// the merge box updates the branch instead; one with commits of its
-    /// own as well doesn't offer it.
+    /// own as well offers Rebase in its place.
     #[test]
     fn a_pull_request_head_not_fetched_turns_merge_into_update_branch() {
         use crate::backend::Command;
@@ -2246,7 +2267,7 @@ mod tests {
         let sent: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
         assert!(
             sent.iter()
-                .any(|c| matches!(c, Command::UpdateBranch { item_id } if item_id == "item-42")),
+                .any(|c| matches!(c, Command::UpdateBranch { item_id, rebase: false } if item_id == "item-42")),
             "{sent:?}"
         );
         assert!(named(harness.root_id(), "merge-action:Updating…").is_some());
@@ -2265,7 +2286,20 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert!(named(harness.root_id(), "merge-action:Update-branch").is_none());
-        assert!(named(harness.root_id(), "merge-action:Merge-unavailable").is_some());
+        let rebase =
+            named(harness.root_id(), "merge-action:Rebase").expect("Rebase in the merge box");
+        rebase.request_focus();
+        harness.rebuild();
+        harness.dispatch_event(key(Code::Enter));
+        harness.rebuild();
+        harness.paint();
+        let sent: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+        assert!(
+            sent.iter()
+                .any(|c| matches!(c, Command::UpdateBranch { item_id, rebase: true } if item_id == "item-42")),
+            "{sent:?}"
+        );
+        assert!(named(harness.root_id(), "merge-action:Rebasing…").is_some());
     }
 
     /// Conflicts go to an agent by default where one may work, held while

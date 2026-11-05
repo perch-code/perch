@@ -1684,6 +1684,9 @@ pub struct ReviewState {
     /// the last.
     pub update_pending: RwSignal<bool>,
     pub update_error: RwSignal<Option<String>>,
+    /// A Rebase on the pull request under way. What stopped the last is
+    /// `update_error`: the two are one command.
+    pub rebase_pending: RwSignal<bool>,
     /// An agent asked to resolve the pull request's conflicts, from the
     /// fetch of its base until the run ends or is refused.
     pub resolving_conflicts: RwSignal<bool>,
@@ -2201,6 +2204,7 @@ impl ReviewState {
             push_error: RwSignal::new(None),
             update_pending: RwSignal::new(false),
             update_error: RwSignal::new(None),
+            rebase_pending: RwSignal::new(false),
             resolving_conflicts: RwSignal::new(false),
             describing: RwSignal::new(false),
             description_error: RwSignal::new(None),
@@ -2436,6 +2440,7 @@ impl ReviewState {
         self.push_error.set(None);
         self.update_pending.set(false);
         self.update_error.set(None);
+        self.rebase_pending.set(false);
         self.resolving_conflicts.set(false);
         self.describing.set(false);
         self.description_error.set(None);

@@ -336,9 +336,11 @@ async fn push_to_pull_inner(ctx: &Ctx, item_id: &str) -> Result<(), String> {
 /// Bring the open pull request's head into the worktree's repository, and
 /// move the worktree to it when that loses nothing: when the worktree's
 /// head is one the pull request has. A worktree with commits of its own
-/// stays where it is, and the count says how the two stand.
-pub(super) async fn update_from_pull(ctx: &Ctx, item_id: &str) {
-    let outcome = update_from_pull_inner(ctx, item_id).await;
+/// stays where it is, and the count says how the two stand, unless
+/// `rebase` asks for those commits to be replayed on the pull request's
+/// head.
+pub(super) async fn update_from_pull(ctx: &Ctx, item_id: &str, rebase: bool) {
+    let outcome = update_from_pull_inner(ctx, item_id, rebase).await;
     let event = match outcome {
         Ok(caught_up) => Event::BranchUpdated {
             item_id: item_id.to_string(),
@@ -354,7 +356,7 @@ pub(super) async fn update_from_pull(ctx: &Ctx, item_id: &str) {
 
 /// Whether an open review that was left behind at an older head has
 /// caught up with the worktree.
-async fn update_from_pull_inner(ctx: &Ctx, item_id: &str) -> Result<bool, String> {
+async fn update_from_pull_inner(ctx: &Ctx, item_id: &str, rebase: bool) -> Result<bool, String> {
     let item = ctx.item(item_id).ok_or("The item is gone")?;
     let checkout = item
         .checkout
@@ -441,6 +443,15 @@ async fn update_from_pull_inner(ctx: &Ctx, item_id: &str) -> Result<bool, String
             }
         })?;
     }
+    // Both have commits the other lacks: the worktree's go on top.
+    let rebased = rebase
+        && !only_behind
+        && head != pr.head_sha
+        && !ctx.preparer.is_ancestor(dir, &pr.head_sha, &head).await;
+    if rebased {
+        rebase_onto(ctx, item_id, dir, &pr.head_ref, &pr.head_sha).await?;
+    }
+    let moved = only_behind || rebased;
 
     // The row follows the worktree's head, and counts it against the pull
     // request's again; an open review reads the moved head.
@@ -458,14 +469,14 @@ async fn update_from_pull_inner(ctx: &Ctx, item_id: &str) -> Result<bool, String
         ctx.send_items();
     }
     let mut caught_up = false;
-    if only_behind {
+    if moved {
         let navigation_id = ctx.slot.lock().ok().and_then(|mut g| {
             g.as_mut()
                 .filter(|open| open.item_id == item_id)
                 .map(|open| {
                     // A review left at an older head because the worktree
                     // couldn't move: it has moved now, with nothing of its own
-                    // to lose, so the review follows it as for a commit.
+                    // lost, so the review follows it as for a commit.
                     caught_up = open.checkout.stale.take().is_some();
                     open.navigation_id
                 })
@@ -477,6 +488,60 @@ async fn update_from_pull_inner(ctx: &Ctx, item_id: &str) -> Result<bool, String
         }
     }
     Ok(caught_up)
+}
+
+/// Replay the worktree's own commits on the pull request's head, with the
+/// reader's git, hooks and identity. Only on the pull request's branch
+/// and with nothing uncommitted; a rebase that stops on a conflict is
+/// undone, so the worktree is as it was.
+async fn rebase_onto(
+    ctx: &Ctx,
+    item_id: &str,
+    dir: &Path,
+    branch: &str,
+    pr_head: &str,
+) -> Result<(), String> {
+    let git = ctx.preparer.git();
+    let on_branch = git
+        .run(Some(dir), ["symbolic-ref", "-q", "HEAD"], QUERY_TIMEOUT)
+        .await
+        .is_ok_and(|r| r.trim() == format!("refs/heads/{branch}"));
+    if !on_branch {
+        return Err(format!(
+            "The worktree isn't on {branch}. Check it out, then rebase."
+        ));
+    }
+    match ctx.preparer.is_dirty(dir).await {
+        Ok(false) => {}
+        Ok(true) => {
+            return Err(
+                "The worktree has uncommitted changes. Commit or stash them, then rebase.".into(),
+            )
+        }
+        Err(e) => return Err(format!("Couldn't read the worktree: {e}")),
+    }
+    let rebased = git
+        .run(Some(dir), ["rebase", "-q", pr_head], COMMIT_TIMEOUT)
+        .await;
+    if let Err(e) = rebased {
+        tracing::info!(item = item_id, error = %e, "the rebase failed");
+        let undone = git
+            .run(Some(dir), ["rebase", "--abort"], QUERY_TIMEOUT)
+            .await
+            .is_ok();
+        let conflict = matches!(&e, perch_git::Error::Git { stderr, .. } if stderr.contains("CONFLICT") || stderr.contains("could not apply"));
+        return Err(match (conflict, undone) {
+            (true, true) => "Your commits conflict with the pull request's, so nothing was changed. Rebase by hand in the worktree.".to_string(),
+            (_, true) => format!("Couldn't rebase, so nothing was changed: {}", git_says(e)),
+            (_, false) => format!("Couldn't rebase, and the rebase is still under way in the worktree: {}", git_says(e)),
+        });
+    }
+    tracing::info!(
+        item = item_id,
+        head = pr_head,
+        "rebased a branch on its pull request"
+    );
+    Ok(())
 }
 
 /// What a failed git call said, by its first error line.

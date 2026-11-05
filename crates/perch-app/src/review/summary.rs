@@ -130,6 +130,7 @@ pub fn summary(
                 divergence(state),
                 push_button(app, state, backend.clone()),
                 update_button(state, backend.clone()),
+                rebase_button(state, backend.clone()),
             ))
             .style(|s| s.items_center().min_width(0.0).col_gap(theme::SUMMARY_GAP)),
         ),
@@ -1132,17 +1133,34 @@ pub(crate) fn push(state: ReviewState, backend: &Backend) {
 pub(crate) fn can_update(state: ReviewState) -> bool {
     state.item.with(|item| {
         item.as_ref().is_some_and(|item| {
-            let on_branch = item
-                .checkout
-                .as_ref()
-                .zip(item.pull_request())
-                .is_some_and(|(c, pr)| c.on_disk && c.branch == pr.head_ref);
-            on_branch
+            on_pull_branch(item)
                 && item
                     .divergence()
                     .is_some_and(|d| d.ahead.is_none_or(|a| a == 0))
         })
     })
+}
+
+/// Whether Rebase can bring the worktree and its pull request together:
+/// the worktree is on the pull request's branch and each has commits the
+/// other lacks, so neither Push nor Update branch can.
+pub(crate) fn can_rebase(state: ReviewState) -> bool {
+    state.item.with(|item| {
+        item.as_ref().is_some_and(|item| {
+            on_pull_branch(item)
+                && item.divergence().is_some_and(|d| {
+                    d.ahead.is_some_and(|a| a > 0) && d.behind.is_some_and(|b| b > 0)
+                })
+        })
+    })
+}
+
+/// Whether the item's worktree is on disk and on its pull request's branch.
+fn on_pull_branch(item: &Item) -> bool {
+    item.checkout
+        .as_ref()
+        .zip(item.pull_request())
+        .is_some_and(|(c, pr)| c.on_disk && c.branch == pr.head_ref)
 }
 
 /// Fetch the pull request's head into the worktree and fast-forward to
@@ -1157,6 +1175,21 @@ pub(crate) fn update(state: ReviewState, backend: &Backend) {
     state.update_pending.set(true);
     state.update_error.set(None);
     backend.update_branch(&item_id);
+}
+
+/// Replay the worktree's own commits on the pull request's head, as
+/// Rebase does here, in the notice and in the merge box. Nothing is
+/// pushed: Push does that after.
+pub(crate) fn rebase(state: ReviewState, backend: &Backend) {
+    let Some(item_id) = state
+        .item
+        .with_untracked(|i| i.as_ref().map(|i| i.id.clone()))
+    else {
+        return;
+    };
+    state.rebase_pending.set(true);
+    state.update_error.set(None);
+    backend.rebase_branch(&item_id);
 }
 
 /// Push, beside `3 unpushed`, and what stopped the last one.
@@ -1181,6 +1214,19 @@ fn update_button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
         state.update_error,
         move || can_update(state),
         move || update(state, &backend),
+    )
+}
+
+/// Rebase, beside `1 unpushed · 12 behind PR`, and what stopped the last
+/// one.
+fn rebase_button(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    branch_button(
+        state,
+        ("Rebase", "Rebasing…", "rebase-branch"),
+        state.rebase_pending,
+        state.update_error,
+        move || can_rebase(state),
+        move || rebase(state, &backend),
     )
 }
 
@@ -1342,22 +1388,61 @@ pub fn back_to_current(app: AppState, state: ReviewState, backend: Rc<Backend>) 
 
 /// Why the files on screen may not be the pull request's latest.
 ///
-/// Two cases, one shape: the pull request moved while the worktree had
-/// work in it, or it could not be fetched at all. Both offer Check again,
-/// which opens the item as a click on its row does: once the work is
-/// pushed or discarded, or GitHub answers, that catches up.
+/// Three cases, one shape: the pull request moved while the worktree had
+/// work in it, it moved while the worktree had commits of its own (the
+/// two diverged), or it could not be fetched at all. Diverged offers
+/// Rebase; the others offer Check again, which opens the item as a click
+/// on its row does: once the work is pushed or discarded, or GitHub
+/// answers, that catches up.
 ///
 /// A commit, the index or a run on Code is no case: the language servers
 /// are given each file as it shows.
 fn notice_text(state: ReviewState) -> Option<String> {
-    notice_lines(state).map(|(text, _)| text)
+    notice_lines(state).map(|(text, _, _)| text)
 }
 
-/// The notice and the longer account its tip gives on hover. The notice
-/// is cut from the end, so it leads with what happened.
-fn notice_lines(state: ReviewState) -> Option<(String, String)> {
+/// What the notice's button does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoticeAction {
+    CheckAgain,
+    Rebase,
+}
+
+/// The notice, the longer account its tip gives on hover, and its
+/// button. The notice is cut from the end, so it leads with what
+/// happened.
+fn notice_lines(state: ReviewState) -> Option<(String, String, NoticeAction)> {
     if let Some(head) = state.stale_head.get() {
         let sha = crate::review::timeline::short_sha(&head);
+        let counts = state.item.with(|i| {
+            i.as_ref()
+                .and_then(|i| i.divergence())
+                .and_then(|d| d.ahead.zip(d.behind))
+        });
+        if let Some((ahead, behind)) = counts.filter(|_| can_rebase(state)) {
+            let commits = |n: u32| {
+                if n == 1 {
+                    "1 commit".to_string()
+                } else {
+                    format!("{n} commits")
+                }
+            };
+            return Some((
+                format!("Not updated to {sha}: branch has diverged"),
+                format!(
+                    "The pull request has {} this worktree lacks, up to {sha}, \
+                     and the worktree has {} the pull request lacks. Neither \
+                     can simply move to the other. Rebase puts the worktree's \
+                     {} on top of {sha}, here in the worktree; Push then \
+                     sends {}.",
+                    commits(behind),
+                    commits(ahead),
+                    if ahead == 1 { "commit" } else { "commits" },
+                    if ahead == 1 { "it" } else { "them" },
+                ),
+                NoticeAction::Rebase,
+            ));
+        }
         return Some((
             format!("Not updated to {sha}: worktree has local work"),
             format!(
@@ -1368,6 +1453,7 @@ fn notice_lines(state: ReviewState) -> Option<(String, String)> {
                  To get the new commits, push or discard that work, then \
                  click Check again."
             ),
+            NoticeAction::CheckAgain,
         ));
     }
     if state.offline.get() {
@@ -1378,6 +1464,7 @@ fn notice_lines(state: ReviewState) -> Option<(String, String)> {
              and may be behind the pull request. Check again asks GitHub \
              again."
                 .to_string(),
+            NoticeAction::CheckAgain,
         ));
     }
     None
@@ -1388,10 +1475,12 @@ fn notice_lines(state: ReviewState) -> Option<(String, String)> {
 /// it is a sentence, and its start says what it is about. Check again
 /// does not give way. Hidden when there is nothing to say.
 pub fn notice(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    // It reads the item, which is written far more often than it changes.
+    let lines = Memo::new(move |_| notice_lines(state));
     dyn_container(
-        move || notice_lines(state),
+        move || lines.get(),
         move |lines| {
-            let Some((text, why)) = lines else {
+            let Some((text, why, action)) = lines else {
                 return Empty::new().into_any();
             };
             let words = Stack::horizontal((
@@ -1407,7 +1496,11 @@ pub fn notice(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl I
             .style(|s| s.items_center().min_width(0.0));
             // The tip wraps the words, so it gives way too.
             let words = tip(words, why).style(|s| s.min_width(0.0).flex_shrink(1.0_f32));
-            Stack::horizontal((words, check_again(app, state, backend.clone())))
+            let button = match action {
+                NoticeAction::CheckAgain => check_again(app, state, backend.clone()).into_any(),
+                NoticeAction::Rebase => rebase_in_notice(state, backend.clone()).into_any(),
+            };
+            Stack::horizontal((words, button))
                 .style(|s| {
                     s.items_center()
                         .height(22.0)
@@ -1432,11 +1525,33 @@ pub fn notice(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl I
     })
 }
 
+/// Rebase, in the notice of a diverged branch: as Rebase on the Branch
+/// row, which shows what stopped it.
+fn rebase_in_notice(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    notice_button(
+        move || {
+            if state.rebase_pending.get() {
+                "Rebasing…"
+            } else {
+                "Rebase"
+            }
+            .to_string()
+        },
+        move || {
+            if !state.rebase_pending.get_untracked() && !state.offline.get_untracked() {
+                rebase(state, &backend);
+            }
+        },
+    )
+    .debug_name("rebase in notice")
+}
+
 /// Check again: the item opened again, as a click on its row does, which
 /// fetches the pull request and moves a clean worktree to its head.
 fn check_again(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    Label::derived(|| "Check again".to_string())
-        .on_event_stop(el::Click, move |_, _| {
+    notice_button(
+        || "Check again".to_string(),
+        move || {
             if let Some(item_id) = state
                 .item
                 .with_untracked(|item| item.as_ref().map(|item| item.id.clone()))
@@ -1444,8 +1559,15 @@ fn check_again(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                 let navigation_id = backend.open_item(&item_id);
                 app.begin_item_review(state, "Reading the pull request", &item_id, navigation_id);
             }
-        })
-        .debug_name("check again")
+        },
+    )
+    .debug_name("check again")
+}
+
+/// The notice's one button, at the end of the pill.
+fn notice_button(label: impl Fn() -> String + 'static, act: impl Fn() + 'static) -> Label {
+    Label::derived(label)
+        .on_event_stop(el::Click, move |_, _| act())
         .style(|s| {
             clickable(s)
                 .height(18.0)
@@ -2212,6 +2334,46 @@ mod tests {
             "{:?}",
             state.preparing.get()
         );
+    }
+
+    /// A worktree with a commit of its own, left behind a pull request
+    /// that moved on: the notice says they diverged and offers Rebase.
+    #[test]
+    fn a_diverged_branch_is_offered_rebase_not_check_again() {
+        let (mut harness, _, state) = pull_request_harness();
+        state.item.update(|slot| {
+            let mut item = (**slot.as_ref().unwrap()).clone();
+            let (pr_ref, pr_head) = item
+                .pull_request()
+                .map(|pr| (pr.head_ref.clone(), pr.head_sha.clone()))
+                .unwrap();
+            let c = item.checkout.as_mut().unwrap();
+            c.branch = pr_ref;
+            c.on_disk = true;
+            c.head_sha = "mine".into();
+            c.divergence = Some(perch_github::Divergence {
+                head: "mine".into(),
+                pr_head,
+                ahead: 1,
+                behind: 12,
+            });
+            *slot = Some(Arc::new(item));
+        });
+        state.stale_head.set(Some("2070f3d1c0ffee".into()));
+        harness.rebuild();
+        harness.paint();
+
+        assert_eq!(
+            notice_text(state).as_deref(),
+            Some("Not updated to 2070f3d: branch has diverged")
+        );
+        assert!(named(harness.root_id(), "check again").is_none());
+        let rebase = rect(&harness, "rebase in notice");
+        assert!(within(rebase, rect(&harness, "item notice")));
+        assert!(rect(&harness, "rebase-branch").width() > 0.0);
+
+        harness.click(rebase.center().x, rebase.center().y);
+        assert!(state.rebase_pending.get());
     }
 
     fn snapshot() -> crate::review::model::ReviewGroupSummary {

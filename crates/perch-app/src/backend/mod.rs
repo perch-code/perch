@@ -222,9 +222,12 @@ pub enum Command {
     },
     /// Fetch the open pull request's head into the item's worktree, and
     /// fast-forward to it when the worktree has nothing the pull request
-    /// lacks. `BranchUpdated` or `BranchUpdateFailed` answers.
+    /// lacks. With `rebase`, a worktree that has commits of its own and
+    /// is behind too has them replayed on the pull request's head.
+    /// `BranchUpdated` or `BranchUpdateFailed` answers.
     UpdateBranch {
         item_id: String,
+        rebase: bool,
     },
     /// Have an agent merge the pull request's base into its branch and
     /// resolve the conflicts, in a Work run. `ConflictsAsked` answers once
@@ -2999,6 +3002,15 @@ impl Backend {
     pub fn update_branch(&self, item_id: &str) {
         let _ = self.commands.send(Command::UpdateBranch {
             item_id: item_id.to_string(),
+            rebase: false,
+        });
+    }
+
+    /// Put the worktree's own commits on top of the pull request's head.
+    pub fn rebase_branch(&self, item_id: &str) {
+        let _ = self.commands.send(Command::UpdateBranch {
+            item_id: item_id.to_string(),
+            rebase: true,
         });
     }
 
@@ -4751,9 +4763,11 @@ async fn run(
                 let ctx = ctx.clone();
                 tokio::spawn(async move { open_pull::push_to_pull(&ctx, &item_id).await });
             }
-            Command::UpdateBranch { item_id } => {
+            Command::UpdateBranch { item_id, rebase } => {
                 let ctx = ctx.clone();
-                tokio::spawn(async move { open_pull::update_from_pull(&ctx, &item_id).await });
+                tokio::spawn(
+                    async move { open_pull::update_from_pull(&ctx, &item_id, rebase).await },
+                );
             }
             Command::ResolveConflicts {
                 item_id,
@@ -16031,7 +16045,14 @@ async fn open_owned_branch_for_pull(
         .await
         .map(|s| s.trim().to_string())
         .unwrap_or(checkout.merge_base);
-    if checkout.head_sha != pr_head_sha {
+    // Commits of the reader's own on top of the pull request's head leave
+    // nothing out: only a head the worktree lacks makes it stale.
+    if checkout.head_sha != pr_head_sha
+        && !ctx
+            .preparer
+            .is_ancestor(&checkout.worktree, pr_head_sha, &checkout.head_sha)
+            .await
+    {
         checkout.stale = Some(pr_head_sha.to_string());
     }
     Ok(checkout)
@@ -31535,7 +31556,7 @@ read eof || true
             "PR head not fetched"
         );
 
-        open_pull::update_from_pull(&ctx, &item.id).await;
+        open_pull::update_from_pull(&ctx, &item.id, false).await;
 
         assert!(received
             .try_iter()
@@ -31604,7 +31625,7 @@ read eof || true
         item.checkout.as_mut().unwrap().head_sha = mine.clone();
         ctx.with_cache(|c| c.update_item(&item)).unwrap().unwrap();
 
-        open_pull::update_from_pull(&ctx, &item.id).await;
+        open_pull::update_from_pull(&ctx, &item.id, false).await;
 
         assert!(received
             .try_iter()
@@ -31614,6 +31635,67 @@ read eof || true
             ctx.item(&item.id).unwrap().divergence().unwrap().label(),
             "1 unpushed \u{b7} 1 behind PR"
         );
+    }
+
+    #[tokio::test]
+    async fn rebase_puts_the_worktrees_commits_on_the_pull_requests_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), "http://127.0.0.1:9", &[]);
+        let (mut item, worktree, moved) = moved_on_elsewhere(&ctx, dir.path());
+        std::fs::write(worktree.join("mine.txt"), "mine\n").unwrap();
+        git(&worktree, &["add", "."]);
+        git(&worktree, &["commit", "-q", "-m", "mine"]);
+        item.checkout.as_mut().unwrap().head_sha = git(&worktree, &["rev-parse", "HEAD"]);
+        ctx.with_cache(|c| c.update_item(&item)).unwrap().unwrap();
+
+        open_pull::update_from_pull(&ctx, &item.id, true).await;
+
+        assert!(received
+            .try_iter()
+            .any(|e| matches!(e, Event::BranchUpdated { .. })));
+        assert_eq!(git(&worktree, &["rev-parse", "HEAD~1"]), moved);
+        assert_eq!(git(&worktree, &["log", "-1", "--format=%s"]), "mine");
+        assert_eq!(git(&worktree, &["branch", "--show-current"]), "feature");
+        assert_eq!(
+            ctx.item(&item.id).unwrap().divergence().unwrap().label(),
+            "1 unpushed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rebase_that_conflicts_leaves_the_worktree_as_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), "http://127.0.0.1:9", &[]);
+        let (mut item, worktree, _) = moved_on_elsewhere(&ctx, dir.path());
+        let other = dir.path().join("other");
+        std::fs::write(other.join("one.txt"), "theirs\n").unwrap();
+        git(&other, &["commit", "-q", "-am", "theirs"]);
+        git(&other, &["push", "-q", "origin", "feature"]);
+        let theirs = git(&other, &["rev-parse", "HEAD"]);
+        std::fs::write(worktree.join("one.txt"), "mine\n").unwrap();
+        git(&worktree, &["commit", "-q", "-am", "mine"]);
+        let mine = git(&worktree, &["rev-parse", "HEAD"]);
+        if let Some(perch_github::ItemSubject::PullRequest(pr)) = item.subject.as_mut() {
+            pr.head_sha = theirs;
+        }
+        item.checkout.as_mut().unwrap().head_sha = mine.clone();
+        ctx.with_cache(|c| c.update_item(&item)).unwrap().unwrap();
+
+        open_pull::update_from_pull(&ctx, &item.id, true).await;
+
+        let failed = received.try_iter().find_map(|e| match e {
+            Event::BranchUpdateFailed { message, .. } => Some(message),
+            _ => None,
+        });
+        assert!(
+            failed
+                .as_deref()
+                .is_some_and(|m| m.contains("nothing was changed")),
+            "{failed:?}"
+        );
+        assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), mine);
+        assert_eq!(git(&worktree, &["branch", "--show-current"]), "feature");
+        assert_eq!(git(&worktree, &["status", "--porcelain"]), "");
     }
 
     #[tokio::test]
