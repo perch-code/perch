@@ -665,11 +665,29 @@ fn wire_folds(
 /// scroll lands on the next update pass, and an edit before then, such as
 /// a card's rows arriving under a jump, moves the view from where the
 /// jump put it rather than back to where it was.
+///
+/// The scroll has landed when the viewport moves. A viewport that only
+/// changes size has not landed it: an editor built for a place it is
+/// coming back to is laid out at its top first, and the wrap that follows
+/// at the laid-out width would otherwise scroll it back there.
 fn heading(viewport: RwSignal<Rect>, scroll_to: RwSignal<Option<Vec2>>) -> RwSignal<Rect> {
     let heading = RwSignal::new(viewport.get_untracked());
-    Effect::new(move |_| heading.set(viewport.get()));
+    let pending = RwSignal::new(None::<Vec2>);
+    Effect::new(move |before: Option<Rect>| {
+        let now = viewport.get();
+        let moved = before.is_none_or(|before| before.origin() != now.origin());
+        if moved {
+            pending.set(None);
+        }
+        match pending.get_untracked() {
+            Some(at) => heading.set(now.with_origin(at.to_point())),
+            None => heading.set(now),
+        }
+        now
+    });
     Effect::new(move |_| {
         if let Some(at) = scroll_to.get() {
+            pending.set(Some(at));
             heading.set(viewport.get_untracked().with_origin(at.to_point()));
         }
     });
@@ -4369,6 +4387,81 @@ mod window {
             0.0,
             "a tab opened again starts at the top"
         );
+    }
+
+    /// A long file of wrapped prose with cards through it, scrolled far
+    /// down, as an RFC under review is, comes back where it was after a
+    /// link in one of its cards went to another file. The editor built
+    /// for it is laid out at its top before the scroll to its place
+    /// lands, and the wrap at the laid-out width took it back there.
+    #[test]
+    fn a_long_wrapped_file_with_cards_shows_where_it_was_when_its_tab_shows_again() {
+        let prose: String = (0..900)
+            .map(|i| {
+                if i % 3 == 0 {
+                    format!("line {i} {}\n", "word ".repeat(40))
+                } else {
+                    format!("line {i}\n")
+                }
+            })
+            .collect();
+        let (mut harness, state) = harness_as(
+            prose,
+            String::new(),
+            perch_git::ChangeStatus::Added,
+            crate::backend::Backend::detached(),
+        );
+        state.wrap.set(true);
+        rebuilt(&mut harness);
+        state.set_comment_threads(Arc::new(vec![
+            thread_on("t1", 48, 48, false),
+            thread_on("t2", 51, 63, false),
+            thread_on("t3", 840, 846, false),
+            thread_on("t4", 848, 848, false),
+        ]));
+        rebuilt(&mut harness);
+        rebuilt(&mut harness);
+        let viewport = || super::STACKED_VIEWPORT.with(|v| v.get()).unwrap();
+        for _ in 0..30 {
+            scroll_rows(&mut harness, 40);
+        }
+        let scrolled = viewport().get().y0;
+        let line_height = crate::theme::code_line_height() as f64;
+        assert!(
+            scrolled > 800.0 * line_height,
+            "not far enough down: {scrolled}"
+        );
+        let place = || {
+            state
+                .file_places
+                .with(|p| p.get("src/x.rs").and_then(|p| p.anchor))
+        };
+        let left_at = place();
+
+        let other = crate::backend::build_loaded_file(
+            "src/y.rs".into(),
+            "fn y() {}\n".repeat(900),
+            "fn y() {}\n".repeat(900),
+            Some(perch_git::ChangeStatus::Modified),
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        );
+        state.go_to_file("src/y.rs", Some((500, 0)));
+        rebuilt(&mut harness);
+        state.finish_load("src/y.rs", Arc::new(other));
+        rebuilt(&mut harness);
+        rebuilt(&mut harness);
+        assert!(viewport().get().y0 > 0.0, "the link went to its line");
+
+        super::super::tabs::step_tab(state, &crate::backend::Backend::detached(), false);
+        rebuilt(&mut harness);
+        rebuilt(&mut harness);
+        assert_eq!(state.active.get().as_deref(), Some("src/x.rs"));
+        // The pane may be another width now, so the lines another height:
+        // the same line is at the top, the same distance into it.
+        assert!(viewport().get().y0 > 800.0 * line_height, "back at the top");
+        assert_eq!(place(), left_at, "back from the link's file");
     }
 
     /// Three changes fifty lines apart, then twelve four lines apart so
