@@ -10103,7 +10103,8 @@ async fn merge_open_pull_request(
 ///
 /// The drafts go three ways. One that opens a thread at the head rides in
 /// the review, unless its lines are outside the pull request's diff: then
-/// it goes on its file (`hold_back_outside_diff`). That, one that opens a
+/// it goes on its file (`hold_back_outside_diff`), as does one at an older
+/// commit outside that commit's. That, one that opens a
 /// thread at an older commit, and a reply under a thread on GitHub, post
 /// one request each once the review has landed, since the review's
 /// comments cannot carry any of them. Then GitHub's
@@ -10225,15 +10226,7 @@ async fn submit_open_pull_request_review(
         .html_url
         .find("/pull/")
         .map_or(fresh.html_url.as_str(), |at| &fresh.html_url[..at]);
-    hold_back_outside_diff(
-        ctx,
-        &checkout,
-        repo_url,
-        &fresh.base_sha,
-        expected_head_sha,
-        &mut drafts,
-    )
-    .await;
+    hold_back_outside_diff(ctx, &checkout, repo_url, &fresh.base_sha, &mut drafts).await;
 
     // Nothing else commits to the item's discussion until the drafts are
     // matched to what posted: a read landing in between would list a
@@ -10331,7 +10324,7 @@ async fn submit_open_pull_request_review(
             .create_file_comment(
                 repo_full_name,
                 number,
-                expected_head_sha,
+                &anchor.commit_sha,
                 &anchor.path,
                 body,
             )
@@ -10504,10 +10497,10 @@ fn record_posted(
 struct SplitDrafts {
     /// Opens a thread at the head: rides in the review's comments.
     in_review: Vec<DraftRow>,
-    /// Would open a thread at the head on lines the pull request's diff
-    /// does not show, which GitHub refuses, and the whole review with it,
-    /// in a file the pull request changes. Each posts after the review on
-    /// its file instead, with the text `hold_back_outside_diff` gave it: a
+    /// Would open a thread on lines its commit's diff does not show, which
+    /// GitHub refuses (at the head, the whole review with it), in a file
+    /// that diff changes. Each posts after the review on its file at its
+    /// commit instead, with the text `hold_back_outside_diff` gave it: a
     /// link to its lines, then the draft's.
     on_file: Vec<(DraftRow, String)>,
     /// The same in a file the pull request does not change, where GitHub
@@ -10558,53 +10551,95 @@ fn split_drafts(drafts: Vec<DraftRow>, head_sha: &str) -> SplitDrafts {
     split
 }
 
-/// Keep back from the review the drafts GitHub would refuse: those whose
-/// lines are not inside one hunk of the pull request's diff, first line
-/// and last, which GitHub's API asks of a review comment even where its
-/// own page takes one on any line. One such comment fails the whole
-/// review, so these do not ride in it. One in a file the pull request
-/// changes goes on that file instead, opening with a permalink to its
-/// lines at the head, or at the merge base for the base side, under
-/// `repo_url`; one in any other file stays a draft. The diff is the head
-/// against GitHub's merge base, read in the checkout with three lines of
-/// context, as `DraftLines` reads a review's findings. Where git cannot
-/// read it the drafts go unchecked and GitHub decides, as it always did.
+/// Keep back the drafts GitHub would refuse: those that open a thread on
+/// lines not inside one hunk of their commit's diff, first line and last,
+/// which GitHub's API asks of a review comment even where its own page
+/// takes one on any line. At the head one such comment fails the whole
+/// review, so these do not ride in it; at an older commit, where a draft
+/// posts on its own after the head moved on, GitHub refuses that one
+/// ("could not be resolved"). One in a file its commit's diff changes goes
+/// on that file instead, opening with a permalink to its lines at its
+/// commit, or at the merge base for the base side, under `repo_url`; one
+/// in any other file stays a draft. A commit's diff is it against its
+/// merge base with `base_sha`, as GitHub diffs a pull request, read in the
+/// checkout with three lines of context, as `DraftLines` reads a review's
+/// findings. Where git cannot read it the drafts go unchecked and GitHub
+/// decides, as it always did.
 async fn hold_back_outside_diff(
     ctx: &Ctx,
     checkout: &perch_git::Checkout,
     repo_url: &str,
     base_sha: &str,
-    head_sha: &str,
     drafts: &mut SplitDrafts,
 ) {
-    if drafts.in_review.is_empty() {
-        return;
-    }
-    let Some(merge_base) = github_merge_base(ctx, checkout, base_sha, head_sha).await else {
-        return;
+    let mut diffs = CommitDiffs {
+        ctx,
+        checkout,
+        base_sha,
+        read: std::collections::HashMap::new(),
+        hunks: std::collections::HashMap::new(),
     };
-    let diff = match perch_git::RangeDiff::read(&checkout.bare, &merge_base, head_sha).await {
-        Ok(diff) => diff,
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                "could not read the pull request's diff; its drafts go unchecked"
-            );
-            return;
-        }
-    };
-    let mut hunks: std::collections::HashMap<
-        (String, perch_git::DiffSide),
-        Option<Vec<std::ops::RangeInclusive<u32>>>,
-    > = std::collections::HashMap::new();
     for draft in std::mem::take(&mut drafts.in_review) {
-        let Some(anchor) = &draft.anchor else {
-            drafts.in_review.push(draft);
-            continue;
+        match diffs.outside(repo_url, &draft).await {
+            None => drafts.in_review.push(draft),
+            Some(OffDiff::OnFile(body)) => drafts.on_file.push((draft, body)),
+            Some(OffDiff::Kept) => drafts.outside_diff.push(draft),
+        }
+    }
+    // A reply goes under its thread wherever that is; only a draft that
+    // opens one has lines GitHub checks.
+    for draft in std::mem::take(&mut drafts.after_review) {
+        let outside = if draft.thread_github_id.is_some() {
+            None
+        } else {
+            diffs.outside(repo_url, &draft).await
         };
+        match outside {
+            None => drafts.after_review.push(draft),
+            Some(OffDiff::OnFile(body)) => drafts.on_file.push((draft, body)),
+            Some(OffDiff::Kept) => drafts.outside_diff.push(draft),
+        }
+    }
+}
+
+/// Where a draft goes whose lines its commit's diff does not show.
+enum OffDiff {
+    /// On its file, with this text: a permalink to its lines, then its own.
+    OnFile(String),
+    /// Nowhere: its commit's diff does not change its file. A draft still.
+    Kept,
+}
+
+/// The pull request's diff at each commit drafts open threads at, read
+/// once each, for `hold_back_outside_diff`.
+struct CommitDiffs<'a> {
+    ctx: &'a Ctx,
+    checkout: &'a perch_git::Checkout,
+    base_sha: &'a str,
+    /// A commit's merge base and its diff from there; `None` where git
+    /// could not read it.
+    read: std::collections::HashMap<String, Option<(String, perch_git::RangeDiff)>>,
+    /// A file's hunks on a side of a commit's diff, by commit, path and
+    /// side; `None` where git could not read them.
+    hunks: std::collections::HashMap<HunksKey, Option<Vec<std::ops::RangeInclusive<u32>>>>,
+}
+
+type HunksKey = (String, String, perch_git::DiffSide);
+
+impl CommitDiffs<'_> {
+    /// Where `draft` goes instead of on its lines: `None` for one GitHub
+    /// takes there, or that cannot be checked.
+    async fn outside(&mut self, repo_url: &str, draft: &DraftRow) -> Option<OffDiff> {
+        let anchor = draft.anchor.as_ref()?;
+        let commit = anchor.commit_sha.as_str();
+        if !self.read.contains_key(commit) {
+            let read = self.read_diff(commit).await;
+            self.read.insert(commit.to_string(), read);
+        }
+        let (merge_base, diff) = self.read[commit].as_ref()?;
         let side = reviews::git_side(anchor.side);
-        let key = (anchor.path.clone(), side);
-        if !hunks.contains_key(&key) {
+        let key = (commit.to_string(), anchor.path.clone(), side);
+        if !self.hunks.contains_key(&key) {
             let read = match diff.hunks(&anchor.path, side).await {
                 Ok(read) => Some(read),
                 Err(error) => {
@@ -10615,30 +10650,41 @@ async fn hold_back_outside_diff(
                     None
                 }
             };
-            hunks.insert(key.clone(), read);
+            self.hunks.insert(key.clone(), read);
         }
-        let outside = matches!(&hunks[&key], Some(hunks) if !in_one_hunk(hunks, anchor));
-        if !outside {
-            drafts.in_review.push(draft);
-            continue;
+        let hunks = self.hunks[&key].as_ref()?;
+        if in_one_hunk(hunks, anchor) {
+            return None;
         }
         let Some(file) = diff.file(&anchor.path) else {
-            drafts.outside_diff.push(draft);
-            continue;
+            return Some(OffDiff::Kept);
         };
-        let commit = match side {
+        let at = match side {
             perch_git::DiffSide::Left => merge_base.as_str(),
-            perch_git::DiffSide::Right => head_sha,
+            perch_git::DiffSide::Right => commit,
         };
-        let body = perch_github::comments::file_comment_body(
+        Some(OffDiff::OnFile(perch_github::comments::file_comment_body(
             repo_url,
-            commit,
+            at,
             file.path_on(side).unwrap_or(&anchor.path),
             anchor.start_line,
             anchor.line,
             &draft.body,
-        );
-        drafts.on_file.push((draft, body));
+        )))
+    }
+
+    async fn read_diff(&self, commit: &str) -> Option<(String, perch_git::RangeDiff)> {
+        let merge_base = github_merge_base(self.ctx, self.checkout, self.base_sha, commit).await?;
+        match perch_git::RangeDiff::read(&self.checkout.bare, &merge_base, commit).await {
+            Ok(diff) => Some((merge_base, diff)),
+            Err(error) => {
+                tracing::warn!(
+                    commit, %error,
+                    "could not read the pull request's diff; its drafts go unchecked"
+                );
+                None
+            }
+        }
     }
 }
 
@@ -22154,7 +22200,7 @@ mod tests {
         drafts
             .in_review
             .push(on("base", "code.rs", perch_github::Side::Left, 25, 26));
-        hold_back_outside_diff(&ctx, &checkout, repo_url, &merge_base, &head, &mut drafts).await;
+        hold_back_outside_diff(&ctx, &checkout, repo_url, &merge_base, &mut drafts).await;
         assert_eq!(ids(&drafts.in_review), ["changed", "hunk", "removed"]);
         assert_eq!(ids(&drafts.outside_diff), ["untouched"]);
         let on_file: Vec<(&str, &str)> = drafts
@@ -22183,7 +22229,7 @@ mod tests {
         // A base the clone has not fetched: the merge base it was opened with.
         let unfetched = "0".repeat(40);
         let mut drafts = split(vec![at("changed", 10, 10), at("below", 20, 20)]);
-        hold_back_outside_diff(&ctx, &checkout, repo_url, &unfetched, &head, &mut drafts).await;
+        hold_back_outside_diff(&ctx, &checkout, repo_url, &unfetched, &mut drafts).await;
         assert_eq!(drafts.on_file.len(), 1);
         assert_eq!(drafts.on_file[0].0.message_id, "below");
 
@@ -22198,7 +22244,7 @@ mod tests {
         };
         for (checkout, base) in [(&unmerged, &unfetched), (&gone, &merge_base)] {
             let mut drafts = split(vec![at("below", 20, 20)]);
-            hold_back_outside_diff(&ctx, checkout, repo_url, base, &head, &mut drafts).await;
+            hold_back_outside_diff(&ctx, checkout, repo_url, base, &mut drafts).await;
             assert_eq!(
                 ids(&drafts.in_review),
                 ["below"],
@@ -22207,6 +22253,78 @@ mod tests {
             );
             assert!(drafts.outside_diff.is_empty() && drafts.on_file.is_empty());
         }
+    }
+
+    /// A draft that opens a thread at a commit the head has moved past
+    /// posts on its own against that commit, and GitHub resolves its lines
+    /// in that commit's diff, not the head's: one outside it is refused
+    /// ("could not be resolved"). It goes on its file at that commit, or
+    /// stays a draft, as one at the head does. A reply is not checked.
+    #[tokio::test]
+    async fn the_drafts_at_an_older_commit_are_checked_against_its_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(dir.path(), &nowhere(), &[]);
+        let repo = dir.path().join("repo");
+        let (merge_base, older) = one_hunk_repo(&repo);
+        // The head goes on to change line 20, which the older commit did not.
+        let code = std::fs::read_to_string(repo.join("code.rs")).unwrap();
+        std::fs::write(
+            repo.join("code.rs"),
+            code.replace("line 20\n", "line twenty\n"),
+        )
+        .unwrap();
+        git(&repo, &["commit", "-q", "-am", "more"]);
+        let head = git(&repo, &["rev-parse", "HEAD"]);
+        let checkout = perch_git::Checkout {
+            worktree: repo.clone(),
+            bare: repo.clone(),
+            branch: "feature".into(),
+            head_sha: head.clone(),
+            stale: None,
+            merge_base: merge_base.clone(),
+        };
+        let at = |id: &str, path: &str, commit: &str, line, root| DraftRow {
+            anchor: Some(Anchor {
+                path: path.into(),
+                start_line: line,
+                line,
+                side: perch_github::Side::Right,
+                commit_sha: commit.into(),
+            }),
+            ..draft_row(id, &format!("t-{id}"), commit, root, 0)
+        };
+        let ids = |rows: &[DraftRow]| {
+            rows.iter()
+                .map(|d| d.message_id.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut drafts = SplitDrafts {
+            in_review: vec![at("head", "code.rs", &head, 20, None)],
+            after_review: vec![
+                at("reply", "code.rs", &older, 20, Some(31)),
+                at("changed", "code.rs", &older, 10, None),
+                at("below", "code.rs", &older, 20, None),
+                at("untouched", "same.rs", &older, 1, None),
+            ],
+            ..SplitDrafts::default()
+        };
+        let repo_url = "https://github.com/a/b";
+        hold_back_outside_diff(&ctx, &checkout, repo_url, &merge_base, &mut drafts).await;
+        assert_eq!(ids(&drafts.in_review), ["head"]);
+        assert_eq!(ids(&drafts.after_review), ["reply", "changed"]);
+        assert_eq!(ids(&drafts.outside_diff), ["untouched"]);
+        let on_file: Vec<(&str, &str)> = drafts
+            .on_file
+            .iter()
+            .map(|(draft, body)| (draft.message_id.as_str(), body.as_str()))
+            .collect();
+        assert_eq!(
+            on_file,
+            [(
+                "below",
+                format!("{repo_url}/blob/{older}/code.rs#L20\n\ndraft below").as_str()
+            )]
+        );
     }
 
     /// A durable row for `a/b#<number>`, as an on-demand open makes it.
