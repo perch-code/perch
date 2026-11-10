@@ -84,27 +84,31 @@ pub fn summary(
     });
     let grants_backend = backend.clone();
     // Who the item can be assigned to, when the reader may assign: asked
-    // as an issue or a pull request opens, a repository at a time.
-    let assign_repo = Memo::new(move |_| {
+    // as an issue or a pull request opens, since whoever took part in it
+    // can be as well as the repository's assignable users.
+    let assign_item = Memo::new(move |_| {
         state.item.with(|item| {
-            item.as_ref()
-                .filter(|item| item.subject.is_some())
-                .map(|item| item.repo_full_name.clone())
+            item.as_ref().and_then(|item| {
+                let number = item.subject.as_ref()?.number();
+                Some((item.repo_full_name.clone(), number))
+            })
         })
     });
     {
         let backend = backend.clone();
         floem::reactive::Effect::new(move |_| {
-            if let Some(repo) = assign_repo.get() {
-                backend.assignable_users(&repo);
+            if let Some((repo, number)) = assign_item.get() {
+                backend.assignable_users(&repo, number);
             }
         });
     }
     let assignable = Memo::new(move |_| {
-        assign_repo.get().and_then(|repo| {
-            state
-                .assignable
-                .with(|all| all.get(&repo.to_lowercase()).cloned().flatten())
+        assign_item.get().and_then(|(repo, number)| {
+            state.assignable.with(|all| {
+                all.get(&crate::review::model::assignable_key(&repo, number))
+                    .cloned()
+                    .flatten()
+            })
         })
     });
     let assign_backend = backend.clone();
@@ -1892,7 +1896,8 @@ fn assign_button(
 }
 
 /// The Assign menu: the reader first, then whoever is assigned, then the
-/// rest of the repository's assignable users in GitHub's order, each
+/// rest of who may be, in GitHub's order (whoever took part in the item,
+/// then the repository's assignable users), each
 /// checked while assigned and named after their login. Picking one
 /// assigns them or takes them off and leaves the menu up for the next,
 /// and the box over them narrows them by login or name. GitHub assigns
@@ -2517,7 +2522,7 @@ mod tests {
         );
         // Read access: still no row.
         state.assignable.update(|all| {
-            all.insert("slatedb/slatedb".into(), None);
+            all.insert("slatedb/slatedb#400".into(), None);
         });
         harness.rebuild();
         harness.paint();
@@ -2525,7 +2530,7 @@ mod tests {
 
         state.assignable.update(|all| {
             all.insert(
-                "slatedb/slatedb".into(),
+                "slatedb/slatedb#400".into(),
                 Some(Arc::new(vec![user("criccomini", None)])),
             );
         });
@@ -2584,8 +2589,8 @@ mod tests {
         while let Ok(command) = commands.try_recv() {
             asked |= matches!(
                 command,
-                crate::backend::Command::AssignableUsers { ref repo_full_name }
-                    if repo_full_name == "slatedb/slatedb"
+                crate::backend::Command::AssignableUsers { ref repo_full_name, number }
+                    if repo_full_name == "slatedb/slatedb" && number == 2144
             );
         }
         assert!(asked, "who may be assigned is asked as the issue opens");

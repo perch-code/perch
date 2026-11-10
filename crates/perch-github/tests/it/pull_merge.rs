@@ -700,18 +700,23 @@ async fn who_may_be_assigned_is_asked_with_the_readers_permission() {
     ]);
     let github = GitHub::with_base_uri("token", &base).unwrap();
 
-    let users = github.assignable_users("a/b", 100).await.unwrap().unwrap();
+    let users = github
+        .assignable_users("a/b", 7, 100)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(users[0].login, "criccomini");
-    assert_eq!(github.assignable_users("a/b", 100).await.unwrap(), None);
+    assert_eq!(github.assignable_users("a/b", 7, 100).await.unwrap(), None);
 
     let requests = requests.lock().unwrap();
     assert_eq!(requests[0].path, "/graphql");
     let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
     let query = body["query"].as_str().unwrap();
     assert!(query.contains("viewerPermission") && query.contains("assignableUsers"));
+    assert!(query.contains("suggestedActors"));
     assert_eq!(
         body["variables"],
-        serde_json::json!({ "owner": "a", "name": "b", "first": 100 })
+        serde_json::json!({ "owner": "a", "name": "b", "number": 7, "first": 100 })
     );
 }
 

@@ -1786,18 +1786,26 @@ impl GitHub {
             .ok_or_else(|| Error::Decode(format!("GitHub has no issue {repo_full_name}#{number}")))
     }
 
-    /// The repository's assignable users, at most `first` of them, when
-    /// the reader may assign them; none when they may not. GitHub lets
-    /// triage access and more assign, whoever opened the issue.
+    /// Who issue or pull request `number` can be assigned to: whoever
+    /// took part in it, then the repository's assignable users, at most
+    /// `first` of each, when the reader may assign them; none when they
+    /// may not. GitHub lets triage access and more assign, whoever opened
+    /// the issue.
     pub async fn assignable_users(
         &self,
         repo_full_name: &str,
+        number: u64,
         first: usize,
     ) -> Result<Option<Vec<crate::MentionableUser>>, Error> {
         let (owner, name) = repo_parts(repo_full_name)?;
         let payload = serde_json::json!({
             "query": crate::assignees::assignable_query(),
-            "variables": { "owner": owner, "name": name, "first": first.clamp(1, 100) },
+            "variables": {
+                "owner": owner,
+                "name": name,
+                "number": number,
+                "first": first.clamp(1, 100),
+            },
         });
         let data: crate::assignees::AssignableData =
             self.graphql(&payload, "assignable users").await?;

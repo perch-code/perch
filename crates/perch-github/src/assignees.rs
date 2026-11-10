@@ -1,6 +1,7 @@
 //! Who an issue or pull request is assigned to, and who may change it:
-//! GitHub lets anyone with triage access or more assign, and only the
-//! repository's assignable users can be.
+//! GitHub lets anyone with triage access or more assign, and the
+//! repository's assignable users can be, as can whoever took part in the
+//! issue or pull request: its author or a commenter.
 
 use serde::Deserialize;
 
@@ -18,14 +19,29 @@ pub struct Assigned {
     pub updated_at: jiff::Timestamp,
 }
 
-/// The reader's permission on the repository, and its assignable users,
-/// at most `first` of them, in GitHub's order.
+/// The reader's permission on the repository, its assignable users, and
+/// the people GitHub suggests for issue or pull request `$number`, at most
+/// `first` of each, in GitHub's order. The suggestions are who took part
+/// in it, collaborators or not, which `assignableUsers` leaves out; a bot
+/// among them (Copilot) has no `User` fields and comes back empty.
 pub(crate) fn assignable_query() -> &'static str {
-    "query($owner: String!, $name: String!, $first: Int!) {
+    "query($owner: String!, $name: String!, $number: Int!, $first: Int!) {
   repository(owner: $owner, name: $name) {
     viewer_permission: viewerPermission
     assignable_users: assignableUsers(first: $first) {
       nodes { login name avatar_url: avatarUrl }
+    }
+    item: issueOrPullRequest(number: $number) {
+      ... on Issue {
+        suggested_actors: suggestedActors(first: $first) {
+          nodes { ... on User { login name avatar_url: avatarUrl } }
+        }
+      }
+      ... on PullRequest {
+        suggested_actors: suggestedActors(first: $first) {
+          nodes { ... on User { login name avatar_url: avatarUrl } }
+        }
+      }
     }
   }
 }"
@@ -42,6 +58,14 @@ struct RepositoryNode {
     viewer_permission: Option<String>,
     #[serde(default)]
     assignable_users: Option<UserConnection>,
+    #[serde(default)]
+    item: Option<ItemNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ItemNode {
+    #[serde(default)]
+    suggested_actors: Option<UserConnection>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,8 +85,10 @@ struct UserNode {
 }
 
 impl AssignableData {
-    /// The assignable users when the reader may assign them, none when
-    /// they may not: triage access is the least that can.
+    /// Who may be assigned when the reader may assign them, none when
+    /// they may not: triage access is the least that can. The item's
+    /// suggestions come first, as the people it is about, then the
+    /// repository's assignable users, each once.
     pub(crate) fn into_assignable(self) -> Option<Vec<MentionableUser>> {
         let repository = self.repository?;
         let permission = crate::pulls::repository_permission(
@@ -78,21 +104,24 @@ impl AssignableData {
         if !may_assign {
             return None;
         }
-        Some(
-            repository
-                .assignable_users
-                .map(|c| c.nodes)
-                .unwrap_or_default()
-                .into_iter()
-                .flatten()
-                .filter(|n| !n.login.is_empty())
-                .map(|n| MentionableUser {
-                    login: n.login,
-                    name: n.name.filter(|name| !name.trim().is_empty()),
-                    avatar_url: n.avatar_url,
-                })
-                .collect(),
-        )
+        let suggested = repository.item.and_then(|item| item.suggested_actors);
+        let mut users: Vec<MentionableUser> = Vec::new();
+        for n in suggested
+            .into_iter()
+            .chain(repository.assignable_users)
+            .flat_map(|c| c.nodes)
+            .flatten()
+        {
+            if n.login.is_empty() || users.iter().any(|u| u.login.eq_ignore_ascii_case(&n.login)) {
+                continue;
+            }
+            users.push(MentionableUser {
+                login: n.login,
+                name: n.name.filter(|name| !name.trim().is_empty()),
+                avatar_url: n.avatar_url,
+            });
+        }
+        Some(users)
     }
 }
 
@@ -132,6 +161,30 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn whoever_took_part_comes_first_even_without_access() {
+        let data: AssignableData = serde_json::from_str(
+            r#"{"repository":{"viewer_permission":"ADMIN",
+                "assignable_users":{"nodes":[
+                    {"login":"criccomini","name":"Chris","avatar_url":"a"},
+                    {"login":"agavra","name":null,"avatar_url":"b"}
+                ]},
+                "item":{"suggested_actors":{"nodes":[
+                    {},
+                    {"login":"sgbalogh","name":"Stephen Balogh","avatar_url":"c"},
+                    {"login":"Criccomini","name":"Chris","avatar_url":"a"}
+                ]}}}}"#,
+        )
+        .unwrap();
+        let logins: Vec<String> = data
+            .into_assignable()
+            .unwrap()
+            .into_iter()
+            .map(|u| u.login)
+            .collect();
+        assert_eq!(logins, ["sgbalogh", "Criccomini", "agavra"]);
     }
 
     #[test]

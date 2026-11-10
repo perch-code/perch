@@ -1887,9 +1887,10 @@ pub struct ReviewState {
     pub approvals: RwSignal<Vec<crate::backend::ApprovalView>>,
     /// Each repository's grants, by its identity in lower case.
     pub grants: RwSignal<HashMap<String, Vec<perch_github::WorkGrantRecord>>>,
-    /// Who each repository's issues and pull requests can be assigned
-    /// to, by its identity in lower case, when the reader may assign
-    /// them; none when they may not, and absent until GitHub says.
+    /// Who each issue or pull request can be assigned to, by
+    /// `assignable_key`, when the reader may assign them; none when they
+    /// may not, and absent until GitHub says. Kept per item, not per
+    /// repository, since whoever took part in one can be assigned to it.
     pub assignable: RwSignal<HashMap<String, Option<Arc<Vec<perch_github::MentionableUser>>>>>,
     /// The destination last sent from each face, by `ThreadFace::index`:
     /// inline in the code, and on Conversation. A new composer on lines
@@ -5813,6 +5814,12 @@ pub fn anchors_of(threads: &[CommentThread], path: &str) -> Vec<(usize, usize)> 
             )
         })
         .collect()
+}
+
+/// The key of an issue or pull request in `ReviewState::assignable`: its
+/// repository's identity in lower case and its number.
+pub fn assignable_key(repo_full_name: &str, number: u64) -> String {
+    format!("{}#{number}", repo_full_name.to_lowercase())
 }
 
 #[cfg(test)]

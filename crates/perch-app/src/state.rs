@@ -3309,11 +3309,15 @@ impl AppState {
             }
             Event::AssignableUsers {
                 repo_full_name,
+                number,
                 users,
             } => {
                 if let Some(review) = self.review.get_untracked() {
                     review.assignable.update(|all| {
-                        all.insert(repo_full_name.to_lowercase(), users);
+                        all.insert(
+                            crate::review::model::assignable_key(&repo_full_name, number),
+                            users,
+                        );
                     });
                 }
             }

@@ -297,10 +297,12 @@ pub enum Command {
         repo_full_name: String,
         query: String,
     },
-    /// Whether the reader may assign people in a repository, and who
-    /// can be, for the summary's Assignees. `AssignableUsers` answers.
+    /// Whether the reader may assign people to issue or pull request
+    /// `number`, and who can be, for the summary's Assignees.
+    /// `AssignableUsers` answers.
     AssignableUsers {
         repo_full_name: String,
+        number: u64,
     },
     /// Assign `login` to the item's issue or pull request, or take them
     /// off it when `assign` is false.
@@ -1405,10 +1407,11 @@ pub enum Event {
         query: String,
         users: Vec<perch_github::MentionableUser>,
     },
-    /// Who in a repository can be assigned, when the reader may assign
-    /// them; none when they may not.
+    /// Who issue or pull request `number` can be assigned to, when the
+    /// reader may assign them; none when they may not.
     AssignableUsers {
         repo_full_name: String,
+        number: u64,
         users: Option<Arc<Vec<perch_github::MentionableUser>>>,
     },
     /// The issues and pull requests of the item's repository that
@@ -3167,12 +3170,13 @@ impl Backend {
         });
     }
 
-    /// Ask GitHub whether the reader may assign people in a repository,
-    /// and who can be. `AssignableUsers` answers; nothing does when
-    /// GitHub could not be asked.
-    pub fn assignable_users(&self, repo_full_name: &str) {
+    /// Ask GitHub whether the reader may assign people to issue or pull
+    /// request `number`, and who can be. `AssignableUsers` answers;
+    /// nothing does when GitHub could not be asked.
+    pub fn assignable_users(&self, repo_full_name: &str, number: u64) {
         let _ = self.commands.send(Command::AssignableUsers {
             repo_full_name: repo_full_name.to_string(),
+            number,
         });
     }
 
@@ -4872,10 +4876,13 @@ async fn run(
                     mentionable_users(&ctx, &item_id, &repo_full_name, &query).await;
                 });
             }
-            Command::AssignableUsers { repo_full_name } => {
+            Command::AssignableUsers {
+                repo_full_name,
+                number,
+            } => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    assignable_users(&ctx, &repo_full_name).await;
+                    assignable_users(&ctx, &repo_full_name, number).await;
                 });
             }
             Command::SetAssigned {
@@ -10829,18 +10836,21 @@ async fn mentionable_users(ctx: &Ctx, item_id: &str, repo_full_name: &str, query
     }
 }
 
-/// The most assignable users GitHub is asked for: as many as it gives in
-/// one page, which is every collaborator of most repositories.
+/// The most assignable users GitHub is asked for, and the most people it
+/// suggests for the item: as many as it gives in one page, which is every
+/// collaborator of most repositories.
 const ASSIGNABLE_USERS: usize = 100;
 
-/// Whether the reader may assign people in a repository, and who can be.
-/// A failure is quiet: the row stays as it was, without the menu.
-async fn assignable_users(ctx: &Ctx, repo_full_name: &str) {
+/// Whether the reader may assign people to issue or pull request
+/// `number`, and who can be: whoever took part in it as well as the
+/// repository's assignable users. A failure is quiet: the row stays as it
+/// was, without the menu.
+async fn assignable_users(ctx: &Ctx, repo_full_name: &str, number: u64) {
     let Some(github) = ctx.github() else {
         return;
     };
     match github
-        .assignable_users(repo_full_name, ASSIGNABLE_USERS)
+        .assignable_users(repo_full_name, number, ASSIGNABLE_USERS)
         .await
     {
         Ok(users) => {
@@ -10849,6 +10859,7 @@ async fn assignable_users(ctx: &Ctx, repo_full_name: &str) {
             }
             let _ = ctx.events.send(Event::AssignableUsers {
                 repo_full_name: repo_full_name.to_string(),
+                number,
                 users: users.map(Arc::new),
             });
         }
