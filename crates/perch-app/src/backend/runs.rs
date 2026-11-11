@@ -25,6 +25,11 @@ pub(crate) struct RunManager {
 
 struct Inner {
     limit: Arc<Semaphore>,
+    /// One Gemini run at a time, in the order they came, so Perch never
+    /// runs `agy` in parallel on the reader's account. Taken after a Work
+    /// run's worktree lock and before a slot, so a waiting Gemini run
+    /// holds back neither Claude Code nor Codex.
+    gemini: Arc<tokio::sync::Mutex<()>>,
     /// One Work run at a time in a worktree, in the order they came. A
     /// Work run takes its worktree's lock before a slot, so one waiting
     /// on another Work run does not hold a slot from anyone else.
@@ -50,6 +55,7 @@ enum OwnerFence {
 struct Entry {
     id: String,
     owner: RunOwner,
+    gemini: bool,
     /// For a Work run, the worktree it changes, as the disk resolves it.
     worktree: Option<PathBuf>,
     cancelled: AtomicBool,
@@ -85,6 +91,7 @@ pub(crate) struct Admission {
 pub(crate) struct RunLease {
     entry: Arc<Entry>,
     _permit: OwnedSemaphorePermit,
+    _gemini: Option<OwnedMutexGuard<()>>,
     _worktree: Option<OwnedMutexGuard<()>>,
 }
 
@@ -100,6 +107,7 @@ impl RunManager {
         Self {
             inner: Arc::new(Inner {
                 limit: Arc::new(Semaphore::new(limit.max(1))),
+                gemini: Arc::new(tokio::sync::Mutex::new(())),
                 worktrees: Mutex::new(HashMap::new()),
                 admission: Mutex::new(AdmissionGate::default()),
                 entries: Mutex::new(HashMap::new()),
@@ -191,6 +199,7 @@ impl RunManager {
         let entry = Arc::new(Entry {
             id: run.id.clone(),
             owner: run.owner.clone(),
+            gemini: run.backend == perch_github::GEMINI,
             worktree,
             cancelled: AtomicBool::new(false),
             execution_done: AtomicBool::new(false),
@@ -274,6 +283,32 @@ impl RunManager {
                 }
             }
         };
+        let gemini = if entry.gemini {
+            match self.inner.gemini.clone().try_lock_owned() {
+                Ok(guard) => Some(guard),
+                Err(_) => {
+                    self.set_activity(&entry.id, "Waiting for the Gemini run");
+                    let wait = self.inner.gemini.clone().lock_owned();
+                    tokio::pin!(wait);
+                    let guard = tokio::select! {
+                        biased;
+                        _ = entry.cancel.notified() => {
+                            self.finish_cancelled_queue(&entry);
+                            return None;
+                        }
+                        guard = &mut wait => guard,
+                    };
+                    if entry.cancelled.load(Ordering::Acquire) {
+                        self.finish_cancelled_queue(&entry);
+                        return None;
+                    }
+                    self.set_activity(&entry.id, "Waiting for an execution slot");
+                    Some(guard)
+                }
+            }
+        } else {
+            None
+        };
         let acquire = self.inner.limit.clone().acquire_owned();
         tokio::pin!(acquire);
         let permit = tokio::select! {
@@ -324,6 +359,7 @@ impl RunManager {
         Some(RunLease {
             entry,
             _permit: permit,
+            _gemini: gemini,
             _worktree: worktree,
         })
     }
@@ -1301,5 +1337,81 @@ mod tests {
             manager.load("one").unwrap().terminal_reason,
             Some(TerminalReason::UserStopped)
         );
+    }
+
+    #[tokio::test]
+    async fn gemini_runs_one_at_a_time_without_holding_slots_from_other_backends() {
+        let manager = manager(2);
+        let gemini = |id: &str| RunRecord {
+            backend: perch_github::GEMINI.into(),
+            ..run(id, &format!("thread-{id}"), &format!("request-{id}"))
+        };
+
+        let first = manager.start(admit(&manager, gemini("g1"))).await.unwrap();
+
+        let second = admit(&manager, gemini("g2"));
+        let second_waiter = {
+            let manager = manager.clone();
+            tokio::spawn(async move { manager.start(second).await })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !second_waiter.is_finished(),
+            "a second Gemini run must wait for the first even when global slots remain"
+        );
+        assert_eq!(
+            manager.load("g2").unwrap().latest_activity.as_deref(),
+            Some("Waiting for the Gemini run")
+        );
+
+        let third = admit(&manager, gemini("g3"));
+        let third_waiter = {
+            let manager = manager.clone();
+            tokio::spawn(async move { manager.start(third).await })
+        };
+        tokio::task::yield_now().await;
+
+        // Waiting Gemini runs have not taken the second global slot, so a
+        // Codex run proceeds alongside the active Gemini run.
+        let codex = manager
+            .start(admit(
+                &manager,
+                run("codex", "thread-codex", "request-codex"),
+            ))
+            .await
+            .expect("queued Gemini runs must not hold global slots");
+
+        // Cancelling a queued Gemini run settles it without ever starting it.
+        manager.cancel("g2");
+        assert!(
+            second_waiter.await.unwrap().is_none(),
+            "cancelled Gemini waiter must not acquire a lease"
+        );
+        assert_eq!(manager.load("g2").unwrap().status, RunStatus::Stopped);
+
+        manager.transition(
+            "g1",
+            RunStatus::Failed,
+            Some(TerminalReason::Other),
+            Some("fixture complete".into()),
+        );
+        manager.finish(first);
+
+        let third = tokio::time::timeout(Duration::from_secs(1), third_waiter)
+            .await
+            .expect("the next Gemini run did not wake when the first finished")
+            .unwrap()
+            .unwrap();
+        assert_eq!(third.entry.id, "g3");
+
+        for lease in [codex, third] {
+            manager.transition(
+                &lease.entry.id,
+                RunStatus::Failed,
+                Some(TerminalReason::Other),
+                Some("fixture complete".into()),
+            );
+            manager.finish(lease);
+        }
     }
 }

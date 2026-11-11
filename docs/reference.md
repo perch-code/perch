@@ -796,11 +796,12 @@ that goes to it the same way, and **Show** in the Review popover, while a
 review runs, goes to it in the Agents row. Work continues while another item is open.
 
 Perch executes at most four top-level agents by default and queues the rest in
-FIFO order. Stopping a run terminates and reaps its process group. Closing
+FIFO order; Gemini runs one at a time, and a waiting Gemini run does not hold a
+slot from Claude Code or Codex. Stopping a run terminates and reaps its process group. Closing
 Perch does the same for every process it owns; after an abnormal exit,
 nonterminal rows return as Interrupted and are not replayed automatically.
 
-Perch discovers both CLIs automatically. Their optional settings are:
+Perch discovers all three CLIs automatically. Their optional settings are:
 
 ```toml
 [agent]
@@ -813,10 +814,17 @@ max_concurrent_runs = 4
 [agent.codex]
 binary = "codex"
 models = ["gpt-6-astra"]       # omit to use Codex's own model catalog
+
+[agent.gemini]
+binary = "agy"
+models = ["gemini-4-carbon"]   # omit to use agy's own model catalog
 ```
 
 Without Claude Code installed, a Claude `model` gives way to `gpt-6.1-sol`
-when Codex offers it, at the same effort.
+when Codex offers it, at the same effort, or to `agy`'s first Gemini model
+when only `agy` is installed. For heavy PR review usage with Gemini, prefer
+setting `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) over a personal subscription
+OAuth login in `agy`.
 
 `perch --agents [limit]` prints active runs and retained history without
 launching an agent. `perch --ask owner/repo#N path:start-end "question"`
@@ -853,7 +861,7 @@ Perch does not try to detect them; it limits what following one could do.
   `*_KEY`, `*_APIKEY`, `*_PASSWORD`, `*_PASSWD`, `*_PASS`, `*_PAT`, or
   `*_CREDENTIALS`. The CLIs' own credentials (`ANTHROPIC_API_KEY`,
   `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`,
-  `CODEX_API_KEY`) are the exception, since without them there is no run.
+  `CODEX_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`) are the exception, since without them there is no run.
   Credentials for other providers, such as `AWS_SECRET_ACCESS_KEY`, fall
   under the rule, so a CLI configured that way must be signed in instead.
 - **Cleaned quotes.** Text quoted into a prompt keeps the words a reader

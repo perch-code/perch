@@ -23,8 +23,10 @@ You need:
 - A Mac (Apple Silicon or Intel) or Linux (x86_64 or arm64, glibc 2.35+,
   GTK 3), with git
 - The [GitHub CLI](https://cli.github.com/), signed in with `gh auth login`
-- For agents: [Claude Code](https://claude.com/claude-code) 2.1.223+ and/or
-  [Codex CLI](https://github.com/openai/codex) 0.155.1+, signed in
+- For agents: [Claude Code](https://claude.com/claude-code) 2.1.223+,
+  [Codex CLI](https://github.com/openai/codex) 0.155.1+, and/or
+  [Antigravity CLI](https://antigravity.google/docs/cli/reference) (`agy`)
+  1.5.5+, signed in
 
 Then install the latest release:
 

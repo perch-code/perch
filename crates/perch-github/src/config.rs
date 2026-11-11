@@ -70,8 +70,9 @@ pub struct AgentConfig {
     /// The Claude Code models the picker offers.
     #[serde(default = "default_models")]
     pub models: Vec<String>,
-    /// Maximum top-level agent processes. Additional work waits in the
-    /// durable FIFO queue; native subagents remain part of their parent.
+    /// Maximum top-level agent processes (Gemini runs one at a time).
+    /// Additional work waits in the durable FIFO queue; native subagents
+    /// remain part of their parent.
     #[serde(default = "default_max_concurrent_runs")]
     pub max_concurrent_runs: usize,
     #[serde(default)]
