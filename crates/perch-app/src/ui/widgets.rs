@@ -775,6 +775,8 @@ pub(crate) fn error_line(message: Option<String>, debug: &'static str) -> floem:
             .style(|s| {
                 s.min_width(0.0)
                     .flex_grow(1.0_f32)
+                    .flex_basis(0.0)
+                    .text_wrap()
                     .font_size(theme::TEXT_META)
                     .color(theme::closed())
             }),

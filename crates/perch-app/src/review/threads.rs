@@ -3741,7 +3741,7 @@ fn github_message_view(
     )
     .into_any();
     let body = Stack::vertical((
-        message_body(state, thread, &message.body, Some(backend)),
+        message_body(state, thread, &message.body, Some((app, backend))),
         reactions,
         confirm,
     ))
@@ -3856,7 +3856,7 @@ fn posted_message_view(
         ),
     );
     let body = Stack::vertical((
-        message_body(state, thread, &message.body, Some(backend)),
+        message_body(state, thread, &message.body, Some((app, backend))),
         reactions,
         confirm,
     ))
@@ -3894,7 +3894,7 @@ fn message_body(
     state: ReviewState,
     thread: &CommentThread,
     body: &str,
-    applying: Option<Rc<Backend>>,
+    applying: Option<(AppState, Rc<Backend>)>,
 ) -> floem::AnyView {
     if thread.anchor.is_none() || !crate::review::suggestion::has_suggestion(body) {
         return crate::review::markdown::render_linked(body, state).into_any();
@@ -3906,8 +3906,14 @@ fn message_body(
     dyn_container(
         move || original.get(),
         move |original| {
-            let foot = applying.clone().and_then(|backend| {
-                crate::review::apply_suggestion::foot(state, backend, &thread, original.clone())
+            let foot = applying.clone().and_then(|(app, backend)| {
+                crate::review::apply_suggestion::foot(
+                    app,
+                    state,
+                    backend,
+                    &thread,
+                    original.clone(),
+                )
             });
             crate::review::markdown::render_suggesting(&body, state, original, foot).into_any()
         },

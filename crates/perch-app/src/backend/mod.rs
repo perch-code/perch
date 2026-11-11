@@ -11634,6 +11634,9 @@ async fn commit_suggestion_inner(
             perch_github::Error::Graphql(m) if m.contains("Expected branch to point to") => {
                 "The pull request's head moved while committing. Try again.".to_string()
             }
+            perch_github::Error::Graphql(m) if m.contains("does not have the correct permissions") => {
+                "You can't push to this pull request's branch. On a fork, its author has to allow edits by maintainers.".to_string()
+            }
             e => format!("GitHub could not commit the suggestion: {e}"),
         })?;
     tracing::info!(item = item_id, path, "committed a suggestion");

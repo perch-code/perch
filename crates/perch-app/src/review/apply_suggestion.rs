@@ -25,6 +25,7 @@ use crate::icons::SidebarIcon;
 use crate::review::markdown::Foot;
 use crate::review::model::ReviewState;
 use crate::review::suggestion::{headline_for, Commit, Original};
+use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{self, action_button, editor_box, icon_action, prose_editor};
 
@@ -39,6 +40,7 @@ const GAP: f64 = 4.0;
 /// GitHub. None where Apply suggestion can never be pressed: a thread off
 /// the head's lines, an outdated one, or one whose lines are not known.
 pub fn foot(
+    app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
     thread: &CommentThread,
@@ -52,6 +54,7 @@ pub fn foot(
     let thread_id = thread.id.clone();
     Some(Foot::new(move |lines| {
         bar(
+            app,
             state,
             backend.clone(),
             thread_id.clone(),
@@ -64,21 +67,51 @@ pub fn foot(
 
 /// Why Apply suggestion is off, as github.com words it, or `None` when
 /// it can be pressed.
-fn refusal(state: ReviewState, thread_id: &str, unchanged: bool) -> Option<&'static str> {
+fn refusal(
+    app: AppState,
+    state: ReviewState,
+    thread_id: &str,
+    unchanged: bool,
+) -> Option<&'static str> {
     if unchanged {
         Some("This suggestion is invalid because no changes were made to the code.")
     } else if state.offline.get() {
         Some("GitHub is unavailable while Perch is offline.")
     } else if state.is_resolved(thread_id) {
         Some("This suggestion has been applied or marked resolved.")
+    } else if !may_push_head(app, state) {
+        Some("You can't push to this pull request's branch, so its suggestions can't be committed.")
     } else {
         None
     }
 }
 
+/// Whether the reader may commit to the pull request's head: their own
+/// pull request, or one GitHub says they may push to, which on a fork
+/// needs its author to allow edits by maintainers. Until GitHub has said,
+/// the button stays on, and GitHub's own refusal is shown if it comes.
+fn may_push_head(app: AppState, state: ReviewState) -> bool {
+    let Some(can_push) = state
+        .pull_request_overview
+        .with(|o| o.as_ref().map(|o| o.viewer_can_push_head()))
+    else {
+        return true;
+    };
+    can_push
+        || app.viewer.with(|v| {
+            v.as_ref().is_some_and(|(login, _)| {
+                state.pull_request.with(|p| {
+                    p.as_ref()
+                        .is_some_and(|p| p.author_login.eq_ignore_ascii_case(login))
+                })
+            })
+        })
+}
+
 /// The row under the lines with Apply suggestion at its end, while the
 /// pull request is open.
 fn bar(
+    app: AppState,
     state: ReviewState,
     backend: Rc<Backend>,
     thread_id: String,
@@ -93,7 +126,7 @@ fn bar(
             .with(|p| p.as_ref().is_some_and(|p| p.is_open() && !p.merged))
     });
     let refused_id = thread_id.clone();
-    let refused = Memo::new(move |_| refusal(state, &refused_id, unchanged));
+    let refused = Memo::new(move |_| refusal(app, state, &refused_id, unchanged));
     let seed = Commit {
         thread_id,
         headline: headline_for(&path),
@@ -704,6 +737,59 @@ mod tests {
         settle(&mut harness);
         click(&mut harness, "apply-suggestion");
         assert!(!is_open(), "no change: off");
+        assert!(commands.try_recv().is_err());
+
+        let root = TestRoot::new();
+        let fork = state_with_suggestion("```suggestion\nlet c = 3;\n```");
+        let overview = |maintainer_can_modify| perch_github::PullRequestOverview {
+            head_sha: "h".into(),
+            mergeable: perch_github::MergeableState::Mergeable,
+            merge_state: perch_github::MergeState::Clean,
+            review_decision: None,
+            viewer_can_merge_as_admin: false,
+            viewer_permission: Some(perch_github::RepositoryPermission::Admin),
+            allowed_merge_methods: Default::default(),
+            checks: perch_github::Checks {
+                state: perch_github::CheckState::Passing,
+                url: None,
+                runs: Vec::new(),
+            },
+            squash_message: Default::default(),
+            merge_message: Default::default(),
+            cross_repository: true,
+            maintainer_can_modify,
+        };
+        fork.pull_request_overview
+            .set(Some(Arc::new(overview(false))));
+        let view = crate::review::threads::messages_view(
+            app,
+            fork,
+            backend.clone(),
+            "t1".into(),
+            ThreadFace::Card,
+        );
+        let mut fork_harness = HeadlessHarness::new_with_size(root, view, 1000.0, 800.0);
+        settle(&mut fork_harness);
+        click(&mut fork_harness, "apply-suggestion");
+        assert!(!is_open(), "a fork closed to maintainers: off");
+        app.viewer.set(Some((
+            fork.pull_request
+                .with_untracked(|p| p.as_ref().unwrap().author_login.clone()),
+            String::new(),
+        )));
+        settle(&mut fork_harness);
+        click(&mut fork_harness, "apply-suggestion");
+        assert!(is_open(), "the reader's own fork: on");
+        app.viewer.set(None);
+        fork_harness.click(5.0, 790.0);
+        settle(&mut fork_harness);
+        fork.pull_request_overview
+            .set(Some(Arc::new(overview(true))));
+        settle(&mut fork_harness);
+        click(&mut fork_harness, "apply-suggestion");
+        assert!(is_open(), "a fork open to maintainers: on");
+        fork_harness.click(5.0, 790.0);
+        settle(&mut fork_harness);
         assert!(commands.try_recv().is_err());
 
         let mut closed = pull();
