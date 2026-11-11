@@ -1376,6 +1376,51 @@ mod tests {
             .with(|open| open.contains("claude-run")));
     }
 
+    /// Once a review is done, the popover's line about it goes to it in the
+    /// Agents section, unfolded even if the reader had folded it.
+    #[test]
+    fn the_last_reviews_line_goes_to_it_in_the_agents_row() {
+        let (mut harness, app, review) = pull_request_harness();
+        add(
+            app,
+            &[perch_github::RunRecord {
+                owner: perch_github::RunOwner::Review {
+                    item_id: "pr".into(),
+                    reviewer_run_id: "attempt-claude".into(),
+                },
+                purpose: perch_github::comments::RunPurpose::WorktreeReview,
+                ..record("claude-run", perch_github::RunStatus::Completed, 1)
+            }],
+        );
+        let summary = super::super::model::tests::review_summary("group-3", &["attempt-claude"]);
+        app.review_groups.update(|all| {
+            all.insert("pr".into(), Arc::new(vec![summary]));
+        });
+        app.collapsed_agent_review_groups.update(|collapsed| {
+            collapsed.insert("group-3".into());
+        });
+        // Folded, the popover would say why Run cannot go instead.
+        review.review_agents_expanded.set(true);
+        review.show_tab(crate::review::model::ItemTab::Code);
+        settle(&mut harness);
+
+        click(&mut harness, "review-control");
+        assert!(review.review_open.get());
+        click(&mut harness, "review-agents-latest");
+        assert!(!review.review_open.get(), "the line left the popover open");
+        assert_eq!(
+            review.tab.get(),
+            crate::review::model::ItemTab::Conversation
+        );
+        assert!(review.agents_unfolded.get());
+        assert!(!app
+            .collapsed_agent_review_groups
+            .with(|collapsed| collapsed.contains("group-3")));
+        settle(&mut harness);
+        assert_eq!(review.pending_review_reveal.get(), None);
+        assert!(review.agents_open_runs.with(|open| open.is_empty()));
+    }
+
     /// A run asked for from elsewhere comes into view: the section unfolds,
     /// the run opens, and the ask is done with once the row is laid out.
     #[test]

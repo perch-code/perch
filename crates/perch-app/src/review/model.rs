@@ -1576,6 +1576,9 @@ pub struct ReviewState {
     /// A run to bring into view in the Agents section, once its row is laid
     /// out: unfolded, open, and at the top of the page.
     pub pending_run_reveal: RwSignal<Option<String>>,
+    /// A review, by group id, to bring into view in the Agents section once
+    /// its row is laid out: unfolded and at the top of the page.
+    pub pending_review_reveal: RwSignal<Option<String>>,
     /// How far down Conversation was scrolled, kept as it scrolls, so the
     /// page shows where it was left when it is built again: after a file's
     /// tab has shown in its place, or when the item comes back. Written
@@ -2173,6 +2176,7 @@ impl ReviewState {
             agents_unfolded: RwSignal::new(false),
             agents_open_runs: RwSignal::new(HashSet::new()),
             pending_run_reveal: RwSignal::new(None),
+            pending_review_reveal: RwSignal::new(None),
             conversation_scroll: RwSignal::new(0.0),
             file_places: RwSignal::new(HashMap::new()),
             layout: RwSignal::new(Layout::Stacked),

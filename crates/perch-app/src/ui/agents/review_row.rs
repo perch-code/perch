@@ -130,7 +130,7 @@ pub(super) fn review_row(
     )
     .style(|s| s.width_full().padding_left(REVIEW_INSET));
 
-    Stack::vertical((
+    let row = Stack::vertical((
         header,
         match &summary {
             Some(summary) => status_line(review, summary.clone()).into_any(),
@@ -145,6 +145,18 @@ pub(super) fn review_row(
             .padding_horiz(theme::CARD_PADDING)
             .border_top(1.0)
             .border_color(theme::border_muted())
+    });
+    // Asked for from the Review popover, it scrolls the page to put itself
+    // at the top, as a revealed run does.
+    let row_id = row.view_id();
+    row.on_event_cont(el::UpdatePhaseLayout, move |_, _| {
+        if review
+            .pending_review_reveal
+            .with_untracked(|pending| pending.as_deref() == Some(key.as_str()))
+        {
+            review.pending_review_reveal.set(None);
+            row_id.scroll_to(Some(floem::kurbo::Rect::new(0.0, 0.0, 1.0, 100_000.0)));
+        }
     })
 }
 

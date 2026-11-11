@@ -281,12 +281,14 @@ fn reviewers_summary(app: AppState, state: ReviewState) -> String {
 }
 
 /// What the agents are doing, with Show to go to them in the Agents section;
-/// else, folded, why Run cannot go; else what the last review found.
+/// else, folded, why Run cannot go; else what the last review found, which
+/// goes to that review in the Agents section.
 fn agents_status(app: AppState, state: ReviewState, expanded: Memo<bool>) -> impl IntoView {
     #[derive(Clone, PartialEq)]
     enum Status {
         Active(String),
         Note(String),
+        Latest { text: String, group: String },
         Nothing,
     }
     let status = move || {
@@ -305,11 +307,14 @@ fn agents_status(app: AppState, state: ReviewState, expanded: Memo<bool>) -> imp
                 .cloned()
         });
         match latest {
-            Some(summary) => Status::Note(format!(
-                "Review #{} \u{b7} {}",
-                summary.group.number,
-                count_summary(&summary)
-            )),
+            Some(summary) => Status::Latest {
+                text: format!(
+                    "Review #{} \u{b7} {}",
+                    summary.group.number,
+                    count_summary(&summary)
+                ),
+                group: summary.group.id.clone(),
+            },
             None => Status::Nothing,
         }
     };
@@ -350,6 +355,34 @@ fn agents_status(app: AppState, state: ReviewState, expanded: Memo<bool>) -> imp
             .debug_name("review-agents-status")
             .into_any(),
             Status::Note(note) => text(note).debug_name("review-agents-status").into_any(),
+            Status::Latest { text, group } => {
+                let key_group = group.clone();
+                Label::derived(move || text.clone())
+                    .on_event_stop(el::Click, move |_, _| {
+                        show_review_in_agents(app, state, &group)
+                    })
+                    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+                        if matches!(key.code, Code::Enter | Code::Space) {
+                            show_review_in_agents(app, state, &key_group);
+                            EventPropagation::Stop
+                        } else {
+                            EventPropagation::Continue
+                        }
+                    })
+                    .style(|s| {
+                        clickable(s)
+                            .font_size(theme::TEXT_META)
+                            .color(theme::fg_subtle())
+                            .text_wrap()
+                            .min_width(0.0)
+                            .flex_grow(1.0_f32)
+                            .keyboard_navigable()
+                            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+                            .hover(|s| s.color(theme::fg_muted()))
+                    })
+                    .debug_name("review-agents-latest")
+                    .into_any()
+            }
             Status::Nothing => Empty::new().into_any(),
         }
     })
@@ -1207,6 +1240,26 @@ fn show_in_agents(app: AppState, state: ReviewState, summary: &ReviewGroupSummar
         if let Some(run) = run {
             state.pending_run_reveal.set(Some(run));
         }
+    });
+}
+
+/// The last review's line in the Review popover goes to that review in
+/// the item's Agents section: the section and the review unfold, and the
+/// review comes to the top of the page.
+fn show_review_in_agents(app: AppState, state: ReviewState, group: &str) {
+    crate::review::review_menu::close(state, false);
+    floem::reactive::Effect::batch(|| {
+        state.show_tab(crate::review::model::ItemTab::Conversation);
+        state.agents_unfolded.set(true);
+        if app
+            .collapsed_agent_review_groups
+            .with_untracked(|collapsed| collapsed.contains(group))
+        {
+            app.collapsed_agent_review_groups.update(|collapsed| {
+                collapsed.remove(group);
+            });
+        }
+        state.pending_review_reveal.set(Some(group.to_string()));
     });
 }
 
