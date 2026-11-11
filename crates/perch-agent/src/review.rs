@@ -1588,7 +1588,9 @@ fn extract_text_review(raw: &str, manifest: &ReviewManifest) -> ReviewExtraction
                 output_format_version: REVIEW_OUTPUT_FORMAT_VERSION,
             };
         }
-        let diagnostic = if raw.trim() == "(none)" {
+        let diagnostic = if raw.trim().is_empty() {
+            "the reviewer ended without an answer"
+        } else if raw.trim() == "(none)" {
             "the reviewer said only \"(none)\" and filed no findings report"
         } else {
             "the native review response did not match the supported findings format"
@@ -2626,6 +2628,16 @@ mod tests {
         assert_eq!(
             result.diagnostics,
             vec!["the reviewer said only \"(none)\" and filed no findings report".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_empty_answer_is_incomplete_and_says_so() {
+        let result = extract_review(Backend::Gemini, "", &manifest());
+        assert!(result.incomplete);
+        assert_eq!(
+            result.diagnostics,
+            vec!["the reviewer ended without an answer".to_string()]
         );
     }
 

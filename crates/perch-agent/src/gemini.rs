@@ -124,11 +124,14 @@ pub fn read_only_settings(cwd: &Path, dirs: &[PathBuf]) -> String {
 /// The arguments every print-mode run shares, before the model's.
 ///
 /// A linked worktree's git directories sit outside it, where agy's
-/// sandbox reads nothing, and git there says "not a git repository". They
-/// go in read-only with the rest.
+/// sandbox reads nothing, and git there says "not a git repository"; so
+/// do the object directories a checkout borrows through alternates, a
+/// review snapshot's among them, without which git can't open a commit.
+/// They go in read-only with the rest.
 pub(crate) fn print_args(cwd: &Path, dirs: &[PathBuf], model: &str, effort: &str) -> Vec<String> {
     let mut dirs = dirs.to_vec();
     dirs.extend(crate::linked_git_dirs(cwd));
+    dirs.extend(crate::alternate_object_dirs(cwd));
     let mut args: Vec<String> = vec![
         "--output-format".into(),
         "stream-json".into(),
@@ -1593,6 +1596,41 @@ mod tests {
         let settings = &args[args.iter().position(|a| a == "--settings").unwrap() + 1];
         assert!(
             settings.contains(&format!("write_file({git_dir})")),
+            "{settings}"
+        );
+    }
+
+    #[test]
+    fn borrowed_objects_are_read_only() {
+        // A review snapshot's checkout keeps its history in a sibling
+        // repo.git through alternates, chained here one further.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let far = root.join("far.git/objects");
+        let near = root.join("repo.git/objects");
+        let own = root.join("checkout/.git/objects");
+        for dir in [&far, &near, &own] {
+            std::fs::create_dir_all(dir.join("info")).unwrap();
+        }
+        std::fs::write(near.join("info/alternates"), format!("{}\n", far.display())).unwrap();
+        std::fs::write(
+            own.join("info/alternates"),
+            "# borrowed\n../../../repo.git/objects\n",
+        )
+        .unwrap();
+
+        let args = print_args(&root.join("checkout"), &[], "m", "low");
+        let added: Vec<&String> = args
+            .windows(2)
+            .filter(|w| w[0] == "--add-dir")
+            .map(|w| &w[1])
+            .collect();
+        let near = near.to_string_lossy().into_owned();
+        let far = far.to_string_lossy().into_owned();
+        assert_eq!(added, [&near, &far]);
+        let settings = &args[args.iter().position(|a| a == "--settings").unwrap() + 1];
+        assert!(
+            settings.contains(&format!("write_file({near})")),
             "{settings}"
         );
     }

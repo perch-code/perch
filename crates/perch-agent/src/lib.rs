@@ -348,6 +348,44 @@ pub fn linked_git_dirs(worktree: &std::path::Path) -> Vec<PathBuf> {
     dirs
 }
 
+/// The object directories a checkout borrows through git's alternates,
+/// which git reads for every commit it can't find in its own: a review
+/// snapshot's checkout keeps its history in the snapshot's `repo.git`
+/// this way. Alternates may chain, which git follows five deep. Paths
+/// are as written, relative ones against the objects directory naming
+/// them.
+pub fn alternate_object_dirs(worktree: &std::path::Path) -> Vec<PathBuf> {
+    let common = match linked_git_dirs(worktree).pop() {
+        Some(dir) => dir,
+        None => worktree.join(".git"),
+    };
+    let mut found: Vec<PathBuf> = Vec::new();
+    let mut next = vec![common.join("objects")];
+    for _ in 0..=5 {
+        let mut borrowed = Vec::new();
+        for objects in &next {
+            let Ok(list) = std::fs::read_to_string(objects.join("info/alternates")) else {
+                continue;
+            };
+            for line in list.lines().map(str::trim) {
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let dir = real_path(&objects.join(line));
+                if dir.is_dir() && !found.contains(&dir) {
+                    found.push(dir.clone());
+                    borrowed.push(dir);
+                }
+            }
+        }
+        if borrowed.is_empty() {
+            break;
+        }
+        next = borrowed;
+    }
+    found
+}
+
 /// What in a git directory steers git rather than holding the history,
 /// which a run that may commit still may not write.
 const GIT_CONTROL: [&str; 4] = ["config", "config.worktree", "commondir", "hooks"];
