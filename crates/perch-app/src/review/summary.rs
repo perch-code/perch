@@ -192,7 +192,7 @@ pub fn summary(
             move |(logins, may_assign)| {
                 let nobody = logins.is_empty();
                 Stack::horizontal((
-                    assignees(app, logins)
+                    assignees(app, state, logins, assignable)
                         .style(move |s| s.min_width(0.0).apply_if(nobody, |s| s.hide())),
                     assign_button(app, state, assign_backend.clone(), assignable)
                         .style(move |s| s.apply_if(!may_assign, |s| s.hide())),
@@ -1801,15 +1801,40 @@ fn reviewers_view(
     })
 }
 
-fn assignees(app: AppState, logins: Vec<String>) -> impl IntoView {
+/// Avatar and login of each assignee. GitHub names an assignee by login
+/// alone, so the face is whichever one the item already has for them: as
+/// its author, a reviewer or a commenter, or in the Assign menu.
+fn assignees(
+    app: AppState,
+    state: ReviewState,
+    logins: Vec<String>,
+    assignable: Memo<Option<Arc<Vec<MentionableUser>>>>,
+) -> impl IntoView {
     dyn_stack(
         move || logins.clone(),
         |l| l.clone(),
         move |login| {
             let seed = login.clone();
+            let face = login.clone();
+            let url = move || {
+                // Read untracked there; a comment's face may come later.
+                state.discussion.track();
+                state.issue_comments.track();
+                Some(avatar_url_for(state, &face))
+                    .filter(|u| !u.is_empty())
+                    .or_else(|| {
+                        assignable.with(|users| {
+                            users
+                                .as_ref()?
+                                .iter()
+                                .find(|u| u.login == face)
+                                .map(|u| u.avatar_url.clone())
+                        })
+                    })
+                    .unwrap_or_default()
+            };
             Stack::horizontal((
-                avatar(app, String::new, theme::SUMMARY_AVATAR, seed)
-                    .style(|s| s.margin_right(5.0)),
+                avatar(app, url, theme::SUMMARY_AVATAR, seed).style(|s| s.margin_right(5.0)),
                 name_label(
                     move || Name::Login(login.clone()),
                     |s| s.font_size(theme::TEXT_BADGE).color(theme::fg_muted()),
@@ -2548,6 +2573,37 @@ mod tests {
             row.x0 + theme::SUMMARY_NAME_WIDTH,
             "with nobody assigned, Assign is where the values start"
         );
+    }
+
+    #[test]
+    fn an_assignee_has_the_face_the_item_already_has_for_them() {
+        let mut pull = pull_request(812);
+        pull.author_login = "sgbalogh".into();
+        pull.author_avatar_url = "https://avatars/sgbalogh".into();
+        pull.assignees = vec!["sgbalogh".into(), "rohan".into(), "nobody".into()];
+        let (mut harness, app, state) = pull_request_harness_with(pull);
+        let mut png = Vec::new();
+        image::RgbaImage::new(2, 2)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let png = Arc::new(png);
+        app.avatars.update(|m| {
+            m.insert("https://avatars/sgbalogh".into(), png.clone());
+            m.insert("https://avatars/rohan".into(), png.clone());
+        });
+        // Rohan's face is known only from the Assign menu.
+        let mut rohan = user("rohan", None);
+        rohan.avatar_url = "https://avatars/rohan".into();
+        state.assignable.update(|all| {
+            all.insert("slatedb/slatedb#812".into(), Some(Arc::new(vec![rohan])));
+        });
+        harness.rebuild();
+        harness.paint();
+        let row = named(harness.root_id(), "summary row Assignees").unwrap();
+        let initial = |c: &str| named(row, &format!("Label: {c:?}")).is_some();
+        assert!(!initial("S"), "the author's face, as in the Author row");
+        assert!(!initial("R"), "the face from the Assign menu");
+        assert!(initial("N"), "nobody's face is known: their initial");
     }
 
     #[test]
