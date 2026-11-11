@@ -379,7 +379,7 @@ fn strip_cd(command: &str) -> String {
 }
 
 /// The last three path components, which is what a reader recognises.
-fn short_path(path: &str) -> String {
+pub(crate) fn short_path(path: &str) -> String {
     let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
     if parts.len() <= 3 {
         return path.trim_start_matches('/').to_string();

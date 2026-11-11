@@ -1,14 +1,16 @@
 //! Run a coding agent as a child process and read what it does.
 //!
-//! Two agents: Claude Code, driven as `claude -p`, and Codex, driven as
-//! `codex app-server` or, for a review, `codex exec`, each with JSON
-//! events on stdout. No SDK and no library:
+//! Three agents: Claude Code, driven as `claude -p`; Codex, driven as
+//! `codex app-server` or, for a review, `codex exec`; and Gemini, through
+//! the Antigravity CLI, driven as `agy` in print mode or, for Work, as
+//! `agy acp`; each with JSON events on stdout. No SDK and no library:
 //! the binary on `PATH`, a child process, one JSON object per line. Perch
 //! works with whatever version of the CLI the user has, and the parsers
 //! are the whole contract with them.
 
 mod codex;
 mod discover;
+mod gemini;
 mod interactive;
 mod parse;
 mod review;
@@ -31,8 +33,12 @@ use tokio::sync::Notify;
 
 pub use codex::CodexParser;
 pub use discover::{
-    codex_catalog, codex_default_model, find_binary, install_dirs, parse_codex_catalog,
-    path_with_install_dirs, CodexModel,
+    codex_catalog, codex_default_model, find_binary, gemini_catalog, install_dirs,
+    parse_codex_catalog, parse_gemini_catalog, path_with_install_dirs, CodexModel,
+};
+pub use gemini::{
+    read_only_settings as gemini_read_only_settings, repo_config as gemini_repo_config,
+    GeminiParser, CONFIG_DIRS as GEMINI_CONFIG_DIRS,
 };
 pub use interactive::{ApprovalKind, ApprovalRequest, Decision};
 use interactive::{ClaudeHost, CodexServer, CodexThread, Conversation};
@@ -49,15 +55,26 @@ pub use review::{
 pub enum Backend {
     ClaudeCode,
     Codex,
+    Gemini,
 }
 
 impl Backend {
-    pub const ALL: [Backend; 2] = [Backend::ClaudeCode, Backend::Codex];
+    pub const ALL: [Backend; 3] = [Backend::ClaudeCode, Backend::Codex, Backend::Gemini];
 
     pub fn name(self) -> &'static str {
         match self {
             Backend::ClaudeCode => "claude-code",
             Backend::Codex => "codex",
+            Backend::Gemini => "gemini",
+        }
+    }
+
+    /// For the screen: "Claude", "Codex", "Gemini".
+    pub fn label(self) -> &'static str {
+        match self {
+            Backend::ClaudeCode => "Claude",
+            Backend::Codex => "Codex",
+            Backend::Gemini => "Gemini",
         }
     }
 
@@ -256,8 +273,19 @@ const EDIT_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
 /// What in a worktree a Work run may not write: the file that points at
 /// the git directory, and the agents' own configuration, which a later
-/// run, or the reader's own agent, would take as instructions.
-pub const WORK_PROTECTED: &[&str] = &[".git", ".claude", ".codex", ".mcp.json"];
+/// run, or the reader's own agent, would take as instructions. agy's
+/// (`.agents`, `.agent`, `_agents`) also holds hooks and MCP servers it
+/// runs outside any sandbox.
+pub const WORK_PROTECTED: &[&str] = &[
+    ".git",
+    ".claude",
+    ".codex",
+    ".mcp.json",
+    ".agents",
+    ".agent",
+    "_agents",
+    ".gemini",
+];
 
 /// Permission rules scoping the editing tools to the worktree, in Claude
 /// Code's absolute-path form (`//` before the path), with the protected
@@ -564,6 +592,8 @@ pub fn is_scrubbed_env(name: &str) -> bool {
         "CLAUDE_CODE_OAUTH_TOKEN",
         "OPENAI_API_KEY",
         "CODEX_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
     ];
     const ALWAYS: &[&str] = &["GITHUB_TOKEN", "GH_TOKEN", "PERCH_GIT_TOKEN"];
     const SUFFIXES: &[&str] = &[
@@ -611,6 +641,10 @@ pub struct RunSpec {
     /// Ask or Work. For Claude Code it picks the tool lists and the
     /// sandbox settings; Codex has no tool list, and it picks the sandbox.
     pub mode: Mode,
+    /// Directories outside `cwd` a question may read. Only agy needs
+    /// telling: its sandbox reads nowhere else, where Claude Code's and
+    /// Codex's read anywhere.
+    pub read_dirs: Vec<PathBuf>,
 }
 
 impl RunSpec {
@@ -619,6 +653,49 @@ impl RunSpec {
         match self.backend {
             Backend::ClaudeCode => self.claude_args(),
             Backend::Codex => self.codex_args(),
+            Backend::Gemini => self.gemini_args(),
+        }
+    }
+
+    /// Gemini: a question in print mode, read-only in agy's sandbox, with
+    /// the prompt on stdin; Work as an ACP server, which asks.
+    fn gemini_args(&self) -> Vec<String> {
+        match &self.mode {
+            Mode::Ask => {
+                let mut args = gemini::print_args(
+                    &self.cwd,
+                    &self.read_dirs,
+                    &self.model,
+                    gemini::effort_name(self.effort),
+                );
+                args.extend(["--input-format".into(), "stream-json".into()]);
+                if let Some(id) = &self.resume {
+                    args.extend(["--conversation".into(), id.clone()]);
+                }
+                args
+            }
+            Mode::Work(_) => vec!["acp".into()],
+        }
+    }
+
+    /// agy takes no system prompt of its own in print mode, so what Perch
+    /// would append to it goes ahead of the first prompt.
+    fn gemini_prompt(&self) -> String {
+        match &self.system {
+            Some(system) if self.resume.is_none() => format!("{system}\n\n{}", self.prompt),
+            _ => self.prompt.clone(),
+        }
+    }
+
+    /// Why this run will not start, when it will not: a Gemini run in a
+    /// checkout carrying agy's own configuration, unless trusted.
+    pub fn refusal(&self) -> Option<String> {
+        match self.backend {
+            Backend::Gemini => gemini::refusal(
+                &self.cwd,
+                matches!(&self.mode, Mode::Work(grant) if grant.trust),
+            ),
+            _ => None,
         }
     }
 
@@ -708,6 +785,23 @@ impl RunSpec {
         match self.backend {
             Backend::ClaudeCode => Conversation::Claude(ClaudeHost::new(self.prompt.clone())),
             Backend::Codex => Conversation::Codex(Box::new(CodexServer::new(self.codex_thread()))),
+            Backend::Gemini => match &self.mode {
+                Mode::Ask => Conversation::Gemini(gemini::GeminiHost::new(self.gemini_prompt())),
+                Mode::Work(grant) => {
+                    let mut writable = vec![real_path(&self.cwd)];
+                    writable.extend(grant.write.iter().map(|p| real_path(p)));
+                    // The path the refusal check walked, so agy looks above
+                    // the same directory it did.
+                    Conversation::Acp(Box::new(gemini::AcpClient::new(gemini::AcpSession {
+                        cwd: real_path(&self.cwd),
+                        model: self.model.clone(),
+                        effort: gemini::effort_name(self.effort).to_string(),
+                        prompt: self.gemini_prompt(),
+                        resume: self.resume.clone(),
+                        writable,
+                    })))
+                }
+            },
         }
     }
 
@@ -850,6 +944,7 @@ enum ParserKind {
         terminal_permission_denial: Option<bool>,
     },
     Codex(CodexParser),
+    Gemini(GeminiParser),
 }
 
 /// Where a run's raw protocol output is kept, line for line, beside the
@@ -914,6 +1009,7 @@ impl Parser {
                 terminal_permission_denial: None,
             },
             Backend::Codex => ParserKind::Codex(CodexParser::new()),
+            Backend::Gemini => ParserKind::Gemini(GeminiParser::new()),
         };
         Self {
             kind,
@@ -1011,6 +1107,13 @@ impl Parser {
                 events
             }
             ParserKind::Codex(p) => p.parse_line(line),
+            ParserKind::Gemini(p) => {
+                let mut events = p.parse_value(value);
+                if more {
+                    events.retain(|event| !matches!(event, RunEvent::Finished { .. }));
+                }
+                events
+            }
         }
     }
 
@@ -1018,6 +1121,7 @@ impl Parser {
         match self.kind {
             ParserKind::Claude { .. } => Backend::ClaudeCode,
             ParserKind::Codex(_) => Backend::Codex,
+            ParserKind::Gemini(_) => Backend::Gemini,
         }
     }
 
@@ -1105,6 +1209,9 @@ pub enum RunEvent {
 pub enum Error {
     #[error("invalid review invocation: {0}")]
     InvalidReview(String),
+    /// The run would not be safe to start where it was asked to.
+    #[error("{0}")]
+    Refused(String),
     #[error("could not start {binary}: {source}")]
     Spawn {
         binary: PathBuf,
@@ -1410,6 +1517,9 @@ impl Run {
     /// Must be called on a tokio runtime. Exactly one of `Finished`,
     /// `Failed`, and `Stopped` is the last event sent.
     pub fn spawn(spec: RunSpec, events: UnboundedSender<RunEvent>) -> Result<Run, Error> {
+        if let Some(why) = spec.refusal() {
+            return Err(Error::Refused(why));
+        }
         let args = spec.args();
         let conversation = Some(spec.conversation());
         Self::spawn_process(
@@ -2087,6 +2197,7 @@ mod tests {
             backend: Backend::ClaudeCode,
             binary: "claude".into(),
             model: "sonnet".into(),
+            read_dirs: Vec::new(),
             effort: Effort::High,
             cwd: "/tmp".into(),
             prompt: "why?".into(),
@@ -2140,6 +2251,7 @@ mod tests {
             backend: Backend::ClaudeCode,
             binary: "claude".into(),
             model: "sonnet".into(),
+            read_dirs: Vec::new(),
             effort: Effort::Medium,
             cwd: "/tmp".into(),
             prompt: "and?".into(),
@@ -2207,6 +2319,7 @@ mod tests {
             backend,
             binary: "agent".into(),
             model: "m".into(),
+            read_dirs: Vec::new(),
             effort: Effort::High,
             cwd: "/tmp".into(),
             prompt: "do it".into(),
@@ -2840,8 +2953,8 @@ mod tests {
             assert_eq!(Backend::parse(b.name()), Some(b));
         }
         assert_eq!(Backend::parse("codex"), Some(Backend::Codex));
+        assert_eq!(Backend::parse("gemini"), Some(Backend::Gemini));
         assert_eq!(Backend::parse("Claude-Code"), Some(Backend::ClaudeCode));
-        assert_eq!(Backend::parse("gemini"), None);
     }
 
     fn claude(effort: Effort) -> RunSpec {
@@ -2849,6 +2962,7 @@ mod tests {
             backend: Backend::ClaudeCode,
             binary: "claude".into(),
             model: "opus".into(),
+            read_dirs: Vec::new(),
             effort,
             cwd: "/tmp".into(),
             prompt: "why?".into(),
@@ -2898,6 +3012,7 @@ mod tests {
             backend: Backend::Codex,
             binary: "codex".into(),
             model: "gpt-5.6-sol".into(),
+            read_dirs: Vec::new(),
             effort: Effort::High,
             cwd: "/tmp/w t".into(),
             prompt: "why?".into(),
@@ -2993,5 +3108,79 @@ mod tests {
             named("/x/.perch", Some(std::path::Path::new(""))),
             "/x/.perch"
         );
+    }
+
+    fn gemini(mode: Mode, cwd: &std::path::Path) -> RunSpec {
+        RunSpec {
+            backend: Backend::Gemini,
+            binary: "agy".into(),
+            model: "gemini-4-carbon".into(),
+            read_dirs: Vec::new(),
+            effort: Effort::Ultra,
+            cwd: cwd.to_path_buf(),
+            prompt: "Why?".into(),
+            system: Some("You are in Perch.".into()),
+            resume: None,
+            mode,
+        }
+    }
+
+    #[test]
+    fn a_gemini_question_runs_in_print_mode_read_only_on_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = gemini(Mode::Ask, dir.path());
+        let args = spec.args();
+        assert!(!args.iter().any(|a| a == "acp" || a == "-p"));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--input-format", "stream-json"]));
+        assert!(
+            args.windows(2).any(|w| w == ["--effort", "max"]),
+            "{args:?}"
+        );
+        assert!(args.windows(2).any(|w| w == ["--model", "gemini-4-carbon"]));
+        let Conversation::Gemini(mut host) = spec.conversation() else {
+            panic!("a question is held in print mode");
+        };
+        let first: serde_json::Value = serde_json::from_str(&host.opening()[0]).unwrap();
+        assert_eq!(first["message"]["content"], "You are in Perch.\n\nWhy?");
+        let resumed = RunSpec {
+            resume: Some("c-1".into()),
+            ..gemini(Mode::Ask, dir.path())
+        };
+        assert!(resumed
+            .args()
+            .windows(2)
+            .any(|w| w == ["--conversation", "c-1"]));
+    }
+
+    #[test]
+    fn gemini_work_talks_to_acp_and_is_refused_beside_agy_config() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let work = gemini(Mode::Work(WorkGrant::default()), dir.path());
+        assert_eq!(work.args(), ["acp"]);
+        assert!(matches!(work.conversation(), Conversation::Acp(_)));
+        assert_eq!(work.refusal(), None);
+        std::fs::create_dir(dir.path().join("_agents")).unwrap();
+        assert!(work.refusal().is_some());
+        assert!(gemini(Mode::Ask, dir.path()).refusal().is_some());
+        let trusted = gemini(
+            Mode::Work(WorkGrant {
+                trust: true,
+                ..WorkGrant::default()
+            }),
+            dir.path(),
+        );
+        assert_eq!(trusted.refusal(), None);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(matches!(Run::spawn(work, tx), Err(Error::Refused(_))));
+    }
+
+    #[test]
+    fn gemini_s_own_credentials_reach_it() {
+        for name in ["GEMINI_API_KEY", "GOOGLE_API_KEY"] {
+            assert!(!is_scrubbed_env(name), "{name}");
+        }
     }
 }

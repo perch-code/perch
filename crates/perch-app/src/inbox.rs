@@ -158,11 +158,9 @@ pub fn chip(event: &ActivityEvent) -> String {
             files,
             ..
         } => {
-            let agent = match perch_agent::Backend::parse(backend) {
-                Some(perch_agent::Backend::ClaudeCode) => "Claude",
-                Some(perch_agent::Backend::Codex) => "Codex",
-                None => "Agent",
-            };
+            let agent = perch_agent::Backend::parse(backend)
+                .map(perch_agent::Backend::label)
+                .unwrap_or("Agent");
             let mode_label = match mode {
                 RunMode::Ask => "Ask",
                 RunMode::Work => "Work",

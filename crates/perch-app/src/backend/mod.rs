@@ -4131,10 +4131,18 @@ async fn run(
             for problem in crate::ask::discover(&mut agent).await {
                 tracing::warn!(%problem, "agent discovery");
             }
-            tracing::info!(claude = %agent.binary, codex = ?agent.codex.models, "agents found");
-            if agent.models.is_empty() && agent.codex.models.is_empty() {
+            tracing::info!(
+                claude = %agent.binary,
+                codex = ?agent.codex.models,
+                gemini = ?agent.gemini.models,
+                "agents found"
+            );
+            if agent.models.is_empty()
+                && agent.codex.models.is_empty()
+                && agent.gemini.models.is_empty()
+            {
                 let _ = events.send(Event::Notice(
-                    "No coding agent found. Install Claude Code or Codex, or set agent.binary in config.toml.".into(),
+                    "No coding agent found. Install Claude Code, Codex or agy (Gemini), or set agent.binary in config.toml.".into(),
                 ));
             }
             let _ = events.send(Event::AgentConfig(agent.clone()));
@@ -4265,7 +4273,7 @@ async fn run(
         config.agent = agent;
     }
     watch_usage(&config.agent, &data_root, &events);
-    let (claude_review, codex_review) = tokio::join!(
+    let (claude_review, codex_review, gemini_review) = tokio::join!(
         perch_agent::detect_review_capability(
             perch_agent::Backend::ClaudeCode,
             Path::new(&config.agent.binary),
@@ -4274,8 +4282,12 @@ async fn run(
             perch_agent::Backend::Codex,
             Path::new(&config.agent.codex.binary),
         ),
+        perch_agent::detect_review_capability(
+            perch_agent::Backend::Gemini,
+            Path::new(&config.agent.gemini.binary),
+        ),
     );
-    let review_capabilities = Arc::new(vec![claude_review, codex_review]);
+    let review_capabilities = Arc::new(vec![claude_review, codex_review, gemini_review]);
     let review_snapshots = Arc::new(ReviewSnapshotStore::new(data_root.clone()));
     let knowledge = match perch_knowledge::Knowledge::open(data_root.join("knowledge")) {
         Ok(knowledge) => Some(Arc::new(knowledge)),
@@ -17548,6 +17560,23 @@ fn work_setup(
         }
         _ => "reaches no host without asking".to_string(),
     };
+    if backend == perch_agent::Backend::Gemini {
+        // agy's ACP server has no sandbox Perch can shape: every command
+        // is a request, and the framing says so instead.
+        let (branch, base) = item
+            .checkout
+            .as_ref()
+            .map(|c| (c.branch.clone(), c.base_ref.clone()))
+            .unwrap_or_default();
+        let framing = crate::ask::gemini_work_framing(
+            &config.display_name(&item.repo_full_name),
+            &branch,
+            &base,
+            grant.commit,
+            approvals,
+        );
+        return Ok((perch_agent::Mode::Work(grant), framing, approvals));
+    }
     let (branch, base) = item
         .checkout
         .as_ref()
@@ -17878,20 +17907,22 @@ async fn execute_question(
     let handle = match perch_agent::Run::spawn(spec, tx) {
         Ok(handle) => handle,
         Err(error) => {
-            let message = format!(
-                "{error}. {}",
-                crate::ask::binary_hint(
-                    perch_agent::Backend::parse(&run.backend)
-                        .unwrap_or(perch_agent::Backend::ClaudeCode),
-                )
+            let message = crate::ask::spawn_failure(
+                &error,
+                perch_agent::Backend::parse(&run.backend)
+                    .unwrap_or(perch_agent::Backend::ClaudeCode),
             );
+            let reason = match error {
+                perch_agent::Error::Refused(_) => TerminalReason::Other,
+                _ => TerminalReason::SpawnFailed,
+            };
             let persisted = append_stored_event(
                 ctx,
                 &run.id,
                 "terminal",
                 StoredRunEvent::Terminated {
                     status: RunStatus::Failed,
-                    reason: TerminalReason::SpawnFailed,
+                    reason,
                     message: message.clone(),
                 },
             );
@@ -17901,12 +17932,8 @@ async fn execute_question(
                 }
                 Err(persist_error) => {
                     tracing::warn!(run = %run.id, %persist_error, "could not persist spawn failure");
-                    ctx.runs.transition(
-                        &run.id,
-                        RunStatus::Failed,
-                        Some(TerminalReason::SpawnFailed),
-                        Some(message),
-                    );
+                    ctx.runs
+                        .transition(&run.id, RunStatus::Failed, Some(reason), Some(message));
                 }
             }
             ctx.runs.finish(lease);
@@ -18396,20 +18423,12 @@ async fn retry_run(ctx: &Ctx, old_run_id: &str) {
         return;
     };
     let model = old.requested_model.clone();
-    let configured = match backend {
-        perch_agent::Backend::ClaudeCode => ctx
-            .config()
-            .agent
-            .models
-            .iter()
-            .any(|candidate| candidate == &model),
-        perch_agent::Backend::Codex => ctx
-            .config()
-            .agent
-            .codex_models()
-            .iter()
-            .any(|candidate| candidate == &model),
-    };
+    let configured = ctx
+        .config()
+        .agent
+        .models_for(backend.name())
+        .iter()
+        .any(|candidate| candidate == &model);
     if !configured {
         ctx.notice(format!(
             "{model} is no longer available for {}",

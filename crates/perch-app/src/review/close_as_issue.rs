@@ -460,10 +460,7 @@ fn writer(
                 if state.issue_drafting.get() {
                     return "Writing…".to_string();
                 }
-                match choice().0 {
-                    perch_agent::Backend::ClaudeCode => "Write with Claude".to_string(),
-                    perch_agent::Backend::Codex => "Write with Codex".to_string(),
-                }
+                format!("Write with {}", choice().0.label())
             },
             "close-as-issue-write",
             false,

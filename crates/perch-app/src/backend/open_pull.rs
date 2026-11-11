@@ -664,9 +664,7 @@ pub(super) async fn write_title_and_body(
     let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
     let run = match perch_agent::Run::spawn(spec, events) {
         Ok(run) => std::sync::Arc::new(run),
-        Err(e) => {
-            return DescriptionOutcome::Failed(format!("{e}. {}", crate::ask::binary_hint(backend)))
-        }
+        Err(e) => return DescriptionOutcome::Failed(crate::ask::spawn_failure(&e, backend)),
     };
     let taken = WRITERS.lock().is_ok_and(|mut writers| {
         if writers.contains_key(item_id) {

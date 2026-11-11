@@ -261,10 +261,7 @@ async fn diagnose(
     context: &FeedbackContext,
     (backend, model, effort): (perch_agent::Backend, String, perch_agent::Effort),
 ) -> Result<Notes, String> {
-    let by = match backend {
-        perch_agent::Backend::ClaudeCode => "Claude",
-        perch_agent::Backend::Codex => "Codex",
-    };
+    let by = backend.label();
     let checkout = request
         .item_id
         .as_deref()
@@ -284,7 +281,7 @@ async fn diagnose(
             &crate::log_file::dir().display().to_string(),
         ),
     };
-    let spec = crate::ask::run_spec(
+    let mut spec = crate::ask::run_spec(
         &ctx.config().agent,
         backend,
         &model,
@@ -294,10 +291,12 @@ async fn diagnose(
         None,
         perch_agent::Mode::Ask,
     );
+    // agy's sandbox reads only what it is given; the logs are the point.
+    spec.read_dirs.push(crate::log_file::dir());
     let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
     let run = match perch_agent::Run::spawn(spec, events) {
         Ok(run) => Arc::new(run),
-        Err(e) => return Err(format!("{e}. {}", crate::ask::binary_hint(backend))),
+        Err(e) => return Err(crate::ask::spawn_failure(&e, backend)),
     };
     if let Ok(mut slot) = DIAGNOSIS.lock() {
         if let Some(old) = slot.replace(run.clone()) {
@@ -450,7 +449,13 @@ async fn collect(ctx: &Ctx, request: &PrepareRequest) -> FeedbackContext {
         agent.codex.binary_version.as_deref(),
         !agent.codex.models.is_empty(),
     );
-    let agents = vec![claude.0, codex.0];
+    let gemini = cli_line(
+        "Antigravity",
+        &agent.gemini.binary,
+        agent.gemini.binary_version.as_deref(),
+        !agent.gemini.models.is_empty(),
+    );
+    let agents = vec![claude.0, codex.0, gemini.0];
 
     let servers = language_servers(ctx, request).await;
 
@@ -524,6 +529,9 @@ async fn collect(ctx: &Ctx, request: &PrepareRequest) -> FeedbackContext {
     }
     if let Some(v) = codex.1 {
         summary.push_str(&format!(" · Codex {v}"));
+    }
+    if let Some(v) = gemini.1 {
+        summary.push_str(&format!(" · Antigravity {v}"));
     }
 
     FeedbackContext {

@@ -151,15 +151,12 @@ impl AgentRunSummary {
     }
 
     pub fn backend_label(&self) -> &str {
-        if self.backend.eq_ignore_ascii_case("codex") {
-            "Codex"
-        } else if self.backend.eq_ignore_ascii_case("claude-code")
-            || self.backend.eq_ignore_ascii_case("claude")
-        {
-            "Claude"
-        } else {
-            &self.backend
+        if self.backend.eq_ignore_ascii_case("claude") {
+            return "Claude";
         }
+        perch_agent::Backend::parse(&self.backend)
+            .map(perch_agent::Backend::label)
+            .unwrap_or(&self.backend)
     }
 
     pub fn retry_target(&self) -> AgentRetryTarget {

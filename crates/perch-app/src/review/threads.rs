@@ -48,7 +48,10 @@ pub fn model_label(model: &str) -> String {
     let mut version = Vec::new();
     let mut gpt = false;
     for part in model.split('-').filter(|part| !part.is_empty()) {
-        if part.eq_ignore_ascii_case("claude") || part.eq_ignore_ascii_case("codex") {
+        if part.eq_ignore_ascii_case("claude")
+            || part.eq_ignore_ascii_case("codex")
+            || part.eq_ignore_ascii_case("gemini")
+        {
             // The maker, which `model_name` puts first.
         } else if part.eq_ignore_ascii_case("gpt") {
             gpt = true;
@@ -85,8 +88,7 @@ pub fn model_label(model: &str) -> String {
 /// maker is the backend's, or the id's when the backend is not known.
 pub fn model_name(backend: &str, model: &str) -> String {
     let maker = match perch_agent::Backend::parse(backend) {
-        Some(perch_agent::Backend::ClaudeCode) => Some("Claude"),
-        Some(perch_agent::Backend::Codex) => Some("Codex"),
+        Some(backend) => Some(backend.label()),
         None if backend.eq_ignore_ascii_case("claude") => Some("Claude"),
         None => {
             let model = model.trim().to_ascii_lowercase();
@@ -94,6 +96,8 @@ pub fn model_name(backend: &str, model: &str) -> String {
                 Some("Claude")
             } else if model.starts_with("gpt") {
                 Some("Codex")
+            } else if model.starts_with("gemini") {
+                Some("Gemini")
             } else {
                 None
             }
@@ -211,6 +215,7 @@ fn default_choice(agent: &perch_github::AgentConfig) -> AgentChoice {
         .models
         .iter()
         .chain(agent.codex_models())
+        .chain(agent.gemini_models())
         .any(|m| *m == agent.model);
     let model = if offered {
         agent.model.clone()
@@ -1655,7 +1660,7 @@ pub fn destination_label(destination: &Destination) -> String {
 }
 
 /// The picker's sections: one per backend that has models, Claude Code
-/// first. Each entry names the backend the model runs on, which is
+/// first, then Codex, then Gemini. Each entry names the backend the model runs on, which is
 /// config's call, not the section's, so a model listed under both stays
 /// with Claude Code wherever it appears.
 pub(crate) fn model_groups(
@@ -1664,7 +1669,8 @@ pub(crate) fn model_groups(
     let entry = |m: &String| (crate::ask::backend_for(agent, m), m.clone());
     let claude: Vec<_> = agent.models.iter().map(entry).collect();
     let codex: Vec<_> = agent.codex_models().iter().map(entry).collect();
-    [claude, codex]
+    let gemini: Vec<_> = agent.gemini_models().iter().map(entry).collect();
+    [claude, codex, gemini]
         .into_iter()
         .filter(|g| !g.is_empty())
         .collect()
@@ -1870,9 +1876,11 @@ fn approvals_note(approvals: perch_github::Approvals, agent: Option<&AgentChoice
     let haiku = agent.is_some_and(|(backend, model, _)| {
         *backend == perch_agent::Backend::ClaudeCode && model.to_ascii_lowercase().contains("haiku")
     });
+    let gemini = agent.is_some_and(|(backend, _, _)| *backend == perch_agent::Backend::Gemini);
     match approvals {
         Approvals::Ask => "Every request to leave the sandbox comes to you",
         Approvals::Auto if haiku => "Haiku has no auto mode, so every request comes to you",
+        Approvals::Auto if gemini => "Gemini has no auto mode, so every request comes to you",
         Approvals::Auto => "The agent's reviewer decides; what it won't comes to you",
         Approvals::Never => "Perch allows every request without asking",
     }

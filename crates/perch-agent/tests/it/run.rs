@@ -51,6 +51,7 @@ fn spec(binary: PathBuf, cwd: PathBuf) -> RunSpec {
         system: None,
         resume: None,
         mode: perch_agent::Mode::Ask,
+        read_dirs: Vec::new(),
     }
 }
 

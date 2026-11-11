@@ -49,8 +49,10 @@ pub struct Config {
 ///
 /// The top-level keys mean Claude Code, as they did before there was a
 /// second backend, so an old file keeps working. Codex lives under
-/// `[agent.codex]`. A model name picks the backend: one listed only under
-/// Codex goes to Codex, anything else to Claude Code.
+/// `[agent.codex]` and Gemini, through the Antigravity CLI, under
+/// `[agent.gemini]`. A model name picks the backend: one listed only under
+/// Codex goes to Codex, one listed only under Gemini to Gemini, anything
+/// else to Claude Code.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct AgentConfig {
     /// The Claude Code executable. Found on `PATH` unless a path is given here.
@@ -74,6 +76,8 @@ pub struct AgentConfig {
     pub max_concurrent_runs: usize,
     #[serde(default)]
     pub codex: CodexConfig,
+    #[serde(default)]
+    pub gemini: GeminiConfig,
 }
 
 /// The second backend. Absent from an old file is the usual case: the
@@ -99,10 +103,33 @@ pub struct CodexConfig {
     pub efforts: BTreeMap<String, Vec<String>>,
 }
 
+/// The third backend: Gemini, through the Antigravity CLI. Like Codex, its
+/// models come from the CLI's own catalog (`agy models`) unless the file
+/// names them.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct GeminiConfig {
+    /// The `agy` executable. Found on `PATH` unless a path is given here.
+    #[serde(default = "default_gemini_binary")]
+    pub binary: String,
+    /// Filled by startup discovery and copied into durable run provenance.
+    #[serde(skip)]
+    pub binary_version: Option<String>,
+    /// The Gemini models the picker offers, after the others. Empty in
+    /// the file means ask agy; empty after that means Gemini is not
+    /// offered.
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// The effort names each model takes, from the catalog. Filled by
+    /// discovery, never by the file.
+    #[serde(skip)]
+    pub efforts: BTreeMap<String, Vec<String>>,
+}
+
 /// The backend names, spelled as `perch-agent` spells them. Strings rather
 /// than its enum so this crate does not have to depend on it.
 pub const CLAUDE_CODE: &str = "claude-code";
 pub const CODEX: &str = "codex";
+pub const GEMINI: &str = "gemini";
 
 /// What the picker starts on when Claude Code is missing and Codex offers
 /// it: GPT-6.1-Sol.
@@ -113,6 +140,9 @@ fn default_binary() -> String {
 }
 fn default_codex_binary() -> String {
     "codex".into()
+}
+fn default_gemini_binary() -> String {
+    "agy".into()
 }
 fn default_model() -> String {
     "opus".into()
@@ -143,6 +173,18 @@ impl Default for AgentConfig {
             models: default_models(),
             max_concurrent_runs: default_max_concurrent_runs(),
             codex: CodexConfig::default(),
+            gemini: GeminiConfig::default(),
+        }
+    }
+}
+
+impl Default for GeminiConfig {
+    fn default() -> Self {
+        Self {
+            binary: default_gemini_binary(),
+            binary_version: None,
+            models: Vec::new(),
+            efforts: BTreeMap::new(),
         }
     }
 }
@@ -159,34 +201,35 @@ impl Default for CodexConfig {
 }
 
 impl AgentConfig {
-    /// Which backend runs a model. Codex only when the name is listed
-    /// under Codex and not under Claude Code, so a name in both, or one
-    /// nobody lists, goes where it always went.
+    /// Which backend runs a model. Codex or Gemini only when the name is
+    /// listed under it alone, so a name in two lists, or one nobody
+    /// lists, goes where it always went.
     pub fn backend_of(&self, model: &str) -> &'static str {
         let claude = self.models.iter().any(|m| m == model);
         let codex = self.codex.models.iter().any(|m| m == model);
-        if codex && !claude {
-            CODEX
-        } else {
-            CLAUDE_CODE
+        let gemini = self.gemini.models.iter().any(|m| m == model);
+        match (claude, codex, gemini) {
+            (false, true, false) => CODEX,
+            (false, false, true) => GEMINI,
+            _ => CLAUDE_CODE,
         }
     }
 
     /// The executable for a backend name. An unknown name gets Claude
     /// Code's, the same fallback `backend_of` makes.
     pub fn binary_for(&self, backend: &str) -> &str {
-        if backend == CODEX {
-            &self.codex.binary
-        } else {
-            &self.binary
+        match backend {
+            CODEX => &self.codex.binary,
+            GEMINI => &self.gemini.binary,
+            _ => &self.binary,
         }
     }
 
     pub fn binary_version_for(&self, backend: &str) -> Option<&str> {
-        if backend == CODEX {
-            self.codex.binary_version.as_deref()
-        } else {
-            self.binary_version.as_deref()
+        match backend {
+            CODEX => self.codex.binary_version.as_deref(),
+            GEMINI => self.gemini.binary_version.as_deref(),
+            _ => self.binary_version.as_deref(),
         }
     }
 
@@ -195,13 +238,31 @@ impl AgentConfig {
         &self.codex.models
     }
 
+    /// What the picker lists after the Codex models.
+    pub fn gemini_models(&self) -> &[String] {
+        &self.gemini.models
+    }
+
+    /// The models a backend name runs, in the picker's order.
+    pub fn models_for(&self, backend: &str) -> &[String] {
+        match backend {
+            CODEX => &self.codex.models,
+            GEMINI => &self.gemini.models,
+            _ => &self.models,
+        }
+    }
+
     /// Whether a model takes an effort level. Only Codex's catalog says,
     /// and only for the models it listed; any other model is taken to
     /// take them all. Codex runs a level a model lacks at the nearest one
     /// it has, so this is what lets the picker say so rather than let it
     /// happen.
     pub fn effort_supported(&self, model: &str, effort: &str) -> bool {
-        match self.codex.efforts.get(model) {
+        let listed = match self.backend_of(model) {
+            GEMINI => self.gemini.efforts.get(model),
+            _ => self.codex.efforts.get(model),
+        };
+        match listed {
             Some(levels) => levels.iter().any(|l| l == effort),
             None => true,
         }
@@ -431,7 +492,8 @@ pub struct RepoWork {
     #[serde(default)]
     pub network: Vec<String>,
     /// Load the repository's own agent configuration for Work runs: its
-    /// `.claude/` settings, `.mcp.json` and `.codex/`. What is there runs
+    /// `.claude/` settings, `.mcp.json`, `.codex/`, and agy's `.agents/`,
+    /// without which Gemini does not run there at all. What is there runs
     /// as the reader, outside any sandbox.
     #[serde(default)]
     pub trust: bool,
@@ -1341,6 +1403,31 @@ network = ["index.crates.io"]
         let c = Config::parse("[display]\ncode_font_size = 4").unwrap();
         assert_eq!(c.display.code_font_size, 8.0);
         assert_eq!(c.warnings.len(), 1, "{:?}", c.warnings);
+    }
+
+    #[test]
+    fn a_gemini_table_parses_and_picks_the_backend_by_model() {
+        let c: Config = toml::from_str(
+            r#"
+            [agent.gemini]
+            binary = "/opt/agy"
+            models = ["gemini-4-carbon"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.agent.gemini.binary, "/opt/agy");
+        assert_eq!(c.agent.backend_of("gemini-4-carbon"), GEMINI);
+        assert_eq!(c.agent.binary_for(GEMINI), "/opt/agy");
+        assert_eq!(c.agent.models_for(GEMINI), ["gemini-4-carbon".to_string()]);
+        assert_eq!(c.agent.backend_of("opus"), CLAUDE_CODE);
+        let mut agent = c.agent.clone();
+        agent
+            .gemini
+            .efforts
+            .insert("gemini-4-carbon".into(), vec!["low".into(), "high".into()]);
+        assert!(agent.effort_supported("gemini-4-carbon", "high"));
+        assert!(!agent.effort_supported("gemini-4-carbon", "max"));
+        assert_eq!(AgentConfig::default().gemini.binary, "agy");
     }
 
     #[test]

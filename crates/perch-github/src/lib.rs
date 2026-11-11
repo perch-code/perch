@@ -44,8 +44,8 @@ pub use comments::{
 pub use commits::Unreadable;
 pub use config::{
     append_repo, is_local, remove_repo, AgentConfig, Approvals, ApprovalsTable, CodexConfig,
-    Config, DeclaredRepo, RepoConfig, RepoLsp, RepoWork, WorkDefaults, CLAUDE_CODE, CODEX,
-    CODEX_DEFAULT_MODEL, LOCAL_OWNER,
+    Config, DeclaredRepo, GeminiConfig, RepoConfig, RepoLsp, RepoWork, WorkDefaults, CLAUDE_CODE,
+    CODEX, CODEX_DEFAULT_MODEL, GEMINI, LOCAL_OWNER,
 };
 pub use discussion::{
     CommentPlace, Discussion, IssueComment, PullReviewEvent, Review, ReviewComment,

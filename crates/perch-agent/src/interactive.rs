@@ -7,7 +7,9 @@
 //! `can_use_tool` control requests for anything its permissions would
 //! otherwise prompt for. Codex is driven through `codex app-server`, a
 //! JSON-RPC peer that starts a thread and a turn on request and sends
-//! its approval requests to the client.
+//! its approval requests to the client. Gemini's Work goes through
+//! `agy acp`, another such peer, and its questions through print mode on
+//! stdin; see `gemini`.
 //!
 //! A conversation is told each line the CLI prints. It says what to write
 //! back, which events the line makes, and when stdin should close, which
@@ -86,6 +88,10 @@ pub(crate) struct Reply {
 pub(crate) enum Conversation {
     Claude(ClaudeHost),
     Codex(Box<CodexServer>),
+    /// Gemini in print mode, for a question.
+    Gemini(crate::gemini::GeminiHost),
+    /// Gemini as `agy acp`, for Work.
+    Acp(Box<crate::gemini::AcpClient>),
 }
 
 impl Conversation {
@@ -94,6 +100,8 @@ impl Conversation {
         match self {
             Conversation::Claude(c) => c.opening(),
             Conversation::Codex(c) => c.opening(),
+            Conversation::Gemini(c) => c.opening(),
+            Conversation::Acp(c) => c.opening(),
         }
     }
 
@@ -101,6 +109,8 @@ impl Conversation {
         match self {
             Conversation::Claude(c) => c.after_line(value),
             Conversation::Codex(c) => c.after_line(value),
+            Conversation::Gemini(c) => c.after_line(value),
+            Conversation::Acp(c) => c.after_line(value),
         }
     }
 
@@ -110,6 +120,9 @@ impl Conversation {
         match self {
             Conversation::Claude(c) => c.answer(id, decision),
             Conversation::Codex(c) => c.answer(id, decision),
+            // A question in print mode never asks.
+            Conversation::Gemini(_) => None,
+            Conversation::Acp(c) => c.answer(id, decision),
         }
     }
 
@@ -119,13 +132,15 @@ impl Conversation {
         match self {
             Conversation::Claude(c) => c.steer(text),
             Conversation::Codex(c) => c.steer(text),
+            Conversation::Gemini(c) => c.steer(text),
+            Conversation::Acp(c) => c.steer(text),
         }
     }
 
     /// Whether this conversation's lines are parsed by it alone, rather
     /// than by the backend's print-mode parser first.
     pub fn parses_everything(&self) -> bool {
-        matches!(self, Conversation::Codex(_))
+        matches!(self, Conversation::Codex(_) | Conversation::Acp(_))
     }
 }
 

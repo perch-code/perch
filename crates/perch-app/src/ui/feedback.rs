@@ -258,41 +258,29 @@ pub fn apply(app: AppState, review: ReviewState, event: Event) {
 /// The model menu's pick, or the CLI there is when the pick's isn't
 /// installed. None with neither.
 fn diagnosis_choice(app: AppState, review: ReviewState) -> Option<AgentChoice> {
-    let (claude, codex) = app
-        .agent
-        .with(|agent| (!agent.models.is_empty(), !agent.codex.models.is_empty()));
     let picked = review
         .agent_last
         .get()
         .unwrap_or_else(|| crate::review::threads::defaults(app));
-    let has = |backend| match backend {
-        perch_agent::Backend::ClaudeCode => claude,
-        perch_agent::Backend::Codex => codex,
+    let has = |backend: perch_agent::Backend| {
+        app.agent
+            .with(|agent| !agent.models_for(backend.name()).is_empty())
     };
     if has(picked.0) {
         return Some(picked);
     }
-    let other = match picked.0 {
-        perch_agent::Backend::ClaudeCode => perch_agent::Backend::Codex,
-        perch_agent::Backend::Codex => perch_agent::Backend::ClaudeCode,
-    };
-    if !has(other) {
-        return None;
-    }
+    // The first other CLI there is, in the picker's order.
+    let other = perch_agent::Backend::ALL
+        .into_iter()
+        .find(|backend| *backend != picked.0 && has(*backend))?;
     app.agent.with(|agent| {
-        let model = match other {
-            perch_agent::Backend::ClaudeCode => agent.models.first().cloned(),
-            perch_agent::Backend::Codex => agent.codex.models.first().cloned(),
-        }?;
+        let model = agent.models_for(other.name()).first().cloned()?;
         Some((other, model, picked.2))
     })
 }
 
 fn agent_name(choice: &Option<AgentChoice>) -> &'static str {
-    match choice.as_ref().map(|c| c.0) {
-        Some(perch_agent::Backend::Codex) => "Codex",
-        _ => "Claude",
-    }
+    choice.as_ref().map_or("Claude", |c| c.0.label())
 }
 
 /// Preview…: hand the backend the draft and what the window knows.
@@ -723,7 +711,7 @@ fn form(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoVi
             ),
             Label::derived(move || {
                 if choice().is_none() {
-                    "Needs Claude Code or Codex installed.".to_string()
+                    "Needs Claude Code, Codex, or agy installed.".to_string()
                 } else {
                     "It reads Perch's logs and runs read-only commands on this Mac, offline. \
                      Its notes go in the preview."

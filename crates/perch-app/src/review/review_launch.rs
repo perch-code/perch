@@ -189,6 +189,21 @@ pub(crate) fn agents_section(
                         rows_backend.clone(),
                         perch_agent::Backend::Codex,
                     ),
+                    // Gemini is the newcomer: its row shows once agy is
+                    // installed rather than greyed out for everyone.
+                    if models_for(&app.agent.get_untracked(), perch_agent::Backend::Gemini)
+                        .is_empty()
+                    {
+                        Empty::new().into_any()
+                    } else {
+                        reviewer_row(
+                            app,
+                            state,
+                            rows_backend.clone(),
+                            perch_agent::Backend::Gemini,
+                        )
+                        .into_any()
+                    },
                 ))
                 .style(|s| s.flex_col().width_full().gap(4.0))
             },
@@ -1050,10 +1065,7 @@ fn capability(
 }
 
 fn models_for(agent: &perch_github::AgentConfig, backend: perch_agent::Backend) -> Vec<String> {
-    match backend {
-        perch_agent::Backend::ClaudeCode => agent.models.clone(),
-        perch_agent::Backend::Codex => agent.codex_models().to_vec(),
-    }
+    agent.models_for(backend.name()).to_vec()
 }
 
 fn supported_efforts(
@@ -1268,10 +1280,7 @@ pub(crate) fn newer_changes(state: ReviewState, summary: &ReviewGroupSummary) ->
 }
 
 fn backend_label(backend: perch_agent::Backend) -> &'static str {
-    match backend {
-        perch_agent::Backend::ClaudeCode => "Claude",
-        perch_agent::Backend::Codex => "Codex",
-    }
+    backend.label()
 }
 
 pub(crate) fn backend_label_from_name(backend: &str) -> &'static str {

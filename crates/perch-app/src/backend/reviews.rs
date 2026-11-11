@@ -1689,10 +1689,7 @@ fn validate_launch(ctx: &Ctx, request: &ReviewLaunchRequest) -> Result<(), Strin
             ));
         }
         let config = ctx.config();
-        let models = match reviewer.backend {
-            AgentBackend::ClaudeCode => config.agent.models.as_slice(),
-            AgentBackend::Codex => config.agent.codex_models(),
-        };
+        let models = config.agent.models_for(reviewer.backend.name());
         if reviewer.model.trim().is_empty() || !models.iter().any(|model| model == &reviewer.model)
         {
             return Err(format!(

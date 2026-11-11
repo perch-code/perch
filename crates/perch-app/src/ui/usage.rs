@@ -207,6 +207,8 @@ pub fn close(review: ReviewState, restore_focus: bool) {
 #[derive(Clone, PartialEq)]
 struct Shown {
     accounts: Vec<(&'static str, Account)>,
+    /// Gemini runs, but agy reports no limits to show.
+    gemini: bool,
     now: Timestamp,
 }
 
@@ -225,13 +227,19 @@ fn popover(app: AppState) -> impl IntoView {
                     .collect()
             })
         },
+        gemini: app.agent.with(|agent| !agent.gemini.models.is_empty()),
         now: now.get(),
     });
     dyn_container(
         move || shown.get(),
         |shown| {
             if shown.accounts.is_empty() {
-                return Label::derived(|| "No agent CLI found".to_string())
+                let text = if shown.gemini {
+                    "agy reports no usage limits"
+                } else {
+                    "No agent CLI found"
+                };
+                return Label::derived(move || text.to_string())
                     .style(|s| {
                         s.font_size(theme::TEXT_META)
                             .color(theme::fg_subtle())
@@ -475,6 +483,7 @@ mod tests {
                 }),
                 error: Some("Codex took too long to report usage".into()),
             },
+            gemini: Account::default(),
         });
         settle(&mut harness);
         (harness, app, review)

@@ -1,5 +1,5 @@
 //! What is installed, found without being told: where each binary is, and
-//! which models Codex will run. Claude Code has stable aliases, so its list
+//! which models Codex and agy will run. Claude Code has stable aliases, so its list
 //! is fixed; Codex has only slugs that change with each release, so its
 //! own catalog is the list.
 
@@ -180,6 +180,87 @@ pub async fn codex_catalog(binary: &Path) -> Result<Vec<CodexModel>, String> {
     Ok(models)
 }
 
+/// The effort suffixes `agy models` puts on a model's id, one id per
+/// level: `gemini-4-carbon-high`.
+const GEMINI_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// The Gemini models `agy models` lists, one line each, `id<TAB>name`,
+/// folded into one entry per model with the levels it lists. agy takes
+/// the bare model with `--effort`. Only Gemini's own: agy also offers
+/// other providers' models, which Perch runs through their own CLIs.
+pub fn parse_gemini_catalog(text: &str) -> Vec<CodexModel> {
+    let mut models: Vec<CodexModel> = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.splitn(2, '\t');
+        let id = parts.next().unwrap_or("").trim();
+        if !id.starts_with("gemini-") || id.contains(char::is_whitespace) {
+            continue;
+        }
+        let name = parts.next().unwrap_or(id).trim();
+        let (slug, effort) = GEMINI_EFFORTS
+            .iter()
+            .find_map(|effort| {
+                id.strip_suffix(effort)
+                    .and_then(|rest| rest.strip_suffix('-'))
+                    .map(|rest| (rest, Some(*effort)))
+            })
+            .unwrap_or((id, None));
+        // "Gemini 4 Carbon (High)" names the model at one level.
+        let display_name = match name.rsplit_once(" (") {
+            Some((base, _)) if effort.is_some() => base.to_string(),
+            _ => name.to_string(),
+        };
+        let at = match models.iter().position(|m| m.slug == slug) {
+            Some(at) => at,
+            None => {
+                models.push(CodexModel {
+                    slug: slug.to_string(),
+                    display_name,
+                    efforts: Vec::new(),
+                });
+                models.len() - 1
+            }
+        };
+        if let Some(effort) = effort {
+            if !models[at].efforts.iter().any(|e| e == effort) {
+                models[at].efforts.push(effort.to_string());
+            }
+        }
+    }
+    for model in &mut models {
+        model
+            .efforts
+            .sort_by_key(|e| GEMINI_EFFORTS.iter().position(|g| g == e));
+    }
+    models
+}
+
+/// Ask agy for its models: `agy models`, which asks the account's
+/// service, so it is bounded like Codex's.
+pub async fn gemini_catalog(binary: &Path) -> Result<Vec<CodexModel>, String> {
+    let run = tokio::process::Command::new(binary)
+        .arg("models")
+        .stdin(std::process::Stdio::null())
+        .output();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(10), run)
+        .await
+        .map_err(|_| "agy models took more than ten seconds".to_string())?
+        .map_err(|e| format!("could not run agy models: {e}"))?;
+    if !output.status.success() {
+        let tail = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .last()
+            .unwrap_or("")
+            .to_string();
+        return Err(format!("agy models exited with {}: {tail}", output.status));
+    }
+    let models = parse_gemini_catalog(&String::from_utf8_lossy(&output.stdout));
+    if models.is_empty() {
+        return Err("agy models listed no Gemini models".into());
+    }
+    Ok(models)
+}
+
 /// The model Codex itself would run, from its own `config.toml`. The
 /// fallback when the catalog cannot be read: one entry the CLI is known
 /// to accept.
@@ -228,6 +309,26 @@ mod tests {
         assert_eq!(models[0].display_name, "GPT-6-Astra");
         assert!(models[0].efforts.iter().any(|e| e == "ultra"));
         assert!(!models[1].efforts.iter().any(|e| e == "ultra"));
+    }
+
+    #[test]
+    fn agy_s_models_fold_into_one_entry_per_model_with_its_levels() {
+        let listed = "Fetching available models...\n\
+gemini-4-carbon-medium\tGemini 4 Carbon (Medium)\n\
+gemini-4-carbon-high\tGemini 4 Carbon (High)\n\
+gemini-4-carbon-low\tGemini 4 Carbon (Low)\n\
+gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n\
+claude-opus-5-5-low\tClaude Opus 5.5 (Low)\n\
+gpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n";
+        let models = parse_gemini_catalog(listed);
+        assert_eq!(
+            models.iter().map(|m| m.slug.as_str()).collect::<Vec<_>>(),
+            ["gemini-4-carbon", "gemini-3.8-flash"]
+        );
+        assert_eq!(models[0].display_name, "Gemini 4 Carbon");
+        assert_eq!(models[0].efforts, ["low", "medium", "high"]);
+        assert_eq!(models[1].efforts, ["high"]);
+        assert!(parse_gemini_catalog("").is_empty());
     }
 
     #[test]

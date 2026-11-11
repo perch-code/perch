@@ -562,10 +562,7 @@ fn writer(
                 if state.describing.get() {
                     return "Writing…".to_string();
                 }
-                match choice().0 {
-                    perch_agent::Backend::ClaudeCode => "Write with Claude".to_string(),
-                    perch_agent::Backend::Codex => "Write with Codex".to_string(),
-                }
+                format!("Write with {}", choice().0.label())
             },
             "open-pull-request-write",
             false,

@@ -1477,10 +1477,7 @@ fn resolving_conflicts(app: AppState, state: ReviewState) -> bool {
 }
 
 fn agent_name(agent: perch_agent::Backend) -> &'static str {
-    match agent {
-        perch_agent::Backend::ClaudeCode => "Claude",
-        perch_agent::Backend::Codex => "Codex",
-    }
+    agent.label()
 }
 
 /// A button of the merge surface, named in the tree for its label.

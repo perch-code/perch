@@ -751,9 +751,8 @@ async fn run_once(
     let run = match perch_agent::Run::spawn(spec, events) {
         Ok(run) => Arc::new(run),
         Err(e) => {
-            return Err(WalkthroughOutcome::Failed(format!(
-                "{e}. {}",
-                crate::ask::binary_hint(backend)
+            return Err(WalkthroughOutcome::Failed(crate::ask::spawn_failure(
+                &e, backend,
             )))
         }
     };
