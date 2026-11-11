@@ -1778,6 +1778,7 @@ fn reviewers_view(
                             reactions: Default::default(),
                             id: 0,
                             user: String::new(),
+                            user_avatar_url: String::new(),
                             body: String::new(),
                             state,
                             submitted_at: None,

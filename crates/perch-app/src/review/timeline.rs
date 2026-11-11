@@ -545,6 +545,7 @@ pub(crate) mod tests {
             reactions: Default::default(),
             id,
             user: "chris".into(),
+            user_avatar_url: String::new(),
             body: body.into(),
             state: state.into(),
             submitted_at: when.map(at),

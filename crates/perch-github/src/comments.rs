@@ -1420,6 +1420,7 @@ mod tests {
             id: 10,
             node_id: String::new(),
             user: "me".into(),
+            user_avatar_url: String::new(),
             body: String::new(),
             state: "PENDING".into(),
             submitted_at: None,

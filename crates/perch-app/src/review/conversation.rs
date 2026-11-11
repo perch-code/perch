@@ -584,6 +584,7 @@ mod tests {
                 reactions: Default::default(),
                 id: 9,
                 user: "chris".into(),
+                user_avatar_url: String::new(),
                 body: "Looks right.".into(),
                 state: "APPROVED".into(),
                 submitted_at: Some(at("2026-09-16T11:40:00Z")),

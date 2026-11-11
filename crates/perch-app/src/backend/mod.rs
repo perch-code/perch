@@ -23336,6 +23336,7 @@ mod tests {
             reactions: Default::default(),
             id: 9,
             user: "reviewer".into(),
+            user_avatar_url: String::new(),
             body: "first".into(),
             state: "COMMENTED".into(),
             submitted_at: Some("2026-09-20T18:00:00Z".parse().unwrap()),

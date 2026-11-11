@@ -1180,9 +1180,9 @@ pub(crate) fn avatar_url_of(state: ReviewState, login: String) -> Box<dyn Fn() -
 }
 
 /// The avatar GitHub sent for a login, from whichever payload carries one:
-/// the author, a conversation comment, a review comment, a requested
-/// reviewer. A review comes with none of its own, and would otherwise
-/// show an initial beside the same person's picture.
+/// the author, a requested reviewer, a conversation comment, a review, a
+/// review comment. A reviewer who only approved is in none of the others:
+/// GitHub drops them from the requested reviewers once they review.
 pub fn avatar_url_for(state: ReviewState, login: &str) -> String {
     state
         .pull_request
@@ -1210,6 +1210,12 @@ pub fn avatar_url_for(state: ReviewState, login: &str) -> String {
                         .iter()
                         .find(|c| c.user == login)
                         .map(|c| c.user_avatar_url.clone())
+                        .or_else(|| {
+                            d.reviews
+                                .iter()
+                                .find(|r| r.user == login && !r.user_avatar_url.is_empty())
+                                .map(|r| r.user_avatar_url.clone())
+                        })
                         .or_else(|| {
                             d.review_comments
                                 .iter()
@@ -3073,6 +3079,32 @@ mod tests {
     /// A finding one review reported is Reported; Still present needs a
     /// later review to have seen it again. Fixed and dismissed say so
     /// whatever the reviews were.
+    /// A reviewer who only approved, with no comment anywhere, has their
+    /// face from the review itself.
+    #[test]
+    fn a_reviewer_who_only_approved_has_their_face() {
+        let state = ReviewState::new();
+        state
+            .discussion
+            .set(Some(std::sync::Arc::new(perch_github::Discussion {
+                reviews: vec![perch_github::Review {
+                    id: 1,
+                    node_id: String::new(),
+                    user: "nomiero".into(),
+                    user_avatar_url: "https://avatars/nomiero".into(),
+                    body: "Thanks, LGTM".into(),
+                    state: "APPROVED".into(),
+                    submitted_at: None,
+                    html_url: String::new(),
+                    reactions: Default::default(),
+                    viewer_can_update: false,
+                }],
+                ..Default::default()
+            })));
+        assert_eq!(avatar_url_for(state, "nomiero"), "https://avatars/nomiero");
+        assert_eq!(avatar_url_for(state, "someone"), "");
+    }
+
     #[test]
     fn a_finding_is_still_present_only_once_a_later_review_saw_it() {
         use perch_github::{FindingDisposition, FindingVerification};

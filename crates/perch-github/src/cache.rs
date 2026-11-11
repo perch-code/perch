@@ -7467,6 +7467,7 @@ mod tests {
                 id: 9,
                 node_id: "PRR_9".into(),
                 user: "rohan".into(),
+                user_avatar_url: String::new(),
                 body: "nice".into(),
                 state: "APPROVED".into(),
                 submitted_at: Some(stamp_of("2026-09-16T11:40:00Z")),

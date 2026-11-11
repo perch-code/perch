@@ -836,6 +836,7 @@ mod tests {
             id,
             node_id: String::new(),
             user: user.into(),
+            user_avatar_url: String::new(),
             body: String::new(),
             state: state.into(),
             submitted_at: (state != "PENDING").then(|| at("2026-09-16T12:00:00Z")),

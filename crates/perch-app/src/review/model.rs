@@ -6528,6 +6528,7 @@ mod tests {
                     id: 9,
                     node_id: "PRR_9".into(),
                     user: "rohan".into(),
+                    user_avatar_url: String::new(),
                     body: "lgtm".into(),
                     state: "APPROVED".into(),
                     submitted_at: None,

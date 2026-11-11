@@ -1519,6 +1519,7 @@ mod tests {
             reactions: Default::default(),
             id: 55,
             user: "reviewer".into(),
+            user_avatar_url: String::new(),
             body: "Looks good".into(),
             state: "COMMENTED".into(),
             submitted_at: None,

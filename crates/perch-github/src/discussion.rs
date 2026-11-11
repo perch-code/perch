@@ -301,6 +301,10 @@ pub struct Review {
     #[serde(default)]
     pub node_id: String,
     pub user: String,
+    /// The reviewer's picture, which a reviewer who only approved has
+    /// nowhere else. Empty on a row an older build kept.
+    #[serde(default)]
+    pub user_avatar_url: String,
     pub body: String,
     /// `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`, `DISMISSED`, `PENDING`.
     pub state: String,
@@ -476,6 +480,11 @@ impl From<ReviewPayload> for Review {
             viewer_can_update: false,
             id: p.id,
             node_id: p.node_id,
+            user_avatar_url: p
+                .user
+                .as_ref()
+                .map(|u| u.avatar_url.clone())
+                .unwrap_or_default(),
             user: login(p.user),
             body: p.body,
             state: p.state,
@@ -859,6 +868,25 @@ mod tests {
     }
 
     #[test]
+    fn a_review_keeps_its_authors_face() {
+        let p: ReviewPayload = serde_json::from_str(
+            r#"{"id":9,"state":"APPROVED","user":{"login":"r","avatar_url":"https://avatars/r"}}"#,
+        )
+        .unwrap();
+        assert_eq!(Review::from(p).user_avatar_url, "https://avatars/r");
+    }
+
+    /// A review an older build cached, with no face, still loads.
+    #[test]
+    fn a_cached_review_without_a_face_still_reads() {
+        let r: Review = serde_json::from_str(
+            r#"{"id":9,"user":"r","body":"","state":"APPROVED","submitted_at":null,"html_url":""}"#,
+        )
+        .unwrap();
+        assert_eq!(r.user_avatar_url, "");
+    }
+
+    #[test]
     fn an_issue_comment_reads_its_author_out_of_the_nested_user() {
         let p: IssueCommentPayload = serde_json::from_str(
             r#"{"id":1,"user":{"login":"chris","avatar_url":"https://avatars/1"},"body":"q",
@@ -1081,6 +1109,7 @@ mod tests {
                 id: 9,
                 node_id: "PRR_9".into(),
                 user: "chris".into(),
+                user_avatar_url: String::new(),
                 body: "nice".into(),
                 state: "APPROVED".into(),
                 submitted_at: Some(at("2026-09-16T11:40:00Z")),
@@ -1172,6 +1201,7 @@ mod tests {
                 id: 9,
                 node_id: "PRR_9".into(),
                 user: "rohan".into(),
+                user_avatar_url: String::new(),
                 body: "lgtm".into(),
                 state: "APPROVED".into(),
                 submitted_at: None,
