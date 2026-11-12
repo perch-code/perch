@@ -637,7 +637,7 @@ mod tests {
     }
 
     /// Blocked, by conflicts or by the rules, Merge stays but is quiet,
-    /// and its box says why. The Status row's Conflicts opens the box at
+    /// and its box says why. The summary's conflicts glyph opens the box at
     /// its resolver.
     #[test]
     fn a_blocked_pull_request_has_a_quiet_merge_and_conflicts_open_the_box() {
@@ -648,7 +648,7 @@ mod tests {
         assert!(shown(&harness, "merge-button"));
         assert_eq!(background(&harness, "merge-split"), Some(theme::badge_bg()));
 
-        click(&mut harness, "readiness Conflicts");
+        click(&mut harness, "merge status");
         assert!(
             state.merge_open.get_untracked(),
             "Conflicts did not open the box"

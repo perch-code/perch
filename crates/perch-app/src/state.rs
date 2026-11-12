@@ -2499,7 +2499,7 @@ impl AppState {
                     // batched, so the other way round there is a moment
                     // with no overview and nothing being read, in which
                     // what is kept while reading (the bar's Merge, the
-                    // Status row's chips) lets go and its popover shuts.
+                    // summary's status glyphs) lets go and its popover shuts.
                     review.pull_request_overview_loading.set(true);
                     review.pull_request_overview.set(None);
                     review.pull_request_overview_error.set(None);

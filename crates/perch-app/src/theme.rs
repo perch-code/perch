@@ -918,7 +918,7 @@ pub fn language_color(language: Option<perch_syntax::Language>) -> Color {
 // The item view: the summary's rows and pills, and Conversation's cards
 // ---------------------------------------------------------------------------
 
-/// The state pill in the summary's Status row: the state's colour as
+/// The state pill on the summary's line: the state's colour as
 /// text on a wash of the same colour.
 pub const STATE_PILL_HEIGHT: f64 = 20.0;
 pub const STATE_WASH: f32 = 0.12;

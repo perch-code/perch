@@ -537,6 +537,15 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
         ),
         SidebarIcon::PullRequest => pull_request_body(&c),
         SidebarIcon::Issue => issue_body(&c),
+        // GitHub's merge glyph: a line between two commits, and a third
+        // off to the side joining it.
+        SidebarIcon::Merge => format!(
+            r#"<circle cx="4.5" cy="3.6" r="1.7" fill="none" stroke="{c}" stroke-width="1.4"/>
+               <circle cx="4.5" cy="12.4" r="1.7" fill="none" stroke="{c}" stroke-width="1.4"/>
+               <circle cx="11.6" cy="8.6" r="1.7" fill="none" stroke="{c}" stroke-width="1.4"/>
+               <path d="M4.5 5.3 V10.7 M4.5 5.3 C4.5 7.6 6.6 8.6 9.9 8.6" fill="none"
+                     stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>"#
+        ),
         SidebarIcon::Repository => format!(
             r#"<path d="M4.6 1.9 H13 V11.6 H4.8 a1.6 1.6 0 0 0 0 3.2 H13 M3.2 13.2 V3.3
                        A1.4 1.4 0 0 1 4.6 1.9 M13 11.6 V14.8" fill="none" stroke="{c}"
@@ -691,13 +700,16 @@ pub enum SidebarIcon {
     File,
     /// A megaphone: send feedback, a bug or an idea.
     Feedback,
+    /// A branch joining a line: whether a pull request merges cleanly.
+    Merge,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 73] = [
+    pub const ALL: [SidebarIcon; 74] = [
+        SidebarIcon::Merge,
         SidebarIcon::Feedback,
         SidebarIcon::Waiting,
         SidebarIcon::File,
