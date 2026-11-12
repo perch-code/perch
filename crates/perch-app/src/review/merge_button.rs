@@ -552,10 +552,10 @@ mod tests {
         let bar = rect(&harness, "item bar");
         let split = rect(&harness, "merge-split");
         let review = rect(&harness, "review-control");
-        let start = rect(&harness, "start work button");
+        let agents = rect(&harness, "agents-button");
         assert!(within(split, bar), "Merge at {split:?} is not in the bar");
         assert!(split.width() > 0.0);
-        assert!(start.x1 <= split.x0 && split.x1 <= review.x0);
+        assert!(agents.x1 <= split.x0 && split.x1 <= review.x0);
         assert!(
             review.x0 - split.x1 <= 8.0,
             "Merge at {split:?} is not beside Review at {review:?}"

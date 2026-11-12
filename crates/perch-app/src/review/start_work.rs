@@ -17,12 +17,9 @@ use perch_github::{
 };
 
 use crate::backend::Backend;
-use crate::icons::SidebarIcon;
-use crate::review::cards::tip;
-use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::{action_button, icon_button};
+use crate::ui::widgets::action_button;
 
 /// Whether there is anything to cut from: an issue or a pull request on
 /// GitHub that isn't merged, or a worktree with a checkout.
@@ -37,52 +34,6 @@ pub fn can_start_work(item: &Item) -> bool {
         }
         None => item.checkout.is_some(),
     }
-}
-
-/// Whether Start work is a button in the bar: on an issue or a pull
-/// request nothing has been started from yet. Once something has, and on
-/// a worktree of the reader's own, it is a row in the bar's menu.
-pub fn in_bar(app: AppState, item: &Item) -> bool {
-    can_start_work(item)
-        && item.subject.is_some()
-        && !app.items.with(|all| {
-            all.iter()
-                .any(|i| i.from_item_id.as_deref() == Some(item.id.as_str()))
-        })
-}
-
-/// The branch glyph in the bar, while Start work is there: see `in_bar`.
-pub fn button(app: AppState, state: ReviewState) -> impl IntoView {
-    let id = Memo::new(move |_| {
-        state.item.with(|i| {
-            i.as_deref()
-                .filter(|item| in_bar(app, item))
-                .map(|item| item.id.clone())
-        })
-    });
-    dyn_container(
-        move || id.get(),
-        move |id| {
-            let Some(id) = id else {
-                return Empty::new().into_any();
-            };
-            tip(
-                icon_button(
-                    || SidebarIcon::Branch,
-                    theme::fg_muted,
-                    move || ask(app, Pending::Item(id.clone())),
-                ),
-                "Start work".to_string(),
-            )
-            .debug_name("start work button")
-            .into_any()
-        },
-    )
-    .style(move |s| {
-        s.flex_shrink(0.0_f32)
-            .pointer_events_auto()
-            .apply_if(id.with(Option::is_none), |s| s.hide())
-    })
 }
 
 /// Cut the item's branch and open it, from the bar or any row's menu.
