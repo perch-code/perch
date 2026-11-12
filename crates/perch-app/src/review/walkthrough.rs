@@ -6,8 +6,8 @@
 //! their places, each with its Read check. While the pane is out, each
 //! place has a note in Code under its lines, drawn as a thread of
 //! Perch's own is, which ends in the Follow up box and the way to the
-//! place before and after. Conversation has a row that leads to it. All
-//! of it is Perch's own, so all of it is grey.
+//! place before and after. All of it is Perch's own, so all of it is
+//! grey.
 //!
 //! A place's lines are found in Code's file by their text, so its note
 //! follows a file that moved on since, and has none where the lines are
@@ -25,7 +25,7 @@ use perch_github::{Anchor, Author, CommentThread, Side};
 
 use crate::backend::{Backend, CodeSide, Lines, Part, Step, Walkthrough, WalkthroughOutcome};
 use crate::icons::SidebarIcon;
-use crate::review::cards::{self, perch_surface};
+use crate::review::cards;
 use crate::review::doc::CardId;
 use crate::review::model::{AgentChoice, ItemTab, LoadedFile, ReviewState};
 use crate::review::threads::{self, Place, ThreadFace};
@@ -470,111 +470,6 @@ fn estimate_rows(step: &Step) -> usize {
         })
         .sum();
     body + 7
-}
-
-/// Open the walkthrough's pane on Code.
-fn open_pane(app: AppState, state: ReviewState, backend: &Backend) {
-    state.one_move(|| {
-        if state.tab.get_untracked() != ItemTab::Code {
-            state.show_tab(ItemTab::Code);
-        }
-    });
-    drawer::show_walkthrough(app, backend);
-}
-
-/// The row on Conversation that leads to the walkthrough in Code: what
-/// it is before there is one, that one is being written, or how long the
-/// one there is. Only for an item with files.
-pub fn conversation_row(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    {
-        let backend = backend.clone();
-        let item = Memo::new(move |_| item_id(state));
-        Effect::new(move |_| {
-            if item.get().is_some() {
-                load_kept(state, &backend);
-            }
-        });
-    }
-    let writing = Memo::new(move |_| {
-        item_id(state).is_some_and(|id| {
-            state
-                .walkthroughs_writing
-                .with(|writing| writing.contains_key(&id))
-        })
-    });
-    let shown = Memo::new(move |_| shown(state));
-    let words = move || {
-        if writing.get() {
-            return "Writing a walkthrough\u{2026}".to_string();
-        }
-        match shown.get() {
-            Some(w) => {
-                let chapters = w.chapters.iter().filter(|c| !c.follow_through).count();
-                format!(
-                    "{} \u{b7} {}",
-                    count_of(chapters, "chapter"),
-                    count_of(w.steps.len(), "place")
-                )
-            }
-            None => "Have an agent tell this change as a story".to_string(),
-        }
-    };
-    Stack::horizontal((
-        sidebar_glyph(SidebarIcon::Milestone, theme::fg_muted)
-            .style(|s| s.size(14.0, 14.0).flex_shrink(0.0_f32)),
-        Label::derived(|| "Walkthrough".to_string()).style(|s| {
-            s.font_size(theme::TEXT_BODY)
-                .font_weight(theme::weight_emphasis())
-                .color(theme::fg())
-                .flex_shrink(0.0_f32)
-                .selectable(false)
-        }),
-        Label::derived(words).style(|s| {
-            s.font_size(theme::TEXT_META)
-                .color(theme::fg_muted())
-                .text_ellipsis()
-                .min_width(0.0)
-                .flex_grow(1.0_f32)
-                .flex_basis(0.0)
-                .selectable(false)
-        }),
-        action_button(
-            move || {
-                if shown.with(Option::is_some) || writing.get() {
-                    "Open in Code".to_string()
-                } else {
-                    "Write in Code".to_string()
-                }
-            },
-            "walkthrough-open",
-            false,
-            || true,
-            move || open_pane(app, state, &backend),
-        )
-        .style(|s| s.flex_shrink(0.0_f32)),
-    ))
-    .debug_name("walkthrough-row")
-    .style(move |s| {
-        perch_surface(s)
-            .items_center()
-            .width_full()
-            .gap(8.0)
-            .padding_horiz(theme::CARD_PADDING)
-            .padding_vert(10.0)
-            .margin_bottom(theme::CARD_GAP)
-            .apply_if(
-                !state.has_files() || state.issue.with(Option::is_some),
-                |s| s.hide(),
-            )
-    })
-}
-
-/// "1 chapter", "3 places".
-fn count_of(n: usize, noun: &str) -> String {
-    match n {
-        1 => format!("1 {noun}"),
-        n => format!("{n} {noun}s"),
-    }
 }
 
 /// What the pane's body shows.
@@ -2742,37 +2637,6 @@ mod tests {
         state.walkthrough_at.set(Some(0));
         click_on(&mut harness, back);
         assert_eq!(state.walkthrough_at.get_untracked(), Some(0));
-    }
-
-    /// Conversation's row says what a walkthrough is until there is one,
-    /// then how long it is, and opens it in Code.
-    #[test]
-    fn conversation_leads_to_the_walkthrough_in_code() {
-        let root = TestRoot::new();
-        let state = state_on_branch();
-        with_files(state);
-        let app = AppState::new();
-        let (backend, _commands) = Backend::recording();
-        let view = conversation_row(app, state, Rc::new(backend));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 1000.0, 80.0);
-        apply(state, "item-7".into(), WalkthroughOutcome::Loaded(vec![]));
-        settle(&mut harness);
-        let root = harness.root_id();
-        assert!(find(root, "Have an agent tell this change as a story").is_some());
-        assert!(find(root, "Write in Code").is_some());
-
-        apply(
-            state,
-            "item-7".into(),
-            WalkthroughOutcome::Written(Box::new(walkthrough("w1", "head-7"))),
-        );
-        settle(&mut harness);
-        assert!(find(root, "1 chapter \u{b7} 3 places").is_some());
-        let open = named(root, "walkthrough-open").unwrap();
-        assert!(find(open, "Open in Code").is_some());
-        click_on(&mut harness, open);
-        assert_eq!(state.tab.get_untracked(), ItemTab::Code);
-        assert!(app.walkthrough_open.get_untracked());
     }
 
     /// A base line is the head line it became: moved down by what was put

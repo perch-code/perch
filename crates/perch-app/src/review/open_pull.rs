@@ -1,5 +1,6 @@
-//! Opening a pull request from a worktree of the reader's own, at the foot
-//! of Conversation, where a pull request has Checks and Merge.
+//! Opening a pull request from a worktree of the reader's own, on
+//! Conversation over the description, where a pull request has Checks
+//! and Merge.
 //!
 //! Folded, one line: how many commits the branch has past its base, how
 //! many files are uncommitted, and a button. Unfolded, the form: title,

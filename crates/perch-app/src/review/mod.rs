@@ -25,6 +25,7 @@ pub mod markdown_toolbar;
 pub mod math;
 pub mod mention;
 pub mod merge;
+pub mod merge_button;
 pub mod model;
 pub mod navigation;
 pub mod notified;

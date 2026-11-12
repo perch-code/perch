@@ -764,8 +764,9 @@ pub(crate) fn icon_action(
 /// Why a form's last try failed: a warning glyph and the message, in
 /// the closed colour. Nothing without a message.
 pub(crate) fn error_line(message: Option<String>, debug: &'static str) -> floem::AnyView {
+    // Hidden, not just empty, so a column's gap skips the line it isn't.
     let Some(message) = message else {
-        return Empty::new().into_any();
+        return Empty::new().style(|s| s.hide()).into_any();
     };
     Stack::horizontal((
         sidebar_glyph(SidebarIcon::Warning, theme::closed)

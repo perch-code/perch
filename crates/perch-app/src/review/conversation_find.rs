@@ -362,14 +362,15 @@ mod tests {
         }
     }
 
-    /// The description and a comment each name the epoch, three long
-    /// comments push the page past the window, and the last comment
-    /// names it again, twice, in a fenced block.
+    /// The description and the newest comment each name the epoch, three
+    /// long comments push the page past the window, and the oldest
+    /// comment, at the page's end, names it again, twice, in a fenced
+    /// block.
     fn discussion() -> Discussion {
         let filler = "A sentence that runs on well past the column's width. ".repeat(30);
         let mut comments = vec![comment(
             1,
-            "2026-09-15T10:00:00Z",
+            "2026-09-16T10:00:00Z",
             "The Epoch is read twice.",
         )];
         for i in 0..3 {
@@ -377,7 +378,7 @@ mod tests {
         }
         comments.push(comment(
             20,
-            "2026-09-16T10:00:00Z",
+            "2026-09-15T10:00:00Z",
             "Bump it:\n\n```\nepoch += 1;\nsave(epoch);\n```",
         ));
         Discussion {

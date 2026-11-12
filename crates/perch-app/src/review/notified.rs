@@ -160,7 +160,7 @@ fn start_wait(review: ReviewState) {
 
 /// Conversation up, the card open if it is a folded thread, and asked to
 /// come into view once it is laid out.
-fn go_to(review: ReviewState, card: CardId) {
+pub(crate) fn go_to(review: ReviewState, card: CardId) {
     if let CardId::Thread(id) = &card {
         if review.is_folded(id) {
             review.toggle_fold(id);

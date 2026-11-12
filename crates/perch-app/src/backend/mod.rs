@@ -7788,8 +7788,9 @@ fn send_agent_runs_from_cache(
     let _ = events.send(Event::AgentRuns { runs });
 }
 
-/// One item's runs for its Agents section: the active ones, on the first
-/// page only, since they are not paged, then a page of its history.
+/// One item's runs, for the Agents dropdown's group for the open item and
+/// the Review popover's history: the active ones, on the first page only,
+/// since they are not paged, then a page of its history.
 fn send_item_runs(
     cache: &SharedCache,
     events: &EventSender<Event>,

@@ -1,8 +1,8 @@
 //! Closing a pull request as an issue, for a pull request that found a
 //! real bug but isn't worth merging.
 //!
-//! Close as issue… beside Close pull request unfolds a form at the foot
-//! of Conversation: the issue's title and body, and the comment the pull
+//! Close as issue… beside Close pull request unfolds a form on
+//! Conversation, over the description: the issue's title and body, and the comment the pull
 //! request gets as it closes. An agent can write the issue from the pull
 //! request into the form. What is typed is kept per item in `AppState`
 //! until Perch quits or the issue opens. Nothing goes to GitHub until

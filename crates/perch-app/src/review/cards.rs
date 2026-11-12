@@ -174,28 +174,6 @@ pub fn perch_surface(s: floem::style::Style) -> floem::style::Style {
         .border_radius(theme::CARD_RADIUS)
 }
 
-/// The header of a section after the timeline, Checks, Agents or
-/// Reviews: one height and the cards' room at its sides on each, its
-/// title first and a fold's chevron, if it has one, last.
-pub fn section_header_style(s: floem::style::Style) -> floem::style::Style {
-    s.items_center()
-        .width_full()
-        .height(theme::SECTION_HEADER_HEIGHT)
-        .padding_horiz(theme::CARD_PADDING)
-        .gap(8.0)
-}
-
-/// A section's title, set as a byline's name is but a step larger.
-pub fn section_title(text: &'static str) -> Label {
-    Label::derived(move || text.to_string()).style(|s| {
-        s.font_size(theme::TEXT_BODY)
-            .font_weight(theme::weight_emphasis())
-            .color(theme::fg())
-            .flex_shrink(0.0_f32)
-            .selectable(false)
-    })
-}
-
 /// One GitHub entry on Conversation: its byline, then its text, if it
 /// has any, in a white box.
 pub fn card(header: impl IntoView + 'static, body: Option<floem::AnyView>) -> impl IntoView {
@@ -1257,14 +1235,14 @@ fn ask_about(
     state.open_composer_with(None, anchor, quote, Destination::agent(agent), None);
 }
 
-/// Quote reply at the head of a card's actions: the composer at the foot
-/// of Conversation, bound for GitHub, with the text quoted as GitHub's own
-/// Quote reply quotes it: what is selected in `scope`, the card's text,
-/// or else all of it. GitHub keeps no thread under a comment, a review
-/// or the description, so a reply is a new comment at the end, and the
-/// quote says what it answers. A draft already bound for GitHub there
-/// keeps its text, the quote under it. Absent where there is no pull
-/// request or issue to post to, as Reply is.
+/// Quote reply at the head of a card's actions: Conversation's composer,
+/// over the timeline, bound for GitHub, with the text quoted as GitHub's
+/// own Quote reply quotes it: what is selected in `scope`, the card's
+/// text, or else all of it. GitHub keeps no thread under a comment, a
+/// review or the description, so a reply is a new comment, the newest,
+/// and the quote says what it answers. A draft already bound for GitHub
+/// there keeps its text, the quote under it. Absent where there is no
+/// pull request or issue to post to, as Reply is.
 fn quote_reply_button(
     state: ReviewState,
     hovered: RwSignal<bool>,
@@ -1288,7 +1266,7 @@ fn quote_reply_button(
     .into_any()
 }
 
-/// Open the foot composer bound for GitHub with `body` quoted, under
+/// Open Conversation's composer bound for GitHub with `body` quoted, under
 /// whatever the reader had typed there for GitHub.
 fn quote_reply(state: ReviewState, body: &str) {
     let quote = crate::ask::quote_reply(body);
@@ -1325,6 +1303,7 @@ pub fn description_card(
     body: String,
     node_id: String,
     editable: bool,
+    whole: RwSignal<bool>,
 ) -> impl IntoView {
     let hovered = RwSignal::new(false);
     let description = if body.trim().is_empty() {
@@ -1341,7 +1320,7 @@ pub fn description_card(
     let leading = leading_actions(quote, edit, None);
     let react = reactable(&node_id);
     let reactions = reactions_under(app, state, backend.clone(), &react);
-    let shown = Stack::vertical((description, reactions))
+    let shown = Stack::vertical((clamped(state, description, whole), reactions))
         .style(|s| s.flex_col().width_full())
         .into_any();
     let shown = edited_in_card(app, state, backend.clone(), node_id, shown);
@@ -1371,6 +1350,120 @@ pub fn description_card(
         ),
         hovered,
     )
+}
+
+/// How tall a description is drawn until the reader asks for the rest:
+/// a long one would otherwise put the composer and the newest of the
+/// timeline under it a screen or more down.
+pub const DESCRIPTION_CLAMP: f64 = 320.0;
+
+/// A description's text, cut at `DESCRIPTION_CLAMP` when it is taller,
+/// with Show more under it to draw the whole of it while `whole` says so,
+/// and Show less to cut it again. Drawn whole while Cmd-F's bar is up, as
+/// a match in the cut-off part could not be scrolled to.
+///
+/// Show less sits at the foot of the whole text, often a screen or more
+/// under its top, and cutting it takes all that from over the reader:
+/// the page, kept at its offset, would show them the timeline far below.
+/// So the cut text comes back into view once it is laid out.
+fn clamped(state: ReviewState, text: floem::AnyView, whole: RwSignal<bool>) -> impl IntoView {
+    // The text's own height: it does not shrink to the cut, which only
+    // clips it.
+    let height = RwSignal::new(0.0_f64);
+    let long = Memo::new(move |_| height.get() > DESCRIPTION_CLAMP);
+    let cut_again = Rc::new(Cell::new(false));
+    let asked = cut_again.clone();
+    let text = text
+        .on_event_cont(
+            floem::context::LayoutChanged::listener(),
+            move |_, changed: &floem::context::LayoutChanged| {
+                let tall = changed.new_box.height();
+                if height.get_untracked() != tall {
+                    height.set(tall);
+                }
+            },
+        )
+        .style(|s| s.width_full().flex_shrink(0.0_f32));
+    let clamped = Stack::vertical((
+        text.clip().debug_name("description-text").style(move |s| {
+            let cut = long.get() && !whole.get() && !state.conversation_find_open.get();
+            s.flex_col()
+                .width_full()
+                .apply_if(cut, |s| s.max_height(DESCRIPTION_CLAMP))
+        }),
+        text_action(
+            move || {
+                if whole.get() {
+                    "Show less".to_string()
+                } else {
+                    "Show more".to_string()
+                }
+            },
+            "description-more",
+            move || {
+                if whole.get_untracked() {
+                    asked.set(true);
+                }
+                whole.update(|whole| *whole = !*whole)
+            },
+        )
+        .style(move |s| {
+            s.margin_top(6.0)
+                .margin_left(-8.0)
+                .apply_if(!long.get() || state.conversation_find_open.get(), |s| {
+                    s.hide()
+                })
+        }),
+    ))
+    .debug_name("description-clamped");
+    let id = clamped.id();
+    clamped
+        .on_event_cont(el::UpdatePhaseLayout, move |_, _| {
+            if cut_again.replace(false) {
+                id.scroll_to(None);
+            }
+        })
+        .style(|s| s.flex_col().width_full().items_start())
+}
+
+/// A quiet word to press, as Show more under a long description: muted
+/// text that washes on hover, pressed by a click, and by Enter or Space
+/// once it has the keyboard.
+pub(crate) fn text_action(
+    label: impl Fn() -> String + 'static,
+    debug: &'static str,
+    action: impl Fn() + 'static,
+) -> impl IntoView {
+    let action: Rc<dyn Fn()> = Rc::new(action);
+    let click = action.clone();
+    Container::new(Label::derived(label).style(|s| {
+        s.font_size(theme::TEXT_META)
+            .font_weight(theme::weight_emphasis())
+            .color(theme::fg_muted())
+            .selectable(false)
+            .pointer_events_none()
+    }))
+    .on_event_stop(el::Click, move |_, _| click())
+    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+        if matches!(key.code, Code::Enter | Code::Space) {
+            action();
+            EventPropagation::Stop
+        } else {
+            EventPropagation::Continue
+        }
+    })
+    .debug_name(debug)
+    .style(|s| {
+        clickable(s)
+            .height(26.0)
+            .items_center()
+            .flex_shrink(0.0_f32)
+            .padding_horiz(8.0)
+            .border_radius(theme::RADIUS)
+            .keyboard_navigable()
+            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+            .hover(|s| s.background(theme::canvas_hover()))
+    })
 }
 
 /// One conversation comment, with the reactions on it under.
@@ -2557,7 +2650,7 @@ pub(crate) fn finding_controls(
         move |summary| match summary {
             Some((summary, historical, original_group, head)) => {
                 let finding = &summary.finding;
-                // "Claude Opus 5.5 (high)", as the Agents section names a run.
+                // "Claude Opus 5.5 (high)", as the Review popover names a reviewer.
                 let reviewer = if summary.attributions.is_empty() {
                     match (&summary.backend, &summary.model) {
                         (Some(backend), Some(model)) => threads::model_name(backend, model),
@@ -2687,7 +2780,7 @@ pub(crate) fn finding_controls(
                     Some(group) if !historical => {
                         let group_id = group.group.id.clone();
                         let item_id = group.group.item_id.clone();
-                        quiet_action("View original", move || {
+                        quiet_action("View original", "view-original", move || {
                             let request_id =
                                 original_backend.open_review_snapshot(&item_id, &group_id);
                             app.begin_historical_review(state, group.clone(), request_id);
@@ -2878,10 +2971,27 @@ fn finding_meta(s: floem::style::Style) -> floem::style::Style {
 }
 
 /// An action said in a word, not a button: the one a finding offers
-/// besides what is done to it.
-fn quiet_action(label: &'static str, action: impl Fn() + 'static) -> Label {
+/// besides what is done to it, the Checks row's Details and the merge
+/// card's Hide. Pressed by a click, and by Enter or Space once it has
+/// the keyboard.
+pub(crate) fn quiet_action(
+    label: &'static str,
+    debug: &'static str,
+    action: impl Fn() + 'static,
+) -> Label {
+    let action: Rc<dyn Fn()> = Rc::new(action);
+    let click = action.clone();
     Label::derived(move || label.to_string())
-        .on_event_stop(el::Click, move |_, _| action())
+        .on_event_stop(el::Click, move |_, _| click())
+        .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+            if matches!(key.code, Code::Enter | Code::Space) {
+                action();
+                EventPropagation::Stop
+            } else {
+                EventPropagation::Continue
+            }
+        })
+        .debug_name(debug)
         .style(|s| {
             clickable(s)
                 .font_size(theme::TEXT_BADGE)
@@ -2889,8 +2999,11 @@ fn quiet_action(label: &'static str, action: impl Fn() + 'static) -> Label {
                 .padding_horiz(6.0)
                 .height(24.0)
                 .items_center()
+                .flex_shrink(0.0_f32)
                 .border_radius(theme::RADIUS)
                 .selectable(false)
+                .keyboard_navigable()
+                .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
                 .hover(|s| s.color(theme::fg()).background(theme::canvas_hover()))
         })
 }

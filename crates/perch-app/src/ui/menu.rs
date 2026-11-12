@@ -55,6 +55,12 @@ pub struct Menu {
     filter: Option<String>,
     /// The most rows that may be checked at once.
     most_checked: Option<usize>,
+    /// The tallest the panel may be, short of the window; a longer list
+    /// scrolls inside it.
+    max_height: Option<f64>,
+    /// Where the rows that stay under the list start, in sight however
+    /// far it scrolls; none for a menu that is all list.
+    foot: Option<usize>,
 }
 
 enum Entry {
@@ -81,6 +87,9 @@ pub struct Item {
     /// The name's and note's colour in place of the usual, for a row
     /// that warns.
     tint: Option<fn() -> Color>,
+    /// The icon's colour in place of the name's, for an icon that says
+    /// how something stands.
+    icon_tint: Option<fn() -> Color>,
     action: Option<Rc<dyn Fn()>>,
     /// What picking a row that toggles does in place of `action`, with
     /// the check's new state.
@@ -106,6 +115,8 @@ impl Menu {
             return_focus: None,
             filter: None,
             most_checked: None,
+            max_height: None,
+            foot: None,
         }
     }
 
@@ -119,6 +130,7 @@ impl Menu {
             detail: None,
             note: None,
             tint: None,
+            icon_tint: None,
             action: None,
             toggle: None,
             remove: None,
@@ -178,6 +190,20 @@ impl Menu {
         self
     }
 
+    /// No taller than `height`, as a list that can run long is: its rows
+    /// scroll inside the panel past that, as they do past the window.
+    pub fn max_height(mut self, height: f64) -> Self {
+        self.max_height = Some(height);
+        self
+    }
+
+    /// The rows from here on stay under the list, past a line, in sight
+    /// however far a long one scrolls: a way out such as "Open on GitHub".
+    pub fn footer(mut self) -> Self {
+        self.foot = Some(self.entries.len());
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
         !self.entries.iter().any(|e| !matches!(e, Entry::Separator))
     }
@@ -185,9 +211,19 @@ impl Menu {
     /// The entries as drawn: no separator first, last or twice.
     fn tidy(mut self) -> Self {
         let mut entries = Vec::with_capacity(self.entries.len());
-        for entry in self.entries {
+        let mut foot = None;
+        for (index, entry) in self.entries.into_iter().enumerate() {
+            if self.foot == Some(index) {
+                // Its own line is drawn over the footer, so none leads it.
+                if matches!(entries.last(), Some(Entry::Separator)) {
+                    entries.pop();
+                }
+                foot = Some(entries.len());
+            }
             let separator = matches!(entry, Entry::Separator);
-            if separator && entries.last().is_none_or(|e| matches!(e, Entry::Separator)) {
+            let fresh = foot == Some(entries.len());
+            if separator && (fresh || entries.last().is_none_or(|e| matches!(e, Entry::Separator)))
+            {
                 continue;
             }
             entries.push(entry);
@@ -195,31 +231,43 @@ impl Menu {
         if matches!(entries.last(), Some(Entry::Separator)) {
             entries.pop();
         }
+        // A footer with nothing over it, or nothing in it, is just rows.
+        self.foot = foot.filter(|&at| at > 0 && at < entries.len());
         self.entries = entries;
         self
     }
 
     /// The menu as a reader would list it: `✓ ` before a checked row, a
-    /// greyed one in parentheses, `▸` after a submenu, `—` for a line.
+    /// greyed one in parentheses, `▸` after a submenu, `—` for a line,
+    /// the footer's included.
     #[cfg(test)]
     pub fn outline(&self) -> Vec<String> {
         self.entries
             .iter()
             .enumerate()
-            .map(|(index, e)| match e {
-                Entry::Item(i) => {
-                    let mark = if i.is_checked() { "✓ " } else { "" };
-                    if self.live(index) {
-                        format!("{mark}{}", i.label)
-                    } else {
-                        format!("{mark}({})", i.label)
-                    }
-                }
-                Entry::Submenu { label, menu } if menu.enabled => format!("{label} ▸"),
-                Entry::Submenu { label, .. } => format!("({label} ▸)"),
-                Entry::Separator => "—".to_string(),
+            .flat_map(|(index, e)| {
+                let foot = (self.foot == Some(index)).then(|| "—".to_string());
+                foot.into_iter()
+                    .chain(std::iter::once(self.outline_entry(index, e)))
             })
             .collect()
+    }
+
+    #[cfg(test)]
+    fn outline_entry(&self, index: usize, e: &Entry) -> String {
+        match e {
+            Entry::Item(i) => {
+                let mark = if i.is_checked() { "✓ " } else { "" };
+                if self.live(index) {
+                    format!("{mark}{}", i.label)
+                } else {
+                    format!("{mark}({})", i.label)
+                }
+            }
+            Entry::Submenu { label, menu } if menu.enabled => format!("{label} ▸"),
+            Entry::Submenu { label, .. } => format!("({label} ▸)"),
+            Entry::Separator => "—".to_string(),
+        }
     }
 
     /// The submenu under `label`.
@@ -338,6 +386,12 @@ impl Item {
     /// Draw the name and note in `color`, while the row can be picked.
     pub fn tint(mut self, color: fn() -> Color) -> Self {
         self.tint = Some(color);
+        self
+    }
+
+    /// Draw the icon in `color`, as a status glyph is drawn elsewhere.
+    pub fn icon_tint(mut self, color: fn() -> Color) -> Self {
+        self.icon_tint = Some(color);
         self
     }
 
@@ -565,7 +619,14 @@ fn place(anchor: Anchor, size: Size, window: Size) -> Point {
             } else {
                 above
             };
-            Point::new(clamp_x(r.x0), y)
+            // From the view's left edge, or, without room on the right,
+            // ending at its right edge rather than against the window's.
+            let x = if fits_right(r.x0) {
+                r.x0
+            } else {
+                r.x1 - size.width
+            };
+            Point::new(clamp_x(x), y)
         }
         Anchor::At(p) => {
             let x = if fits_right(p.x) {
@@ -1046,7 +1107,8 @@ fn panel(host: Rc<Host>, level: Level) -> impl IntoView {
         Entry::Submenu { menu, .. } => menu.icon.is_some(),
         Entry::Separator => false,
     });
-    let rows = menu
+    let foot = menu.foot.unwrap_or(menu.entries.len());
+    let mut rows = menu
         .entries
         .iter()
         .enumerate()
@@ -1054,8 +1116,20 @@ fn panel(host: Rc<Host>, level: Level) -> impl IntoView {
             Entry::Separator => separator(&level, index).into_any(),
             _ => row(host.clone(), &level, index, entry, checks, icons).into_any(),
         })
-        .chain(menu.filter.is_some().then(|| no_matches(&level).into_any()))
         .collect::<Vec<_>>();
+    let footer_rows = rows.split_off(foot);
+    rows.extend(menu.filter.is_some().then(|| no_matches(&level).into_any()));
+    let footer = (!footer_rows.is_empty()).then(|| {
+        Stack::vertical_from_iter(footer_rows)
+            .debug_name("menu-footer")
+            .style(|s| {
+                s.flex_col()
+                    .flex_shrink(0.0_f32)
+                    .padding(GUTTER)
+                    .border_top(1.0)
+                    .border_color(theme::menu_separator())
+            })
+    });
     let filter = menu
         .filter
         .clone()
@@ -1071,8 +1145,11 @@ fn panel(host: Rc<Host>, level: Level) -> impl IntoView {
                 .padding(GUTTER)
         })
         .scroll()
+        // A footer row lit keeps the list at its end, where the keys
+        // left it on the way down.
         .ensure_visible(move || match highlight.get() {
             Some(i) => {
+                let i = i.min(foot.saturating_sub(1));
                 let top = scroll_level.row_top(i);
                 let height = scroll_level.menu.entries[i].height();
                 Rect::new(0.0, top - GUTTER, 1.0, top + height + GUTTER)
@@ -1093,6 +1170,7 @@ fn panel(host: Rc<Host>, level: Level) -> impl IntoView {
     let anchor = level.anchor;
     let depth = level.depth;
     let window = host.window;
+    let most_height = menu.max_height;
     let min_width = if depth == 0 {
         host.min_width
     } else {
@@ -1101,6 +1179,7 @@ fn panel(host: Rc<Host>, level: Level) -> impl IntoView {
     let panel = Stack::vertical((
         filter.map_or_else(|| Empty::new().into_any(), IntoView::into_any),
         content,
+        footer.map_or_else(|| Empty::new().into_any(), IntoView::into_any),
     ));
     let panel_id = panel.id();
     let enter_host = host.clone();
@@ -1160,7 +1239,8 @@ fn panel(host: Rc<Host>, level: Level) -> impl IntoView {
                 .max_width(MAX_WIDTH)
                 .apply(surface(floem::style::Style::new()))
                 .apply_if(window.height > 2.0 * EDGE, |s| {
-                    s.max_height(window.height - 2.0 * EDGE)
+                    let room = window.height - 2.0 * EDGE;
+                    s.max_height(most_height.map_or(room, |most| most.min(room)))
                 });
             match measured.get() {
                 Some(size) if window.width > 0.0 => {
@@ -1310,8 +1390,15 @@ fn row(
                 .justify_center()
         })
     });
+    let icon_fg = match entry {
+        Entry::Item(Item {
+            icon_tint: Some(tint),
+            ..
+        }) if enabled => *tint,
+        _ => fg,
+    };
     let icon = icons.then(|| match icon {
-        Some(icon) => sidebar_glyph(icon, fg)
+        Some(icon) => sidebar_glyph(icon, icon_fg)
             .style(|s| s.size(16.0, 16.0).flex_shrink(0.0_f32))
             .into_any(),
         None => Empty::new()

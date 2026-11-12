@@ -1,11 +1,12 @@
-//! One run's request, activity and result.
+//! One run's request, activity and result, in a sheet over the window.
 
 use std::rc::Rc;
 use std::sync::Arc;
 
+use floem::event::EventPropagation;
 use floem::peniko::kurbo::Point;
 use floem::prelude::*;
-use floem::reactive::{RwSignal, SignalGet, SignalUpdate, SignalWith};
+use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
 use floem::style::{Position, TextOverflow};
 use floem::text::{OverflowWrap, WordBreakStrength};
 use floem::views::scroll::ScrollChanged;
@@ -15,15 +16,135 @@ use floem::views::{
 use perch_github::comments::{RunEvent, RunEventRecord};
 
 use crate::backend::Backend;
+use crate::icons::SidebarIcon;
+use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
+use crate::ui::widgets::icon_action;
 
 use super::model::{AgentRunPurpose, AgentRunStatus, AgentRunSummary};
 use super::{status_color, text_action};
 
-/// What a run did, as its row in an item's Agents list opens to: its
-/// request, its activity, its answer and what it cost, no taller than
-/// `cap` and scrolling inside that, following the end while the run goes.
+/// How wide the sheet is, at most.
+const SHEET_WIDTH: f64 = 720.0;
+
+/// A run's raw output, in a sheet over the window: what a reviewer said
+/// as it read the change, opened from its line in the Review popover, or
+/// what a question's run did when it has no thread to show it in. The
+/// popover is too narrow for a transcript, and it is read once in a while,
+/// so it comes up here over whatever opened it, which is as it was when
+/// the sheet goes: on Escape, its close button, or a press beside it.
+pub fn sheet(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    let shown = Memo::new(move |_| review.agent_output.get());
+    dyn_container(
+        move || shown.get(),
+        move |run_id| {
+            let Some(run) =
+                run_id.and_then(|id| floem::reactive::Effect::untrack(|| app.agent_run(&id)))
+            else {
+                return Empty::new().into_any();
+            };
+            Container::new(panel(app, review, backend.clone(), run))
+                .on_event_stop(el::PointerDown, move |_, _| close(review))
+                .style(|s| {
+                    s.size_full()
+                        .items_start()
+                        .justify_center()
+                        .padding(48.0)
+                        .background(theme::scrim())
+                })
+                .into_any()
+        },
+    )
+    .debug_name("agent-output")
+    .style(move |s| {
+        s.position(Position::Absolute)
+            .inset(0.0)
+            .z_index(100)
+            .apply_if(shown.with(Option::is_none), |s| s.hide())
+    })
+}
+
+/// Put the sheet away.
+pub fn close(review: ReviewState) {
+    if review.agent_output.with_untracked(Option::is_some) {
+        review.agent_output.set(None);
+    }
+}
+
+/// The sheet itself: who ran and what it was asked, a close button, and
+/// what it did under them, scrolling inside the window's height.
+fn panel(
+    app: AppState,
+    review: ReviewState,
+    backend: Rc<Backend>,
+    run: AgentRunSummary,
+) -> impl IntoView {
+    let name = crate::review::threads::agent_name(&run.backend, &run.model, &run.effort);
+    let about = format!("{} \u{b7} {}", run.purpose.label(), run.subject());
+    let close_button = icon_action(
+        SidebarIcon::Close,
+        "agent-output close",
+        || true,
+        move || close(review),
+    );
+    // The keyboard goes to the close button once it is laid out, so
+    // Escape reaches the window from here whatever had it before.
+    let close_id = close_button.view_id();
+    let asked = RwSignal::new(false);
+    let close_button = close_button.on_event_cont(el::UpdatePhaseLayout, move |_, _| {
+        if !asked.get_untracked() {
+            asked.set(true);
+            close_id.request_focus();
+        }
+    });
+    let cap = (app.window_height.get_untracked() - 220.0).max(240.0);
+    Stack::vertical((
+        Stack::horizontal((
+            Stack::vertical((
+                Label::derived(move || name.clone()).style(|s| {
+                    s.font_size(theme::TEXT_BODY)
+                        .font_weight(theme::weight_emphasis())
+                        .color(theme::fg())
+                        .selectable(false)
+                }),
+                Label::derived(move || about.clone()).style(|s| {
+                    s.font_size(theme::TEXT_META)
+                        .color(theme::fg_subtle())
+                        .text_ellipsis()
+                        .min_width(0.0)
+                        .margin_top(2.0)
+                        .selectable(false)
+                }),
+            ))
+            .style(|s| s.flex_col().min_width(0.0).flex_grow(1.0_f32)),
+            close_button,
+        ))
+        .style(|s| s.items_start().width_full().gap(8.0).padding(14.0)),
+        inline(app, backend, run, cap),
+    ))
+    .on_event_stop(el::PointerDown, |_, _| {})
+    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+        if key.code == Code::Escape && key.modifiers.is_empty() {
+            close(review);
+            EventPropagation::Stop
+        } else {
+            EventPropagation::Continue
+        }
+    })
+    .debug_name("agent-output-panel")
+    .style(|s| {
+        s.flex_col()
+            .width(SHEET_WIDTH)
+            .max_width_full()
+            .min_height(0.0)
+            .apply(crate::ui::menu::panel_surface(floem::style::Style::new()))
+    })
+}
+
+/// What a run did: its request, its activity, its answer and what it
+/// cost, no taller than `cap` and scrolling inside that, following the
+/// end while the run goes.
 pub(super) fn inline(
     state: AppState,
     backend: Rc<Backend>,

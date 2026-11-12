@@ -66,7 +66,8 @@ pub(crate) fn watch(app: AppState, state: ReviewState, backend: Rc<Backend>) {
 /// on a pull request it is one line, the reviewers chosen and Run, with
 /// Settings to unfold the rest, which folds the reader's review in turn;
 /// on a branch it is all there is, unfolded.
-/// Under the line, what the agents are doing or last found.
+/// Under the line, why Run cannot go, and under it all the item's
+/// reviews, newest first, each opening in place to what it found.
 pub(crate) fn agents_section(
     app: AppState,
     state: ReviewState,
@@ -127,12 +128,10 @@ pub(crate) fn agents_section(
                             .pointer_events_none()
                     }),
                 )
-                .on_event_stop(el::Click, move |_, _| {
-                    state.review_agents_expanded.update(|open| *open = !*open)
-                })
+                .on_event_stop(el::Click, move |_, _| toggle_settings(state))
                 .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
                     if matches!(key.code, Code::Enter | Code::Space) {
-                        state.review_agents_expanded.update(|open| *open = !*open);
+                        toggle_settings(state);
                         EventPropagation::Stop
                     } else {
                         EventPropagation::Continue
@@ -170,7 +169,7 @@ pub(crate) fn agents_section(
             },
         ),
     ))
-    .style(|s| s.items_center().width_full().gap(8.0));
+    .style(|s| s.items_center().width_full().gap(8.0).flex_shrink(0.0_f32));
 
     let settings = Stack::vertical((
         dyn_container(
@@ -243,12 +242,39 @@ pub(crate) fn agents_section(
         s.flex_col()
             .width_full()
             .gap(14.0)
+            .flex_shrink(0.0_f32)
             .apply_if(!expanded.get(), |s| s.hide())
     });
 
-    Stack::vertical((head, agents_status(app, state, expanded), settings))
-        .style(|s| s.flex_col().width_full().gap(8.0))
-        .debug_name("review-agents")
+    // The reviews go under the picker and Run, and under the settings
+    // while they are unfolded. They scroll, so this part shrinks to what
+    // the popover has room for; the reader's own review, whose drafts
+    // scroll too, gives up its room first while it is unfolded (see
+    // review_menu).
+    Stack::vertical((
+        head,
+        agents_status(app, state, expanded),
+        settings,
+        crate::ui::agents::reviews::history(app, state, backend),
+    ))
+    .style(|s| {
+        s.flex_col()
+            .width_full()
+            .min_height(0.0)
+            .flex_shrink(1.0_f32)
+            .gap(8.0)
+    })
+    .debug_name("review-agents")
+}
+
+/// Unfold the agents' settings, or fold them. Unfolded, they shut an
+/// agent review open under them, so one thing at a time is open.
+fn toggle_settings(state: ReviewState) {
+    let open = !state.review_agents_expanded.get_untracked();
+    if open && state.review_expanded.with_untracked(Option::is_some) {
+        state.review_expanded.set(None);
+    }
+    state.review_agents_expanded.set(open);
 }
 
 /// The reviewers the next run would start, `Claude Opus (high)`, one
@@ -280,113 +306,31 @@ fn reviewers_summary(app: AppState, state: ReviewState) -> String {
     }
 }
 
-/// What the agents are doing, with Show to go to them in the Agents section;
-/// else, folded, why Run cannot go; else what the last review found, which
-/// goes to that review in the Agents section.
+/// Folded, why Run cannot go.
 fn agents_status(app: AppState, state: ReviewState, expanded: Memo<bool>) -> impl IntoView {
-    #[derive(Clone, PartialEq)]
-    enum Status {
-        Active(String),
-        Note(String),
-        Latest { text: String, group: String },
-        Nothing,
-    }
-    let status = move || {
-        if let Some(group) = active_group(app, state) {
-            return Status::Active(progress_label(&group));
-        }
-        if !expanded.get() {
-            if let Some(reason) = launch_validation(app, state).reason {
-                return Status::Note(reason);
+    dyn_container(
+        move || {
+            if expanded.get() {
+                None
+            } else {
+                launch_validation(app, state).reason
             }
-        }
-        let latest = current_item_id(state).and_then(|item_id| {
-            app.review_groups_for(&item_id)
-                .iter()
-                .max_by_key(|summary| summary.group.number)
-                .cloned()
-        });
-        match latest {
-            Some(summary) => Status::Latest {
-                text: format!(
-                    "Review #{} \u{b7} {}",
-                    summary.group.number,
-                    count_summary(&summary)
-                ),
-                group: summary.group.id.clone(),
-            },
-            None => Status::Nothing,
-        }
-    };
-    dyn_container(status, move |status| {
-        let text = |text: String| {
-            Label::derived(move || text.clone()).style(|s| {
-                s.font_size(theme::TEXT_META)
-                    .color(theme::fg_subtle())
-                    .text_wrap()
-                    .min_width(0.0)
-                    .flex_grow(1.0_f32)
-            })
-        };
-        match status {
-            Status::Active(progress) => Stack::horizontal((
-                text(progress),
-                Container::new(Label::derived(|| "Show".to_string()).style(|s| {
-                    s.font_size(theme::TEXT_BADGE)
-                        .color(theme::accent())
-                        .selectable(false)
-                        .pointer_events_none()
-                }))
-                .on_event_stop(el::Click, move |_, _| {
-                    if let Some(group) = active_group(app, state) {
-                        show_in_agents(app, state, &group);
-                    }
-                })
+        },
+        |note| match note {
+            Some(note) => Label::derived(move || note.clone())
                 .style(|s| {
-                    clickable(s)
-                        .padding_horiz(6.0)
-                        .padding_vert(3.0)
-                        .border_radius(theme::RADIUS)
-                        .hover(|s| s.background(theme::canvas_hover()))
+                    s.font_size(theme::TEXT_META)
+                        .color(theme::fg_subtle())
+                        .text_wrap()
+                        .min_width(0.0)
+                        .width_full()
                 })
-                .debug_name("review-show-agents"),
-            ))
-            .style(|s| s.items_center().width_full().gap(8.0))
-            .debug_name("review-agents-status")
-            .into_any(),
-            Status::Note(note) => text(note).debug_name("review-agents-status").into_any(),
-            Status::Latest { text, group } => {
-                let key_group = group.clone();
-                Label::derived(move || text.clone())
-                    .on_event_stop(el::Click, move |_, _| {
-                        show_review_in_agents(app, state, &group)
-                    })
-                    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-                        if matches!(key.code, Code::Enter | Code::Space) {
-                            show_review_in_agents(app, state, &key_group);
-                            EventPropagation::Stop
-                        } else {
-                            EventPropagation::Continue
-                        }
-                    })
-                    .style(|s| {
-                        clickable(s)
-                            .font_size(theme::TEXT_META)
-                            .color(theme::fg_subtle())
-                            .text_wrap()
-                            .min_width(0.0)
-                            .flex_grow(1.0_f32)
-                            .keyboard_navigable()
-                            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
-                            .hover(|s| s.color(theme::fg_muted()))
-                    })
-                    .debug_name("review-agents-latest")
-                    .into_any()
-            }
-            Status::Nothing => Empty::new().into_any(),
-        }
-    })
-    .style(|s| s.width_full())
+                .debug_name("review-agents-status")
+                .into_any(),
+            None => Empty::new().into_any(),
+        },
+    )
+    .style(|s| s.width_full().flex_shrink(0.0_f32))
 }
 
 /// A word on the uncommitted work when the head leaves it out of a
@@ -912,57 +856,6 @@ fn invalid(reason: impl Into<String>) -> LaunchValidation {
     }
 }
 
-/// Group-level summaries belong in Conversation even when a successful
-/// review found nothing and therefore produced no finding threads.
-/// A review's findings, a chip for each kind it has: new in the notice's
-/// yellow, fixed in green, and the rest grey. A kind with none has no
-/// chip.
-pub(crate) fn count_chips(summary: &ReviewGroupSummary) -> impl IntoView {
-    type Ink = fn() -> floem::peniko::Color;
-    let group = &summary.group;
-    let kinds: [(u64, &str, Ink, Ink); 4] = [
-        (
-            group.new_findings,
-            "new",
-            theme::notice_fg,
-            theme::notice_bg,
-        ),
-        (
-            group.still_present,
-            "still present",
-            theme::fg_muted,
-            theme::badge_bg,
-        ),
-        (
-            group.verified_fixed,
-            "verified fixed",
-            theme::open,
-            theme::diff_added_bg,
-        ),
-        (
-            group.not_verified,
-            "not verified",
-            theme::fg_subtle,
-            theme::badge_bg,
-        ),
-    ];
-    let chips = kinds
-        .into_iter()
-        .filter(|(count, ..)| *count > 0)
-        .map(|(count, words, ink, fill)| {
-            crate::ui::widgets::badge(move || format!("{count} {words}"), ink, fill, None)
-                .into_any()
-        })
-        .collect::<Vec<_>>();
-    Stack::horizontal_from_iter(chips)
-        .debug_name("review-group-counts")
-        .style(|s| {
-            s.items_center()
-                .flex_wrap(floem::style::FlexWrap::Wrap)
-                .gap(6.0)
-        })
-}
-
 fn build_draft(app: AppState, state: ReviewState, item_id: &str) -> Option<ReviewLaunchDraft> {
     let item = state
         .item
@@ -1220,49 +1113,6 @@ pub(crate) fn progress_label(summary: &ReviewGroupSummary) -> String {
     format!("Reviewing · {complete} of {total} complete")
 }
 
-/// While a review runs, Show in the Review popover goes to it in the
-/// item's Agents section: the section unfolds, and the review's first attempt with
-/// a run opens at the top of the page.
-fn show_in_agents(app: AppState, state: ReviewState, summary: &ReviewGroupSummary) {
-    crate::review::review_menu::close(state, false);
-    let run = app.agent_runs.with_untracked(|runs| {
-        runs.iter()
-            .find(|run| {
-                run.review_attempt_id
-                    .as_deref()
-                    .is_some_and(|attempt| summary.attempts.iter().any(|a| a.id == attempt))
-            })
-            .map(|run| run.id.clone())
-    });
-    floem::reactive::Effect::batch(|| {
-        state.show_tab(crate::review::model::ItemTab::Conversation);
-        state.agents_unfolded.set(true);
-        if let Some(run) = run {
-            state.pending_run_reveal.set(Some(run));
-        }
-    });
-}
-
-/// The last review's line in the Review popover goes to that review in
-/// the item's Agents section: the section and the review unfold, and the
-/// review comes to the top of the page.
-fn show_review_in_agents(app: AppState, state: ReviewState, group: &str) {
-    crate::review::review_menu::close(state, false);
-    floem::reactive::Effect::batch(|| {
-        state.show_tab(crate::review::model::ItemTab::Conversation);
-        state.agents_unfolded.set(true);
-        if app
-            .collapsed_agent_review_groups
-            .with_untracked(|collapsed| collapsed.contains(group))
-        {
-            app.collapsed_agent_review_groups.update(|collapsed| {
-                collapsed.remove(group);
-            });
-        }
-        state.pending_review_reveal.set(Some(group.to_string()));
-    });
-}
-
 pub(crate) fn attempt_summary(summary: &ReviewGroupSummary) -> String {
     if summary.attempts.is_empty() {
         return "No reviewer attempts were admitted".into();
@@ -1304,16 +1154,6 @@ pub(crate) fn unread_summary(summary: &ReviewGroupSummary) -> Option<String> {
         })
         .collect::<Vec<_>>();
     (!lines.is_empty()).then(|| lines.join("\n"))
-}
-
-fn count_summary(summary: &ReviewGroupSummary) -> String {
-    format!(
-        "{} new · {} still present · {} verified fixed · {} not verified",
-        summary.group.new_findings,
-        summary.group.still_present,
-        summary.group.verified_fixed,
-        summary.group.not_verified
-    )
 }
 
 /// Whether the checkout has moved past what a review read. A review of

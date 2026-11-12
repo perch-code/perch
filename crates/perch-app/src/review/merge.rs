@@ -1,8 +1,11 @@
-//! Pull-request checks and the deliberate, native merge surface.
+//! Pull-request checks and the deliberate, native merge box.
 //!
-//! The overview is a live GitHub snapshot for one exact head.  Cached checks
-//! are useful to read while it arrives, but every merge decision below uses
-//! the live snapshot and rechecks it again when the confirmation is pressed.
+//! The box is the popover under the bar's Merge (`merge_button`); the
+//! checks are the summary's Checks row and its menu, which read their
+//! words and glyphs from here. The overview is a live GitHub snapshot for
+//! one exact head. Cached checks are useful to read while it arrives, but
+//! every merge decision below uses the live snapshot and rechecks it again
+//! when the confirmation is pressed.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -11,9 +14,7 @@ use floem::event::EventPropagation;
 use floem::peniko::Color;
 use floem::prelude::*;
 use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate, SignalWith};
-use floem::views::{
-    dyn_container, dyn_stack, Container, Decorators, Empty, Label, Stack, TextInput,
-};
+use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack, TextInput};
 use floem::AnyView;
 use perch_github::{
     Check, CheckRunState, CheckState, Checks, CommitMessage, Item, MergeMethod, MergeMethods,
@@ -235,178 +236,229 @@ pub(crate) fn conflicts_request(base: &str, rev: &str, branch: &str) -> String {
     )
 }
 
-/// One restrained surface between the conversation and its composer.
-pub fn surface(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    let checks_expanded = RwSignal::new(true);
-    let can_push = Memo::new(move |_| crate::review::summary::can_push(app, state));
-    let may_set_draft = Memo::new(move |_| crate::review::summary::may_set_draft(app, state));
-    // GitHub's common default, and the least surprising default when it is
-    // enabled. `effective_method` falls back to another repository-enabled
-    // method when squash is unavailable.
-    let selected_method = RwSignal::new(MergeMethod::Squash);
-    let bypass_requirements = RwSignal::new(false);
-    let confirmation = RwSignal::new(None::<MergeConfirmation>);
-    let message = MessageDraft::new();
-    let resolver = Resolver {
-        agent: Memo::new(move |_| conflicts_agent(app, state)),
-        busy: Memo::new(move |_| resolving_conflicts(app, state)),
-        route: RwSignal::new(ConflictRoute::Agent),
-    };
-
-    // Consent and confirmation apply to one exact head, never to whichever
-    // pull request happens to occupy this long-lived review view next.
-    Effect::new(move |previous: Option<(Option<String>, Option<String>)>| {
-        let identity = (
-            state
-                .item
-                .with(|item| item.as_ref().map(|item| item.id.clone())),
-            state
-                .pull_request
-                .with(|pull| pull.as_ref().map(|pull| pull.head_sha.clone())),
-        );
-        if previous.as_ref() != Some(&identity) {
-            selected_method.set(MergeMethod::Squash);
-            bypass_requirements.set(false);
-            confirmation.set(None);
-            resolver.route.set(ConflictRoute::Agent);
-        }
-        identity
-    });
-    // A same-head refresh can represent different checks, protection rules,
-    // or permissions. Bypass consent is therefore one-shot for the live
-    // status generation that presented it, not a sticky preference.
-    Effect::new(move |previous: Option<u64>| {
-        let generation = state.pull_request_status_generation.get();
-        if previous != Some(generation) {
-            bypass_requirements.set(false);
-            confirmation.set(None);
-        }
-        generation
-    });
-
-    dyn_container(
-        move || state.pull_request.with(Option::is_some),
-        move |has_pull_request| {
-            if !has_pull_request {
-                return Empty::new().into_any();
-            }
-
-            Container::new(
-                Stack::vertical((
-                    checks_section(state, checks_expanded),
-                    merge_section(
-                        state,
-                        backend.clone(),
-                        selected_method,
-                        bypass_requirements,
-                        confirmation,
-                        message,
-                        can_push,
-                        may_set_draft,
-                        resolver,
-                    ),
-                ))
-                .style(|s| s.flex_col().width_full()),
-            )
-            .debug_name("pull-request-checks-and-merge")
-            // GitHub's, so white and framed, as its comments are.
-            .style(|s| {
-                crate::review::cards::github_surface(s.width_full())
-                    .margin_top(theme::CONVERSATION_ENTRY_PADDING)
-            })
-            .into_any()
-        },
-    )
+/// The merge box's own state: the method picked, the bypass consented
+/// to, the confirmation under way and its commit message, and the agent
+/// that would resolve conflicts. Made once with the bar's Merge, whose
+/// label and method menu read it, and shared with the popover that
+/// button opens, which draws `section`.
+#[derive(Clone, Copy)]
+pub(crate) struct MergeBox {
+    selected_method: RwSignal<MergeMethod>,
+    bypass_requirements: RwSignal<bool>,
+    confirmation: RwSignal<Option<MergeConfirmation>>,
+    message: MessageDraft,
+    can_push: Memo<bool>,
+    may_set_draft: Memo<bool>,
+    resolver: Resolver,
 }
 
-fn checks_section(state: ReviewState, expanded: RwSignal<bool>) -> impl IntoView {
-    let header = Stack::horizontal((
-        crate::review::cards::section_title("Checks").style(|s| s.pointer_events_none()),
-        Label::derived(move || {
-            current_checks(state)
-                .as_deref()
-                .map(checks_summary)
-                .unwrap_or_else(|| {
-                    if state.pull_request_overview_loading.get() {
-                        "Loading…".to_string()
-                    } else {
-                        "Unavailable".to_string()
-                    }
-                })
-        })
-        // In the colour of how the checks stand, as the summary's pill is.
-        .style(move |s| {
-            let color = match current_checks(state).map(|checks| checks.state.clone()) {
-                Some(CheckState::Failing { .. }) => theme::closed(),
-                Some(CheckState::Running) => theme::draft_yellow(),
-                Some(CheckState::Passing) => theme::open(),
-                _ => theme::fg_subtle(),
-            };
-            s.font_size(theme::TEXT_META)
-                .color(color)
-                .text_ellipsis()
-                .min_width(0.0)
-                .selectable(false)
-                .pointer_events_none()
-        }),
-        Empty::new().style(|s| s.flex_grow(1.0_f32)),
-        dyn_container(
-            move || expanded.get(),
-            |is_expanded| {
-                sidebar_glyph(
-                    if is_expanded {
-                        SidebarIcon::ChevronUp
-                    } else {
-                        SidebarIcon::ChevronDown
-                    },
-                    theme::fg_subtle,
-                )
-                .style(|s| s.size(12.0, 12.0).pointer_events_none())
+/// What the bar's Merge shows for the open item, when it shows at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BarMerge {
+    /// A draft the reader may mark ready for review: the button does that,
+    /// and says so while it goes (`pending`).
+    ReadyForReview { pending: bool },
+    /// Merge, named for the method picked. `ready` when GitHub would take
+    /// it now, which makes the button green; quiet otherwise, and the
+    /// popover says why. `pick` when the repository allows more than one
+    /// method, for the chevron beside it.
+    Merge {
+        label: String,
+        ready: bool,
+        pick: bool,
+    },
+}
+
+impl MergeBox {
+    pub(crate) fn new(app: AppState, state: ReviewState) -> Self {
+        let merge = MergeBox {
+            // GitHub's common default, and the least surprising default
+            // when it is enabled. `effective_method` falls back to another
+            // repository-enabled method when squash is unavailable.
+            selected_method: RwSignal::new(MergeMethod::Squash),
+            bypass_requirements: RwSignal::new(false),
+            confirmation: RwSignal::new(None),
+            message: MessageDraft::new(),
+            can_push: Memo::new(move |_| crate::review::summary::can_push(app, state)),
+            may_set_draft: Memo::new(move |_| crate::review::summary::may_set_draft(app, state)),
+            resolver: Resolver {
+                agent: Memo::new(move |_| conflicts_agent(app, state)),
+                busy: Memo::new(move |_| resolving_conflicts(app, state)),
+                route: RwSignal::new(ConflictRoute::Agent),
             },
-        ),
-    ))
-    .on_event_stop(el::Click, move |_, _| {
-        expanded.update(|value| *value = !*value)
-    })
-    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if matches!(key.code, Code::Enter | Code::Space) {
-            expanded.update(|value| *value = !*value);
-            EventPropagation::Stop
-        } else {
-            EventPropagation::Continue
+        };
+
+        // Consent and confirmation apply to one exact head, never to
+        // whichever pull request happens to occupy this long-lived review
+        // view next.
+        Effect::new(move |previous: Option<(Option<String>, Option<String>)>| {
+            let identity = (
+                state
+                    .item
+                    .with(|item| item.as_ref().map(|item| item.id.clone())),
+                state
+                    .pull_request
+                    .with(|pull| pull.as_ref().map(|pull| pull.head_sha.clone())),
+            );
+            if previous.as_ref() != Some(&identity) {
+                merge.selected_method.set(MergeMethod::Squash);
+                merge.bypass_requirements.set(false);
+                merge.confirmation.set(None);
+                merge.resolver.route.set(ConflictRoute::Agent);
+            }
+            identity
+        });
+        // A same-head refresh can represent different checks, protection
+        // rules, or permissions. Bypass consent is therefore one-shot for
+        // the live status generation that presented it, not a sticky
+        // preference.
+        Effect::new(move |previous: Option<u64>| {
+            let generation = state.pull_request_status_generation.get();
+            if previous != Some(generation) {
+                merge.bypass_requirements.set(false);
+                merge.confirmation.set(None);
+            }
+            generation
+        });
+        merge
+    }
+
+    /// The box: how the merge stands and why, the errors it ended in, and
+    /// what can be done, from the merge and its confirmation to Push,
+    /// Update branch and resolving conflicts.
+    pub(crate) fn section(self, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+        merge_section(
+            state,
+            backend,
+            self.selected_method,
+            self.bypass_requirements,
+            self.confirmation,
+            self.message,
+            self.can_push,
+            self.may_set_draft,
+            self.resolver,
+        )
+    }
+
+    /// Put away a confirmation under way, as shutting the popover does.
+    pub(crate) fn cancel(self) {
+        self.confirmation.set(None);
+    }
+
+    /// What the bar's Merge shows: Ready for review on a draft the reader
+    /// may mark ready, else Merge for a reader who may merge an open pull
+    /// request, green only when GitHub would take it as it stands. A
+    /// branch behind its base is quiet too, though GitHub may take it.
+    /// Nothing on an issue, a branch, a pull request merged or closed,
+    /// offline, or on an old review's snapshot. Tracked.
+    pub(crate) fn bar(self, state: ReviewState) -> Option<BarMerge> {
+        if state.offline.get() || state.historical_review.with(Option::is_some) {
+            return None;
         }
-    })
-    .style(|s| {
-        crate::review::cards::section_header_style(clickable(s))
-            .keyboard_navigable()
-            .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
-    });
+        let pull = state.pull_request.get()?;
+        if !pull.is_open() || pull.merged {
+            return None;
+        }
+        let draft_pending = state.draft_pending.get();
+        if pull.draft && (self.may_set_draft.get() || draft_pending.is_some()) {
+            return Some(BarMerge::ReadyForReview {
+                pending: draft_pending == Some(false),
+            });
+        }
+        if !may_merge(state) {
+            return None;
+        }
+        let item = state.item.get()?;
+        let overview = state.pull_request_overview.get();
+        let decision = decide_merge(merge_facts(
+            &pull,
+            &item,
+            overview.as_deref(),
+            false,
+            false,
+            state.stale_head.with(Option::is_some),
+            state.pull_request_overview_loading.get(),
+        ));
+        let methods = overview
+            .as_deref()
+            .map(|overview| overview.allowed_merge_methods);
+        let pending = state.merge_pending.get();
+        let label = if pending {
+            "Merging…"
+        } else {
+            methods
+                .and_then(|methods| effective_method(self.selected_method.get(), methods))
+                .map_or("Merge", method_label)
+        };
+        let behind = overview
+            .as_deref()
+            .is_some_and(|overview| overview.merge_state == MergeState::Behind);
+        Some(BarMerge::Merge {
+            label: label.to_string(),
+            ready: decision == MergeDecision::Ready && !behind && !pending,
+            pick: !pending && methods.is_some_and(|methods| method_count(methods) > 1),
+        })
+    }
 
-    let body = dyn_container(
-        move || {
-            (
-                expanded.get(),
-                current_checks(state),
-                state.pull_request_overview_loading.get(),
-            )
-        },
-        move |(is_expanded, checks, loading)| {
-            if !is_expanded {
-                return Empty::new().into_any();
-            }
-            match checks {
-                Some(checks) if !checks.runs.is_empty() => checks_rows(checks).into_any(),
-                Some(_) => checks_message("No checks reported for this head.").into_any(),
-                None if loading => checks_message("Loading checks from GitHub…").into_any(),
-                None => checks_message("Checks are unavailable.").into_any(),
-            }
-        },
-    );
-
-    Stack::vertical((header, body)).style(|s| s.flex_col().width_full())
+    /// The methods the repository allows, the one picked checked. Picking
+    /// another puts a confirmation under way away, as it was for the
+    /// method picked before.
+    pub(crate) fn method_menu(self, state: ReviewState) -> Menu {
+        match state.pull_request_overview.with_untracked(|overview| {
+            overview
+                .as_deref()
+                .map(|overview| overview.allowed_merge_methods)
+        }) {
+            Some(methods) => merge_method_menu(methods, self.selected_method, self.confirmation),
+            None => Menu::new(),
+        }
+    }
 }
 
-fn current_checks(state: ReviewState) -> Option<Arc<Checks>> {
+/// How many merge methods the repository allows.
+fn method_count(methods: MergeMethods) -> usize {
+    [methods.merge, methods.squash, methods.rebase]
+        .into_iter()
+        .filter(|allowed| *allowed)
+        .count()
+}
+
+/// Whether the reader may merge the open pull request, as the merge box
+/// itself decides who may: open and not merged, GitHub reached and not an
+/// old review's snapshot, and the live overview saying they may write or
+/// merge as an admin. The bar's Merge is offered on this; what else
+/// stands in the way, checks or conflicts or a worktree behind, is the
+/// box's to say once it is open. Tracked.
+pub(crate) fn may_merge(state: ReviewState) -> bool {
+    if state.offline.get() || state.historical_review.with(Option::is_some) {
+        return false;
+    }
+    let open = state.pull_request.with(|pull| {
+        pull.as_ref()
+            .is_some_and(|pull| pull.is_open() && !pull.merged)
+    });
+    open && state
+        .pull_request_overview
+        .with(|overview| overview.as_deref().is_some_and(writes))
+}
+
+/// Whether the overview says the reader may merge: write access, or an
+/// admin's leave to merge past the rules.
+fn writes(overview: &PullRequestOverview) -> bool {
+    overview.viewer_can_merge_as_admin
+        || matches!(
+            overview.viewer_permission,
+            Some(
+                RepositoryPermission::Admin
+                    | RepositoryPermission::Maintain
+                    | RepositoryPermission::Write
+            )
+        )
+}
+
+/// The checks for the head: the live overview's when it has come, else
+/// the cached rollup. Tracked.
+pub(crate) fn current_checks(state: ReviewState) -> Option<Arc<Checks>> {
     state
         .pull_request_overview
         .with(|overview| {
@@ -415,97 +467,6 @@ fn current_checks(state: ReviewState) -> Option<Arc<Checks>> {
                 .map(|overview| Arc::new(overview.checks.clone()))
         })
         .or_else(|| state.checks.get())
-}
-
-fn checks_rows(checks: Arc<Checks>) -> impl IntoView {
-    let rows = Arc::new(checks.runs.iter().cloned().enumerate().collect::<Vec<_>>());
-    let row_count = rows.len();
-    dyn_stack(
-        move || rows.as_ref().clone(),
-        |(index, check)| format!("{index}:{}:{:?}", check.name, check.kind),
-        move |(index, check)| check_row(check, index + 1 == row_count),
-    )
-    .style(|s| {
-        s.flex_col()
-            .width_full()
-            .border_top(1.0)
-            .border_color(theme::border_muted())
-    })
-}
-
-fn checks_message(message: &'static str) -> impl IntoView {
-    Label::derived(move || message.to_string()).style(|s| {
-        s.width_full()
-            .padding_horiz(16.0)
-            .padding_vert(14.0)
-            .border_top(1.0)
-            .border_color(theme::border_muted())
-            .font_size(theme::TEXT_META)
-            .color(theme::fg_subtle())
-    })
-}
-
-fn check_row(check: Check, last: bool) -> impl IntoView {
-    let (icon, icon_color) = check_icon(check.state);
-    let debug = format!("check-row:{}", check.name);
-    let name = check_label(&check);
-    let status = check_status_label(&check);
-    let status_color = check_color(check.state);
-    let url = check.url.filter(|url| !url.is_empty());
-    let click_url = url.clone();
-    let key_url = url.clone();
-    let interactive = url.is_some();
-
-    Stack::horizontal((
-        sidebar_glyph(icon, icon_color)
-            .style(|s| s.size(15.0, 15.0).margin_right(10.0).pointer_events_none()),
-        Label::derived(move || name.clone()).style(|s| {
-            s.min_width(0.0)
-                .flex_grow(1.0_f32)
-                .font_size(theme::TEXT_META)
-                .color(theme::fg())
-                .text_ellipsis()
-                .selectable(false)
-                .pointer_events_none()
-        }),
-        Label::derived(move || status.clone()).style(move |s| {
-            s.font_size(theme::TEXT_META)
-                .color(status_color())
-                .margin_left(16.0)
-                .selectable(false)
-                .pointer_events_none()
-        }),
-    ))
-    .on_event_stop(el::Click, move |_, _| {
-        if let Some(url) = click_url.as_deref() {
-            open_in_browser(url);
-        }
-    })
-    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if matches!(key.code, Code::Enter | Code::Space) {
-            if let Some(url) = key_url.as_deref() {
-                open_in_browser(url);
-                return EventPropagation::Stop;
-            }
-        }
-        EventPropagation::Continue
-    })
-    .style(move |s| {
-        s.width_full()
-            .height(38.0)
-            .items_center()
-            .padding_horiz(16.0)
-            .apply_if(!last, |s| {
-                s.border_bottom(1.0).border_color(theme::border_muted())
-            })
-            .apply_if(interactive, |s| {
-                clickable(s)
-                    .keyboard_navigable()
-                    .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
-                    .hover(|s| s.background(theme::canvas_subtle()))
-            })
-    })
-    .debug_name(debug)
 }
 
 fn check_name(check: &Check) -> String {
@@ -521,7 +482,9 @@ fn check_name(check: &Check) -> String {
     name
 }
 
-fn check_label(check: &Check) -> String {
+/// A check's name, with its workflow and event, and what it says of
+/// itself.
+pub(crate) fn check_label(check: &Check) -> String {
     let name = check_name(check);
     match check
         .description
@@ -534,7 +497,8 @@ fn check_label(check: &Check) -> String {
     }
 }
 
-fn check_status_label(check: &Check) -> String {
+/// How a check stands, and how long it took once it is done.
+pub(crate) fn check_status_label(check: &Check) -> String {
     let status = check_status(check.state);
     let Some(seconds) = check
         .started_at
@@ -563,71 +527,8 @@ fn compact_duration(seconds: i64) -> String {
     }
 }
 
-fn checks_summary(checks: &Checks) -> String {
-    if checks.runs.is_empty() {
-        return match checks.state {
-            CheckState::Passing => "Checks passed",
-            CheckState::Failing { .. } => "Checks failed",
-            CheckState::Running => "Checks running",
-            CheckState::Unknown => "No checks",
-        }
-        .to_string();
-    }
-    let failures = checks
-        .runs
-        .iter()
-        .filter(|check| check.state.is_failing())
-        .count();
-    let pending = checks
-        .runs
-        .iter()
-        .filter(|check| check.state.is_pending())
-        .count();
-    let waiting = checks
-        .runs
-        .iter()
-        .filter(|check| check.state == CheckRunState::Waiting)
-        .count();
-    let passing = checks
-        .runs
-        .iter()
-        .filter(|check| check.state.is_passing())
-        .count();
-    let unknown = checks
-        .runs
-        .len()
-        .saturating_sub(failures + pending + passing);
-
-    if failures > 0 {
-        return format!("{} failed · {} passed", failures, passing);
-    }
-    if matches!(checks.state, CheckState::Failing { .. }) {
-        return "Checks failed".to_string();
-    }
-    if waiting > 0 && waiting == pending {
-        return format!("{} waiting · {} passed", waiting, passing);
-    }
-    if waiting > 0 {
-        return format!(
-            "{} running · {} waiting · {} passed",
-            pending - waiting,
-            waiting,
-            passing
-        );
-    }
-    if pending > 0 {
-        return format!("{} running · {} passed", pending, passing);
-    }
-    if matches!(checks.state, CheckState::Running) {
-        return format!("Checks running · {} passed", passing);
-    }
-    if unknown > 0 {
-        return format!("{} unknown · {} passed", unknown, passing);
-    }
-    format!("{} checks passed", passing)
-}
-
-fn check_icon(state: CheckRunState) -> (SidebarIcon, fn() -> Color) {
+/// A check's glyph, in the colour of how it stands.
+pub(crate) fn check_icon(state: CheckRunState) -> (SidebarIcon, fn() -> Color) {
     if state.is_passing() {
         (SidebarIcon::Check, theme::open)
     } else if state.is_failing() {
@@ -638,20 +539,6 @@ fn check_icon(state: CheckRunState) -> (SidebarIcon, fn() -> Color) {
         (SidebarIcon::Refresh, theme::draft_yellow)
     } else {
         (SidebarIcon::Warning, theme::fg_subtle)
-    }
-}
-
-fn check_color(state: CheckRunState) -> fn() -> Color {
-    if state.is_passing() {
-        theme::open
-    } else if state.is_failing() {
-        theme::closed
-    } else if state == CheckRunState::Waiting {
-        theme::fg_subtle
-    } else if state.is_pending() {
-        theme::draft_yellow
-    } else {
-        theme::fg_subtle
     }
 }
 
@@ -719,7 +606,6 @@ fn merge_section(
             merge_content(
                 state,
                 backend.clone(),
-                selected_method,
                 bypass_requirements,
                 confirmation,
                 message,
@@ -734,7 +620,6 @@ fn merge_section(
 fn merge_content(
     state: ReviewState,
     backend: Rc<Backend>,
-    selected_method: RwSignal<MergeMethod>,
     bypass_requirements: RwSignal<bool>,
     confirmation: RwSignal<Option<MergeConfirmation>>,
     message: MessageDraft,
@@ -752,11 +637,6 @@ fn merge_content(
             title,
             detail,
         )
-        .style(|s| {
-            s.padding(16.0)
-                .border_top(1.0)
-                .border_color(theme::border())
-        })
         .debug_name("merge-finished")
         .into_any();
     }
@@ -770,7 +650,6 @@ fn merge_content(
     let controls = merge_controls(
         state,
         backend,
-        selected_method,
         bypass_requirements,
         confirmation,
         message,
@@ -789,14 +668,7 @@ fn merge_content(
         error_line(snapshot.update_error.clone(), "merge-update-error"),
         controls,
     ))
-    .style(|s| {
-        s.flex_col()
-            .width_full()
-            .gap(10.0)
-            .padding(16.0)
-            .border_top(1.0)
-            .border_color(theme::border())
-    })
+    .style(|s| s.flex_col().width_full().gap(12.0))
     .into_any()
 }
 
@@ -892,7 +764,6 @@ fn status_row(icon: impl IntoView + 'static, title: String, detail: String) -> S
 fn merge_controls(
     state: ReviewState,
     backend: Rc<Backend>,
-    selected_method: RwSignal<MergeMethod>,
     bypass_requirements: RwSignal<bool>,
     confirmation: RwSignal<Option<MergeConfirmation>>,
     message: MessageDraft,
@@ -1014,10 +885,11 @@ fn merge_controls(
                     .into_any();
             }
 
+            // Hidden, not just empty, so the column's gap skips it.
             let bypass_control = if bypass_needed {
                 bypass_checkbox(bypass_requirements, confirmation).into_any()
             } else {
-                Empty::new().into_any()
+                Empty::new().style(|s| s.hide()).into_any()
             };
 
             let request = MergeConfirmation {
@@ -1046,26 +918,11 @@ fn merge_controls(
                 },
             )
             .style(|s| s.flex_grow(1.0_f32));
-            // One allowed method leaves nothing to pick, so the button stands alone.
-            let methods = overview.allowed_merge_methods;
-            let method_picker = if [methods.merge, methods.squash, methods.rebase]
-                .into_iter()
-                .filter(|allowed| *allowed)
-                .count()
-                > 1
-            {
-                merge_method_button(methods, selected_method, confirmation).into_any()
-            } else {
-                Empty::new().into_any()
-            };
-
-            Stack::vertical((
-                bypass_control,
-                Stack::horizontal((action, method_picker))
-                    .style(|s| s.width_full().items_center().gap(8.0)),
-            ))
-            .style(|s| s.flex_col().width_full().gap(8.0))
-            .into_any()
+            // The method is picked from the chevron beside the bar's Merge,
+            // which names it; the box has no picker of its own.
+            Stack::vertical((bypass_control, action))
+                .style(|s| s.flex_col().width_full().gap(8.0))
+                .into_any()
         }
     }
 }
@@ -1247,23 +1104,6 @@ fn message_fields(message: MessageDraft) -> impl IntoView {
     );
 
     Stack::vertical((title, body)).style(|s| s.flex_col().width_full().gap(8.0))
-}
-
-fn merge_method_button(
-    methods: MergeMethods,
-    selected_method: RwSignal<MergeMethod>,
-    confirmation: RwSignal<Option<MergeConfirmation>>,
-) -> impl View {
-    picker(
-        move || {
-            effective_method(selected_method.get(), methods)
-                .map(method_short)
-                .unwrap_or("Method")
-                .to_string()
-        },
-        move || merge_method_menu(methods, selected_method, confirmation),
-    )
-    .debug_name("merge-method")
 }
 
 /// The small button beside a merge box action that picks how it goes.
@@ -1480,7 +1320,7 @@ fn agent_name(agent: perch_agent::Backend) -> &'static str {
     agent.label()
 }
 
-/// A button of the merge surface, named in the tree for its label.
+/// A button of the merge box, named in the tree for its label.
 fn merge_button(
     label: String,
     prominent: bool,
@@ -1534,17 +1374,7 @@ fn merge_facts(
         overview_loading,
         heads_match,
         only_ahead,
-        has_write_permission: overview.is_some_and(|overview| {
-            overview.viewer_can_merge_as_admin
-                || matches!(
-                    overview.viewer_permission,
-                    Some(
-                        RepositoryPermission::Admin
-                            | RepositoryPermission::Maintain
-                            | RepositoryPermission::Write
-                    )
-                )
-        }),
+        has_write_permission: overview.is_some_and(writes),
         mergeable: overview.map(|overview| overview.mergeable),
         merge_state: overview.map(|overview| overview.merge_state),
         can_bypass: overview.is_some_and(|overview| overview.viewer_can_merge_as_admin),
@@ -2053,54 +1883,6 @@ mod tests {
     }
 
     #[test]
-    fn checks_summary_never_calls_unknown_or_truncated_details_all_passed() {
-        let empty_pass = Checks {
-            state: CheckState::Passing,
-            url: None,
-            runs: Vec::new(),
-        };
-        assert_eq!(checks_summary(&empty_pass), "Checks passed");
-
-        let partial = Checks {
-            state: CheckState::Passing,
-            url: None,
-            runs: vec![check(CheckRunState::Success), check(CheckRunState::Unknown)],
-        };
-        assert_eq!(checks_summary(&partial), "1 unknown · 1 passed");
-
-        let truncated_failure = Checks {
-            state: CheckState::Failing {
-                workflow: "a check outside the returned details".into(),
-            },
-            url: None,
-            runs: vec![check(CheckRunState::Success)],
-        };
-        assert_eq!(checks_summary(&truncated_failure), "Checks failed");
-    }
-
-    #[test]
-    fn checks_summary_counts_jobs_a_rerun_has_not_reached_apart() {
-        let rerun = |runs| Checks {
-            state: CheckState::Running,
-            url: None,
-            runs,
-        };
-        let partway = rerun(vec![
-            check(CheckRunState::Pending),
-            check(CheckRunState::Waiting),
-            check(CheckRunState::Waiting),
-            check(CheckRunState::Success),
-        ]);
-        assert_eq!(checks_summary(&partway), "1 running · 2 waiting · 1 passed");
-
-        let between = rerun(vec![
-            check(CheckRunState::Waiting),
-            check(CheckRunState::Success),
-        ]);
-        assert_eq!(checks_summary(&between), "1 waiting · 1 passed");
-    }
-
-    #[test]
     fn check_rows_include_status_descriptions_and_compact_durations() {
         let mut detailed = check(CheckRunState::Success);
         detailed.description = Some("Contributor License Agreement is signed.".into());
@@ -2117,19 +1899,15 @@ mod tests {
     }
 
     #[test]
-    fn rendered_surface_shows_checks_and_supports_keyboard_bypass_confirmation() {
+    fn rendered_box_supports_keyboard_bypass_confirmation() {
         let root = TestRoot::new();
         let state = review_state(MergeState::Blocked, true);
-        let view = surface(
-            crate::state::AppState::new(),
-            state,
-            Rc::new(Backend::detached()),
-        );
+        let view = MergeBox::new(crate::state::AppState::new(), state)
+            .section(state, Rc::new(Backend::detached()));
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         harness.rebuild();
         harness.paint();
 
-        assert!(named(harness.root_id(), "check-row:check").is_some());
         let bypass = named(harness.root_id(), "merge-bypass").unwrap();
         bypass.request_focus();
         harness.rebuild();
@@ -2636,11 +2414,8 @@ mod tests {
         merged.merged = true;
         merged.merged_by = Some("criccomini".into());
         state.pull_request.set(Some(Arc::new(merged.clone())));
-        let view = surface(
-            crate::state::AppState::new(),
-            state,
-            Rc::new(Backend::detached()),
-        );
+        let view = MergeBox::new(crate::state::AppState::new(), state)
+            .section(state, Rc::new(Backend::detached()));
         let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 600.0);
         harness.rebuild();
         harness.paint();

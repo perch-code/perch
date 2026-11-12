@@ -176,8 +176,9 @@ pub(crate) fn section(app: AppState, state: ReviewState, backend: Rc<Backend>) -
     .debug_name("submit-review")
 }
 
-/// The section folded to a line while the agents' settings are unfolded
-/// over it: what it holds, and Open to go back to it.
+/// The section folded to a line while the agents' settings or one of
+/// their reviews are open over it: what it holds, and Open to go back to
+/// it, which folds them.
 pub(crate) fn folded(state: ReviewState) -> impl IntoView {
     let drafts = Memo::new(move |_| state.drafts());
     Stack::horizontal((
@@ -208,7 +209,12 @@ pub(crate) fn folded(state: ReviewState) -> impl IntoView {
             "submit-review-unfold",
             false,
             || true,
-            move || state.review_agents_expanded.set(false),
+            move || {
+                floem::reactive::Effect::batch(|| {
+                    state.review_agents_expanded.set(false);
+                    state.review_expanded.set(None);
+                })
+            },
         ),
     ))
     .style(|s| {
@@ -917,8 +923,10 @@ mod tests {
         commands: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
     ) -> Result<Command, tokio::sync::mpsc::error::TryRecvError> {
         loop {
+            // What the popover asks for as it opens: the item's reviews,
+            // and its runs, for their reviewers.
             match commands.try_recv() {
-                Ok(Command::LoadReviewDashboard { .. }) => continue,
+                Ok(Command::LoadReviewDashboard { .. } | Command::LoadItemRuns { .. }) => continue,
                 other => return other,
             }
         }

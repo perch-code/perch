@@ -772,8 +772,8 @@ pub fn composer_view(
     //
     // A composer laid in place on Conversation also leaves its box where
     // `a` can find it and scrolls the page to the whole of itself, Send
-    // included: it sits at the end of the conversation, or under a thread,
-    // and may have opened off screen or only its top on it.
+    // included: it sits over the timeline, or under a thread, and may
+    // have opened off screen or only its top on it.
     let inner = editor.editor().editor_view_id;
     let whole = std::rc::Rc::new(std::cell::Cell::new(None::<floem::ViewId>));
     let whole_set = whole.clone();
@@ -1559,8 +1559,8 @@ pub fn subject_word(state: ReviewState) -> &'static str {
 /// keeps the effort where the model takes it. GitHub can be picked where
 /// a draft has somewhere to land, a composer on lines or under a thread
 /// that is on GitHub, and where the text posts at once as an issue
-/// comment: the foot of a pull request's or an issue's conversation, or
-/// under a thread with neither lines nor a place on GitHub. A draft being
+/// comment: Conversation's own, over a pull request's or an issue's
+/// timeline, or under a thread with neither lines nor a place on GitHub. A draft being
 /// edited stays a draft: the models are greyed out, since sending would
 /// replace its body, not ask.
 fn destination_picker(app: AppState, state: ReviewState) -> impl IntoView {
@@ -7210,11 +7210,12 @@ mod tests {
         }
     }
 
-    /// An answer asked at the foot of a pull request sits in a thread of
-    /// Perch's own with no lines and no place on GitHub, where a draft
-    /// could not go. Post to GitHub is offered there all the same, since
-    /// the composer it opens posts an issue comment: the same send the
-    /// foot has, which is what the reader would otherwise paste into.
+    /// An answer asked from a pull request's Conversation sits in a
+    /// thread of Perch's own with no lines and no place on GitHub, where a
+    /// draft could not go. Post to GitHub is offered there all the same,
+    /// since the composer it opens posts an issue comment: the same send
+    /// Conversation's composer has, which is what the reader would
+    /// otherwise paste into.
     /// With no pull request to comment on it goes, and Copy stays.
     #[test]
     fn post_to_github_is_offered_on_a_thread_of_perchs_own_and_posts_an_issue_comment() {
@@ -8271,7 +8272,7 @@ mod tests {
         );
     }
 
-    /// At the foot of a pull request's conversation GitHub is offered
+    /// In the composer over a pull request's timeline GitHub is offered
     /// and posts an issue comment: under a thread that is on GitHub it is
     /// a reply that posts at once, under one of Perch's own with no lines
     /// it is an issue comment too, and on an issue it is not offered.
@@ -8330,12 +8331,12 @@ mod tests {
         assert!(state.posts_issue_comment(&on_issue));
     }
 
-    /// With GitHub picked at the foot the button reads Comment. The first
-    /// send asks, naming the pull request, and Escape takes the question
-    /// back with the text intact; the next send, Enter alone, posts. The
-    /// box is still while the comment goes, a refusal gives the text back
-    /// with the reason under it, and a comment that posted closes the
-    /// composer. The next composer at the foot is an agent's again.
+    /// With GitHub picked in Conversation's composer the button reads
+    /// Comment. The first send asks, naming the pull request, and Escape
+    /// takes the question back with the text intact; the next send, Enter
+    /// alone, posts. The box is still while the comment goes, a refusal
+    /// gives the text back with the reason under it, and a comment that
+    /// posted closes the composer. The next composer there is an agent's again.
     #[test]
     fn an_issue_comment_asks_once_posts_on_enter_and_keeps_the_text_when_refused() {
         let root = TestRoot::new();
@@ -8487,7 +8488,8 @@ mod tests {
         );
         assert_eq!(state.composer_draft.get(), "");
 
-        // The foot still opens on an agent; GitHub is a click away.
+        // Conversation's composer still opens on an agent; GitHub is a
+        // click away.
         state.open_composer(None, None, String::new(), sonnet_medium());
         assert_eq!(
             state.composer.get().unwrap().destination,
@@ -8648,7 +8650,7 @@ mod tests {
         assert!(!close_offered(app, state));
     }
 
-    /// The composer at the foot of Conversation, with the close menu over
+    /// Conversation's composer, over the timeline, with the close menu over
     /// the window as the app draws it, in a window `width` wide.
     fn with_close_menu(
         root: TestRoot,

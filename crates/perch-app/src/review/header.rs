@@ -3,7 +3,8 @@
 //! The bar is the window's title bar. It holds what is open, the switch
 //! between Conversation and Code, and the things a reader reaches for from
 //! anywhere in an item: GitHub, plan usage, every item's agents, Start
-//! work, Review on anything with files, and closing the item.
+//! work, Merge on a pull request the reader may merge, Review on anything
+//! with files, and closing the item.
 //! Everything else about the item, its state and number, branches, checks
 //! and worktree, and what GitHub says about it, is `review::summary`,
 //! under Conversation's title.
@@ -132,13 +133,14 @@ fn state_glyph(state: ReviewState) -> impl IntoView {
 }
 
 /// What is reached for from anywhere in an item: GitHub, every item's
-/// agents, Start work, Review, and closing it. Bug reports and plan usage
-/// are the app's, and sit in the drawer's footer.
+/// agents, Start work, Merge, Review, and closing it. Bug reports and plan
+/// usage are the app's, and sit in the drawer's footer.
 fn trailing(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     Stack::horizontal((
         github_button(state),
         crate::ui::agents::dropdown::button(app, state, backend.clone()),
         crate::review::start_work::button(app, state),
+        crate::review::merge_button::control(app, state, backend.clone()),
         review_control(app, state, backend.clone()),
         close_button(app, state, backend),
     ))
@@ -528,13 +530,13 @@ pub(crate) mod tests {
     fn popover_covers_the_item(harness: &HeadlessHarness, popover: floem::ViewId) {
         let bounds = popover.get_visual_rect_no_clip();
         let x = bounds.x0 + 2.0;
-        let title_y = theme::REVIEW_HEADER_HEIGHT + theme::CONVERSATION_PADDING + 10.0;
-        let summary_y = title_y + theme::TEXT_PAGE_TITLE as f64 + theme::CONVERSATION_TITLE_GAP;
+        let first_y = theme::REVIEW_HEADER_HEIGHT + theme::CONVERSATION_PADDING + 10.0;
+        let second_y = first_y + theme::SUMMARY_ROW;
         assert!(
-            bounds.y0 < title_y && bounds.y1 > summary_y,
+            bounds.y0 < first_y && bounds.y1 > second_y,
             "popover at {bounds:?} does not reach the summary"
         );
-        for (layer, y) in [("title", title_y), ("summary", summary_y)] {
+        for (layer, y) in [("summary's first row", first_y), ("its second", second_y)] {
             let target = harness
                 .element_id_at(x, y)
                 .unwrap_or_else(|| panic!("nothing under the {layer}"))
@@ -588,13 +590,13 @@ pub(crate) mod tests {
     fn conversation_is_under_the_bar_and_codes_tabs_are_under_it_too() {
         let (mut harness, _, state) = pull_request_harness();
         let bar = rect(&harness, "item bar");
-        let title = rect(&harness, "conversation-title");
+        let column = rect(&harness, "conversation column");
         assert!(
             named(harness.root_id(), "tab strip").is_none(),
             "Conversation has no tabs"
         );
         assert_eq!(
-            title.y0,
+            column.y0,
             bar.y1 + theme::CONVERSATION_PADDING,
             "the page starts under the bar with the column's own padding"
         );
@@ -607,7 +609,7 @@ pub(crate) mod tests {
         let strip = rect(&harness, "tab strip");
         assert_eq!(strip.y0, bar.y1, "the tabs start under the bar");
         assert_eq!(strip.height(), theme::TAB_HEIGHT);
-        assert!(named(harness.root_id(), "conversation-title").is_none());
+        assert!(named(harness.root_id(), "conversation column").is_none());
 
         let conversation = rect(&harness, "Conversation pill").center();
         harness.click(conversation.x, conversation.y);

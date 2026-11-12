@@ -23,8 +23,8 @@ pub enum Checked {
     Full,
 }
 
-/// Where a history loaded a page at a time stands: an item's runs on its
-/// Agents section, or a run's events in its detail.
+/// Where a history loaded a page at a time stands: an item's runs in the
+/// Agents dropdown, or a run's events in its detail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HistoryPage {
     /// Older entries are left to load.
@@ -42,7 +42,8 @@ pub struct PendingAgentNavigation {
     pub navigation_id: u64,
     pub item_id: String,
     pub review_attempt_id: Option<String>,
-    /// A run to open in the item's Agents section once it is there.
+    /// A run to bring into view once the item is there: see
+    /// `ui::agents::reveal`.
     pub run_id: Option<String>,
 }
 
@@ -340,12 +341,10 @@ pub struct AppState {
     /// keyboard when it was opened by a shortcut, to hand it back to when
     /// the drawer shuts.
     pub drawer_opener: RwSignal<Option<floem::ViewId>>,
-    /// Each item's history for its Agents section, by item: whether older runs
-    /// are left to load, and whether a page is on its way.
+    /// Each item's run history for the Agents dropdown's group for it, by
+    /// item: whether older runs are left to load, and whether a page is on
+    /// its way.
     pub item_runs: RwSignal<HashMap<String, HistoryPage>>,
-    /// Review group rows are expanded by default; this records the explicit
-    /// collapses so newly admitted reviewer children are immediately visible.
-    pub collapsed_agent_review_groups: RwSignal<HashSet<String>>,
     pub pending_agent_navigation: RwSignal<Option<PendingAgentNavigation>>,
     pub agent_navigation_token: RwSignal<u64>,
     expected_navigation_id: RwSignal<Option<u64>>,
@@ -494,7 +493,6 @@ impl AppState {
             agents_clock_armed: RwSignal::new(false),
             drawer_opener: RwSignal::new(None),
             item_runs: RwSignal::new(HashMap::new()),
-            collapsed_agent_review_groups: RwSignal::new(HashSet::new()),
             pending_agent_navigation: RwSignal::new(None),
             agent_navigation_token: RwSignal::new(0),
             expected_navigation_id: RwSignal::new(None),
@@ -609,7 +607,7 @@ impl AppState {
         }
     }
 
-    /// Ask for a page of an item's runs for its Agents section: the first, or
+    /// Ask for a page of an item's runs for the Agents dropdown: the first, or
     /// the one after the oldest it has.
     pub fn load_item_runs(&self, backend: &crate::backend::Backend, item_id: &str, older: bool) {
         const PAGE: usize = 20;
@@ -1241,7 +1239,7 @@ impl AppState {
 
     /// Keep an open run's detail live without retaining every transcript
     /// in the app signal: a run's events are here once its detail has been
-    /// asked for, by opening it in an Agents section. The same event already
+    /// asked for, by opening its raw output. The same event already
     /// committed before AgentStep was published; its authoritative sequence
     /// comes from AgentRunUpdated.
     fn append_open_agent_event(&self, run_id: &str, event: &perch_agent::RunEvent) {
@@ -1410,8 +1408,8 @@ impl AppState {
         })
     }
 
-    /// Open a run's item on Conversation, with the run open in its Agents
-    /// row once the item's threads have landed.
+    /// Open a run's item on Conversation, and bring the run into view once
+    /// the item's threads have landed: see `ui::agents::reveal`.
     pub fn begin_agent_run_navigation(
         &self,
         item_id: String,
@@ -1982,7 +1980,11 @@ impl AppState {
                     groups,
                     findings.clone(),
                 );
-                if review.is_item(&item_id) {
+                // A past review shows every finding it had, whatever
+                // has become of them since.
+                if review.is_item(&item_id)
+                    && review.historical_review.with_untracked(Option::is_none)
+                {
                     review.apply_review_finding_filter(
                         review.review_finding_filter.get_untracked(),
                         &findings,
@@ -1994,7 +1996,9 @@ impl AppState {
             }
             Event::ReviewFindingUpdated { item_id, summary } => {
                 self.update_review_finding(item_id.clone(), summary);
-                if review.is_item(&item_id) {
+                if review.is_item(&item_id)
+                    && review.historical_review.with_untracked(Option::is_none)
+                {
                     let findings = self.review_findings_for(&item_id);
                     review.apply_review_finding_filter(
                         review.review_finding_filter.get_untracked(),
@@ -2445,9 +2449,14 @@ impl AppState {
                     status_generation >= review.pull_request_status_generation.get_untracked();
                 if review.is_item(&item_id) && is_current_subject && is_current_generation {
                     review.pull_request_status_generation.set(status_generation);
+                    // Reading before the overview goes: nothing here is
+                    // batched, so the other way round there is a moment
+                    // with no overview and nothing being read, in which
+                    // what is kept while reading (the bar's Merge, the
+                    // Status row's chips) lets go and its popover shuts.
+                    review.pull_request_overview_loading.set(true);
                     review.pull_request_overview.set(None);
                     review.pull_request_overview_error.set(None);
-                    review.pull_request_overview_loading.set(true);
                 }
             }
             Event::PullRequestOverviewReady {
@@ -2543,11 +2552,13 @@ impl AppState {
                     // or checks changed without the head moving. Never leave
                     // the old live authorization snapshot enabled while its
                     // replacement is being fetched.
-                    review.pull_request_overview.set(None);
-                    review.pull_request_overview_error.set(None);
+                    // Reading first, as for PullRequestOverviewLoading, so
+                    // what is kept while reading holds through the swap.
                     review
                         .pull_request_overview_loading
                         .set(pull_request.is_open() && !review.offline.get_untracked());
+                    review.pull_request_overview.set(None);
+                    review.pull_request_overview_error.set(None);
                 }
             }
             Event::PullRequestMergeStarted {
@@ -4607,7 +4618,7 @@ mod tests {
     }
 
     /// A run on another item: the item opens on Conversation, whatever it
-    /// was left on, and the run is asked for in its Agents section once its
+    /// was left on, and the run is asked to be brought into view once its
     /// threads are here.
     #[test]
     fn a_run_on_another_item_opens_it_on_conversation_asking_for_the_run() {
@@ -6814,6 +6825,62 @@ mod tests {
                 .map(|summary| summary.group.id.as_str()),
             Some("selected")
         );
+    }
+
+    /// A finding settled while a past review is up leaves that review
+    /// showing it, since the past review shows every finding it had; on
+    /// the live item the same news hides its thread.
+    #[test]
+    fn a_finding_settled_under_a_past_review_stays_in_it() {
+        let app = AppState::new();
+        let review = review_of("wt");
+        let at: jiff::Timestamp = "2026-09-18T09:59:00Z".parse().unwrap();
+        let dismissed = crate::review::model::ReviewFindingSummary {
+            finding: perch_github::Finding {
+                id: "f-1".into(),
+                item_id: "wt".into(),
+                stable_key: "lock".into(),
+                thread_id: "finding-1".into(),
+                created_group_id: None,
+                disposition: perch_github::FindingDisposition::Dismissed,
+                verification: perch_github::FindingVerification::Unverified,
+                dismissal_reason: None,
+                possible_duplicate_of: None,
+                duplicate_of: None,
+                last_verified_snapshot_id: None,
+                last_verified_head_sha: None,
+                last_checked_snapshot_id: None,
+                last_checked_head_sha: None,
+                created_at: at,
+                updated_at: at,
+            },
+            severity: perch_github::FindingSeverity::High,
+            attributions: Vec::new(),
+            seen_in_reviews: Vec::new(),
+            backend: None,
+            model: None,
+            original_review_number: None,
+            title: "The lock is held across an await.".into(),
+        };
+        let update = || Event::ReviewFindingUpdated {
+            item_id: "wt".into(),
+            summary: dismissed.clone(),
+        };
+
+        review
+            .historical_review
+            .set(Some(historical_summary("selected")));
+        app.apply_with_review(update(), review);
+        assert!(
+            review.hidden_review_threads.with(HashSet::is_empty),
+            "the past review lost a finding"
+        );
+
+        review.historical_review.set(None);
+        app.apply_with_review(update(), review);
+        assert!(review
+            .hidden_review_threads
+            .with(|hidden| hidden.contains("finding-1")));
     }
 
     #[test]

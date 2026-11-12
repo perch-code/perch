@@ -257,9 +257,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     // and the container builds its child again on each: the status is
     // written on every poll, and a page built again is a scroll back at
     // the top.
-    // The clock that moves the agents' elapsed times. Wired once, here,
-    // since the rows are built again with the pane.
-    agents::wire(state);
+    // The clock that moves the agents' elapsed times, and the run asked
+    // for from elsewhere brought into view. Wired once, here, since the
+    // rows are built again with the pane.
+    agents::wire(state, review, backend.clone());
     let empty_backend = backend.clone();
     let pane = dyn_container(
         move || main_pane.get(),
@@ -358,6 +359,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         open_box::overlay(state),
         // Start work's confirmation, as modal.
         crate::review::start_work::overlay(state, backend.clone()),
+        // A run's raw output, over the Review popover it was opened from.
+        agents::detail::sheet(state, review, backend.clone()),
         // Over everything, and only while a drawer's edge is being dragged.
         sidebar::resize_cursor_sheet(state),
         drawer::resize_cursor_sheet(state),
@@ -445,6 +448,15 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 }
                 if state.start_work_confirm.with(Option::is_some) {
                     return crate::review::start_work::key(state, key_backend, key);
+                }
+                // Escape puts a run's raw output away, from wherever the
+                // keyboard is, before it reaches a popover under it.
+                if key.code == Code::Escape
+                    && key.modifiers.is_empty()
+                    && review.agent_output.with_untracked(Option::is_some)
+                {
+                    agents::detail::close(review);
+                    return EventPropagation::Stop;
                 }
                 // Cmd-N opens the new-work view, from anywhere.
                 if key.code == Code::KeyN && key.modifiers == OS_MOD {
@@ -754,9 +766,9 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 if key.modifiers.is_empty() {
                     match key.code {
                         Code::KeyA => {
-                            // On Conversation the composer is laid in place at the
-                            // end of the column, about the item as a whole: `a`
-                            // opens it, or takes the keyboard back to it.
+                            // On Conversation the composer is laid in place over
+                            // the timeline, about the item as a whole: `a` opens
+                            // it, or takes the keyboard back to it.
                             if review.tab.get() == crate::review::model::ItemTab::Conversation {
                                 match review
                                     .composer_box
@@ -2026,7 +2038,7 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert_eq!(review.tab.get(), ItemTab::Conversation);
-        assert!(named(harness.root_id(), "conversation-title").is_some());
+        assert!(named(harness.root_id(), "conversation column").is_some());
 
         harness.dispatch_event(mode(2));
         harness.rebuild();

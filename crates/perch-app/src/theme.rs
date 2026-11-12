@@ -267,6 +267,21 @@ pub fn running() -> Color {
 pub fn draft_yellow() -> Color {
     pick(rgb(0xbf8700), rgb(0xd29922))
 }
+/// The bar's Merge while GitHub would take the pull request: the green
+/// GitHub's own merge button is, deeper under the pointer.
+pub fn merge_bg() -> Color {
+    pick(rgb(0x1f883d), rgb(0x238636))
+}
+pub fn merge_hover() -> Color {
+    pick(rgb(0x1a7f37), rgb(0x2ea043))
+}
+/// The words on the green, and the rule between its two parts.
+pub fn on_merge() -> Color {
+    pick(rgb(0xffffff), rgb(0xf0f6fc))
+}
+pub fn merge_rule() -> Color {
+    pick(rgba(0xffffff, 0x4d), rgba(0xf0f6fc, 0x4d))
+}
 
 /// Badges.
 /// A caution pill: the amber GitHub uses for an attention banner.
@@ -376,13 +391,12 @@ pub fn avatar_tints() -> [Color; 6] {
 /// base for a row's title, the prose and a summary's rows; a step down
 /// for a toolbar's labels and the bar's title; two for a row's byline and
 /// age, a section's heading and a chip; and up to 16 for a section's
-/// title and 24 for the page's. Codex has nothing smaller than 12, so a
+/// title. Codex has nothing smaller than 12, so a
 /// section heading and a badge are the same size and differ in weight
 /// and colour. The renderer rounds the size in its glyph cache key, so
 /// fractional sizes that round together share bitmaps on a non-retina
 /// display.
 pub const TEXT_TITLE: f32 = 14.0;
-pub const TEXT_PAGE_TITLE: f32 = 24.0;
 pub const TEXT_SECTION_TITLE: f32 = 16.0;
 pub const TEXT_BODY: f32 = 14.0;
 pub const TEXT_META: f32 = 13.0;
@@ -415,10 +429,8 @@ pub fn weight_strong() -> FontWeight {
 }
 
 /// Line heights, as a multiple of the size. Prose runs at 1.625, Codex's
-/// relaxed leading, which is what its description and comments read at;
-/// the page title is set tight, at 1.2, so its two lines sit close.
+/// relaxed leading, which is what its description and comments read at.
 pub const PROSE_LINE_HEIGHT: f32 = 1.625;
-pub const PAGE_TITLE_LINE_HEIGHT: f32 = 1.2;
 
 /// Layout constants.
 /// The navigation panel, matching the roomy Codex dock at its default size.
@@ -933,8 +945,8 @@ pub const CHIP_PADDING: f64 = 7.0;
 /// How wide the reading column is. Prose past this is hard to follow.
 pub const CONVERSATION_WIDTH: f64 = 845.0;
 pub const CONVERSATION_PADDING: f64 = 40.0;
-/// Breathing room under the in-page title, and between the timeline and
-/// the sections after it.
+/// Breathing room under the summary's rows, and between the sections
+/// under them.
 pub const CONVERSATION_TITLE_GAP: f64 = 28.0;
 pub const CONVERSATION_ENTRY_PADDING: f64 = 24.0;
 /// Room between two cards, and between an event line and its neighbours.
@@ -945,8 +957,6 @@ pub const EVENT_GAP: f64 = 6.0;
 /// and `cards::perch_surface`.
 pub const CARD_RADIUS: f64 = RADIUS_LG;
 pub const CARD_PADDING: f64 = 16.0;
-/// The header of a section after the timeline: Checks, Agents, Reviews.
-pub const SECTION_HEADER_HEIGHT: f64 = 44.0;
 /// The compact byline at the top of a Conversation entry.
 pub const BYLINE_HEIGHT: f64 = 32.0;
 /// A reaction pill under a comment, and the room above the row of them.

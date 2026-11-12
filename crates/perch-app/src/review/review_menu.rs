@@ -1,11 +1,13 @@
 //! Review in the bar: one button, and one popover under it.
 //!
 //! The popover is the reader's review in the making. On top, the agents
-//! who can review the branch, folded to one line with Run beside it; their
-//! findings arrive as the reader's drafts. Under them, on an open pull
-//! request, those drafts, a summary and a verdict for GitHub. Unfolding
-//! the agents' settings folds the reader's review to a line. A branch with
-//! no pull request has only the agents, unfolded.
+//! who can review the branch, folded to one line with Run beside it, and
+//! under them the reviews they have done, newest first, each opening in
+//! place to its reviewers and what it found; their findings arrive as the
+//! reader's drafts. Under them, on an open pull request, those drafts, a
+//! summary and a verdict for GitHub. Unfolding the agents' settings, or
+//! opening one of their reviews, folds the reader's review to a line. A
+//! branch with no pull request has only the agents, unfolded.
 //!
 //! `review_launch` draws the agents' part and `submit_review` the rest;
 //! this module is the button, the popover around them, and opening and
@@ -45,6 +47,8 @@ pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
             if let Some(item_id) = item_id {
                 app.begin_review_dashboard_load(&item_id);
                 load_backend.load_review_dashboard(&item_id);
+                // And the item's runs, for its reviews' reviewers.
+                crate::ui::agents::load_item_runs(app, &load_backend, &item_id);
             }
         }
         open
@@ -197,6 +201,8 @@ pub(crate) fn cancel(state: ReviewState, restore_focus: bool) {
 pub(crate) fn close(state: ReviewState, restore_focus: bool) {
     state.review_open.set(false);
     state.review_agents_expanded.set(false);
+    state.review_expanded.set(None);
+    state.review_older_shown.set(false);
     state.submit_review_focused.set(false);
     state.submit_review_confirm_discard.set(false);
     state.submit_review_outcome.set(None);
@@ -254,14 +260,17 @@ fn popover(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Into
         .style(|s| s.items_start().width_full().gap(8.0)),
         review_launch::agents_section(app, state, backend, submitting),
         // One of the two parts unfolds at a time, so the popover stays
-        // the height of either alone. The review is built anew on each
-        // submission that comes back with something left to say, so the
-        // summary box starts empty: what was in it posted.
+        // the height of either alone: the agents' settings or one of
+        // their reviews open folds the reader's review to its line. The
+        // review is built anew on each submission that comes back with
+        // something left to say, so the summary box starts empty: what
+        // was in it posted.
         dyn_container(
             move || {
                 (
                     submitting.get(),
-                    state.review_agents_expanded.get(),
+                    state.review_agents_expanded.get()
+                        || state.review_expanded.with(Option::is_some),
                     state.submit_review_generation.get(),
                 )
             },
@@ -273,11 +282,17 @@ fn popover(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Into
                 }
             },
         )
-        .style(|s| {
+        // Unfolded, it gives up the popover's lack before the agents'
+        // reviews do: shrinking goes by factor times size, and a factor
+        // under 1 would leave the rest unshrunk once this one is spent.
+        // Folded to its line, it keeps it, and the reviews scroll instead.
+        .style(move |s| {
+            let folded =
+                state.review_agents_expanded.get() || state.review_expanded.with(Option::is_some);
             s.flex_col()
                 .width_full()
                 .min_height(0.0)
-                .flex_shrink(1.0_f32)
+                .flex_shrink(if folded { 0.0_f32 } else { 100.0_f32 })
         }),
     ))
     .style(|s| {

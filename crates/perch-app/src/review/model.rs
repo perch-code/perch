@@ -153,8 +153,8 @@ pub enum ItemTab {
 
 /// An item's pane as it was left: which of Conversation and Code was
 /// showing, the file tabs, the files shown whole, where the reader was on
-/// each tab, and the Agents section, unfolded or not and the runs open in it. The item opens on it again; the first time,
-/// on Conversation alone.
+/// each tab. The item opens on it again; the first time, on Conversation
+/// alone.
 #[derive(Debug, Clone)]
 pub struct Pane {
     tab: ItemTab,
@@ -163,8 +163,6 @@ pub struct Pane {
     whole: HashSet<String>,
     conversation_scroll: f64,
     file_places: HashMap<String, FilePlace>,
-    agents_unfolded: bool,
-    agents_open_runs: HashSet<String>,
     code_seen: bool,
 }
 
@@ -177,8 +175,6 @@ impl Default for Pane {
             whole: HashSet::new(),
             conversation_scroll: 0.0,
             file_places: HashMap::new(),
-            agents_unfolded: false,
-            agents_open_runs: HashSet::new(),
             code_seen: false,
         }
     }
@@ -1498,6 +1494,17 @@ pub struct ReviewState {
     /// they fold to one line under the reader's review; a branch has
     /// nothing else to show, and always shows them.
     pub review_agents_expanded: RwSignal<bool>,
+    /// The agents' review the popover has open to its reviewers and
+    /// findings, by its key in the run list (`AgentReviewRunGroup::key`).
+    /// One open folds the reader's own review to its line, as the
+    /// settings do. Forgotten as the popover shuts.
+    pub review_expanded: RwSignal<Option<String>>,
+    /// Whether the popover lists every review of the item, not only the
+    /// latest. Forgotten as it shuts.
+    pub review_older_shown: RwSignal<bool>,
+    /// The run whose raw output is up in its sheet over the window: what
+    /// a reviewer said, or a question's run that has no thread to show.
+    pub agent_output: RwSignal<Option<String>>,
     /// The agent launcher and the immutable history selection are
     /// view-local; durable preferences and groups live on `AppState`.
     pub review_launcher_draft: RwSignal<Option<ReviewLaunchDraft>>,
@@ -1568,17 +1575,10 @@ pub struct ReviewState {
     /// The tree asked for by the item's first visit to Code, taken by the
     /// editor pane, which holds the backend handle to save it as open.
     pub tree_wanted: RwSignal<bool>,
-    /// Whether the Agents section on Conversation is unfolded into the item's
-    /// runs.
-    pub agents_unfolded: RwSignal<bool>,
-    /// The runs open in the Agents section, showing what they did.
-    pub agents_open_runs: RwSignal<HashSet<String>>,
-    /// A run to bring into view in the Agents section, once its row is laid
-    /// out: unfolded, open, and at the top of the page.
+    /// A run to bring into view once it and its item are here: a
+    /// question's thread on Conversation, or a reviewer's review open in
+    /// the Review popover. See `ui::agents::reveal`.
     pub pending_run_reveal: RwSignal<Option<String>>,
-    /// A review, by group id, to bring into view in the Agents section once
-    /// its row is laid out: unfolded and at the top of the page.
-    pub pending_review_reveal: RwSignal<Option<String>>,
     /// How far down Conversation was scrolled, kept as it scrolls, so the
     /// page shows where it was left when it is built again: after a file's
     /// tab has shown in its place, or when the item comes back. Written
@@ -1663,6 +1663,8 @@ pub struct ReviewState {
     /// State of the deliberate, confirmed merge mutation.
     pub merge_pending: RwSignal<bool>,
     pub merge_error: RwSignal<Option<String>>,
+    /// Whether the merge box hangs open under the bar's Merge.
+    pub merge_open: RwSignal<bool>,
     /// Latest merge mutation observed for the displayed checkout. Every event
     /// also carries the item and pull-request identity, so checkout resets can
     /// clear this without letting a different subject settle the new view.
@@ -2143,6 +2145,9 @@ impl ReviewState {
             review_open: RwSignal::new(false),
             review_opener: RwSignal::new(None),
             review_agents_expanded: RwSignal::new(false),
+            review_expanded: RwSignal::new(None),
+            review_older_shown: RwSignal::new(false),
+            agent_output: RwSignal::new(None),
             review_launcher_draft: RwSignal::new(None),
             review_launcher_instructions: RwSignal::new(String::new()),
             review_launcher_uncommitted: RwSignal::new(None),
@@ -2173,10 +2178,7 @@ impl ReviewState {
             panes: RwSignal::new(HashMap::new()),
             code_seen: RwSignal::new(false),
             tree_wanted: RwSignal::new(false),
-            agents_unfolded: RwSignal::new(false),
-            agents_open_runs: RwSignal::new(HashSet::new()),
             pending_run_reveal: RwSignal::new(None),
-            pending_review_reveal: RwSignal::new(None),
             conversation_scroll: RwSignal::new(0.0),
             file_places: RwSignal::new(HashMap::new()),
             layout: RwSignal::new(Layout::Stacked),
@@ -2202,6 +2204,7 @@ impl ReviewState {
             pull_request_status_generation: RwSignal::new(0),
             merge_pending: RwSignal::new(false),
             merge_error: RwSignal::new(None),
+            merge_open: RwSignal::new(false),
             merge_attempt_id: RwSignal::new(None),
             pull_readiness: RwSignal::new(None),
             pull_bases: RwSignal::new(None),
@@ -2409,6 +2412,9 @@ impl ReviewState {
         self.review_open.set(false);
         self.review_opener.set(None);
         self.review_agents_expanded.set(false);
+        self.review_expanded.set(None);
+        self.review_older_shown.set(false);
+        self.agent_output.set(None);
         self.review_launcher_draft.set(None);
         self.review_launcher_instructions.set(String::new());
         self.review_launcher_uncommitted.set(None);
@@ -2440,6 +2446,7 @@ impl ReviewState {
         self.pull_request_status_generation.set(0);
         self.merge_pending.set(false);
         self.merge_error.set(None);
+        self.merge_open.set(false);
         self.merge_attempt_id.set(None);
         self.pull_readiness.set(None);
         self.pull_bases.set(None);
@@ -2674,8 +2681,6 @@ impl ReviewState {
             active: self.active.get_untracked(),
             whole: self.whole.get_untracked(),
             conversation_scroll: self.conversation_scroll.get_untracked(),
-            agents_unfolded: self.agents_unfolded.get_untracked(),
-            agents_open_runs: self.agents_open_runs.get_untracked(),
             file_places: self.file_places.get_untracked(),
             code_seen: self.code_seen.get_untracked(),
         };
@@ -2715,8 +2720,6 @@ impl ReviewState {
                 self.whole.set(pane.whole);
             }
             self.conversation_scroll.set(pane.conversation_scroll);
-            self.agents_unfolded.set(pane.agents_unfolded);
-            self.agents_open_runs.set(pane.agents_open_runs);
             self.file_places.set(pane.file_places);
             self.code_seen.set(pane.code_seen);
             self.tree_wanted.set(false);
@@ -2787,6 +2790,8 @@ impl ReviewState {
                     self.submit_review_outcome.set(None);
                     self.review_open.set(false);
                     self.review_agents_expanded.set(false);
+                    self.review_expanded.set(None);
+                    self.review_older_shown.set(false);
                     self.submit_review_focused.set(false);
                 }
             }
@@ -5445,8 +5450,8 @@ impl ReviewState {
     }
 
     /// Whether the composer's text, sent to GitHub, posts at once as an
-    /// issue comment: it is about the item as a whole, at the foot of the
-    /// conversation or under a thread that has neither lines nor a place
+    /// issue comment: it is about the item as a whole, Conversation's own
+    /// over the timeline or one under a thread that has neither lines nor a place
     /// on GitHub, so there is nothing to reply under and nothing to draft
     /// for the review. Untracked.
     pub fn posts_issue_comment(&self, composer: &Composer) -> bool {
@@ -7342,35 +7347,6 @@ mod tests {
         assert_eq!(tabs(), ["src/z.rs"]);
         assert_eq!(state.active.get().as_deref(), Some("src/z.rs"));
         assert!(state.whole.get().is_empty());
-    }
-
-    /// The Agents section, unfolded or not and the runs open in it, waits with
-    /// the item's pane while another item is open.
-    #[test]
-    fn the_agents_row_waits_with_the_items_pane() {
-        let state = ReviewState::new();
-        let open = |id: &str| {
-            let mut item =
-                perch_github::Item::new("slatedb/slatedb", "2026-09-18T09:59:00Z".parse().unwrap());
-            item.id = id.into();
-            state.begin("Reading the worktree");
-            state.item.set(Some(Arc::new(item)));
-            state.restore_pane()
-        };
-        open("a");
-        assert!(!state.agents_unfolded.get(), "folded the first time");
-        state.agents_unfolded.set(true);
-        state.agents_open_runs.update(|open| {
-            open.insert("run".into());
-        });
-
-        open("b");
-        assert!(!state.agents_unfolded.get());
-        assert!(state.agents_open_runs.with(HashSet::is_empty));
-
-        open("a");
-        assert!(state.agents_unfolded.get());
-        assert!(state.agents_open_runs.with(|open| open.contains("run")));
     }
 
     /// Where the reader was, on Conversation and in each file, waits with

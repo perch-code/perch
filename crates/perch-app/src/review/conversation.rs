@@ -1,23 +1,30 @@
 //! Conversation: the item's description, everything said about it on
 //! GitHub, and every thread the reader has had with an agent about it, in
-//! one quiet reading column in time order, with the composer at the end.
+//! one quiet reading column. Under the summary comes what Perch is doing
+//! about the item, its agents and the forms the menus unfold; then the
+//! description, the composer, and the timeline, newest first, its older
+//! cards folded under a row that shows them.
 //!
-//! The order is `review::timeline`'s; this module only draws it. The cards
-//! are in `review::cards`, and a thread's card shares its views with the
-//! inline card on Code.
+//! The order is `review::timeline`'s, oldest first, which the page turns
+//! round as it draws it. The cards are in `review::cards`, and a thread's
+//! card shares its views with the inline card on Code.
 
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use floem::prelude::*;
-use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
-use floem::style::{CursorStyle, Position};
+use floem::reactive::{Effect, Memo, ReactiveId, SignalGet, SignalUpdate, SignalWith};
+use floem::style::Position;
 use floem::views::scroll::ScrollChanged;
 use floem::views::{
     dyn_container, dyn_stack, Container, Decorators, Empty, Label, ScrollExt, Stack,
 };
+use floem::ViewId;
 
 use crate::backend::Backend;
 use crate::review::cards;
+use crate::review::doc::CardId;
 use crate::review::model::{Paging, ReviewFindingFilter, ReviewState};
 use crate::review::threads::{self, ThreadFace};
 use crate::review::timeline::{timeline, Card};
@@ -25,7 +32,335 @@ use crate::review::OpenFile;
 use crate::review::{conversation_find, find};
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::clickable;
+
+/// How many of the newest cards the timeline shows before the rest fold
+/// under Show older: enough to catch up on what happened lately, few
+/// enough that a long history does not push the page's end out of reach.
+const NEWEST_SHOWN: usize = 8;
+
+/// What the reader unfolded on the page: the timeline's older cards, and
+/// the whole of a long description.
+#[derive(Clone, Copy)]
+struct Unfolded {
+    older: RwSignal<bool>,
+    description: RwSignal<bool>,
+}
+
+thread_local! {
+    /// Each window's unfolding, by its review state, with the item it is
+    /// for. The page is built again whenever Conversation comes back from
+    /// Code, and the scroll it is put back to was taken with these open,
+    /// so they outlast the page; another item folds them again.
+    static UNFOLDED: RefCell<HashMap<ReactiveId, (String, bool, bool)>> =
+        RefCell::new(HashMap::new());
+}
+
+/// The page's unfolding, as the last page for this item left it.
+fn unfolded(state: ReviewState) -> Unfolded {
+    let window = state.item.id();
+    let unfolded = Unfolded {
+        older: RwSignal::new(false),
+        description: RwSignal::new(false),
+    };
+    let item = Memo::new(move |_| {
+        state
+            .item
+            .with(|item| item.as_ref().map(|item| item.id.clone()))
+    });
+    Effect::new(move |_| {
+        let item = item.get();
+        let (older, description) =
+            UNFOLDED.with(|kept| match (kept.borrow().get(&window), &item) {
+                (Some((was, older, description)), Some(item)) if was == item => {
+                    (*older, *description)
+                }
+                _ => (false, false),
+            });
+        if unfolded.older.get_untracked() != older {
+            unfolded.older.set(older);
+        }
+        if unfolded.description.get_untracked() != description {
+            unfolded.description.set(description);
+        }
+    });
+    Effect::new(move |_| {
+        let (older, description) = (unfolded.older.get(), unfolded.description.get());
+        let item = item.get_untracked();
+        UNFOLDED.with(|kept| {
+            let mut kept = kept.borrow_mut();
+            match item {
+                Some(item) if older || description => {
+                    kept.insert(window, (item, older, description));
+                }
+                _ => {
+                    kept.remove(&window);
+                }
+            }
+        });
+    });
+    unfolded
+}
+
+/// The timeline as the page shows it: newest first, and without the
+/// description, which is pinned above it.
+fn newest_first(cards: &[Card]) -> impl Iterator<Item = &Card> {
+    cards
+        .iter()
+        .rev()
+        .filter(|card| !matches!(card, Card::Description { .. }))
+}
+
+/// Whether the card `id` is one that Show older would show.
+fn folded_away(cards: &[Card], id: &CardId) -> bool {
+    newest_first(cards)
+        .skip(NEWEST_SHOWN)
+        .any(|card| cards::card_id(card) == *id)
+}
+
+/// The card a composer is open in: a thread with its follow-up box open
+/// under it, or a comment or review being edited in place.
+#[derive(Clone, PartialEq)]
+enum Held {
+    Thread(String),
+    Edit(String),
+}
+
+impl Held {
+    /// What the open composer is in, when it is in a card.
+    fn of(state: ReviewState) -> Option<Held> {
+        state.composer.with(|c| {
+            let c = c.as_ref()?;
+            match (&c.thread_id, &c.editing) {
+                (Some(thread), _) => Some(Held::Thread(thread.clone())),
+                (None, Some(node)) => Some(Held::Edit(node.clone())),
+                (None, None) => None,
+            }
+        })
+    }
+
+    fn is(&self, card: &Card) -> bool {
+        match (self, card) {
+            (Held::Thread(id), Card::Thread(thread)) => thread.id == *id,
+            (Held::Edit(node), Card::Comment(comment)) => comment.node_id == *node,
+            (Held::Edit(node), Card::Review { review }) => review.node_id == *node,
+            _ => false,
+        }
+    }
+}
+
+/// Whether the timeline shows every card: the reader unfolded them, or
+/// newer cards have pushed the one a composer is open in past the
+/// newest. That card is not folded away under the reader as they type
+/// in it, which would take the box and the keyboard with it.
+fn shows_all(cards: &[Card], older: bool, held: Option<&Held>) -> bool {
+    older
+        || held.is_some_and(|held| {
+            newest_first(cards)
+                .skip(NEWEST_SHOWN)
+                .any(|card| held.is(card))
+        })
+}
+
+/// The room above each timeline card, by its key: cards sit the standard
+/// gap apart, and an event line, which has no box, a little closer to
+/// whatever is on either side of it. Apart from the cards' keys, and
+/// read as each card is styled, so a newer card landing over the one
+/// that was first moves it down without building it again, along with
+/// whatever is open in it.
+fn gaps(cards: &[Card]) -> HashMap<String, f64> {
+    let mut gaps = HashMap::new();
+    // Whether the card over this one was an event line; `None` for the
+    // first.
+    let mut after_event = None;
+    for card in newest_first(cards) {
+        let event = matches!(card, Card::Event(_));
+        let gap = match after_event {
+            None => 0.0,
+            Some(was) if was || event => theme::EVENT_GAP,
+            Some(_) => theme::CARD_GAP,
+        };
+        after_event = Some(event);
+        gaps.insert(cards::key(card), gap);
+    }
+    gaps
+}
+
+/// Where the reader is on the page, so what they are looking at stays
+/// where it is in the window when something over it changes height. The
+/// timeline is newest first, so a comment a poll brings, a thread an Ask
+/// starts and an answer streaming into it all land over a reader who has
+/// scrolled down to older cards; and a form over everything as it
+/// unfolds. floem's scroll keeps its offset, not what is at it, so without
+/// this each would push the page down under the reader.
+#[derive(Default)]
+struct Place {
+    /// The scroll's offset, as it last said.
+    offset: Cell<f64>,
+    /// The column's rows in sight, top first, each with its top on the
+    /// page as it was last laid out.
+    seen: RefCell<Vec<(ViewId, f64)>>,
+}
+
+impl Place {
+    /// The column's rows, each of the timeline's cards a row of its own,
+    /// with their tops and bottoms on the page. Hidden ones have no
+    /// height.
+    fn rows(column: ViewId, timeline: ViewId) -> Vec<(ViewId, f64, f64)> {
+        let top = column.get_layout_rect().y0;
+        let mut rows = Vec::new();
+        for row in column.children() {
+            let rect = row.get_layout_rect();
+            if row == timeline {
+                for card in row.children() {
+                    let card_rect = card.get_layout_rect();
+                    let y = top + rect.y0;
+                    rows.push((card, y + card_rect.y0, y + card_rect.y1));
+                }
+            } else {
+                rows.push((row, top + rect.y0, top + rect.y1));
+            }
+        }
+        rows
+    }
+
+    /// Takes note of the rows in sight with the page scrolled to `offset`.
+    fn see(&self, rows: &[(ViewId, f64, f64)], offset: f64, height: f64) {
+        self.offset.set(offset);
+        *self.seen.borrow_mut() = rows
+            .iter()
+            .filter(|(_, y0, y1)| y1 > y0 && *y1 > offset && *y0 < offset + height)
+            .map(|(id, y0, _)| (*id, *y0))
+            .collect();
+    }
+
+    /// How far the topmost row the reader had in sight that is still on
+    /// the page has moved since. Nothing at the page's top, where what
+    /// lands over the reader is what they should see.
+    fn moved(&self, rows: &[(ViewId, f64, f64)]) -> Option<f64> {
+        if self.offset.get() <= 0.0 {
+            return None;
+        }
+        self.seen
+            .borrow()
+            .iter()
+            .find_map(|(id, was)| {
+                rows.iter()
+                    .find(|(row, y0, y1)| row == id && y1 > y0)
+                    .map(|(_, now, _)| now - was)
+            })
+            .filter(|moved| moved.abs() >= 0.5)
+    }
+}
+
+/// Shows the older cards whenever something asks for one of them: a
+/// question's run from the Agents dropdown or a notification's open, which name
+/// the card to bring into view, and Cmd-F, which looks through every
+/// card on the page. And keeps them shown once newer cards have pushed
+/// the one a composer is open in among them, so it does not fold away
+/// when the composer closes either.
+fn unfold_when_asked(
+    state: ReviewState,
+    all: Memo<Vec<Card>>,
+    held: Memo<Option<Held>>,
+    unfolded: Unfolded,
+) {
+    let unfold = move || {
+        if !unfolded.older.get_untracked() {
+            unfolded.older.set(true);
+        }
+    };
+    // A card asked for once it is laid out, which a folded card never is.
+    // Watched as the cards change too, since one asked for before it
+    // landed may land among the older.
+    Effect::new(move |_| {
+        let asked = state.pending_focus_card.get();
+        let folded = asked.is_some_and(|id| {
+            !unfolded.older.get_untracked() && all.with(|cards| folded_away(cards, &id))
+        });
+        if folded {
+            unfold();
+        }
+    });
+    // A card asked for at once, which scrolls itself into view only if it
+    // was there to hear it: the folded one is asked again once it is
+    // built. The first run only subscribes, as the cards' own do, so a
+    // card focused on Code does not move the page as it comes up.
+    Effect::new(move |first: Option<()>| {
+        let asked = state.focus_card.get();
+        if first.is_none() || unfolded.older.get_untracked() {
+            return;
+        }
+        let Some(id) = asked else {
+            return;
+        };
+        if all.with_untracked(|cards| folded_away(cards, &id)) {
+            unfold();
+            state.pending_focus_card.set(Some(id));
+        }
+    });
+    Effect::new(move |_| {
+        if state.conversation_find_open.get() {
+            unfold();
+        }
+    });
+    Effect::new(move |_| {
+        let held = held.get();
+        if all.with(|cards| shows_all(cards, false, held.as_ref())) {
+            unfold();
+        }
+    });
+}
+
+/// What Perch is doing about the item, under the summary: the forms the
+/// menus unfold. Its merge is the bar's Merge button's, its agents' runs
+/// the bar's Agents dropdown's, and their reviews the Review popover's.
+/// Each puts room above
+/// itself; the group gives that room back at its top and keeps it at its
+/// foot, so with none of them showing the description is where it would
+/// be without them.
+fn sections(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    Stack::vertical((
+        crate::review::open_pull::surface(app, state, backend.clone()),
+        crate::review::close_as_issue::surface(app, state, backend),
+    ))
+    .debug_name("conversation sections")
+    .style(|s| {
+        s.flex_col()
+            .width_full()
+            .margin_top(-theme::CONVERSATION_ENTRY_PADDING)
+            .padding_bottom(theme::CONVERSATION_ENTRY_PADDING)
+    })
+}
+
+/// Under the newest cards, the way to the rest: a quiet button between
+/// two rules, there while any are folded away.
+fn older_row(hidden: Memo<usize>, older: RwSignal<bool>) -> impl IntoView {
+    let rule = || {
+        Empty::new().style(|s| {
+            s.height(1.0)
+                .flex_grow(1.0_f32)
+                .flex_basis(0.0)
+                .background(theme::border_muted())
+        })
+    };
+    Stack::horizontal((
+        rule(),
+        cards::text_action(
+            move || format!("Show {} older", hidden.get()),
+            "show-older",
+            move || older.set(true),
+        ),
+        rule(),
+    ))
+    .debug_name("older cards")
+    .style(move |s| {
+        s.items_center()
+            .width_full()
+            .gap(8.0)
+            .margin_top(theme::CARD_GAP)
+            .apply_if(hidden.get() == 0, |s| s.hide())
+    })
+}
 
 /// One scrolling column, centred, on the page grey, with the find bar
 /// hung over its top right.
@@ -36,30 +371,53 @@ pub fn view(
     open_file: OpenFile,
     open_item: crate::ui::items::OpenItem,
 ) -> impl IntoView {
+    let description_backend = backend.clone();
+    let description_file = open_file.clone();
     let card_backend = backend.clone();
-    let summary_backend = backend.clone();
     let composer_backend = backend.clone();
-    // Each card with the room above it: cards sit the standard gap apart,
-    // and an event line, which has no box, a little closer to whatever is
-    // on either side of it. The gap is in the key, so a card whose neighbour changes kind
-    // is laid out again.
-    let rows = move || {
-        let cards = cards(state);
-        let mut rows = Vec::with_capacity(cards.len());
-        // Whether the card before was an event line; `None` for the first.
-        let mut after_event = None;
-        for card in cards {
-            let event = matches!(card, Card::Event(_));
-            let gap = match after_event {
-                None => 0.0,
-                Some(was) if was || event => theme::EVENT_GAP,
-                Some(_) => theme::CARD_GAP,
-            };
-            after_event = Some(event);
-            rows.push((card, gap));
-        }
-        rows
+    // Every card, oldest first, as the timeline sorts them; a memo, so a
+    // write that changes no card leaves the page alone.
+    let all = Memo::new(move |_| cards(state));
+    let unfolded = unfolded(state);
+    let held = Memo::new(move |_| Held::of(state));
+    unfold_when_asked(state, all, held, unfolded);
+    let gaps = Memo::new(move |_| all.with(|cards| gaps(cards)));
+    let description = move || {
+        all.with(|cards| {
+            cards
+                .iter()
+                .filter(|card| matches!(card, Card::Description { .. }))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
     };
+    // Whether a card holding a composer has been pushed among the older
+    // is worked out here, from the cards and the composer as they are
+    // now, rather than left to the effect that unfolds them: run first,
+    // this would drop that card and build it again.
+    let rows = move || {
+        let older = unfolded.older.get();
+        let held = held.get();
+        all.with(|cards| {
+            let shown = if shows_all(cards, older, held.as_ref()) {
+                usize::MAX
+            } else {
+                NEWEST_SHOWN
+            };
+            newest_first(cards).take(shown).cloned().collect::<Vec<_>>()
+        })
+    };
+    let hidden = Memo::new(move |_| {
+        let older = unfolded.older.get();
+        let held = held.get();
+        all.with(|cards| {
+            if shows_all(cards, older, held.as_ref()) {
+                0
+            } else {
+                newest_first(cards).count().saturating_sub(NEWEST_SHOWN)
+            }
+        })
+    });
     let empty = move || {
         // Only a bare branch has nothing: a pull request or an issue has a
         // description whatever else it has.
@@ -73,121 +431,150 @@ pub fn view(
                 .is_none_or(|item_id| app.review_groups_for(&item_id).is_empty())
     };
 
-    let page = Container::new(
-        Stack::vertical((
-            conversation_title(state),
-            crate::review::summary::summary(app, state, summary_backend.clone(), open_item),
-            crate::review::walkthrough::conversation_row(app, state, backend.clone()),
-            finding_filters(app, state),
-            dyn_stack(
-                rows,
-                |(card, gap)| format!("{}:{gap}", cards::key(card)),
-                move |(card, gap)| {
-                    card_view(
-                        app,
-                        state,
-                        card_backend.clone(),
-                        open_file.clone(),
-                        card,
-                        gap,
-                    )
-                },
+    let timeline = dyn_stack(rows, cards::key, move |card| {
+        let key = cards::key(&card);
+        let gap = move || gaps.with(|gaps| gaps.get(&key).copied().unwrap_or(0.0));
+        card_view(
+            app,
+            state,
+            card_backend.clone(),
+            open_file.clone(),
+            card,
+            gap,
+            unfolded,
+        )
+    })
+    .debug_name("timeline")
+    .style(|s| s.flex_col().width_full());
+    let timeline_id = timeline.id();
+
+    let column = Stack::vertical((
+        crate::review::summary::summary(app, state, backend.clone(), open_item),
+        sections(app, state, backend.clone()),
+        // The description first whatever else there is: it says what
+        // the item is, and the timeline under it is what came of it.
+        dyn_stack(description, cards::key, move |card| {
+            card_view(
+                app,
+                state,
+                description_backend.clone(),
+                description_file.clone(),
+                card,
+                || 0.0,
+                unfolded,
             )
-            .style(|s| s.flex_col().width_full()),
-            // What GitHub says of the item, white, then what Perch has
-            // done about it, grey, over the ask box, which is grey too.
-            crate::review::merge::surface(app, state, backend.clone()),
-            crate::review::open_pull::surface(app, state, backend.clone()),
-            crate::review::close_as_issue::surface(app, state, backend.clone()),
-            crate::ui::agents::section::section(app, state, summary_backend),
-            Label::derived(|| "Nothing here yet. Ask about the worktree below.".to_string()).style(
-                move |s| {
-                    // Hidden rather than absent, so it takes no share of the
-                    // column's gap while there is something here.
-                    s.font_size(theme::TEXT_BODY)
-                        .color(theme::fg_subtle())
-                        .width_full()
-                        .text_align(floem::text::Alignment::Center)
-                        .padding_vert(28.0)
-                        .selectable(false)
-                        .apply_if(!empty(), |s| s.hide())
-                },
-            ),
-            composer(app, state, composer_backend).style(|s| {
-                s.width_full()
-                    .padding_top(theme::CONVERSATION_ENTRY_PADDING)
-            }),
-        ))
-        // A definite width, cut to the page's when the page is narrower,
-        // rather than the page's width capped: under a cap, the pass that
-        // sizes the page unconstrained lands on the cap's width as well,
-        // and taffy takes its unwrapped height for the constrained pass
-        // at that same width. The column's bottom, wrapped rows and long
-        // comments included, could then not be scrolled into view.
-        .style(|s| {
-            s.flex_col()
-                .width(theme::CONVERSATION_WIDTH)
-                .max_width_full()
+        })
+        .style(|s| s.flex_col().width_full()),
+        composer(app, state, composer_backend).style(|s| {
+            s.width_full()
+                .padding_top(theme::CARD_GAP)
+                .padding_bottom(theme::CONVERSATION_ENTRY_PADDING)
         }),
-    )
+        timeline,
+        older_row(hidden, unfolded.older),
+        resolved_row(app, state, unfolded.older),
+        Label::derived(|| "Nothing here yet. Ask about the worktree above.".to_string()).style(
+            move |s| {
+                // Hidden rather than absent, so it takes no share of the
+                // column's gap while there is something here.
+                s.font_size(theme::TEXT_BODY)
+                    .color(theme::fg_subtle())
+                    .width_full()
+                    .text_align(floem::text::Alignment::Center)
+                    .padding_vert(28.0)
+                    .selectable(false)
+                    .apply_if(!empty(), |s| s.hide())
+            },
+        ),
+    ))
+    .debug_name("conversation column")
+    // A definite width, cut to the page's when the page is narrower,
+    // rather than the page's width capped: under a cap, the pass that
+    // sizes the page unconstrained lands on the cap's width as well,
+    // and taffy takes its unwrapped height for the constrained pass
+    // at that same width. The column's bottom, wrapped rows and long
+    // comments included, could then not be scrolled into view.
     .style(|s| {
-        s.width_full()
-            .items_start()
-            .justify_center()
-            .padding(theme::CONVERSATION_PADDING)
-    })
-    .scroll()
-    // Where the reader left the page, put back as it is built, since a
-    // file's tab showing in its place takes the page away; and kept as it
-    // scrolls. The request waits for the page to be laid out.
-    .scroll_to(move || {
-        let y = state.conversation_scroll.get_untracked();
-        (y > 0.0).then_some(floem::kurbo::Point::new(0.0, y))
-    })
-    // Page Up and Page Down: a page, less a line kept in sight so the
-    // reader keeps their place. Cmd-Up and Cmd-Down: the top, or the end,
-    // by a delta past it, which the scroll clamps. A delta rather than a
-    // point shows the bars that hide while idle, as the wheel does.
-    .scroll_delta(move || {
-        let Some(paging) = state.paging.get() else {
-            return floem::kurbo::Vec2::ZERO;
-        };
-        state.paging.set(None);
-        crate::review::notified::cancel(state);
-        let page = || {
-            let height = state
-                .conversation_page
-                .get_untracked()
-                .map_or(0.0, |id| id.get_content_rect_local().height());
-            (height - theme::code_line_height() as f64).max(0.0)
-        };
-        let y = match paging {
-            Paging::Up => -page(),
-            Paging::Down => page(),
-            Paging::Top => -f64::MAX,
-            Paging::End => f64::MAX,
-        };
-        floem::kurbo::Vec2::new(0.0, y)
-    })
-    .on_event_cont(
-        ScrollChanged::listener(),
-        move |_, event: &ScrollChanged| {
-            state.conversation_scroll.set(event.offset.y);
-        },
-    )
-    .on_event_cont(el::PointerWheel, move |_, _| {
-        crate::review::notified::cancel(state)
-    })
-    .debug_name("conversation")
-    // A bare key goes to the focused view and bubbles up from there, and
-    // a click on the page would otherwise focus nothing: the column takes
-    // the focus so `a` reaches the window's handler.
-    .style(|s| {
-        s.size_full()
-            .min_height(0.0)
-            .background(theme::canvas())
-            .focusable()
+        s.flex_col()
+            .width(theme::CONVERSATION_WIDTH)
+            .max_width_full()
     });
+    let column_id = column.id();
+    let place = Rc::new(Place::default());
+    let seen = place.clone();
+    let shift = RwSignal::new(0.0_f64);
+
+    let page = Container::new(column)
+        .style(|s| {
+            s.width_full()
+                .items_start()
+                .justify_center()
+                .padding(theme::CONVERSATION_PADDING)
+        })
+        .scroll()
+        // Where the reader left the page, put back as it is built, since a
+        // file's tab showing in its place takes the page away; and kept as it
+        // scrolls. The request waits for the page to be laid out.
+        .scroll_to(move || {
+            let y = state.conversation_scroll.get_untracked();
+            (y > 0.0).then_some(floem::kurbo::Point::new(0.0, y))
+        })
+        // Page Up and Page Down: a page, less a line kept in sight so the
+        // reader keeps their place. Cmd-Up and Cmd-Down: the top, or the end,
+        // by a delta past it, which the scroll clamps. A delta rather than a
+        // point shows the bars that hide while idle, as the wheel does.
+        .scroll_delta(move || {
+            let Some(paging) = state.paging.get() else {
+                return floem::kurbo::Vec2::ZERO;
+            };
+            state.paging.set(None);
+            crate::review::notified::cancel(state);
+            let page = || {
+                let height = state
+                    .conversation_page
+                    .get_untracked()
+                    .map_or(0.0, |id| id.get_content_rect_local().height());
+                (height - theme::code_line_height() as f64).max(0.0)
+            };
+            let y = match paging {
+                Paging::Up => -page(),
+                Paging::Down => page(),
+                Paging::Top => -f64::MAX,
+                Paging::End => f64::MAX,
+            };
+            floem::kurbo::Vec2::new(0.0, y)
+        })
+        // What keeps the reader's place: a delta rather than a point, sent at
+        // once rather than after layout, so a view that brings itself into
+        // view from the same layout, as a composer opening does, moves the
+        // page after it, from where it has been put back to.
+        .scroll_delta(move || floem::kurbo::Vec2::new(0.0, shift.get()))
+        .on_event_cont(
+            ScrollChanged::listener(),
+            move |_, event: &ScrollChanged| {
+                state.conversation_scroll.set(event.offset.y);
+                if let Some(page) = state.conversation_page.get_untracked() {
+                    seen.see(
+                        &Place::rows(column_id, timeline_id),
+                        event.offset.y,
+                        page.get_content_rect_local().height(),
+                    );
+                }
+            },
+        )
+        .on_event_cont(el::PointerWheel, move |_, _| {
+            crate::review::notified::cancel(state)
+        })
+        .debug_name("conversation")
+        // A bare key goes to the focused view and bubbles up from there, and
+        // a click on the page would otherwise focus nothing: the column takes
+        // the focus so `a` reaches the window's handler.
+        .style(|s| {
+            s.size_full()
+                .min_height(0.0)
+                .background(theme::canvas())
+                .focusable()
+        });
 
     // Cmd-F's bar looks through the page and scrolls it; its matches
     // follow the query from here, and the page's text as it is laid out.
@@ -213,6 +600,18 @@ pub fn view(
     });
     Stack::new((page, find::bar(state, find::Pane::Conversation)))
         .on_event_cont(el::UpdatePhaseLayout, move |cx, _| {
+            // First, so the page is back in place before what the find
+            // bar or a view laid out here scrolls to.
+            let rows = Place::rows(column_id, timeline_id);
+            let offset = place.offset.get();
+            let offset = match place.moved(&rows) {
+                Some(moved) => {
+                    shift.set(moved);
+                    (offset + moved).max(0.0)
+                }
+                None => offset,
+            };
+            place.see(&rows, offset, page_id.get_content_rect_local().height());
             if !asked.replace(true)
                 && state.composer.with_untracked(Option::is_none)
                 && !state.find_focused.get_untracked()
@@ -230,7 +629,9 @@ pub fn view(
         .style(|s| s.size_full().min_height(0.0).position(Position::Relative))
 }
 
-/// The page's cards in order, as `review::timeline` sorts them. Tracked.
+/// The page's cards, oldest first as `review::timeline` sorts them, the
+/// description at their head. The page shows them the other way round.
+/// Tracked.
 pub(crate) fn cards(state: ReviewState) -> Vec<Card> {
     let pull = state.pull_request.get();
     let discussion = state.discussion.get();
@@ -260,108 +661,97 @@ pub(crate) fn cards(state: ReviewState) -> Vec<Card> {
     })
 }
 
-fn finding_filters(app: AppState, state: ReviewState) -> impl IntoView {
-    dyn_container(
-        move || {
-            let item_id = state
-                .item
-                .with(|item| item.as_ref().map(|item| item.id.clone()))?;
-            let findings = state
-                .historical_findings
-                .get()
-                .unwrap_or_else(|| app.review_findings_for(&item_id));
-            (!findings.is_empty()).then_some((item_id, findings))
-        },
-        move |value| match value {
-            Some((item_id, findings)) => {
-                let open = findings
-                    .iter()
-                    .filter(|finding| finding.is_actionable())
-                    .count();
-                let total = findings.len();
-                let open_findings = findings.clone();
-                let all_findings = findings;
-                Stack::horizontal((
-                    Label::derived(move || format!("Review findings · {open} open")).style(|s| {
-                        s.font_size(theme::TEXT_META)
-                            .font_weight(theme::weight_emphasis())
-                            .color(theme::fg_muted())
-                            .margin_right(4.0)
-                    }),
-                    finding_filter_button("Open", ReviewFindingFilter::Open, state, open_findings),
-                    finding_filter_button("All", ReviewFindingFilter::All, state, all_findings),
-                    Label::derived(move || format!("{total} total"))
-                        .style(|s| s.font_size(theme::TEXT_BADGE).color(theme::fg_subtle())),
-                ))
-                .debug_name(format!("review-finding-filters:{item_id}"))
-                // Space, not a rule, under it: the cards have their own
-                // borders, and a rule would lie on the first one's.
-                .style(|s| s.items_center().gap(6.0).padding_bottom(theme::CARD_GAP))
-                .into_any()
-            }
-            None => Empty::new().into_any(),
-        },
-    )
-}
-
-fn finding_filter_button(
-    label: &'static str,
-    filter: ReviewFindingFilter,
-    state: ReviewState,
-    findings: std::sync::Arc<Vec<crate::review::model::ReviewFindingSummary>>,
-) -> impl IntoView {
-    Label::derived(move || label.to_string())
-        .on_event_stop(el::Click, move |_, _| {
-            state.apply_review_finding_filter(filter, &findings);
-        })
-        .style(move |s| {
-            clickable(s)
-                .height(24.0)
-                .padding_horiz(8.0)
-                .items_center()
-                .font_size(theme::TEXT_BADGE)
-                .color(if state.review_finding_filter.get() == filter {
-                    theme::fg()
-                } else {
-                    theme::fg_muted()
-                })
-                .background(if state.review_finding_filter.get() == filter {
-                    theme::badge_bg()
-                } else {
-                    theme::canvas()
-                })
-                .border_radius(theme::RADIUS)
-                .cursor(CursorStyle::Pointer)
-                .selectable(false)
-        })
-}
-
-/// The full item title belongs in the reading surface as well as the compact
-/// window bar. This mirrors Codex: the bar orients, while the page title starts
-/// the document at a comfortable reading size.
-fn conversation_title(state: ReviewState) -> impl IntoView {
-    let title = move || {
-        state
-            .pull_request
-            .with(|p| p.as_ref().map(|p| p.title.clone()))
-            .or_else(|| {
-                state
-                    .item
-                    .with(|i| i.as_ref().map(|i| i.title().to_string()))
+/// The threads of fixed and dismissed findings, which the timeline leaves
+/// out, as one row under it that shows them, and once they are shown,
+/// hides them again. Gone when there are none, and on a past review,
+/// which shows every finding it had.
+fn resolved_row(app: AppState, state: ReviewState, older: RwSignal<bool>) -> impl IntoView {
+    // How many of the item's threads are left out now, and how many the
+    // row would leave out: read off the threads themselves, not the
+    // filter, so the row says what the page shows. A thread with nothing
+    // in it is never shown, and one with a draft always is, so neither
+    // is counted.
+    let counts = Memo::new(move |_| {
+        if state.historical_review.with(Option::is_some) {
+            return (0, 0);
+        }
+        let Some(item_id) = state
+            .item
+            .with(|item| item.as_ref().map(|item| item.id.clone()))
+        else {
+            return (0, 0);
+        };
+        let resolved = app
+            .review_findings_for(&item_id)
+            .iter()
+            .filter(|finding| !finding.is_actionable())
+            .map(|finding| finding.finding.thread_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        state.hidden_review_threads.with(|hidden| {
+            state.comment_threads.with(|threads| {
+                let movable = threads.iter().filter(|thread| {
+                    !thread.messages.is_empty() && !thread.messages.iter().any(|m| m.is_draft())
+                });
+                let (mut out, mut settled) = (0, 0);
+                for thread in movable {
+                    out += usize::from(hidden.contains(&thread.id));
+                    settled += usize::from(resolved.contains(&thread.id));
+                }
+                (out, settled)
             })
-            .unwrap_or_default()
-    };
-    Label::derived(title)
-        .debug_name("conversation-title")
-        .style(|s| {
-            s.width_full()
-                .text_wrap()
-                .font_size(theme::TEXT_PAGE_TITLE)
-                .font_weight(theme::weight_emphasis())
-                .line_height(theme::PAGE_TITLE_LINE_HEIGHT)
-                .color(theme::fg())
-                .padding_bottom(theme::CONVERSATION_TITLE_GAP)
         })
+    });
+    let rule = || {
+        Empty::new().style(|s| {
+            s.height(1.0)
+                .flex_grow(1.0_f32)
+                .flex_basis(0.0)
+                .background(theme::border_muted())
+        })
+    };
+    Stack::horizontal((
+        rule(),
+        cards::text_action(
+            move || {
+                let (out, settled) = counts.get();
+                let (verb, n) = if out > 0 {
+                    ("Show", out)
+                } else {
+                    ("Hide", settled)
+                };
+                let noun = if n == 1 { "finding" } else { "findings" };
+                format!("{verb} {n} resolved {noun}")
+            },
+            "show-resolved",
+            move || {
+                let Some(item_id) = state
+                    .item
+                    .with_untracked(|item| item.as_ref().map(|item| item.id.clone()))
+                else {
+                    return;
+                };
+                let findings = app.review_findings_for(&item_id);
+                if counts.get_untracked().0 > 0 {
+                    state.apply_review_finding_filter(ReviewFindingFilter::All, &findings);
+                    // A resolved thread is often an old one, which would
+                    // come back among the folded cards and show nothing.
+                    older.set(true);
+                } else {
+                    state.apply_review_finding_filter(ReviewFindingFilter::Open, &findings);
+                }
+            },
+        ),
+        rule(),
+    ))
+    .debug_name("resolved findings")
+    .style(move |s| {
+        let (out, settled) = counts.get();
+        s.items_center()
+            .width_full()
+            .gap(8.0)
+            .margin_top(theme::CARD_GAP)
+            .apply_if(out == 0 && settled == 0, |s| s.hide())
+    })
 }
 
 /// One card, with the room above it.
@@ -371,7 +761,8 @@ fn card_view(
     backend: Rc<Backend>,
     open_file: OpenFile,
     card: Card,
-    gap: f64,
+    gap: impl Fn() -> f64 + 'static,
+    unfolded: Unfolded,
 ) -> floem::AnyView {
     let pull = state.pull_request.get_untracked();
     let debug = card.kind();
@@ -384,7 +775,16 @@ fn card_view(
             node_id,
             editable,
             ..
-        } => cards::description_card(app, state, backend, body, node_id, editable).into_any(),
+        } => cards::description_card(
+            app,
+            state,
+            backend,
+            body,
+            node_id,
+            editable,
+            unfolded.description,
+        )
+        .into_any(),
         Card::Comment(comment) => cards::comment_card(app, state, backend, comment).into_any(),
         Card::Review { review } => cards::review_card(app, state, backend, review).into_any(),
         Card::Event(event) => {
@@ -408,8 +808,8 @@ fn card_view(
             cards::thread_card(app, state, backend, open_file, thread).into_any()
         }
     };
-    // Asked for from elsewhere, the Agents section's Show in thread or an
-    // unread notification's open, the card comes into view as it
+    // Asked for from elsewhere, a question's run in the Agents dropdown or
+    // an unread notification's open, the card comes into view as it
     // flashes. The first run only subscribes, as the flash's does.
     let id = view.view_id();
     let focus_id = card_id.clone();
@@ -438,15 +838,16 @@ fn card_view(
     view.debug_name(format!("card:{debug}"))
         .style(move |s| {
             s.width_full()
-                .margin_top(gap)
+                .margin_top(gap())
                 .apply_if(flashing.get(), |s| s.border_color(theme::accent()))
         })
         .into_any()
 }
 
-/// The composer for asking about the item as a whole, in place at the end
-/// of the column, or the box that opens it. A follow-up's composer is
-/// under its thread instead, and one editing a comment is in its card.
+/// The composer for asking about the item as a whole, in place under the
+/// description and over the timeline, where what it starts will land; or
+/// the box that opens it. A follow-up's composer is under its thread
+/// instead, and one editing a comment is in its card.
 fn composer(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     // Keyed on whether one is open, what it is about and which opening it
     // is, not on the composer itself: picking a model writes the composer,
@@ -789,6 +1190,7 @@ mod tests {
         let comment = find(root, "card:comment").unwrap();
         let description = find(root, "card:description").unwrap();
         let review = find(root, "card:review").unwrap();
+        to_top(&mut harness, comment);
 
         // The pills, and the picker at their end; the description, with
         // nothing on it, has the row hidden; the review, kept without a
@@ -914,9 +1316,38 @@ mod tests {
                 },
             ],
         };
-        let (harness, _, state) = app_harness_on(backend, discussion);
+        let (mut harness, _, state) = app_harness_on(backend, discussion);
+        let comment = find(harness.root_id(), "card:comment").unwrap();
+        to_top(&mut harness, comment);
         while commands.try_recv().is_ok() {}
         (harness, state, commands)
+    }
+
+    /// The page scrolled to put `id` near the top of the window, or as
+    /// near as the page's end lets it, as a reader scrolls to what they
+    /// are reading: the older cards are under the fold.
+    fn to_top(harness: &mut HeadlessHarness, id: floem::ViewId) {
+        let viewport = find(harness.root_id(), "conversation")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        let by = id.get_visual_rect_no_clip().y0 - viewport.y0 - 40.0;
+        let c = viewport.center();
+        if by > 0.0 {
+            harness.scroll_down(c.x, c.y, by);
+        } else if by < 0.0 {
+            harness.scroll_up(c.x, c.y, -by);
+        }
+        for _ in 0..2 {
+            harness.rebuild();
+            harness.paint();
+        }
+    }
+
+    /// Show older, pressed.
+    fn show_older(harness: &mut HeadlessHarness) {
+        let button = find(harness.root_id(), "show-older").expect("nothing is folded");
+        to_top(harness, button);
+        click_on(harness, button);
     }
 
     fn click_on(harness: &mut HeadlessHarness, id: floem::ViewId) {
@@ -1079,10 +1510,15 @@ mod tests {
     }
 
     /// The picker hangs from its face, so an entry above that grows while
-    /// it is open carries it down with the face.
+    /// it is open carries it down with the face. At the page's top, as
+    /// further down the page keeps what is in view where it was.
     #[test]
     fn the_picker_follows_its_face_when_the_column_moves() {
         let (mut harness, state, _commands) = reacted_harness();
+        harness.set_size(1400.0, 2400.0);
+        state.paging.set(Some(crate::review::model::Paging::Top));
+        settle(&mut harness);
+        assert_eq!(state.conversation_scroll.get_untracked(), 0.0);
         let comment = find(harness.root_id(), "card:comment").unwrap();
         let face = find(find(comment, "reactions").unwrap(), "react-button").unwrap();
         click_on(&mut harness, face);
@@ -1274,6 +1710,26 @@ mod tests {
         find(harness.root_id(), text).is_some_and(|id| harness.get_layout_rect(id).height() > 0.0)
     }
 
+    /// The cards on the page, the description first, as `cards_in_order`
+    /// names them.
+    fn card_views(harness: &HeadlessHarness) -> Vec<floem::ViewId> {
+        fn under(id: floem::ViewId, out: &mut Vec<floem::ViewId>) {
+            if id
+                .debug_name()
+                .split_whitespace()
+                .any(|w| w.starts_with("card:"))
+            {
+                out.push(id);
+            }
+            for child in id.children() {
+                under(child, out);
+            }
+        }
+        let mut found = Vec::new();
+        under(harness.root_id(), &mut found);
+        found
+    }
+
     fn cards_in_order(harness: &HeadlessHarness) -> Vec<String> {
         let mut all = Vec::new();
         names(harness.root_id(), &mut all);
@@ -1286,49 +1742,572 @@ mod tests {
             .collect()
     }
 
-    /// A title longer than the column wraps onto more lines rather than
-    /// running past the page's edge.
+    /// Every view under `id` whose debug name contains `text`, in tree
+    /// order.
+    fn all_named(id: floem::ViewId, text: &str) -> Vec<floem::ViewId> {
+        let mut found = Vec::new();
+        fn under(id: floem::ViewId, text: &str, out: &mut Vec<floem::ViewId>) {
+            if id.debug_name().contains(text) {
+                out.push(id);
+            }
+            for child in id.children() {
+                under(child, text, out);
+            }
+        }
+        under(id, text, &mut found);
+        found
+    }
+
+    /// The page from its top: the summary, the description, the
+    /// composer, and the timeline under them, the newest card first and
+    /// the oldest last. The title is the window bar's alone, the
+    /// walkthrough is Code's, and the item's runs, even with one there,
+    /// are the bar's Agents dropdown's.
     #[test]
-    fn a_long_title_wraps_in_a_narrow_pane() {
-        let root = TestRoot::new();
-        let app = AppState::new();
-        let state = ReviewState::new();
-        let mut pr = pull();
-        pr.title = "Fence the manifest and the reader and the admin builders, ".repeat(4);
-        let now = at("2026-09-18T09:59:00Z");
-        let mut item = Item::new("criccomini/perch", now);
-        item.id = "wt".into();
-        item.subject = Some(ItemSubject::PullRequest(pr.clone()));
-        state.item.set(Some(Arc::new(item)));
-        state.ready.set(true);
-        state.set_phase(crate::review::model::Phase::Ready);
-        state.pull_request.set(Some(Arc::new(pr)));
-        state.composer_autofocus.set(false);
-        let backend = crate::backend::Backend::detached();
-        let view = crate::ui::app_view(app, state, Rc::new(backend));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 1000.0, 900.0);
+    fn the_page_runs_from_the_summary_down_to_the_oldest_card() {
+        let (mut harness, app, _) = app_harness();
+        app.merge_agent_runs([perch_github::RunSummary::from(&run())]);
+        let mut review = crate::ui::agents::model::tests::review_summary("group-1", &[]);
+        review.group.item_id = "wt".into();
+        app.review_groups.update(|all| {
+            all.insert("wt".into(), Arc::new(vec![review]));
+        });
         harness.rebuild();
         harness.paint();
+        let column = find(harness.root_id(), "conversation column").unwrap();
+        let at = |name: &str| {
+            let id = find(column, name).unwrap_or_else(|| panic!("no {name} on the page"));
+            let rect = id.get_visual_rect_no_clip();
+            assert!(rect.height() > 0.0, "{name} is not shown");
+            rect
+        };
+        // The run and the review are the bar's, and so is Merge: none of
+        // their views, by the names they have there, is on the page.
+        for theirs in [
+            "agents-dropdown",
+            "agent-review",
+            "agent-run",
+            "merge-split",
+            "merge-popover",
+            "merge-action",
+        ] {
+            let found = all_named(column, theirs);
+            assert!(
+                found.is_empty(),
+                "the page has {theirs}: {:?}",
+                found.iter().map(|id| id.debug_name()).collect::<Vec<_>>()
+            );
+        }
+        let order = ["item summary", "card:description", "composer", "timeline"];
+        for pair in order.windows(2) {
+            let (above, below) = (at(pair[0]), at(pair[1]));
+            assert!(
+                above.y1 <= below.y0,
+                "{} at {above:?} is not over {} at {below:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert_eq!(
+            cards_in_order(&harness),
+            [
+                "card:description",
+                "card:event",
+                "card:thread",
+                "card:review",
+                "card:comment",
+                "card:event"
+            ]
+        );
+        let events = all_named(column, "card:event");
+        assert!(
+            events[0].get_visual_rect_no_clip().y0 < events[1].get_visual_rect_no_clip().y0,
+            "the merge is not over the opening"
+        );
 
-        let title = find(harness.root_id(), "conversation-title").unwrap();
-        let rect = title.get_visual_rect_no_clip();
-        let page = find(harness.root_id(), "conversation")
+        let mut all = Vec::new();
+        names(column, &mut all);
+        let text = all.join("\n");
+        assert!(
+            !text.contains("\"Fence the manifest\""),
+            "the page repeats the title"
+        );
+        assert!(
+            !text.contains("walkthrough"),
+            "the page has a walkthrough row"
+        );
+        assert!(!shown(&harness, "older cards"), "nothing is folded away");
+    }
+
+    /// Close as issue's form, which a menu unfolds, sits over the
+    /// description, with no merge box on the page, since merging is the
+    /// bar's, and the timeline runs straight on from the composer, with
+    /// no strip of finding filters between them.
+    #[test]
+    fn the_forms_sit_in_their_places() {
+        let (mut harness, app, state) = app_harness();
+        let at: jiff::Timestamp = "2026-09-18T09:59:00Z".parse().unwrap();
+        app.update_review_finding(
+            "wt".into(),
+            crate::review::model::ReviewFindingSummary {
+                finding: perch_github::Finding {
+                    id: "f-1".into(),
+                    item_id: "wt".into(),
+                    stable_key: "lock".into(),
+                    thread_id: "finding-1".into(),
+                    created_group_id: None,
+                    disposition: perch_github::FindingDisposition::Open,
+                    verification: perch_github::FindingVerification::Unverified,
+                    dismissal_reason: None,
+                    possible_duplicate_of: None,
+                    duplicate_of: None,
+                    last_verified_snapshot_id: None,
+                    last_verified_head_sha: None,
+                    last_checked_snapshot_id: None,
+                    last_checked_head_sha: None,
+                    created_at: at,
+                    updated_at: at,
+                },
+                severity: perch_github::FindingSeverity::High,
+                attributions: Vec::new(),
+                seen_in_reviews: Vec::new(),
+                backend: None,
+                model: None,
+                original_review_number: None,
+                title: "The lock is held across an await.".into(),
+            },
+        );
+        crate::review::close_as_issue::unfold(app, state, "wt");
+        harness.set_size(1400.0, 3000.0);
+        settle(&mut harness);
+        let column = find(harness.root_id(), "conversation column").unwrap();
+        // The column's own rows first, as the forms have boxes of their
+        // own called composer.
+        let at = |name: &str| {
+            let id = column
+                .children()
+                .into_iter()
+                .find(|row| row.debug_name().contains(name))
+                .or_else(|| find(column, name))
+                .unwrap_or_else(|| panic!("no {name} on the page"));
+            let rect = id.get_visual_rect_no_clip();
+            assert!(rect.height() > 0.0, "{name} is not shown");
+            rect
+        };
+        assert!(
+            find(column, "merge-action").is_none(),
+            "a merge box on the page"
+        );
+        let order = ["close-as-issue", "card:description", "composer", "timeline"];
+        assert!(
+            find(column, "review-finding-filters").is_none(),
+            "the findings strip is back"
+        );
+        for pair in order.windows(2) {
+            let (above, below) = (at(pair[0]), at(pair[1]));
+            assert!(
+                above.y1 <= below.y0,
+                "{} at {above:?} is not over {} at {below:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    /// A dismissed finding's thread is left out of the timeline, with one
+    /// row under it that shows it and then hides it again; with nothing
+    /// resolved, there is no row.
+    #[test]
+    fn resolved_findings_fold_into_one_row() {
+        let (mut harness, app, state) = app_harness();
+        settle(&mut harness);
+        assert!(
+            !shown(&harness, "resolved findings"),
+            "a row with nothing resolved"
+        );
+        assert!(shown(&harness, "card:thread"));
+
+        let at: jiff::Timestamp = "2026-09-18T09:59:00Z".parse().unwrap();
+        app.update_review_finding(
+            "wt".into(),
+            crate::review::model::ReviewFindingSummary {
+                finding: perch_github::Finding {
+                    id: "f-1".into(),
+                    item_id: "wt".into(),
+                    stable_key: "fence".into(),
+                    thread_id: "t1".into(),
+                    created_group_id: None,
+                    disposition: perch_github::FindingDisposition::Dismissed,
+                    verification: perch_github::FindingVerification::Unverified,
+                    dismissal_reason: None,
+                    possible_duplicate_of: None,
+                    duplicate_of: None,
+                    last_verified_snapshot_id: None,
+                    last_verified_head_sha: None,
+                    last_checked_snapshot_id: None,
+                    last_checked_head_sha: None,
+                    created_at: at,
+                    updated_at: at,
+                },
+                severity: perch_github::FindingSeverity::Low,
+                attributions: Vec::new(),
+                seen_in_reviews: Vec::new(),
+                backend: None,
+                model: None,
+                original_review_number: None,
+                title: "The fence is not needed.".into(),
+            },
+        );
+        // As the window does when a finding changes.
+        state.apply_review_finding_filter(
+            state.review_finding_filter.get_untracked(),
+            &app.review_findings_for("wt"),
+        );
+        settle(&mut harness);
+        assert!(
+            !shown(&harness, "card:thread"),
+            "the dismissed thread is shown"
+        );
+        assert!(shown(&harness, "\"Show 1 resolved finding\""));
+
+        let row = find(harness.root_id(), "show-resolved").unwrap();
+        to_top(&mut harness, row);
+        click_on(&mut harness, row);
+        settle(&mut harness);
+        assert!(
+            shown(&harness, "card:thread"),
+            "the thread did not come back"
+        );
+        assert!(shown(&harness, "\"Hide 1 resolved finding\""));
+
+        let row = find(harness.root_id(), "show-resolved").unwrap();
+        to_top(&mut harness, row);
+        click_on(&mut harness, row);
+        settle(&mut harness);
+        assert!(!shown(&harness, "card:thread"), "the thread stayed");
+    }
+
+    /// Shown, a resolved finding's thread older than the cards the
+    /// timeline keeps unfolded comes back unfolded, rather than among the
+    /// folded cards where the click would seem to do nothing.
+    #[test]
+    fn an_old_resolved_finding_comes_back_unfolded() {
+        let (mut harness, app, state) =
+            app_harness_on(crate::backend::Backend::detached(), long_discussion());
+        let at: jiff::Timestamp = "2026-09-18T09:59:00Z".parse().unwrap();
+        app.update_review_finding(
+            "wt".into(),
+            crate::review::model::ReviewFindingSummary {
+                finding: perch_github::Finding {
+                    id: "f-1".into(),
+                    item_id: "wt".into(),
+                    stable_key: "fence".into(),
+                    thread_id: "t1".into(),
+                    created_group_id: None,
+                    disposition: perch_github::FindingDisposition::Dismissed,
+                    verification: perch_github::FindingVerification::Unverified,
+                    dismissal_reason: None,
+                    possible_duplicate_of: None,
+                    duplicate_of: None,
+                    last_verified_snapshot_id: None,
+                    last_verified_head_sha: None,
+                    last_checked_snapshot_id: None,
+                    last_checked_head_sha: None,
+                    created_at: at,
+                    updated_at: at,
+                },
+                severity: perch_github::FindingSeverity::Low,
+                attributions: Vec::new(),
+                seen_in_reviews: Vec::new(),
+                backend: None,
+                model: None,
+                original_review_number: None,
+                title: "The fence is not needed.".into(),
+            },
+        );
+        state.apply_review_finding_filter(
+            state.review_finding_filter.get_untracked(),
+            &app.review_findings_for("wt"),
+        );
+        settle(&mut harness);
+        assert!(shown(&harness, "older cards"), "nothing is folded");
+
+        let row = find(harness.root_id(), "show-resolved").unwrap();
+        to_top(&mut harness, row);
+        click_on(&mut harness, row);
+        settle(&mut harness);
+        assert!(shown(&harness, "card:thread"), "the thread is folded away");
+    }
+
+    /// A discussion with seven more comments, between the review and the
+    /// merge, so the timeline has twelve cards: the newest eight are the
+    /// merge and these.
+    fn long_discussion() -> Discussion {
+        let mut discussion = discussion();
+        for i in 0..7 {
+            discussion.comments.push(IssueComment {
+                node_id: String::new(),
+                reactions: Default::default(),
+                id: 100 + i,
+                user: "rohan".into(),
+                user_avatar_url: String::new(),
+                body: format!("Comment {i}."),
+                created_at: at(&format!("2026-09-17T0{i}:00:00Z")),
+                updated_at: None,
+                html_url: format!("https://github.com/criccomini/perch/pull/57#issuecomment-{i}"),
+                viewer_can_delete: false,
+                viewer_can_update: false,
+            });
+        }
+        discussion
+    }
+
+    /// The timeline cards on the page, the description left out.
+    fn timeline_cards(harness: &HeadlessHarness) -> usize {
+        cards_in_order(harness)
+            .iter()
+            .filter(|card| *card != "card:description")
+            .count()
+    }
+
+    /// Twelve cards are the newest eight and Show 4 older, which shows the
+    /// rest. They stay shown when Conversation comes back from Code, and
+    /// fold again when another item opens.
+    #[test]
+    fn the_timeline_folds_its_older_cards_until_asked() {
+        let (mut harness, _, state) =
+            app_harness_on(crate::backend::Backend::detached(), long_discussion());
+        assert_eq!(timeline_cards(&harness), super::NEWEST_SHOWN);
+        assert!(shown(&harness, "older cards"));
+        assert!(find(harness.root_id(), "Show 4 older").is_some());
+        let cards = cards_in_order(&harness);
+        assert_eq!(cards[1], "card:event", "the merge is not first");
+        assert!(cards[2..].iter().all(|card| card == "card:comment"));
+
+        show_older(&mut harness);
+        assert_eq!(timeline_cards(&harness), 12);
+        assert!(!shown(&harness, "older cards"));
+        assert_eq!(
+            cards_in_order(&harness).last().map(String::as_str),
+            Some("card:event"),
+            "the opening is not last"
+        );
+
+        state.show_tab(crate::review::model::ItemTab::Code);
+        harness.rebuild();
+        harness.paint();
+        state.show_tab(crate::review::model::ItemTab::Conversation);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(timeline_cards(&harness), 12, "Code folded them again");
+
+        state.item.update(|item| {
+            if let Some(item) = item {
+                Arc::make_mut(item).id = "wt2".into();
+            }
+        });
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(
+            timeline_cards(&harness),
+            super::NEWEST_SHOWN,
+            "another item kept them shown"
+        );
+        assert!(shown(&harness, "older cards"));
+    }
+
+    /// A card asked for that is folded away, as a question's run asks for
+    /// its thread, shows the older cards and comes into view; and Cmd-F's
+    /// bar shows them all, so it looks through every card.
+    #[test]
+    fn a_card_asked_for_or_find_shows_the_older_cards() {
+        let (mut harness, _, state) =
+            app_harness_on(crate::backend::Backend::detached(), long_discussion());
+        harness.set_size(1400.0, 500.0);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(timeline_cards(&harness), super::NEWEST_SHOWN);
+
+        state
+            .focus_card
+            .set(Some(crate::review::doc::CardId::Entry("comment:1".into())));
+        settle(&mut harness);
+        assert_eq!(timeline_cards(&harness), 12);
+        assert!(
+            card_shown(&harness, "card:comment", false),
+            "the oldest comment is not in view"
+        );
+
+        let (mut harness, _, state) =
+            app_harness_on(crate::backend::Backend::detached(), long_discussion());
+        assert_eq!(timeline_cards(&harness), super::NEWEST_SHOWN);
+        state.conversation_find_open.set(true);
+        settle(&mut harness);
+        assert_eq!(timeline_cards(&harness), 12, "find sees only the newest");
+    }
+
+    /// A notification's open, or a question's run whose thread the filter
+    /// hid, asks for its card to be focused once it is laid out: a card
+    /// folded away shows the older cards and comes into view, and so does
+    /// one asked for before the cards it lands among have come.
+    #[test]
+    fn a_card_asked_for_ahead_of_its_layout_shows_the_older_cards() {
+        let comment = || Some(crate::review::doc::CardId::Entry("comment:1".into()));
+        let (mut harness, _, state) =
+            app_harness_on(crate::backend::Backend::detached(), long_discussion());
+        harness.set_size(1400.0, 500.0);
+        settle(&mut harness);
+        assert_eq!(timeline_cards(&harness), super::NEWEST_SHOWN);
+        state.pending_focus_card.set(comment());
+        settle(&mut harness);
+        assert_eq!(timeline_cards(&harness), 12);
+        assert_eq!(state.focus_card.get_untracked(), comment());
+        assert!(
+            card_shown(&harness, "card:comment", false),
+            "the oldest comment is not in view"
+        );
+
+        // Asked for before the discussion with it has landed.
+        let mut early = discussion();
+        early.comments.clear();
+        let (mut harness, app, state) = app_harness_on(crate::backend::Backend::detached(), early);
+        harness.set_size(1400.0, 500.0);
+        settle(&mut harness);
+        state.pending_focus_card.set(comment());
+        settle(&mut harness);
+        assert_eq!(state.pending_focus_card.get_untracked(), comment());
+        deliver(app, state, long_discussion());
+        settle(&mut harness);
+        assert_eq!(
+            timeline_cards(&harness),
+            12,
+            "the older cards stayed folded"
+        );
+        assert_eq!(state.focus_card.get_untracked(), comment());
+        assert!(
+            card_shown(&harness, "card:comment", false),
+            "the oldest comment is not in view"
+        );
+    }
+
+    /// A card with a composer open in it stays on the page when newer
+    /// cards push it past the newest: the older cards unfold rather than
+    /// take it away, and its box and the keyboard with it. They stay
+    /// unfolded once the composer closes.
+    #[test]
+    fn a_card_being_edited_is_not_folded_away_by_newer_ones() {
+        use crate::review::model::Destination;
+        let mut discussion = long_discussion();
+        // The oldest of the seven, the eighth newest card.
+        let edited = discussion
+            .comments
+            .iter_mut()
+            .find(|c| c.id == 100)
+            .unwrap();
+        edited.node_id = "IC_100".into();
+        edited.viewer_can_update = true;
+        let (mut harness, app, state) =
+            app_harness_on(crate::backend::Backend::detached(), discussion.clone());
+        assert_eq!(timeline_cards(&harness), super::NEWEST_SHOWN);
+        state.open_composer_with(
+            None,
+            None,
+            "Comment 0, edited.".into(),
+            Destination::GitHub,
+            Some("IC_100".into()),
+        );
+        settle(&mut harness);
+        let editor = find(harness.root_id(), "comment-editor").unwrap();
+        let typing = find(editor, "composer-box").expect("the card holds the editor");
+        let editing = state.composer_box.get_untracked();
+        assert!(
+            editing.is_some(),
+            "the editor's box is not where `a` finds it"
+        );
+
+        discussion.comments.push(IssueComment {
+            id: 2,
+            node_id: String::new(),
+            user: "rohan".into(),
+            user_avatar_url: String::new(),
+            body: "One more thing.".into(),
+            created_at: at("2026-09-18T09:00:00Z"),
+            updated_at: None,
+            html_url: "https://github.com/criccomini/perch/pull/57#issuecomment-2".into(),
+            reactions: Default::default(),
+            viewer_can_delete: false,
+            viewer_can_update: false,
+        });
+        deliver(app, state, discussion);
+        settle(&mut harness);
+        assert_eq!(timeline_cards(&harness), 13, "the edited card folded away");
+        let editor = find(harness.root_id(), "comment-editor").unwrap();
+        assert_eq!(
+            find(editor, "composer-box"),
+            Some(typing),
+            "the editor was built again"
+        );
+        assert_eq!(state.composer_box.get_untracked(), editing);
+
+        state.close_composer();
+        settle(&mut harness);
+        assert_eq!(timeline_cards(&harness), 13, "closing it folded them");
+    }
+
+    /// A long description is cut to a few hundred pixels, with Show more
+    /// under it, which draws all of it, and Show less, which cuts it
+    /// again; Cmd-F's bar draws it whole. A short one has neither.
+    #[test]
+    fn a_long_description_is_cut_until_show_more() {
+        let (harness, _, _) = app_harness();
+        assert!(!shown(&harness, "description-more"), "a short one is cut");
+
+        let mut long = discussion();
+        long.body = "A paragraph of the description.\n\n".repeat(40);
+        let (mut harness, _, state) = app_harness_on(crate::backend::Backend::detached(), long);
+        settle(&mut harness);
+        let text = |harness: &HeadlessHarness| {
+            let id = find(harness.root_id(), "description-text").unwrap();
+            id.get_visual_rect_no_clip().height()
+        };
+        assert_eq!(text(&harness), crate::review::cards::DESCRIPTION_CLAMP);
+        assert!(find(harness.root_id(), "Show more").is_some());
+        let more = find(harness.root_id(), "description-more").unwrap();
+        click_on(&mut harness, more);
+        assert!(text(&harness) > 2.0 * crate::review::cards::DESCRIPTION_CLAMP);
+        assert!(find(harness.root_id(), "Show less").is_some());
+        // Under the whole of it now, a screen or more down.
+        more.scroll_to(None);
+        settle(&mut harness);
+        click_on(&mut harness, more);
+        assert_eq!(text(&harness), crate::review::cards::DESCRIPTION_CLAMP);
+        // And the cut text is back in view, not the timeline far below.
+        settle(&mut harness);
+        let viewport = find(harness.root_id(), "conversation")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        let cut = find(harness.root_id(), "description-text")
             .unwrap()
             .get_visual_rect_no_clip();
         assert!(
-            rect.x1 <= page.x1,
-            "the title at {rect:?} runs past {page:?}"
+            cut.y0 >= viewport.y0 && cut.y0 < viewport.y1,
+            "the description at {cut:?} is out of {viewport:?}"
         );
-        let line = (crate::theme::TEXT_PAGE_TITLE * crate::theme::PAGE_TITLE_LINE_HEIGHT) as f64;
+        let more = more.get_visual_rect_no_clip();
         assert!(
-            rect.height() - crate::theme::CONVERSATION_TITLE_GAP > 1.5 * line,
-            "the title is one line high: {rect:?}"
+            more.y0 >= viewport.y0 && more.y1 <= viewport.y1,
+            "Show more at {more:?} is out of {viewport:?}"
         );
+
+        state.conversation_find_open.set(true);
+        settle(&mut harness);
+        assert!(text(&harness) > 2.0 * crate::review::cards::DESCRIPTION_CLAMP);
+        assert!(!shown(&harness, "description-more"));
     }
 
     /// The page's end can be scrolled to, whatever wraps on it. Under a
     /// width cap taffy served the column's unwrapped height for the pass
-    /// at the cap's width, and the composer under long comments or a
+    /// at the cap's width, and the oldest cards under long comments or a
     /// wrapped summary row sat past the scroll's end.
     #[test]
     fn the_end_of_the_page_can_be_scrolled_into_view_when_its_text_and_rows_wrap() {
@@ -1377,10 +2356,7 @@ mod tests {
         // The column is at its full width, and its rows and comments
         // wrap.
         let scroll = find(harness.root_id(), "conversation").unwrap();
-        let column = find(harness.root_id(), "conversation-title")
-            .unwrap()
-            .parent()
-            .unwrap();
+        let column = find(harness.root_id(), "conversation column").unwrap();
         assert_eq!(
             harness.get_layout_rect(column).width(),
             crate::theme::CONVERSATION_WIDTH
@@ -1397,23 +2373,23 @@ mod tests {
             "the scroll's content is not the column"
         );
 
-        // And so the composer, at the column's end, can be reached.
+        // And so the oldest card, at the column's end, can be reached.
         let viewport = scroll.get_visual_rect_no_clip();
         harness.scroll_down(viewport.center().x, viewport.center().y, 100_000.0);
         harness.rebuild();
         harness.paint();
-        let composer = find(harness.root_id(), "composer")
-            .unwrap()
-            .get_visual_rect_no_clip();
+        let end = column.get_visual_rect_no_clip();
         assert_eq!(
-            composer.y1,
+            end.y1,
             viewport.y1 - crate::theme::CONVERSATION_PADDING,
-            "the composer at {composer:?} is not at the end of the scroll {viewport:?}"
+            "the column's end at {end:?} is not at the end of the scroll {viewport:?}"
         );
+        let oldest = *card_views(&harness).last().unwrap();
+        assert!(oldest.get_visual_rect_no_clip().y1 <= viewport.y1);
     }
 
     #[test]
-    fn the_cards_are_in_time_order_with_the_thread_between_the_review_and_the_merge() {
+    fn the_cards_are_newest_first_with_the_thread_between_the_merge_and_the_review() {
         let (harness, _, state) = app_harness();
         assert_eq!(state.tab.get(), crate::review::model::ItemTab::Conversation);
         assert_eq!(
@@ -1421,9 +2397,9 @@ mod tests {
             [
                 "card:description",
                 "card:event",
-                "card:comment",
-                "card:review",
                 "card:thread",
+                "card:review",
+                "card:comment",
                 "card:event"
             ]
         );
@@ -1496,6 +2472,8 @@ mod tests {
             ),
         ]);
         let (mut harness, _, _) = app_harness_on(crate::backend::Backend::detached(), discussion);
+        // Nine cards: the opening is folded away.
+        show_older(&mut harness);
 
         let mut all = Vec::new();
         names(harness.root_id(), &mut all);
@@ -1516,6 +2494,7 @@ mod tests {
         let opened = crate::ui::widgets::opened;
         opened();
         let slug = find(harness.root_id(), "slatedb/slatedb#2098").unwrap();
+        to_top(&mut harness, slug);
         let c = slug.get_visual_rect_no_clip().center();
         harness.click(c.x, c.y);
         assert_eq!(
@@ -1604,6 +2583,8 @@ mod tests {
         let opened = crate::ui::widgets::opened;
         opened();
         let click = |harness: &mut HeadlessHarness, needle: &str| {
+            let line = on_event_line(harness.root_id(), needle).0;
+            to_top(harness, line);
             let at = on_event_line(harness.root_id(), needle).1.center();
             harness.click(at.x, at.y);
         };
@@ -1618,6 +2599,8 @@ mod tests {
 
         // The line is one text: a drag from the subject back over the sha
         // takes both, to copy, and opens nothing.
+        let line = on_event_line(harness.root_id(), "Fence").0;
+        to_top(&mut harness, line);
         let (line, subject) = on_event_line(harness.root_id(), "Fence");
         let (other, sha) = on_event_line(harness.root_id(), "aaaaaaa");
         assert_eq!(line, other, "the sha and the subject are one text");
@@ -1693,8 +2676,10 @@ mod tests {
         };
         let root = harness.root_id();
         let comment = find(root, "card:comment").unwrap();
+        to_top(&mut harness, comment);
         click(&mut harness, name_in(comment, "chris"));
         assert_eq!(opened(), vec!["https://github.com/chris".to_string()]);
+        to_top(&mut harness, on_event_line(root, "rohan").0);
         let rohan = on_event_line(root, "rohan").1.center();
         harness.click(rohan.x, rohan.y);
         assert_eq!(opened(), vec!["https://github.com/rohan".to_string()]);
@@ -1742,6 +2727,9 @@ mod tests {
         let (mut harness, ..) = app_harness();
         let opened = crate::ui::widgets::opened;
         opened();
+        // The opening is the oldest card, at the page's end.
+        let line = on_event_line(harness.root_id(), "#57").0;
+        to_top(&mut harness, line);
         let (line, number) = on_event_line(harness.root_id(), "#57");
         assert_eq!(
             crate::review::linked_text::with_text(line, str::to_string).as_deref(),
@@ -1782,6 +2770,7 @@ mod tests {
         assert_eq!(asked, vec!["Manifest".to_string()]);
 
         let comment = find(harness.root_id(), "card:comment").unwrap();
+        to_top(&mut harness, comment);
         let text = find(comment, "LinkedText").unwrap();
         let links = crate::review::linked_text::links_on_first_line(&mut harness, text);
         assert_eq!(
@@ -1838,16 +2827,16 @@ mod tests {
             [
                 "card:description",
                 "card:event",
-                "card:comment",
                 "card:thread",
                 "card:review",
                 "card:thread",
+                "card:comment",
                 "card:event"
             ],
-            "GitHub's thread at its comment's time, before the review it was left in"
+            "GitHub's thread at its comment's time, under the review it was left in"
         );
         let root = harness.root_id();
-        let card = find(root, "card:thread").unwrap();
+        let card = *all_named(root, "card:thread").last().unwrap();
         let mut all = Vec::new();
         names(card, &mut all);
         let text = all.join("\n");
@@ -1913,8 +2902,8 @@ mod tests {
         );
     }
 
-    /// Quote reply on a comment opens the composer at the foot of the
-    /// column, bound for GitHub, with the comment quoted and room under
+    /// Quote reply on a comment opens the composer over the timeline,
+    /// bound for GitHub, with the comment quoted and room under
     /// it; Quote reply on the review then quotes it under what the reader
     /// typed, rather than throwing that away.
     #[test]
@@ -1938,14 +2927,14 @@ mod tests {
         assert_eq!(
             (composer.thread_id, composer.anchor),
             (None, None),
-            "at the foot"
+            "over the timeline"
         );
         assert!(composer.destination.is_github());
         assert_eq!(state.composer_draft.get(), "> Thanks\n\n");
         let foot = find(harness.root_id(), "composer").unwrap();
         assert!(
             find(foot, "composer-box").is_some(),
-            "the box is open at the foot"
+            "the box is open over the timeline"
         );
 
         state
@@ -1974,9 +2963,7 @@ mod tests {
         app.viewer.set(Some(("criccomini".into(), String::new())));
         let root = harness.root_id();
         let comment = find(root, "card:comment").unwrap();
-        comment.scroll_to(None);
-        harness.rebuild();
-        harness.paint();
+        to_top(&mut harness, comment);
         hover_and_click(&mut harness, comment, "delete-comment");
         assert_eq!(state.confirm_comment.get().as_deref(), Some("IC_1"));
         assert!(shown(&harness, "delete-comment-confirmation"));
@@ -2017,9 +3004,10 @@ mod tests {
     }
 
     /// Edit on a comment the reader may edit opens the composer in the
-    /// card, its words in it, the foot keeping the box that asks; Update
-    /// comment shows the new words at once and asks the backend. A card
-    /// GitHub did not say the reader may edit offers no Edit.
+    /// card, its words in it, the composer over the timeline keeping the
+    /// box that asks; Update comment shows the new words at once and asks
+    /// the backend. A card GitHub did not say the reader may edit offers
+    /// no Edit.
     #[test]
     fn edit_opens_the_composer_in_the_card_and_updates_the_comment() {
         use crate::review::model::Destination;
@@ -2051,7 +3039,7 @@ mod tests {
         let boxes = all.iter().filter(|n| n.contains("composer-box")).count();
         assert_eq!(
             boxes, 1,
-            "the card's alone; the foot keeps the box that asks"
+            "the card's alone; the page's composer keeps the box that asks"
         );
 
         // Opened again with other words, as the reader would type them.
@@ -2422,8 +3410,8 @@ mod tests {
         assert_eq!(state.composer_draft.get(), "> Thanks for the fix\n\n");
     }
 
-    /// An issue takes a comment at its foot as a pull request does, so
-    /// its comments offer Quote reply too.
+    /// An issue takes a comment from its Conversation as a pull request
+    /// does, so its comments offer Quote reply too.
     #[test]
     fn quote_reply_on_an_issue_quotes_into_the_composer_for_github() {
         let (mut harness, _, state) =
@@ -2457,7 +3445,7 @@ mod tests {
         assert_eq!(
             (composer.thread_id, composer.anchor),
             (None, None),
-            "at the foot"
+            "over the timeline"
         );
         assert!(composer.destination.is_github());
         assert_eq!(state.composer_draft.get(), "> Thanks\n\n");
@@ -2564,7 +3552,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_branch_says_so_above_the_composer() {
+    fn a_bare_branch_says_so_under_the_composer() {
         let (mut harness, _, state) = app_harness();
         state.pull_request.set(None);
         state.discussion.set(None);
@@ -2574,6 +3562,16 @@ mod tests {
         assert!(cards_in_order(&harness).is_empty());
         assert!(shown(&harness, "Nothing here yet"));
         assert!(shown(&harness, "Ask about this worktree"));
+        let at = |text: &str| {
+            find(harness.root_id(), text)
+                .unwrap()
+                .get_visual_rect_no_clip()
+        };
+        let (composer, empty) = (at("composer"), at("Nothing here yet"));
+        assert!(
+            composer.y1 <= empty.y0,
+            "the label at {empty:?} is not under the composer at {composer:?}"
+        );
     }
 
     #[test]
@@ -2955,12 +3953,12 @@ mod tests {
         let (mut harness, app, _) = app_harness();
         let scroll = find(harness.root_id(), "conversation").unwrap();
         let viewport = scroll.get_visual_rect_no_clip();
-        let title = find(harness.root_id(), "conversation-title").unwrap();
-        let top = title.get_visual_rect_no_clip().y0;
+        let column = find(harness.root_id(), "conversation column").unwrap();
+        let top = column.get_visual_rect_no_clip().y0;
         harness.scroll_down(viewport.center().x, viewport.center().y, 300.0);
         harness.rebuild();
         harness.paint();
-        let scrolled = title.get_visual_rect_no_clip().y0;
+        let scrolled = column.get_visual_rect_no_clip().y0;
         assert!(
             scrolled < top,
             "the page did not scroll: {top} then {scrolled}"
@@ -2977,7 +3975,7 @@ mod tests {
         let after = find(harness.root_id(), "conversation").unwrap();
         assert_eq!(after, scroll, "the poll built the page again");
         assert_eq!(
-            title.get_visual_rect_no_clip().y0,
+            column.get_visual_rect_no_clip().y0,
             scrolled,
             "the poll moved the page"
         );
@@ -2985,20 +3983,27 @@ mod tests {
 
     /// What a notification has the poll fetch lands on the page as it
     /// is: a comment said while the reader is on it is one more card in
-    /// the same scroll, and the reader is where they were.
+    /// the same scroll, over the newest, and the reader is where they
+    /// were: the card they had in view stays where it was in the window,
+    /// the page scrolling down by what landed over it. The card that was
+    /// newest moves down without being built again.
     #[test]
     fn a_comment_that_arrives_joins_the_page_in_place() {
         use crate::backend::Event;
 
         let (mut harness, app, state) = app_harness();
+        harness.set_size(1400.0, 400.0);
+        settle(&mut harness);
         let scroll = find(harness.root_id(), "conversation").unwrap();
-        let viewport = scroll.get_visual_rect_no_clip();
-        let title = find(harness.root_id(), "conversation-title").unwrap();
-        harness.scroll_down(viewport.center().x, viewport.center().y, 300.0);
-        harness.rebuild();
-        harness.paint();
-        let scrolled = title.get_visual_rect_no_clip().y0;
+        // The reader down at the oldest card, with newer ones over it.
+        let oldest = *all_named(harness.root_id(), "card:event").last().unwrap();
+        to_top(&mut harness, oldest);
+        let in_view = oldest.get_visual_rect_no_clip().y0;
+        let scrolled = state.conversation_scroll.get_untracked();
+        assert!(scrolled > 0.0, "the page did not scroll");
         let before = cards_in_order(&harness);
+        let newest = card_views(&harness)[1];
+        assert!(newest.debug_name().contains("card:event"));
 
         let mut discussion = discussion();
         discussion.comments.push(IssueComment {
@@ -3021,11 +4026,10 @@ mod tests {
             },
             state,
         );
-        harness.rebuild();
-        harness.paint();
+        settle(&mut harness);
 
         let mut expected = before.clone();
-        expected.push("card:comment".into());
+        expected.insert(1, "card:comment".into());
         assert_eq!(
             cards_in_order(&harness),
             expected,
@@ -3037,10 +4041,52 @@ mod tests {
             "the comment built the page again"
         );
         assert_eq!(
-            title.get_visual_rect_no_clip().y0,
-            scrolled,
-            "the comment moved the page"
+            oldest.get_visual_rect_no_clip().y0,
+            in_view,
+            "the comment moved the card in view"
         );
+        let comment = find(harness.root_id(), "card:comment").unwrap();
+        assert!(
+            state.conversation_scroll.get_untracked()
+                >= scrolled + comment.get_visual_rect_no_clip().height(),
+            "the page did not scroll by what landed over the reader"
+        );
+        assert_eq!(
+            card_views(&harness)[2],
+            newest,
+            "the card that was newest was built again"
+        );
+        assert_eq!(
+            newest.get_visual_rect_no_clip().y0 - comment.get_visual_rect_no_clip().y1,
+            crate::theme::EVENT_GAP,
+            "the card that was newest has not the room under a comment"
+        );
+    }
+
+    /// At the page's top, what lands over the timeline is what the reader
+    /// should see: the page stays at its top.
+    #[test]
+    fn a_comment_that_arrives_at_the_top_of_the_page_does_not_scroll_it() {
+        let (mut harness, app, state) = app_harness();
+        harness.set_size(1400.0, 400.0);
+        settle(&mut harness);
+        let mut more = discussion();
+        more.comments.push(IssueComment {
+            id: 2,
+            node_id: String::new(),
+            user: "rohan".into(),
+            user_avatar_url: String::new(),
+            body: "One more thing.".into(),
+            created_at: at("2026-09-18T09:00:00Z"),
+            updated_at: None,
+            html_url: "https://github.com/criccomini/perch/pull/57#issuecomment-2".into(),
+            reactions: Default::default(),
+            viewer_can_delete: false,
+            viewer_can_update: false,
+        });
+        deliver(app, state, more);
+        settle(&mut harness);
+        assert_eq!(state.conversation_scroll.get_untracked(), 0.0);
     }
 
     /// A file's tab showing takes the page away, as a link to a file from
@@ -3054,12 +4100,12 @@ mod tests {
         let scroll = find(harness.root_id(), "conversation").unwrap();
         let viewport = scroll.get_visual_rect_no_clip();
         let root = harness.root_id();
-        let title = move || find(root, "conversation-title").unwrap();
-        let top = title().get_visual_rect_no_clip().y0;
+        let column = move || find(root, "conversation column").unwrap();
+        let top = column().get_visual_rect_no_clip().y0;
         harness.scroll_down(viewport.center().x, viewport.center().y, 300.0);
         harness.rebuild();
         harness.paint();
-        let scrolled = title().get_visual_rect_no_clip().y0;
+        let scrolled = column().get_visual_rect_no_clip().y0;
         assert!(scrolled < top, "the page did not scroll");
 
         state.show_tab(ItemTab::Code);
@@ -3075,7 +4121,7 @@ mod tests {
         harness.paint();
         assert_ne!(find(harness.root_id(), "conversation").unwrap(), scroll);
         assert_eq!(
-            title().get_visual_rect_no_clip().y0,
+            column().get_visual_rect_no_clip().y0,
             scrolled,
             "the page opened somewhere else"
         );
@@ -3102,15 +4148,15 @@ mod tests {
         })
     }
 
-    /// Cmd-Down goes to the end of the page, the composer at the foot of
-    /// the scroll, and Cmd-Up back to its top. A composer keeps them.
+    /// Cmd-Down goes to the end of the page, the oldest card at the foot
+    /// of the scroll, and Cmd-Up back to its top. A composer keeps them.
     #[test]
     fn cmd_up_and_down_go_to_the_end_of_the_page_and_back_to_its_top() {
         let (mut harness, _, state) = app_harness();
         let scroll = find(harness.root_id(), "conversation").unwrap();
         let viewport = scroll.get_visual_rect_no_clip();
-        let title = find(harness.root_id(), "conversation-title").unwrap();
-        let top = title.get_visual_rect_no_clip().y0;
+        let column = find(harness.root_id(), "conversation column").unwrap();
+        let top = column.get_visual_rect_no_clip().y0;
         harness.click(700.0, 500.0);
         harness.rebuild();
 
@@ -3118,15 +4164,13 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert_eq!(state.paging.get(), None, "the page took the key");
-        let composer = find(harness.root_id(), "composer")
-            .unwrap()
-            .get_visual_rect_no_clip();
+        let foot = column.get_visual_rect_no_clip();
         assert_eq!(
-            composer.y1,
+            foot.y1,
             viewport.y1 - crate::theme::CONVERSATION_PADDING,
-            "the composer at {composer:?} is not at the end of the scroll {viewport:?}"
+            "the column's end at {foot:?} is not at the end of the scroll {viewport:?}"
         );
-        let end = title.get_visual_rect_no_clip().y0;
+        let end = column.get_visual_rect_no_clip().y0;
         assert!(end < top);
 
         // A composer's are the start and the end of its text.
@@ -3135,30 +4179,29 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert_eq!(state.paging.get(), None);
-        assert_eq!(title.get_visual_rect_no_clip().y0, end);
+        assert_eq!(column.get_visual_rect_no_clip().y0, end);
         state.composer_focused.set(false);
 
         harness.dispatch_event(page_key(Paging::Top));
         harness.rebuild();
         harness.paint();
-        assert_eq!(title.get_visual_rect_no_clip().y0, top);
+        assert_eq!(column.get_visual_rect_no_clip().y0, top);
     }
 
-    /// The ask box at the foot of the page opens into a composer taller
+    /// The ask box at the foot of the window opens into a composer taller
     /// than itself, and the page follows it down: the whole composer,
     /// Send and all, is on screen, not only its first lines.
     #[test]
-    fn the_composer_opened_at_the_foot_of_the_page_is_all_on_screen() {
+    fn the_composer_opened_at_the_foot_of_the_window_is_all_on_screen() {
         let (mut harness, _, state) = app_harness();
-        let scroll = find(harness.root_id(), "conversation").unwrap();
-        let viewport = scroll.get_visual_rect_no_clip();
-        harness.click(700.0, 500.0);
-        harness.rebuild();
-        harness.dispatch_event(page_key(Paging::End));
+        // The window cut to just under the ask box.
+        let foot = find(harness.root_id(), "composer").unwrap();
+        harness.set_size(1400.0, foot.get_visual_rect_no_clip().y1 + 2.0);
         harness.rebuild();
         harness.paint();
+        let scroll = find(harness.root_id(), "conversation").unwrap();
+        let viewport = scroll.get_visual_rect_no_clip();
 
-        let foot = find(harness.root_id(), "composer").unwrap();
         click_on(&mut harness, foot);
         harness.rebuild();
         harness.paint();
@@ -3181,8 +4224,8 @@ mod tests {
         harness.rebuild();
         harness.paint();
         let root = harness.root_id();
-        let title = move || find(root, "conversation-title").unwrap();
-        let top = title().get_visual_rect_no_clip().y0;
+        let column = move || find(root, "conversation column").unwrap();
+        let top = column().get_visual_rect_no_clip().y0;
         let form = find(root, "close-as-issue").expect("no form");
         let boxes = [
             find(form, "TextInput").expect("no title box"),
@@ -3197,7 +4240,7 @@ mod tests {
             harness.paint();
             assert_eq!(state.paging.get(), None);
             assert_eq!(
-                title().get_visual_rect_no_clip().y0,
+                column().get_visual_rect_no_clip().y0,
                 top,
                 "{} gave the page the key",
                 text_box.debug_name()
@@ -3212,14 +4255,14 @@ mod tests {
     fn the_page_keys_scroll_by_a_page() {
         let (mut harness, _, state) = app_harness();
         // Short enough that the page is over two pages long.
-        harness.set_size(1400.0, 500.0);
+        harness.set_size(1400.0, 400.0);
         harness.rebuild();
         harness.paint();
         let scroll = find(harness.root_id(), "conversation").unwrap();
         let page =
             scroll.get_content_rect_local().height() - crate::theme::code_line_height() as f64;
-        let title = find(harness.root_id(), "conversation-title").unwrap();
-        let top = title.get_visual_rect_no_clip().y0;
+        let column = find(harness.root_id(), "conversation column").unwrap();
+        let top = column.get_visual_rect_no_clip().y0;
         harness.click(700.0, 300.0);
         harness.rebuild();
 
@@ -3232,7 +4275,7 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert_eq!(state.conversation_scroll.get(), 2.0 * page);
-        assert_eq!(title.get_visual_rect_no_clip().y0, top - 2.0 * page);
+        assert_eq!(column.get_visual_rect_no_clip().y0, top - 2.0 * page);
 
         state.composer_focused.set(true);
         harness.dispatch_event(page_key(Paging::Up));
@@ -3248,13 +4291,13 @@ mod tests {
     fn the_page_keys_work_on_a_page_nobody_clicked() {
         let (mut harness, _, state) = app_harness();
         let root = harness.root_id();
-        let title = move || find(root, "conversation-title").unwrap();
-        let top = title().get_visual_rect_no_clip().y0;
+        let column = move || find(root, "conversation column").unwrap();
+        let top = column().get_visual_rect_no_clip().y0;
         harness.dispatch_event(page_key(Paging::Down));
         harness.rebuild();
         harness.paint();
         assert!(
-            title().get_visual_rect_no_clip().y0 < top,
+            column().get_visual_rect_no_clip().y0 < top,
             "the first page did not move"
         );
 
@@ -3267,12 +4310,12 @@ mod tests {
         state.show_tab(crate::review::model::ItemTab::Conversation);
         harness.rebuild();
         harness.paint();
-        assert_eq!(title().get_visual_rect_no_clip().y0, top);
+        assert_eq!(column().get_visual_rect_no_clip().y0, top);
         harness.dispatch_event(page_key(Paging::Down));
         harness.rebuild();
         harness.paint();
         assert!(
-            title().get_visual_rect_no_clip().y0 < top,
+            column().get_visual_rect_no_clip().y0 < top,
             "the page back from Code did not move"
         );
     }
@@ -3345,21 +4388,11 @@ mod tests {
         }
     }
 
-    /// The last card of `kind` on the page, and whether all of it is
-    /// inside the scroll's box.
-    fn last_card_shown(harness: &HeadlessHarness, kind: &str) -> bool {
-        fn under(id: floem::ViewId, kind: &str, out: &mut Vec<floem::ViewId>) {
-            if id.debug_name().contains(kind) {
-                out.push(id);
-            }
-            for child in id.children() {
-                under(child, kind, out);
-            }
-        }
-        let mut found = Vec::new();
-        under(harness.root_id(), kind, &mut found);
-        let card = found
-            .last()
+    /// Whether all of the newest card of `kind` on the page, the first,
+    /// or else the oldest, the last, is inside the scroll's box.
+    fn card_shown(harness: &HeadlessHarness, kind: &str, newest: bool) -> bool {
+        let found = all_named(harness.root_id(), kind);
+        let card = if newest { found.first() } else { found.last() }
             .expect("no such card")
             .get_visual_rect_no_clip();
         let viewport = find(harness.root_id(), "conversation")
@@ -3383,8 +4416,8 @@ mod tests {
     #[test]
     fn an_unread_notification_opens_on_the_comment_that_woke_the_reader() {
         let (mut harness, app, state) = opened_from(notification("2026-09-18T09:00:20Z", true));
-        let title = find(harness.root_id(), "conversation-title").unwrap();
-        let top = title.get_visual_rect_no_clip().y0;
+        let column = find(harness.root_id(), "conversation column").unwrap();
+        let top = column.get_visual_rect_no_clip().y0;
         assert_eq!(state.focus_card.get(), None, "the cached page is older");
 
         deliver(app, state, with_new_comment());
@@ -3395,11 +4428,11 @@ mod tests {
             Some(crate::review::doc::CardId::Entry("comment:2".into()))
         );
         assert!(
-            title.get_visual_rect_no_clip().y0 < top,
+            column.get_visual_rect_no_clip().y0 < top,
             "the page did not move"
         );
         assert!(
-            last_card_shown(&harness, "card:comment"),
+            card_shown(&harness, "card:comment", true),
             "the new comment is not in view"
         );
         assert!(state.notified.get().is_none(), "the open is done");
@@ -3420,7 +4453,7 @@ mod tests {
             "{:?}",
             state.focus_card.get()
         );
-        assert!(last_card_shown(&harness, "card:event"));
+        assert!(card_shown(&harness, "card:event", true));
     }
 
     /// A read notification opens where the reader left the page, and so
@@ -3463,7 +4496,7 @@ mod tests {
         settle(&mut harness);
         assert_eq!(state.tab.get(), crate::review::model::ItemTab::Conversation);
         assert!(
-            last_card_shown(&harness, "card:comment"),
+            card_shown(&harness, "card:comment", true),
             "the new comment is not in view"
         );
     }
