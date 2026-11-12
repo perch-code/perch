@@ -353,7 +353,7 @@ pub(crate) fn hover_action(
     )
 }
 
-/// Quote reply under the pointer, as [`hover_action`] is: `quote` gets
+/// Quote reply under the pointer, named `tip`, as [`hover_action`] is: `quote` gets
 /// what was selected in `scope`'s text as the pointer came onto the
 /// button, or `None` to quote the whole. A press moves the focus, and
 /// the selection goes with it, before the click lands, so the selection
@@ -361,22 +361,19 @@ pub(crate) fn hover_action(
 pub(crate) fn quote_action(
     hovered: RwSignal<bool>,
     scope: floem::ViewId,
+    tip: &'static str,
     name: &'static str,
     quote: Rc<dyn Fn(Option<String>)>,
 ) -> impl IntoView {
     let selected = Rc::new(RefCell::new(None));
     let read = selected.clone();
     let action: Rc<dyn Fn()> = Rc::new(move || quote(read.borrow().clone()));
-    Container::new(hover_action(
-        hovered,
-        SidebarIcon::Reply,
-        "Quote reply",
-        name,
-        action,
-    ))
-    .on_event_cont(el::PointerEnter, move |_, _| {
-        *selected.borrow_mut() = crate::review::linked_text::selected_under(scope);
-    })
+    Container::new(hover_action(hovered, SidebarIcon::Reply, tip, name, action)).on_event_cont(
+        el::PointerEnter,
+        move |_, _| {
+            *selected.borrow_mut() = crate::review::linked_text::selected_under(scope);
+        },
+    )
 }
 
 /// Delete under the pointer, for a comment on GitHub, while `may` says
@@ -1265,7 +1262,7 @@ fn quote_reply_button(
             if !offered {
                 return Empty::new().into_any();
             }
-            quote_action(hovered, scope, "quote-reply", quote.clone()).into_any()
+            quote_action(hovered, scope, "Quote reply", "quote-reply", quote.clone()).into_any()
         },
     )
     .into_any()
