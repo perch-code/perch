@@ -1,12 +1,13 @@
 //! Code's tabs, shaped like an editor's: the open files'.
 //!
 //! The active tab takes the surface of what it shows, the editor's or the
-//! page's, and nothing else marks it: it reads as a piece of the pane
-//! come up into the grey strip. Everything in the strip but the active
-//! tab carries the rule that separates the strip from the pane; drawing
-//! that rule under the active tab too would cut it off from what it is
-//! showing. No rule between two tabs either: their names and the room
-//! around them part them.
+//! page's, and nothing else marks it: it is the lit one in the grey
+//! strip. The rule that separates the strip from the pane runs under
+//! every tab, the active one too. What sits right under the strip is
+//! often not that white (a hunk's header, the gutter), so a tab that
+//! broke the rule opened onto nothing and read as a notch in it. No rule
+//! between two tabs either: their names and the room around them part
+//! them.
 
 use std::rc::Rc;
 
@@ -252,8 +253,7 @@ pub fn step_tab(state: ReviewState, backend: &Backend, forward: bool) -> bool {
 }
 
 /// Room in the strip with nothing in it, ruled along its bottom as the
-/// inactive tabs are, so the rule under the strip runs unbroken to the
-/// active tab.
+/// tabs are, so the rule under the strip runs unbroken.
 fn strip_rule() -> Empty {
     Empty::new().style(|s| {
         s.flex_grow(1.0_f32)
@@ -264,10 +264,8 @@ fn strip_rule() -> Empty {
 }
 
 /// A file's tab. The active one has the surface of what it shows, the
-/// editor's or the page's, which are one white, and nothing along its
-/// bottom, so the tab and what it shows join up. Its bottom still has the
-/// rule's width, in its own colour, so a name does not move when its tab
-/// comes to show.
+/// editor's or the page's, which are one white. Every tab has the strip's
+/// rule along its bottom.
 fn tab_style(s: Style, active: bool) -> Style {
     let base = s
         .height_full()
@@ -278,14 +276,13 @@ fn tab_style(s: Style, active: bool) -> Style {
         .flex_shrink(0.0_f32)
         .selectable(false)
         .border_bottom(1.0)
+        .border_color(theme::border())
         .hover(|s| s.cursor(CursorStyle::Pointer));
 
     if active {
         base.background(theme::code_bg())
-            .border_color(theme::code_bg())
     } else {
         base.background(Color::TRANSPARENT)
-            .border_color(theme::border())
             .hover(|s| s.background(theme::canvas_hover()))
     }
 }
