@@ -875,7 +875,9 @@ fn pick(
             .flex_shrink(0.0_f32)
             .items_center()
             .justify_center()
-            .border_radius(theme::RADIUS)
+            // The menu rows' corner, which sits true inside the card's
+            // at the same 4px gutter.
+            .border_radius(crate::ui::menu::ROW_RADIUS)
             .keyboard_navigable()
             .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
             .apply_if(keyed.get(), |s| {
