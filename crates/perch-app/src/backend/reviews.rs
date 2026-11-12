@@ -2300,6 +2300,17 @@ fn json_candidate(raw: &str) -> Option<&str> {
     if trimmed.starts_with('{') && trimmed.ends_with('}') {
         return Some(trimmed);
     }
+    let open = "```json\n";
+    if let Some(at) = raw
+        .rfind(&format!("\n{open}"))
+        .map(|at| at + 1)
+        .or_else(|| raw.starts_with(open).then_some(0))
+    {
+        let tail = &raw[at + open.len()..];
+        if let Some(end) = tail.rfind("\n```") {
+            return Some(tail[..end].trim());
+        }
+    }
     let start = raw.find("```json")? + "```json".len();
     let tail = &raw[start..];
     let end = tail.find("```")?;
@@ -4133,5 +4144,19 @@ mod tests {
         let mut corrupt = snapshot;
         corrupt.retained_ref = Some(perch_git::HEAD_REF.into());
         assert!(!valid_empty_snapshot(&group, &corrupt));
+    }
+
+    #[test]
+    fn json_candidate_reads_the_last_fenced_block_and_keeps_quoted_fences() {
+        let raw = concat!(
+            "Checked the earlier example:\n```json\n{\"verifications\":[]}\n```\n\n",
+            "```json\n{\n  \"verifications\": [\n    {\n      \"finding_id\": \"f1\",\n",
+            "      \"status\": \"present\",\n      \"reason\": \"See ```foo``` in lib.rs\"\n    }\n  ]\n}\n```"
+        );
+        let candidate = json_candidate(raw).expect("last fenced block");
+        let parsed: VerificationEnvelope = serde_json::from_str(candidate).unwrap();
+        assert_eq!(parsed.verifications.len(), 1);
+        assert_eq!(parsed.verifications[0].finding_id, "f1");
+        assert!(parsed.verifications[0].reason.contains("```foo```"));
     }
 }

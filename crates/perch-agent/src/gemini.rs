@@ -11,16 +11,17 @@
 //! comes to the client as `session/request_permission`. It takes no
 //! settings and no sandbox Perch can shape, so Perch is the policy: an
 //! edit inside the worktree, clear of the protected paths, is allowed
-//! without asking, and everything else comes to the reader. The session
-//! stays in agy's `default` mode. Its `auto` mode approves edits and
-//! sandboxed commands itself, `.agents/hooks.json` among them, without a
-//! request reaching Perch.
+//! without asking; an edit to a protected path is refused outright; and
+//! everything else comes to the reader. The session stays in agy's
+//! `default` mode. Its `auto` mode approves edits and sandboxed commands
+//! itself, `.agents/hooks.json` among them, without a request reaching
+//! Perch.
 //!
-//! Both load the checkout's own `.agents/` (and `.agent/`, `_agents/`):
-//! hooks and MCP servers that run as the reader, outside any sandbox,
-//! with no trust prompt and no flag to turn them off. So a checkout that
-//! has one is refused unless the reader trusts the repository; see
-//! [`repo_config`].
+//! Both load the checkout's own `.agents/` (and `.agent/`, `_agents/`,
+//! `_agent/`): hooks and MCP servers that run as the reader, outside any
+//! sandbox, with no trust prompt and no flag to turn them off. So a
+//! checkout that has one is refused unless the reader trusts the
+//! repository; see [`repo_config`].
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
@@ -32,9 +33,9 @@ use crate::parse::{counts_suffix, one_line, short_path, str_of};
 use crate::RunEvent;
 
 /// Where agy looks for a workspace's own customizations: hooks, MCP
-/// servers, plugins, skills, rules and agents. agy 1.5.5 reads all three
+/// servers, plugins, skills, rules and agents. agy 1.5.5 reads all four
 /// at the top of the workspace.
-pub const CONFIG_DIRS: &[&str] = &[".agents", ".agent", "_agents"];
+pub const CONFIG_DIRS: &[&str] = &[".agents", ".agent", "_agents", "_agent"];
 
 /// The workspace configuration agy would load from `cwd`, if there is any:
 /// one of [`CONFIG_DIRS`] in `cwd` or a directory above it, up to the top
@@ -966,6 +967,21 @@ impl AcpClient {
             .unwrap_or_default();
         let mut events = self.flush_text();
         if let Some(paths) = edit_paths(&call) {
+            if paths
+                .iter()
+                .any(|path| is_protected(path, &self.session.cwd, &self.session.writable))
+            {
+                self.refused = true;
+                events.push(RunEvent::PermissionDenied {
+                    tool: Some(tool_name(&call)).filter(|n| !n.is_empty()),
+                    message: "Perch refused to edit a protected path".into(),
+                });
+                return Reply {
+                    writes: answer_line(&id, &options, false).into_iter().collect(),
+                    events,
+                    ..Reply::default()
+                };
+            }
             if !paths.is_empty()
                 && paths
                     .iter()
@@ -1041,10 +1057,24 @@ fn tool_summary(u: &Value) -> String {
     }
 }
 
+fn is_edit_call(call: &Value) -> bool {
+    str_of(call, "kind") == "edit"
+        || matches!(
+            tool_name(call).as_str(),
+            "write_file"
+                | "write_to_file"
+                | "replace_file_content"
+                | "multi_replace_file_content"
+                | "sed_file"
+                | "edit_file"
+                | "notebook_edit"
+        )
+}
+
 /// The files an edit request writes, when it is one: ACP's `edit` kind,
 /// with its locations, or the path in its input.
 fn edit_paths(call: &Value) -> Option<Vec<PathBuf>> {
-    if str_of(call, "kind") != "edit" {
+    if !is_edit_call(call) {
         return None;
     }
     let mut paths: Vec<PathBuf> = call
@@ -1114,6 +1144,15 @@ fn resolve(path: &Path) -> Option<PathBuf> {
     }
 }
 
+fn has_protected_name(path: &Path) -> bool {
+    path.components().any(|part| {
+        let part = part.as_os_str().to_string_lossy();
+        crate::WORK_PROTECTED
+            .iter()
+            .any(|name| part.eq_ignore_ascii_case(name))
+    })
+}
+
 /// Whether an edit to `path` may go without asking: under one of
 /// `writable`, with no protected name anywhere below that root. Names
 /// compare without case, as macOS's filesystem does, so `.Claude` is
@@ -1127,14 +1166,34 @@ fn may_edit(path: &Path, writable: &[PathBuf]) -> bool {
         let Ok(inside) = path.strip_prefix(root) else {
             return false;
         };
-        inside.components().next().is_some()
-            && !inside.components().any(|part| {
-                let part = part.as_os_str().to_string_lossy();
-                crate::WORK_PROTECTED
-                    .iter()
-                    .any(|name| part.eq_ignore_ascii_case(name))
-            })
+        inside.components().next().is_some() && !has_protected_name(inside)
     })
+}
+
+/// Whether `path` names a protected agent or git path, which a Work run
+/// may not edit even under Allow all or a grant.
+fn is_protected(path: &Path, cwd: &Path, writable: &[PathBuf]) -> bool {
+    if may_edit(path, writable) {
+        return false;
+    }
+    let full = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    let Some(resolved) = resolve(&full) else {
+        return has_protected_name(path);
+    };
+    let mut inside_any = false;
+    for root in writable {
+        if let Ok(inside) = resolved.strip_prefix(root) {
+            inside_any = true;
+            if has_protected_name(inside) {
+                return true;
+            }
+        }
+    }
+    !inside_any && has_protected_name(&resolved)
 }
 
 /// A permission request as the card shows it.
@@ -1493,16 +1552,44 @@ mod tests {
         for (n, path) in [
             root.join(".agents/hooks.json"),
             root.join("_agents/x"),
+            root.join("_agent/x"),
             root.join("sub/.agents/hooks.json"),
             root.join(".git/hooks/pre-commit"),
             root.join(".claude/settings.json"),
+            PathBuf::from(".agents/hooks.json"),
+            PathBuf::from("/tmp/elsewhere/.git/hooks/pre-commit"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let id = n as u64 + 10;
+            let refused = acp.after_line(&line(&ask(&path.to_string_lossy(), id)));
+            let reply = written(&refused);
+            assert_eq!(
+                reply["result"]["outcome"]["optionId"], "deny",
+                "{path:?} was not refused outright"
+            );
+            assert!(
+                matches!(
+                    &refused.events[..],
+                    [RunEvent::PermissionDenied {
+                        tool: Some(tool),
+                        ..
+                    }] if tool == "write_file"
+                ),
+                "{path:?}: {:?}",
+                refused.events
+            );
+        }
+
+        for (n, path) in [
             root.join("src/../../escape.txt"),
             PathBuf::from("/etc/hosts"),
         ]
         .iter()
         .enumerate()
         {
-            let id = n as u64 + 10;
+            let id = n as u64 + 30;
             let asked = acp.after_line(&line(&ask(&path.to_string_lossy(), id)));
             assert!(asked.writes.is_empty(), "{path:?} went without asking");
             assert!(
@@ -1661,13 +1748,31 @@ mod tests {
         for path in [
             wt.join(".Claude/settings.json"),
             wt.join(".AGENTS/hooks.json"),
+            wt.join("_AGENT/hooks.json"),
             wt.join(".MCP.json"),
             wt.join("sub/.GIT/config"),
             wt.join("packages/app/.claude/settings.json"),
             wt.join(".claude/settings.json"),
         ] {
             assert!(!may_edit(&path, &writable), "{path:?}");
+            assert!(is_protected(&path, &wt, &writable), "{path:?}");
         }
+        // A worktree inside `.claude/worktrees/` still allows its own code
+        // while keeping `.claude` outside it protected.
+        let nested_wt = parent.join(".claude/worktrees/feat");
+        std::fs::create_dir_all(&nested_wt).unwrap();
+        let nested_writable = vec![nested_wt.clone()];
+        assert!(may_edit(&nested_wt.join("src/lib.rs"), &nested_writable));
+        assert!(!is_protected(
+            &nested_wt.join("src/lib.rs"),
+            &nested_wt,
+            &nested_writable
+        ));
+        assert!(is_protected(
+            &parent.join(".claude/settings.json"),
+            &nested_wt,
+            &nested_writable
+        ));
     }
 
     #[test]

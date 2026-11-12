@@ -45,10 +45,10 @@ use interactive::{ClaudeHost, CodexServer, CodexThread, Conversation};
 pub use parse::{parse_line, summarize_tool_call};
 pub use review::{
     assess_review_capability, detect_review_capability, extract_review, preserve_native_response,
-    review_output_schema, CliVersion, EvidenceSpan, ReviewCapability, ReviewEffort,
-    ReviewExtraction, ReviewFinding, ReviewLocation, ReviewManifest, ReviewManifestEntry,
-    ReviewSeverity, ReviewSide, ReviewSpec, ReviewVerificationSpec, REPORT_DELIMITER,
-    REVIEW_ADAPTER_VERSION, REVIEW_OUTPUT_FORMAT_VERSION,
+    review_output_schema, review_verification_schema, CliVersion, EvidenceSpan, ReviewCapability,
+    ReviewEffort, ReviewExtraction, ReviewFinding, ReviewLocation, ReviewManifest,
+    ReviewManifestEntry, ReviewSeverity, ReviewSide, ReviewSpec, ReviewVerificationSpec,
+    REPORT_DELIMITER, REVIEW_ADAPTER_VERSION, REVIEW_OUTPUT_FORMAT_VERSION,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,8 +274,8 @@ const EDIT_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
 /// What in a worktree a Work run may not write: the file that points at
 /// the git directory, and the agents' own configuration, which a later
 /// run, or the reader's own agent, would take as instructions. agy's
-/// (`.agents`, `.agent`, `_agents`) also holds hooks and MCP servers it
-/// runs outside any sandbox.
+/// (`.agents`, `.agent`, `_agents`, `_agent`) also holds hooks and MCP
+/// servers it runs outside any sandbox.
 pub const WORK_PROTECTED: &[&str] = &[
     ".git",
     ".claude",
@@ -284,6 +284,7 @@ pub const WORK_PROTECTED: &[&str] = &[
     ".agents",
     ".agent",
     "_agents",
+    "_agent",
     ".gemini",
 ];
 
