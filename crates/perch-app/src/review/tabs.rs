@@ -1,10 +1,12 @@
 //! Code's tabs, shaped like an editor's: the open files'.
 //!
 //! The active tab takes the surface of what it shows, the editor's or the
-//! page's, and an accent stripe along its top, so it reads as continuous
-//! with what is below it. Everything in the strip but the active tab
-//! carries the rule that separates the strip from the pane; drawing that
-//! rule under the active tab too would cut it off from what it is showing.
+//! page's, and nothing else marks it: it reads as a piece of the pane
+//! come up into the grey strip. Everything in the strip but the active
+//! tab carries the rule that separates the strip from the pane; drawing
+//! that rule under the active tab too would cut it off from what it is
+//! showing. No rule between two tabs either: their names and the room
+//! around them part them.
 
 use std::rc::Rc;
 
@@ -261,30 +263,28 @@ fn strip_rule() -> Empty {
     })
 }
 
-/// A file's tab. The active one has the surface of
-/// what it shows, the editor's or the page's, which are one white, with
-/// the stripe on top and nothing along its bottom, so the tab and what it
-/// shows join up.
+/// A file's tab. The active one has the surface of what it shows, the
+/// editor's or the page's, which are one white, and nothing along its
+/// bottom, so the tab and what it shows join up. Its bottom still has the
+/// rule's width, in its own colour, so a name does not move when its tab
+/// comes to show.
 fn tab_style(s: Style, active: bool) -> Style {
     let base = s
         .height_full()
         .items_center()
-        .padding_left(10.0)
-        .padding_right(6.0)
+        .padding_left(12.0)
+        .padding_right(8.0)
         .max_width(theme::TAB_MAX_WIDTH)
         .flex_shrink(0.0_f32)
         .selectable(false)
-        .border_right(1.0)
-        .border_color(theme::border_muted())
+        .border_bottom(1.0)
         .hover(|s| s.cursor(CursorStyle::Pointer));
 
     if active {
         base.background(theme::code_bg())
-            .border_top(2.0)
-            .border_color(theme::accent())
+            .border_color(theme::code_bg())
     } else {
         base.background(Color::TRANSPARENT)
-            .border_bottom(1.0)
             .border_color(theme::border())
             .hover(|s| s.background(theme::canvas_hover()))
     }
