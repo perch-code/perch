@@ -982,10 +982,11 @@ pub const ANCHOR_LINES: usize = 8;
 pub const THREAD_AVATAR: f64 = 24.0;
 pub const INLINE_THREAD_AVATAR: f64 = 20.0;
 pub const THREAD_AVATAR_GAP: f64 = 8.0;
-/// The room at a thread's sides, GitHub's 16 on Conversation and less in
-/// the code, and above and below each comment, so two comments are twice
-/// it apart. The first comment has the side's room over it.
-pub const THREAD_INSET: f64 = 16.0;
+/// The room at a thread's sides, and above and below each comment, so
+/// two comments are twice it apart. The first comment has the side's
+/// room over it. Conversation's is under GitHub's 16, so the foot's
+/// button is not far further from the side than from the hairline.
+pub const THREAD_INSET: f64 = 12.0;
 pub const INLINE_THREAD_INSET: f64 = 12.0;
 pub const THREAD_COMMENT_SPACE: f64 = 12.0;
 pub const INLINE_THREAD_COMMENT_SPACE: f64 = 10.0;
@@ -999,8 +1000,10 @@ pub const THREAD_HEADER_BUTTON: f64 = 28.0;
 pub const INLINE_THREAD_HEADER: f64 = 32.0;
 /// A thread in the code is no wider than github.com draws one.
 pub const INLINE_THREAD_MAX_WIDTH: f64 = 780.0;
-/// The Follow up box and the foot's Resolve button.
+/// The Follow up box and the foot's Resolve button, and the room over
+/// and under each in its row on Conversation.
 pub const THREAD_CONTROL: f64 = 32.0;
+pub const THREAD_CONTROL_SPACE: f64 = 10.0;
 /// A line of a comment being typed, which the composer's styling gives
 /// the editor and the box's heights are counted in.
 pub const COMPOSER_LINE_HEIGHT: f32 = TEXT_BODY * 1.5;

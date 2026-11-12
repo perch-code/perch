@@ -2916,7 +2916,7 @@ pub fn follow_up(
             // would read as Perch's on a GitHub thread.
             s.items_center()
                 .width_full()
-                .padding_vert(8.0)
+                .padding_vert(theme::THREAD_CONTROL_SPACE)
                 .padding_horiz(theme::THREAD_INSET)
                 .border_top(1.0)
                 .border_color(theme::border_muted())
@@ -3030,7 +3030,10 @@ fn resolve_foot(
         .debug_name("thread-foot")
         .style(move |s| {
             s.width_full()
-                .padding_vert(8.0)
+                .padding_vert(match face {
+                    ThreadFace::Card => theme::THREAD_CONTROL_SPACE,
+                    ThreadFace::Inline => 8.0,
+                })
                 .padding_horiz(face.inset())
                 .border_top(1.0)
                 .border_color(theme::border())
