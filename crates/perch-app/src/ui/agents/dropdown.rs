@@ -1,5 +1,7 @@
-//! The Agents button in the bar, and the dropdown it opens: the one list
-//! of runs. With an item open, every run of that item comes first, under
+//! The details button in the bar, and the dropdown it opens: what there
+//! is to say about the open item (`review::summary::details`), then the
+//! one list of runs. With nothing open the button is Agents, and the
+//! dropdown the runs alone. With an item open, every run of that item comes first, under
 //! This pull request, This issue or This branch: what is working, then
 //! what finished, newest first, a review's reviewers as one row for the
 //! review, and older runs a row away. Then what is working on the other
@@ -27,11 +29,11 @@ use floem::views::{dyn_container, Container, Decorators, Empty, Label, ScrollExt
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
-use crate::review::cards::{hover_action, tip, track_hover};
+use crate::review::cards::{hover_action, tip_with, track_hover};
 use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
-use crate::ui::widgets::{clickable, sidebar_glyph};
+use crate::ui::widgets::{clickable, icon_in};
 
 use super::model::{
     active_groups_with_reviews, elapsed_label, group_review_runs, history_runs_with_reviews,
@@ -53,7 +55,20 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
     // The glyph alone, as the gauge beside it, with the count and the dot
     // pinned to its corners.
     let button = Stack::new((
-        sidebar_glyph(SidebarIcon::Agents, theme::fg_muted).style(|s| s.pointer_events_none()),
+        // A list while an item is open, for its details over the runs;
+        // the agents' own glyph with nothing open.
+        icon_in(
+            move || {
+                let glyph = if review.item.with(Option::is_some) {
+                    SidebarIcon::BulletList
+                } else {
+                    SidebarIcon::Agents
+                };
+                crate::icons::sidebar_icon(glyph, theme::fg_muted())
+            },
+            theme::fg_muted,
+        )
+        .style(|s| s.pointer_events_none()),
         Label::derived(move || count().to_string())
             .debug_name("agents count")
             .style(move |s| {
@@ -120,7 +135,13 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
         .debug_name("agents-button");
 
     let stack = Stack::new((
-        tip(button, "Agents".to_string()),
+        tip_with(button, move || {
+            if review.item.with_untracked(Option::is_some) {
+                "Details and agents".to_string()
+            } else {
+                "Agents".to_string()
+            }
+        }),
         dyn_container(
             move || review.agents_dropdown_open.get(),
             move |open| {
@@ -363,6 +384,7 @@ fn popover(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
         super::load_item_runs(app, &backend, &id);
     }
     let listing = Memo::new(move |_| listing(app, review));
+    let details = crate::review::summary::details(app, review, backend.clone());
     let build_rows = rows.clone();
     let body = dyn_container(
         move || listing.get(),
@@ -438,7 +460,9 @@ fn popover(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
     let asked = Rc::new(std::cell::Cell::new(false));
     let keys = rows.clone();
     Container::new(
-        body.scroll()
+        Stack::vertical((details, body))
+            .style(|s| s.flex_col().width_full().max_width_full())
+            .scroll()
             .style(|s| s.width_full().max_height(theme::AGENTS_DROPDOWN_MAX_HEIGHT)),
     )
     .on_event_cont(el::UpdatePhaseLayout, move |_, _| {

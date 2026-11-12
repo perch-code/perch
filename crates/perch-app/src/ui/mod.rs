@@ -86,7 +86,6 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     });
     let panel_backend = backend.clone();
     let panel_open = open_item.clone();
-    let review_open_item = open_item.clone();
     let key_backend = backend.clone();
     let capture_backend = backend.clone();
     let pointer_backend = backend.clone();
@@ -276,13 +275,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 )
                 .into_any()
             } else if open {
-                crate::review::review_view(
-                    state,
-                    review,
-                    review_backend.clone(),
-                    review_open_item.clone(),
-                )
-                .into_any()
+                crate::review::review_view(state, review, review_backend.clone()).into_any()
             } else if no_token {
                 empty_pane(state, review, empty_backend.clone(), token_help(state)).into_any()
             } else {
@@ -1111,6 +1104,12 @@ fn close_item_or_window(
 /// Shut the Agents dropdown and the usage popover when a press with
 /// `hit_path` lands outside the button each hangs from.
 fn dismiss_popovers(review: ReviewState, hit_path: Option<&[floem::ElementId]>) {
+    // A menu opened from a popover is not under it in the tree: a press
+    // on one of its rows, or the press that puts it away, leaves the
+    // popover up.
+    if menu::is_open() {
+        return;
+    }
     let inside = |anchor: Option<floem::ViewId>| {
         let (Some(anchor), Some(leaf)) = (anchor, hit_path.and_then(|path| path.last())) else {
             return false;

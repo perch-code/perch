@@ -369,7 +369,6 @@ pub fn view(
     state: ReviewState,
     backend: Rc<Backend>,
     open_file: OpenFile,
-    open_item: crate::ui::items::OpenItem,
 ) -> impl IntoView {
     let description_backend = backend.clone();
     let description_file = open_file.clone();
@@ -449,7 +448,7 @@ pub fn view(
     let timeline_id = timeline.id();
 
     let column = Stack::vertical((
-        crate::review::summary::summary(app, state, backend.clone(), open_item),
+        crate::review::summary::summary(app, state, backend.clone()),
         sections(app, state, backend.clone()),
         // The description first whatever else there is: it says what
         // the item is, and the timeline under it is what came of it.
@@ -2303,8 +2302,8 @@ mod tests {
 
     /// The page's end can be scrolled to, whatever wraps on it. Under a
     /// width cap taffy served the column's unwrapped height for the pass
-    /// at the cap's width, and the oldest cards under long comments or a
-    /// wrapped summary row sat past the scroll's end.
+    /// at the cap's width, and the oldest cards under long comments sat
+    /// past the scroll's end.
     #[test]
     fn the_end_of_the_page_can_be_scrolled_into_view_when_its_text_and_rows_wrap() {
         let root = TestRoot::new();
@@ -2349,16 +2348,13 @@ mod tests {
         harness.rebuild();
         harness.paint();
 
-        // The column is at its full width, and its rows and comments
-        // wrap.
+        // The column is at its full width, and its comments wrap.
         let scroll = find(harness.root_id(), "conversation").unwrap();
         let column = find(harness.root_id(), "conversation column").unwrap();
         assert_eq!(
             harness.get_layout_rect(column).width(),
             crate::theme::CONVERSATION_WIDTH
         );
-        let labels = find(harness.root_id(), "summary row Labels").unwrap();
-        assert!(harness.get_layout_rect(labels).height() > crate::theme::SUMMARY_ROW);
 
         // What the scroll thinks it holds is what the column is, with the
         // page's padding around it.
@@ -4161,9 +4157,9 @@ mod tests {
         harness.paint();
         assert_eq!(state.paging.get(), None, "the page took the key");
         let foot = column.get_visual_rect_no_clip();
-        assert_eq!(
-            foot.y1,
-            viewport.y1 - crate::theme::CONVERSATION_PADDING,
+        // To a hundredth: the column's height is a sum of f32 rows.
+        assert!(
+            (foot.y1 - (viewport.y1 - crate::theme::CONVERSATION_PADDING)).abs() < 0.01,
             "the column's end at {foot:?} is not at the end of the scroll {viewport:?}"
         );
         let end = column.get_visual_rect_no_clip().y0;
@@ -4251,7 +4247,7 @@ mod tests {
     fn the_page_keys_scroll_by_a_page() {
         let (mut harness, _, state) = app_harness();
         // Short enough that the page is over two pages long.
-        harness.set_size(1400.0, 400.0);
+        harness.set_size(1400.0, 300.0);
         harness.rebuild();
         harness.paint();
         let scroll = find(harness.root_id(), "conversation").unwrap();
@@ -4259,7 +4255,7 @@ mod tests {
             scroll.get_content_rect_local().height() - crate::theme::code_line_height() as f64;
         let column = find(harness.root_id(), "conversation column").unwrap();
         let top = column.get_visual_rect_no_clip().y0;
-        harness.click(700.0, 300.0);
+        harness.click(700.0, 200.0);
         harness.rebuild();
 
         harness.dispatch_event(page_key(Paging::Down));
@@ -4371,7 +4367,7 @@ mod tests {
             discussion(),
             move |state| crate::review::notified::follow(state, &thread),
         );
-        harness.set_size(1400.0, 460.0);
+        harness.set_size(1400.0, 380.0);
         harness.rebuild();
         harness.paint();
         (harness, app, state)

@@ -39,12 +39,24 @@ pub fn can_start_work(item: &Item) -> bool {
     }
 }
 
-/// The branch glyph in the bar, on anything Start work can cut from.
+/// Whether Start work is a button in the bar: on an issue or a pull
+/// request nothing has been started from yet. Once something has, and on
+/// a worktree of the reader's own, it is a row in the bar's menu.
+pub fn in_bar(app: AppState, item: &Item) -> bool {
+    can_start_work(item)
+        && item.subject.is_some()
+        && !app.items.with(|all| {
+            all.iter()
+                .any(|i| i.from_item_id.as_deref() == Some(item.id.as_str()))
+        })
+}
+
+/// The branch glyph in the bar, while Start work is there: see `in_bar`.
 pub fn button(app: AppState, state: ReviewState) -> impl IntoView {
     let id = Memo::new(move |_| {
         state.item.with(|i| {
             i.as_deref()
-                .filter(|item| can_start_work(item))
+                .filter(|item| in_bar(app, item))
                 .map(|item| item.id.clone())
         })
     });

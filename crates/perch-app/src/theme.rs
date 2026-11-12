@@ -461,7 +461,7 @@ pub const MAIN_MIN_WIDTH: f64 = 620.0;
 /// The Agents dropdown under the bar's button: as wide as Review's popover,
 /// and as tall as this before it scrolls.
 pub const AGENTS_DROPDOWN_WIDTH: f64 = 430.0;
-pub const AGENTS_DROPDOWN_MAX_HEIGHT: f64 = 460.0;
+pub const AGENTS_DROPDOWN_MAX_HEIGHT: f64 = 560.0;
 /// The popovers over the drawer's footer, bug reports and plan usage, one
 /// width for both: the bug report's preview wants the room.
 pub const FOOTER_POPOVER_WIDTH: f64 = 440.0;
@@ -929,7 +929,7 @@ pub const STATE_WASH: f32 = 0.12;
 pub const SUMMARY_ROW: f64 = 32.0;
 /// The name column: the glyph, its gap, and the longest name with room
 /// to spare.
-pub const SUMMARY_NAME_WIDTH: f64 = 124.0;
+pub const SUMMARY_NAME_WIDTH: f64 = 104.0;
 pub const SUMMARY_GLYPH: f64 = 14.0;
 /// Between the parts of a value: the branches and their churn, the pill
 /// and the number.

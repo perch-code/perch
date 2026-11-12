@@ -1,14 +1,17 @@
-//! The summary at the top of Conversation: what the item is, in rows.
+//! The summary at the top of Conversation, and the details in the bar.
 //!
-//! Each row is a name and a value, as Codex's summary has them: Author,
-//! Branch with the worktree on it, Reviewers, Checks, Status, then what
-//! GitHub says about the item. A row is absent when it has nothing, and
-//! the block with them. Checks and Status say enough to know whether the
-//! pull request can go in: Checks lists every check in its menu, and the
-//! bar's Merge has the rest.
+//! The summary is one line: the item's state, its repository and number,
+//! its checks, what blocks its merge, its churn, and who opened it. That
+//! says enough to know whether a pull request can go in: the checks chip
+//! lists every check in its menu, and the bar's Merge has the rest.
 //! The notices, and the way back from a retained snapshot, sit over the
-//! rows; on Code the notice is in the tab bar and the way back in the
+//! line; on Code the notice is in the tab bar and the way back in the
 //! rail, since the summary is Conversation's alone.
+//!
+//! Everything else is `details`, rows of a name and a value in the
+//! popover the bar's details button opens, as Codex has them: Branch,
+//! Worktree, Reviewers, then what GitHub says about the item. A row is
+//! absent when it has nothing.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -28,32 +31,50 @@ use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
-use crate::ui::items::OpenItem;
 use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::widgets::{
     avatar, badge_box, badge_text, clickable, name_label, open_in_browser, sidebar_glyph,
     worktree_menu, Name,
 };
 
-/// The block at the top of the page: the notices, then the rows. Hidden
+/// The block at the top of the page: the notices, then the line. Hidden
 /// rather than empty when there is nothing to say, so what follows it
 /// starts at the top.
-pub fn summary(
-    app: AppState,
-    state: ReviewState,
-    backend: Rc<Backend>,
-    open_item: OpenItem,
-) -> impl IntoView {
-    let data = Memo::new(move |_| github_data(app, state));
+pub fn summary(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    let author = Memo::new(move |_| github_data(app, state).author);
     let shown = Memo::new(move |_| {
         subject_state(state).is_some()
             || !repo_of(state).is_empty()
-            || !branches_text(state).is_empty()
+            || churn_of(state).is_some()
+            || author.with(Option::is_some)
             || state.historical_review.with(Option::is_some)
             || notice_text(state).is_some()
-            || data.with(|d| !d.is_empty())
     });
-    let directory_backend = backend.clone();
+    // Asked as the item opens, so the details have them when they open.
+    ask(app, state, &backend);
+    Stack::vertical((
+        notices(app, state, backend.clone()),
+        line(app, state, backend, author),
+    ))
+    .debug_name("item summary")
+    .style(move |s| {
+        s.flex_col()
+            .width_full()
+            .padding_bottom(theme::CONVERSATION_TITLE_GAP)
+            .apply_if(!shown.get(), |s| s.hide())
+    })
+}
+
+/// What the details ask the backend for as an item opens.
+#[derive(Clone, Copy)]
+struct Asked {
+    /// The repository's grants, on an item that takes Work runs.
+    grants: Memo<Vec<(String, String)>>,
+    /// Who the item can be assigned to, when the reader may assign.
+    assignable: Memo<Option<Arc<Vec<MentionableUser>>>>,
+}
+
+fn ask(app: AppState, state: ReviewState, backend: &Rc<Backend>) -> Asked {
     // The repository's grants, on an item that takes Work runs: asked for
     // as the item opens, and kept as the backend sends them.
     let work_repo = Memo::new(move |_| {
@@ -87,7 +108,6 @@ pub fn summary(
             .map(|grant| (grant.id, grant.label))
             .collect::<Vec<_>>()
     });
-    let grants_backend = backend.clone();
     // Who the item can be assigned to, when the reader may assign: asked
     // as an issue or a pull request opens, since whoever took part in it
     // can be as well as the repository's assignable users.
@@ -116,33 +136,51 @@ pub fn summary(
             })
         })
     });
+    Asked { grants, assignable }
+}
+
+/// The rest of what there is to say about the item, in rows, at the top
+/// of the bar's details: its branches and worktree, then what GitHub says
+/// about it. A row is absent when it has nothing, and the block with
+/// them.
+pub(crate) fn details(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    let data = Memo::new(move |_| github_data(app, state));
+    let Asked { grants, assignable } = ask(app, state, &backend);
+    let shown = Memo::new(move |_| {
+        !branches_text(state).is_empty()
+            || data.with(|d| d.has_details())
+            || grants.with(|g| !g.is_empty())
+            || assignable.with(Option::is_some)
+    });
+    let grants_backend = backend.clone();
     let assign_backend = backend.clone();
+    let closes_backend = backend.clone();
+    let open_backend = backend.clone();
     Stack::vertical((
-        notices(app, state, backend.clone()),
-        dyn_row(
-            SidebarIcon::Person,
-            "Author",
-            move || data.with(|d| d.author.clone()),
-            Option::is_some,
-            move |author| match author {
-                Some(author) => author_view(app, author).into_any(),
-                None => Empty::new().into_any(),
-            },
-        ),
         row(
             SidebarIcon::Branch,
             "Branch",
             move || !branches_text(state).is_empty(),
+            branches(state),
+        ),
+        row(
+            SidebarIcon::Folder,
+            "Worktree",
+            move || checkout_on_disk(state).is_some(),
             Stack::horizontal((
-                branches(state),
-                directory(app, state, directory_backend),
-                churn(state),
+                directory(app, state, backend.clone()),
                 divergence(state),
                 push_button(app, state, backend.clone()),
                 update_button(state, backend.clone()),
                 rebase_button(state, backend.clone()),
             ))
-            .style(|s| s.items_center().min_width(0.0).col_gap(theme::SUMMARY_GAP)),
+            .style(|s| {
+                s.items_center()
+                    .min_width(0.0)
+                    .flex_wrap(floem::taffy::FlexWrap::Wrap)
+                    .col_gap(theme::SUMMARY_GAP)
+                    .row_gap(4.0)
+            }),
         ),
         dyn_row(
             SidebarIcon::Person,
@@ -151,7 +189,6 @@ pub fn summary(
             |r| !r.is_empty(),
             move |reviewers| reviewers_view(app, reviewers),
         ),
-        status_row(app, state, backend.clone()),
         dyn_row(
             SidebarIcon::Check,
             "Work may",
@@ -212,7 +249,7 @@ pub fn summary(
             move || data.with(|d| d.closes.clone()),
             |c| !c.is_empty(),
             move |closes| {
-                let backend = backend.clone();
+                let backend = closes_backend.clone();
                 let repo = state
                     .item
                     .with(|i| i.as_ref().map(|i| i.repo_full_name.clone()))
@@ -220,6 +257,7 @@ pub fn summary(
                 chips(closes, move |n| {
                     let (backend, repo) = (backend.clone(), repo.clone());
                     let open = move || {
+                        crate::ui::agents::dropdown::close(state, false);
                         // By number rather than by row: the issue may
                         // have no item yet, and the backend makes one.
                         let navigation_id = backend.open_subject(&repo, ItemKind::Issue, n);
@@ -240,26 +278,27 @@ pub fn summary(
             move || data.with(|d| d.in_perch.clone()),
             |i| !i.is_empty(),
             move |items| {
-                let open_item = open_item.clone();
+                let backend = open_backend.clone();
                 chips(items, move |item| {
-                    let open = open_item.clone();
-                    let target = item.clone();
+                    let backend = backend.clone();
                     let name = item.title().to_string();
-                    chip(
-                        name,
-                        theme::badge_bg,
-                        theme::fg_muted,
-                        Some(Rc::new(move || open(&target))),
-                    )
+                    let open = move || {
+                        crate::ui::agents::dropdown::close(state, false);
+                        crate::ui::open_item(app, state, &backend, &item);
+                    };
+                    chip(name, theme::badge_bg, theme::fg_muted, Some(Rc::new(open)))
                 })
             },
         ),
     ))
-    .debug_name("item summary")
+    .debug_name("item details")
     .style(move |s| {
         s.flex_col()
             .width_full()
-            .padding_bottom(theme::CONVERSATION_TITLE_GAP)
+            .padding_horiz(14.0)
+            .padding_vert(6.0)
+            .border_bottom(1.0)
+            .border_color(theme::border_muted())
             .apply_if(!shown.get(), |s| s.hide())
     })
 }
@@ -331,63 +370,69 @@ fn dyn_row<T: Clone + PartialEq + 'static, V: IntoView + 'static>(
     )
 }
 
-/// Open, Draft, Merged, Closed as the pill, then the repository and
-/// number as the sidebar's rows say them, then the checks' verdict. An
-/// open pull request adds what GitHub says blocks its merge, once the
-/// live overview has come; merging it is the bar's. A worktree of the reader's own has no
-/// state, and its row is its repository alone; one with no GitHub remote
-/// has no row.
-fn status_row(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    let subject = move || subject_state(state);
-    // A memo, so the row is rebuilt when the glyph or the name changes
-    // and not on every refresh of the pull request: the pill and the
-    // number inside it follow the signals on their own.
-    let heading = Memo::new(move |_| match subject() {
-        Some(
-            SubjectState::IssueOpen | SubjectState::IssueClosed | SubjectState::IssueNotPlanned,
-        ) => (SidebarIcon::Issue, "Status"),
-        Some(_) => (SidebarIcon::PullRequest, "Status"),
-        None => (SidebarIcon::Repository, "Repository"),
-    });
-    dyn_container(
-        move || heading.get(),
-        move |(glyph, name)| {
-            row(
-                glyph,
-                name,
-                move || subject().is_some() || !repo_of(state).is_empty(),
-                Stack::horizontal((
-                    state_pill(app, state, backend.clone()),
-                    Label::derived(move || repo_of(state))
-                        .debug_name("repository line")
-                        .on_event_stop(el::Click, move |_, _| {
-                            if let Some(url) = url_of(state) {
-                                open_in_browser(&url);
-                            }
-                        })
-                        .style(move |s| {
-                            let opens = url_of(state).is_some();
-                            s.font_size(theme::TEXT_META)
-                                .color(theme::fg_muted())
-                                .selectable(false)
-                                .apply_if(repo_of(state).is_empty(), |s| s.hide())
-                                // Underlined under the pointer, as a name is.
-                                .apply_if(opens, crate::ui::widgets::underlined_link)
-                        }),
-                    checks_line(state),
-                    readiness(state),
-                ))
-                .style(|s| {
-                    s.items_center()
-                        .width_full()
-                        .min_width(0.0)
-                        .col_gap(theme::SUMMARY_GAP)
-                }),
-            )
-            .into_any()
-        },
-    )
-    .style(|s| s.width_full())
+/// The one line under the title: Open, Draft, Merged, Closed as the
+/// pill, then the repository and number as the sidebar's rows say them,
+/// the checks' verdict, what GitHub says blocks an open pull request's
+/// merge once the live overview has come, the lines added and removed,
+/// and who opened it. Merging is the bar's, and the rest of what there is
+/// to say is in the bar's details. A worktree of the reader's own has no
+/// state, and starts at its repository; one with no GitHub remote has its
+/// churn alone.
+fn line(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    author: Memo<Option<(String, String, Option<jiff::Timestamp>)>>,
+) -> impl IntoView {
+    let present = move || {
+        subject_state(state).is_some()
+            || !repo_of(state).is_empty()
+            || churn_of(state).is_some()
+            || author.with(Option::is_some)
+    };
+    Stack::horizontal((
+        state_pill(app, state, backend),
+        Label::derived(move || repo_of(state))
+            .debug_name("repository line")
+            .on_event_stop(el::Click, move |_, _| {
+                if let Some(url) = url_of(state) {
+                    open_in_browser(&url);
+                }
+            })
+            .style(move |s| {
+                let opens = url_of(state).is_some();
+                s.font_size(theme::TEXT_META)
+                    .color(theme::fg_muted())
+                    .selectable(false)
+                    .apply_if(repo_of(state).is_empty(), |s| s.hide())
+                    // Underlined under the pointer, as a name is.
+                    .apply_if(opens, crate::ui::widgets::underlined_link)
+            }),
+        checks_line(state),
+        readiness(state),
+        churn(state),
+        dyn_container(
+            move || author.get(),
+            move |author| match author {
+                Some(author) => author_view(app, author).into_any(),
+                None => Empty::new().into_any(),
+            },
+        )
+        .style(move |s| {
+            s.min_width(0.0)
+                .apply_if(author.with(Option::is_none), |s| s.hide())
+        }),
+    ))
+    .debug_name("summary line")
+    .style(move |s| {
+        s.items_center()
+            .width_full()
+            .min_width(0.0)
+            .min_height(theme::SUMMARY_ROW)
+            .flex_wrap(floem::taffy::FlexWrap::Wrap)
+            .col_gap(theme::SUMMARY_GAP)
+            .apply_if(!present(), |s| s.hide())
+    })
 }
 
 /// The repository and number, as the sidebar's rows say them. A worktree of
@@ -1940,14 +1985,14 @@ struct GitHubData {
 }
 
 impl GitHubData {
-    fn is_empty(&self) -> bool {
-        self.author.is_none()
-            && self.reviewers.is_empty()
+    /// Whether GitHub says anything the details have a row for.
+    fn has_details(&self) -> bool {
+        !(self.reviewers.is_empty()
             && self.labels.is_empty()
             && self.assignees.is_empty()
             && self.milestone.is_none()
             && self.closes.is_empty()
-            && self.in_perch.is_empty()
+            && self.in_perch.is_empty())
     }
 }
 
@@ -2412,8 +2457,8 @@ pub(crate) mod tests {
     use floem::kurbo::Rect;
 
     use crate::review::header::tests::{
-        issue_harness, named, pull_request, pull_request_harness, pull_request_harness_with, rect,
-        within,
+        issue_harness, named, open_details, pull_request, pull_request_harness,
+        pull_request_harness_with, rect, within,
     };
     use crate::review::model::ItemTab;
 
@@ -2455,7 +2500,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_summary_tops_the_page_in_rows_and_only_on_conversation() {
+    fn the_summary_tops_the_page_in_a_line_and_only_on_conversation() {
         let (mut harness, _, state) = pull_request_harness();
         let column = rect(&harness, "conversation column");
         let summary = rect(&harness, "item summary");
@@ -2464,23 +2509,49 @@ pub(crate) mod tests {
             (column.x0, column.y0),
             "the summary at {summary:?} is not at the top of the page {column:?}"
         );
-        // A pull request with a checkout and passing checks, and nobody
-        // asked to review it: Author, Branch, Status. The worktree has no
-        // row of its own; it is on the Branch row, and the checks are on
-        // Status.
-        assert_eq!(rows_shown(&harness), ["Author", "Branch", "Status"]);
-
-        // Each row is a line tall, its name in the column at the left and
-        // its value after the column.
-        let mut last: Option<Rect> = None;
-        for (row, value) in [
-            ("Author", "author"),
-            ("Branch", "branches"),
-            ("Status", "state pill"),
+        // A pull request with a checkout and passing checks: the pill,
+        // the number, the checks, the churn and who opened it, on one
+        // line. The rest is in the bar's details.
+        assert!(rows_shown(&harness).is_empty());
+        let line = rect(&harness, "summary line");
+        assert_eq!(line.height(), theme::SUMMARY_ROW, "the line at {line:?}");
+        assert!(within(line, summary));
+        let mut last = line.x0;
+        for part in [
+            "state pill",
+            "repository line",
+            "checks pill",
+            "churn",
+            "author",
         ] {
+            let r = rect(&harness, part);
+            assert!(
+                within(r, line),
+                "{part} at {r:?} is not on the line {line:?}"
+            );
+            assert!(
+                r.x0 >= last,
+                "{part} at {r:?} is not after what is before it"
+            );
+            assert!(
+                (r.center().y - line.center().y).abs() < 0.01,
+                "{part} at {r:?} is not centred on the line {line:?}"
+            );
+            last = r.x1;
+        }
+        assert_eq!(rect(&harness, "state pill").x0, line.x0);
+
+        // The details have the branches and the worktree, each a row a
+        // line tall, its name in the column at the left and its value
+        // after the column.
+        open_details(&mut harness, state);
+        assert_eq!(rows_shown(&harness), ["Branch", "Worktree"]);
+        let details = rect(&harness, "item details");
+        let mut last: Option<Rect> = None;
+        for (row, value) in [("Branch", "branches"), ("Worktree", "worktree menu")] {
             let r = rect(&harness, &format!("summary row {row}"));
             assert_eq!(r.height(), theme::SUMMARY_ROW, "{row} at {r:?}");
-            assert!(within(r, summary), "{row} at {r:?} is outside {summary:?}");
+            assert!(within(r, details), "{row} at {r:?} is outside {details:?}");
             if let Some(last) = last {
                 assert_eq!(r.y0, last.y1, "{row} at {r:?} does not follow {last:?}");
             }
@@ -2493,47 +2564,15 @@ pub(crate) mod tests {
                 "{value} at {v:?} is not after the name column"
             );
         }
-        // The worktree is after the branches on their row and the churn
-        // after it, and the number is beside the pill with the checks
-        // after it.
-        let branches = rect(&harness, "branches");
-        let worktree = rect(&harness, "worktree menu");
-        let churn = rect(&harness, "churn");
-        assert!(
-            within(worktree, rect(&harness, "summary row Branch")),
-            "the worktree at {worktree:?} is not on the Branch row"
-        );
-        assert!(
-            worktree.x0 >= branches.x1 && worktree.center().y == branches.center().y,
-            "the worktree at {worktree:?} is not after the branches at {branches:?}"
-        );
-        assert!(
-            churn.x0 >= worktree.x1 && churn.center().y == branches.center().y,
-            "the churn at {churn:?} is not after the worktree at {worktree:?}"
-        );
-        let pill = rect(&harness, "state pill");
-        let repo = rect(&harness, "repository line");
-        assert!(
-            repo.x0 >= pill.x1,
-            "{repo:?} is not after the pill at {pill:?}"
-        );
-        let checks = rect(&harness, "checks pill");
-        assert!(
-            within(checks, rect(&harness, "summary row Status")),
-            "the checks at {checks:?} are not on the Status row"
-        );
-        assert!(
-            checks.x0 >= repo.x1 && checks.center().y == pill.center().y,
-            "the checks at {checks:?} are not after the number at {repo:?}"
-        );
+        crate::ui::agents::dropdown::close(state, false);
 
         // Files has none of it: the page is Conversation's alone.
         state.tab.set(ItemTab::Code);
         harness.rebuild();
         harness.paint();
         assert!(named(harness.root_id(), "item summary").is_none());
+        assert!(named(harness.root_id(), "summary line").is_none());
         assert!(named(harness.root_id(), "branches").is_none());
-        assert!(named(harness.root_id(), "worktree menu").is_none());
     }
 
     #[test]
@@ -2555,24 +2594,24 @@ pub(crate) mod tests {
             .collect();
         pull.assignees = vec!["cadonna".into()];
         pull.milestone = Some("v1.0".into());
-        let (harness, ..) = pull_request_harness_with(pull);
+        let (mut harness, _, state) = pull_request_harness_with(pull);
+        open_details(&mut harness, state);
         assert_eq!(
             rows_shown(&harness),
             [
-                "Author",
                 "Branch",
+                "Worktree",
                 "Reviewers",
-                "Status",
                 "Labels",
                 "Assignees",
                 "Milestone"
             ]
         );
-        // Twelve reviewers do not fit on one line of the column: the row
-        // grows to hold them, none is pushed past the column's edge, and
-        // the name stays on the first line.
+        // Twelve reviewers do not fit on one line of the details: the row
+        // grows to hold them, none is pushed past the edge, and the name
+        // stays on the first line.
         let row = rect(&harness, "summary row Reviewers");
-        let summary = rect(&harness, "item summary");
+        let details = rect(&harness, "item details");
         assert!(
             row.height() > theme::SUMMARY_ROW,
             "the row at {row:?} did not wrap"
@@ -2584,7 +2623,7 @@ pub(crate) mod tests {
             "the last reviewer at {last:?} is on the first line"
         );
         assert!(
-            last.x1 <= summary.x1,
+            last.x1 <= details.x1,
             "the last reviewer at {last:?} is past the edge"
         );
         assert!(
@@ -2594,18 +2633,23 @@ pub(crate) mod tests {
         let name = rect(&harness, "summary name Reviewers");
         assert_eq!((name.y0, name.height()), (row.y0, theme::SUMMARY_ROW));
         // The rows under it follow it whole.
-        let status = rect(&harness, "summary row Status");
-        assert_eq!(status.y0, row.y1);
+        let labels = rect(&harness, "summary row Labels");
+        assert_eq!(labels.y0, row.y1);
     }
 
     #[test]
     fn an_issue_has_its_status_and_number_and_nothing_an_issue_cannot_have() {
-        let (harness, ..) = issue_harness();
-        assert_eq!(rows_shown(&harness), ["Author", "Status"]);
-        let repo = rect(&harness, "repository line");
-        assert!(within(repo, rect(&harness, "summary row Status")));
-        assert!(named(harness.root_id(), "worktree menu").is_none());
+        let (mut harness, _, state) = issue_harness();
+        let line = rect(&harness, "summary line");
+        assert!(within(rect(&harness, "repository line"), line));
+        assert!(within(rect(&harness, "author"), line));
         assert!(named(harness.root_id(), "checks pill").is_none());
+        assert!(named(harness.root_id(), "churn").is_none());
+        // Nothing for the details to say: no branch, and no worktree.
+        open_details(&mut harness, state);
+        assert!(rows_shown(&harness).is_empty());
+        assert_eq!(rect(&harness, "item details").height(), 0.0);
+        assert!(named(harness.root_id(), "worktree menu").is_none());
     }
 
     #[test]
@@ -2623,7 +2667,7 @@ pub(crate) mod tests {
         harness.paint();
         let notice = rect(&harness, "item notice");
         let summary = rect(&harness, "item summary");
-        let branch = rect(&harness, "summary row Branch");
+        let branch = rect(&harness, "summary line");
         assert!(
             within(notice, summary),
             "{notice:?} is not in the summary {summary:?}"
@@ -2734,10 +2778,12 @@ pub(crate) mod tests {
         assert!(named(harness.root_id(), "check again").is_none());
         let rebase = rect(&harness, "rebase in notice");
         assert!(within(rebase, rect(&harness, "item notice")));
-        assert!(rect(&harness, "rebase-branch").width() > 0.0);
 
         harness.click(rebase.center().x, rebase.center().y);
         assert!(state.rebase_pending.get());
+        // The worktree's row in the details has it too.
+        open_details(&mut harness, state);
+        assert!(rect(&harness, "rebase-branch").width() > 0.0);
     }
 
     pub(crate) fn snapshot() -> crate::review::model::ReviewGroupSummary {
@@ -2875,6 +2921,7 @@ pub(crate) mod tests {
     #[test]
     fn the_assignees_row_offers_assign_once_github_says_the_reader_may() {
         let (mut harness, _, state) = issue_harness();
+        open_details(&mut harness, state);
         assert!(
             !rows_shown(&harness).contains(&"Assignees".to_string()),
             "nobody assigned and no word from GitHub: no row"
@@ -2931,8 +2978,7 @@ pub(crate) mod tests {
         state.assignable.update(|all| {
             all.insert("slatedb/slatedb#812".into(), Some(Arc::new(vec![rohan])));
         });
-        harness.rebuild();
-        harness.paint();
+        open_details(&mut harness, state);
         let row = named(harness.root_id(), "summary row Assignees").unwrap();
         let initial = |c: &str| named(row, &format!("Label: {c:?}")).is_some();
         assert!(!initial("S"), "the author's face, as in the Author row");
@@ -3000,7 +3046,8 @@ pub(crate) mod tests {
             },
         ];
         pull.assignees = vec!["cadonna".into()];
-        let (mut harness, ..) = pull_request_harness_with(pull);
+        let (mut harness, _, state) = pull_request_harness_with(pull);
+        open_details(&mut harness, state);
         let opened = crate::ui::widgets::opened;
         opened();
         for (login, url) in [
@@ -3032,7 +3079,8 @@ pub(crate) mod tests {
 
     #[test]
     fn what_perch_started_from_the_item_is_a_row_of_chips() {
-        let (mut harness, app, ..) = pull_request_harness();
+        let (mut harness, app, state) = pull_request_harness();
+        open_details(&mut harness, state);
         assert!(!rows_shown(&harness).contains(&"In Perch".to_string()));
         let now = "2026-09-20T12:00:00Z".parse().unwrap();
         let mut child = Item::new("slatedb/slatedb", now);
@@ -3103,9 +3151,8 @@ pub(crate) mod tests {
         let view = crate::ui::app_view(app, state, Rc::new(backend));
         let mut harness =
             floem::headless::HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
-        harness.rebuild();
-        harness.paint();
-        assert_eq!(rows_shown(&harness), ["Branch", "Repository", "Work may"]);
+        open_details(&mut harness, state);
+        assert_eq!(rows_shown(&harness), ["Branch", "Worktree", "Work may"]);
         let mut asked = false;
         while let Ok(command) = commands.try_recv() {
             asked |= matches!(command, crate::backend::Command::ListGrants { ref repo } if repo == "slatedb/slatedb");
@@ -3227,6 +3274,7 @@ pub(crate) mod tests {
             harness.paint();
         };
         settle(&mut harness);
+        open_details(&mut harness, state);
         let open_menu = |harness: &mut floem::headless::HeadlessHarness| {
             let chip = rect(harness, "worktree menu").center();
             harness.pointer_down(chip.x, chip.y);
@@ -3302,26 +3350,27 @@ pub(crate) mod tests {
             floem::headless::HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
         harness.rebuild();
         harness.paint();
-        assert_eq!(rows_shown(&harness), ["Branch", "Repository"]);
         assert!(named(harness.root_id(), "state pill").is_none());
-        // Its worktree is on the Branch row, as a pull request's is, and
-        // there is nothing to merge.
-        assert!(within(
-            rect(&harness, "worktree menu"),
-            rect(&harness, "summary row Branch")
-        ));
+        // There is nothing to merge, and the line starts at the
+        // repository.
         assert_eq!(rect(&harness, "merge-control").width(), 0.0);
-        let row = rect(&harness, "summary row Repository");
+        let line = rect(&harness, "summary line");
         let repo = rect(&harness, "repository line");
         assert_eq!(
-            repo.x0,
-            row.x0 + theme::SUMMARY_NAME_WIDTH,
-            "the repository at {repo:?} is not where the values start"
+            repo.x0, line.x0,
+            "the repository at {repo:?} is not where the line starts"
         );
         // A branch has no page, and its repository leads nowhere.
         crate::ui::widgets::opened();
         harness.click(repo.center().x, repo.center().y);
         assert_eq!(crate::ui::widgets::opened(), Vec::<String>::new());
+        // Its worktree is in the details, as a pull request's is.
+        open_details(&mut harness, state);
+        assert_eq!(rows_shown(&harness), ["Branch", "Worktree"]);
+        assert!(within(
+            rect(&harness, "worktree menu"),
+            rect(&harness, "summary row Worktree")
+        ));
     }
 
     /// The repository and number after the pill open the pull request on
@@ -3719,17 +3768,24 @@ pub(crate) mod tests {
         out
     }
 
-    /// The words in the row named `row`, after its name.
-    fn row_texts(harness: &floem::headless::HeadlessHarness, row: &str) -> Vec<String> {
-        let row = named(harness.root_id(), &format!("summary row {row}"))
-            .unwrap_or_else(|| panic!("no row {row}"));
-        texts(row).into_iter().skip(1).collect()
+    /// The words on the summary's line up to its churn: the pill, the
+    /// number, the checks and what blocks the merge.
+    fn line_texts(harness: &floem::headless::HeadlessHarness) -> Vec<String> {
+        let line = named(harness.root_id(), "summary line").expect("no line");
+        let after: usize = ["churn", "author"]
+            .into_iter()
+            .filter_map(|part| named(line, part))
+            .map(|part| texts(part).len())
+            .sum();
+        let mut all = texts(line);
+        all.truncate(all.len() - after);
+        all
     }
 
-    /// What the checks chip says, on the Status row.
+    /// What the checks chip says, on the line.
     fn checks_texts(harness: &floem::headless::HeadlessHarness) -> Vec<String> {
-        let row = named(harness.root_id(), "summary row Status").expect("no Status row");
-        texts(named(row, "checks pill").expect("no checks on the Status row"))
+        let line = named(harness.root_id(), "summary line").expect("no line");
+        texts(named(line, "checks pill").expect("no checks on the line"))
     }
 
     #[test]
@@ -3839,7 +3895,7 @@ pub(crate) mod tests {
         ] {
             assert!(named(summary, gone).is_none(), "{gone} is in the summary");
         }
-        let status = row_texts(&harness, "Status");
+        let status = line_texts(&harness);
         assert!(!status.contains(&"Details".to_string()), "{status:?}");
         assert!(!status.contains(&"Merge".to_string()), "{status:?}");
     }
@@ -3933,7 +3989,7 @@ pub(crate) mod tests {
             .set(Some(Arc::new(overview(checks_of(&[], 1)))));
         harness.rebuild();
         harness.paint();
-        let texts = row_texts(&harness, "Status");
+        let texts = line_texts(&harness);
         assert_eq!(
             texts.last().map(String::as_str),
             Some("1 passed"),
@@ -3946,7 +4002,7 @@ pub(crate) mod tests {
         state.pull_request_overview.set(Some(Arc::new(waiting)));
         harness.rebuild();
         harness.paint();
-        let texts = row_texts(&harness, "Status");
+        let texts = line_texts(&harness);
         assert!(
             texts.ends_with(&["1 passed".to_string(), "Review required".to_string()]),
             "{texts:?}"
@@ -3963,7 +4019,7 @@ pub(crate) mod tests {
             .set(Some(Arc::new(blocked.clone())));
         harness.rebuild();
         harness.paint();
-        let texts = row_texts(&harness, "Status");
+        let texts = line_texts(&harness);
         assert!(
             texts.ends_with(&["Changes requested".to_string(), "Conflicts".to_string()]),
             "{texts:?}"
@@ -4010,7 +4066,7 @@ pub(crate) mod tests {
         state.pull_request_overview.set(None);
         harness.rebuild();
         harness.paint();
-        assert!(row_texts(&harness, "Status").contains(&"Conflicts".to_string()));
+        assert!(line_texts(&harness).contains(&"Conflicts".to_string()));
 
         // Closed or merged, there is nothing left to be ready for, though
         // GitHub's overview still says approved and no conflicts.

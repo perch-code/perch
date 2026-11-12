@@ -2,12 +2,14 @@
 //!
 //! The bar is the window's title bar. It holds what is open, the switch
 //! between Conversation and Code, and the things a reader reaches for from
-//! anywhere in an item: GitHub, plan usage, every item's agents, Start
-//! work, Merge on a pull request the reader may merge, Review on anything
-//! with files, and closing the item.
-//! Everything else about the item, its state and number, branches, checks
-//! and worktree, and what GitHub says about it, is `review::summary`,
-//! under Conversation's title.
+//! anywhere in an item, as Codex's bar has them: a menu of what can be
+//! done with the item, GitHub among it; its details, which are its
+//! branches, its worktree, what GitHub says about it and every item's
+//! agents; Start work until something has been started; Merge on a pull
+//! request the reader may merge; Review on anything with files; and
+//! closing the item.
+//! The item's state and number, its checks and who opened it are
+//! `review::summary`, one line under Conversation's title.
 
 use std::rc::Rc;
 
@@ -23,8 +25,9 @@ use crate::review::summary::subject_state;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::items::github_url;
+use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::titlebar::title_bar;
-use crate::ui::widgets::{icon_button, open_in_browser, sidebar_glyph};
+use crate::ui::widgets::{copy_to_clipboard, icon_button, open_in_browser, sidebar_glyph};
 
 /// The bar, the same for every kind of item: a pull request, an issue, or
 /// a worktree of the reader's own.
@@ -131,12 +134,13 @@ fn state_glyph(state: ReviewState) -> impl IntoView {
     .style(|s| s.flex_shrink(0.0_f32))
 }
 
-/// What is reached for from anywhere in an item: GitHub, every item's
-/// agents, Start work, Merge, Review, and closing it. Bug reports and plan
-/// usage are the app's, and sit in the drawer's footer.
+/// What is reached for from anywhere in an item: its menu, its details
+/// and every item's agents, Start work, Merge, Review, and closing it.
+/// Bug reports and plan usage are the app's, and sit in the drawer's
+/// footer.
 fn trailing(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     Stack::horizontal((
-        github_button(state),
+        more_button(app, state),
         crate::ui::agents::dropdown::button(app, state, backend.clone()),
         crate::review::start_work::button(app, state),
         crate::review::merge_button::control(app, state, backend.clone()),
@@ -152,26 +156,63 @@ fn trailing(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
     })
 }
 
-/// Open the pull request or the issue on github.com. A worktree of the
-/// reader's own is nowhere on GitHub, and has no button.
-fn github_button(state: ReviewState) -> impl IntoView {
-    let url = move || state.item.with(|i| i.as_deref().and_then(github_url));
-    dyn_container(url, move |url| {
-        let Some(url) = url else {
-            return Empty::new().into_any();
-        };
-        tip(
-            icon_button(
-                || SidebarIcon::External,
-                theme::fg_muted,
-                move || open_in_browser(&url),
-            ),
-            "Open on GitHub".to_string(),
-        )
-        .debug_name("github button")
-        .into_any()
-    })
-    .style(move |s| control(s).apply_if(url().is_none(), |s| s.hide()))
+/// The three dots: a menu of what can be done with the item. Absent
+/// while there is no item to do it with.
+fn more_button(app: AppState, state: ReviewState) -> impl IntoView {
+    icon_button(|| SidebarIcon::Ellipsis, theme::fg_muted, || {})
+        .into_view()
+        .dropdown(move || more_menu(app, state))
+        .debug_name("more button")
+        .style(move |s| {
+            control(s)
+                .keyboard_navigable()
+                .focus_visible(|s| s.outline(2.0).outline_color(theme::accent_ring()))
+                .apply_if(state.item.with(Option::is_none), |s| s.hide())
+        })
+}
+
+/// The bar's menu: the pull request's or the issue's page on github.com
+/// and its link, the branch's name, and Start work once it has left the
+/// bar. A worktree of the reader's own is nowhere on GitHub, and has the
+/// last two.
+fn more_menu(app: AppState, state: ReviewState) -> Menu {
+    let Some(item) = state.item.get_untracked() else {
+        return Menu::new();
+    };
+    let mut menu = Menu::new();
+    if let Some(url) = github_url(&item) {
+        let link = url.clone();
+        menu = menu
+            .item("Open on GitHub", move |i| {
+                i.icon(SidebarIcon::External)
+                    .action(move || open_in_browser(&url))
+            })
+            .item("Copy Link", move |i| {
+                i.icon(SidebarIcon::Link)
+                    .action(move || copy_to_clipboard(link.clone()))
+            });
+    }
+    let branch = item
+        .pull_request()
+        .map(|pull| pull.head_ref.clone())
+        .or_else(|| item.checkout.as_ref().map(|c| c.branch.clone()))
+        .filter(|branch| !branch.is_empty());
+    if let Some(branch) = branch {
+        menu = menu.item("Copy Branch Name", move |i| {
+            i.icon(SidebarIcon::Copy)
+                .action(move || copy_to_clipboard(branch.clone()))
+        });
+    }
+    let in_bar = floem::reactive::Effect::untrack(|| crate::review::start_work::in_bar(app, &item));
+    if crate::review::start_work::can_start_work(&item) && !in_bar {
+        use crate::review::start_work::{ask, Pending};
+        let id = item.id.clone();
+        menu = menu.separator().item("Start Work", move |i| {
+            i.icon(SidebarIcon::Branch)
+                .action(move || ask(app, Pending::Item(id.clone())))
+        });
+    }
+    menu
 }
 
 /// Review for anything with files: a pull request, or a worktree of the
@@ -397,6 +438,13 @@ pub(crate) mod tests {
         (harness, app, state)
     }
 
+    /// Open the bar's details, as a press on their button does.
+    pub(crate) fn open_details(harness: &mut HeadlessHarness, state: ReviewState) {
+        state.agents_dropdown_open.set(true);
+        harness.rebuild();
+        harness.paint();
+    }
+
     pub(crate) fn within(inner: Rect, outer: Rect) -> bool {
         inner.x0 >= outer.x0 && inner.x1 <= outer.x1 && inner.y0 >= outer.y0 && inner.y1 <= outer.y1
     }
@@ -434,11 +482,11 @@ pub(crate) mod tests {
         assert_eq!(bar.y0, 0.0, "and at the window's top: it is the title bar");
 
         // Left to right: Back and Forward, the title, the switch, then
-        // GitHub, Agents, Start work, Review, and close against the right
-        // edge.
+        // the menu, the details, Start work, Review, and close against
+        // the right edge.
         let title = rect(&harness, "item title");
         let switch = rect(&harness, "item switch");
-        let github = rect(&harness, "github button");
+        let github = rect(&harness, "more button");
         let agents = rect(&harness, "agents-button");
         let start = rect(&harness, "start work button");
         let review = rect(&harness, "review-control");
@@ -446,8 +494,8 @@ pub(crate) mod tests {
         for (name, r) in [
             ("title", title),
             ("switch", switch),
-            ("github", github),
-            ("agents", agents),
+            ("more", github),
+            ("details", agents),
             ("start work", start),
             ("review", review),
             ("close", close),
@@ -628,7 +676,7 @@ pub(crate) mod tests {
         assert_eq!(rect(&harness, "item switch").width(), 0.0);
         assert!(named(harness.root_id(), "tab strip").is_none());
         let title = rect(&harness, "item title");
-        let github = rect(&harness, "github button");
+        let github = rect(&harness, "more button");
         assert!(title.x1 <= github.x0);
 
         let mut item = (*state.item.get().unwrap()).clone();
@@ -724,14 +772,123 @@ pub(crate) mod tests {
         let bar = rect(&harness, "item bar");
         // An issue has no files to review.
         assert!(named(harness.root_id(), "review-control").is_none());
-        let github = rect(&harness, "github button");
+        let github = rect(&harness, "more button");
         let start = rect(&harness, "start work button");
         let close = rect(&harness, "close button");
-        for (name, r) in [("github", github), ("start work", start), ("close", close)] {
+        for (name, r) in [("more", github), ("start work", start), ("close", close)] {
             assert!(within(r, bar), "{name} at {r:?} is not in the bar {bar:?}");
             assert!(r.width() > 0.0, "{name} has no width");
         }
         assert!(github.x1 <= start.x0 && start.x1 <= close.x0);
+    }
+
+    /// The menu has GitHub, the link and the branch's name. Start work is
+    /// a button in the bar until something has been started from the
+    /// item, and a row in the menu after; a worktree of the reader's own
+    /// has it in the menu from the start.
+    #[test]
+    fn the_menu_has_github_and_start_work_once_it_has_left_the_bar() {
+        let (mut harness, app, state) = pull_request_harness();
+        assert_eq!(
+            more_menu(app, state).outline(),
+            ["Open on GitHub", "Copy Link", "Copy Branch Name"]
+        );
+        assert!(rect(&harness, "start work button").width() > 0.0);
+
+        let now = "2026-09-20T12:00:00Z".parse().unwrap();
+        let mut child = Item::new("slatedb/slatedb", now);
+        child.id = "child".into();
+        child.from_item_id = Some("pr".into());
+        app.items.set(vec![child]);
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "start work button").is_none());
+        let menu = more_menu(app, state);
+        assert_eq!(
+            menu.outline(),
+            [
+                "Open on GitHub",
+                "Copy Link",
+                "Copy Branch Name",
+                "—",
+                "Start Work"
+            ]
+        );
+        menu.choose("Start Work");
+        assert!(app.start_work_confirm.with(Option::is_some));
+
+        crate::ui::widgets::opened();
+        menu.choose("Open on GitHub");
+        assert_eq!(
+            crate::ui::widgets::opened(),
+            ["https://github.com/slatedb/slatedb/pull/812"]
+        );
+
+        // A press on the dots opens it.
+        let more = rect(&harness, "more button").center();
+        harness.pointer_down(more.x, more.y);
+        harness.rebuild();
+        harness.paint();
+        assert!(crate::ui::menu::is_open());
+        assert!(named(harness.root_id(), "menu-row:Open on GitHub").is_some());
+        crate::ui::menu::close();
+
+        // A worktree of the reader's own is nowhere on GitHub.
+        let mut branch = Item::new("slatedb/slatedb", now);
+        branch.id = "branch".into();
+        branch.checkout = Some(checkout());
+        state.pull_request.set(None);
+        state.item.set(Some(Arc::new(branch)));
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "start work button").is_none());
+        assert_eq!(
+            more_menu(app, state).outline(),
+            ["Copy Branch Name", "—", "Start Work"]
+        );
+    }
+
+    /// The details open from the list in the bar: the item's rows over
+    /// the agents' runs, and a press outside puts them away.
+    #[test]
+    fn the_details_open_from_the_bar_over_the_agents() {
+        let (mut harness, _, state) = pull_request_harness();
+        assert!(named(harness.root_id(), "item details").is_none());
+        let button = rect(&harness, "agents-button").center();
+        harness.click(button.x, button.y);
+        harness.rebuild();
+        harness.paint();
+        assert!(state.agents_dropdown_open.get());
+        let popover = rect(&harness, "agents-dropdown");
+        let details = rect(&harness, "item details");
+        assert!(details.height() > 0.0);
+        assert!(
+            within(details, popover),
+            "the details at {details:?} are not in {popover:?}"
+        );
+        assert_eq!(
+            details.y0,
+            popover.y0 + 1.0,
+            "the details are not on top, under the border"
+        );
+        let branch = rect(&harness, "summary row Branch");
+        let worktree = rect(&harness, "worktree menu");
+        assert!(within(branch, details));
+        assert!(
+            within(worktree, rect(&harness, "summary row Worktree")),
+            "the worktree at {worktree:?} is not on its row"
+        );
+        assert!(
+            worktree.x1 <= details.x1,
+            "{worktree:?} runs past {details:?}"
+        );
+
+        let title = rect(&harness, "item title").center();
+        harness.click(title.x, title.y);
+        harness.rebuild();
+        harness.paint();
+        assert!(!state.agents_dropdown_open.get());
+        assert!(named(harness.root_id(), "item details").is_none());
     }
 
     /// The X closes the item, as Cmd-[ does.

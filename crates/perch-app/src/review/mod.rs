@@ -96,12 +96,7 @@ pub fn load_file(backend: &Backend, path: &str) {
 }
 
 /// The main pane while an item is open.
-pub fn review_view(
-    app: AppState,
-    state: ReviewState,
-    backend: Rc<Backend>,
-    open_item: crate::ui::items::OpenItem,
-) -> impl IntoView {
+pub fn review_view(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let open_file = open_file(state, backend.clone());
     let body_backend = backend.clone();
     let tabs_backend = backend.clone();
@@ -155,14 +150,9 @@ pub fn review_view(
                         },
                     )
                     .into_any(),
-                    Phase::Issue | Phase::Ready => item_view(
-                        app,
-                        state,
-                        open_file.clone(),
-                        body_backend.clone(),
-                        open_item.clone(),
-                    )
-                    .into_any(),
+                    Phase::Issue | Phase::Ready => {
+                        item_view(app, state, open_file.clone(), body_backend.clone()).into_any()
+                    }
                 },
             )
             // A zero basis, so the body takes what the drawer leaves.
@@ -228,7 +218,6 @@ fn item_view(
     state: ReviewState,
     open_file: OpenFile,
     backend: Rc<Backend>,
-    open_item: crate::ui::items::OpenItem,
 ) -> impl IntoView {
     // A memo, so the pane is built again when what it shows changes and
     // not on every write to the tab.
@@ -273,14 +262,7 @@ fn item_view(
                 } else if code {
                     editor::editor_pane(app, state, backend.clone(), open_file.clone()).into_any()
                 } else {
-                    conversation::view(
-                        app,
-                        state,
-                        backend.clone(),
-                        open_file.clone(),
-                        open_item.clone(),
-                    )
-                    .into_any()
+                    conversation::view(app, state, backend.clone(), open_file.clone()).into_any()
                 }
             },
         )

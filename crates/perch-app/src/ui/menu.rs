@@ -724,7 +724,6 @@ thread_local! {
 }
 
 /// Whether a menu is up.
-#[cfg(test)]
 pub fn is_open() -> bool {
     OPEN.with(|open| open.borrow().is_some())
 }
