@@ -27,11 +27,6 @@ use tokio::sync::Semaphore;
 
 pub(crate) use issue_draft::with_found_in;
 pub use open_pull::{DescriptionOutcome, OpenStep, PullRequestReadiness};
-#[cfg(test)]
-pub use walkthrough::Background;
-#[cfg(test)]
-pub use walkthrough::{Chapter, Hunk};
-pub use walkthrough::{CodeSide, Lines, Part, Step, Walkthrough, WalkthroughOutcome};
 use windows::{CommandSender, View, Views};
 pub use windows::{EventSender, WindowId, NO_WINDOW};
 
@@ -44,7 +39,6 @@ pub(crate) mod open_pull;
 pub(crate) mod reviews;
 pub(crate) mod runs;
 mod update;
-mod walkthrough;
 mod windows;
 
 /// How many avatar downloads may be in flight at once.
@@ -250,32 +244,6 @@ pub enum Command {
     },
     StopPullRequestDescription {
         item_id: String,
-    },
-    /// Send the walkthroughs kept for the item. `Walkthrough` answers.
-    LoadWalkthrough {
-        item_id: String,
-    },
-    /// Have an agent write a walkthrough of the item's change under a
-    /// scope, reading the change and changing nothing. `Walkthrough`
-    /// answers.
-    WriteWalkthrough {
-        item_id: String,
-        scope: perch_git::Scope,
-        backend: perch_agent::Backend,
-        model: String,
-        effort: perch_agent::Effort,
-        /// What the reader asked the agent to keep in mind, or nothing.
-        guidance: String,
-    },
-    StopWalkthrough {
-        item_id: String,
-    },
-    /// Keep places of one of the item's walkthroughs read, or not.
-    MarkWalkthroughRead {
-        item_id: String,
-        id: String,
-        places: Vec<usize>,
-        read: bool,
     },
     /// Submit a final review of the exact pull request head the reader saw,
     /// with the drafts in the cache: the backend reads them itself, so a
@@ -1250,16 +1218,6 @@ pub enum Event {
     PullRequestDescription {
         item_id: String,
         outcome: DescriptionOutcome,
-    },
-    Walkthrough {
-        item_id: String,
-        outcome: WalkthroughOutcome,
-    },
-    /// What the agent writing the item's walkthrough has done so far, as
-    /// a run's steps, sent again with each thing it does.
-    WalkthroughProgress {
-        item_id: String,
-        steps: Vec<perch_github::RunStep>,
     },
     /// The branches `repo` can start new work from, the base first, or why
     /// they could not be listed.
@@ -3051,44 +3009,6 @@ impl Backend {
         });
     }
 
-    pub fn load_walkthrough(&self, item_id: &str) {
-        let _ = self.commands.send(Command::LoadWalkthrough {
-            item_id: item_id.to_string(),
-        });
-    }
-
-    pub fn write_walkthrough(
-        &self,
-        item_id: &str,
-        scope: &perch_git::Scope,
-        (backend, model, effort): crate::review::model::AgentChoice,
-        guidance: &str,
-    ) {
-        let _ = self.commands.send(Command::WriteWalkthrough {
-            item_id: item_id.to_string(),
-            scope: scope.clone(),
-            backend,
-            model,
-            effort,
-            guidance: guidance.to_string(),
-        });
-    }
-
-    pub fn stop_walkthrough(&self, item_id: &str) {
-        let _ = self.commands.send(Command::StopWalkthrough {
-            item_id: item_id.to_string(),
-        });
-    }
-
-    pub fn mark_walkthrough_read(&self, item_id: &str, id: &str, places: Vec<usize>, read: bool) {
-        let _ = self.commands.send(Command::MarkWalkthroughRead {
-            item_id: item_id.to_string(),
-            id: id.to_string(),
-            places,
-            read,
-        });
-    }
-
     pub fn prepare_feedback(&self, request: crate::feedback::PrepareRequest) {
         let _ = self
             .commands
@@ -4811,31 +4731,6 @@ async fn run(
             Command::StopPullRequestDescription { item_id } => {
                 open_pull::stop_describing(&item_id);
             }
-            Command::LoadWalkthrough { item_id } => {
-                let ctx = ctx.clone();
-                tokio::spawn(async move { walkthrough::load(&ctx, &item_id).await });
-            }
-            Command::WriteWalkthrough {
-                item_id,
-                scope,
-                backend,
-                model,
-                effort,
-                guidance,
-            } => {
-                let ctx = ctx.clone();
-                tokio::spawn(async move {
-                    walkthrough::write(&ctx, &item_id, &scope, (backend, &model, effort), &guidance)
-                        .await
-                });
-            }
-            Command::StopWalkthrough { item_id } => walkthrough::stop(&item_id),
-            Command::MarkWalkthroughRead {
-                item_id,
-                id,
-                places,
-                read,
-            } => walkthrough::mark_read(&ctx, &item_id, &id, &places, read),
             Command::SubmitPullRequestReview {
                 attempt_id,
                 item_id,
@@ -8560,7 +8455,6 @@ async fn delete_item(ctx: &Ctx, id: &str, accept_loss: bool) -> Result<(), Strin
         .and_then(Result::ok)
         .unwrap_or_default();
     drop_work_refs(ctx, &runs).await;
-    walkthrough::drop_all(ctx, id).await;
     if let Some(checkout) = item.checkout.as_ref().filter(|c| c.owned) {
         let bare = owned_repo(ctx.preparer.store(), &item);
         let present = bare.is_some() && checkout.path.join(".git").exists();
@@ -32026,294 +31920,6 @@ read eof || true
             open_pull::DescriptionOutcome::Stopped
         );
         assert!(started.elapsed() < Duration::from_secs(20));
-    }
-
-    /// A `claude` that answers `first`, or `again` when it resumes a
-    /// session, adding its arguments to `args` in `dir` each time.
-    fn walking_claude(dir: &Path, first: &str, again: &str) -> String {
-        use std::os::unix::fs::PermissionsExt;
-        let lines = |text: &str| {
-            let message = serde_json::json!({
-                "type": "assistant",
-                "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
-                "session_id": "s1",
-            });
-            let result = serde_json::json!({
-                "type": "result", "subtype": "success", "result": text, "session_id": "s1",
-            });
-            format!(
-                "printf '%s\\n' '{}' '{message}' '{result}'",
-                r#"{"type":"system","subtype":"init","session_id":"s1","model":"sonnet"}"#
-            )
-        };
-        let path = dir.join("claude");
-        std::fs::write(
-            &path,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{args}'\nhead -n 2 >> '{args}'\n\
-                 case \"$*\" in\n*--resume*) {again} ;;\n*) {first} ;;\nesac\n",
-                args = dir.join("args").display(),
-                first = lines(first),
-                again = lines(again),
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path.to_string_lossy().into_owned()
-    }
-
-    fn walkthrough_of(received: &Receiver<Event>) -> WalkthroughOutcome {
-        received
-            .try_iter()
-            .find_map(|event| match event {
-                Event::Walkthrough { outcome, .. } => Some(outcome),
-                _ => None,
-            })
-            .expect("the walkthrough ends with an outcome")
-    }
-
-    /// The first answer's one step names no place and so covers no hunk,
-    /// so the session is asked again, naming both; the second answer
-    /// places it on the branch's one hunk, and the thread it names that
-    /// the item doesn't have is dropped. The step keeps its lines' text.
-    /// What was written is kept, and read back for the head.
-    #[tokio::test]
-    async fn a_walkthrough_asks_again_for_the_hunks_it_left_out_and_is_kept() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut ctx, received) = ctx(dir.path(), &nowhere(), &[]);
-        let mut config = Config::default();
-        config.agent.binary = walking_claude(
-            dir.path(),
-            r#"{"summary": "o", "steps": [{"title": "Why", "body": [{"text": "Because."}]}]}"#,
-            r#"{"summary": "Two first.", "steps": [{"title": "Add two", "hunks": ["h1"], "body": [
-                {"text": "It adds two."}, {"thread": "gh-404"},
-                {"text": "Beside one."},
-                {"code": {"path": "one.txt", "side": "base", "start": 1, "end": 30}}]}]}"#,
-        );
-        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
-        let (item, worktree, _remote) = pushable_branch(&ctx, dir.path());
-
-        walkthrough::write(
-            &ctx,
-            &item.id,
-            &perch_git::Scope::Branch,
-            (
-                perch_agent::Backend::ClaudeCode,
-                "sonnet",
-                perch_agent::Effort::Medium,
-            ),
-            "",
-        )
-        .await;
-
-        let WalkthroughOutcome::Written(written) = walkthrough_of(&received) else {
-            panic!("not written");
-        };
-        assert_eq!(written.summary, "Two first.");
-        assert_eq!(written.head, git(&worktree, &["rev-parse", "HEAD"]));
-        assert_eq!(written.hunks.len(), 1);
-        assert_eq!(
-            (written.hunks[0].path.as_str(), written.hunks[0].start),
-            ("two.txt", 1)
-        );
-        assert_eq!(written.steps.len(), 1);
-        let step = &written.steps[0];
-        assert_eq!(
-            step.at,
-            walkthrough::Lines {
-                path: "two.txt".into(),
-                side: walkthrough::CodeSide::Head,
-                start: 1,
-                end: 1
-            }
-        );
-        assert_eq!(step.text, vec!["two".to_string()]);
-        // In its order, without the thread the item doesn't have, and the
-        // lines cut to the base's one line.
-        assert_eq!(
-            step.body,
-            vec![
-                walkthrough::Part::Text {
-                    text: "It adds two.".into()
-                },
-                walkthrough::Part::Text {
-                    text: "Beside one.".into()
-                },
-                walkthrough::Part::Code(walkthrough::Lines {
-                    path: "one.txt".into(),
-                    side: walkthrough::CodeSide::Base,
-                    start: 1,
-                    end: 1
-                }),
-            ]
-        );
-        let args = std::fs::read_to_string(dir.path().join("args")).unwrap();
-        assert!(args.contains("h1 two.txt head 1-1"), "{args}");
-        assert!(args.contains("--resume"), "{args}");
-        assert!(args.contains("covers these hunks"), "{args}");
-        assert!(args.contains("- h1 two.txt head 1-1"), "{args}");
-        assert!(args.contains("name no lines in the code"), "{args}");
-        assert!(
-            !args.contains("--permission-prompt-tool"),
-            "Ask's tools: {args}"
-        );
-
-        assert_eq!(written.scope, perch_git::Scope::Branch);
-        assert_eq!(written.model, "Claude Sonnet");
-        assert!(written.snapshot_ref.is_none());
-        walkthrough::load(&ctx, &item.id).await;
-        assert_eq!(
-            walkthrough_of(&received),
-            WalkthroughOutcome::Loaded(vec![*written])
-        );
-    }
-
-    /// A hunk the agent never places, asked twice, gets a last step of
-    /// Perch's own on its lines rather than going out of sight.
-    #[tokio::test]
-    async fn hunks_never_placed_get_a_last_step_of_their_own() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut ctx, received) = ctx(dir.path(), &nowhere(), &[]);
-        let mut config = Config::default();
-        let answer = r#"{"summary": "o", "steps": [{"title": "Why", "prose": "Because.",
-            "lines": {"path": "one.txt", "start": 1}}]}"#;
-        config.agent.binary = walking_claude(dir.path(), answer, answer);
-        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
-        let (item, _worktree, _remote) = pushable_branch(&ctx, dir.path());
-
-        walkthrough::write(
-            &ctx,
-            &item.id,
-            &perch_git::Scope::Branch,
-            (
-                perch_agent::Backend::ClaudeCode,
-                "sonnet",
-                perch_agent::Effort::Medium,
-            ),
-            "",
-        )
-        .await;
-
-        let WalkthroughOutcome::Written(written) = walkthrough_of(&received) else {
-            panic!("not written");
-        };
-        let titles: Vec<(&str, bool)> = written
-            .steps
-            .iter()
-            .map(|s| (s.title.as_str(), s.unplaced))
-            .collect();
-        assert_eq!(
-            titles,
-            vec![("Why", false), ("Also changed in two.txt", true)]
-        );
-        assert_eq!(written.steps[1].at.path, "two.txt");
-        assert_eq!(written.steps[1].text, vec!["two".to_string()]);
-        assert!(written.steps[1].body.is_empty());
-        // In a follow-through of their own, after the agent's chapter.
-        assert_eq!(written.chapters.len(), 2);
-        assert!(written.chapters[1].follow_through);
-        assert_eq!(written.steps[1].chapter, 1);
-    }
-
-    /// A walkthrough of the uncommitted work is of the worktree as it was,
-    /// recorded at a ref of its own, against the head. Unstaged has none.
-    #[tokio::test]
-    async fn a_walkthrough_of_uncommitted_work_records_the_worktree() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut ctx, received) = ctx(dir.path(), &nowhere(), &[]);
-        let mut config = Config::default();
-        let answer = r#"{"summary": "s", "chapters": [{"title": "Three", "places": [
-            {"title": "Add three", "hunks": ["h1"], "body": [{"text": "It adds three."}]}]}]}"#;
-        config.agent.binary = walking_claude(dir.path(), answer, answer);
-        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
-        let (item, worktree, _remote) = pushable_branch(&ctx, dir.path());
-        std::fs::write(worktree.join("two.txt"), "two\nthree\n").unwrap();
-
-        walkthrough::write(
-            &ctx,
-            &item.id,
-            &perch_git::Scope::Uncommitted,
-            (
-                perch_agent::Backend::ClaudeCode,
-                "sonnet",
-                perch_agent::Effort::Medium,
-            ),
-            "",
-        )
-        .await;
-
-        let WalkthroughOutcome::Written(written) = walkthrough_of(&received) else {
-            panic!("not written");
-        };
-        assert_eq!(written.scope, perch_git::Scope::Uncommitted);
-        assert_eq!(written.merge_base, git(&worktree, &["rev-parse", "HEAD"]));
-        let snapshot = written
-            .snapshot_ref
-            .clone()
-            .expect("a ref for the worktree");
-        assert_eq!(git(&worktree, &["rev-parse", &snapshot]), written.head);
-        assert_eq!(
-            git(&worktree, &["show", &format!("{}:two.txt", written.head)]),
-            "two\nthree"
-        );
-        assert_eq!(
-            (written.hunks[0].path.as_str(), written.hunks[0].end),
-            ("two.txt", 2)
-        );
-        assert_eq!(
-            written.steps[0].text.last().map(String::as_str),
-            Some("three")
-        );
-
-        walkthrough::write(
-            &ctx,
-            &item.id,
-            &perch_git::Scope::Unstaged,
-            (
-                perch_agent::Backend::ClaudeCode,
-                "sonnet",
-                perch_agent::Effort::Medium,
-            ),
-            "",
-        )
-        .await;
-        assert!(matches!(
-            walkthrough_of(&received),
-            WalkthroughOutcome::Failed(_)
-        ));
-    }
-
-    #[tokio::test]
-    async fn an_answer_that_isnt_a_walkthrough_fails_and_keeps_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut ctx, received) = ctx(dir.path(), &nowhere(), &[]);
-        let mut config = Config::default();
-        config.agent.binary = walking_claude(dir.path(), "Sorry, no.", "Sorry, no.");
-        ctx.config = Arc::new(std::sync::RwLock::new(Arc::new(config)));
-        let (item, _worktree, _remote) = pushable_branch(&ctx, dir.path());
-
-        walkthrough::write(
-            &ctx,
-            &item.id,
-            &perch_git::Scope::Branch,
-            (
-                perch_agent::Backend::ClaudeCode,
-                "sonnet",
-                perch_agent::Effort::Medium,
-            ),
-            "",
-        )
-        .await;
-
-        assert!(matches!(
-            walkthrough_of(&received),
-            WalkthroughOutcome::Failed(_)
-        ));
-        walkthrough::load(&ctx, &item.id).await;
-        assert_eq!(
-            walkthrough_of(&received),
-            WalkthroughOutcome::Loaded(vec![])
-        );
     }
 
     /// A pull request whose open is slow, cloning a large repository, holds

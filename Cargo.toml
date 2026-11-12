@@ -196,9 +196,8 @@ incremental = true
 # copy of its pixels, so on Linux a window that another had covered
 # showed what had been on the screen there until something in it
 # changed. Then one that adds zoom-in and zoom-out cursors, which
-# winit draws and floem's `CursorStyle` had no names for; a shrunk
-# walkthrough diagram shows the zoom-in one. Last, one that keeps the
-# style cache's maps at their addresses. The cache knew a class context
+# winit draws and floem's `CursorStyle` had no names for. Last, one that
+# keeps the style cache's maps at their addresses. The cache knew a class context
 # by its map's address, and glibc gives a freed map's address to the next
 # one of its size, so on Linux a sidebar row's face ring kept its light
 # colour when the system went dark.

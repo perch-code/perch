@@ -1,5 +1,4 @@
-//! The drawer on the right: the open item's files, as a tree, or its
-//! walkthrough, on Code. The two take turns.
+//! The drawer on the right: the open item's files, as a tree, on Code.
 //!
 //! It is part of the main pane, under Code's tabs and beside the file,
 //! so opening it moves the body over rather than covering what is being
@@ -9,16 +8,15 @@
 //!
 //! The tile at the right end of Code's tabs opens the tree, where Codex
 //! has its folder, and Cmd-Shift-E does from anywhere, going to Code
-//! first from Conversation. Both are toggles on Code. The tile beside it
-//! opens the walkthrough. On Conversation the drawer is hidden, and comes
-//! back with Code.
+//! first from Conversation. Both are toggles on Code. On Conversation the
+//! drawer is hidden, and comes back with Code.
 
 use std::rc::Rc;
 use std::time::Duration;
 
 use floem::event::DragConfig;
 use floem::prelude::*;
-use floem::reactive::{Effect, Memo, RwSignal, SignalGet, SignalUpdate};
+use floem::reactive::{Memo, RwSignal, SignalGet, SignalUpdate};
 use floem::style::{CursorStyle, Position};
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 
@@ -28,27 +26,14 @@ use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
 
-/// The words `meta` keeps under `drawer.view` for an open tree and an
-/// open walkthrough. Anything else, `closed` or the `agents` an older
-/// Perch wrote, is a shut drawer.
+/// The word `meta` keeps under `drawer.view` for an open tree. Anything
+/// else, `closed` or the `agents` or `walkthrough` an older Perch wrote,
+/// is a shut drawer.
 const OPEN: &str = "files";
-const WALKTHROUGH: &str = "walkthrough";
 
-/// What the drawer holds, or that it is shut.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DrawerView {
-    Shut,
-    Files,
-    Walkthrough,
-}
-
-/// What the saved word opens.
-pub fn parse(value: &str) -> DrawerView {
-    match value {
-        OPEN => DrawerView::Files,
-        WALKTHROUGH => DrawerView::Walkthrough,
-        _ => DrawerView::Shut,
-    }
+/// Whether the saved word is an open tree.
+pub fn saved_open(value: &str) -> bool {
+    value == OPEN
 }
 
 /// Where the drawer goes, and how wide.
@@ -103,30 +88,7 @@ pub fn show(state: AppState, backend: &Backend, opener: Option<floem::ViewId>) {
     if !state.tree_open.get_untracked() {
         state.tree_open.set(true);
     }
-    if state.walkthrough_open.get_untracked() {
-        state.walkthrough_open.set(false);
-    }
     backend.set_meta("drawer.view", OPEN);
-}
-
-/// Open the walkthrough in the drawer, in the tree's place.
-pub fn show_walkthrough(state: AppState, backend: &Backend) {
-    if !state.walkthrough_open.get_untracked() {
-        state.walkthrough_open.set(true);
-    }
-    if state.tree_open.get_untracked() {
-        state.tree_open.set(false);
-    }
-    backend.set_meta("drawer.view", WALKTHROUGH);
-}
-
-/// The walkthrough tile's press: shut it when it shows, else open it.
-pub fn toggle_walkthrough(state: AppState, backend: &Backend) {
-    if floem::reactive::Effect::untrack(|| state.walkthrough_shown()) {
-        close(state, backend, true);
-    } else {
-        show_walkthrough(state, backend);
-    }
 }
 
 /// A control's press: shut the tree when it shows, else open it.
@@ -138,10 +100,9 @@ pub fn toggle(state: AppState, backend: &Backend, opener: Option<floem::ViewId>)
     }
 }
 
-/// Shut the drawer, whichever it holds.
+/// Shut the drawer.
 pub fn close(state: AppState, backend: &Backend, restore_focus: bool) {
     state.tree_open.set(false);
-    state.walkthrough_open.set(false);
     backend.set_meta("drawer.view", "closed");
     if restore_focus {
         restore_opener(state);
@@ -163,36 +124,18 @@ fn restore_opener(state: AppState) {
 /// no more: a memo, since the signals under it are written more often
 /// than they change.
 pub fn panel(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    let view = Memo::new(move |_| {
-        if state.tree_shown() {
-            DrawerView::Files
-        } else if state.walkthrough_shown() {
-            DrawerView::Walkthrough
-        } else {
-            DrawerView::Shut
-        }
-    });
-    let shown = Memo::new(move |_| view.get() != DrawerView::Shut);
-    // The walkthrough's notes are in Code while its pane is out.
-    Effect::new(move |_| {
-        let out = view.get() == DrawerView::Walkthrough;
-        if review.walkthrough_out.get_untracked() != out {
-            review.walkthrough_out.set(out);
-        }
-    });
+    let shown = Memo::new(move |_| state.tree_shown());
     let placement = Memo::new(move |_| current_placement(state));
 
     let content_backend = backend.clone();
     let content = dyn_container(
-        move || view.get(),
-        move |view| match view {
-            DrawerView::Files => {
+        move || shown.get(),
+        move |shown| {
+            if shown {
                 crate::review::rail::drawer_view(state, review, content_backend.clone()).into_any()
+            } else {
+                Empty::new().into_any()
             }
-            DrawerView::Walkthrough => {
-                crate::review::walkthrough::pane(state, review, content_backend.clone()).into_any()
-            }
-            DrawerView::Shut => Empty::new().into_any(),
         },
     )
     .style(|s| s.size_full().flex_col().min_width(0.0));
@@ -407,13 +350,12 @@ mod tests {
     }
 
     /// The tree open is saved as `files`, as the drawer on it was. The
-    /// `agents` an older Perch saved for its inspector is a shut drawer.
+    /// `agents` and `walkthrough` an older Perch saved are a shut drawer.
     #[test]
     fn the_saved_word_is_an_open_tree_and_anything_else_is_shut() {
-        assert_eq!(parse(OPEN), DrawerView::Files);
-        assert_eq!(parse(WALKTHROUGH), DrawerView::Walkthrough);
-        for shut in ["closed", "agents", ""] {
-            assert_eq!(parse(shut), DrawerView::Shut, "{shut} opened the drawer");
+        assert!(saved_open(OPEN));
+        for shut in ["closed", "agents", "walkthrough", ""] {
+            assert!(!saved_open(shut), "{shut} opened the drawer");
         }
     }
 }

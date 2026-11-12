@@ -396,9 +396,9 @@ async fn commits_only_on_counts_what_deleting_the_branch_loses() {
         2,
         "a run's record does not count as holding them"
     );
-    // Nor does a walkthrough's recorded worktree, kept the same way.
+    // Nor does a record an older Perch left under `walkthroughs/`.
     f.preparer
-        .record_worktree(&cut.worktree, "refs/perch/walkthroughs/x/w1", "walkthrough")
+        .record_worktree(&cut.worktree, "refs/perch/walkthroughs/x/w1", "old record")
         .await
         .unwrap();
     assert_eq!(
@@ -407,7 +407,7 @@ async fn commits_only_on_counts_what_deleting_the_branch_loses() {
             .await
             .unwrap(),
         2,
-        "a walkthrough's record does not count as holding them"
+        "an old record does not count as holding them"
     );
 
     // Another branch at the first commit keeps it.

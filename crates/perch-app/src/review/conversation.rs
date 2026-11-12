@@ -1760,9 +1760,9 @@ mod tests {
 
     /// The page from its top: the summary, the description, the
     /// composer, and the timeline under them, the newest card first and
-    /// the oldest last. The title is the window bar's alone, the
-    /// walkthrough is Code's, and the item's runs, even with one there,
-    /// are the bar's Agents dropdown's.
+    /// the oldest last. The title is the window bar's alone, and
+    /// the item's runs, even with one there, are the bar's Agents
+    /// dropdown's.
     #[test]
     fn the_page_runs_from_the_summary_down_to_the_oldest_card() {
         let (mut harness, app, _) = app_harness();
@@ -1831,10 +1831,6 @@ mod tests {
         assert!(
             !text.contains("\"Fence the manifest\""),
             "the page repeats the title"
-        );
-        assert!(
-            !text.contains("walkthrough"),
-            "the page has a walkthrough row"
         );
         assert!(!shown(&harness, "older cards"), "nothing is folded away");
     }

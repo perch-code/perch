@@ -11,7 +11,6 @@ Features:
 * Language server protocol (LSP) support, so you can "find references",
   "open call hierarchy", and so on.
 * Threaded GitHub-style conversations with humans and agents.
-* Code walkthroughs for PRs.
 * Fully integrated client-side Claude/Codex reviews.
 
 <img src="docs/screenshot.png" width="720" alt="Perch showing a pull request's code with a review thread, find references, and the inbox">

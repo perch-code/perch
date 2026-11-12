@@ -328,7 +328,6 @@ fn card_name(card: &doc::CardId) -> String {
     match card {
         doc::CardId::Thread(id) => format!("thread {id}"),
         doc::CardId::Composer => "composer".to_string(),
-        doc::CardId::Step(i) => format!("step {}", i + 1),
         doc::CardId::Entry(id) => id.clone(),
     }
 }

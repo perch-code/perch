@@ -145,10 +145,6 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
             r#"<path d="M6.2 3.6 L10.6 8 L6.2 12.4" fill="none" stroke="{c}"
                      stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
-        SidebarIcon::ChevronLeft => format!(
-            r#"<path d="M9.8 3.6 L5.4 8 L9.8 12.4" fill="none" stroke="{c}"
-                     stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"#
-        ),
         SidebarIcon::ChevronUp => format!(
             r#"<path d="M3.6 9.8 L8 5.4 L12.4 9.8" fill="none" stroke="{c}"
                      stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"#
@@ -566,7 +562,6 @@ pub enum SidebarIcon {
     Undo,
     Comment,
     ChevronRight,
-    ChevronLeft,
     ChevronDown,
     ChevronUp,
     Close,
@@ -702,7 +697,7 @@ impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 74] = [
+    pub const ALL: [SidebarIcon; 73] = [
         SidebarIcon::Feedback,
         SidebarIcon::Waiting,
         SidebarIcon::File,
@@ -770,7 +765,6 @@ impl SidebarIcon {
         SidebarIcon::Undo,
         SidebarIcon::Comment,
         SidebarIcon::ChevronRight,
-        SidebarIcon::ChevronLeft,
         SidebarIcon::ChevronDown,
         SidebarIcon::ChevronUp,
         SidebarIcon::Close,

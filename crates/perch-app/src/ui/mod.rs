@@ -851,10 +851,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 // Cmd-W closes the open file, as in any editor, then the
                 // item, then the window; `v` checks it
                 // as viewed, `]` and `[` go to the next and previous change,
-                // `}` and `{` open the next and previous unviewed file, and
-                // `.` and `,` go to the next and previous step while the
-                // walkthrough is out. Files only. The braces are shifted
-                // brackets: the physical codes with Shift alone, so Cmd-{
+                // and `}` and `{` open the next and previous unviewed file.
+                // Files only. The braces are shifted brackets: the physical codes with Shift alone, so Cmd-{
                 // steps through the tabs.
                 if review.tab.get() == crate::review::model::ItemTab::Code {
                     let shifted = key.modifiers == Modifiers::SHIFT;
@@ -864,18 +862,6 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                                 review.close_tab(&path);
                                 return EventPropagation::Stop;
                             }
-                        }
-                        Code::Period | Code::Comma
-                            if key.modifiers.is_empty()
-                                && review.walkthrough_out.get()
-                                && crate::review::walkthrough::shown(review).is_some() =>
-                        {
-                            crate::review::walkthrough::step_by(
-                                review,
-                                key_backend,
-                                key.code == Code::Period,
-                            );
-                            return EventPropagation::Stop;
                         }
                         Code::BracketRight | Code::BracketLeft if key.modifiers.is_empty() => {
                             crate::review::tabs::jump_to_change(

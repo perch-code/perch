@@ -1204,11 +1204,6 @@ pub struct ReviewLaunchDraft {
 pub struct Composer {
     /// `None` starts a thread; `Some` is a follow-up in that thread.
     pub thread_id: Option<String>,
-    /// The walkthrough place whose Follow up this is: a new thread on its
-    /// lines, typed in its note's foot as a reply is in a thread's, which
-    /// sends the note quoted ahead of what is typed. The walkthrough's id
-    /// and the place's index in it.
-    pub step: Option<(String, usize)>,
     pub anchor: Option<Anchor>,
     /// Where the text goes: an agent, its model and effort together,
     /// since the picker lists models and config says whose each is, or
@@ -1248,8 +1243,7 @@ fn head_text(buffer: &DisplayBuffer) -> String {
 /// the scope its file was loaded under, the base side's path in it, which
 /// a rename makes another, and the text of the side they are on as it was
 /// shown. GitHub reads a comment's lines against the merge base and the
-/// head, so a draft for it from here is moved to those first. A
-/// walkthrough's lines are GitHub's already.
+/// head, so a draft for it from here is moved to those first.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Picked {
     pub scope: Scope,
@@ -1705,33 +1699,6 @@ pub struct ReviewState {
     pub describing: RwSignal<bool>,
     pub description_error: RwSignal<Option<String>>,
     pub description_offer: RwSignal<Option<(String, String)>>,
-    /// Walkthroughs by item: every one kept for each item asked about,
-    /// the newest first, the items one is being written for, since when
-    /// and for which scope, and what stopped the last for each. By item
-    /// and not reset with it, as a walkthrough takes minutes and the
-    /// reader may look elsewhere.
-    pub walkthroughs: RwSignal<HashMap<String, Arc<Vec<Arc<crate::backend::Walkthrough>>>>>,
-    pub walkthroughs_writing: RwSignal<HashMap<String, (jiff::Timestamp, Scope)>>,
-    /// What the agent writing each one has done so far.
-    pub walkthrough_steps: RwSignal<HashMap<String, Vec<perch_github::RunStep>>>,
-    pub walkthrough_errors: RwSignal<HashMap<String, String>>,
-    /// What the reader has written to steer each item's next walkthrough,
-    /// and the agent picked for walkthroughs, `None` until one is: then
-    /// the one last asked here.
-    pub walkthrough_guidance: RwSignal<HashMap<String, String>>,
-    pub walkthrough_agent: RwSignal<Option<AgentChoice>>,
-    /// The walkthrough picked from the pane's list, by item, when it is
-    /// not the newest of the scope.
-    pub walkthrough_picked: RwSignal<HashMap<String, String>>,
-    /// Whether the walkthrough's pane is out, which puts its notes in
-    /// Code; the drawer says so.
-    pub walkthrough_out: RwSignal<bool>,
-    /// Whether the pane shows the form to write one more, over one that
-    /// is written.
-    pub walkthrough_composing: RwSignal<bool>,
-    /// The place of the open item's walkthrough the reader is on, by
-    /// index, once they have started it.
-    pub walkthrough_at: RwSignal<Option<usize>>,
     /// Close as issue under way, and what stopped the last.
     pub issue_closing: RwSignal<bool>,
     pub issue_error: RwSignal<Option<String>>,
@@ -2223,16 +2190,6 @@ impl ReviewState {
             describing: RwSignal::new(false),
             description_error: RwSignal::new(None),
             description_offer: RwSignal::new(None),
-            walkthroughs: RwSignal::new(HashMap::new()),
-            walkthroughs_writing: RwSignal::new(HashMap::new()),
-            walkthrough_steps: RwSignal::new(HashMap::new()),
-            walkthrough_errors: RwSignal::new(HashMap::new()),
-            walkthrough_guidance: RwSignal::new(HashMap::new()),
-            walkthrough_agent: RwSignal::new(None),
-            walkthrough_picked: RwSignal::new(HashMap::new()),
-            walkthrough_out: RwSignal::new(false),
-            walkthrough_composing: RwSignal::new(false),
-            walkthrough_at: RwSignal::new(None),
             issue_closing: RwSignal::new(false),
             issue_error: RwSignal::new(None),
             issue_body_height: RwSignal::new(None),
@@ -2509,8 +2466,6 @@ impl ReviewState {
         // The rows are the next item's cards' to fill; whether a card is
         // open is the reader's and stays, as `collapsed_cards` says.
         self.card_rows.set(HashMap::new());
-        self.walkthrough_at.set(None);
-        self.walkthrough_composing.set(false);
         self.hovered_line.set(None);
         self.hovered_base.set(false);
         self.hovered_by.set(None);
@@ -3645,8 +3600,8 @@ impl ReviewState {
                 asked: None,
             }),
         };
-        // They open on Code: a Cmd-click on a walkthrough's lines asks from
-        // its own tab, which is left once, for Back.
+        // They open on Code: asked from another tab, that tab is left
+        // once, for Back.
         if self.tab.get_untracked() == ItemTab::Code {
             open();
         } else {
@@ -4207,11 +4162,6 @@ impl ReviewState {
     /// editor repaints from the new sides rather than the stale ones.
     /// Returns the paths to ask the backend for.
     pub fn change_scope(&self, scope: Scope, files: Arc<Vec<ChangedFile>>) -> Vec<String> {
-        if self.scope.with_untracked(|held| *held != scope) {
-            // The place is one of the old scope's walkthrough.
-            self.walkthrough_at.set(None);
-            self.walkthrough_composing.set(false);
-        }
         self.scope.set(scope);
         self.set_changed_files(files);
         let paths = self.reload_loaded(|_| true);
@@ -4352,16 +4302,6 @@ impl ReviewState {
                 .collect::<Vec<_>>();
             let mut out = anchors_of(&visible, path);
             if let Some(file) = file.as_deref() {
-                // A step's lines stay in view as a thread's do.
-                for (_, anchor) in crate::review::walkthrough::steps_in(*self, file) {
-                    match anchor.side {
-                        perch_github::Side::Right => out.push((
-                            anchor.start_line.saturating_sub(1) as usize,
-                            anchor.line.saturating_sub(1) as usize,
-                        )),
-                        perch_github::Side::Left => out.extend(aligned_head_ranges(file, &anchor)),
-                    }
-                }
                 out.extend(
                     visible
                         .iter()
@@ -4415,13 +4355,8 @@ impl ReviewState {
                 .map(|thread| CardId::Thread(thread.id.clone()))
                 .filter(|card| self.is_collapsed(card))
                 .collect();
-            let threads = self
-                .card_rows
-                .with(|rows| cards_of(&visible, composer.as_ref(), &file, &collapsed, rows));
-            // A step's card goes right under its lines, over any thread's.
-            let mut out = crate::review::walkthrough::step_cards(*self, &file);
-            out.extend(threads);
-            out
+            self.card_rows
+                .with(|rows| cards_of(&visible, composer.as_ref(), &file, &collapsed, rows))
         })
     }
 
@@ -4433,7 +4368,7 @@ impl ReviewState {
         self.composer
             .with(|c| {
                 c.as_ref()
-                    .filter(|c| c.thread_id.is_none() && !self.note_drawn(c.step.as_ref()))
+                    .filter(|c| c.thread_id.is_none())
                     .and_then(|c| c.anchor.clone())
             })
             .or_else(|| self.sent_composer.get())
@@ -4442,39 +4377,17 @@ impl ReviewState {
 
     /// Whether the open composer is drawn as a card in the code: it starts
     /// a thread on lines of the active file, which is loaded and has the
-    /// lines, or in the note of a walkthrough place found there. Tracked.
+    /// lines. Tracked.
     pub fn composer_is_inline(&self) -> bool {
         let Some(file) = self.active_file() else {
             return false;
         };
-        let (anchor, step) = match self.composer.with(|c| {
+        let anchor = self.composer.with(|c| {
             c.as_ref()
                 .filter(|c| c.thread_id.is_none())
-                .map(|c| (c.anchor.clone(), c.step.clone()))
-        }) {
-            Some((Some(anchor), step)) => (anchor, step),
-            _ => return false,
-        };
-        // A place's Follow up is in its note, which is drawn where the
-        // place is found in the file; with the note not drawn, it is a
-        // card under the lines as any new thread's.
-        match step {
-            Some(step) if self.note_drawn(Some(&step)) => {
-                crate::review::walkthrough::steps_in(*self, &file)
-                    .iter()
-                    .any(|(i, _)| *i == step.1)
-            }
-            _ => anchor.path == file.path && card_line(&file, &anchor).is_some(),
-        }
-    }
-
-    /// Whether the note of walkthrough place `step` is drawn: the pane is
-    /// out and shows its walkthrough. Tracked.
-    fn note_drawn(&self, step: Option<&(String, usize)>) -> bool {
-        step.is_some_and(|(id, _)| {
-            self.walkthrough_out.get()
-                && crate::review::walkthrough::shown(*self).is_some_and(|w| w.id == *id)
-        })
+                .and_then(|c| c.anchor.clone())
+        });
+        anchor.is_some_and(|anchor| anchor.path == file.path && card_line(&file, &anchor).is_some())
     }
 
     /// Whether a follow-up on a thread is drawn inside the thread's card
@@ -5076,31 +4989,6 @@ impl ReviewState {
         self.open_composer_with(thread_id, anchor, draft, destination, None);
     }
 
-    /// Open the composer in walkthrough place `step`'s foot, for a new
-    /// thread on its lines at `anchor`.
-    pub fn open_step_composer(
-        &self,
-        step: (String, usize),
-        mut anchor: Anchor,
-        defaults: AgentChoice,
-    ) {
-        // A place is located in the file without naming a commit; its
-        // lines are of the one Code shows, as lines picked there are.
-        if anchor.commit_sha.is_empty() {
-            anchor.commit_sha =
-                floem::reactive::Effect::untrack(|| self.lines_commit()).unwrap_or_default();
-        }
-        let destination = self.destination_for(None, Some(&anchor), defaults);
-        self.place_composer(
-            None,
-            Some(anchor),
-            String::new(),
-            destination,
-            None,
-            Some(step),
-        );
-    }
-
     /// Where a new composer about `thread_id` or `anchor` sends: the rules'
     /// pick, with GitHub only where a draft could go.
     fn destination_for(
@@ -5163,7 +5051,8 @@ impl ReviewState {
 
     /// Open a composer on a destination the caller chose: Ask about this
     /// goes to an agent whatever the thread's last message was, and a
-    /// draft's edit goes back to GitHub with `editing` set to it.
+    /// draft's edit goes back to GitHub with `editing` set to it. It opens
+    /// in the code when it has a card there, else on Conversation.
     pub fn open_composer_with(
         &self,
         thread_id: Option<String>,
@@ -5171,20 +5060,6 @@ impl ReviewState {
         draft: String,
         destination: Destination,
         editing: Option<String>,
-    ) {
-        self.place_composer(thread_id, anchor, draft, destination, editing, None);
-    }
-
-    /// Open a composer in the code when it has a card there, else on
-    /// Conversation.
-    fn place_composer(
-        &self,
-        thread_id: Option<String>,
-        anchor: Option<Anchor>,
-        draft: String,
-        destination: Destination,
-        editing: Option<String>,
-        step: Option<(String, usize)>,
     ) {
         self.composer_draft.set(draft.clone());
         // A confirm or a refusal was about the composer this replaces.
@@ -5204,7 +5079,6 @@ impl ReviewState {
             };
             self.composer.set(Some(Composer {
                 thread_id,
-                step,
                 anchor,
                 destination,
                 draft,
@@ -5284,16 +5158,12 @@ impl ReviewState {
     /// The composer's question went to the backend, and the composer is
     /// closed. A composer that was a card in the code leaves its rows
     /// where they are, under its anchor, for the thread's card to take
-    /// when the thread arrives; see `sent_composer`. One in a walkthrough
-    /// note had no rows of its own to leave.
+    /// when the thread arrives; see `sent_composer`.
     pub fn composer_sent(&self) {
         let card = floem::reactive::Effect::untrack(|| self.composer_is_inline())
             .then(|| {
-                self.composer.with_untracked(|c| {
-                    c.as_ref()
-                        .filter(|c| c.step.is_none())
-                        .and_then(|c| c.anchor.clone())
-                })
+                self.composer
+                    .with_untracked(|c| c.as_ref().and_then(|c| c.anchor.clone()))
             })
             .flatten();
         floem::reactive::Effect::batch(|| {
