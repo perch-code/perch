@@ -35,9 +35,10 @@ use crate::discussion::{
 use crate::items::{Issue, IssueCloseReason, IssuePayload, IssueRights};
 use crate::model::{SubjectSnapshot, SubjectState, Thread};
 use crate::pulls::{
-    check_sighting, rest_check_sighting, CheckSighting, CommitMessage, MergeMethod, MergeRequest,
-    MergeResult, PullPayload, PullRequest, PullRequestOverview, PullRequestOverviewAccumulator,
-    PullRequestOverviewQuery, PULL_REQUEST_OVERVIEW_QUERY,
+    check_sighting, rest_check_sighting, BranchRulePayload, CheckSighting, CommitMessage,
+    MergeMethod, MergeRequest, MergeResult, PullPayload, PullRequest, PullRequestOverview,
+    PullRequestOverviewAccumulator, PullRequestOverviewQuery, RulesetPayload,
+    PULL_REQUEST_OVERVIEW_QUERY,
 };
 use crate::reactions::{
     reaction_mutation, reactions_query, NodeReading, ReactionKind, ReactionMutationData, Reactions,
@@ -517,9 +518,56 @@ impl GitHub {
             cursor = Some(next);
         }
 
-        overview
-            .map(PullRequestOverviewAccumulator::into_overview)
-            .ok_or_else(|| Error::Decode("GitHub returned no pull request overview".into()))
+        let overview = overview
+            .ok_or_else(|| Error::Decode("GitHub returned no pull request overview".into()))?;
+        let base = overview.ruleset_bypass_base().map(str::to_owned);
+        let mut overview = overview.into_overview();
+        if let Some(base) = base {
+            match self.viewer_can_bypass_rulesets(repo_full_name, &base).await {
+                Ok(can_bypass) => overview.viewer_can_merge_as_admin = can_bypass,
+                Err(e) => {
+                    tracing::warn!(repo = repo_full_name, number, error = %e, "could not read the base branch's rulesets");
+                }
+            }
+        }
+        Ok(overview)
+    }
+
+    /// Whether the viewer may bypass every ruleset that has a rule on
+    /// `branch`. False when no ruleset applies: whatever blocks the merge
+    /// then is not something a ruleset bypass gets past.
+    async fn viewer_can_bypass_rulesets(
+        &self,
+        repo_full_name: &str,
+        branch: &str,
+    ) -> Result<bool, Error> {
+        let encoded =
+            percent_encoding::utf8_percent_encode(branch, percent_encoding::NON_ALPHANUMERIC);
+        let body = self
+            .get_text(&format!(
+                "/repos/{repo_full_name}/rules/branches/{encoded}?per_page=100"
+            ))
+            .await?;
+        let rules: Vec<BranchRulePayload> =
+            serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+        let rulesets: std::collections::BTreeSet<u64> =
+            rules.iter().map(|rule| rule.ruleset_id).collect();
+        if rulesets.is_empty() {
+            return Ok(false);
+        }
+        // The repository endpoint answers for rulesets inherited from the
+        // organization too, and is the only one that reports the bypass.
+        for id in rulesets {
+            let body = self
+                .get_text(&format!("/repos/{repo_full_name}/rulesets/{id}"))
+                .await?;
+            let ruleset: RulesetPayload =
+                serde_json::from_str(&body).map_err(|e| Error::Decode(e.to_string()))?;
+            if !ruleset.viewer_can_bypass_for_pull_request() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Merge exactly the head the user confirmed. GitHub rejects the request

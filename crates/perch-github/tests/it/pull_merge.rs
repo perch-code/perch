@@ -801,3 +801,101 @@ async fn a_write_that_fails_with_a_5xx_is_sent_once() {
         .is_err());
     assert_eq!(requests.lock().unwrap().len(), 1);
 }
+
+fn ruleset_blocked_overview() -> String {
+    OVERVIEW
+        .replace(
+            r#""viewer_can_merge_as_admin": true,"#,
+            r#""viewer_can_merge_as_admin": false, "base_ref_name": "release/1.0","#,
+        )
+        .to_string()
+}
+
+const BRANCH_RULES: &str = r#"[
+  {"type": "deletion", "ruleset_source_type": "Repository", "ruleset_source": "a/b", "ruleset_id": 7},
+  {"type": "pull_request", "ruleset_source_type": "Repository", "ruleset_source": "a/b", "ruleset_id": 7},
+  {"type": "required_status_checks", "ruleset_source_type": "Organization", "ruleset_source": "a", "ruleset_id": 9}
+]"#;
+
+#[tokio::test]
+async fn overview_lets_a_ruleset_bypasser_merge_a_blocked_pull_request() {
+    let (base, requests) = spawn(vec![
+        Response::new("200 OK", ruleset_blocked_overview()),
+        Response::new("200 OK", BRANCH_RULES),
+        Response::new(
+            "200 OK",
+            r#"{"id": 7, "current_user_can_bypass": "pull_requests_only"}"#,
+        ),
+        Response::new(
+            "200 OK",
+            r#"{"id": 9, "current_user_can_bypass": "always"}"#,
+        ),
+    ]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let overview = github.fetch_pull_request_overview("a/b", 42).await.unwrap();
+
+    assert_eq!(overview.merge_state, MergeState::Blocked);
+    assert!(overview.viewer_can_merge_as_admin);
+    let requests = requests.lock().unwrap();
+    let paths: Vec<&str> = requests.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            "/graphql",
+            "/repos/a/b/rules/branches/release%2F1%2E0?per_page=100",
+            "/repos/a/b/rulesets/7",
+            "/repos/a/b/rulesets/9",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn overview_keeps_the_block_when_one_ruleset_cannot_be_bypassed() {
+    let (base, _requests) = spawn(vec![
+        Response::new("200 OK", ruleset_blocked_overview()),
+        Response::new("200 OK", BRANCH_RULES),
+        Response::new(
+            "200 OK",
+            r#"{"id": 7, "current_user_can_bypass": "always"}"#,
+        ),
+        Response::new("200 OK", r#"{"id": 9, "current_user_can_bypass": "never"}"#),
+    ]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let overview = github.fetch_pull_request_overview("a/b", 42).await.unwrap();
+
+    assert!(!overview.viewer_can_merge_as_admin);
+}
+
+#[tokio::test]
+async fn overview_keeps_the_block_when_no_ruleset_applies_or_rules_cannot_be_read() {
+    let (base, requests) = spawn(vec![
+        Response::new("200 OK", ruleset_blocked_overview()),
+        Response::new("200 OK", "[]"),
+    ]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+    let overview = github.fetch_pull_request_overview("a/b", 42).await.unwrap();
+    assert!(!overview.viewer_can_merge_as_admin);
+    assert_eq!(requests.lock().unwrap().len(), 2);
+
+    let (base, _requests) = spawn(vec![
+        Response::new("200 OK", ruleset_blocked_overview()),
+        Response::new("404 Not Found", r#"{"message": "Not Found"}"#),
+    ]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+    let overview = github.fetch_pull_request_overview("a/b", 42).await.unwrap();
+    assert!(!overview.viewer_can_merge_as_admin);
+}
+
+#[tokio::test]
+async fn overview_skips_rulesets_for_a_reader() {
+    let body = ruleset_blocked_overview().replace(r#""ADMIN""#, r#""READ""#);
+    let (base, requests) = spawn(vec![Response::new("200 OK", body)]);
+    let github = GitHub::with_base_uri("token", &base).unwrap();
+
+    let overview = github.fetch_pull_request_overview("a/b", 42).await.unwrap();
+
+    assert!(!overview.viewer_can_merge_as_admin);
+    assert_eq!(requests.lock().unwrap().len(), 1);
+}

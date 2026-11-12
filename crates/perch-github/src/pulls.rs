@@ -125,6 +125,9 @@ pub struct PullRequestOverview {
     pub mergeable: MergeableState,
     pub merge_state: MergeState,
     pub review_decision: Option<ReviewDecision>,
+    /// Whether the viewer may merge past unmet requirements: GitHub's
+    /// `viewerCanMergeAsAdmin`, which covers classic branch protection
+    /// only, or a bypass on every ruleset with a rule on the base branch.
     pub viewer_can_merge_as_admin: bool,
     pub viewer_permission: Option<RepositoryPermission>,
     pub allowed_merge_methods: MergeMethods,
@@ -443,6 +446,7 @@ query PullRequestOverview($owner: String!, $name: String!, $number: Int!, $conte
       merge_state: mergeStateStatus
       review_decision: reviewDecision
       viewer_can_merge_as_admin: viewerCanMergeAsAdmin
+      base_ref_name: baseRefName
       cross_repository: isCrossRepository
       maintainer_can_modify: maintainerCanModify
       squash_title: viewerMergeHeadlineText(mergeType: SQUASH)
@@ -528,6 +532,7 @@ impl OverviewRepositoryPayload {
             merge_state: merge_state(&pull.merge_state),
             review_decision: pull.review_decision.as_deref().and_then(review_decision),
             viewer_can_merge_as_admin: pull.viewer_can_merge_as_admin,
+            base_ref_name: pull.base_ref_name,
             viewer_permission: self.viewer_permission.as_deref().map(repository_permission),
             allowed_merge_methods: MergeMethods {
                 merge: self.merge_commit_allowed,
@@ -561,6 +566,7 @@ pub(crate) struct PullRequestOverviewPage {
     merge_state: MergeState,
     review_decision: Option<ReviewDecision>,
     viewer_can_merge_as_admin: bool,
+    base_ref_name: String,
     viewer_permission: Option<RepositoryPermission>,
     allowed_merge_methods: MergeMethods,
     squash_message: CommitMessage,
@@ -632,6 +638,27 @@ impl PullRequestOverviewAccumulator {
         Ok(())
     }
 
+    /// The base branch whose rulesets decide whether the viewer may merge
+    /// a blocked pull request. `viewerCanMergeAsAdmin` is false for a
+    /// requirement that comes from a ruleset, whoever is asking, so a
+    /// blocked pull request a writer cannot merge as admin needs a second
+    /// look. `None` when the answer would change nothing.
+    pub(crate) fn ruleset_bypass_base(&self) -> Option<&str> {
+        let can_write = matches!(
+            self.latest.viewer_permission,
+            Some(
+                RepositoryPermission::Write
+                    | RepositoryPermission::Maintain
+                    | RepositoryPermission::Admin
+            )
+        );
+        (self.latest.merge_state == MergeState::Blocked
+            && !self.latest.viewer_can_merge_as_admin
+            && can_write
+            && !self.latest.base_ref_name.is_empty())
+        .then_some(self.latest.base_ref_name.as_str())
+    }
+
     pub(crate) fn into_overview(self) -> PullRequestOverview {
         PullRequestOverview {
             head_sha: self.latest.head_sha,
@@ -662,6 +689,8 @@ struct OverviewPullPayload {
     review_decision: Option<String>,
     #[serde(default)]
     viewer_can_merge_as_admin: bool,
+    #[serde(default)]
+    base_ref_name: String,
     #[serde(default)]
     cross_repository: bool,
     #[serde(default)]
@@ -1441,5 +1470,30 @@ mod tests {
         // A listing cut at its page says nothing.
         let cut = r#"{"total_count":101,"check_runs":[]}"#;
         assert_eq!(rest_check_sighting(cut, statuses), None);
+    }
+}
+
+/// One rule in force on a branch, as `/rules/branches/{branch}` lists it.
+/// Only the ruleset it belongs to matters here.
+#[derive(Debug, Deserialize)]
+pub(crate) struct BranchRulePayload {
+    pub(crate) ruleset_id: u64,
+}
+
+/// A ruleset as the repository endpoint returns it, which is the only one
+/// that says what the asking user may bypass.
+#[derive(Debug, Deserialize)]
+pub(crate) struct RulesetPayload {
+    #[serde(default)]
+    current_user_can_bypass: Option<String>,
+}
+
+impl RulesetPayload {
+    /// Whether the viewer may merge a pull request past this ruleset.
+    pub(crate) fn viewer_can_bypass_for_pull_request(&self) -> bool {
+        matches!(
+            self.current_user_can_bypass.as_deref(),
+            Some("always" | "pull_requests_only" | "exempt")
+        )
     }
 }
