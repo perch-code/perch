@@ -35,6 +35,8 @@ struct App {
     open_box_on_open: Cell<bool>,
     /// Send Feedback… was asked for with no window open, the same way.
     feedback_on_open: Cell<bool>,
+    /// Check for Updates… was, the same way: the next window asks.
+    check_update_on_open: Cell<bool>,
 }
 
 #[derive(Clone)]
@@ -139,6 +141,7 @@ pub fn start(backend: Backend, events: std::sync::mpsc::Receiver<(WindowId, Even
             focused: Cell::new(None),
             open_box_on_open: Cell::new(false),
             feedback_on_open: Cell::new(false),
+            check_update_on_open: Cell::new(false),
         })));
     });
 }
@@ -208,6 +211,9 @@ pub fn window(settings: Option<AppState>) -> Option<(AppState, ReviewState, Rc<B
         crate::ui::feedback::open(state, review, crate::feedback::FeedbackKind::Idea, None);
     }
     let backend = Rc::new(app.backend.open_window());
+    if app.check_update_on_open.replace(false) {
+        backend.check_for_update();
+    }
     Some((state, review, backend))
 }
 
@@ -348,6 +354,30 @@ pub fn show_feedback() {
         ),
         None => {
             app.feedback_on_open.set(true);
+            open(None);
+        }
+    }
+}
+
+/// Check for Updates… from the Perch menu: look now, and say what was
+/// found in the focused window. With no window, one opens to say it.
+pub fn check_for_update() {
+    let Some(app) = app() else {
+        return;
+    };
+    let focused = app.focused.get();
+    let window = {
+        let windows = app.windows.borrow();
+        windows
+            .iter()
+            .find(|w| Some(w.id) == focused)
+            .or(windows.first())
+            .cloned()
+    };
+    match window {
+        Some(window) => window.backend.check_for_update(),
+        None => {
+            app.check_update_on_open.set(true);
             open(None);
         }
     }

@@ -66,6 +66,21 @@ pub enum UpdateStatus {
     Failed { version: String, error: String },
 }
 
+/// What a look the reader asked for found, for the window they asked in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Checked {
+    /// A newer release is coming down, which can take a while.
+    Downloading { version: String },
+    /// This build is the latest.
+    Current,
+    /// A newer release is unpacked and waiting for a restart.
+    Ready { version: String },
+    /// This build isn't an app Perch can replace: `cargo run`, say.
+    NotARelease,
+    /// The look failed.
+    Failed(String),
+}
+
 /// The version this build is.
 pub fn current_version() -> Version {
     Version::parse(env!("CARGO_PKG_VERSION")).expect("Cargo.toml's version is semver")

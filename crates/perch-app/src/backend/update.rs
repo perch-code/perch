@@ -9,7 +9,7 @@ use semver::Version;
 
 use super::{Ctx, Event};
 use crate::feedback::REPO;
-use crate::update::{self, UpdateStatus};
+use crate::update::{self, Checked, UpdateStatus};
 
 /// How long after launch the first look waits: past the token, and past
 /// the burst of reads a new window makes.
@@ -47,7 +47,7 @@ pub(super) fn spawn(ctx: Ctx) {
 /// One look: a newer release comes down and `Ready` goes to every
 /// window. A failed look is logged and waits for the next.
 async fn check(ctx: &Ctx) {
-    match fetch(ctx).await {
+    match fetch(ctx, |_| {}).await {
         Ok(Some(ready)) => {
             let dir = update::updates_dir();
             let keep = ready.version.clone();
@@ -64,6 +64,43 @@ async fn check(ctx: &Ctx) {
     }
 }
 
+/// Check for Updates…: one look now, answered in the window that asked
+/// whatever it finds. `Ready` still goes to every window.
+pub(super) async fn check_now(ctx: &Ctx) {
+    let say = |found: Checked| {
+        let _ = ctx.events.send(Event::UpdateChecked(found));
+    };
+    if update::running_bundle().is_none() {
+        return say(Checked::NotARelease);
+    }
+    let downloading = |version: &Version| {
+        say(Checked::Downloading {
+            version: version.to_string(),
+        })
+    };
+    match fetch(ctx, downloading).await {
+        Ok(Some(ready)) => {
+            let version = ready.version.to_string();
+            // The asking window first, so it says so once.
+            say(Checked::Ready {
+                version: version.clone(),
+            });
+            let _ = ctx
+                .events
+                .send(Event::Update(UpdateStatus::Ready { version }));
+        }
+        Ok(None) => say(Checked::Current),
+        Err(e) => {
+            tracing::warn!("couldn't check for an update: {e}");
+            say(Checked::Failed(e));
+        }
+    }
+}
+
+/// One download at a time: the clock's look and one asked for unpack
+/// into the same folder.
+static FETCHING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// A release newer than this build, unpacked.
 struct Fetched {
     version: Version,
@@ -72,8 +109,10 @@ struct Fetched {
 
 /// The latest release, downloaded and unpacked unless it already is.
 /// None when this build is the latest. No token is an error, not an
-/// answer: it says nothing of what was downloaded before.
-async fn fetch(ctx: &Ctx) -> Result<Option<Fetched>, String> {
+/// answer: it says nothing of what was downloaded before. `downloading`
+/// hears the version when there's a download to wait for.
+async fn fetch(ctx: &Ctx, downloading: impl Fn(&Version)) -> Result<Option<Fetched>, String> {
+    let _one = FETCHING.lock().await;
     let Some(github) = ctx.github() else {
         return Err("there's no GitHub token to ask with".into());
     };
@@ -96,6 +135,7 @@ async fn fetch(ctx: &Ctx) -> Result<Option<Fetched>, String> {
         return Ok(None);
     };
     tracing::info!("downloading Perch {version}");
+    downloading(&version);
     let tarball = github
         .download_release_asset(asset)
         .await
@@ -127,7 +167,7 @@ pub(super) async fn install(ctx: &Ctx, version: String) {
     let staged = match Version::parse(&version) {
         Ok(wanted) => match update::staged(&update::updates_dir(), &wanted) {
             Some(app) => Ok(app),
-            None => match fetch(ctx).await {
+            None => match fetch(ctx, |_| {}).await {
                 Ok(Some(fetched)) if fetched.version == wanted => Ok(fetched.app),
                 Ok(_) => Err(format!("Perch {version} is no longer the latest release.")),
                 Err(e) => Err(e),

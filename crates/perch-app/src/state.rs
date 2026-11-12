@@ -880,6 +880,39 @@ impl AppState {
         self.update.set(status);
     }
 
+    /// What Check for Updates… found, said in the window that asked.
+    fn apply_update_checked(&self, found: crate::update::Checked) {
+        use crate::update::{Checked, UpdateStatus};
+        match found {
+            Checked::Downloading { version } => {
+                self.notify(format!("Downloading Perch {version}…"), Tone::Success)
+            }
+            Checked::Current => self.notify(
+                format!(
+                    "Perch {} is the latest version.",
+                    crate::update::current_version()
+                ),
+                Tone::Success,
+            ),
+            Checked::Ready { version } => {
+                self.notify(
+                    format!(
+                        "Perch {version} is ready. Restart from the drawer's footer to update."
+                    ),
+                    Tone::Success,
+                );
+                self.update.set(UpdateStatus::Ready { version });
+            }
+            Checked::NotARelease => self.notify(
+                "This build of Perch isn't a release, so it can't update itself.",
+                Tone::Warning,
+            ),
+            Checked::Failed(error) => {
+                self.notify(format!("Couldn't check for updates: {error}"), Tone::Error)
+            }
+        }
+    }
+
     fn show_agent_completion(&self, run_id: String) {
         self.show_toast(ToastKind::AgentRun(run_id));
     }
@@ -3383,6 +3416,7 @@ impl AppState {
             Event::WorkApprovals(approvals) => self.work_approvals.set(approvals),
             Event::Usage(board) => self.usage.set(board),
             Event::Update(status) => self.apply_update(status),
+            Event::UpdateChecked(found) => self.apply_update_checked(found),
             Event::UpdateInstalled => floem::quit_app(),
             Event::CommentThreads { .. }
             | Event::AgentStep { .. }
@@ -7406,6 +7440,43 @@ mod tests {
         assert_eq!(
             message(&app).as_deref(),
             Some("couldn't move /Applications/Perch.app aside")
+        );
+    }
+
+    #[test]
+    fn a_look_asked_for_always_says_what_it_found() {
+        use crate::update::{Checked, UpdateStatus};
+        let message = |app: &AppState| match app.current_toast().map(|t| t.kind) {
+            Some(ToastKind::Message { text, .. }) => Some(text),
+            _ => None,
+        };
+        let _root = floem::headless::TestRoot::new();
+        let app = AppState::new();
+
+        app.apply(Event::UpdateChecked(Checked::Current));
+        let said = message(&app).unwrap();
+        assert!(said.ends_with("is the latest version."), "{said}");
+
+        // Ready is said even when the footer already offers it, and the
+        // broadcast that follows adds nothing.
+        let ready = UpdateStatus::Ready {
+            version: "0.2.0".into(),
+        };
+        app.apply(Event::Update(ready.clone()));
+        app.dismiss_toast(app.current_toast().unwrap().token);
+        app.apply(Event::UpdateChecked(Checked::Ready {
+            version: "0.2.0".into(),
+        }));
+        assert!(message(&app).unwrap().contains("Perch 0.2.0 is ready"));
+        app.dismiss_toast(app.current_toast().unwrap().token);
+        app.apply(Event::Update(ready.clone()));
+        assert_eq!(message(&app), None);
+        assert_eq!(app.update.get(), ready);
+
+        app.apply(Event::UpdateChecked(Checked::Failed("no network".into())));
+        assert_eq!(
+            message(&app).as_deref(),
+            Some("Couldn't check for updates: no network")
         );
     }
 

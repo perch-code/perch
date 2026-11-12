@@ -832,6 +832,9 @@ pub enum Command {
     InstallUpdate {
         version: String,
     },
+    /// Check for Updates…: look for a newer release now. `UpdateChecked`
+    /// answers, in the window that asked.
+    CheckForUpdate,
 }
 
 /// How the reader answered a request.
@@ -1614,6 +1617,8 @@ pub enum Event {
     FeedbackFailed(crate::feedback::SendError),
     /// Where updating Perch stands, for every window.
     Update(crate::update::UpdateStatus),
+    /// What Check for Updates… found, for the window that asked.
+    UpdateChecked(crate::update::Checked),
     /// The new app is in place and opens once this one is gone: quit.
     UpdateInstalled,
     /// The commits over the base and whether the checkout has work in it,
@@ -1770,6 +1775,7 @@ impl Event {
                 | Event::AgentReviewNavigationFailed { .. }
                 | Event::HistoricalReviewReady { .. }
                 | Event::HistoricalReviewFailed { .. }
+                | Event::UpdateChecked(_)
                 | Event::LspStatus { .. }
                 | Event::LspWarning { .. }
                 | Event::LspUpdateAvailable { .. }
@@ -3057,6 +3063,10 @@ impl Backend {
         let _ = self.commands.send(Command::InstallUpdate {
             version: version.to_string(),
         });
+    }
+
+    pub fn check_for_update(&self) {
+        let _ = self.commands.send(Command::CheckForUpdate);
     }
 
     pub fn plus_one_feedback(&self, number: u64, node_id: &str, react: bool) {
@@ -5396,6 +5406,10 @@ async fn run(
             Command::InstallUpdate { version } => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move { update::install(&ctx, version).await });
+            }
+            Command::CheckForUpdate => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { update::check_now(&ctx).await });
             }
             Command::OpenFile {
                 path,

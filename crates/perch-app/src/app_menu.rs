@@ -1,4 +1,4 @@
-//! New Window, Open… and Send Feedback… in the Perch menu. The menu is
+//! Check for Updates…, New Window, Open… and Send Feedback… in the Perch menu. The menu is
 //! winit's; the items' target is Perch's own, not a window's, so they
 //! still work with no window left.
 
@@ -29,6 +29,11 @@ mod mac {
                 crate::windows::show_open_box();
             }
 
+            #[unsafe(method(checkForUpdate:))]
+            fn check_for_update(&self, _sender: Option<&AnyObject>) {
+                crate::windows::check_for_update();
+            }
+
             #[unsafe(method(sendFeedback:))]
             fn send_feedback(&self, _sender: Option<&AnyObject>) {
                 crate::windows::show_feedback();
@@ -41,8 +46,8 @@ mod mac {
             return;
         };
         let app = NSApplication::sharedApplication(mtm);
-        // About, a separator, then New Window, Open…, Send Feedback… and a
-        // separator of their own.
+        // About and Check for Updates…, a separator, then New Window,
+        // Open…, Send Feedback… and a separator of their own.
         let Some(menu) = app
             .mainMenu()
             .and_then(|bar| bar.itemAtIndex(0))
@@ -82,7 +87,17 @@ mod mac {
             )
         };
         unsafe { feedback.setTarget(Some(&target)) };
-        let at = menu.numberOfItems().min(2);
+        let updates = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                mtm.alloc(),
+                ns_string!("Check for Updates…"),
+                Some(sel!(checkForUpdate:)),
+                ns_string!(""),
+            )
+        };
+        unsafe { updates.setTarget(Some(&target)) };
+        menu.insertItem_atIndex(&updates, menu.numberOfItems().min(1));
+        let at = menu.numberOfItems().min(3);
         menu.insertItem_atIndex(&item, at);
         menu.insertItem_atIndex(&open, at + 1);
         menu.insertItem_atIndex(&feedback, at + 2);
