@@ -11,6 +11,7 @@ pub mod nav_row;
 pub mod new_work;
 pub mod notifications;
 pub mod open_box;
+pub mod profile_card;
 pub mod sidebar;
 pub mod titlebar;
 pub mod toast;

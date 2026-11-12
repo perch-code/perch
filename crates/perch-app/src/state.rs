@@ -3141,6 +3141,7 @@ impl AppState {
                 });
             }
             Event::Picture { url, decoded } => crate::review::images::arrived(url, decoded),
+            Event::Profile { login, answer } => crate::ui::profile_card::arrived(login, answer),
             Event::Participants(found) => {
                 self.participants.update(|m| m.extend(found));
             }

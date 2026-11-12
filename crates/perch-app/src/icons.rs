@@ -522,6 +522,17 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                <path d="M2.8 13.6 C2.8 10.6 5.1 9.1 8 9.1 S13.2 10.6 13.2 13.6" fill="none"
                      stroke="{c}" stroke-width="1.4" stroke-linecap="round"/>"#
         ),
+        SidebarIcon::Organization => format!(
+            r#"<path d="M2.8 13.8 V2.6 H9.6 V13.8 M9.6 6.6 H13.2 V13.8 M1.8 13.8 H14.2" fill="none"
+                     stroke="{c}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+               <path d="M5.2 5.3 H7.2 M5.2 7.9 H7.2 M5.2 10.5 H7.2" stroke="{c}" stroke-width="1.4"
+                     stroke-linecap="round"/>"#
+        ),
+        SidebarIcon::Location => format!(
+            r#"<path d="M8 14.2 C8 14.2 3.4 10 3.4 6.4 A4.6 4.6 0 0 1 12.6 6.4 C12.6 10 8 14.2 8 14.2 Z"
+                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
+               <circle cx="8" cy="6.4" r="1.6" fill="none" stroke="{c}" stroke-width="1.3"/>"#
+        ),
         SidebarIcon::Tag => format!(
             r#"<path d="M2.2 2.2 H7.6 L13.8 8.4 L8.4 13.8 L2.2 7.6 Z" fill="none" stroke="{c}"
                      stroke-width="1.4" stroke-linejoin="round"/>
@@ -635,6 +646,10 @@ pub enum SidebarIcon {
     Person,
     /// A luggage tag: the labels.
     Tag,
+    /// A building and its annex: where someone works.
+    Organization,
+    /// A map's pin: where someone is.
+    Location,
     /// The pull request glyph in the caller's colour, for a row's name
     /// rather than a state.
     PullRequest,
@@ -708,8 +723,10 @@ impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 74] = [
+    pub const ALL: [SidebarIcon; 76] = [
         SidebarIcon::Merge,
+        SidebarIcon::Organization,
+        SidebarIcon::Location,
         SidebarIcon::Feedback,
         SidebarIcon::Waiting,
         SidebarIcon::File,

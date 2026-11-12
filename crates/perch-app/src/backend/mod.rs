@@ -592,6 +592,10 @@ pub enum Command {
     WantPicture {
         url: String,
     },
+    /// Ask GitHub who a login is, for the card under it, for every window.
+    WantProfile {
+        login: String,
+    },
 
     /// Who decides an item's Work requests from now on, over config.
     SetApprovals {
@@ -959,11 +963,26 @@ impl WorkApprovals {
     }
 }
 
+/// What came of asking GitHub who a login is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProfileAnswer {
+    Found(perch_github::Profile),
+    /// GitHub has no account by the name.
+    NoAccount,
+    /// It could not be asked: to ask again the next time.
+    Failed,
+}
+
 #[derive(Debug, Clone)]
 pub enum Event {
     Avatar {
         url: String,
         bytes: Vec<u8>,
+    },
+    /// What GitHub said of who a login is.
+    Profile {
+        login: String,
+        answer: ProfileAnswer,
     },
     /// What came of downloading a picture a comment shows.
     Picture {
@@ -3483,6 +3502,13 @@ impl Backend {
         });
     }
 
+    /// Ask GitHub who a login is.
+    pub fn want_profile(&self, login: &str) {
+        let _ = self.commands.send(Command::WantProfile {
+            login: login.to_string(),
+        });
+    }
+
     pub fn set_meta(&self, key: &str, value: &str) {
         let _ = self.commands.send(Command::SetMeta {
             key: key.to_string(),
@@ -5082,6 +5108,7 @@ async fn run(
                 ctx.with_cache(|c| c.set_meta(&key, &value));
             }
             Command::WantPicture { url } => ctx.want_picture(url),
+            Command::WantProfile { login } => ctx.want_profile(login),
             Command::SetApprovals { item_id, approvals } => {
                 if let Ok(mut picks) = ctx.approval_picks.lock() {
                     picks.insert(item_id, approvals);
@@ -6360,6 +6387,38 @@ impl Ctx {
                 url,
                 decoded: decoded.map(Arc::new),
             });
+        });
+    }
+
+    /// Ask GitHub who `login` is, and have their face on hand. It waits
+    /// its turn with the faces.
+    fn want_profile(&self, login: String) {
+        let Some(github) = self.github() else {
+            let _ = self.events.send(Event::Profile {
+                login,
+                answer: ProfileAnswer::Failed,
+            });
+            return;
+        };
+        let ctx = self.clone();
+        tokio::spawn(async move {
+            let Ok(permit) = ctx.avatars.acquire().await else {
+                return;
+            };
+            let found = github.profile(&login).await;
+            drop(permit);
+            let answer = match found {
+                Ok(Some(profile)) => {
+                    ctx.want_avatars([profile.avatar_url.clone()]);
+                    ProfileAnswer::Found(profile)
+                }
+                Ok(None) => ProfileAnswer::NoAccount,
+                Err(e) => {
+                    tracing::debug!(error = %e, login, "profile fetch failed");
+                    ProfileAnswer::Failed
+                }
+            };
+            let _ = ctx.events.send(Event::Profile { login, answer });
         });
     }
 

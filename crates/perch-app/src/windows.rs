@@ -441,6 +441,25 @@ pub fn want_picture(url: &str) {
     }
 }
 
+/// Ask GitHub who a login is, for every window.
+pub fn want_profile(login: &str) {
+    if let Some(app) = app() {
+        app.backend.want_profile(login);
+    }
+}
+
+/// The window that last had the keyboard: the one the pointer is in.
+pub fn focused_state() -> Option<AppState> {
+    let app = app()?;
+    let focused = app.focused.get();
+    let windows = app.windows.borrow();
+    windows
+        .iter()
+        .find(|w| Some(w.id) == focused)
+        .or(windows.first())
+        .map(|w| w.state)
+}
+
 /// A click on the Dock icon opens a window when none is left. A minimized
 /// one macOS brings back itself.
 pub fn reopen() {

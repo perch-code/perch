@@ -25,6 +25,7 @@ pub mod search;
 mod subjects;
 pub mod subscription;
 pub mod timeline;
+pub mod users;
 pub mod workflow_runs;
 
 pub use activity::{ActivityEvent, ActivityOutcome, ItemActivity};
@@ -80,6 +81,7 @@ pub use reviews::{
 pub use search::{SearchHit, SearchPage};
 pub use subscription::IssueViewerState;
 pub use timeline::{PullEvent, PullEventKind, Reference};
+pub use users::Profile;
 pub use workflow_runs::{
     announced_verdict, Check, CheckKind, CheckRunState, CheckState, Checks, WorkflowRunPayload,
     WorkflowRunQuery,

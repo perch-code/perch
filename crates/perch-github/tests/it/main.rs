@@ -16,4 +16,5 @@ mod reactions;
 mod releases;
 mod search;
 mod timeline_pages;
+mod users;
 mod workflow_runs;

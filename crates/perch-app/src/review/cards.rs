@@ -52,6 +52,7 @@ use crate::review::OpenFile;
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
+use crate::ui::profile_card::with_profile_card;
 use crate::ui::widgets::{
     avatar, clickable, confirmation, name_label, open_in_browser, sidebar_glyph, underlined_link,
     Name,
@@ -220,6 +221,7 @@ pub(crate) fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> im
         when,
     } = who;
     let seed = login.clone();
+    let faced = login.clone();
     let verb_empty = verb.is_empty();
     // A verdict's words take its glyph's colour, so Changes requested
     // reads as red as its mark does; a comment's are muted.
@@ -231,8 +233,11 @@ pub(crate) fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> im
             .unwrap_or_default()
     });
     Stack::horizontal((
-        avatar(app, avatar_url, avatar_size, seed)
-            .style(|s| s.margin_right(9.0).flex_shrink(0.0_f32)),
+        with_profile_card(
+            avatar(app, avatar_url, avatar_size, seed)
+                .style(|s| s.margin_right(9.0).flex_shrink(0.0_f32)),
+            move || Some(faced.clone()),
+        ),
         match glyph {
             Some((icon, color)) => sidebar_glyph(icon, color)
                 .style(|s| s.size(14.0, 14.0).margin_right(5.0))

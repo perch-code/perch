@@ -51,6 +51,7 @@ use crate::timeline::{
     fill_logins, same_moment, tidy, wants_login, DeletedAuthorsData, PullCommitPayload, PullEvent,
     PullEventKind, TimelineEventPayload, DELETED_AUTHORS_QUERY, TIMELINE_MAX_PAGES,
 };
+use crate::users::Profile;
 use crate::workflow_runs::{Checks, WorkflowRunPayload, WorkflowRunsPayload};
 
 /// Page size for the notifications list. GitHub caps `per_page` at 50 here.
@@ -2684,6 +2685,19 @@ impl GitHub {
             .get_text(&format!("/repos/{repo_full_name}/releases/latest"))
             .await
         {
+            Ok(body) => body,
+            Err(Error::Status { status: 404, .. }) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        serde_json::from_str(&body)
+            .map(Some)
+            .map_err(|e| Error::Decode(e.to_string()))
+    }
+
+    /// Who `login` is, as their page says. `None` for a login GitHub has
+    /// no account for.
+    pub async fn profile(&self, login: &str) -> Result<Option<Profile>, Error> {
+        let body = match self.get_text(&format!("/users/{login}")).await {
             Ok(body) => body,
             Err(Error::Status { status: 404, .. }) => return Ok(None),
             Err(e) => return Err(e),

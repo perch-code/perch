@@ -124,7 +124,8 @@ impl Name {
 /// the person's page in the browser. `style` is the label's own, since a
 /// byline and the strip set a name differently; the pointer and the
 /// underline under it come with the link. A name that leads nowhere is
-/// the same label, plain.
+/// the same label, plain. A login the pointer rests on shows who it is
+/// (`profile_card`).
 ///
 /// The underline is the label's bottom border, kept transparent until the
 /// pointer is over it, so a name is the same height whether or not it is
@@ -144,7 +145,14 @@ pub fn name_label(
         let name = name.clone();
         move || name().profile_url()
     };
-    Label::derived(text)
+    let login = {
+        let name = name.clone();
+        move || match name() {
+            Name::Login(login) => Some(login),
+            Name::Plain(_) => None,
+        }
+    };
+    let label = Label::derived(text)
         .on_event(el::Click, move |_, _| match url() {
             Some(url) => {
                 open_in_browser(&url);
@@ -163,7 +171,8 @@ pub fn name_label(
                 s
             }
         })
-        .debug_name("name label")
+        .debug_name("name label");
+    super::profile_card::with_profile_card(label, login)
 }
 
 /// Style a row that behaves as a button.
