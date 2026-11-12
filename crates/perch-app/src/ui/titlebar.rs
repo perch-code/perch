@@ -45,15 +45,41 @@ fn title_bar_with<V: IntoView + 'static>(
         if !on_bar {
             return EventPropagation::Continue;
         }
-        match press.state.count {
-            1 => drag(),
-            2 => zoom(),
-            // A third press in the same spot is neither: the second one
-            // zoomed, and nothing needs dragging or zooming straight back.
-            _ => {}
-        }
+        pressed(press.state.count, &drag, &zoom);
         EventPropagation::Stop
     })
+}
+
+fn pressed(count: u8, drag: &impl Fn(), zoom: &impl Fn()) {
+    match count {
+        1 => drag(),
+        2 => zoom(),
+        // A third press in the same spot is neither: the second one
+        // zoomed, and nothing needs dragging or zooming straight back.
+        _ => {}
+    }
+}
+
+/// A view in a bar that takes the pointer, for a tip on hover say, and is
+/// still the bar to a press: it drags and zooms the window as the bar's own
+/// surface does.
+pub fn part_of_bar<V: IntoView + 'static>(view: V) -> impl IntoView {
+    part_of_bar_with(view, drag_window, toggle_window_maximized)
+}
+
+fn part_of_bar_with<V: IntoView + 'static>(
+    view: V,
+    drag: impl Fn() + 'static,
+    zoom: impl Fn() + 'static,
+) -> impl IntoView {
+    view.into_intermediate()
+        .on_event(el::PointerDown, move |_, press: &PointerButtonEvent| {
+            if press.button != Some(PointerButton::Primary) {
+                return EventPropagation::Continue;
+            }
+            pressed(press.state.count, &drag, &zoom);
+            EventPropagation::Stop
+        })
 }
 
 #[cfg(test)]
@@ -87,6 +113,18 @@ mod tests {
             Label::derived(|| "part of the bar".to_string())
                 .style(|s| s.width(150.0).pointer_events_none()),
             Empty::new().style(|s| s.flex_grow(1.0_f32).pointer_events_none()),
+            part_of_bar_with(
+                Label::derived(|| "hovered".to_string()),
+                {
+                    let drags = counts.drags.clone();
+                    move || drags.set(drags.get() + 1)
+                },
+                {
+                    let zooms = counts.zooms.clone();
+                    move || zooms.set(zooms.get() + 1)
+                },
+            )
+            .style(|s| s.width(100.0)),
             Label::derived(|| "a control".to_string()).style(|s| s.width(100.0)),
         ))
         .style(|s| s.width_full().height(60.0).items_center());
@@ -108,11 +146,12 @@ mod tests {
     }
 
     // The button spans x 0..40 at y 16..44; the label 40..190; the spacer
-    // 190..700; the pickable label 700..800.
+    // 190..600; the hovered part 600..700; the pickable label 700..800.
     const BUTTON: (f64, f64) = (20.0, 30.0);
     const LABEL: (f64, f64) = (100.0, 30.0);
     const SPACER: (f64, f64) = (400.0, 30.0);
     const ABOVE_BUTTON: (f64, f64) = (20.0, 5.0);
+    const HOVERED: (f64, f64) = (650.0, 30.0);
     const PICKABLE: (f64, f64) = (750.0, 30.0);
     const BELOW_BAR: (f64, f64) = (400.0, 300.0);
 
@@ -138,6 +177,16 @@ mod tests {
         harness.pointer_up(ABOVE_BUTTON.0, ABOVE_BUTTON.1);
         assert_eq!(counts.drags.get(), 2);
         assert_eq!(counts.clicks.get(), 0);
+    }
+
+    #[test]
+    fn a_part_that_takes_the_pointer_still_drags_and_zooms() {
+        let (mut harness, counts) = harness();
+
+        harness.pointer_down(HOVERED.0, HOVERED.1);
+        assert_eq!((counts.drags.get(), counts.zooms.get()), (1, 0));
+        harness.double_click(HOVERED.0, HOVERED.1);
+        assert_eq!((counts.drags.get(), counts.zooms.get()), (1, 1));
     }
 
     #[test]

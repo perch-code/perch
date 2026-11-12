@@ -13,20 +13,22 @@
 
 use std::rc::Rc;
 
+use floem::event::EventPropagation;
 use floem::prelude::*;
-use floem::reactive::{SignalGet, SignalWith};
+use floem::reactive::{SignalGet, SignalUpdate, SignalWith};
+use floem::text::TextOverflowChanged;
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 
 use crate::backend::Backend;
 use crate::icons::{self, SidebarIcon};
-use crate::review::cards::tip;
+use crate::review::cards::{tip, tip_with};
 use crate::review::model::{Phase, ReviewState};
 use crate::review::summary::subject_state;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::items::github_url;
 use crate::ui::menu::{Menu, MenuExt};
-use crate::ui::titlebar::title_bar;
+use crate::ui::titlebar::{part_of_bar, title_bar};
 use crate::ui::widgets::{copy_to_clipboard, icon_button, open_in_browser, sidebar_glyph};
 
 /// The bar, the same for every kind of item: a pull request, an issue, or
@@ -83,14 +85,7 @@ fn leading(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Into
         crate::ui::sidebar::pane_lights_lane(app),
         crate::ui::history::buttons(app, state, backend),
         state_glyph(state),
-        Label::derived(move || title(state))
-            .debug_name("item title")
-            .style(|s| {
-                s.font_size(theme::TEXT_META)
-                    .color(theme::fg())
-                    .text_ellipsis()
-                    .min_width(0.0)
-            }),
+        item_title(state),
     ))
     .style(|s| {
         side(s)
@@ -99,6 +94,30 @@ fn leading(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Into
             .min_width(0.0)
             .gap(8.0)
     })
+}
+
+/// The title, cut short with an ellipsis when the bar has no room for all
+/// of it, and then the whole of it is a tip on hover. It takes the pointer
+/// only while it is cut short, and a press on it still drags the window.
+fn item_title(state: ReviewState) -> impl IntoView {
+    let cut_short = RwSignal::new(false);
+    let label = Label::derived(move || title(state))
+        .debug_name("item title")
+        .on_event(
+            TextOverflowChanged::listener(),
+            move |_, change: &TextOverflowChanged| {
+                cut_short.set(change.is_overflowing);
+                EventPropagation::Continue
+            },
+        )
+        .style(move |s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::fg())
+                .text_ellipsis()
+                .min_width(0.0)
+                .apply_if(cut_short.get(), |s| s.pointer_events_auto())
+        });
+    tip_with(part_of_bar(label), move || title(state)).style(|s| s.min_width(0.0))
 }
 
 /// The pull request's or the issue's title. A worktree of the reader's own
@@ -556,6 +575,33 @@ pub(crate) mod tests {
         assert_eq!(
             rect(&harness, "close button").x1,
             bar.x1 - theme::REVIEW_HEADER_PADDING
+        );
+    }
+
+    /// A title that is cut short takes the pointer, so hovering it shows
+    /// the whole of it. One that fits is the bar's own surface.
+    #[test]
+    fn only_a_title_cut_short_takes_the_pointer() {
+        let (harness, _, _) = pull_request_harness();
+        let title = rect(&harness, "item title").center();
+        let hit = harness.element_id_at(title.x, title.y).unwrap();
+        assert_eq!(
+            hit.owning_id(),
+            named(harness.root_id(), "item bar").unwrap(),
+            "a title that fits took the pointer"
+        );
+
+        let mut pull = pull_request(812);
+        pull.title = "Add tracing spans to every read path, ".repeat(8);
+        let (mut harness, _, _) = pull_request_harness_with(pull);
+        harness.rebuild();
+        harness.paint();
+        let title = rect(&harness, "item title").center();
+        let hit = harness.element_id_at(title.x, title.y).unwrap();
+        assert_eq!(
+            hit.owning_id(),
+            named(harness.root_id(), "item title").unwrap(),
+            "a title cut short let the pointer through"
         );
     }
 
