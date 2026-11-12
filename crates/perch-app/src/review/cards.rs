@@ -1439,33 +1439,48 @@ fn clamped(state: ReviewState, text: floem::AnyView, whole: RwSignal<bool>) -> i
 /// How much of a cut description's foot fades into the card.
 const CUT_FADE: usize = 56;
 
+/// How far the fade's layers run below the cut, into the card's own
+/// colour.
+const CUT_FADE_OVERRUN: f32 = 2.0;
+
 /// The card's own colour over the last lines of a cut description,
 /// thickening downward, so the text fades out rather than stopping
-/// mid-line. It is a strip a pixel tall per step: vger places a gradient
-/// brush from the window's corner, not the view's. Clicks and selection
-/// go through it to the text.
+/// mid-line. vger places a gradient brush from the window's corner, not
+/// the view's, so it is a layer per pixel row, each running from its row
+/// to past the foot and adding its share. Rows side by side would not
+/// do: vger feathers every edge, so on a half pixel two neighbours cover
+/// a row by half each and the last row by half alone, and the text
+/// showed through to the cut. Clicks and selection go through it to the
+/// text.
 fn cut_fade(cut: Memo<bool>) -> impl IntoView {
-    let strips = (0..CUT_FADE)
+    let mut clear = 1.0_f32;
+    let layers = (0..CUT_FADE)
         .map(|i| {
             // Eased, so the fade starts gently and the last line is gone.
             let t = (i + 1) as f32 / CUT_FADE as f32;
-            let alpha = t * t * (3.0 - 2.0 * t);
+            let left = 1.0 - t * t * (3.0 - 2.0 * t);
+            // What this layer must hide of what the ones above let through.
+            let alpha = (1.0 - left / clear).clamp(0.0, 1.0);
+            clear = left;
             Empty::new().style(move |s| {
-                s.width_full()
-                    .height(1.0)
-                    .flex_shrink(0.0_f32)
+                s.absolute()
+                    .inset_left(0.0)
+                    .inset_right(0.0)
+                    .inset_top(i as f32)
+                    // Past the foot, so no feathered edge lies on the cut.
+                    .inset_bottom(-CUT_FADE_OVERRUN)
                     .background(theme::canvas().with_alpha(alpha))
             })
         })
         .collect::<Vec<_>>();
-    Stack::vertical_from_iter(strips)
+    Stack::vertical_from_iter(layers)
         .debug_name("description-fade")
         .style(move |s| {
             s.absolute()
                 .inset_left(0.0)
                 .inset_right(0.0)
                 .inset_bottom(0.0)
-                .flex_col()
+                .height(CUT_FADE as f32)
                 .pointer_events_none()
                 .apply_if(!cut.get(), |s| s.hide())
         })
