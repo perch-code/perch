@@ -310,22 +310,44 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
     // Opening a file from Cmd-P's palette, which the window's keys do.
     let go_to_file = crate::review::open_file(review, backend.clone());
 
+    let sidebar_present = floem::reactive::Memo::new(move |_| state.sidebar_present());
     let root = Stack::vertical((
         Stack::horizontal((
             dyn_container(
-                move || state.sidebar_open.get(),
-                move |open| {
-                    if open {
+                // Sliding shut it is still there, so a Memo: the drawer is
+                // built once however many frames the slide takes.
+                move || sidebar_present.get(),
+                move |present| {
+                    if present {
                         // The handle is absolutely placed over the drawer's
                         // right edge, so the drawer is its positioning box.
-                        floem::views::Container::new(Stack::horizontal((
-                            sidebar::sidebar(state, panel_backend.clone(), panel_open.clone()),
-                            sidebar::resize_handle(state),
-                        )))
-                        .style(|s| {
+                        floem::views::Container::new(
+                            Stack::horizontal((
+                                sidebar::sidebar(state, panel_backend.clone(), panel_open.clone()),
+                                sidebar::resize_handle(state),
+                            ))
+                            // Sliding, the drawer keeps its width and its
+                            // right edge stays on the box's: the rest of it
+                            // is off the window's left.
+                            .style(move |s| {
+                                let hidden =
+                                    state.sidebar_width.get() - state.sidebar_shown_width();
+                                s.height_full().flex_shrink(0.0_f32).margin_left(-hidden)
+                            }),
+                        )
+                        .debug_name("left drawer")
+                        .style(move |s| {
+                            // Only mid-slide is the box narrower than the
+                            // drawer, and only then does it clip: the
+                            // footer's popovers hang out of it at rest.
+                            let sliding = state.sidebar_slide.get().is_some();
                             s.height_full()
                                 .flex_shrink(0.0_f32)
                                 .position(floem::style::Position::Relative)
+                                .apply_if(sliding, |s| {
+                                    s.width(state.sidebar_shown_width())
+                                        .overflow_x(floem::taffy::Overflow::Hidden)
+                                })
                         })
                         .into_any()
                     } else {
@@ -956,7 +978,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 // Show or hide the sidebar drawer.
                 Code::Backslash => {
                     if !key.modifiers.contains(Modifiers::SHIFT) {
-                        state.sidebar_open.update(|open| *open = !*open);
+                        state.toggle_sidebar();
                         EventPropagation::Stop
                     } else {
                         EventPropagation::Continue
@@ -983,7 +1005,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                         }
                     } else {
                         state.focus_search.set(true);
-                        state.sidebar_open.set(true);
+                        state.show_sidebar(true);
                     }
                     EventPropagation::Stop
                 }
@@ -1057,8 +1079,7 @@ fn pane_with_bar(
         titlebar::title_bar(
             Stack::horizontal((
                 Stack::horizontal((
-                    sidebar::lights_lane(state, theme::REVIEW_HEADER_PADDING)
-                        .style(move |s| s.apply_if(state.sidebar_open.get(), |s| s.hide())),
+                    sidebar::pane_lights_lane(state),
                     history::buttons(state, review, backend.clone()),
                     title,
                 ))
@@ -1296,6 +1317,65 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert!(!offered(&harness), "one in the config");
+    }
+
+    #[test]
+    fn sliding_the_drawer_keeps_its_width_and_the_pane_follows_its_edge() {
+        let state = AppState::new();
+        let review = ReviewState::new();
+        let root = TestRoot::new();
+        let view = app_view(state, review, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        harness.rebuild();
+        let root_id = harness.root_id();
+        let drawer = named(root_id, "left drawer").expect("no drawer");
+        let strip = || {
+            named(root_id, "drawer strip")
+                .unwrap()
+                .get_visual_rect_no_clip()
+        };
+        let pane = || {
+            named(root_id, "main-pane")
+                .unwrap()
+                .get_visual_rect_no_clip()
+        };
+        assert_eq!((strip().x0, pane().x0), (0.0, theme::SIDEBAR_WIDTH));
+
+        // Half way shut: half of it is off the window's left, at its full
+        // width, and the pane has the half it left.
+        state.sidebar_slide.set(Some(0.5));
+        state.sidebar_open.set(false);
+        harness.rebuild();
+        let half = theme::SIDEBAR_WIDTH / 2.0;
+        assert_eq!(
+            named(harness.root_id(), "left drawer"),
+            Some(drawer),
+            "the drawer was rebuilt for the slide"
+        );
+        // The strip ends at the drawer's border, a pixel short of its edge.
+        assert_eq!((strip().x0, strip().x1), (-half, half - 1.0));
+        assert_eq!(pane().x0, half);
+        assert!(
+            named(harness.root_id(), "empty bar")
+                .and_then(|bar| named(bar, "drawer toggle"))
+                .is_some_and(|toggle| toggle.get_visual_rect_no_clip().is_zero_area()),
+            "the pane's control is up while the drawer covers the lights"
+        );
+
+        // Nearly shut, the pane's control is up, where it rests.
+        state.sidebar_slide.set(Some(10.0 / theme::SIDEBAR_WIDTH));
+        harness.rebuild();
+        let toggle = named(harness.root_id(), "empty bar")
+            .and_then(|bar| named(bar, "drawer toggle"))
+            .unwrap();
+        assert!((pane().x0 - 10.0).abs() < 1e-6);
+        assert!((toggle.get_visual_rect_no_clip().x0 - theme::ACTIVITY_RAIL_WIDTH).abs() < 1e-6);
+
+        // There: the drawer is gone.
+        state.sidebar_slide.set(None);
+        harness.rebuild();
+        assert!(named(harness.root_id(), "left drawer").is_none());
+        assert_eq!(pane().x0, 0.0);
     }
 
     #[test]

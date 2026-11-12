@@ -122,7 +122,7 @@ pub fn toggle(app: AppState, review: ReviewState, opener: Option<floem::ViewId>)
 /// there is, or a new one of `kind`. It hangs from the drawer's footer, so
 /// a shut drawer opens with it.
 pub fn open(app: AppState, review: ReviewState, kind: FeedbackKind, opener: Option<floem::ViewId>) {
-    app.sidebar_open.set(true);
+    app.show_sidebar(true);
     crate::review::review_menu::close(review, false);
     crate::ui::agents::dropdown::close(review, false);
     crate::ui::usage::close(review, false);

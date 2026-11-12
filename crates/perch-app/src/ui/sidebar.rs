@@ -90,6 +90,28 @@ pub fn lights_lane(state: AppState, inset: f64) -> impl IntoView {
     .style(|s| s.items_center().flex_shrink(0.0_f32).pointer_events_none())
 }
 
+/// The lane at the start of the main pane's bar, there while the drawer
+/// is off the lights. The drawer slides shut carrying its own control, and
+/// this one comes up once the pane's edge is under the lights, already
+/// where it rests: the lane takes only what the drawer has left of it.
+pub fn pane_lights_lane(state: AppState) -> impl IntoView {
+    let inset = theme::REVIEW_HEADER_PADDING;
+    Stack::horizontal((
+        Empty::new().style(move |s| {
+            let lane = theme::lights_lane_width() - inset;
+            s.width((lane - state.sidebar_shown_width()).max(0.0))
+        }),
+        toggle_button(state),
+    ))
+    .style(move |s| {
+        let lane = (theme::lights_lane_width() - inset).max(0.0);
+        s.items_center()
+            .flex_shrink(0.0_f32)
+            .pointer_events_none()
+            .apply_if(state.sidebar_shown_width() > lane, |s| s.hide())
+    })
+}
+
 /// `+`: the new-work view, as `Cmd-N` opens it.
 fn new_work_button(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     Container::new(sidebar_glyph(SidebarIcon::Plus, theme::nav_muted).style(|s| s.size(16.0, 16.0)))
@@ -116,9 +138,7 @@ fn toggle_button(state: AppState) -> impl IntoView {
     Container::new(
         sidebar_glyph(SidebarIcon::Drawer, theme::nav_muted).style(|s| s.size(16.0, 16.0)),
     )
-    .on_event_stop(el::Click, move |_, _| {
-        state.sidebar_open.update(|o| *o = !*o)
-    })
+    .on_event_stop(el::Click, move |_, _| state.toggle_sidebar())
     .debug_name("drawer toggle")
     .style(|s| {
         crate::ui::widgets::clickable(s)

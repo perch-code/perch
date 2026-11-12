@@ -77,8 +77,7 @@ fn side(s: floem::style::Style) -> floem::style::Style {
 /// title.
 fn leading(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     Stack::horizontal((
-        crate::ui::sidebar::lights_lane(app, theme::REVIEW_HEADER_PADDING)
-            .style(move |s| s.apply_if(app.sidebar_open.get(), |s| s.hide())),
+        crate::ui::sidebar::pane_lights_lane(app),
         crate::ui::history::buttons(app, state, backend),
         state_glyph(state),
         Label::derived(move || title(state))

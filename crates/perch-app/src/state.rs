@@ -435,6 +435,11 @@ pub struct AppState {
     pub now: RwSignal<Timestamp>,
     /// Whether the left drawer is showing.
     pub sidebar_open: RwSignal<bool>,
+    /// How much of the drawer is in the window while it slides open or
+    /// shut, from 0 to 1. None at rest, where `sidebar_open` says.
+    pub sidebar_slide: RwSignal<Option<f64>>,
+    /// Counts the slides, so a slide stops when the next one starts.
+    pub sidebar_slide_run: RwSignal<u64>,
     /// How wide the drawer is. Dragged, so a signal rather than a constant.
     pub sidebar_width: RwSignal<f64>,
     /// Whether the drawer's edge is being dragged. The cursor follows what
@@ -535,6 +540,8 @@ impl AppState {
             last_poll_problem: RwSignal::new(None),
             now: RwSignal::new(Timestamp::now()),
             sidebar_open: RwSignal::new(true),
+            sidebar_slide: RwSignal::new(None),
+            sidebar_slide_run: RwSignal::new(0),
             sidebar_width: RwSignal::new(crate::theme::SIDEBAR_WIDTH),
             sidebar_resizing: RwSignal::new(false),
             search_focused: RwSignal::new(false),
@@ -1372,6 +1379,55 @@ impl AppState {
                 && review.tab.get() == crate::review::model::ItemTab::Code
                 && review.has_files()
         })
+    }
+
+    /// How much of the left drawer is in the window, from 0 to 1: where
+    /// its slide has got to, or all or none of it at rest. Tracked.
+    pub fn sidebar_shown(&self) -> f64 {
+        let rest = if self.sidebar_open.get() { 1.0 } else { 0.0 };
+        self.sidebar_slide.get().unwrap_or(rest)
+    }
+
+    /// The width the left drawer takes from the main pane now. Tracked.
+    pub fn sidebar_shown_width(&self) -> f64 {
+        match self.sidebar_shown() {
+            shown if shown <= 0.0 => 0.0,
+            shown => shown * self.sidebar_width.get(),
+        }
+    }
+
+    /// Whether the left drawer is in the tree: open, or sliding. Tracked.
+    pub fn sidebar_present(&self) -> bool {
+        self.sidebar_open.get() || self.sidebar_slide.get().is_some()
+    }
+
+    /// Open or shut the left drawer, sliding it there.
+    pub fn show_sidebar(&self, open: bool) {
+        if self.sidebar_open.get_untracked() == open {
+            return;
+        }
+        let run = self.sidebar_slide_run.get_untracked() + 1;
+        self.sidebar_slide_run.set(run);
+        if SIDEBAR_SLIDE.is_zero() {
+            self.sidebar_slide.set(None);
+            self.sidebar_open.set(open);
+            return;
+        }
+        // From where it is, which is part way when a slide is cut short.
+        let rest = if open { 0.0 } else { 1.0 };
+        let from = self.sidebar_slide.get_untracked().unwrap_or(rest);
+        let to = 1.0 - rest;
+        // The slide first, so the drawer is never out of the tree between
+        // the two writes.
+        self.sidebar_slide.set(Some(from));
+        self.sidebar_open.set(open);
+        // A slide cut short has less far to go, and takes less time.
+        let length = SIDEBAR_SLIDE.mul_f64((to - from).abs());
+        slide_sidebar(*self, run, from, to, std::time::Instant::now(), length);
+    }
+
+    pub fn toggle_sidebar(&self) {
+        self.show_sidebar(!self.sidebar_open.get_untracked());
     }
 
     /// Whether the drawer shows the tree: asked for, and on Code. Asked
@@ -3983,6 +4039,44 @@ fn by_item(
         .into_iter()
         .map(|a| (a.item_id.clone(), a))
         .collect()
+}
+
+/// How long the left drawer takes to slide all the way open or shut. The
+/// headless harness never runs a timer, so under test it moves at once.
+const SIDEBAR_SLIDE: Duration = Duration::from_millis(if cfg!(test) { 0 } else { 200 });
+
+/// Where a slide from `from` to `to` has got to, `t` of the way through
+/// its time: fast at first and settling, as the system's sidebars do.
+fn slide_at(from: f64, to: f64, t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    from + (to - from) * (1.0 - (1.0 - t).powi(3))
+}
+
+/// Move the drawer along on the next frame, and again until it is there.
+fn slide_sidebar(
+    state: AppState,
+    run: u64,
+    from: f64,
+    to: f64,
+    started: std::time::Instant,
+    length: Duration,
+) {
+    let step = move |_| {
+        if state.sidebar_slide_run.get_untracked() != run {
+            return;
+        }
+        let t = started.elapsed().as_secs_f64() / length.as_secs_f64().max(f64::EPSILON);
+        if t >= 1.0 {
+            state.sidebar_slide.set(None);
+        } else {
+            state.sidebar_slide.set(Some(slide_at(from, to, t)));
+            slide_sidebar(state, run, from, to, started, length);
+        }
+    };
+    // With no window to take a frame from, a timer at about a frame.
+    if floem::action::exec_after_animation_frame(step) == floem::action::TimerToken::INVALID {
+        floem::action::exec_after(Duration::from_millis(16), step);
+    }
 }
 
 #[cfg(test)]
@@ -7294,5 +7388,28 @@ mod tests {
             message(&app).as_deref(),
             Some("couldn't move /Applications/Perch.app aside")
         );
+    }
+
+    #[test]
+    fn a_slide_starts_fast_settles_and_ends_where_it_was_going() {
+        assert_eq!(slide_at(0.0, 1.0, 0.0), 0.0);
+        assert_eq!(slide_at(0.0, 1.0, 1.0), 1.0);
+        assert_eq!(slide_at(1.0, 0.0, 1.0), 0.0);
+        assert_eq!(slide_at(0.25, 1.0, 2.0), 1.0, "past its time");
+        assert!(slide_at(0.0, 1.0, 0.5) > 0.5, "ahead of the clock");
+        let steps: Vec<f64> = (0..=10)
+            .map(|i| slide_at(1.0, 0.0, f64::from(i) / 10.0))
+            .collect();
+        assert!(steps.windows(2).all(|pair| pair[1] < pair[0]));
+    }
+
+    #[test]
+    fn showing_the_drawer_under_test_moves_it_at_once() {
+        let state = AppState::new();
+        state.show_sidebar(false);
+        assert!(!state.sidebar_open.get() && !state.sidebar_present());
+        assert_eq!(state.sidebar_shown_width(), 0.0);
+        state.toggle_sidebar();
+        assert_eq!(state.sidebar_shown_width(), crate::theme::SIDEBAR_WIDTH);
     }
 }
