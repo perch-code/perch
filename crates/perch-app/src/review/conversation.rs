@@ -468,7 +468,7 @@ pub fn view(
         composer(app, state, composer_backend).style(|s| {
             s.width_full()
                 .padding_top(theme::CARD_GAP)
-                .padding_bottom(theme::CONVERSATION_ENTRY_PADDING)
+                .padding_bottom(theme::CARD_GAP)
         }),
         timeline,
         older_row(hidden, unfolded.older),
@@ -4371,7 +4371,7 @@ mod tests {
             discussion(),
             move |state| crate::review::notified::follow(state, &thread),
         );
-        harness.set_size(1400.0, 500.0);
+        harness.set_size(1400.0, 460.0);
         harness.rebuild();
         harness.paint();
         (harness, app, state)
