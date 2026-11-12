@@ -1530,9 +1530,8 @@ pub fn subject_word(state: ReviewState) -> &'static str {
 }
 
 /// Where the text goes and how hard the agent thinks, in one menu as
-/// Claude's app has it: each maker's models under its name, the newest
-/// of each family, then Effort and the older versions in submenus, then
-/// GitHub under a line. The face is the model with the effort in grey
+/// Claude's app has it: a submenu of models per maker, then Effort,
+/// another, then GitHub under a line. The face is the model with the effort in grey
 /// after it, `Sol 6.1 High`, or `GitHub`. A model carries its backend,
 /// so picking one sets both, and keeps the effort where the model takes
 /// it. GitHub can be picked where a draft has somewhere to land, a
@@ -1540,7 +1539,7 @@ pub fn subject_word(state: ReviewState) -> &'static str {
 /// text posts at once as an issue comment: Conversation's own, over a
 /// pull request's or an issue's timeline, or under a thread with neither
 /// lines nor a place on GitHub. A draft being edited stays a draft: the
-/// models are greyed out, since sending would replace its body, not ask.
+/// makers are greyed out, since sending would replace its body, not ask.
 fn agent_picker(app: AppState, state: ReviewState) -> impl IntoView {
     let choice = move || {
         state
@@ -1712,13 +1711,15 @@ pub(crate) fn model_sections(
         .collect()
 }
 
-/// The agent picker's menu, without GitHub: each maker's models under
-/// its name, the newest of each family; then Effort, a submenu with the
-/// level chosen at its row's end, where a level the model does not take
-/// is shown but cannot be picked; then More models, the older versions.
-/// `selected` is the model chosen, none when the text is for GitHub,
-/// which leaves Effort out. Picking a model keeps `effort`, or the
-/// nearest the model takes.
+/// The agent picker's menu, without GitHub: a row per maker, each a
+/// submenu of its models, the newest of each family and then, under a
+/// line, the older versions, with the model chosen at the end of its
+/// maker's row; then Effort, a submenu with the level chosen at its
+/// row's end, where a level the model does not take is shown but cannot
+/// be picked. `selected` is the model chosen, none when the text is for
+/// GitHub, which leaves Effort out. Picking a model keeps `effort`, or
+/// the nearest the model takes. With `models_enabled` off the makers are
+/// greyed.
 pub(crate) fn agent_menu(
     agent: &perch_github::AgentConfig,
     selected: Option<&str>,
@@ -1735,21 +1736,33 @@ pub(crate) fn agent_menu(
         let model = model.to_string();
         menu.item(model_label(&model), move |item| {
             item.checked(checked)
-                .enabled(models_enabled)
                 .action(move || pick(backend, model.clone(), effort))
         })
     };
     let sections = model_sections(agent);
     let mut menu = Menu::new();
-    for (i, (maker, families)) in sections.iter().enumerate() {
-        if i > 0 {
-            menu = menu.separator();
-        }
-        menu = menu.heading(*maker);
-        for family in families {
-            let (backend, model) = &family.versions[0];
-            menu = model_row(menu, *backend, model);
-        }
+    for (maker, families) in &sections {
+        menu = menu.submenu(*maker, |mut sub| {
+            for family in families {
+                let (backend, model) = &family.versions[0];
+                sub = model_row(sub, *backend, model);
+            }
+            let older = families.iter().flat_map(|f| &f.versions[1..]);
+            for (i, (backend, model)) in older.enumerate() {
+                if i == 0 {
+                    sub = sub.separator();
+                }
+                sub = model_row(sub, *backend, model);
+            }
+            let chosen = families
+                .iter()
+                .flat_map(|f| &f.versions)
+                .find(|(_, model)| selected == Some(model.as_str()));
+            if let Some((_, model)) = chosen {
+                sub = sub.detail(model_label(model));
+            }
+            sub.enabled(models_enabled)
+        });
     }
     let chosen = selected.and_then(|model| {
         sections
@@ -1773,31 +1786,6 @@ pub(crate) fn agent_menu(
                 });
             }
             sub.detail(effort.label())
-        });
-    }
-    let older = sections
-        .iter()
-        .map(|(maker, families)| {
-            let older = families
-                .iter()
-                .flat_map(|family| &family.versions[1..])
-                .collect::<Vec<_>>();
-            (*maker, older)
-        })
-        .filter(|(_, older)| !older.is_empty())
-        .collect::<Vec<_>>();
-    if !older.is_empty() {
-        menu = menu.separator().submenu("More models", |mut sub| {
-            for (i, (maker, models)) in older.iter().enumerate() {
-                if i > 0 {
-                    sub = sub.separator();
-                }
-                sub = sub.heading(*maker);
-                for (backend, model) in models {
-                    sub = model_row(sub, *backend, model);
-                }
-            }
-            sub
         });
     }
     menu
@@ -4846,13 +4834,15 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert!(crate::ui::menu::is_open());
-        let opus = find(harness.root_id(), "menu-row:Opus")
-            .unwrap()
-            .get_visual_rect_no_clip()
-            .center();
-        harness.click(opus.x, opus.y);
-        harness.rebuild();
-        harness.paint();
+        for row in ["menu-row:Claude", "menu-row:Opus"] {
+            let at = find(harness.root_id(), row)
+                .unwrap()
+                .get_visual_rect_no_clip()
+                .center();
+            harness.click(at.x, at.y);
+            harness.rebuild();
+            harness.paint();
+        }
         assert!(!crate::ui::menu::is_open());
         assert_eq!(
             state
@@ -6168,21 +6158,24 @@ mod tests {
         };
 
         let menu = agent_menu(&agent, Some("gpt-6-luna"), Effort::High, true, pick.clone());
+        assert_eq!(menu.outline(), ["Claude ▸", "Codex ▸", "—", "Effort ▸"]);
+        let claude = menu.submenu_named("Claude").unwrap();
         assert_eq!(
-            menu.outline(),
+            claude.outline(),
+            ["Opus", "Sonnet"],
+            "Claude has nothing older, so no line"
+        );
+        let codex = menu.submenu_named("Codex").unwrap();
+        assert_eq!(
+            codex.outline(),
             [
-                "[Claude]",
-                "Opus",
-                "Sonnet",
-                "—",
-                "[Codex]",
                 "Sol 6.1",
                 "Astra 6",
                 "✓ Luna 6",
                 "—",
-                "Effort ▸",
-                "—",
-                "More models ▸"
+                "Sol 6",
+                "Sol 5.6",
+                "Luna 5.6"
             ]
         );
         let effort = menu.submenu_named("Effort").unwrap();
@@ -6190,23 +6183,19 @@ mod tests {
             effort.outline(),
             ["Low", "Medium", "✓ High", "XHigh", "Max", "Ultra"]
         );
-        let more = menu.submenu_named("More models").unwrap();
-        assert_eq!(
-            more.outline(),
-            ["[Codex]", "Sol 6", "Sol 5.6", "Luna 5.6"],
-            "Claude has nothing older, so no heading"
-        );
 
-        menu.choose("Sol 6.1");
+        codex.choose("Sol 6.1");
         effort.choose("Low");
         // A model keeps the effort, or the highest it takes.
-        more.choose("Sol 5.6");
+        codex.choose("Sol 5.6");
+        claude.choose("Opus");
         assert_eq!(
             *picked.borrow(),
             [
                 "codex gpt-6.1-sol high",
                 "codex gpt-6-luna low",
-                "codex gpt-5.6-sol medium"
+                "codex gpt-5.6-sol medium",
+                "claude-code opus high"
             ]
         );
 
@@ -6220,7 +6209,7 @@ mod tests {
             pick.clone(),
         );
         assert_eq!(
-            menu.submenu_named("More models").unwrap().outline()[2],
+            menu.submenu_named("Codex").unwrap().outline()[5],
             "✓ Sol 5.6"
         );
         assert_eq!(
@@ -6229,10 +6218,9 @@ mod tests {
         );
 
         // For GitHub there is no effort; a draft being edited greys every
-        // model.
+        // maker.
         let github = agent_menu(&agent, None, Effort::High, false, pick);
-        assert!(github.submenu_named("Effort").is_none());
-        assert_eq!(github.outline()[1], "(Opus)");
+        assert_eq!(github.outline(), ["(Claude ▸)", "(Codex ▸)"]);
     }
 
     /// One button holds the model and the effort, the effort in grey,

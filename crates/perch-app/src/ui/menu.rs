@@ -68,13 +68,8 @@ pub struct Menu {
 
 enum Entry {
     Item(Item),
-    Submenu {
-        label: String,
-        menu: Rc<Menu>,
-    },
+    Submenu { label: String, menu: Rc<Menu> },
     Separator,
-    /// A group's name over its rows: not a row, so it cannot be picked.
-    Heading(String),
 }
 
 /// One command: its name, what it does, and how it looks.
@@ -164,13 +159,6 @@ impl Menu {
         self
     }
 
-    /// A name over the rows that follow, such as whose models they are.
-    /// It goes while a filter has something typed.
-    pub fn heading(mut self, label: impl Into<String>) -> Self {
-        self.entries.push(Entry::Heading(label.into()));
-        self
-    }
-
     /// What a submenu's row says at its end, such as the effort chosen
     /// inside it.
     pub fn detail(mut self, detail: impl Into<String>) -> Self {
@@ -228,10 +216,7 @@ impl Menu {
     }
 
     pub fn is_empty(&self) -> bool {
-        !self
-            .entries
-            .iter()
-            .any(|e| !matches!(e, Entry::Separator | Entry::Heading(_)))
+        !self.entries.iter().any(|e| !matches!(e, Entry::Separator))
     }
 
     /// The entries as drawn: no separator first, last or twice.
@@ -265,7 +250,7 @@ impl Menu {
 
     /// The menu as a reader would list it: `✓ ` before a checked row, a
     /// greyed one in parentheses, `▸` after a submenu, `—` for a line,
-    /// the footer's included, and a heading in brackets.
+    /// the footer's included.
     #[cfg(test)]
     pub fn outline(&self) -> Vec<String> {
         self.entries
@@ -293,7 +278,6 @@ impl Menu {
             Entry::Submenu { label, menu } if menu.enabled => format!("{label} ▸"),
             Entry::Submenu { label, .. } => format!("({label} ▸)"),
             Entry::Separator => "—".to_string(),
-            Entry::Heading(label) => format!("[{label}]"),
         }
     }
 
@@ -347,7 +331,7 @@ impl Menu {
                 i.enabled && !i.gone.get() && !over
             }
             Entry::Submenu { menu, .. } => menu.enabled,
-            Entry::Separator | Entry::Heading(_) => false,
+            Entry::Separator => false,
         }
     }
 
@@ -359,7 +343,6 @@ impl Menu {
             Entry::Item(i) => has(&i.label) || i.detail.as_deref().is_some_and(has),
             Entry::Submenu { label, .. } => has(label),
             Entry::Separator => false,
-            Entry::Heading(_) => typed.is_empty(),
         }
     }
 }
@@ -456,7 +439,6 @@ impl Entry {
             Entry::Item(i) => &i.label,
             Entry::Submenu { label, .. } => label,
             Entry::Separator => "",
-            Entry::Heading(label) => label,
         }
     }
 
@@ -464,7 +446,6 @@ impl Entry {
     fn height(&self) -> f64 {
         match self {
             Entry::Item(Item { note: Some(_), .. }) => NOTE_ROW_HEIGHT,
-            Entry::Heading(_) => HEADING_HEIGHT,
             _ => ROW_HEIGHT,
         }
     }
@@ -582,7 +563,6 @@ const NOTE_ROW_HEIGHT: f64 = 46.0;
 pub const ROW_RADIUS: f64 = 12.0;
 const ROW_PADDING: f64 = 8.0;
 const SEPARATOR_HEIGHT: f64 = 9.0;
-const HEADING_HEIGHT: f64 = 24.0;
 const MIN_WIDTH: f64 = 180.0;
 const MAX_WIDTH: f64 = 480.0;
 /// The room kept between a menu and the window's edges.
@@ -948,7 +928,7 @@ impl Host {
                 }
             },
             Entry::Submenu { .. } => self.open_submenu(depth, index, keyboard),
-            Entry::Separator | Entry::Heading(_) => {}
+            Entry::Separator => {}
         }
     }
 
@@ -1135,7 +1115,7 @@ fn panel(host: Rc<Host>, level: Level) -> impl IntoView {
     let icons = menu.entries.iter().any(|e| match e {
         Entry::Item(i) => i.icon.is_some(),
         Entry::Submenu { menu, .. } => menu.icon.is_some(),
-        Entry::Separator | Entry::Heading(_) => false,
+        Entry::Separator => false,
     });
     let foot = menu.foot.unwrap_or(menu.entries.len());
     let mut rows = menu
@@ -1144,7 +1124,6 @@ fn panel(host: Rc<Host>, level: Level) -> impl IntoView {
         .enumerate()
         .map(|(index, entry)| match entry {
             Entry::Separator => separator(&level, index).into_any(),
-            Entry::Heading(label) => heading(&level, index, label.clone()).into_any(),
             _ => row(host.clone(), &level, index, entry, checks, icons).into_any(),
         })
         .collect::<Vec<_>>();
@@ -1311,30 +1290,6 @@ fn separator(level: &Level, index: usize) -> impl IntoView {
     })
 }
 
-/// The heading at `index`, in the small grey of a section's name, gone
-/// while a filter has something typed.
-fn heading(level: &Level, index: usize, label: String) -> impl IntoView {
-    let level = level.clone();
-    let name = format!("menu-heading:{label}");
-    Container::new(Label::derived(move || label.clone()).style(|s| {
-        s.font_size(theme::TEXT_BADGE)
-            .color(theme::fg_subtle())
-            .text_ellipsis()
-            .min_width(0.0)
-            .selectable(false)
-    }))
-    .debug_name(name)
-    .style(move |s| {
-        let hidden = !level.shown(index, &level.typed());
-        s.height(HEADING_HEIGHT)
-            .flex_shrink(0.0_f32)
-            .items_center()
-            .padding_horiz(ROW_PADDING)
-            .padding_top(2.0)
-            .apply_if(hidden, |s| s.hide())
-    })
-}
-
 /// A filter's box, over the rows. It has the keyboard from the start, and
 /// typing lights the first row left.
 fn filter_box(host: &Host, level: &Level, placeholder: String) -> impl IntoView {
@@ -1414,7 +1369,7 @@ fn row(
             true,
             menu.enabled,
         ),
-        Entry::Separator | Entry::Heading(_) => unreachable!("not a row"),
+        Entry::Separator => unreachable!("not a row"),
     };
     let removable = matches!(entry, Entry::Item(i) if i.remove.is_some());
     // Greyed for good. A row of a full set greys only its name, as it
@@ -1801,24 +1756,6 @@ mod tests {
             vec!["Pin", "(Rename)", "—", "Open in ▸", "Delete"]
         );
         assert!(Menu::new().separator().is_empty());
-    }
-
-    #[test]
-    fn a_heading_names_its_rows_and_is_not_one() {
-        let menu = Menu::new()
-            .heading("Claude")
-            .item("Opus", |i| i)
-            .separator()
-            .heading("Codex")
-            .item("Sol", |i| i)
-            .tidy();
-        assert_eq!(menu.outline(), ["[Claude]", "Opus", "—", "[Codex]", "Sol"]);
-        assert!(!menu.live(0) && menu.live(1), "a heading cannot be picked");
-        assert!(
-            menu.matches(0, "") && !menu.matches(0, "cl"),
-            "gone once typing"
-        );
-        assert!(Menu::new().heading("Claude").is_empty());
     }
 
     #[test]
