@@ -249,6 +249,13 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
             r#"<path d="M4.5 11.5 L11.5 4.5 M5.8 4.5 H11.5 V10.2" fill="none" stroke="{c}"
                      stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
+        // Two rules, a knob on each: the settings of a view.
+        SidebarIcon::View => format!(
+            r#"<path d="M2.5 5 H7.6 M12 5 H13.5 M2.5 11 H4 M8.4 11 H13.5" stroke="{c}"
+                     stroke-width="1.4" stroke-linecap="round"/>
+               <circle cx="9.8" cy="5" r="1.9" fill="none" stroke="{c}" stroke-width="1.4"/>
+               <circle cx="6.2" cy="11" r="1.9" fill="none" stroke="{c}" stroke-width="1.4"/>"#
+        ),
         SidebarIcon::Terminal => format!(
             r#"<rect x="2" y="2.8" width="12" height="10.4" rx="2" fill="none" stroke="{c}"
                      stroke-width="1.4"/>
@@ -697,6 +704,8 @@ pub enum SidebarIcon {
     Suggest,
     /// An arrow up and to the right: open somewhere else.
     ArrowUpRight,
+    /// Two sliders: the menu of how a file is shown.
+    View,
     /// A prompt and a cursor in a window: a terminal.
     Terminal,
     /// An eye: mark unread, to look at again.
@@ -723,7 +732,8 @@ impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 76] = [
+    pub const ALL: [SidebarIcon; 77] = [
+        SidebarIcon::View,
         SidebarIcon::Merge,
         SidebarIcon::Organization,
         SidebarIcon::Location,

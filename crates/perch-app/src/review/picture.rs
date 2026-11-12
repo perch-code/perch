@@ -710,7 +710,7 @@ mod window {
         // change navigation is gone, and the keys do nothing rather than
         // leave a jump for the next editor to take.
         let root = harness.root_id();
-        assert!(find(root, "Label: \"1 change\"").is_none());
+        assert!(find(root, "change total").is_none());
         crate::review::tabs::jump_to_change(state, true);
         assert!(state.jump_to_line.get().is_none());
 
@@ -728,7 +728,7 @@ mod window {
             "the tile stays, to flip back"
         );
         assert!(
-            find(root, "Label: \"1 change\"").is_some(),
+            find(root, "change total").is_some(),
             "the markup has changes to jump between"
         );
 

@@ -28,6 +28,7 @@ use crate::review::timeline::count_of;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::drawer;
+use crate::ui::menu::{Menu, MenuExt};
 use crate::ui::widgets::icon_in;
 
 /// The open files' tabs, then, at the right end, what is about the open
@@ -350,7 +351,9 @@ fn close_button(on_close: impl Fn() + 'static) -> impl IntoView {
 /// Jump between the changed regions of the open file.
 ///
 /// The count is the point as much as the buttons: it says at a glance how
-/// much of this file the pull request actually touched. A file drawn as a
+/// much of this file the pull request actually touched, and, once the
+/// caret is in or past a change, which of them it is at: `3 / 13`, the 3
+/// dark. Before the first it is the count alone. A file drawn as a
 /// picture has no lines on the screen to jump between, so it has none of
 /// this until it is shown as markup, and neither does Conversation.
 fn change_nav(state: ReviewState) -> impl IntoView {
@@ -365,14 +368,33 @@ fn change_nav(state: ReviewState) -> impl IntoView {
         if n == 0 {
             Empty::new().into_any()
         } else {
+            let at = move || change_position(state);
+            let number = |s: Style| s.font_size(theme::TEXT_BADGE).selectable(false);
             Stack::horizontal((
                 nav_button(state, false),
-                Label::derived(move || count_of(n, "change", "changes")).style(|s| {
-                    s.font_size(theme::TEXT_BADGE)
-                        .color(theme::fg_muted())
-                        .selectable(false)
-                        .margin_horiz(6.0)
-                }),
+                tip_with(
+                    Stack::horizontal((
+                        Label::derived(move || at().to_string())
+                            .style(move |s| {
+                                number(s)
+                                    .color(theme::fg())
+                                    .margin_right(4.0)
+                                    .apply_if(at() == 0, |s| s.hide())
+                            })
+                            .debug_name("change position"),
+                        Label::derived(move || {
+                            if at() == 0 {
+                                n.to_string()
+                            } else {
+                                format!("/ {n}")
+                            }
+                        })
+                        .style(move |s| number(s).color(theme::fg_muted()))
+                        .debug_name("change total"),
+                    ))
+                    .style(|s| s.items_center().margin_horiz(4.0)),
+                    move || format!("{} in this file", count_of(n, "change", "changes")),
+                ),
                 nav_button(state, true),
             ))
             .style(|s| s.items_center().padding_horiz(10.0).flex_shrink(0.0_f32))
@@ -386,6 +408,22 @@ fn change_nav(state: ReviewState) -> impl IntoView {
             .border_bottom(1.0)
             .border_color(theme::border())
     })
+}
+
+/// Which of the open file's changes the caret is in or past, counted from
+/// one; nothing before the first.
+fn change_position(state: ReviewState) -> usize {
+    let line = state.cursor_line.get();
+    state
+        .active_file()
+        .map(|f| {
+            f.buffer
+                .change_starts
+                .iter()
+                .take_while(|start| **start <= line)
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 /// Scroll to the next or previous change after the cursor's line, as the
@@ -443,67 +481,54 @@ fn nav_button(state: ReviewState, forward: bool) -> impl IntoView {
 }
 
 /// The tiles at the strip's right end: while a file shows, Source, when
-/// the file is a picture, or Preview, when it is markdown, then Show whole, then Word wrap, Stacked and
-/// Split, with a rule after each group; then the tree, in the drawer on
-/// the right. A chosen tile is filled; the others are only a glyph until
-/// the pointer is over one. The tree's tile is at the strip's end, so it
-/// keeps its place when the file's come and go. An issue's default branch
-/// has no change to fold to or set beside its base, so it has Word wrap
-/// and the tree alone.
+/// the file is a picture, or Preview, when it is markdown, then the view
+/// menu; then the tree, in the drawer on the right. A chosen tile is
+/// filled; the others are only a glyph until the pointer is over one. The
+/// tree's tile is at the strip's end, so it keeps its place when the
+/// file's come and go.
 ///
-/// The rules are there because the groups are kinds of preference. The
-/// layout and Word wrap outlive the item: they are ways of reading, not
-/// facts about a file, so each goes to `meta` under a key and comes back
-/// at the next launch. Show whole is the open tab's: a reader unfolds the
-/// file they are reading and not the others, so it lasts as long as the
-/// tab and every file opens folded. Source is the file's, for the app's life: a
-/// reader wants the markup of this SVG, not of SVGs. Preview is too. The drawer is the
-/// window's, and comes back at the next launch as the layout does.
+/// The layout, Word wrap and the fold are in the menu and not tiles of
+/// their own because they are set and left: three of them filled at once
+/// said nothing. The layout and Word wrap outlive the item: they are ways
+/// of reading, not facts about a file, so each goes to `meta` under a key
+/// and comes back at the next launch. The fold is the open tab's: a
+/// reader unfolds the file they are reading and not the others, so it
+/// lasts as long as the tab and every file opens folded. Source is the
+/// file's, for the app's life: a reader wants the markup of this SVG, not
+/// of SVGs. Preview is too. The drawer is the window's, and comes back at
+/// the next launch as the layout does.
 fn tiles(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    let issue = move || state.issue.with(Option::is_some);
-    let change_only = move |s: floem::style::Style| s.apply_if(issue(), |s| s.hide());
     Stack::horizontal((
         Stack::horizontal((
             source_group(state),
             preview_group(state),
-            Stack::horizontal((fold_tile(state), tile_rule()))
-                .style(move |s| change_only(s.items_center())),
-            Stack::horizontal((
-                wrap_tile(app, state),
-                layout_tile(app, state, Layout::Stacked, SidebarIcon::Stacked).style(change_only),
-                layout_tile(app, state, Layout::Split, SidebarIcon::Split).style(change_only),
-            ))
-            .style(|s| s.items_center().gap(2.0)),
-            tile_rule(),
+            view_tile(app, state),
         ))
         .debug_name("file tiles")
-        .style(move |s| s.items_center().apply_if(!on_file(state), |s| s.hide())),
+        .style(move |s| {
+            s.items_center()
+                .gap(TILE_GAP)
+                .apply_if(!on_file(state), |s| s.hide())
+        }),
         tree_tile(app, backend),
     ))
     .style(|s| {
         s.flex_shrink(0.0_f32)
             .height_full()
             .items_center()
+            .gap(TILE_GAP)
             .padding_horiz(8.0)
             .border_bottom(1.0)
             .border_color(theme::border())
     })
 }
 
-/// The rule between two groups of tiles.
-fn tile_rule() -> impl IntoView {
-    Empty::new().style(|s| {
-        s.width(1.0)
-            .height(theme::TILE_RULE_HEIGHT)
-            .margin_horiz(theme::TILE_RULE_GAP)
-            .flex_shrink(0.0_f32)
-            .background(theme::border_muted())
-    })
-}
+/// The room between two tiles.
+const TILE_GAP: f64 = 2.0;
 
-/// The Source tile and its rule, while the open file has a picture, and
-/// nothing while it does not: the tile means nothing for a file that is
-/// only ever its text.
+/// The Source tile, while the open file has a picture, and nothing while
+/// it does not: the tile means nothing for a file that is only ever its
+/// text.
 fn source_group(state: ReviewState) -> impl IntoView {
     // A memo, so the group is rebuilt when the answer changes and not on
     // every file that loads.
@@ -514,20 +539,22 @@ fn source_group(state: ReviewState) -> impl IntoView {
         move || has_picture.get(),
         move |picture| {
             if picture {
-                Stack::horizontal((source_tile(state), tile_rule()))
-                    .debug_name("source group")
-                    .style(|s| s.items_center())
-                    .into_any()
+                source_tile(state).into_any()
             } else {
                 Empty::new().into_any()
             }
         },
     )
-    .style(|s| s.items_center().flex_shrink(0.0_f32))
+    .debug_name("source group")
+    .style(move |s| {
+        s.items_center()
+            .flex_shrink(0.0_f32)
+            .apply_if(!has_picture.get(), |s| s.hide())
+    })
 }
 
-/// The Preview tile and its rule, while the open file is markdown that
-/// loaded whole, and nothing otherwise.
+/// The Preview tile, while the open file is markdown that loaded whole,
+/// and nothing otherwise.
 fn preview_group(state: ReviewState) -> impl IntoView {
     let markdown = floem::reactive::Memo::new(move |_| {
         state
@@ -538,16 +565,18 @@ fn preview_group(state: ReviewState) -> impl IntoView {
         move || markdown.get(),
         move |markdown| {
             if markdown {
-                Stack::horizontal((preview_tile(state), tile_rule()))
-                    .debug_name("preview group")
-                    .style(|s| s.items_center())
-                    .into_any()
+                preview_tile(state).into_any()
             } else {
                 Empty::new().into_any()
             }
         },
     )
-    .style(|s| s.items_center().flex_shrink(0.0_f32))
+    .debug_name("preview group")
+    .style(move |s| {
+        s.items_center()
+            .flex_shrink(0.0_f32)
+            .apply_if(!markdown.get(), |s| s.hide())
+    })
 }
 
 /// A markdown file drawn as it reads, filled while it is what shows; the
@@ -590,46 +619,83 @@ fn source_tile(state: ReviewState) -> impl IntoView {
     )
 }
 
-fn layout_tile(
-    app: AppState,
-    state: ReviewState,
-    layout: Layout,
-    glyph: SidebarIcon,
-) -> impl IntoView {
-    let active = move || state.layout.get() == layout;
-    tile(glyph, active, move || {
-        // A write of the same value would still rebuild the editor.
-        if state.layout.get_untracked() == layout {
-            return;
-        }
-        state.layout.set(layout);
-        app.pending_meta
-            .set(Some(("review.layout".into(), layout.name().into())));
-    })
-    .debug_name(format!("{} tile", layout.name()))
+/// The view menu's tile: a glyph, and the menu under it at a press.
+fn view_tile(app: AppState, state: ReviewState) -> impl IntoView {
+    tip_with(
+        Container::new(
+            icon_in(
+                || crate::icons::sidebar_icon(SidebarIcon::View, theme::fg_muted()),
+                theme::fg_muted,
+            )
+            .style(|s| s.pointer_events_none()),
+        )
+        .dropdown(move || view_menu(app, state))
+        .debug_name("view tile")
+        .style(|s| {
+            crate::ui::widgets::clickable(s)
+                .size(theme::LAYOUT_TILE, theme::LAYOUT_TILE)
+                .items_center()
+                .justify_center()
+                .border_radius(4.0)
+                .hover(|s| s.background(theme::canvas_hover()))
+        }),
+        || "How the file is shown".to_string(),
+    )
 }
 
-/// Word wrap: filled while long lines wrap at the code's width, and a
-/// glyph while they scroll sideways, which is the default.
-fn wrap_tile(app: AppState, state: ReviewState) -> impl IntoView {
-    let wraps = move || state.wrap.get();
-    tip_with(
-        tile(SidebarIcon::Wrap, wraps, move || {
-            let wrap = !state.wrap.get_untracked();
-            state.wrap.set(wrap);
-            let value = if wrap { "on" } else { "off" };
-            app.pending_meta
-                .set(Some(("review.wrap".into(), value.into())));
-        })
-        .debug_name("wrap tile"),
-        move || {
-            if wraps() {
-                "Long lines wrap. Click to scroll them sideways instead.".to_string()
-            } else {
-                "Long lines scroll sideways. Click to wrap them.".to_string()
-            }
-        },
-    )
+/// How the open file is shown: Stacked or Split, one of them checked,
+/// then Word wrap and Fold to changes, each checked while it is on and
+/// flipped in place with the menu left up. An issue's default branch has
+/// no change to fold to or set beside its base, so it has Word wrap
+/// alone.
+pub fn view_menu(app: AppState, state: ReviewState) -> Menu {
+    let change = state.issue.with_untracked(Option::is_none);
+    let mut menu = Menu::new();
+    if change {
+        let now = state.layout.get_untracked();
+        for (label, layout, glyph) in [
+            ("Stacked", Layout::Stacked, SidebarIcon::Stacked),
+            ("Split", Layout::Split, SidebarIcon::Split),
+        ] {
+            menu = menu.item(label, |i| {
+                i.icon(glyph)
+                    .checked(now == layout)
+                    .action(move || set_layout(app, state, layout))
+            });
+        }
+        menu = menu.separator();
+    }
+    menu = menu.item("Word wrap", |i| {
+        i.icon(SidebarIcon::Wrap)
+            .checked(state.wrap.get_untracked())
+            .toggle(move |wrap| {
+                state.wrap.set(wrap);
+                let value = if wrap { "on" } else { "off" };
+                app.pending_meta
+                    .set(Some(("review.wrap".into(), value.into())));
+            })
+    });
+    if change {
+        let folded = state
+            .active
+            .with_untracked(|a| a.as_deref().is_none_or(|path| state.folded(path)));
+        menu = menu.item("Fold to changes", |i| {
+            i.icon(SidebarIcon::Fold)
+                .checked(folded)
+                .toggle(move |_| state.toggle_whole())
+        });
+    }
+    menu
+}
+
+fn set_layout(app: AppState, state: ReviewState, layout: Layout) {
+    // A write of the same value would still rebuild the editor.
+    if state.layout.get_untracked() == layout {
+        return;
+    }
+    state.layout.set(layout);
+    app.pending_meta
+        .set(Some(("review.layout".into(), layout.name().into())));
 }
 
 /// The tree in the drawer on the right: filled while it shows, and a
@@ -647,27 +713,6 @@ fn tree_tile(app: AppState, backend: std::rc::Rc<Backend>) -> impl IntoView {
                 "Hide the files".to_string()
             } else {
                 "Show the files".to_string()
-            }
-        },
-    )
-}
-
-/// The open file folded to its changes, which is the default and is drawn
-/// filled, or shown whole. With no file open it is drawn as the default
-/// and does nothing.
-fn fold_tile(state: ReviewState) -> impl IntoView {
-    let folded = move || {
-        state
-            .active
-            .with(|a| a.as_deref().is_none_or(|path| state.folded(path)))
-    };
-    tip_with(
-        tile(SidebarIcon::Fold, folded, move || state.toggle_whole()),
-        move || {
-            if folded() {
-                "Folded to the changes. Click to show the file whole.".to_string()
-            } else {
-                "Shown whole. Click to fold to the changes.".to_string()
             }
         },
     )
@@ -739,9 +784,9 @@ mod tests {
         assert!(!app.tree_shown());
         let tabs = rect(&harness, "tab strip");
         assert_eq!(tabs.x1, 1400.0);
-        let split = rect(&harness, "split tile");
+        let view = rect(&harness, "view tile");
         let files = rect(&harness, "files tile");
-        assert!(split.x1 <= files.x0, "after the layout tiles");
+        assert!(view.x1 <= files.x0, "after the view menu's tile");
         assert!(within(files, tabs));
         assert!(
             named(harness.root_id(), "agents tile").is_none(),
@@ -963,6 +1008,74 @@ mod tests {
         harness.click(tab.center().x, tab.center().y);
         harness.rebuild();
         assert!(state.composer_in_code());
+    }
+
+    /// The view menu: the two layouts, the one in use checked, then Word
+    /// wrap and the fold. An issue has Word wrap alone.
+    #[test]
+    fn the_view_menu_has_the_layouts_then_wrap_and_the_fold() {
+        let (_harness, app, state) = pull_request_harness();
+        state.open_tab("src/x.rs");
+        assert_eq!(
+            view_menu(app, state).outline(),
+            ["✓ Stacked", "Split", "—", "Word wrap", "✓ Fold to changes"]
+        );
+
+        view_menu(app, state).choose("Split");
+        view_menu(app, state).choose("Word wrap");
+        view_menu(app, state).choose("Fold to changes");
+        assert_eq!(state.layout.get(), Layout::Split);
+        assert!(state.wrap.get());
+        assert!(!state.folded("src/x.rs"));
+        assert_eq!(
+            view_menu(app, state).outline(),
+            ["Stacked", "✓ Split", "—", "✓ Word wrap", "Fold to changes"]
+        );
+
+        let (_harness, app, state) = issue_harness();
+        assert_eq!(view_menu(app, state).outline(), ["Word wrap"]);
+    }
+
+    /// The stepper says which change the caret is at once it is in or
+    /// past one, and only how many there are before the first.
+    #[test]
+    fn the_stepper_counts_the_changes_up_to_the_caret() {
+        let (mut harness, _, state) = pull_request_harness();
+        state.open_tab("src/x.rs");
+        state.finish_load(
+            "src/x.rs",
+            Arc::new(crate::backend::build_loaded_file(
+                "src/x.rs".into(),
+                "a\nb\nc\nd\ne\nf\ng\n".into(),
+                "a\nb\nd\ne\nf\n".into(),
+                Some(perch_git::ChangeStatus::Modified),
+                false,
+                perch_git::Scope::Branch,
+                String::new(),
+            )),
+        );
+        state.show_tab(ItemTab::Code);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(state.active_file().unwrap().change_count(), 2);
+        assert_eq!(change_position(state), 0);
+        assert_eq!(rect(&harness, "change position").width(), 0.0);
+        let alone = rect(&harness, "change total");
+
+        jump_to_change(state, true);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(change_position(state), 1);
+        assert!(rect(&harness, "change position").width() > 0.0);
+        assert!(
+            rect(&harness, "change total").width() > alone.width(),
+            "the total has its slash"
+        );
+
+        jump_to_change(state, true);
+        assert_eq!(change_position(state), 2);
+        jump_to_change(state, false);
+        assert_eq!(change_position(state), 1);
     }
 
     #[test]

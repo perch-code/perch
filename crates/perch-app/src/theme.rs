@@ -1104,13 +1104,9 @@ pub fn diff_expander_hover_bg() -> Color {
 pub fn diff_expander_hover_fg() -> Color {
     rgb(0xffffff)
 }
-/// The Source, Show whole, Stacked and Split tiles at the right end of
-/// the file tab bar.
+/// The Source, Preview, view menu and tree tiles at the right end of the
+/// file tab bar.
 pub const LAYOUT_TILE: f64 = 22.0;
-/// The rule between the tile groups, which are kinds of preference: its
-/// height, and the room on each side of it.
-pub const TILE_RULE_HEIGHT: f64 = 14.0;
-pub const TILE_RULE_GAP: f64 = 6.0;
 /// A picture, an SVG drawn in place of its markup: the wash under it, so
 /// its canvas shows and so does a shape in the pane's own white, and the
 /// room between the picture and the edges of its pane.

@@ -3488,63 +3488,37 @@ mod window {
         assert!(harness.get_computed_style(left_scroll).get(HideBars));
     }
 
-    /// The tiles sit at the strip's right end: 8 of padding, then the
-    /// tree's tile and its rule, then
-    /// Split, Stacked and Word wrap reading leftwards, each `LAYOUT_TILE`
-    /// square with 2 between, in a strip `TAB_HEIGHT` tall under the
-    /// header's bar.
-    fn tile_center(layout: Layout) -> (f64, f64) {
-        let tile = crate::theme::LAYOUT_TILE;
-        let split_right =
-            1400.0 - 8.0 - tile - (crate::theme::TILE_RULE_GAP + 1.0 + crate::theme::TILE_RULE_GAP);
-        let x = match layout {
-            Layout::Split => split_right - tile / 2.0,
-            Layout::Stacked => split_right - tile - 2.0 - tile / 2.0,
-        };
-        let y = crate::theme::REVIEW_HEADER_HEIGHT + crate::theme::TAB_HEIGHT / 2.0;
-        (x, y)
+    /// Open the strip's view menu, as a press on its tile does, and pick
+    /// the row named `label`.
+    fn pick_view(harness: &mut HeadlessHarness, label: &str) {
+        let tile = find(harness.root_id(), "view tile")
+            .expect("no view tile")
+            .get_visual_rect_no_clip()
+            .center();
+        harness.pointer_down(tile.x, tile.y);
+        harness.rebuild();
+        harness.paint();
+        let row = find(harness.root_id(), &format!("menu-row:{label}"))
+            .unwrap_or_else(|| panic!("no {label:?} in the view menu"))
+            .get_visual_rect_no_clip()
+            .center();
+        harness.click(row.x, row.y);
+        harness.rebuild();
+        harness.paint();
     }
 
     #[test]
-    fn the_toggle_sets_the_layout() {
+    fn the_view_menu_sets_the_layout() {
         let (mut harness, state) = harness();
-        let (x, y) = tile_center(Layout::Split);
-        let under = harness.element_id_at(x, y);
-        harness.click(x, y);
-        harness.rebuild();
-        harness.paint();
-        assert_eq!(
-            state.layout.get(),
-            Layout::Split,
-            "click at ({x}, {y}) over {under:?} did not split"
+        pick_view(&mut harness, "Split");
+        assert_eq!(state.layout.get(), Layout::Split);
+        assert!(
+            !crate::ui::menu::is_open(),
+            "a layout picked shuts the menu"
         );
 
-        let (x, y) = tile_center(Layout::Stacked);
-        harness.click(x, y);
-        harness.rebuild();
-        harness.paint();
+        pick_view(&mut harness, "Stacked");
         assert_eq!(state.layout.get(), Layout::Stacked);
-    }
-
-    /// The Show whole tile is left of Stacked, past the rule and the room
-    /// on either side of it.
-    /// Word wrap's tile, left of Stacked.
-    fn wrap_tile_center() -> (f64, f64) {
-        let (stacked, y) = tile_center(Layout::Stacked);
-        (stacked - crate::theme::LAYOUT_TILE - 2.0, y)
-    }
-
-    fn fold_tile_center() -> (f64, f64) {
-        let (wrap, y) = wrap_tile_center();
-        let tile = crate::theme::LAYOUT_TILE;
-        (
-            wrap - tile / 2.0
-                - crate::theme::TILE_RULE_GAP
-                - 1.0
-                - crate::theme::TILE_RULE_GAP
-                - tile / 2.0,
-            y,
-        )
     }
 
     /// A pull request for the item, so the window draws the review.
@@ -3595,15 +3569,12 @@ mod window {
         let whole = live.doc.get().text.clone();
         assert!(!state.wrap.get(), "lines run on by default");
 
-        let (x, y) = wrap_tile_center();
-        let under = harness.element_id_at(x, y);
-        harness.click(x, y);
+        pick_view(&mut harness, "Word wrap");
+        assert!(state.wrap.get());
+        assert!(crate::ui::menu::is_open(), "a toggle leaves the menu up");
+        crate::ui::menu::close();
         harness.rebuild();
         harness.paint();
-        assert!(
-            state.wrap.get(),
-            "click at ({x}, {y}) over {under:?} did not wrap"
-        );
         let doc = live.doc.get();
         assert_eq!(laid_out_text(&live), doc.text, "edited into the editor");
         let wraps = doc
@@ -3673,7 +3644,8 @@ mod window {
         harness.dispatch_event(cmd_c());
         assert_eq!(crate::ui::widgets::copied(), std::slice::from_ref(&long));
 
-        harness.click(x, y);
+        pick_view(&mut harness, "Word wrap");
+        crate::ui::menu::close();
         harness.rebuild();
         harness.paint();
         assert!(!state.wrap.get());
@@ -3714,22 +3686,19 @@ mod window {
         assert_eq!(live.doc.get().len(), 104);
         assert_eq!(state.hidden_lines(), 34);
 
-        let (x, y) = fold_tile_center();
-        let under = harness.element_id_at(x, y);
-        harness.click(x, y);
+        pick_view(&mut harness, "Fold to changes");
+        assert!(!state.folded("src/x.rs"));
+        crate::ui::menu::close();
         harness.rebuild();
         harness.paint();
-        assert!(
-            !state.folded("src/x.rs"),
-            "click at ({x}, {y}) over {under:?} did not show the file whole"
-        );
         let doc = live.doc.get();
         assert_eq!(doc.len(), 64 + 72, "every line, no divider");
         assert!(doc.folds.is_empty());
         assert_eq!(state.hidden_lines(), 0, "nothing hidden");
         assert_eq!(laid_out_text(&live), doc.text);
 
-        harness.click(x, y);
+        pick_view(&mut harness, "Fold to changes");
+        crate::ui::menu::close();
         harness.rebuild();
         harness.paint();
         assert!(state.folded("src/x.rs"));
