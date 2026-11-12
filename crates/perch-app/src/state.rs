@@ -315,6 +315,11 @@ pub struct AppState {
     /// Whether the reader asked for the tree in the drawer on the right.
     /// Whether it shows is `tree_shown`: only on Code.
     pub tree_open: RwSignal<bool>,
+    /// How much of the drawer on the right is in the window while it
+    /// slides open or shut, from 0 to 1. None at rest.
+    pub tree_slide: RwSignal<Option<f64>>,
+    /// Counts its slides, so a slide stops when the next one starts.
+    pub tree_slide_run: RwSignal<u64>,
     /// How wide the drawer is. Dragged, so a signal rather than a constant;
     /// docked, it may be shown narrower than this to leave the main pane
     /// its minimum.
@@ -485,6 +490,8 @@ impl AppState {
             agent_run_events: RwSignal::new(HashMap::new()),
             agent_run_events_pages: RwSignal::new(HashMap::new()),
             tree_open: RwSignal::new(false),
+            tree_slide: RwSignal::new(None),
+            tree_slide_run: RwSignal::new(0),
             drawer_width: RwSignal::new(crate::theme::DRAWER_WIDTH),
             drawer_resizing: RwSignal::new(false),
             window_width: RwSignal::new(0.0),
@@ -1397,27 +1404,12 @@ impl AppState {
 
     /// Open or shut the left drawer, sliding it there.
     pub fn show_sidebar(&self, open: bool) {
-        if self.sidebar_open.get_untracked() == open {
-            return;
-        }
-        let run = self.sidebar_slide_run.get_untracked() + 1;
-        self.sidebar_slide_run.set(run);
-        if SIDEBAR_SLIDE.is_zero() {
-            self.sidebar_slide.set(None);
-            self.sidebar_open.set(open);
-            return;
-        }
-        // From where it is, which is part way when a slide is cut short.
-        let rest = if open { 0.0 } else { 1.0 };
-        let from = self.sidebar_slide.get_untracked().unwrap_or(rest);
-        let to = 1.0 - rest;
-        // The slide first, so the drawer is never out of the tree between
-        // the two writes.
-        self.sidebar_slide.set(Some(from));
-        self.sidebar_open.set(open);
-        // A slide cut short has less far to go, and takes less time.
-        let length = SIDEBAR_SLIDE.mul_f64((to - from).abs());
-        slide_sidebar(*self, run, from, to, std::time::Instant::now(), length);
+        slide_to(
+            self.sidebar_open,
+            self.sidebar_slide,
+            self.sidebar_slide_run,
+            open,
+        );
     }
 
     pub fn toggle_sidebar(&self) {
@@ -1429,6 +1421,26 @@ impl AppState {
     /// for when there is a tree to show. Tracked.
     pub fn tree_shown(&self) -> bool {
         self.tree_open.get() && self.tree_available()
+    }
+
+    /// Whether the drawer on the right is in the tree: showing, or
+    /// sliding shut. Tracked.
+    pub fn tree_present(&self) -> bool {
+        self.tree_available() && (self.tree_open.get() || self.tree_slide.get().is_some())
+    }
+
+    /// How much of the drawer on the right is in the window, from 0 to 1:
+    /// where its slide has got to, or all or none of it at rest. Tracked.
+    pub fn tree_slid(&self) -> f64 {
+        let rest = if self.tree_open.get() { 1.0 } else { 0.0 };
+        self.tree_slide.get().unwrap_or(rest).clamp(0.0, 1.0)
+    }
+
+    /// Ask for the tree in the drawer on the right, or shut it, sliding
+    /// it there. Only the asking slides: a tree that comes and goes with
+    /// Code does so at once.
+    pub fn show_tree(&self, open: bool) {
+        slide_to(self.tree_open, self.tree_slide, self.tree_slide_run, open);
     }
 
     pub fn active_agent_counts(&self) -> (usize, usize) {
@@ -4007,9 +4019,9 @@ fn by_item(
         .collect()
 }
 
-/// How long the left drawer takes to slide all the way open or shut. The
+/// How long a drawer takes to slide all the way open or shut. The
 /// headless harness never runs a timer, so under test it moves at once.
-const SIDEBAR_SLIDE: Duration = Duration::from_millis(if cfg!(test) { 0 } else { 200 });
+const DRAWER_SLIDE: Duration = Duration::from_millis(if cfg!(test) { 0 } else { 200 });
 
 /// Where a slide from `from` to `to` has got to, `t` of the way through
 /// its time: fast at first and settling, as the system's sidebars do.
@@ -4018,9 +4030,49 @@ fn slide_at(from: f64, to: f64, t: f64) -> f64 {
     from + (to - from) * (1.0 - (1.0 - t).powi(3))
 }
 
+/// Open or shut a drawer, sliding it there: `slide` is how much of it is
+/// in the window on the way, and `runs` counts its slides.
+fn slide_to(
+    is_open: RwSignal<bool>,
+    slide: RwSignal<Option<f64>>,
+    runs: RwSignal<u64>,
+    open: bool,
+) {
+    if is_open.get_untracked() == open {
+        return;
+    }
+    let run = runs.get_untracked() + 1;
+    runs.set(run);
+    if DRAWER_SLIDE.is_zero() {
+        slide.set(None);
+        is_open.set(open);
+        return;
+    }
+    // From where it is, which is part way when a slide is cut short.
+    let rest = if open { 0.0 } else { 1.0 };
+    let from = slide.get_untracked().unwrap_or(rest);
+    let to = 1.0 - rest;
+    // The slide first, so the drawer is never out of the tree between
+    // the two writes.
+    slide.set(Some(from));
+    is_open.set(open);
+    // A slide cut short has less far to go, and takes less time.
+    let length = DRAWER_SLIDE.mul_f64((to - from).abs());
+    slide_on(
+        slide,
+        runs,
+        run,
+        from,
+        to,
+        std::time::Instant::now(),
+        length,
+    );
+}
+
 /// Move the drawer along on the next frame, and again until it is there.
-fn slide_sidebar(
-    state: AppState,
+fn slide_on(
+    slide: RwSignal<Option<f64>>,
+    runs: RwSignal<u64>,
     run: u64,
     from: f64,
     to: f64,
@@ -4028,15 +4080,15 @@ fn slide_sidebar(
     length: Duration,
 ) {
     let step = move |_| {
-        if state.sidebar_slide_run.get_untracked() != run {
+        if runs.get_untracked() != run {
             return;
         }
         let t = started.elapsed().as_secs_f64() / length.as_secs_f64().max(f64::EPSILON);
         if t >= 1.0 {
-            state.sidebar_slide.set(None);
+            slide.set(None);
         } else {
-            state.sidebar_slide.set(Some(slide_at(from, to, t)));
-            slide_sidebar(state, run, from, to, started, length);
+            slide.set(Some(slide_at(from, to, t)));
+            slide_on(slide, runs, run, from, to, started, length);
         }
     };
     // With no window to take a frame from, a timer at about a frame.
@@ -7377,5 +7429,15 @@ mod tests {
         assert_eq!(state.sidebar_shown_width(), 0.0);
         state.toggle_sidebar();
         assert_eq!(state.sidebar_shown_width(), crate::theme::SIDEBAR_WIDTH);
+    }
+
+    #[test]
+    fn asking_for_the_tree_under_test_moves_it_at_once() {
+        let state = AppState::new();
+        state.show_tree(true);
+        assert!(state.tree_open.get() && state.tree_slide.get().is_none());
+        assert_eq!(state.tree_slid(), 1.0);
+        state.show_tree(false);
+        assert_eq!(state.tree_slid(), 0.0);
     }
 }

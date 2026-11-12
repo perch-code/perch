@@ -49,6 +49,12 @@ impl Placement {
     pub fn is_docked(self) -> bool {
         matches!(self, Placement::Docked(_))
     }
+
+    pub fn width(self) -> f64 {
+        match self {
+            Placement::Docked(width) | Placement::Overlay(width) => width,
+        }
+    }
 }
 
 /// The room the window has for the drawer once the drawer on the left,
@@ -85,9 +91,7 @@ pub fn show(state: AppState, backend: &Backend, opener: Option<floem::ViewId>) {
     if let Some(opener) = opener {
         state.drawer_opener.set(Some(opener));
     }
-    if !state.tree_open.get_untracked() {
-        state.tree_open.set(true);
-    }
+    state.show_tree(true);
     backend.set_meta("drawer.view", OPEN);
 }
 
@@ -102,7 +106,7 @@ pub fn toggle(state: AppState, backend: &Backend, opener: Option<floem::ViewId>)
 
 /// Shut the drawer.
 pub fn close(state: AppState, backend: &Backend, restore_focus: bool) {
-    state.tree_open.set(false);
+    state.show_tree(false);
     backend.set_meta("drawer.view", "closed");
     if restore_focus {
         restore_opener(state);
@@ -122,16 +126,21 @@ fn restore_opener(state: AppState) {
 /// The drawer, in the main pane's row after its body. Shut, it takes no
 /// room at all. The tree is built as it comes and dropped as it goes, and
 /// no more: a memo, since the signals under it are written more often
-/// than they change.
+/// than they change, and a slide writes one every frame.
+///
+/// Asked for or shut, it slides for 200ms as the drawer on the left does:
+/// its box widens from the window's right edge frame by frame and clips,
+/// the tree keeps its width with the rest off the box's right, and the
+/// body follows the box's left edge.
 pub fn panel(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
-    let shown = Memo::new(move |_| state.tree_shown());
+    let present = Memo::new(move |_| state.tree_present());
     let placement = Memo::new(move |_| current_placement(state));
 
     let content_backend = backend.clone();
     let content = dyn_container(
-        move || shown.get(),
-        move |shown| {
-            if shown {
+        move || present.get(),
+        move |present| {
+            if present {
                 crate::review::rail::drawer_view(state, review, content_backend.clone()).into_any()
             } else {
                 Empty::new().into_any()
@@ -141,25 +150,40 @@ pub fn panel(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
     .style(|s| s.size_full().flex_col().min_width(0.0));
 
     Container::new(
-        Stack::horizontal((resize_handle(state, backend), content)).style(|s| s.size_full()),
+        Stack::horizontal((resize_handle(state, backend), content)).style(move |s| {
+            // Sliding, the width it has at rest: the box less its border.
+            match state.tree_slide.get() {
+                Some(_) => s
+                    .height_full()
+                    .flex_shrink(0.0_f32)
+                    .width((placement.get().width() - 1.0).max(0.0)),
+                None => s.size_full(),
+            }
+        }),
     )
     .style(move |s| {
-        if !shown.get() {
+        if !present.get() {
             return s.hide();
         }
+        // Only mid-slide is the box narrower than the tree, and only
+        // then does it clip: the resize handle hangs out of it at rest.
+        let sliding = state.tree_slide.get().is_some();
+        let placement = placement.get();
+        let width = placement.width() * state.tree_slid();
         let s = s
             .height_full()
             .flex_shrink(0.0_f32)
+            .width(width)
             .background(theme::canvas())
             .border_left(1.0)
             .border_color(theme::border())
-            .position(Position::Relative);
-        match placement.get() {
-            Placement::Docked(width) => s.width(width),
+            .position(Position::Relative)
+            .apply_if(sliding, |s| s.overflow_x(floem::taffy::Overflow::Hidden));
+        match placement {
+            Placement::Docked(_) => s,
             // Over the body's right edge, from under the tabs to the
             // window's bottom, with a shadow to say so.
-            Placement::Overlay(width) => s
-                .width(width)
+            Placement::Overlay(_) => s
                 .max_width_full()
                 .position(Position::Absolute)
                 .inset_top(0.0)

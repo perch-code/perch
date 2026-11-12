@@ -799,6 +799,41 @@ mod tests {
         assert!(named(harness.root_id(), "files-panel").is_none());
         assert_eq!(rect(&harness, "pane-body").x1, 1400.0);
         assert_eq!(state.tab.get(), ItemTab::Code);
+
+        // Half way shut on a slide: the tree is still there at its full
+        // width, half of it past the box, and the body has the half it
+        // left.
+        app.tree_open.set(true);
+        harness.rebuild();
+        let panel = named(harness.root_id(), "files-panel").expect("no tree");
+        app.tree_slide.set(Some(0.5));
+        app.tree_open.set(false);
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(
+            named(harness.root_id(), "files-panel"),
+            Some(panel),
+            "the tree was rebuilt for the slide"
+        );
+        let half = rect(&harness, "right-drawer");
+        assert_eq!((half.x1, half.width()), (1400.0, drawer.width() / 2.0));
+        assert_eq!(rect(&harness, "pane-body").x1, half.x0);
+        let tree = panel.get_visual_rect_no_clip();
+        assert_eq!(
+            (tree.x0, tree.width()),
+            (half.x0 + 1.0, drawer.width() - 1.0)
+        );
+
+        // There: the tree is gone. A slide cut off by Conversation is too.
+        app.tree_slide.set(None);
+        harness.rebuild();
+        assert!(named(harness.root_id(), "files-panel").is_none());
+        app.tree_slide.set(Some(0.5));
+        state.show_tab(ItemTab::Conversation);
+        harness.rebuild();
+        harness.paint();
+        assert!(named(harness.root_id(), "files-panel").is_none());
+        assert_eq!(rect(&harness, "right-drawer").width(), 0.0);
     }
 
     /// A tree asked for stays shut on an issue, which has no Code, and
