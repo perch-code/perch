@@ -649,18 +649,6 @@ fn toggle(
     })
 }
 
-/// Show PR Status: one setting for every tab's rows.
-fn pr_status_toggle(menu: Menu, f: &ItemFilters, set: SetFilters) -> Menu {
-    toggle(
-        menu,
-        "Show PR Status",
-        SidebarIcon::PullRequest,
-        f.show_pr_status,
-        set,
-        |f| f.show_pr_status = !f.show_pr_status,
-    )
-}
-
 /// Inbox's menu.
 fn inbox_menu(state: AppState, backend: Rc<Backend>) -> Menu {
     let f = state.item_filters.get_untracked();
@@ -708,10 +696,9 @@ fn inbox_menu(state: AppState, backend: Rc<Backend>) -> Menu {
         "Unread Only",
         SidebarIcon::Unread,
         f.inbox.unread_only,
-        set.clone(),
+        set,
         |f| f.inbox.unread_only = !f.inbox.unread_only,
     );
-    menu = pr_status_toggle(menu, &f, set);
     menu = menu.separator();
     bulk_item(menu, state, backend, f.inbox.view)
 }
@@ -776,15 +763,14 @@ fn worktree_menu(state: AppState) -> Menu {
         |f, order| *f.worktrees.order_mut() = order,
     );
     menu = menu.separator();
-    menu = toggle(
+    toggle(
         menu,
         "Unread Only",
         SidebarIcon::Unread,
         f.worktrees.unread_only,
-        set.clone(),
+        set,
         |f| f.worktrees.unread_only = !f.worktrees.unread_only,
-    );
-    pr_status_toggle(menu, &f, set)
+    )
 }
 
 /// Browse's menu. Its Repository offers every repository on GitHub
@@ -819,15 +805,9 @@ fn browse_menu(state: AppState) -> Menu {
         f.browse.state = value
     });
     menu = menu.separator();
-    menu = sort_submenu(
-        menu,
-        &ItemSort::BROWSE,
-        f.browse.order,
-        set.clone(),
-        |f, order| f.browse.order = order,
-    );
-    menu = menu.separator();
-    pr_status_toggle(menu, &f, set)
+    sort_submenu(menu, &ItemSort::BROWSE, f.browse.order, set, |f, order| {
+        f.browse.order = order
+    })
 }
 
 /// Inbox is GitHub's ordered thread list. Worktrees' views are over
@@ -1595,7 +1575,6 @@ mod tests {
                 "Sort By ▸",
                 "—",
                 "Unread Only",
-                "✓ Show PR Status",
                 "—",
                 "Mark 2 Done",
             ]
@@ -1661,8 +1640,7 @@ mod tests {
                 "—",
                 "Sort By ▸",
                 "—",
-                "Unread Only",
-                "✓ Show PR Status"
+                "Unread Only"
             ]
         );
         assert_eq!(
@@ -1713,16 +1691,7 @@ mod tests {
         let menu = browse_menu(state);
         assert_eq!(
             menu.outline(),
-            [
-                "View ▸",
-                "—",
-                "Repository ▸",
-                "State ▸",
-                "—",
-                "Sort By ▸",
-                "—",
-                "✓ Show PR Status"
-            ]
+            ["View ▸", "—", "Repository ▸", "State ▸", "—", "Sort By ▸"]
         );
         assert_eq!(
             menu.submenu_named("View").unwrap().outline(),

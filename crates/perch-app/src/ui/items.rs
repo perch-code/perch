@@ -307,7 +307,7 @@ fn byline_with(
         item.repo_full_name.clone(),
         reference,
         Stack::horizontal((
-            nav_row::chips(state, checks, review),
+            nav_row::chips(checks, review),
             activity_note(activity),
             nav_row::note(item.divergence().map(|d| d.label()), theme::draft_yellow),
         ))

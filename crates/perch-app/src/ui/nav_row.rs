@@ -12,7 +12,7 @@
 //! scopes read as one list.
 
 use floem::prelude::*;
-use floem::reactive::{Memo, SignalGet, SignalWith};
+use floem::reactive::{Memo, SignalGet};
 use floem::style::{CursorStyle, Style};
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 use jiff::Timestamp;
@@ -321,64 +321,53 @@ pub fn reference(number: Option<u64>) -> String {
         .unwrap_or_default()
 }
 
-/// The CI chip and the review pill after a pull request's reference,
-/// while the filter menu shows PR status. Nothing on a row with neither.
-pub fn chips(
-    state: AppState,
-    checks: Option<CheckStatus>,
-    review: Option<ReviewDecision>,
-) -> impl IntoView {
-    dyn_container(
-        move || {
-            state.item_filters.with(|f| f.show_pr_status) && (checks.is_some() || review.is_some())
+/// The CI chip and the review pill after a pull request's reference.
+/// Nothing on a row with neither.
+pub fn chips(checks: Option<CheckStatus>, review: Option<ReviewDecision>) -> impl IntoView {
+    if checks.is_none() && review.is_none() {
+        return Empty::new().into_any();
+    }
+    Stack::horizontal((
+        match checks {
+            Some(CheckStatus::Success) => sidebar_glyph(SidebarIcon::Check, theme::open)
+                .style(|s| s.size(11.0, 11.0))
+                .into_any(),
+            Some(CheckStatus::Failure) => sidebar_glyph(SidebarIcon::Close, theme::closed)
+                .style(|s| s.size(11.0, 11.0))
+                .into_any(),
+            Some(CheckStatus::Pending) => Empty::new()
+                .style(|s| {
+                    s.size(7.0, 7.0)
+                        .border_radius(4.0)
+                        .background(theme::draft_yellow())
+                })
+                .into_any(),
+            None => Empty::new().into_any(),
         },
-        move |show| {
-            if !show {
-                return Empty::new().into_any();
-            }
-            Stack::horizontal((
-                match checks {
-                    Some(CheckStatus::Success) => sidebar_glyph(SidebarIcon::Check, theme::open)
-                        .style(|s| s.size(11.0, 11.0))
-                        .into_any(),
-                    Some(CheckStatus::Failure) => sidebar_glyph(SidebarIcon::Close, theme::closed)
-                        .style(|s| s.size(11.0, 11.0))
-                        .into_any(),
-                    Some(CheckStatus::Pending) => Empty::new()
-                        .style(|s| {
-                            s.size(7.0, 7.0)
-                                .border_radius(4.0)
-                                .background(theme::draft_yellow())
-                        })
-                        .into_any(),
-                    None => Empty::new().into_any(),
-                },
-                match review {
-                    Some(r) => Label::derived(move || r.label().to_string())
-                        .style(move |s| {
-                            let color = match r {
-                                ReviewDecision::Approved => theme::open(),
-                                ReviewDecision::ChangesRequested => theme::closed(),
-                                ReviewDecision::ReviewRequested => theme::fg_muted(),
-                            };
-                            s.font_size(theme::TEXT_SECTION)
-                                .color(color)
-                                .border(1.0)
-                                .border_color(color.with_alpha(0.4))
-                                // A pill, at the radius the review's chips use.
-                                .border_radius(theme::CHIP_HEIGHT / 2.0)
-                                .padding_horiz(5.0)
-                                .margin_left(5.0)
-                                .selectable(false)
-                        })
-                        .into_any(),
-                    None => Empty::new().into_any(),
-                },
-            ))
-            .style(|s| s.items_center().margin_left(6.0).flex_shrink(0.0_f32))
-            .into_any()
+        match review {
+            Some(r) => Label::derived(move || r.label().to_string())
+                .style(move |s| {
+                    let color = match r {
+                        ReviewDecision::Approved => theme::open(),
+                        ReviewDecision::ChangesRequested => theme::closed(),
+                        ReviewDecision::ReviewRequested => theme::fg_muted(),
+                    };
+                    s.font_size(theme::TEXT_SECTION)
+                        .color(color)
+                        .border(1.0)
+                        .border_color(color.with_alpha(0.4))
+                        // A pill, at the radius the review's chips use.
+                        .border_radius(theme::CHIP_HEIGHT / 2.0)
+                        .padding_horiz(5.0)
+                        .margin_left(5.0)
+                        .selectable(false)
+                })
+                .into_any(),
+            None => Empty::new().into_any(),
         },
-    )
+    ))
+    .style(|s| s.items_center().margin_left(6.0).flex_shrink(0.0_f32))
+    .into_any()
 }
 
 /// "+1,192 -0", the way Codex writes a branch's churn: the additions in

@@ -542,9 +542,6 @@ pub struct ItemFilters {
     /// Repository identity, shared by the three tabs; `None` includes
     /// every repository.
     pub repository: Option<String>,
-    /// Shared too: the CI chip and the review pill on every row that has
-    /// them.
-    pub show_pr_status: bool,
     pub inbox: InboxFilters,
     pub worktrees: WorktreeFilters,
     pub browse: BrowseFilters,
@@ -556,7 +553,6 @@ impl Default for ItemFilters {
         Self {
             tab: SidebarTab::Inbox,
             repository: None,
-            show_pr_status: true,
             inbox: InboxFilters::default(),
             worktrees: WorktreeFilters::default(),
             browse: BrowseFilters::default(),
@@ -575,7 +571,7 @@ impl ItemFilters {
     pub fn to_meta(&self) -> String {
         let (inbox, worktrees, browse) = (&self.inbox, &self.worktrees, &self.browse);
         format!(
-            "tab={};repository={};show_pr_status={};\
+            "tab={};repository={};\
              inbox={};inbox_whose={};inbox_unread={};inbox_state={};inbox_direction={};\
              worktrees={};worktrees_unread={};worktrees_state={};sort={};direction={};\
              recent_sort={};recent_direction={};\
@@ -585,7 +581,6 @@ impl ItemFilters {
                 .as_deref()
                 .map(encode_meta_value)
                 .unwrap_or_default(),
-            u8::from(self.show_pr_status),
             inbox.view.key(),
             inbox.whose.key(),
             u8::from(inbox.unread_only),
@@ -668,10 +663,9 @@ impl ItemFilters {
                 }
                 "group" if matches!(value, "repo" | "owner" | "date") => {}
                 "group" => return Err(bad()),
-                "show_empty" | "saved" => {
+                "show_empty" | "saved" | "show_pr_status" => {
                     flag()?;
                 }
-                "show_pr_status" => out.show_pr_status = flag()?,
                 "inbox" => match value {
                     "all" => out.inbox.view = InboxView::Inbox,
                     "unread" => {
@@ -761,7 +755,6 @@ impl ItemFilters {
     pub fn narrowed(&self) -> bool {
         let d = Self::default();
         self.repository.is_some()
-            || self.show_pr_status != d.show_pr_status
             || match self.tab {
                 SidebarTab::Inbox => self.inbox != d.inbox,
                 SidebarTab::Worktrees => {
@@ -1918,7 +1911,6 @@ mod tests {
         let filters = ItemFilters {
             tab: SidebarTab::Browse,
             repository: Some("local/notes;scope=all% ☃ ".into()),
-            show_pr_status: false,
             inbox: InboxFilters {
                 view: InboxView::Done,
                 whose: BrowseView::Mentioned,

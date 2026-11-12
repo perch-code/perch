@@ -6,7 +6,7 @@
 //! form: `worktrees` (`worktrees` or `recent`), `repository`,
 //! `worktrees_state` (`any`, `open`, `closed`), `worktrees_unread`, `sort`
 //! and `direction` for Worktrees, `recent_sort` and `recent_direction` for
-//! Recent, and `show_pr_status`, plus `query` for the search box. It is
+//! Recent, plus `query` for the search box. It is
 //! how `items::local_items` is checked against real data without a
 //! window.
 
@@ -24,7 +24,7 @@ pub fn run(args: &[String]) {
                 eprintln!(
                     "keys: worktrees (worktrees, recent), repository, worktrees_state (any, open, closed), \
                      worktrees_unread, sort, direction (newest, oldest), recent_sort, recent_direction, \
-                     show_pr_status, query"
+                     query"
                 );
                 std::process::exit(2);
             }
@@ -89,31 +89,29 @@ fn print(filters: &ItemFilters) -> Result<(), String> {
     }
 
     let mut out = String::new();
-    render(&mut out, &visible, filters);
+    render(&mut out, &visible);
     print!("{out}");
     Ok(())
 }
 
 /// Rows have no section headings; each reference names its repository.
-fn render(out: &mut String, visible: &[Item], filters: &ItemFilters) {
+fn render(out: &mut String, visible: &[Item]) {
     for item in visible {
-        row(out, item, &items::full_reference(item), filters);
+        row(out, item, &items::full_reference(item));
     }
 }
 
 /// One row: the glyph letter, the title, the reference line, and whatever
 /// the window would show at the right edge, in the order it shows them.
-fn row(out: &mut String, item: &Item, reference: &str, filters: &ItemFilters) {
+fn row(out: &mut String, item: &Item, reference: &str) {
     let mut line = format!(
         "  {}  {}  [{reference}]",
         RowKind::of(item).letter(),
         item.title()
     );
-    if filters.show_pr_status {
-        if let Some(chips) = pr_status(item) {
-            line.push_str("  ");
-            line.push_str(&chips);
-        }
+    if let Some(chips) = pr_status(item) {
+        line.push_str("  ");
+        line.push_str(&chips);
     }
     if item.is_pinned() {
         line.push_str("  pinned");
@@ -214,7 +212,7 @@ mod tests {
     fn text(filters: &ItemFilters) -> String {
         let visible = items::local_items(&fixture(), filters, &|_| false);
         let mut out = String::new();
-        render(&mut out, &visible, filters);
+        render(&mut out, &visible);
         out
     }
 
@@ -237,15 +235,6 @@ mod tests {
             text(&worktrees("tab=inbox")),
             "",
             "the inbox lists no items"
-        );
-    }
-
-    #[test]
-    fn chips_go_when_pr_status_is_off_and_the_row_still_names_its_repository() {
-        let got = text(&worktrees("worktrees=recent;show_pr_status=0;query=fence"));
-        assert_eq!(
-            got,
-            "  P  Fence the manifest  [criccomini/perch #57 · fence]\n"
         );
     }
 

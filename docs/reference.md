@@ -88,17 +88,17 @@ it searches.
 - **Inbox**: View (Inbox, Snoozed, Done; then Review requested, Yours,
   Assigned, Mentioned, All, from GitHub's reason, Yours also taking what you
   opened), Repository, State, Sort By (Newest or Oldest first),
-  Unread Only, Show PR Status, Mark N Done.
+  Unread Only, Mark N Done.
 - **Worktrees**: View (Worktrees, or Recent: everything opened, worktree or
   not), Repository, State, Sort By (Last activity, Last opened, Created; each
-  view keeps its own), Unread Only, Show PR Status.
+  view keeps its own), Unread Only.
 - **Browse**: View (Review requested, Yours, Assigned, Mentioned, All),
   Repository, State, Sort By (Last activity or Created, sorted by GitHub's
-  search), Show PR Status. Repository offers every repository on GitHub
+  search). Repository offers every repository on GitHub
   that config, Worktrees or Inbox knows of. All searches the repository
   picked, or every declared repository on GitHub.
 
-Repository and Show PR Status are shared by all three tabs. State is Any,
+Repository is shared by all three tabs. State is Any,
 Open, or Merged or Closed everywhere; it defaults to Any on Inbox and
 Worktrees and to Open on Browse.
 

@@ -426,7 +426,7 @@ fn byline(state: AppState, thread: &Thread) -> impl IntoView {
         move || faces.clone(),
         thread.repository.full_name.clone(),
         nav_row::reference(number(thread)),
-        nav_row::chips(state, None, review),
+        nav_row::chips(None, review),
         nav_row::churn(snapshot.and_then(|snapshot| snapshot.churn)),
     )
 }
