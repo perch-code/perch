@@ -1,12 +1,12 @@
 //! The details button in the bar, and the dropdown it opens: what there
 //! is to say about the open item (`review::summary::details`), then the
-//! one list of runs. With nothing open the button is Agents, and the
-//! dropdown the runs alone. With an item open, every run of that item comes first, under
-//! This pull request, This issue or This branch: what is working, then
-//! what finished, newest first, a review's reviewers as one row for the
-//! review, and older runs a row away. Then what is working on the other
-//! items, grouped by item, and what finished last elsewhere. With nothing
-//! open, what is working and what finished last.
+//! one list of runs, under Agents. With nothing open the button is
+//! Agents, and the dropdown the runs alone. What is working comes first,
+//! the open item's before the other items', each turning a spinner where
+//! a finished run has a dot. Then what finished, newest first: the open
+//! item's, a review's reviewers as one row for the review and older runs
+//! a row away, then what finished last elsewhere. Another item's run
+//! names its item.
 //!
 //! A question's run goes to its thread on Conversation, where its answer
 //! is; a reviewer's run, or a review's row, to the review in the Review
@@ -253,25 +253,23 @@ pub fn go_to_run(app: AppState, review: ReviewState, backend: &Backend, run: &Ag
     app.begin_review(review, "Reading the discussion");
 }
 
-/// The open item's runs, under a heading that says what the item is.
+/// The open item's runs.
 #[derive(Clone, PartialEq)]
 struct ThisItem {
     id: String,
-    heading: &'static str,
     entries: Vec<AgentRunEntry>,
     /// Whether older runs are left to load, and whether a page is on its
     /// way.
     page: Option<(bool, bool)>,
 }
 
-/// What the dropdown lists: the open item's runs, every other item's
-/// working runs by item, the item named by its title, then the runs that
-/// finished last elsewhere.
+/// What the dropdown lists: the open item's runs, what is working on
+/// the other items, and the runs that finished last on them.
 #[derive(Clone, PartialEq)]
 struct Listing {
     this: Option<ThisItem>,
-    active: Vec<(String, Vec<AgentRunSummary>)>,
-    recent: Vec<AgentRunSummary>,
+    working: Vec<AgentRunSummary>,
+    finished: Vec<AgentRunSummary>,
 }
 
 fn listing(app: AppState, review: ReviewState) -> Listing {
@@ -280,22 +278,12 @@ fn listing(app: AppState, review: ReviewState) -> Listing {
             .flat_map(|groups| groups.iter().cloned())
             .collect::<Vec<_>>()
     });
-    let this = review.item.with(|item| {
-        item.as_ref().map(|item| {
-            (
-                item.id.clone(),
-                match &item.subject {
-                    Some(perch_github::ItemSubject::PullRequest(_)) => "This pull request",
-                    Some(perch_github::ItemSubject::Issue(_)) => "This issue",
-                    None => "This branch",
-                },
-            )
-        })
-    });
-    let this_id = this.as_ref().map(|(id, _)| id.clone());
+    let this_id = review
+        .item
+        .with(|item| item.as_ref().map(|item| item.id.clone()));
     let elsewhere = |run: &AgentRunSummary| this_id.is_none() || run.item_id != this_id;
     app.agent_runs.with(|runs| {
-        let this = this.map(|(id, heading)| {
+        let this = this_id.clone().map(|id| {
             let groups = app.review_groups_for(&id);
             let entries = with_every_review(
                 group_review_runs(&item_runs(runs, &id, &groups), &groups),
@@ -304,27 +292,22 @@ fn listing(app: AppState, review: ReviewState) -> Listing {
             let page = app
                 .item_runs
                 .with(|pages| pages.get(&id).map(|page| (page.has_more, page.loading)));
-            ThisItem {
-                id,
-                heading,
-                entries,
-                page,
-            }
+            ThisItem { id, entries, page }
         });
-        let active = active_groups_with_reviews(runs, None, &review_groups)
+        let working = active_groups_with_reviews(runs, None, &review_groups)
             .into_iter()
-            .filter(|group| elsewhere(&group.runs[0]))
-            .map(|group| (item_title(app, &group.runs[0]), group.runs))
-            .collect();
-        let mut recent: Vec<_> = history_runs_with_reviews(runs, &review_groups)
-            .into_iter()
+            .flat_map(|group| group.runs)
             .filter(|run| elsewhere(run))
             .collect();
-        recent.truncate(RECENT_RUNS);
+        let finished = history_runs_with_reviews(runs, &review_groups)
+            .into_iter()
+            .filter(|run| elsewhere(run))
+            .take(RECENT_RUNS)
+            .collect();
         Listing {
             this,
-            active,
-            recent,
+            working,
+            finished,
         }
     })
 }
@@ -394,7 +377,7 @@ fn popover(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
             let this_empty = listing.this.as_ref().is_none_or(|this| {
                 this.entries.is_empty() && this.page.is_none_or(|(more, _)| !more)
             });
-            if this_empty && listing.active.is_empty() && listing.recent.is_empty() {
+            if this_empty && listing.working.is_empty() && listing.finished.is_empty() {
                 return Label::derived(|| "No agent runs yet".to_string())
                     .style(|s| {
                         s.font_size(theme::TEXT_META)
@@ -404,11 +387,23 @@ fn popover(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
                     })
                     .into_any();
             }
-            let mut sections: Vec<floem::AnyView> = Vec::new();
-            let open_item = listing.this.is_some();
-            if let Some(this) = listing.this.filter(|_| !this_empty) {
-                sections.push(heading(this.heading).into_any());
-                for entry in this.entries {
+            let mut sections = vec![heading("Agents").into_any()];
+            let other = |run: AgentRunSummary| {
+                let title = item_title(app, &run);
+                row(app, review, backend.clone(), rows, run, Some(title)).into_any()
+            };
+            // What is working, the open item's first; then what finished,
+            // its own again first.
+            let (id, page, (this_working, this_finished)) = match listing.this {
+                Some(this) => (
+                    Some(this.id),
+                    this.page,
+                    this.entries.into_iter().partition(is_working),
+                ),
+                None => (None, None, (Vec::new(), Vec::new())),
+            };
+            let mine = |entries: Vec<AgentRunEntry>, sections: &mut Vec<floem::AnyView>| {
+                for entry in entries {
                     sections.push(match entry {
                         AgentRunEntry::Run(run) => {
                             row(app, review, backend.clone(), rows, run, None).into_any()
@@ -418,35 +413,14 @@ fn popover(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
                         }
                     });
                 }
-                if let Some((true, loading)) = this.page {
-                    sections.push(older(app, backend.clone(), rows, this.id, loading).into_any());
-                }
+            };
+            mine(this_working, &mut sections);
+            sections.extend(listing.working.into_iter().map(other));
+            mine(this_finished, &mut sections);
+            if let (Some(id), Some((true, loading))) = (id, page) {
+                sections.push(older(app, backend.clone(), rows, id, loading).into_any());
             }
-            if !listing.active.is_empty() {
-                sections.push(
-                    heading(if open_item {
-                        "Running elsewhere"
-                    } else {
-                        "Active"
-                    })
-                    .into_any(),
-                );
-                for (title, runs) in listing.active {
-                    sections.push(item_heading(title).into_any());
-                    for run in runs {
-                        sections
-                            .push(row(app, review, backend.clone(), rows, run, None).into_any());
-                    }
-                }
-            }
-            if !listing.recent.is_empty() {
-                sections.push(heading("Recent").into_any());
-                for run in listing.recent {
-                    let title = item_title(app, &run);
-                    sections
-                        .push(row(app, review, backend.clone(), rows, run, Some(title)).into_any());
-                }
-            }
+            sections.extend(listing.finished.into_iter().map(other));
             Stack::vertical_from_iter(sections)
                 .style(|s| s.flex_col().width_full().padding_vert(6.0))
                 .into_any()
@@ -501,6 +475,15 @@ fn popover(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl Int
     .debug_name("agents-dropdown")
 }
 
+/// Whether one of the open item's rows is working: its run, or any of a
+/// review's reviewers.
+fn is_working(entry: &AgentRunEntry) -> bool {
+    match entry {
+        AgentRunEntry::Run(run) => run.status.is_active(),
+        AgentRunEntry::ReviewGroup(group) => reviews::group_status(group).is_active(),
+    }
+}
+
 fn heading(text: &'static str) -> impl IntoView {
     Label::derived(move || text.to_uppercase()).style(|s| {
         s.font_size(theme::TEXT_SECTION)
@@ -513,28 +496,14 @@ fn heading(text: &'static str) -> impl IntoView {
     })
 }
 
-fn item_heading(title: String) -> impl IntoView {
-    Label::derived(move || title.clone()).style(|s| {
-        s.font_size(theme::TEXT_BADGE)
-            .font_weight(theme::weight_emphasis())
-            .color(theme::fg_muted())
-            .text_ellipsis()
-            .width_full()
-            .padding_horiz(14.0)
-            .padding_top(6.0)
-            .padding_bottom(2.0)
-            .selectable(false)
-    })
-}
-
-/// A row's frame: a dot for how it stands, two lines beside it, and what
-/// can be done with it under the pointer. A press or Enter runs `go`
+/// A row's frame: a spinner while it works or a dot for how it ended, two
+/// lines beside it, and what can be done with it under the pointer. A press or Enter runs `go`
 /// while it is `available`.
 #[allow(clippy::too_many_arguments)]
 fn frame(
     rows: &Rows,
     name: String,
-    color: fn() -> floem::peniko::Color,
+    status: AgentRunStatus,
     subject: impl Fn() -> String + 'static,
     detail: impl Fn() -> String + 'static,
     actions: impl FnOnce(RwSignal<bool>) -> floem::AnyView,
@@ -543,14 +512,27 @@ fn frame(
 ) -> impl IntoView {
     let hovered = RwSignal::new(false);
     let click = go.clone();
+    // Both marks fill a 12px column, the dot centred in it.
+    let mark = if status.is_active() {
+        crate::review::run_view::spinner(theme::running)
+            .style(|s| s.size(12.0, 12.0).margin_top(3.0).flex_shrink(0.0_f32))
+            .into_any()
+    } else {
+        let color = status_color(status);
+        Empty::new()
+            .style(move |s| {
+                s.size(7.0, 7.0)
+                    .border_radius(4.0)
+                    .background(color())
+                    .margin_top(6.0)
+                    .margin_left(2.0)
+                    .margin_right(3.0)
+                    .flex_shrink(0.0_f32)
+            })
+            .into_any()
+    };
     let view = Stack::horizontal((
-        Empty::new().style(move |s| {
-            s.size(7.0, 7.0)
-                .border_radius(4.0)
-                .background(color())
-                .margin_top(6.0)
-                .flex_shrink(0.0_f32)
-        }),
+        mark,
         Stack::vertical((
             Label::derived(subject).style(|s| {
                 s.font_size(theme::TEXT_META)
@@ -594,8 +576,8 @@ fn frame(
         let base = s
             .width_full()
             .items_start()
-            .gap(9.0)
-            .padding_left(14.0)
+            .gap(6.0)
+            .padding_left(12.0)
             .padding_right(8.0)
             .padding_vert(7.0)
             .keyboard_navigable();
@@ -609,8 +591,8 @@ fn frame(
 }
 
 /// One run: its status, what it was asked, and under that what ran it and
-/// for how long, or, finished elsewhere, the item it is on and how it
-/// ended.
+/// for how long, or, on another item, that item and how long the run has
+/// worked or how it ended.
 fn row(
     app: AppState,
     review: ReviewState,
@@ -638,13 +620,19 @@ fn row(
         if !available {
             return "Source unavailable".to_string();
         }
-        if let Some(item) = &item {
-            return format!("{item} · {}", status.label());
-        }
-        if review
+        let waiting = review
             .approvals
-            .with(|pending| pending.iter().any(|p| p.run_id == waiting_id))
-        {
+            .with(|pending| pending.iter().any(|p| p.run_id == waiting_id));
+        if let Some(item) = &item {
+            return if waiting {
+                format!("{item} · Waiting on you")
+            } else if status.is_active() {
+                format!("{item} · {}", elapsed_label(&timed, app.now.get()))
+            } else {
+                format!("{item} · {}", status.label())
+            };
+        }
+        if waiting {
             return format!("{who} · Waiting on you");
         }
         let elapsed = elapsed_label(&timed, app.now.get());
@@ -665,7 +653,7 @@ fn row(
     frame(
         rows,
         format!("agents-dropdown-run:{}", run.id),
-        status_color(status),
+        status,
         move || subject.clone(),
         detail,
         move |hovered| run_actions(hovered, actions_backend, &run).into_any(),
@@ -737,7 +725,7 @@ fn review_row(
     frame(
         rows,
         format!("agents-dropdown-review:{}", group.key),
-        status_color(status),
+        status,
         move || subject.clone(),
         detail,
         actions,
@@ -856,12 +844,12 @@ mod tests {
     }
 
     /// The button counts every item's working runs and marks one waiting
-    /// on the reader. Its dropdown lists the open pull request's runs
-    /// first, working before finished and a review's reviewers as one row
-    /// for the review, then what works elsewhere by item, then what
-    /// finished elsewhere, without the pull request's.
+    /// on the reader. Its dropdown is one list under Agents: what works,
+    /// the open pull request's first, then what finished, the pull
+    /// request's first and a review's reviewers as one row for the
+    /// review. A working run's row turns a spinner.
     #[test]
-    fn the_dropdown_lists_this_items_runs_then_elsewhere_then_recent() {
+    fn the_dropdown_is_one_list_working_first_and_this_items_before_the_others() {
         let (mut harness, app, review, _) = window();
         add(
             app,
@@ -908,10 +896,9 @@ mod tests {
         );
         assert!(dropdown.y0 >= button.y1);
         for text in [
-            "\"THIS PULL REQUEST\"",
-            "\"RUNNING ELSEWHERE\"",
-            "\"RECENT\"",
-            "\"other-branch\"",
+            "\"AGENTS\"",
+            "other-branch · ",
+            "other-branch · Completed",
             "Waiting on you",
         ] {
             assert!(
@@ -919,13 +906,38 @@ mod tests {
                 "the dropdown has no {text}"
             );
         }
-        assert!(named(harness.root_id(), "\"ACTIVE\"").is_none());
-        // The pull request's: working, then finished newest first, the
-        // review one row for its two reviewers.
+        for text in [
+            "\"THIS PULL REQUEST\"",
+            "\"RUNNING ELSEWHERE\"",
+            "\"ACTIVE\"",
+            "\"RECENT\"",
+        ] {
+            assert!(
+                named(harness.root_id(), text).is_none(),
+                "the dropdown still has {text}"
+            );
+        }
+        for (row, spins) in [
+            ("agents-dropdown-run:a", true),
+            ("agents-dropdown-run:c", true),
+            ("agents-dropdown-run:d", false),
+            ("agents-dropdown-run:e", false),
+        ] {
+            assert_eq!(
+                named(rect_id(&harness, row), "spinner").is_some(),
+                spins,
+                "{row}'s mark"
+            );
+        }
+        // Working, the pull request's first; then finished, the pull
+        // request's newest first with the review one row for its two
+        // reviewers, then the other item's.
         let this = [
             "agents-dropdown-run:c",
+            "agents-dropdown-run:a",
             "agents-dropdown-review:group-3",
             "agents-dropdown-run:d",
+            "agents-dropdown-run:e",
         ];
         for pair in this.windows(2) {
             assert!(
@@ -938,10 +950,7 @@ mod tests {
         assert!(named(harness.root_id(), "agents-dropdown-run:claude-run").is_none());
         assert!(named(harness.root_id(), "Review #3 · Claude").is_some());
         assert!(named(harness.root_id(), "\"nothing found\"").is_some());
-        // Then elsewhere, then what finished elsewhere: not the pull
-        // request's again.
-        assert!(y(&harness, "agents-dropdown-run:d") < y(&harness, "agents-dropdown-run:a"));
-        assert!(y(&harness, "agents-dropdown-run:a") < y(&harness, "agents-dropdown-run:e"));
+        // The pull request's run is not listed again with the others'.
         let mut rows = Vec::new();
         fn all(id: floem::ViewId, rows: &mut Vec<String>) {
             if id.debug_name().contains("agents-dropdown-run:d") {
@@ -960,21 +969,29 @@ mod tests {
         named(harness.root_id(), name).unwrap()
     }
 
-    /// With no item open the dropdown lists what works and what finished,
-    /// as it always has.
+    /// With no item open the dropdown is the one list: what works, then
+    /// what finished.
     #[test]
-    fn with_nothing_open_the_dropdown_lists_active_and_recent() {
+    fn with_nothing_open_the_dropdown_is_one_list() {
         let (mut harness, _app, review, _) = window();
         click(&mut harness, "close button");
         assert!(review.item.get().is_none());
         open(&mut harness);
-        for text in ["\"ACTIVE\"", "\"RECENT\"", "pull 812 · Completed"] {
+        for text in ["\"AGENTS\"", "pull 812 · Completed"] {
             assert!(
                 named(harness.root_id(), text).is_some(),
                 "the dropdown has no {text}"
             );
         }
-        assert!(named(harness.root_id(), "\"THIS PULL REQUEST\"").is_none());
+        for text in ["\"THIS PULL REQUEST\"", "\"ACTIVE\"", "\"RECENT\""] {
+            assert!(
+                named(harness.root_id(), text).is_none(),
+                "the dropdown still has {text}"
+            );
+        }
+        let rows = ["c", "a", "d", "e"].map(|run| format!("agents-dropdown-run:{run}"));
+        assert!(y(&harness, &rows[0]).max(y(&harness, &rows[1])) < y(&harness, &rows[2]));
+        assert!(y(&harness, &rows[0]).max(y(&harness, &rows[1])) < y(&harness, &rows[3]));
     }
 
     /// Under the pointer, a working run's row stops it and a failed
