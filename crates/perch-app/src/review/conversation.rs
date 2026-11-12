@@ -2267,8 +2267,17 @@ mod tests {
         };
         assert_eq!(text(&harness), crate::review::cards::DESCRIPTION_CLAMP);
         assert!(find(harness.root_id(), "Show more").is_some());
+        // The cut's last lines fade out, flush with its foot.
+        let fade = find(harness.root_id(), "description-fade").unwrap();
+        let cut = find(harness.root_id(), "description-text")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        let faded = fade.get_visual_rect_no_clip();
+        assert_eq!((faded.y1, faded.width()), (cut.y1, cut.width()));
+        assert!(faded.height() > 20.0, "{faded:?}");
         let more = find(harness.root_id(), "description-more").unwrap();
         click_on(&mut harness, more);
+        assert!(!shown(&harness, "description-fade"), "the whole text fades");
         assert!(text(&harness) > 2.0 * crate::review::cards::DESCRIPTION_CLAMP);
         assert!(find(harness.root_id(), "Show less").is_some());
         // Under the whole of it now, a screen or more down.

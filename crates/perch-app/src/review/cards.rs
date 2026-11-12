@@ -1384,13 +1384,17 @@ fn clamped(state: ReviewState, text: floem::AnyView, whole: RwSignal<bool>) -> i
             },
         )
         .style(|s| s.width_full().flex_shrink(0.0_f32));
+    let cut = Memo::new(move |_| long.get() && !whole.get() && !state.conversation_find_open.get());
     let clamped = Stack::vertical((
-        text.clip().debug_name("description-text").style(move |s| {
-            let cut = long.get() && !whole.get() && !state.conversation_find_open.get();
-            s.flex_col()
-                .width_full()
-                .apply_if(cut, |s| s.max_height(DESCRIPTION_CLAMP))
-        }),
+        Stack::vertical((
+            text.clip().debug_name("description-text").style(move |s| {
+                s.flex_col()
+                    .width_full()
+                    .apply_if(cut.get(), |s| s.max_height(DESCRIPTION_CLAMP))
+            }),
+            cut_fade(cut),
+        ))
+        .style(|s| s.flex_col().width_full()),
         text_action(
             move || {
                 if whole.get() {
@@ -1408,8 +1412,9 @@ fn clamped(state: ReviewState, text: floem::AnyView, whole: RwSignal<bool>) -> i
             },
         )
         .style(move |s| {
-            s.margin_top(6.0)
+            s.margin_top(2.0)
                 .margin_left(-8.0)
+                .margin_bottom(-2.0)
                 .apply_if(!long.get() || state.conversation_find_open.get(), |s| {
                     s.hide()
                 })
@@ -1424,6 +1429,41 @@ fn clamped(state: ReviewState, text: floem::AnyView, whole: RwSignal<bool>) -> i
             }
         })
         .style(|s| s.flex_col().width_full().items_start())
+}
+
+/// How much of a cut description's foot fades into the card.
+const CUT_FADE: usize = 56;
+
+/// The card's own colour over the last lines of a cut description,
+/// thickening downward, so the text fades out rather than stopping
+/// mid-line. It is a strip a pixel tall per step: vger places a gradient
+/// brush from the window's corner, not the view's. Clicks and selection
+/// go through it to the text.
+fn cut_fade(cut: Memo<bool>) -> impl IntoView {
+    let strips = (0..CUT_FADE)
+        .map(|i| {
+            // Eased, so the fade starts gently and the last line is gone.
+            let t = (i + 1) as f32 / CUT_FADE as f32;
+            let alpha = t * t * (3.0 - 2.0 * t);
+            Empty::new().style(move |s| {
+                s.width_full()
+                    .height(1.0)
+                    .flex_shrink(0.0_f32)
+                    .background(theme::canvas().with_alpha(alpha))
+            })
+        })
+        .collect::<Vec<_>>();
+    Stack::vertical_from_iter(strips)
+        .debug_name("description-fade")
+        .style(move |s| {
+            s.absolute()
+                .inset_left(0.0)
+                .inset_right(0.0)
+                .inset_bottom(0.0)
+                .flex_col()
+                .pointer_events_none()
+                .apply_if(!cut.get(), |s| s.hide())
+        })
 }
 
 /// A quiet word to press, as Show more under a long description: muted
