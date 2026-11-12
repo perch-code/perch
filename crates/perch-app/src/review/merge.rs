@@ -1,7 +1,7 @@
 //! Pull-request checks and the deliberate, native merge box.
 //!
 //! The box is the popover under the bar's Merge (`merge_button`); the
-//! checks are the summary's Checks row and its menu, which read their
+//! checks are the summary's checks chip and its menu, which read their
 //! words and glyphs from here. The overview is a live GitHub snapshot for
 //! one exact head. Cached checks are useful to read while it arrives, but
 //! every merge decision below uses the live snapshot and rechecks it again

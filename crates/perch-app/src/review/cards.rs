@@ -2971,7 +2971,7 @@ fn finding_meta(s: floem::style::Style) -> floem::style::Style {
 }
 
 /// An action said in a word, not a button: the one a finding offers
-/// besides what is done to it, the Checks row's Details and the merge
+/// besides what is done to it, the checks chip's Details and the merge
 /// card's Hide. Pressed by a click, and by Enter or Space once it has
 /// the keyboard.
 pub(crate) fn quiet_action(

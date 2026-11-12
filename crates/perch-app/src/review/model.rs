@@ -1648,7 +1648,7 @@ pub struct ReviewState {
     /// that sent it lets it go.
     pub suggestion_commits: RwSignal<HashMap<u64, Option<Result<(), String>>>>,
     /// The workflow runs' verdict for the head, once fetched. `None` means
-    /// unknown, and the summary has no Checks row.
+    /// unknown, and the summary has no checks chip.
     pub checks: RwSignal<Option<Arc<Checks>>>,
     /// Live GitHub mergeability, permissions, enabled merge methods, and
     /// detailed checks for the pull request's exact head. Unlike `checks`,

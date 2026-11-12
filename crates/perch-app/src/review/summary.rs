@@ -151,12 +151,6 @@ pub fn summary(
             |r| !r.is_empty(),
             move |reviewers| reviewers_view(app, reviewers),
         ),
-        row(
-            SidebarIcon::Check,
-            "Checks",
-            move || has_checks(state),
-            checks_line(state),
-        ),
         status_row(app, state, backend.clone()),
         dyn_row(
             SidebarIcon::Check,
@@ -338,9 +332,9 @@ fn dyn_row<T: Clone + PartialEq + 'static, V: IntoView + 'static>(
 }
 
 /// Open, Draft, Merged, Closed as the pill, then the repository and
-/// number as the sidebar's rows say them. An open pull request adds what
-/// GitHub says of its reviews and conflicts, once the live overview has
-/// come; merging it is the bar's. A worktree of the reader's own has no
+/// number as the sidebar's rows say them, then the checks' verdict. An
+/// open pull request adds what GitHub says blocks its merge, once the
+/// live overview has come; merging it is the bar's. A worktree of the reader's own has no
 /// state, and its row is its repository alone; one with no GitHub remote
 /// has no row.
 fn status_row(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
@@ -380,6 +374,7 @@ fn status_row(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl I
                                 // Underlined under the pointer, as a name is.
                                 .apply_if(opens, crate::ui::widgets::underlined_link)
                         }),
+                    checks_line(state),
                     readiness(state),
                 ))
                 .style(|s| {
@@ -739,7 +734,7 @@ fn state_pill(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl I
     })
 }
 
-/// How the head's checks stand, in the Checks row's words.
+/// How the head's checks stand, in the checks chip's words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verdict {
     Passing,
@@ -747,7 +742,7 @@ enum Verdict {
     Running,
 }
 
-/// What the Checks row's chip says: the verdict, its words, and how many
+/// What the checks chip says: the verdict, its words, and how many
 /// passed beside a failure.
 #[derive(Debug, Clone, PartialEq)]
 struct ChecksLine {
@@ -767,7 +762,7 @@ impl ChecksLine {
     }
 }
 
-/// The Checks row's line for `checks`: the check that failed by name, or
+/// The checks chip's line for `checks`: the check that failed by name, or
 /// how many did, with how many passed beside it; how many passed when all
 /// did; running as it is. Each check is counted when GitHub has listed
 /// them, as the live overview does; the cached rollup has only its
@@ -819,7 +814,7 @@ fn checks_line_of(checks: &Checks) -> Option<ChecksLine> {
     None
 }
 
-/// The Checks row's line for the open item, from the live overview's
+/// The checks chip's line for the open item, from the live overview's
 /// checks once they have come, else the cached rollup. Tracked.
 fn checks_line_now(state: ReviewState) -> Option<ChecksLine> {
     crate::review::merge::current_checks(state).and_then(|checks| checks_line_of(&checks))
@@ -831,8 +826,9 @@ const CHECKS_MENU_HEIGHT: f64 = 440.0;
 
 /// The checks' verdict for the head as one chip: a green check, a red
 /// cross or a muted dot, its words, the failure in red with how many
-/// passed beside it quieter, and a chevron. A press opens the menu of
-/// every check. Absent until something has been fetched.
+/// passed beside it quieter, and a chevron, on the Status row after the
+/// number. A press opens the menu of every check. Absent until something
+/// has been fetched.
 fn checks_line(state: ReviewState) -> impl IntoView {
     // A memo, so the chip is built again when what it says changes and
     // not on each refresh of the overview.
@@ -921,7 +917,10 @@ fn checks_line(state: ReviewState) -> impl IntoView {
             .into_any()
         },
     )
-    .style(|s| s.min_width(0.0))
+    .style(move |s| {
+        s.min_width(0.0)
+            .apply_if(line.with(Option::is_none), |s| s.hide())
+    })
 }
 
 /// Where a check comes in the menu: what failed first, then what is still
@@ -1010,25 +1009,19 @@ fn checks_menu(state: ReviewState) -> Menu {
     menu
 }
 
-/// Whether the Checks row has a verdict to show.
-fn has_checks(state: ReviewState) -> bool {
-    checks_line_now(state).is_some()
-}
-
-/// How a readiness chip reads: good news in the open colour, bad in the
-/// closed one, the rest muted.
+/// How a readiness chip reads: bad news in the closed colour, the rest
+/// muted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Tone {
-    Good,
     Bad,
     Quiet,
 }
 
 /// What GitHub says stands between an open pull request and its merge,
-/// as the Status row's chips say it: the review decision, then whether it
-/// conflicts. Nothing until the live overview has come, and nothing of
-/// what GitHub has not decided yet. An approval counts the reviewers
-/// whose last verdict approved, when the discussion says.
+/// as the Status row's chips say it: a review it still needs or changes
+/// one asked for, then its conflicts. Only what blocks: an approval is
+/// the Reviewers row's to show, and a merge with no conflicts goes
+/// unsaid. Nothing until the live overview has come.
 fn readiness_of(state: ReviewState) -> Vec<(String, Tone)> {
     use perch_github::{MergeState, MergeableState, ReviewDecision};
 
@@ -1043,51 +1036,28 @@ fn readiness_of(state: ReviewState) -> Vec<(String, Tone)> {
     };
     let mut chips = Vec::new();
     match overview.review_decision {
-        Some(ReviewDecision::Approved) => {
-            let text = match approvals(state, &pull.author_login) {
-                n if n > 1 => format!("{n} approvals"),
-                _ => "Approved".to_string(),
-            };
-            chips.push((text, Tone::Good));
-        }
         Some(ReviewDecision::ChangesRequested) => {
             chips.push(("Changes requested".to_string(), Tone::Bad));
         }
         Some(ReviewDecision::ReviewRequested) => {
             chips.push(("Review required".to_string(), Tone::Quiet));
         }
-        None => {}
+        Some(ReviewDecision::Approved) | None => {}
     }
     // As the merge box decides it: either of GitHub's words for conflicts.
     let conflicting = overview.mergeable == MergeableState::Conflicting
         || overview.merge_state == MergeState::Dirty;
     if conflicting {
         chips.push(("Conflicts".to_string(), Tone::Bad));
-    } else if overview.mergeable == MergeableState::Mergeable {
-        chips.push(("No conflicts".to_string(), Tone::Quiet));
     }
     chips
-}
-
-/// How many reviewers stand by an approval of the pull request, by the
-/// verdicts the Reviewers row draws.
-fn approvals(state: ReviewState, author: &str) -> usize {
-    state.discussion.with(|d| {
-        d.as_ref().map_or(0, |d| {
-            verdicts(&d.reviews, author)
-                .iter()
-                .filter(|(_, verdict)| *verdict == "APPROVED")
-                .count()
-        })
-    })
 }
 
 /// Each reviewer's standing verdict on the pull request, in the order
 /// they first gave one: their last, except that a comment after an
 /// approval or a request for changes leaves that standing, as on GitHub.
 /// The author's own comments are not reviews of it, and a pending review
-/// is not given yet. The Reviewers row draws these and the Status row
-/// counts the approvals among them, so the two agree.
+/// is not given yet. The Reviewers row draws these.
 fn verdicts<'a>(reviews: &'a [perch_github::Review], author: &str) -> Vec<(&'a str, &'a str)> {
     let mut reviews: Vec<_> = reviews
         .iter()
@@ -1151,7 +1121,6 @@ fn readiness(state: ReviewState) -> impl IntoView {
                 |(text, _)| text.clone(),
                 move |(text, tone)| {
                     let ink: fn() -> floem::peniko::Color = match tone {
-                        Tone::Good => theme::open,
                         Tone::Bad => theme::closed,
                         Tone::Quiet => theme::fg_muted,
                     };
@@ -2496,12 +2465,10 @@ pub(crate) mod tests {
             "the summary at {summary:?} is not at the top of the page {column:?}"
         );
         // A pull request with a checkout and passing checks, and nobody
-        // asked to review it: Author, Branch, Checks, Status. The worktree
-        // has no row of its own; it is on the Branch row.
-        assert_eq!(
-            rows_shown(&harness),
-            ["Author", "Branch", "Checks", "Status"]
-        );
+        // asked to review it: Author, Branch, Status. The worktree has no
+        // row of its own; it is on the Branch row, and the checks are on
+        // Status.
+        assert_eq!(rows_shown(&harness), ["Author", "Branch", "Status"]);
 
         // Each row is a line tall, its name in the column at the left and
         // its value after the column.
@@ -2509,7 +2476,6 @@ pub(crate) mod tests {
         for (row, value) in [
             ("Author", "author"),
             ("Branch", "branches"),
-            ("Checks", "checks pill"),
             ("Status", "state pill"),
         ] {
             let r = rect(&harness, &format!("summary row {row}"));
@@ -2528,7 +2494,8 @@ pub(crate) mod tests {
             );
         }
         // The worktree is after the branches on their row and the churn
-        // after it, and the number is beside the pill.
+        // after it, and the number is beside the pill with the checks
+        // after it.
         let branches = rect(&harness, "branches");
         let worktree = rect(&harness, "worktree menu");
         let churn = rect(&harness, "churn");
@@ -2549,6 +2516,15 @@ pub(crate) mod tests {
         assert!(
             repo.x0 >= pill.x1,
             "{repo:?} is not after the pill at {pill:?}"
+        );
+        let checks = rect(&harness, "checks pill");
+        assert!(
+            within(checks, rect(&harness, "summary row Status")),
+            "the checks at {checks:?} are not on the Status row"
+        );
+        assert!(
+            checks.x0 >= repo.x1 && checks.center().y == pill.center().y,
+            "the checks at {checks:?} are not after the number at {repo:?}"
         );
 
         // Files has none of it: the page is Conversation's alone.
@@ -2586,7 +2562,6 @@ pub(crate) mod tests {
                 "Author",
                 "Branch",
                 "Reviewers",
-                "Checks",
                 "Status",
                 "Labels",
                 "Assignees",
@@ -2619,8 +2594,8 @@ pub(crate) mod tests {
         let name = rect(&harness, "summary name Reviewers");
         assert_eq!((name.y0, name.height()), (row.y0, theme::SUMMARY_ROW));
         // The rows under it follow it whole.
-        let checks = rect(&harness, "summary row Checks");
-        assert_eq!(checks.y0, row.y1);
+        let status = rect(&harness, "summary row Status");
+        assert_eq!(status.y0, row.y1);
     }
 
     #[test]
@@ -3751,8 +3726,14 @@ pub(crate) mod tests {
         texts(row).into_iter().skip(1).collect()
     }
 
+    /// What the checks chip says, on the Status row.
+    fn checks_texts(harness: &floem::headless::HeadlessHarness) -> Vec<String> {
+        let row = named(harness.root_id(), "summary row Status").expect("no Status row");
+        texts(named(row, "checks pill").expect("no checks on the Status row"))
+    }
+
     #[test]
-    fn the_checks_row_names_what_failed_and_counts_what_passed() {
+    fn the_checks_chip_names_what_failed_and_counts_what_passed() {
         let line =
             |checks: &Checks| checks_line_of(checks).map(|line| (line.verdict, line.words()));
         assert_eq!(
@@ -3806,23 +3787,22 @@ pub(crate) mod tests {
         assert_eq!(line(&rollup(CheckState::Unknown)), None);
     }
 
-    /// The row is one chip, reading the live overview's checks once they
-    /// come over the cached rollup, with no Details beside it and nothing
-    /// of merging in the summary: that is the bar's.
+    /// The checks are one chip on the Status row, with no row of their
+    /// own, reading the live overview's checks once they come over the
+    /// cached rollup, with no Details beside it and nothing of merging in
+    /// the summary: that is the bar's.
     #[test]
-    fn the_checks_row_is_one_chip_and_the_summary_has_no_merge() {
+    fn the_checks_are_one_chip_on_status_and_the_summary_has_no_merge() {
         let (mut harness, _, state) = pull_request_harness();
-        assert_eq!(row_texts(&harness, "Checks"), ["Checks passed"]);
+        assert!(named(harness.root_id(), "summary row Checks").is_none());
+        assert_eq!(checks_texts(&harness), ["Checks passed"]);
 
         state
             .pull_request_overview
             .set(Some(Arc::new(overview(checks_of(&["clippy"], 13)))));
         harness.rebuild();
         harness.paint();
-        assert_eq!(
-            row_texts(&harness, "Checks"),
-            ["clippy failed", "· 13 passed"]
-        );
+        assert_eq!(checks_texts(&harness), ["clippy failed", "· 13 passed"]);
         let pill = rect(&harness, "checks pill");
         assert!(
             within(rect(&harness, "checks passed"), pill),
@@ -3834,7 +3814,7 @@ pub(crate) mod tests {
             .set(Some(Arc::new(overview(checks_of(&[], 14)))));
         harness.rebuild();
         harness.paint();
-        assert_eq!(row_texts(&harness, "Checks"), ["14 passed"]);
+        assert_eq!(checks_texts(&harness), ["14 passed"]);
 
         let mut running = checks_of(&[], 2);
         running
@@ -3846,7 +3826,7 @@ pub(crate) mod tests {
             .set(Some(Arc::new(overview(running))));
         harness.rebuild();
         harness.paint();
-        assert_eq!(row_texts(&harness, "Checks"), ["Checks running"]);
+        assert_eq!(checks_texts(&harness), ["Checks running"]);
 
         // Merge is the bar's, and the checks' detail the chip's menu: no
         // Details, and none of Merge's controls, under the summary.
@@ -3859,8 +3839,8 @@ pub(crate) mod tests {
         ] {
             assert!(named(summary, gone).is_none(), "{gone} is in the summary");
         }
-        assert!(!row_texts(&harness, "Checks").contains(&"Details".to_string()));
         let status = row_texts(&harness, "Status");
+        assert!(!status.contains(&"Details".to_string()), "{status:?}");
         assert!(!status.contains(&"Merge".to_string()), "{status:?}");
     }
 
@@ -3939,31 +3919,48 @@ pub(crate) mod tests {
         crate::ui::menu::close();
     }
 
-    /// The Status row says what GitHub says of the reviews and conflicts,
-    /// after the number, once the overview has come.
+    /// The Status row says only what blocks the merge, after the checks,
+    /// once the overview has come: an approval and a clean merge go
+    /// unsaid.
     #[test]
-    fn the_status_row_says_whether_it_is_approved_and_conflicts() {
+    fn the_status_row_says_only_what_blocks_the_merge() {
         let (mut harness, app, state) = pull_request_harness();
         assert_eq!(rect(&harness, "readiness").width(), 0.0, "nothing yet");
 
+        // Approved and mergeable: nothing to say.
         state
             .pull_request_overview
             .set(Some(Arc::new(overview(checks_of(&[], 1)))));
         harness.rebuild();
         harness.paint();
         let texts = row_texts(&harness, "Status");
-        assert!(
-            texts.ends_with(&["Approved".to_string(), "No conflicts".to_string()]),
+        assert_eq!(
+            texts.last().map(String::as_str),
+            Some("1 passed"),
             "{texts:?}"
         );
-        let repo = rect(&harness, "repository line");
+        assert_eq!(rect(&harness, "readiness").width(), 0.0, "{texts:?}");
+
+        let mut waiting = overview(checks_of(&[], 1));
+        waiting.review_decision = Some(perch_github::ReviewDecision::ReviewRequested);
+        state.pull_request_overview.set(Some(Arc::new(waiting)));
+        harness.rebuild();
+        harness.paint();
+        let texts = row_texts(&harness, "Status");
+        assert!(
+            texts.ends_with(&["1 passed".to_string(), "Review required".to_string()]),
+            "{texts:?}"
+        );
+        let checks = rect(&harness, "checks pill");
         let chips = rect(&harness, "readiness");
-        assert!(chips.x0 >= repo.x1, "{chips:?} is not after {repo:?}");
+        assert!(chips.x0 >= checks.x1, "{chips:?} is not after {checks:?}");
 
         let mut blocked = overview(checks_of(&[], 1));
         blocked.review_decision = Some(perch_github::ReviewDecision::ChangesRequested);
         blocked.mergeable = perch_github::MergeableState::Conflicting;
-        state.pull_request_overview.set(Some(Arc::new(blocked)));
+        state
+            .pull_request_overview
+            .set(Some(Arc::new(blocked.clone())));
         harness.rebuild();
         harness.paint();
         let texts = row_texts(&harness, "Status");
@@ -3972,8 +3969,9 @@ pub(crate) mod tests {
             "{texts:?}"
         );
 
-        // Two reviewers approved: counted, a comment after an approval
-        // leaving it standing, in the Status row and the Reviewers row.
+        // Two reviewers approved, a comment after an approval leaving it
+        // standing: the Reviewers row draws both as approving, and the
+        // Status row says nothing of it.
         let review = |id: u64, user: &str, verdict: &str, at: &str| perch_github::Review {
             id,
             node_id: String::new(),
@@ -3997,14 +3995,6 @@ pub(crate) mod tests {
                 ],
                 ..Default::default()
             })));
-        state
-            .pull_request_overview
-            .set(Some(Arc::new(overview(checks_of(&[], 1)))));
-        harness.rebuild();
-        harness.paint();
-        assert!(row_texts(&harness, "Status").contains(&"2 approvals".to_string()));
-        // And the Reviewers row draws both as approving, bob's comment
-        // after his approval included.
         let reviewers = github_data(app, state).reviewers;
         let verdict = |login: &str| {
             reviewers
@@ -4020,7 +4010,7 @@ pub(crate) mod tests {
         state.pull_request_overview.set(None);
         harness.rebuild();
         harness.paint();
-        assert!(row_texts(&harness, "Status").contains(&"2 approvals".to_string()));
+        assert!(row_texts(&harness, "Status").contains(&"Conflicts".to_string()));
 
         // Closed or merged, there is nothing left to be ready for, though
         // GitHub's overview still says approved and no conflicts.
