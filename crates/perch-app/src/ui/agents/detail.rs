@@ -226,9 +226,14 @@ fn detail_body(
             },
         )
         .style(move |s| {
+            // The grey runs to the sheet's foot, so it takes the sheet's
+            // round corners there, inside its ring.
+            let radius = crate::ui::menu::RADIUS - 1.0;
             s.width_full()
                 .max_height(cap)
                 .background(theme::canvas_subtle())
+                .border_bottom_left_radius(radius)
+                .border_bottom_right_radius(radius)
         });
     let jump = dyn_container(
         move || !follow.get(),
