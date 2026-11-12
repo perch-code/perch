@@ -4611,14 +4611,12 @@ async fn run(
             Command::DoneNotification { thread_id } => {
                 ctx.clear_notice();
                 if let Some(github) = ctx.github() {
-                    match github.mark_thread_done(&thread_id).await {
-                        Ok(()) => ctx.dismiss_notification(&thread_id),
-                        Err(e) => {
-                            defer_polls_for_error(&e, &mut next_auto_poll);
-                            tracing::warn!(thread = %thread_id, error = %e, "could not mark notification done");
-                            ctx.notice(format!("Could not mark the notification done: {e}"));
-                        }
-                    }
+                    // The row leaves now, and the request runs beside the
+                    // loop: waiting on GitHub, behind whatever else is in
+                    // flight, left the row sitting there after the click.
+                    let held = ctx.dismiss_notifications(&[thread_id]);
+                    let ctx = ctx.clone();
+                    tokio::spawn(async move { done_notifications(&ctx, &github, held).await });
                 } else {
                     ctx.notice("A GitHub token is required to change notifications");
                 }
@@ -4630,10 +4628,9 @@ async fn run(
                     // would hold up every command behind them. A rate
                     // limit they run into gates the next poll through the
                     // client.
+                    let held = ctx.dismiss_notifications(&thread_ids);
                     let ctx = ctx.clone();
-                    tokio::spawn(
-                        async move { done_notifications(&ctx, &github, &thread_ids).await },
-                    );
+                    tokio::spawn(async move { done_notifications(&ctx, &github, held).await });
                 } else {
                     ctx.notice("A GitHub token is required to change notifications");
                 }
@@ -7047,18 +7044,32 @@ impl Ctx {
         });
     }
 
-    /// Hide the exact revision GitHub just accepted as Done. GitHub's list
-    /// endpoint can return Done history again under `all=true`, so the local
-    /// watermark is what keeps the row out until newer activity arrives.
+    /// Hide the exact revision marked Done. GitHub's list endpoint can
+    /// return Done history again under `all=true`, so the local watermark
+    /// is what keeps the row out until newer activity arrives.
     fn dismiss_notification(&self, thread_id: &str) {
-        let thread = self.notifications.lock().ok().and_then(|threads| {
-            threads
+        self.dismiss_notifications(&[thread_id.to_string()]);
+    }
+
+    /// Hide each thread as Done, and hand back what was hidden, for
+    /// [`Ctx::undo_dismissal`] should GitHub refuse it.
+    fn dismiss_notifications(&self, thread_ids: &[String]) -> Vec<(String, Option<Thread>)> {
+        let held: Vec<(String, Option<Thread>)> = {
+            let threads = self.notifications.lock().ok();
+            thread_ids
                 .iter()
-                .find(|thread| thread.id == thread_id)
-                .cloned()
-        });
-        if let Some(thread) = thread {
-            if let Some(Err(error)) = self.with_cache(|cache| cache.dismiss_notification(&thread)) {
+                .map(|id| {
+                    let thread = threads
+                        .as_ref()
+                        .and_then(|threads| threads.iter().find(|thread| &thread.id == id))
+                        .cloned();
+                    (id.clone(), thread)
+                })
+                .collect()
+        };
+        for (thread_id, thread) in &held {
+            let Some(thread) = thread else { continue };
+            if let Some(Err(error)) = self.with_cache(|cache| cache.dismiss_notification(thread)) {
                 tracing::warn!(thread = %thread_id, error = %error, "could not remember notification dismissal");
                 self.notice(format!(
                     "The notification was marked Done, but Perch could not remember it: {error}"
@@ -7066,7 +7077,26 @@ impl Ctx {
             }
         }
         self.edit_notifications(|threads| {
-            threads.retain(|thread| thread.id != thread_id);
+            threads.retain(|thread| !thread_ids.contains(&thread.id));
+        });
+        self.send_marked_notifications();
+        held
+    }
+
+    /// Put back the rows GitHub would not take as Done, each in its place.
+    fn undo_dismissal(&self, held: &[(String, Option<Thread>)]) {
+        for (thread_id, _) in held {
+            if let Some(Err(error)) = self.with_cache(|cache| cache.restore_notification(thread_id))
+            {
+                tracing::warn!(thread = %thread_id, error = %error, "could not take back a notification dismissal");
+            }
+        }
+        self.edit_notifications(|threads| {
+            for (_, thread) in held {
+                if let Some(thread) = thread {
+                    insert_by_activity(threads, thread.clone());
+                }
+            }
         });
         self.send_marked_notifications();
     }
@@ -14785,38 +14815,35 @@ async fn browse(ctx: &Ctx, query: &str, page: u32) -> Result<perch_github::Searc
     }
 }
 
-/// Mark each thread Done in turn. Once GitHub is out of reach or out of
-/// requests the rest would fail the same way, so they are not tried.
-async fn done_notifications(ctx: &Ctx, github: &GitHub, thread_ids: &[String]) {
+/// Tell GitHub each thread is Done, in turn. Their rows have left
+/// already; one GitHub refuses comes back. Once GitHub is out of reach or
+/// out of requests the rest would fail the same way, so they are not
+/// tried, and come back too.
+async fn done_notifications(ctx: &Ctx, github: &GitHub, held: Vec<(String, Option<Thread>)>) {
     let mut failure = None;
-    let mut done = 0;
-    for thread_id in thread_ids {
-        match github.mark_thread_done(thread_id).await {
-            Ok(()) => {
-                ctx.dismiss_notification(thread_id);
-                done += 1;
-            }
-            Err(e) => {
-                tracing::warn!(thread = %thread_id, error = %e, "could not mark notification done");
-                let stop = matches!(
-                    e,
-                    perch_github::Error::RateLimited { .. } | perch_github::Error::Network(_)
-                );
-                failure = Some(e);
-                if stop {
-                    break;
-                }
-            }
+    let mut refused = Vec::new();
+    let mut rest = held.into_iter();
+    while let Some(entry) = rest.next() {
+        let Err(e) = github.mark_thread_done(&entry.0).await else {
+            continue;
+        };
+        tracing::warn!(thread = %entry.0, error = %e, "could not mark notification done");
+        let stop = matches!(
+            e,
+            perch_github::Error::RateLimited { .. } | perch_github::Error::Network(_)
+        );
+        failure = Some(e);
+        refused.push(entry);
+        if stop {
+            refused.extend(rest.by_ref());
         }
     }
     if let Some(e) = failure {
-        let left = thread_ids.len() - done;
-        let noun = if left == 1 {
-            "notification"
-        } else {
-            "notifications"
-        };
-        ctx.notice(format!("Could not mark {left} {noun} done: {e}"));
+        ctx.undo_dismissal(&refused);
+        ctx.notice(match refused.len() {
+            1 => format!("Could not mark the notification done: {e}"),
+            left => format!("Could not mark {left} notifications done: {e}"),
+        });
     }
 }
 
@@ -21529,6 +21556,48 @@ mod tests {
         // GitHub still lists it, now with no mark to hide it.
         let visible = ctx.replace_notifications(inbox.clone(), Some("second"));
         assert_eq!(visible, inbox);
+    }
+
+    /// Done takes the row out before GitHub answers, and a refusal puts
+    /// it back where it was, with no Done mark left behind.
+    #[tokio::test]
+    async fn done_hides_the_row_at_once_and_a_refusal_returns_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let mut newest = thread("6", "six");
+        newest.updated_at = "2026-09-18T12:00:00Z".parse().unwrap();
+        let mut marked = thread("7", "seven");
+        marked.updated_at = "2026-09-18T11:00:00Z".parse().unwrap();
+        let mut oldest = thread("8", "eight");
+        oldest.updated_at = "2026-09-18T10:00:00Z".parse().unwrap();
+        let inbox = vec![newest.clone(), marked.clone(), oldest.clone()];
+        ctx.replace_notifications(inbox.clone(), Some("first"));
+
+        let held = ctx.dismiss_notifications(&[marked.id.clone(), oldest.id.clone()]);
+        assert_eq!(
+            *ctx.notifications.lock().unwrap(),
+            vec![newest],
+            "gone before the request"
+        );
+        // A poll in the meantime leaves them out.
+        assert_eq!(
+            ctx.replace_notifications(inbox.clone(), Some("second"))
+                .len(),
+            1
+        );
+
+        // Nothing answers: the first fails, and the second is not tried.
+        let github = ctx.github().unwrap();
+        done_notifications(&ctx, &github, held).await;
+        assert_eq!(*ctx.notifications.lock().unwrap(), inbox, "back in place");
+        assert!(ctx
+            .with_cache(|cache| cache.load_done_threads().unwrap())
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            ctx.replace_notifications(inbox.clone(), Some("third")),
+            inbox
+        );
     }
 
     #[tokio::test]
