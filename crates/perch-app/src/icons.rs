@@ -311,14 +311,14 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
             r#"<path d="M5.5 4 H10.5 A1.5 1.5 0 0 1 12 5.5 V10.5 A1.5 1.5 0 0 1 10.5 12 H5.5
                        A1.5 1.5 0 0 1 4 10.5 V5.5 A1.5 1.5 0 0 1 5.5 4 Z" fill="{c}"/>"#
         ),
-        // Three connected points: one coordinator and two workers. Kept
-        // abstract so it reads as activity rather than either vendor's logo.
+        // Two four-point sparkles, the mark AI features go by everywhere:
+        // a large outlined one and a small solid one off its shoulder.
         SidebarIcon::Agents => format!(
-            r#"<circle cx="8" cy="4" r="1.7" fill="none" stroke="{c}" stroke-width="1.4"/>
-               <circle cx="4" cy="11.5" r="1.7" fill="none" stroke="{c}" stroke-width="1.4"/>
-               <circle cx="12" cy="11.5" r="1.7" fill="none" stroke="{c}" stroke-width="1.4"/>
-               <path d="M7.1 5.5 L4.9 10 M8.9 5.5 L11.1 10 M5.8 11.5 H10.2" fill="none"
-                     stroke="{c}" stroke-width="1.3" stroke-linecap="round"/>"#
+            r#"<path d="M7 4.2 C7.5 7.3 8.9 8.7 12 9.2 C8.9 9.7 7.5 11.1 7 14.2
+                       C6.5 11.1 5.1 9.7 2 9.2 C5.1 8.7 6.5 7.3 7 4.2 Z" fill="none"
+                     stroke="{c}" stroke-width="1.3" stroke-linejoin="round"/>
+               <path d="M12.2 1.6 C12.4 3 13 3.6 14.4 3.8 C13 4 12.4 4.6 12.2 6
+                       C12 4.6 11.4 4 10 3.8 C11.4 3.6 12 3 12.2 1.6 Z" fill="{c}"/>"#
         ),
         // A dial's 240° arc with its needle past the middle. The hub sits
         // low so the drawing's box, caps included, is centred on 8,8.
@@ -597,7 +597,7 @@ pub enum SidebarIcon {
     Plus,
     /// A filled square: stop.
     Stop,
-    /// Three connected points: app-wide agent activity.
+    /// Two sparkles: app-wide agent activity.
     Agents,
     /// A dial with its needle: how much of a plan's limits is used.
     Gauge,

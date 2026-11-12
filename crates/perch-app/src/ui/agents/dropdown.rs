@@ -55,17 +55,10 @@ pub fn button(app: AppState, review: ReviewState, backend: Rc<Backend>) -> impl 
     // The glyph alone, as the gauge beside it, with the count and the dot
     // pinned to its corners.
     let button = Stack::new((
-        // A list while an item is open, for its details over the runs;
-        // the agents' own glyph with nothing open.
+        // A list either way: an item's details over the runs, or the
+        // runs alone with nothing open.
         icon_in(
-            move || {
-                let glyph = if review.item.with(Option::is_some) {
-                    SidebarIcon::BulletList
-                } else {
-                    SidebarIcon::Agents
-                };
-                crate::icons::sidebar_icon(glyph, theme::fg_muted())
-            },
+            move || crate::icons::sidebar_icon(SidebarIcon::BulletList, theme::fg_muted()),
             theme::fg_muted,
         )
         .style(|s| s.pointer_events_none()),
