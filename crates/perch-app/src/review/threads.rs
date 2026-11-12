@@ -1150,22 +1150,7 @@ fn composer_footer(
     };
     dyn_container(mode, move |mode| match mode {
         FooterMode::Ready => Stack::horizontal((
-            destination_picker(app, state),
-            // No effort to pick for GitHub.
-            dyn_container(
-                move || {
-                    state
-                        .composer
-                        .with(|c| c.as_ref().is_some_and(|c| c.destination.is_github()))
-                },
-                move |github| {
-                    if github {
-                        Empty::new().into_any()
-                    } else {
-                        effort_picker(app, state).into_any()
-                    }
-                },
-            ),
+            agent_picker(app, state),
             access_picker(app, state, backend.clone()),
             Empty::new().style(|s| s.flex_grow(1.0_f32)),
             crate::review::close_menu::split_button(app, state),
@@ -1544,69 +1529,58 @@ pub fn subject_word(state: ReviewState) -> &'static str {
     }
 }
 
-/// Where the text goes, from what config offers: Claude Code's models,
-/// then Codex's under a line when there are any, then GitHub under
-/// another. A model carries its backend, so picking one sets both, and
-/// keeps the effort where the model takes it. GitHub can be picked where
-/// a draft has somewhere to land, a composer on lines or under a thread
-/// that is on GitHub, and where the text posts at once as an issue
-/// comment: Conversation's own, over a pull request's or an issue's
-/// timeline, or under a thread with neither lines nor a place on GitHub. A draft being
-/// edited stays a draft: the models are greyed out, since sending would
-/// replace its body, not ask.
-fn destination_picker(app: AppState, state: ReviewState) -> impl IntoView {
-    use crate::ui::menu::Menu;
-
-    let current = move || {
-        state.composer.with(|c| {
-            c.as_ref()
-                .map(|c| destination_label(&c.destination))
-                .unwrap_or_default()
-        })
+/// Where the text goes and how hard the agent thinks, in one menu as
+/// Claude's app has it: each maker's models under its name, the newest
+/// of each family, then Effort and the older versions in submenus, then
+/// GitHub under a line. The face is the model with the effort in grey
+/// after it, `Sol 6.1 High`, or `GitHub`. A model carries its backend,
+/// so picking one sets both, and keeps the effort where the model takes
+/// it. GitHub can be picked where a draft has somewhere to land, a
+/// composer on lines or under a thread that is on GitHub, and where the
+/// text posts at once as an issue comment: Conversation's own, over a
+/// pull request's or an issue's timeline, or under a thread with neither
+/// lines nor a place on GitHub. A draft being edited stays a draft: the
+/// models are greyed out, since sending would replace its body, not ask.
+fn agent_picker(app: AppState, state: ReviewState) -> impl IntoView {
+    let choice = move || {
+        state
+            .composer
+            .with(|c| c.as_ref().and_then(|c| c.destination.agent_choice()))
     };
-    menu_button(current, move || {
+    let name = move || match choice() {
+        Some((_, model, _)) => model_label(&model),
+        None => "GitHub".to_string(),
+    };
+    let effort = move || {
+        choice()
+            .map(|(_, _, effort)| effort.label().to_string())
+            .unwrap_or_default()
+    };
+    quiet_menu_button(agent_face(name, effort), move || {
         let Some(composer) = state.composer.get_untracked() else {
-            return Menu::new();
+            return crate::ui::menu::Menu::new();
         };
-        let selected = composer.destination.agent_choice().map(|(_, m, _)| m);
-        let models_offered = composer.editing.is_none();
-        let mut menu = Menu::new();
-        for (i, group) in model_groups(&app.agent.get_untracked())
-            .into_iter()
-            .enumerate()
-        {
-            if i > 0 {
-                menu = menu.separator();
-            }
-            for (backend, model) in group {
-                let label = model_label(&model);
-                let pick = model.clone();
-                let checked = selected.as_deref() == Some(model.as_str());
-                menu = menu.item(label, move |item| {
-                    let pick = pick.clone();
-                    item.checked(checked)
-                        .enabled(models_offered)
-                        .action(move || {
-                            let agent = app.agent.get_untracked();
-                            // The effort stays where it was, or where it was
-                            // last for an agent when coming back from GitHub.
-                            let effort = state
-                                .composer
-                                .with_untracked(|c| {
-                                    c.as_ref().and_then(|c| c.destination.agent_choice())
-                                })
-                                .map(|(_, _, e)| e)
-                                .or_else(|| state.agent_last.get_untracked().map(|(_, _, e)| e))
-                                .unwrap_or_else(|| defaults(app).2);
-                            state.set_destination(Destination::Agent {
-                                backend,
-                                model: pick.clone(),
-                                effort: nearest_effort(&agent, &pick, effort),
-                            })
-                        })
-                });
-            }
-        }
+        let chosen = composer.destination.agent_choice();
+        // The effort stays where it was, or where it was last for an
+        // agent when coming back from GitHub.
+        let effort = chosen
+            .as_ref()
+            .map(|(_, _, e)| *e)
+            .or_else(|| state.agent_last.get_untracked().map(|(_, _, e)| e))
+            .unwrap_or_else(|| defaults(app).2);
+        let menu = agent_menu(
+            &app.agent.get_untracked(),
+            chosen.as_ref().map(|(_, model, _)| model.as_str()),
+            effort,
+            composer.editing.is_none(),
+            move |backend, model, effort| {
+                state.set_destination(Destination::Agent {
+                    backend,
+                    model,
+                    effort,
+                })
+            },
+        );
         let github_offered = state.github_offered(&composer);
         menu.separator()
             .item("GitHub", move |item| {
@@ -1617,6 +1591,23 @@ fn destination_picker(app: AppState, state: ReviewState) -> impl IntoView {
             .return_focus(state.composer_box.get_untracked())
     })
     .debug_name("composer-destination")
+}
+
+/// The agent picker's face: the model, then the effort in grey.
+pub(crate) fn agent_face(
+    name: impl Fn() -> String + 'static,
+    effort: impl Fn() -> String + 'static,
+) -> impl IntoView {
+    let face = |s: floem::style::Style| {
+        s.font_size(theme::TEXT_BADGE)
+            .selectable(false)
+            .pointer_events_none()
+    };
+    Stack::horizontal((
+        Label::derived(name).style(move |s| face(s).color(theme::fg())),
+        Label::derived(effort).style(move |s| face(s).color(theme::fg_subtle())),
+    ))
+    .style(|s| s.items_center().gap(5.0))
 }
 
 /// The open composer's anchor and the lines under it, as a suggestion
@@ -1641,15 +1632,6 @@ fn composer_original(
     Some((anchor, original))
 }
 
-/// The picker's face: `Claude Opus`, `Codex Sol 6.1`, or `GitHub`. The
-/// effort has a picker of its own beside it.
-pub fn destination_label(destination: &Destination) -> String {
-    match destination {
-        Destination::Agent { backend, model, .. } => model_name(backend.name(), model),
-        Destination::GitHub => "GitHub".to_string(),
-    }
-}
-
 /// The picker's sections: one per backend that has models, Claude Code
 /// first, then Codex, then Gemini. Each entry names the backend the model runs on, which is
 /// config's call, not the section's, so a model listed under both stays
@@ -1665,6 +1647,160 @@ pub(crate) fn model_groups(
         .into_iter()
         .filter(|g| !g.is_empty())
         .collect()
+}
+
+/// A model's family and its version, as the pickers split them: Sol and
+/// `6.1` for `gpt-6.1-sol`, Opus and nothing for the alias `opus`.
+pub(crate) fn model_family(model: &str) -> (String, String) {
+    let label = model_label(model);
+    match label.rsplit_once(' ') {
+        Some((family, version)) if version.starts_with(|c: char| c.is_ascii_digit()) => {
+            (family.to_string(), version.to_string())
+        }
+        _ => (label, String::new()),
+    }
+}
+
+/// One row of the model picker: a family and the models in it, newest
+/// first, each with the backend it runs on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModelFamily {
+    pub name: String,
+    pub versions: Vec<(perch_agent::Backend, String)>,
+}
+
+/// The picker's sections as it draws them: whose models they are, and
+/// the families among them in the order config lists their first model.
+pub(crate) fn model_sections(
+    agent: &perch_github::AgentConfig,
+) -> Vec<(&'static str, Vec<ModelFamily>)> {
+    use perch_agent::Backend;
+    let lists = [
+        (Backend::ClaudeCode, agent.models.as_slice()),
+        (Backend::Codex, agent.codex_models()),
+        (Backend::Gemini, agent.gemini_models()),
+    ];
+    lists
+        .into_iter()
+        .filter(|(_, models)| !models.is_empty())
+        .map(|(maker, models)| {
+            let mut families: Vec<ModelFamily> = Vec::new();
+            for model in models {
+                let name = model_family(model).0;
+                let entry = (crate::ask::backend_for(agent, model), model.clone());
+                match families.iter_mut().find(|f| f.name == name) {
+                    Some(family) => family.versions.push(entry),
+                    None => families.push(ModelFamily {
+                        name,
+                        versions: vec![entry],
+                    }),
+                }
+            }
+            for family in &mut families {
+                // Newest first; an alias, with no version, is the newest.
+                family.versions.sort_by_key(|(_, model)| {
+                    let version = model_family(model).1;
+                    let parts = version
+                        .split('.')
+                        .map(|part| part.parse::<u32>().unwrap_or(0))
+                        .collect::<Vec<_>>();
+                    std::cmp::Reverse((version.is_empty(), parts))
+                });
+            }
+            (maker.label(), families)
+        })
+        .collect()
+}
+
+/// The agent picker's menu, without GitHub: each maker's models under
+/// its name, the newest of each family; then Effort, a submenu with the
+/// level chosen at its row's end, where a level the model does not take
+/// is shown but cannot be picked; then More models, the older versions.
+/// `selected` is the model chosen, none when the text is for GitHub,
+/// which leaves Effort out. Picking a model keeps `effort`, or the
+/// nearest the model takes.
+pub(crate) fn agent_menu(
+    agent: &perch_github::AgentConfig,
+    selected: Option<&str>,
+    effort: perch_agent::Effort,
+    models_enabled: bool,
+    pick: impl Fn(perch_agent::Backend, String, perch_agent::Effort) + Clone + 'static,
+) -> crate::ui::menu::Menu {
+    use crate::ui::menu::Menu;
+
+    let model_row = |menu: Menu, backend: perch_agent::Backend, model: &str| {
+        let checked = selected == Some(model);
+        let effort = nearest_effort(agent, model, effort);
+        let pick = pick.clone();
+        let model = model.to_string();
+        menu.item(model_label(&model), move |item| {
+            item.checked(checked)
+                .enabled(models_enabled)
+                .action(move || pick(backend, model.clone(), effort))
+        })
+    };
+    let sections = model_sections(agent);
+    let mut menu = Menu::new();
+    for (i, (maker, families)) in sections.iter().enumerate() {
+        if i > 0 {
+            menu = menu.separator();
+        }
+        menu = menu.heading(*maker);
+        for family in families {
+            let (backend, model) = &family.versions[0];
+            menu = model_row(menu, *backend, model);
+        }
+    }
+    let chosen = selected.and_then(|model| {
+        sections
+            .iter()
+            .flat_map(|(_, families)| families)
+            .flat_map(|family| &family.versions)
+            .find(|(_, m)| m == model)
+            .cloned()
+    });
+    if let Some((backend, model)) = chosen {
+        let pick = pick.clone();
+        menu = menu.separator().submenu("Effort", move |mut sub| {
+            for level in perch_agent::Effort::ALL {
+                let takes = agent.effort_supported(&model, level.name());
+                let pick = pick.clone();
+                let model = model.clone();
+                sub = sub.item(level.label(), move |item| {
+                    item.checked(level == effort)
+                        .enabled(takes)
+                        .action(move || pick(backend, model.clone(), level))
+                });
+            }
+            sub.detail(effort.label())
+        });
+    }
+    let older = sections
+        .iter()
+        .map(|(maker, families)| {
+            let older = families
+                .iter()
+                .flat_map(|family| &family.versions[1..])
+                .collect::<Vec<_>>();
+            (*maker, older)
+        })
+        .filter(|(_, older)| !older.is_empty())
+        .collect::<Vec<_>>();
+    if !older.is_empty() {
+        menu = menu.separator().submenu("More models", |mut sub| {
+            for (i, (maker, models)) in older.iter().enumerate() {
+                if i > 0 {
+                    sub = sub.separator();
+                }
+                sub = sub.heading(*maker);
+                for (backend, model) in models {
+                    sub = model_row(sub, *backend, model);
+                }
+            }
+            sub
+        });
+    }
+    menu
 }
 
 /// The effort a model keeps when the one chosen is not among those it
@@ -1684,51 +1820,6 @@ pub(crate) fn nearest_effort(
         .rev()
         .find(|e| agent.effort_supported(model, e.name()))
         .unwrap_or(wanted)
-}
-
-/// The effort to run with. A level the chosen model does not take, by
-/// Codex's own catalog, is shown but cannot be picked.
-fn effort_picker(app: AppState, state: ReviewState) -> impl IntoView {
-    use crate::ui::menu::Menu;
-
-    let choice = move || {
-        state
-            .composer
-            .with(|c| c.as_ref().and_then(|c| c.destination.agent_choice()))
-    };
-    let current = move || {
-        choice()
-            .map(|(_, _, e)| e.label().to_string())
-            .unwrap_or_default()
-    };
-    menu_button(current, move || {
-        // Only drawn for an agent; nothing to list otherwise.
-        let Some((_, model, selected)) = floem::reactive::Effect::untrack(choice) else {
-            return Menu::new();
-        };
-        let agent = app.agent.get_untracked();
-        let mut menu = Menu::new();
-        for effort in perch_agent::Effort::ALL {
-            let takes = agent.effort_supported(&model, effort.name());
-            menu = menu.item(effort.label(), move |item| {
-                item.checked(effort == selected)
-                    .enabled(takes)
-                    .action(move || {
-                        state.composer.update(|c| {
-                            if let Some(Composer {
-                                destination: Destination::Agent { effort: e, .. },
-                                ..
-                            }) = c
-                            {
-                                *e = effort;
-                            }
-                        })
-                    })
-            });
-        }
-        menu.return_focus(state.composer_box.get_untracked())
-    })
-    .debug_name("composer-effort")
 }
 
 /// What the run may do, after the effort, on an item that takes Work and
@@ -1878,39 +1969,16 @@ fn approvals_note(approvals: perch_github::Approvals, agent: Option<&AgentChoice
     .to_string()
 }
 
-/// A small pop-up button, like the toolbar's, sized for the composer.
-fn menu_button(
-    label: impl Fn() -> String + 'static,
+/// A pop-up button as Claude's app draws them under its box: its face
+/// with no border or chevron, on grey under the pointer.
+fn quiet_menu_button(
+    face: impl IntoView + 'static,
     menu: impl Fn() -> crate::ui::menu::Menu + 'static,
 ) -> impl IntoView {
-    tinted_menu_button(label, theme::fg, menu)
-}
-
-/// `menu_button` with its face in a colour of its own.
-fn tinted_menu_button(
-    label: impl Fn() -> String + 'static,
-    color: impl Fn() -> floem::peniko::Color + 'static,
-    menu: impl Fn() -> crate::ui::menu::Menu + 'static,
-) -> impl IntoView {
-    Stack::horizontal((
-        Label::derived(label).style(move |s| {
-            s.font_size(theme::TEXT_BADGE)
-                .color(color())
-                .selectable(false)
-                .pointer_events_none()
-                .margin_right(5.0)
-        }),
-        sidebar_glyph(SidebarIcon::ChevronDown, theme::fg_subtle)
-            .style(|s| s.size(10.0, 10.0).pointer_events_none()),
-    ))
-    .dropdown(menu)
-    .style(|s| {
+    Container::new(face).dropdown(menu).style(|s| {
         s.items_center()
             .height(26.0)
-            .padding_horiz(8.0)
-            .background(theme::canvas())
-            .border(1.0)
-            .border_color(theme::border())
+            .padding_horiz(7.0)
             .border_radius(theme::RADIUS)
             .selectable(false)
             .hover(|s| {
@@ -1918,6 +1986,23 @@ fn tinted_menu_button(
                     .cursor(CursorStyle::Pointer)
             })
     })
+}
+
+/// `quiet_menu_button` with words for a face, in a colour of their own.
+fn tinted_menu_button(
+    label: impl Fn() -> String + 'static,
+    color: impl Fn() -> floem::peniko::Color + 'static,
+    menu: impl Fn() -> crate::ui::menu::Menu + 'static,
+) -> impl IntoView {
+    quiet_menu_button(
+        Label::derived(label).style(move |s| {
+            s.font_size(theme::TEXT_BADGE)
+                .color(color())
+                .selectable(false)
+                .pointer_events_none()
+        }),
+        menu,
+    )
 }
 
 /// The Outdated mark beside an anchor whose lines have moved.
@@ -4753,7 +4838,7 @@ mod tests {
         let text_box = state.composer_box.get().expect("the box registered itself");
         assert!(harness.is_focused(text_box));
 
-        let chip = find(harness.root_id(), "composer-effort")
+        let chip = find(harness.root_id(), "composer-destination")
             .unwrap()
             .get_visual_rect_no_clip()
             .center();
@@ -4761,11 +4846,11 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert!(crate::ui::menu::is_open());
-        let high = find(harness.root_id(), "menu-row:High")
+        let opus = find(harness.root_id(), "menu-row:Opus")
             .unwrap()
             .get_visual_rect_no_clip()
             .center();
-        harness.click(high.x, high.y);
+        harness.click(opus.x, opus.y);
         harness.rebuild();
         harness.paint();
         assert!(!crate::ui::menu::is_open());
@@ -4774,8 +4859,8 @@ mod tests {
                 .composer
                 .get()
                 .and_then(|c| c.destination.agent_choice())
-                .map(|(_, _, e)| e),
-            Some(perch_agent::Effort::High)
+                .map(|(_, model, effort)| (model, effort)),
+            Some(("opus".to_string(), perch_agent::Effort::Medium))
         );
         assert!(
             harness.is_focused(text_box),
@@ -4827,13 +4912,13 @@ mod tests {
         harness.rebuild();
         harness.paint();
 
-        let effort = find(harness.root_id(), "composer-effort")
+        let agent = find(harness.root_id(), "composer-destination")
             .unwrap()
             .get_visual_rect_no_clip();
         let chip = find(harness.root_id(), "composer-access")
             .expect("a picker on Work")
             .get_visual_rect_no_clip();
-        assert!(chip.x0 > effort.x1, "after the effort");
+        assert!(chip.x0 > agent.x1, "after the model and effort");
         assert!(find(harness.root_id(), "Label: \"Ask me\"").is_some());
 
         let at = chip.center();
@@ -5990,6 +6075,226 @@ mod tests {
             vec![(Backend::ClaudeCode, "shared".to_string())],
             "config decides, not the section"
         );
+    }
+
+    /// Claude's aliases, Codex's catalog in its own order, and one Gemini
+    /// model, as the screenshot that asked for families had them.
+    fn versioned_agent() -> perch_github::AgentConfig {
+        perch_github::AgentConfig {
+            models: vec!["opus".into(), "sonnet".into()],
+            codex: perch_github::CodexConfig {
+                binary: "codex".into(),
+                models: [
+                    "gpt-6.1-sol",
+                    "gpt-6-astra",
+                    "gpt-5.6-sol",
+                    "gpt-6-sol",
+                    "gpt-5.6-luna",
+                    "gpt-6-luna",
+                ]
+                .map(String::from)
+                .to_vec(),
+                ..Default::default()
+            },
+            ..perch_github::AgentConfig::default()
+        }
+    }
+
+    #[test]
+    fn a_model_splits_into_its_family_and_its_version() {
+        let family = |m: &str| {
+            let (family, version) = model_family(m);
+            format!("{family}|{version}")
+        };
+        assert_eq!(family("gpt-6.1-sol"), "Sol|6.1");
+        assert_eq!(family("gpt-6-astra"), "Astra|6");
+        assert_eq!(family("opus"), "Opus|");
+        assert_eq!(family("claude-opus-5-5"), "Opus|5.5");
+        assert_eq!(family("gpt-5.5"), "GPT|5.5");
+        assert_eq!(family("o3"), "o3|");
+    }
+
+    #[test]
+    fn the_picker_lists_families_under_their_makers_newest_version_first() {
+        use perch_agent::Backend;
+        let agent = versioned_agent();
+        let sections = model_sections(&agent);
+        let names = |at: usize| {
+            sections[at]
+                .1
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sections[0].0, "Claude");
+        assert_eq!(names(0), ["Opus", "Sonnet"]);
+        assert_eq!(sections[1].0, "Codex");
+        assert_eq!(names(1), ["Sol", "Astra", "Luna"]);
+        let sol = ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol"]
+            .map(|m| (Backend::Codex, m.to_string()))
+            .to_vec();
+        assert_eq!(sections[1].1[0].versions, sol);
+
+        // An alias beside a pinned id of the same family is the newest.
+        let pinned = perch_github::AgentConfig {
+            models: vec!["claude-opus-5-5".into(), "opus".into()],
+            ..perch_github::AgentConfig::default()
+        };
+        assert_eq!(
+            model_sections(&pinned)[0].1[0].versions,
+            [
+                (Backend::ClaudeCode, "opus".to_string()),
+                (Backend::ClaudeCode, "claude-opus-5-5".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn one_menu_picks_the_model_the_effort_and_the_older_versions() {
+        use perch_agent::{Backend, Effort};
+        let mut agent = versioned_agent();
+        agent
+            .codex
+            .efforts
+            .insert("gpt-5.6-sol".into(), vec!["low".into(), "medium".into()]);
+        let picked = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let pick = {
+            let picked = picked.clone();
+            move |backend: Backend, model: String, effort: Effort| {
+                picked
+                    .borrow_mut()
+                    .push(format!("{} {model} {}", backend.name(), effort.name()))
+            }
+        };
+
+        let menu = agent_menu(&agent, Some("gpt-6-luna"), Effort::High, true, pick.clone());
+        assert_eq!(
+            menu.outline(),
+            [
+                "[Claude]",
+                "Opus",
+                "Sonnet",
+                "—",
+                "[Codex]",
+                "Sol 6.1",
+                "Astra 6",
+                "✓ Luna 6",
+                "—",
+                "Effort ▸",
+                "—",
+                "More models ▸"
+            ]
+        );
+        let effort = menu.submenu_named("Effort").unwrap();
+        assert_eq!(
+            effort.outline(),
+            ["Low", "Medium", "✓ High", "XHigh", "Max", "Ultra"]
+        );
+        let more = menu.submenu_named("More models").unwrap();
+        assert_eq!(
+            more.outline(),
+            ["[Codex]", "Sol 6", "Sol 5.6", "Luna 5.6"],
+            "Claude has nothing older, so no heading"
+        );
+
+        menu.choose("Sol 6.1");
+        effort.choose("Low");
+        // A model keeps the effort, or the highest it takes.
+        more.choose("Sol 5.6");
+        assert_eq!(
+            *picked.borrow(),
+            [
+                "codex gpt-6.1-sol high",
+                "codex gpt-6-luna low",
+                "codex gpt-5.6-sol medium"
+            ]
+        );
+
+        // An older version is checked where it is listed, and an effort
+        // it does not take is greyed.
+        let menu = agent_menu(
+            &agent,
+            Some("gpt-5.6-sol"),
+            Effort::Medium,
+            true,
+            pick.clone(),
+        );
+        assert_eq!(
+            menu.submenu_named("More models").unwrap().outline()[2],
+            "✓ Sol 5.6"
+        );
+        assert_eq!(
+            menu.submenu_named("Effort").unwrap().outline()[2..4],
+            ["(High)", "(XHigh)"]
+        );
+
+        // For GitHub there is no effort; a draft being edited greys every
+        // model.
+        let github = agent_menu(&agent, None, Effort::High, false, pick);
+        assert!(github.submenu_named("Effort").is_none());
+        assert_eq!(github.outline()[1], "(Opus)");
+    }
+
+    /// One button holds the model and the effort, the effort in grey,
+    /// and the effort is picked from its submenu.
+    #[test]
+    fn the_agent_button_names_the_model_and_the_effort() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        app.agent.set(versioned_agent());
+        let state = ReviewState::new();
+        let mut item =
+            perch_github::Item::new("acme/repo", "2026-09-20T09:00:00Z".parse().unwrap());
+        item.id = "item-1".into();
+        state.item.set(Some(Arc::new(item)));
+        state.open_composer(
+            None,
+            None,
+            "why?".into(),
+            (
+                perch_agent::Backend::Codex,
+                "gpt-6.1-sol".into(),
+                perch_agent::Effort::Medium,
+            ),
+        );
+        let composer = state.composer.get().unwrap();
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = composer_view(app, state, Rc::new(backend), composer, ThreadFace::Card);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 400.0);
+        harness.rebuild();
+        harness.paint();
+        let button = find(harness.root_id(), "composer-destination").unwrap();
+        assert!(find(button, "Label: \"Sol 6.1\"").is_some());
+        assert!(find(button, "Label: \"Medium\"").is_some());
+
+        let click = |harness: &mut HeadlessHarness, name: &str| {
+            let at = find(harness.root_id(), name)
+                .unwrap_or_else(|| panic!("no {name}"))
+                .get_visual_rect_no_clip()
+                .center();
+            harness.click(at.x, at.y);
+            harness.rebuild();
+            harness.paint();
+        };
+        click(&mut harness, "composer-destination");
+        assert!(crate::ui::menu::is_open());
+        click(&mut harness, "menu-row:Effort");
+        click(&mut harness, "menu-row:High");
+        assert!(!crate::ui::menu::is_open());
+        assert_eq!(
+            state
+                .composer
+                .get()
+                .and_then(|c| c.destination.agent_choice()),
+            Some((
+                perch_agent::Backend::Codex,
+                "gpt-6.1-sol".to_string(),
+                perch_agent::Effort::High
+            ))
+        );
+        // The footer is built again after a pick.
+        let button = find(harness.root_id(), "composer-destination").unwrap();
+        assert!(find(button, "Label: \"High\"").is_some());
     }
 
     fn sonnet_medium() -> AgentChoice {

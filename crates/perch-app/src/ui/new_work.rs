@@ -17,7 +17,7 @@ use perch_git::BaseBranch;
 use crate::backend::{Backend, FirstRun, NewWork};
 use crate::icons::SidebarIcon;
 use crate::review::cards::tip;
-use crate::review::model::{AgentChoice, Destination};
+use crate::review::model::AgentChoice;
 use crate::review::review_launch::{action_button, menu_button};
 use crate::review::timeline::short_sha;
 use crate::state::AppState;
@@ -301,61 +301,30 @@ fn chosen_agent(state: AppState) -> AgentChoice {
         .unwrap_or_else(|| crate::review::threads::defaults(state))
 }
 
-/// `Claude Opus`, and the effort, as the composers pick them; never
-/// GitHub, since new work has nothing on GitHub yet.
+/// The model and the effort, `Sol 6.1 · High`, picked from one menu as
+/// the composers pick them; never GitHub, since new work has nothing on
+/// GitHub yet.
 fn agent_chips(state: AppState) -> impl IntoView {
+    use crate::review::threads;
+
     let nw = state.new_work;
-    let model = menu_button(
-        move || crate::review::threads::destination_label(&Destination::agent(chosen_agent(state))),
+    menu_button(
         move || {
-            let (_, selected, effort) = floem::reactive::Effect::untrack(|| chosen_agent(state));
-            let agent = state.agent.get_untracked();
-            let mut menu = Menu::new();
-            for (i, group) in crate::review::threads::model_groups(&agent)
-                .into_iter()
-                .enumerate()
-            {
-                if i > 0 {
-                    menu = menu.separator();
-                }
-                for (backend, model) in group {
-                    let checked = model == selected;
-                    let label = crate::review::threads::model_label(&model);
-                    let agent = agent.clone();
-                    menu = menu.item(label, move |item| {
-                        let model = model.clone();
-                        let effort = crate::review::threads::nearest_effort(&agent, &model, effort);
-                        item.checked(checked)
-                            .action(move || nw.agent.set(Some((backend, model.clone(), effort))))
-                    });
-                }
-            }
-            menu
+            let (_, model, effort) = chosen_agent(state);
+            format!("{} \u{b7} {}", threads::model_label(&model), effort.label())
+        },
+        move || {
+            let (_, model, effort) = floem::reactive::Effect::untrack(|| chosen_agent(state));
+            threads::agent_menu(
+                &state.agent.get_untracked(),
+                Some(&model),
+                effort,
+                true,
+                move |backend, model, effort| nw.agent.set(Some((backend, model, effort))),
+            )
         },
         "new-work-agent".into(),
-    );
-    let effort = menu_button(
-        move || chosen_agent(state).2.label().to_string(),
-        move || {
-            let (backend, model, selected) =
-                floem::reactive::Effect::untrack(|| chosen_agent(state));
-            let agent = state.agent.get_untracked();
-            let mut menu = Menu::new();
-            for effort in perch_agent::Effort::ALL {
-                let takes = agent.effort_supported(&model, effort.name());
-                let model = model.clone();
-                menu = menu.item(effort.label(), move |item| {
-                    let model = model.clone();
-                    item.checked(effort == selected)
-                        .enabled(takes)
-                        .action(move || nw.agent.set(Some((backend, model.clone(), effort))))
-                });
-            }
-            menu
-        },
-        "new-work-effort".into(),
-    );
-    Stack::horizontal((model, effort)).style(|s| s.items_center().gap(6.0))
+    )
 }
 
 /// Make the worktree. The draft is cleared once it has gone.
@@ -767,10 +736,8 @@ mod tests {
         harness.rebuild();
         harness.paint();
         let agent = rect("new-work-agent");
-        let effort = rect("new-work-effort");
         assert!((agent.y0 - repo.y0).abs() < 1.0, "{agent:?} {repo:?}");
-        assert!((effort.y0 - repo.y0).abs() < 1.0, "{effort:?} {repo:?}");
-        assert!(effort.x1 <= 1100.0, "{effort:?}");
+        assert!(agent.x1 <= 1100.0, "{agent:?}");
     }
 
     #[test]
