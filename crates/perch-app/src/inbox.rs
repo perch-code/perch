@@ -86,8 +86,9 @@ pub fn rows(
 /// The rows under the menu's narrowing and the search, in order. The
 /// view's list, which the rows come from, is the caller's. `viewer` is
 /// the signed-in login, for Yours. A local row is the reader's own work,
-/// so it is under Yours and All, and its search reads the item as a
-/// Worktrees row's does, and what the chip says.
+/// so it is under Yours and All and the reader is who opened it, and
+/// its search reads the item as a Worktrees row's does, and what the
+/// chip says.
 pub fn filter_rows(
     rows: &[InboxRow],
     filters: &InboxFilters,
@@ -95,18 +96,19 @@ pub fn filter_rows(
     repository: Option<&str>,
     query: &str,
 ) -> Vec<InboxRow> {
-    let needle = query.trim().to_lowercase();
+    let search = Search::parse(query, viewer);
     let mut out: Vec<InboxRow> = rows
         .iter()
         .filter(|row| match row {
-            InboxRow::Thread(thread) => admits_thread(thread, filters, viewer, repository, &needle),
+            InboxRow::Thread(thread) => admits_thread(thread, filters, viewer, repository, &search),
             InboxRow::Local { activity, item } => {
                 (!filters.unread_only || activity.is_unread())
                     && matches!(filters.whose, BrowseView::Yours | BrowseView::All)
                     && repository.is_none_or(|repo| item.repo_full_name.eq_ignore_ascii_case(repo))
                     && filters.state.admits(item.is_closed())
-                    && (crate::items::matches_query(item, &needle)
-                        || chip(&activity.event).to_lowercase().contains(&needle))
+                    && search.admits_author(viewer.unwrap_or(""))
+                    && (crate::items::matches_query(item, &search.text)
+                        || chip(&activity.event).to_lowercase().contains(&search.text))
             }
         })
         .cloned()
@@ -117,24 +119,68 @@ pub fn filter_rows(
     out
 }
 
-/// Whether the thread passes the menu's narrowing and `query`, already
-/// trimmed and lowercased.
+/// What the search box holds, lowercased: `author:` words, as GitHub's
+/// search and so Browse spell them, and the rest as text.
+struct Search {
+    /// Logins from `author:rohan` and `author:@rohan`, and the reader's
+    /// for `author:@me`. A row passes on any one of them.
+    authors: Vec<String>,
+    text: String,
+}
+
+impl Search {
+    fn parse(query: &str, viewer: Option<&str>) -> Self {
+        let mut authors = Vec::new();
+        let mut text: Vec<&str> = Vec::new();
+        let query = query.to_lowercase();
+        for word in query.split_whitespace() {
+            match word.strip_prefix("author:") {
+                Some("@me") => authors.push(viewer.unwrap_or("@me").to_lowercase()),
+                Some(login) => authors.push(login.trim_start_matches('@').to_string()),
+                None => text.push(word),
+            }
+        }
+        Self {
+            authors,
+            text: text.join(" "),
+        }
+    }
+
+    /// Whether `login` opened what an `author:` word asks for. The start
+    /// of a login is enough, so the list narrows as it is typed.
+    fn admits_author(&self, login: &str) -> bool {
+        let login = login.to_lowercase();
+        self.authors.is_empty() || self.authors.iter().any(|author| login.starts_with(author))
+    }
+}
+
+/// Whether the thread passes the menu's narrowing and the search. Who
+/// opened it is known once a look has found them; the text reads their
+/// login too.
 fn admits_thread(
     thread: &Thread,
     filters: &InboxFilters,
     viewer: Option<&str>,
     repository: Option<&str>,
-    query: &str,
+    search: &Search,
 ) -> bool {
+    let author = thread
+        .subject_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.author_login.as_str())
+        .unwrap_or("");
+    let query = search.text.as_str();
     (!filters.unread_only || thread.unread)
         && involves(filters.whose, thread, viewer)
         && repository.is_none_or(|repo| thread.repository.full_name.eq_ignore_ascii_case(repo))
         && filters.state.admits(closed(thread))
+        && search.admits_author(author)
         && (query.is_empty()
             || thread.subject.title.to_lowercase().contains(query)
             || thread.repository.full_name.to_lowercase().contains(query)
             || thread.reason.label().to_lowercase().contains(query)
             || thread.subject.kind.wire().to_lowercase().contains(query)
+            || author.to_lowercase().contains(query)
             || thread
                 .number_hint()
                 .is_some_and(|number| number.to_string().contains(query)))
@@ -415,6 +461,65 @@ mod tests {
     /// State goes by what a look found; a thread not yet looked at, or a
     /// kind with nothing to look at, is open. Oldest first turns GitHub's
     /// order over.
+    #[test]
+    fn search_reads_who_opened_it_and_author_words_narrow_to_them() {
+        let opened_by = |id: &str, title: &str, login: &str| {
+            let mut thread = thread(
+                id,
+                "org/one",
+                title,
+                SubjectKind::PullRequest,
+                Reason::Subscribed,
+                true,
+            );
+            thread.subject_snapshot = Some(perch_github::SubjectSnapshot {
+                closed_at: None,
+                author_login: login.into(),
+                author_avatar_url: String::new(),
+                state: SubjectState::PrOpen,
+                churn: None,
+                review_requested: false,
+                participants: None,
+                at: "2026-09-19T12:00:00Z".parse().unwrap(),
+            });
+            thread
+        };
+        let threads = vec![
+            opened_by("5", "Compaction", "Rohan"),
+            opened_by("4", "What rohan asked for", "ada"),
+            opened_by("3", "Manifest race", "Reader"),
+            // Not looked at yet: no one is known to have opened it.
+            thread(
+                "2",
+                "org/one",
+                "Manifest docs",
+                SubjectKind::Issue,
+                Reason::Mention,
+                true,
+            ),
+        ];
+        let ids = |query: &str| {
+            filter(
+                &threads,
+                &InboxFilters::default(),
+                Some("reader"),
+                None,
+                query,
+            )
+            .into_iter()
+            .map(|thread| thread.id)
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(ids("rohan"), ["5", "4"], "a login or a title");
+        assert_eq!(ids("author:rohan"), ["5"]);
+        assert_eq!(ids("Author:@ROH"), ["5"], "any case, as it is typed");
+        assert_eq!(ids("author:rohan author:ada"), ["5", "4"], "either one");
+        assert_eq!(ids("author:@me"), ["3"]);
+        assert_eq!(ids("author:reader manifest"), ["3"], "with text");
+        assert_eq!(ids("author:ada compaction"), Vec::<String>::new());
+        assert_eq!(ids("author:"), ["5", "4", "3", "2"], "nothing typed yet");
+    }
+
     #[test]
     fn state_narrows_on_the_look_and_oldest_first_turns_the_order_over() {
         use crate::items::StateFilter;
