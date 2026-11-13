@@ -18,7 +18,7 @@
 //! pills under its text, and the face in its byline that opens the
 //! picker. A click toggles the pill where it is and asks GitHub after.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -42,13 +42,13 @@ use perch_github::{
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
-use crate::review::markdown;
 use crate::review::model::{Destination, ItemTab, LoadedFile, ReviewState};
 use crate::review::threads::{self, ThreadFace};
 use crate::review::timeline::{
     count_of, event_name, event_pieces, short_sha, verdict, Card, Piece,
 };
 use crate::review::OpenFile;
+use crate::review::{linked_text, markdown};
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
@@ -273,16 +273,47 @@ pub(crate) fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> im
     .style(|s| s.items_center().width_full().min_width(0.0))
 }
 
-/// What a GitHub entry's `⋯` menu holds besides what [`actions`] draws
-/// beside it: Ask about this, its link, and Edit and Delete where the
-/// entry offers them.
+/// What an entry's `⋯` menu holds besides what [`actions`] draws beside
+/// it: a reply, Ask about this, its link, and Edit and Delete where the
+/// entry offers them; on an agent's answer, Post to GitHub and Copy too.
 #[derive(Default)]
 pub(crate) struct More {
+    pub(crate) quote: Option<Quote>,
+    /// Post to GitHub, on an agent's answer.
+    pub(crate) post: Option<Offered>,
+    /// Copy, of an agent's answer, which has no link to copy.
+    pub(crate) copy: Option<Rc<dyn Fn()>>,
     pub(crate) ask: Option<Rc<dyn Fn()>>,
     /// The entry on GitHub; empty for one with no page of its own.
     pub(crate) url: String,
     pub(crate) edit: Option<Offered>,
     pub(crate) delete: Option<Offered>,
+}
+
+/// The reply at the head of the `⋯` menu, named `label`: Quote Reply on a
+/// card, Reply on a review comment. There while `may` says so; `quote`
+/// gets what is selected in `scope`'s text, or `None` where nothing is.
+pub(crate) struct Quote {
+    label: &'static str,
+    scope: floem::ViewId,
+    may: Rc<dyn Fn() -> bool>,
+    quote: Rc<dyn Fn(Option<String>)>,
+}
+
+impl Quote {
+    pub(crate) fn new(
+        label: &'static str,
+        scope: floem::ViewId,
+        may: impl Fn() -> bool + 'static,
+        quote: Rc<dyn Fn(Option<String>)>,
+    ) -> Self {
+        Self {
+            label,
+            scope,
+            may: Rc::new(may),
+            quote,
+        }
+    }
 }
 
 /// A row of the `⋯` menu that is there only while `may` says so.
@@ -292,8 +323,7 @@ pub(crate) struct Offered {
 }
 
 /// The right end of a GitHub byline, drawn only while the card is
-/// hovered: `reply`, a Reply on a review comment or Quote reply on a
-/// card; the reaction picker; and a `⋯` whose menu has the rest, as
+/// hovered: the reaction picker, and a `⋯` whose menu has the rest, as
 /// github.com's has. `react` is the subject's node id; an entry an older
 /// build kept without one has no picker, since GitHub could not be told
 /// what it was for.
@@ -301,15 +331,10 @@ pub(crate) fn actions(
     state: ReviewState,
     backend: Rc<Backend>,
     hovered: RwSignal<bool>,
-    reply: Option<floem::AnyView>,
     react: Option<String>,
     more: More,
 ) -> floem::AnyView {
     Stack::horizontal((
-        match reply {
-            Some(reply) => reply,
-            None => Empty::new().into_any(),
-        },
         match react {
             Some(node_id) => react_button(state, backend, node_id, Some(hovered)).into_any(),
             None => Empty::new().into_any(),
@@ -320,15 +345,23 @@ pub(crate) fn actions(
     .into_any()
 }
 
-/// The `⋯` at the end of an entry's actions, and the menu under it: Ask
-/// about this, Copy link and Open on GitHub, then Edit, then Delete in
-/// red, each past a line. Drawn while the card is under the pointer, and
-/// while its menu is up, which the pointer leaves the card to reach.
-/// Absent while the menu would have no rows.
-fn more_button(hovered: RwSignal<bool>, more: More) -> impl IntoView {
+/// The `⋯` at the end of an entry's actions, and the menu under it: a
+/// reply, Ask about this, Copy link and Open on GitHub, then Edit, then
+/// Delete in red, each past a line. Drawn while the card is under the
+/// pointer, and while its menu is up, which the pointer leaves the card
+/// to reach. Absent while the menu would have no rows.
+///
+/// Quote reply quotes what is selected in the entry's text, and a press
+/// on the `⋯` takes the focus the selection lives by. So the selection is
+/// held from the pointer coming onto the `⋯` until it leaves or the menu
+/// goes, and the text has the focus back as the menu goes.
+pub(crate) fn more_button(hovered: RwSignal<bool>, more: More) -> impl IntoView {
     use crate::ui::menu::{Menu, MenuExt};
 
     let More {
+        quote,
+        post,
+        copy,
         ask,
         url,
         edit,
@@ -338,15 +371,76 @@ fn more_button(hovered: RwSignal<bool>, more: More) -> impl IntoView {
         let may = row.as_ref().map(|row| row.may.clone());
         Memo::new(move |_| may.as_ref().is_some_and(|may| may()))
     };
-    let (may_edit, may_delete) = (offered(&edit), offered(&delete));
-    let always = ask.is_some() || !url.is_empty();
-    let any = Memo::new(move |_| always || may_edit.get() || may_delete.get());
+    let (may_edit, may_delete, may_post) = (offered(&edit), offered(&delete), offered(&post));
+    let may_quote = {
+        let may = quote.as_ref().map(|quote| quote.may.clone());
+        Memo::new(move |_| may.as_ref().is_some_and(|may| may()))
+    };
+    let always = ask.is_some() || copy.is_some() || !url.is_empty();
+    let any = Memo::new(move |_| {
+        always || may_quote.get() || may_post.get() || may_edit.get() || may_delete.get()
+    });
     let up = RwSignal::new(false);
+    let scope = quote.as_ref().map(|quote| quote.scope);
+    // The view whose selection is held for the menu.
+    let held: Rc<Cell<Option<floem::ViewId>>> = Rc::default();
+    let hold = {
+        let held = held.clone();
+        move || {
+            if let Some(scope) = scope.filter(|_| held.get().is_none()) {
+                held.set(linked_text::hold_under(scope));
+            }
+        }
+    };
+    // With the menu gone the text has the focus back, whatever had it
+    // as the menu opened: the press gave it to the `⋯`.
+    let release = |refocus: bool| {
+        let held = held.clone();
+        move || {
+            if let Some(owner) = held.take() {
+                if refocus {
+                    owner.request_focus();
+                }
+                linked_text::release(owner);
+            }
+        }
+    };
+    let (closed, left) = (Rc::new(release(true)), release(false));
     let menu = move || {
-        let mut menu = Menu::new().on_close(move || up.set(false));
+        let closed = closed.clone();
+        let mut menu = Menu::new().on_close(move || {
+            up.set(false);
+            closed();
+        });
+        if let Some(quote) = quote.as_ref().filter(|_| may_quote.get_untracked()) {
+            let selected = linked_text::selected_under(quote.scope);
+            let owner = held.get();
+            let (label, quote) = (quote.label, quote.quote.clone());
+            // Quoted, the words are selected no longer, as a press on
+            // a button would have left them.
+            menu = menu.item(label, |item| {
+                item.icon(SidebarIcon::Reply).action(move || {
+                    quote(selected.clone());
+                    if let Some(owner) = owner {
+                        linked_text::clear(owner);
+                    }
+                })
+            });
+        }
         if let Some(ask) = ask.clone() {
             menu = menu.item("Ask About This", |item| {
                 item.icon(SidebarIcon::Thread).action(move || ask())
+            });
+        }
+        if let Some(post) = post.as_ref().filter(|_| may_post.get_untracked()) {
+            let post = post.action.clone();
+            menu = menu.item("Post to GitHub", |item| {
+                item.icon(SidebarIcon::PullRequest).action(move || post())
+            });
+        }
+        if let Some(copy) = copy.clone() {
+            menu = menu.item("Copy", |item| {
+                item.icon(SidebarIcon::Copy).action(move || copy())
             });
         }
         if !url.is_empty() {
@@ -388,6 +482,16 @@ fn more_button(hovered: RwSignal<bool>, more: More) -> impl IntoView {
                 .style(|s| s.size(14.0, 14.0).pointer_events_none()),
         )
         .dropdown(menu)
+        .on_event_cont(el::PointerEnter, {
+            let hold = hold.clone();
+            move |_, _| hold()
+        })
+        .on_event_cont(el::PointerMove, move |_, _| hold())
+        .on_event_cont(el::PointerLeave, move |_, _| {
+            if !up.get_untracked() {
+                left();
+            }
+        })
         .debug_name("comment-more")
         .style(move |s| {
             let up = up.get();
@@ -431,29 +535,6 @@ pub(crate) fn hover_action(
     )
 }
 
-/// Quote reply under the pointer, named `tip`, as [`hover_action`] is: `quote` gets
-/// what was selected in `scope`'s text as the pointer came onto the
-/// button, or `None` to quote the whole. A press moves the focus, and
-/// the selection goes with it, before the click lands, so the selection
-/// is read on the way in.
-pub(crate) fn quote_action(
-    hovered: RwSignal<bool>,
-    scope: floem::ViewId,
-    tip: &'static str,
-    name: &'static str,
-    quote: Rc<dyn Fn(Option<String>)>,
-) -> impl IntoView {
-    let selected = Rc::new(RefCell::new(None));
-    let read = selected.clone();
-    let action: Rc<dyn Fn()> = Rc::new(move || quote(read.borrow().clone()));
-    Container::new(hover_action(hovered, SidebarIcon::Reply, tip, name, action)).on_event_cont(
-        el::PointerEnter,
-        move |_, _| {
-            *selected.borrow_mut() = crate::review::linked_text::selected_under(scope);
-        },
-    )
-}
-
 /// Delete in the `⋯` menu, for a comment on GitHub, while `may` says
 /// GitHub lets the reader delete it. It asks first, under the comment.
 pub(crate) fn delete_action(
@@ -467,8 +548,8 @@ pub(crate) fn delete_action(
     }
 }
 
-/// Edit in the `⋯` menu, for a comment on GitHub, while `may` says
-/// GitHub lets the reader edit it. `edit` opens the composer in the
+/// Edit or Post to GitHub in the `⋯` menu, while `may` says so. Edit, for
+/// a comment on GitHub the reader may edit, opens the composer in the
 /// comment's place with its text.
 pub(crate) fn edit_action(may: impl Fn() -> bool + 'static, edit: Rc<dyn Fn()>) -> Offered {
     Offered {
@@ -499,7 +580,7 @@ pub(crate) mod more {
 
     /// Bring `card` into view, hover its byline and press its `⋯`;
     /// whether a menu came up.
-    fn open(harness: &mut HeadlessHarness, card: ViewId) -> bool {
+    pub(crate) fn open(harness: &mut HeadlessHarness, card: ViewId) -> bool {
         crate::ui::menu::close();
         card.scroll_to(None);
         settle(harness);
@@ -522,6 +603,7 @@ pub(crate) mod more {
             return false;
         }
         let c = button.get_visual_rect_no_clip().center();
+        harness.pointer_move(c.x, c.y);
         harness.click(c.x, c.y);
         settle(harness);
         crate::ui::menu::is_open()
@@ -1349,35 +1431,21 @@ fn ask_about(
     state.open_composer_with(None, anchor, quote, Destination::agent(agent), None);
 }
 
-/// Quote reply at the head of a card's actions: Conversation's composer,
-/// over the timeline, bound for GitHub, with the text quoted as GitHub's
-/// own Quote reply quotes it: what is selected in `scope`, the card's
-/// text, or else all of it. GitHub keeps no thread under a comment, a
-/// review or the description, so a reply is a new comment, the newest,
-/// and the quote says what it answers. A draft already bound for GitHub
-/// there keeps its text, the quote under it. Absent where there is no
-/// pull request or issue to post to, as Reply is.
-fn quote_reply_button(
-    state: ReviewState,
-    hovered: RwSignal<bool>,
-    body: String,
-    scope: floem::ViewId,
-) -> floem::AnyView {
-    let quote: Rc<dyn Fn(Option<String>)> =
-        Rc::new(move |selected| quote_reply(state, selected.as_deref().unwrap_or(&body)));
-    let offered = Memo::new(move |_| {
-        state.pull_request.with(Option::is_some) || state.issue.with(Option::is_some)
-    });
-    dyn_container(
-        move || offered.get(),
-        move |offered| {
-            if !offered {
-                return Empty::new().into_any();
-            }
-            quote_action(hovered, scope, "Quote reply", "quote-reply", quote.clone()).into_any()
-        },
+/// Quote reply in a card's `⋯` menu: Conversation's composer, over the
+/// timeline, bound for GitHub, with the text quoted as GitHub's own Quote
+/// reply quotes it: what is selected in `scope`, the card's text, or else
+/// all of it. GitHub keeps no thread under a comment, a review or the
+/// description, so a reply is a new comment, the newest, and the quote
+/// says what it answers. A draft already bound for GitHub there keeps its
+/// text, the quote under it. Absent where there is no pull request or
+/// issue to post to, as Reply is.
+fn quote_reply_action(state: ReviewState, body: String, scope: floem::ViewId) -> Quote {
+    Quote::new(
+        "Quote Reply",
+        scope,
+        move || state.pull_request.with(Option::is_some) || state.issue.with(Option::is_some),
+        Rc::new(move |selected| quote_reply(state, selected.as_deref().unwrap_or(&body))),
     )
-    .into_any()
 }
 
 /// Open Conversation's composer bound for GitHub with `body` quoted, under
@@ -1428,9 +1496,8 @@ pub fn description_card(
         markdown::render_linked(&body, state).into_any()
     };
     let scope = description.id();
-    let quote =
-        (!body.trim().is_empty()).then(|| quote_reply_button(state, hovered, body.clone(), scope));
     let more = More {
+        quote: (!body.trim().is_empty()).then(|| quote_reply_action(state, body.clone(), scope)),
         edit: Some(edit_in_card_action(
             state,
             node_id.clone(),
@@ -1451,7 +1518,7 @@ pub fn description_card(
                 app,
                 state,
                 backend.clone(),
-                actions(state, backend, hovered, quote, react, more),
+                actions(state, backend, hovered, react, more),
             ),
             Some(shown),
         ),
@@ -1651,9 +1718,9 @@ pub fn comment_card(
     );
     let ask: Rc<dyn Fn()> = Rc::new(move || ask_about(app, state, None, &author, &url, &body));
     let text = markdown::render_linked(&comment.body, state).into_any();
-    let quote = quote_reply_button(state, hovered, comment.body.clone(), text.id());
     let deletable = comment.viewer_can_delete && !comment.node_id.is_empty();
     let more = More {
+        quote: Some(quote_reply_action(state, comment.body.clone(), text.id())),
         ask: Some(ask),
         url: comment.html_url.clone(),
         edit: Some(edit_in_card_action(
@@ -1665,6 +1732,7 @@ pub fn comment_card(
         delete: Some(delete_action(state, comment.node_id.clone(), move || {
             deletable
         })),
+        ..More::default()
     };
     let confirm = delete_comment_confirmation(app, state, backend.clone(), comment.node_id.clone());
     let react = reactable(&comment.node_id);
@@ -1678,7 +1746,7 @@ pub fn comment_card(
             byline_strip(byline(
                 app,
                 who,
-                actions(state, backend, hovered, Some(quote), react, more),
+                actions(state, backend, hovered, react, more),
             )),
             Some(body),
         ),
@@ -1792,7 +1860,7 @@ pub fn review_card(
     let quote = summary
         .clone()
         .zip(text.as_ref().map(|text| text.id()))
-        .map(|(body, scope)| quote_reply_button(state, hovered, body, scope));
+        .map(|(body, scope)| quote_reply_action(state, body, scope));
     let edit = summary.clone().map(|body| {
         edit_in_card_action(
             state,
@@ -1813,12 +1881,13 @@ pub fn review_card(
     });
 
     let more = More {
+        quote,
         ask,
         url,
         edit,
-        delete: None,
+        ..More::default()
     };
-    let trailing = actions(state, backend, hovered, quote, react, more);
+    let trailing = actions(state, backend, hovered, react, more);
     track_hover(
         card(byline_strip(byline(app, who, trailing)), body),
         hovered,

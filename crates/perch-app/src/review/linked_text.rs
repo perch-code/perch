@@ -212,21 +212,64 @@ thread_local! {
     static PASSAGES: RefCell<HashSet<ViewId>> = RefCell::new(HashSet::new());
     /// The selection there is, if any: the view that owns it and its text.
     static SELECTED: RefCell<Option<(ViewId, String)>> = const { RefCell::new(None) };
+    /// The view whose selection outlasts its focus: see [`hold_under`].
+    static HELD: Cell<Option<ViewId>> = const { Cell::new(None) };
+}
+
+/// The selection, when the view that owns it is under `scope`: that view
+/// and its text.
+fn selection_under(scope: ViewId) -> Option<(ViewId, String)> {
+    let (owner, text) = SELECTED.with_borrow(|selected| selected.clone())?;
+    std::iter::successors(Some(owner), |view| view.parent())
+        .any(|view| view == scope)
+        .then_some((owner, text))
 }
 
 /// The selected text, when the view that owns the selection is under
 /// `scope`: what a Quote reply on a comment quotes in place of the whole.
 pub fn selected_under(scope: ViewId) -> Option<String> {
-    let (owner, text) = SELECTED.with_borrow(|selected| selected.clone())?;
-    let mut at = Some(owner);
-    while let Some(view) = at {
-        if view == scope {
-            return Some(text);
-        }
-        at = view.parent();
-    }
-    None
+    selection_under(scope).map(|(_, text)| text)
 }
+
+/// Keep the selection under `scope`, if there is one, through its view
+/// losing the focus, drawn as it was: a menu takes the keyboard while it
+/// is up, and what it offers may be about the selected words. The view
+/// that owns it, to hand to [`release`].
+pub fn hold_under(scope: ViewId) -> Option<ViewId> {
+    let (owner, _) = selection_under(scope)?;
+    if let Some(other) = HELD.replace(Some(owner)).filter(|held| *held != owner) {
+        other.update_state(Released);
+    }
+    Some(owner)
+}
+
+/// Let go of a selection [`hold_under`] kept: it lasts while its view has
+/// the focus again, and goes at once where the view has not.
+pub fn release(owner: ViewId) {
+    if HELD.get() == Some(owner) {
+        HELD.set(None);
+    }
+    owner.update_state(Released);
+}
+
+/// Let go of the selection `owner` has, held or not, focused or not: it
+/// has been quoted.
+pub fn clear(owner: ViewId) {
+    if HELD.get() == Some(owner) {
+        HELD.set(None);
+    }
+    owner.update_state(Cleared);
+}
+
+fn held(id: ViewId) -> bool {
+    HELD.get() == Some(id)
+}
+
+/// Told to a view whose selection was held and no longer is.
+struct Released;
+
+/// Told to a view whose selection is to go: see [`clear`].
+struct Cleared;
 
 /// `view`, whose linked text views select as one: a drag runs on from
 /// one into the next, as across a browser's paragraphs.
@@ -850,6 +893,17 @@ impl LinkedText {
         });
     }
 
+    /// Lets the selection go, if there is one; whether there was.
+    fn drop_selection(&mut self) -> bool {
+        if self.selecting == Selecting::None && self.spread.is_empty() {
+            return false;
+        }
+        self.selecting = Selecting::None;
+        self.release();
+        self.publish();
+        true
+    }
+
     /// Takes back what a drag from here took of the passage.
     fn release(&mut self) {
         for leaf in self.spread.drain(..).filter_map(leaf) {
@@ -1200,7 +1254,8 @@ impl View for LinkedText {
         // took of it.
         let taken = self.leaf.taken.borrow().clone();
         let taken = taken.and_then(|(owner, range)| {
-            (!range.is_empty() && cx.window_state.is_focused(owner)).then_some(range)
+            (!range.is_empty() && (cx.window_state.is_focused(owner) || held(owner)))
+                .then_some(range)
         });
         let selection = match taken {
             Some(range) => self.with_shadow(|layout, _| {
@@ -1209,7 +1264,7 @@ impl View for LinkedText {
             }),
             None => self
                 .selection()
-                .filter(|_| cx.window_state.is_focused(self.id)),
+                .filter(|_| cx.window_state.is_focused(self.id) || held(self.id)),
         };
         let formulas = self.leaf.formula_rects();
         if let Some(selection) = selection {
@@ -1291,7 +1346,20 @@ impl View for LinkedText {
         }
     }
 
-    fn update(&mut self, _cx: &mut UpdateCx, state: Box<dyn std::any::Any>) {
+    fn update(&mut self, cx: &mut UpdateCx, state: Box<dyn std::any::Any>) {
+        if state.is::<Cleared>() {
+            if self.drop_selection() {
+                cx.window_state.request_paint(self.id);
+            }
+            return;
+        }
+        if state.is::<Released>() {
+            if !held(self.id) && !cx.window_state.is_focused(self.id) {
+                self.drop_selection();
+                cx.window_state.request_paint(self.id);
+            }
+            return;
+        }
         let Ok(token) = state.downcast::<TimerToken>() else {
             return;
         };
@@ -1367,11 +1435,8 @@ impl View for LinkedText {
                     return self.handle_pointer(&pointer, cx);
                 }
             }
-            Event::Focus(FocusEvent::Lost) => {
-                if self.selecting != Selecting::None || !self.spread.is_empty() {
-                    self.selecting = Selecting::None;
-                    self.release();
-                    self.publish();
+            Event::Focus(FocusEvent::Lost) if !held(self.id) => {
+                if self.drop_selection() {
                     cx.window_state.request_paint(self.id);
                 }
             }

@@ -2913,15 +2913,7 @@ mod tests {
         let (mut harness, _, state) = app_harness();
         let quote = |harness: &mut HeadlessHarness, card: &str| {
             let card = find(harness.root_id(), card).unwrap();
-            card.scroll_to(None);
-            harness.rebuild();
-            harness.paint();
-            let c = card.get_visual_rect_no_clip().center();
-            harness.pointer_move(c.x, c.y);
-            harness.rebuild();
-            harness.paint();
-            let button = find(card, "quote-reply").expect("the card offers Quote reply");
-            click_on(harness, button);
+            crate::review::cards::more::pick(harness, card, "Quote Reply");
         };
 
         quote(&mut harness, "card:comment");
@@ -3347,10 +3339,14 @@ mod tests {
         harness.pointer_move(c.x, c.y);
         harness.rebuild();
         harness.paint();
-        assert!(find(comment, "quote-reply").is_some());
         assert_eq!(
             crate::review::cards::more::rows(&mut harness, comment),
-            ["Ask About This", "Copy Link", "Open on GitHub"]
+            [
+                "Quote Reply",
+                "Ask About This",
+                "Copy Link",
+                "Open on GitHub"
+            ]
         );
     }
 
@@ -3371,19 +3367,10 @@ mod tests {
         harness.paint();
     }
 
-    /// Hover `card`, then click its button named `name`.
-    fn hover_and_click(harness: &mut HeadlessHarness, card: floem::ViewId, name: &str) {
-        let c = card.get_visual_rect_no_clip().center();
-        harness.pointer_move(c.x, c.y);
-        harness.rebuild();
-        harness.paint();
-        let button = find(card, name).unwrap_or_else(|| panic!("the card offers {name}"));
-        click_on(harness, button);
-    }
-
     /// With words of a comment selected, Quote reply quotes those words
-    /// and not the whole, as github.com does; words selected in another
-    /// card leave the comment's Quote reply quoting all of it.
+    /// and not the whole, as github.com does, and opening the `⋯` menu it
+    /// is in leaves them selected; words selected in another card leave
+    /// the comment's Quote reply quoting all of it.
     #[test]
     fn quote_reply_quotes_the_selection_when_there_is_one() {
         let mut discussion = discussion();
@@ -3392,17 +3379,23 @@ mod tests {
             app_harness_on(crate::backend::Backend::detached(), discussion);
         let comment = find(harness.root_id(), "card:comment").unwrap();
         select_first_word(&mut harness, comment, "Thanks for the fix");
-        hover_and_click(&mut harness, comment, "quote-reply");
+        // The menu takes the keyboard; the selection stays, and is still
+        // there with the menu shut and nothing picked.
+        let selected = || crate::review::linked_text::selected_under(comment);
+        assert!(crate::review::cards::more::open(&mut harness, comment));
+        assert_eq!(selected().as_deref(), Some("Thanks"));
+        crate::ui::menu::close();
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(selected().as_deref(), Some("Thanks"));
+        crate::review::cards::more::pick(&mut harness, comment, "Quote Reply");
         assert_eq!(state.composer_draft.get(), "> Thanks\n\n");
 
         state.close_composer();
         let description = find(harness.root_id(), "card:description").unwrap();
         select_first_word(&mut harness, description, "The description.");
         let comment = find(harness.root_id(), "card:comment").unwrap();
-        comment.scroll_to(None);
-        harness.rebuild();
-        harness.paint();
-        hover_and_click(&mut harness, comment, "quote-reply");
+        crate::review::cards::more::pick(&mut harness, comment, "Quote Reply");
         assert_eq!(state.composer_draft.get(), "> Thanks for the fix\n\n");
     }
 
@@ -3433,10 +3426,7 @@ mod tests {
                 })));
             });
         let comment = find(harness.root_id(), "card:comment").unwrap();
-        comment.scroll_to(None);
-        harness.rebuild();
-        harness.paint();
-        hover_and_click(&mut harness, comment, "quote-reply");
+        crate::review::cards::more::pick(&mut harness, comment, "Quote Reply");
         let composer = state.composer.get().expect("the composer opened");
         assert_eq!(
             (composer.thread_id, composer.anchor),
@@ -3460,7 +3450,7 @@ mod tests {
         harness.paint();
         let card = find(harness.root_id(), "card:thread").unwrap();
         select_first_word(&mut harness, card, "because the lock");
-        hover_and_click(&mut harness, card, "quote-reply-agent");
+        crate::review::cards::more::pick(&mut harness, card, "Quote Reply");
         let composer = state.composer.get().expect("the Follow up box opened");
         assert_eq!(composer.thread_id.as_deref(), Some("t1"));
         assert!(
@@ -3473,7 +3463,7 @@ mod tests {
         // Nothing selected now: the whole answer, under what was typed.
         state.composer_draft.set("> because\n\nWhy?".into());
         let card = find(harness.root_id(), "card:thread").unwrap();
-        hover_and_click(&mut harness, card, "quote-reply-agent");
+        crate::review::cards::more::pick(&mut harness, card, "Quote Reply");
         assert_eq!(
             state.composer_draft.get(),
             "> because\n\nWhy?\n\n> because the lock\n\n"

@@ -3542,10 +3542,10 @@ fn pending_answer_view(
     )
 }
 
-/// Quote reply, Post to GitHub, while the thread has somewhere on GitHub
-/// to go, and Copy, at the end of an agent's byline, under the pointer
-/// only, as a comment's are. Quote reply opens the Follow up box with
-/// what is selected in `scope`, the answer's text, or else all of it,
+/// The `⋯` at the end of an agent's byline, under the pointer only, as a
+/// comment's is, and its menu: Quote reply, Post to GitHub while the
+/// thread has somewhere on GitHub to go, Copy, and Edit. Quote reply opens
+/// the Follow up box with what is selected in `scope`, the answer's text, or else all of it,
 /// quoted, bound for the agent. Post opens the composer under the
 /// thread's last message, bound for GitHub, with the answer as the text:
 /// a follow-up the reader edits and sends as their own, a draft where the
@@ -3573,7 +3573,7 @@ fn agent_actions(
                 Some(id.clone()),
             );
         });
-        cards::hover_action(hovered, SidebarIcon::Pencil, "Edit", "edit-finding", edit).into_any()
+        cards::edit_action(|| true, edit)
     });
     let (thread_id, anchor) = (thread.id.clone(), thread.anchor.clone());
     let whole = body.clone();
@@ -3597,31 +3597,20 @@ fn agent_actions(
     // an issue thread with lines, or a closed pull request under a thread
     // whose draft would need a review. The pull request lands after the
     // threads, so this follows it rather than the message's own rebuild.
-    let offered = Memo::new(move |_| state.github_offered_on(&thread));
-    Stack::horizontal((
-        cards::quote_action(hovered, scope, "Quote reply", "quote-reply-agent", quote),
-        dyn_container(
-            move || offered.get(),
-            move |offered| {
-                if !offered {
-                    return Empty::new().into_any();
-                }
-                cards::hover_action(
-                    hovered,
-                    SidebarIcon::PullRequest,
-                    "Post to GitHub",
-                    "post-to-github",
-                    post.clone(),
-                )
-                .into_any()
-            },
-        ),
-        cards::hover_action(hovered, SidebarIcon::Copy, "Copy", "copy-message", copy),
-        edit.unwrap_or_else(|| Empty::new().into_any()),
-    ))
-    .debug_name("agent-actions")
-    .style(|s| s.items_center().gap(4.0).flex_shrink(0.0_f32))
-    .into_any()
+    let more = cards::More {
+        quote: Some(cards::Quote::new("Quote Reply", scope, || true, quote)),
+        post: Some(cards::edit_action(
+            move || state.github_offered_on(&thread),
+            post,
+        )),
+        copy: Some(copy),
+        edit,
+        ..cards::More::default()
+    };
+    Container::new(cards::more_button(hovered, more).style(|s| s.margin_right(-4.0)))
+        .debug_name("agent-actions")
+        .style(|s| s.items_center().flex_shrink(0.0_f32))
+        .into_any()
 }
 
 /// Open the Follow up box under `thread_id` with `text` quoted, under
@@ -3680,8 +3669,7 @@ fn reply_and_ask(
     state: ReviewState,
     thread: &CommentThread,
     scope: floem::ViewId,
-    hovered: RwSignal<bool>,
-) -> (floem::AnyView, Rc<dyn Fn()>) {
+) -> (cards::Quote, Rc<dyn Fn()>) {
     let (thread_id, anchor) = (thread.id.clone(), thread.anchor.clone());
     // To an agent, whatever the thread's last message was: the point is
     // to ask about the comment, not to answer it.
@@ -3733,24 +3721,18 @@ fn reply_and_ask(
         );
     });
     let for_reply = thread.clone();
-    let offered = Memo::new(move |_| state.github_offered_on(&for_reply));
-    let reply_button = dyn_container(
-        move || offered.get(),
-        move |offered| {
-            if !offered {
-                return Empty::new().into_any();
-            }
-            cards::quote_action(hovered, scope, "Reply", "reply-github", reply_to.clone())
-                .into_any()
-        },
-    )
-    .into_any();
-    (reply_button, ask)
+    let reply = cards::Quote::new(
+        "Reply",
+        scope,
+        move || state.github_offered_on(&for_reply),
+        reply_to,
+    );
+    (reply, ask)
 }
 
 /// A comment from GitHub in a thread, under its author's face and
-/// byline, with the reactions on it under its text, and Reply, the
-/// reaction picker and a `⋯` menu on hover: Ask about this, its link, and
+/// byline, with the reactions on it under its text, and the reaction
+/// picker and a `⋯` menu on hover: Reply, Ask about this, its link, and
 /// Edit and Delete where GitHub lets the reader.
 #[allow(clippy::too_many_arguments)]
 fn github_message_view(
@@ -3765,7 +3747,7 @@ fn github_message_view(
 ) -> floem::AnyView {
     let hovered = RwSignal::new(false);
     let text = message_body(state, thread, &message.body, Some((app, backend.clone())));
-    let (reply_button, ask) = reply_and_ask(app, state, thread, text.id(), hovered);
+    let (reply, ask) = reply_and_ask(app, state, thread, text.id());
     let node_id = message.node_id.clone().unwrap_or_default();
     let may = node_id.clone();
     let delete = cards::delete_action(state, node_id.clone(), move || {
@@ -3779,10 +3761,12 @@ fn github_message_view(
     let confirm = cards::delete_comment_confirmation(app, state, backend.clone(), node_id);
     let react = message.node_id.as_deref().and_then(cards::reactable);
     let more = cards::More {
+        quote: Some(reply),
         ask: Some(ask),
         url: message.html_url.clone().unwrap_or_default(),
         edit: Some(edit),
         delete: Some(delete),
+        ..cards::More::default()
     };
     let reactions = cards::reactions_under(app, state, backend.clone(), &react);
     let name = login.clone();
@@ -3797,14 +3781,7 @@ fn github_message_view(
             author_label(state, move || Some(author.clone())).into_any(),
             after_review_label(state, message.created_at).into_any(),
         ],
-        cards::actions(
-            state,
-            backend.clone(),
-            hovered,
-            Some(reply_button),
-            react,
-            more,
-        ),
+        cards::actions(state, backend.clone(), hovered, react, more),
     );
     let avatar = crate::ui::widgets::avatar(
         app,
@@ -3890,7 +3867,7 @@ fn posted_message_view(
 ) -> floem::AnyView {
     let hovered = RwSignal::new(false);
     let text = message_body(state, thread, &message.body, Some((app, backend.clone())));
-    let (reply_button, ask) = reply_and_ask(app, state, thread, text.id(), hovered);
+    let (reply, ask) = reply_and_ask(app, state, thread, text.id());
     // The reader wrote it, so GitHub lets them edit and delete it.
     let node_id = message.node_id.clone().unwrap_or_default();
     let deletable = !node_id.is_empty();
@@ -3899,10 +3876,12 @@ fn posted_message_view(
     let confirm = cards::delete_comment_confirmation(app, state, backend.clone(), node_id);
     let react = message.node_id.as_deref().and_then(cards::reactable);
     let more = cards::More {
+        quote: Some(reply),
         ask: Some(ask),
         url: message.html_url.clone().unwrap_or_default(),
         edit: Some(edit),
         delete: Some(delete),
+        ..cards::More::default()
     };
     let reactions = cards::reactions_under(app, state, backend.clone(), &react);
     let byline = byline_row(
@@ -3915,14 +3894,7 @@ fn posted_message_view(
             author_label(state, move || viewer_login(app)).into_any(),
             after_review_label(state, message.created_at).into_any(),
         ],
-        cards::actions(
-            state,
-            backend.clone(),
-            hovered,
-            Some(reply_button),
-            react,
-            more,
-        ),
+        cards::actions(state, backend.clone(), hovered, react, more),
     );
     let body = Stack::vertical((text, reactions, confirm))
         .style(|s| s.flex_col().width_full())
@@ -6967,7 +6939,10 @@ mod tests {
             );
         }
         assert!(
-            find(find(harness.root_id(), "theirs").unwrap(), "reply-github").is_some(),
+            {
+                let theirs = find(harness.root_id(), "theirs").unwrap();
+                cards::more::rows(&mut harness, theirs).contains(&"Reply".to_string())
+            },
             "rohan's comment offers Reply"
         );
         assert!(
@@ -6976,7 +6951,7 @@ mod tests {
         );
 
         let ours = find(harness.root_id(), "ours").unwrap();
-        let actions = ["reply-github", "react-button", "comment-more"];
+        let actions = ["react-button", "comment-more"];
         let drawn = |harness: &HeadlessHarness| -> Vec<bool> {
             actions
                 .iter()
@@ -6988,7 +6963,7 @@ mod tests {
         };
         assert_eq!(
             drawn(&harness),
-            [false; 3],
+            [false; 2],
             "nothing until the pointer is on it"
         );
         let at = find(ours, "posted-when")
@@ -6998,10 +6973,11 @@ mod tests {
         harness.pointer_move(at.x, at.y);
         harness.rebuild();
         harness.paint();
-        assert_eq!(drawn(&harness), [true; 3], "all three under the pointer");
+        assert_eq!(drawn(&harness), [true; 2], "both under the pointer");
         assert_eq!(
             cards::more::rows(&mut harness, ours),
             [
+                "Reply",
                 "Ask About This",
                 "Copy Link",
                 "Open on GitHub",
@@ -7018,11 +6994,11 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert!(crate::ui::menu::is_open());
-        assert_eq!(drawn(&harness), [false, false, true], "its menu is up");
+        assert_eq!(drawn(&harness), [false, true], "its menu is up");
         crate::ui::menu::close();
         harness.rebuild();
         harness.paint();
-        assert_eq!(drawn(&harness), [false; 3], "the menu went");
+        assert_eq!(drawn(&harness), [false; 2], "the menu went");
 
         cards::more::pick(&mut harness, ours, "Copy Link");
         assert_eq!(
@@ -7064,12 +7040,8 @@ mod tests {
             harness.double_click(rect.x0 + 3.0, rect.y0 + 8.0);
             harness.rebuild();
             harness.paint();
-            let reply = find(harness.root_id(), "reply-github").expect("Reply");
-            let c = reply.get_visual_rect_no_clip().center();
-            harness.pointer_move(c.x, c.y);
-            harness.click(c.x, c.y);
-            harness.rebuild();
-            harness.paint();
+            let root = harness.root_id();
+            cards::more::pick(harness, root, "Reply");
         };
         reply(&mut harness);
         let composer = state.composer.get().expect("Reply opened the composer");
@@ -7108,22 +7080,8 @@ mod tests {
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
         harness.rebuild();
         harness.paint();
-        let reply = find(harness.root_id(), "reply-github").expect("Reply on rohan's comment");
-        assert_eq!(
-            harness.get_layout_rect(reply).width(),
-            0.0,
-            "hidden until hovered"
-        );
-        let at = find(harness.root_id(), "Label: \"rohan\"")
-            .unwrap()
-            .get_visual_rect_no_clip()
-            .center();
-        harness.pointer_move(at.x, at.y);
-        harness.rebuild();
-        harness.paint();
-        assert!(harness.get_layout_rect(reply).width() > 0.0);
-        let c = reply.get_visual_rect_no_clip().center();
-        harness.click(c.x, c.y);
+        let root = harness.root_id();
+        cards::more::pick(&mut harness, root, "Reply");
         let composer = state.composer.get().expect("Reply opened the composer");
         assert_eq!(composer.thread_id.as_deref(), Some("gh-31"));
         assert_eq!(composer.anchor, thread.anchor);
@@ -7148,7 +7106,7 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert!(
-            find(harness.root_id(), "reply-github").is_none(),
+            !cards::more::rows(&mut harness, root).contains(&"Reply".to_string()),
             "nowhere for a draft to go"
         );
     }
@@ -7283,15 +7241,9 @@ mod tests {
         harness.rebuild();
         harness.paint();
         let root_id = harness.root_id();
-        let post = find(root_id, "post-to-github").expect("Post to GitHub");
-        let copy = find(root_id, "copy-message").expect("Copy");
+        let more = find(root_id, "comment-more").expect("the answer has a \u{22ef}");
         assert_eq!(
-            harness.get_layout_rect(post).width(),
-            0.0,
-            "hidden until hovered"
-        );
-        assert_eq!(
-            harness.get_layout_rect(copy).width(),
+            harness.get_layout_rect(more).width(),
             0.0,
             "hidden until hovered"
         );
@@ -7300,20 +7252,22 @@ mod tests {
         harness.pointer_move(at.x, at.y);
         harness.rebuild();
         harness.paint();
-        assert_eq!(harness.get_layout_rect(post).width(), 24.0);
-        assert_eq!(harness.get_layout_rect(copy).width(), 24.0);
+        assert_eq!(harness.get_layout_rect(more).width(), 24.0);
         // Over the message's top right corner, not in a row of its own.
-        let corner = post.get_visual_rect_no_clip();
+        let corner = more.get_visual_rect_no_clip();
         assert!(corner.y0 < 20.0, "at the top: {corner:?}");
         assert!(corner.x1 > 600.0 - 60.0, "at the right: {corner:?}");
+        assert_eq!(
+            cards::more::rows(&mut harness, root_id),
+            ["Quote Reply", "Post to GitHub", "Copy"],
+            "an answer is not edited"
+        );
 
         let _ = crate::ui::widgets::copied();
-        let c = copy.get_visual_rect_no_clip().center();
-        harness.click(c.x, c.y);
+        cards::more::pick(&mut harness, root_id, "Copy");
         assert_eq!(crate::ui::widgets::copied(), vec!["because".to_string()]);
 
-        let c = post.get_visual_rect_no_clip().center();
-        harness.click(c.x, c.y);
+        cards::more::pick(&mut harness, root_id, "Post to GitHub");
         let composer = state
             .composer
             .get()
@@ -7323,10 +7277,6 @@ mod tests {
         assert_eq!(composer.anchor, thread.anchor);
         assert_eq!(composer.editing, None, "a new draft, not an edit");
         assert_eq!(state.composer_draft.get(), "because");
-        assert!(
-            find(root_id, "edit-finding").is_none(),
-            "an answer is not edited"
-        );
     }
 
     /// A finding's message has Edit under the pointer, so the reader can
@@ -7353,18 +7303,7 @@ mod tests {
         harness.rebuild();
         harness.paint();
         let root_id = harness.root_id();
-        let edit = find(root_id, "edit-finding").expect("a finding offers Edit");
-        let at = find(root_id, "RichText")
-            .expect("the text")
-            .get_visual_rect_no_clip()
-            .center();
-        harness.pointer_move(at.x, at.y);
-        harness.rebuild();
-        harness.paint();
-        assert_eq!(harness.get_layout_rect(edit).width(), 24.0);
-
-        let c = edit.get_visual_rect_no_clip().center();
-        harness.click(c.x, c.y);
+        cards::more::pick(&mut harness, root_id, "Edit");
         let composer = state.composer.get().expect("Edit opened the composer");
         assert_eq!(composer.editing.as_deref(), Some("f1"));
         assert_eq!(composer.thread_id.as_deref(), Some("finding-1"));
@@ -7373,7 +7312,7 @@ mod tests {
         harness.paint();
         let root_id = harness.root_id();
         assert!(
-            find(root_id, "edit-finding").is_none(),
+            find(root_id, "comment-more").is_none(),
             "the composer took the row"
         );
         assert!(find(root_id, "Label: \"Save\"").is_some());
@@ -7450,7 +7389,6 @@ mod tests {
         harness.rebuild();
         harness.paint();
         let root_id = harness.root_id();
-        let post = find(root_id, "post-to-github").expect("a finding offers it");
         let at = harness.get_layout_rect(root_id).center();
         harness.pointer_move(at.x, at.y);
         harness.rebuild();
@@ -7466,8 +7404,7 @@ mod tests {
             actions.intersect(prose).is_zero_area(),
             "the actions sit beside the text, not on it: {actions:?} over {prose:?}"
         );
-        let c = post.get_visual_rect_no_clip().center();
-        harness.click(c.x, c.y);
+        cards::more::pick(&mut harness, root_id, "Post to GitHub");
         let composer = state.composer.get().expect("the composer opened");
         assert_eq!(composer.thread_id.as_deref(), Some("finding-1"));
         assert_eq!(composer.destination, Destination::GitHub);
@@ -7602,15 +7539,7 @@ mod tests {
         harness.rebuild();
         harness.paint();
         let root_id = harness.root_id();
-        let post = find(root_id, "post-to-github").expect("nowhere to reply, so it comments");
-        assert!(find(root_id, "copy-message").is_some(), "Copy stays");
-
-        let at = harness.get_layout_rect(root_id).center();
-        harness.pointer_move(at.x, at.y);
-        harness.rebuild();
-        harness.paint();
-        let c = post.get_visual_rect_no_clip().center();
-        harness.click(c.x, c.y);
+        cards::more::pick(&mut harness, root_id, "Post to GitHub");
         let composer = state
             .composer
             .get()
@@ -7628,9 +7557,10 @@ mod tests {
         state.pull_request.set(None);
         harness.rebuild();
         harness.paint();
-        assert!(
-            find(harness.root_id(), "post-to-github").is_none(),
-            "nowhere at all"
+        assert_eq!(
+            cards::more::rows(&mut harness, root_id),
+            ["Quote Reply", "Copy", "Edit"],
+            "nowhere at all; the rest stays"
         );
     }
 
@@ -7657,28 +7587,23 @@ mod tests {
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
         harness.rebuild();
         harness.paint();
-        assert!(
-            find(harness.root_id(), "post-to-github").is_none(),
-            "no pull request yet"
-        );
+        let offers_post = |harness: &mut HeadlessHarness| {
+            let root = harness.root_id();
+            cards::more::rows(harness, root).contains(&"Post to GitHub".to_string())
+        };
+        assert!(!offers_post(&mut harness), "no pull request yet");
 
         state.pull_request.set(Some(Arc::new(pull())));
         harness.rebuild();
         harness.paint();
-        assert!(
-            find(harness.root_id(), "post-to-github").is_some(),
-            "the pull request landed"
-        );
+        assert!(offers_post(&mut harness), "the pull request landed");
 
         let mut closed = pull();
         closed.state = "closed".into();
         state.pull_request.set(Some(Arc::new(closed)));
         harness.rebuild();
         harness.paint();
-        assert!(
-            find(harness.root_id(), "post-to-github").is_none(),
-            "closed takes no review"
-        );
+        assert!(!offers_post(&mut harness), "closed takes no review");
     }
 
     /// The draft the reader leaves in `thread`, bound for GitHub.
