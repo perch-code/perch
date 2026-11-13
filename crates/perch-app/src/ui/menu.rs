@@ -64,6 +64,8 @@ pub struct Menu {
     /// Where the rows that stay under the list start, in sight however
     /// far it scrolls; none for a menu that is all list.
     foot: Option<usize>,
+    /// What to run once the menu has gone, picked from or not.
+    on_close: Option<Rc<dyn Fn()>>,
 }
 
 enum Entry {
@@ -121,6 +123,7 @@ impl Menu {
             most_checked: None,
             max_height: None,
             foot: None,
+            on_close: None,
         }
     }
 
@@ -212,6 +215,14 @@ impl Menu {
     /// however far a long one scrolls: a way out such as "Open on GitHub".
     pub fn footer(mut self) -> Self {
         self.foot = Some(self.entries.len());
+        self
+    }
+
+    /// Run `closed` once the menu has gone, however it went: for a button
+    /// that stays drawn while its menu is up. It runs before a picked
+    /// row does.
+    pub fn on_close(mut self, closed: impl Fn() + 'static) -> Self {
+        self.on_close = Some(Rc::new(closed));
         self
     }
 
@@ -861,6 +872,12 @@ impl Host {
                 None => overlay.clear_focus(),
             }
             floem::action::remove_overlay(overlay);
+        }
+        let closed = self
+            .levels
+            .with_untracked(|l| l.first().and_then(|l| l.menu.on_close.clone()));
+        if let Some(closed) = closed {
+            closed();
         }
     }
 

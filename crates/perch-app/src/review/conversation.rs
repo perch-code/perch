@@ -2881,11 +2881,7 @@ mod tests {
         harness.pointer_move(c.x, c.y);
         harness.rebuild();
         harness.paint();
-        let ask = find(card, "ask-about").expect("the comment offers Ask about this");
-        let c = ask.get_visual_rect_no_clip().center();
-        harness.click(c.x, c.y);
-        harness.rebuild();
-        harness.paint();
+        crate::review::cards::more::pick(&mut harness, card, "Ask About This");
         let composer = state.composer.get().expect("the composer opened");
         assert_eq!(composer.thread_id.as_deref(), Some("gh-31"));
         assert_eq!(
@@ -2965,7 +2961,7 @@ mod tests {
         let root = harness.root_id();
         let comment = find(root, "card:comment").unwrap();
         to_top(&mut harness, comment);
-        hover_and_click(&mut harness, comment, "delete-comment");
+        crate::review::cards::more::pick(&mut harness, comment, "Delete\u{2026}");
         assert_eq!(state.confirm_comment.get().as_deref(), Some("IC_1"));
         assert!(shown(&harness, "delete-comment-confirmation"));
         let cancel = find(comment, "cancel-delete-comment").unwrap();
@@ -2975,7 +2971,7 @@ mod tests {
 
         while commands.try_recv().is_ok() {}
         let comment = find(harness.root_id(), "card:comment").unwrap();
-        hover_and_click(&mut harness, comment, "delete-comment");
+        crate::review::cards::more::pick(&mut harness, comment, "Delete\u{2026}");
         let delete = find(comment, "confirm-delete-comment").unwrap();
         click_on(&mut harness, delete);
         assert!(matches!(
@@ -2994,13 +2990,10 @@ mod tests {
         );
 
         let review = find(root, "card:review").unwrap();
-        let c = review.get_visual_rect_no_clip().center();
-        harness.pointer_move(c.x, c.y);
-        harness.rebuild();
-        harness.paint();
+        let rows = crate::review::cards::more::rows(&mut harness, review);
         assert!(
-            find(review, "delete-comment").is_none(),
-            "a review is not deleted from here"
+            !rows.is_empty() && !rows.iter().any(|r| r.starts_with("Delete")),
+            "a review is not deleted from here: {rows:?}"
         );
     }
 
@@ -3021,7 +3014,7 @@ mod tests {
         comment.scroll_to(None);
         harness.rebuild();
         harness.paint();
-        hover_and_click(&mut harness, comment, "edit-comment");
+        crate::review::cards::more::pick(&mut harness, comment, "Edit");
         let composer = state.composer.get().expect("Edit opened the composer");
         assert_eq!(composer.editing.as_deref(), Some("IC_1"));
         assert_eq!(composer.thread_id, None);
@@ -3078,13 +3071,10 @@ mod tests {
         );
 
         let review = find(harness.root_id(), "card:review").unwrap();
-        let c = review.get_visual_rect_no_clip().center();
-        harness.pointer_move(c.x, c.y);
-        harness.rebuild();
-        harness.paint();
+        let rows = crate::review::cards::more::rows(&mut harness, review);
         assert!(
-            find(review, "edit-comment").is_none(),
-            "not without GitHub's say so"
+            !rows.is_empty() && !rows.contains(&"Edit".to_string()),
+            "not without GitHub's say so: {rows:?}"
         );
     }
 
@@ -3117,7 +3107,7 @@ mod tests {
             card.scroll_to(None);
             harness.rebuild();
             harness.paint();
-            hover_and_click(&mut harness, card, "edit-comment");
+            crate::review::cards::more::pick(&mut harness, card, "Edit");
             let composer = state
                 .composer
                 .get()
@@ -3190,11 +3180,8 @@ mod tests {
             card.scroll_to(None);
             harness.rebuild();
             harness.paint();
-            let c = card.get_visual_rect_no_clip().center();
-            harness.pointer_move(c.x, c.y);
-            harness.rebuild();
-            harness.paint();
-            assert!(find(card, "edit-comment").is_none(), "{name}");
+            let rows = crate::review::cards::more::rows(&mut harness, card);
+            assert!(!rows.contains(&"Edit".to_string()), "{name}: {rows:?}");
         }
     }
 
@@ -3356,7 +3343,10 @@ mod tests {
         harness.rebuild();
         harness.paint();
         assert!(find(comment, "quote-reply").is_some());
-        assert!(find(comment, "edit-comment").is_none());
+        assert_eq!(
+            crate::review::cards::more::rows(&mut harness, comment),
+            ["Ask About This", "Copy Link", "Open on GitHub"]
+        );
     }
 
     /// Double-click the first word of the linked text under `card` that

@@ -54,8 +54,8 @@ use crate::theme;
 use crate::timefmt;
 use crate::ui::profile_card::with_profile_card;
 use crate::ui::widgets::{
-    avatar, clickable, confirmation, name_label, open_in_browser, sidebar_glyph, underlined_link,
-    Name,
+    avatar, clickable, confirmation, copy_to_clipboard, name_label, open_in_browser, sidebar_glyph,
+    underlined_link, Name,
 };
 
 /// What a card's row in the column is keyed by. A row with the same key is
@@ -273,61 +273,139 @@ pub(crate) fn byline(app: AppState, who: Byline, trailing: floem::AnyView) -> im
     .style(|s| s.items_center().width_full().min_width(0.0))
 }
 
-/// The right end of a GitHub byline, a glyph each and all only while the
-/// card is hovered: whatever the caller puts first, a Reply on a review
-/// comment or Quote reply on a card; Ask about this, the reaction picker
-/// and the permalink. `react` is the subject's node id; an entry an older
+/// What a GitHub entry's `⋯` menu holds besides what [`actions`] draws
+/// beside it: Ask about this, its link, and Edit and Delete where the
+/// entry offers them.
+#[derive(Default)]
+pub(crate) struct More {
+    pub(crate) ask: Option<Rc<dyn Fn()>>,
+    /// The entry on GitHub; empty for one with no page of its own.
+    pub(crate) url: String,
+    pub(crate) edit: Option<Offered>,
+    pub(crate) delete: Option<Offered>,
+}
+
+/// A row of the `⋯` menu that is there only while `may` says so.
+pub(crate) struct Offered {
+    may: Rc<dyn Fn() -> bool>,
+    action: Rc<dyn Fn()>,
+}
+
+/// The right end of a GitHub byline, drawn only while the card is
+/// hovered: `reply`, a Reply on a review comment or Quote reply on a
+/// card; the reaction picker; and a `⋯` whose menu has the rest, as
+/// github.com's has. `react` is the subject's node id; an entry an older
 /// build kept without one has no picker, since GitHub could not be told
 /// what it was for.
 pub(crate) fn actions(
     state: ReviewState,
     backend: Rc<Backend>,
     hovered: RwSignal<bool>,
-    leading: Option<floem::AnyView>,
-    ask: Option<Rc<dyn Fn()>>,
+    reply: Option<floem::AnyView>,
     react: Option<String>,
-    url: String,
+    more: More,
 ) -> floem::AnyView {
     Stack::horizontal((
-        match leading {
-            Some(leading) => leading,
-            None => Empty::new().into_any(),
-        },
-        match ask {
-            Some(ask) => hover_action(
-                hovered,
-                SidebarIcon::Thread,
-                "Ask about this",
-                "ask-about",
-                ask,
-            )
-            .into_any(),
+        match reply {
+            Some(reply) => reply,
             None => Empty::new().into_any(),
         },
         match react {
             Some(node_id) => react_button(state, backend, node_id, Some(hovered)).into_any(),
             None => Empty::new().into_any(),
         },
-        if url.is_empty() {
-            Empty::new().into_any()
-        } else {
-            hover_action(
-                hovered,
-                SidebarIcon::Link,
-                "Open on GitHub",
-                "github-link",
-                Rc::new(move || open_in_browser(&url)),
-            )
-            .style(|s| s.margin_right(-4.0))
-            .into_any()
-        },
+        more_button(hovered, more).style(|s| s.margin_right(-4.0)),
     ))
     .style(|s| s.items_center().gap(4.0).flex_shrink(0.0_f32))
     .into_any()
 }
 
-/// A glyph that does `action`, named by its tip, "Ask about this" or
-/// "Reply", drawn only while the card is under the pointer. Hidden rather
+/// The `⋯` at the end of an entry's actions, and the menu under it: Ask
+/// about this, Copy link and Open on GitHub, then Edit, then Delete in
+/// red, each past a line. Drawn while the card is under the pointer, and
+/// while its menu is up, which the pointer leaves the card to reach.
+/// Absent while the menu would have no rows.
+fn more_button(hovered: RwSignal<bool>, more: More) -> impl IntoView {
+    use crate::ui::menu::{Menu, MenuExt};
+
+    let More {
+        ask,
+        url,
+        edit,
+        delete,
+    } = more;
+    let offered = |row: &Option<Offered>| {
+        let may = row.as_ref().map(|row| row.may.clone());
+        Memo::new(move |_| may.as_ref().is_some_and(|may| may()))
+    };
+    let (may_edit, may_delete) = (offered(&edit), offered(&delete));
+    let always = ask.is_some() || !url.is_empty();
+    let any = Memo::new(move |_| always || may_edit.get() || may_delete.get());
+    let up = RwSignal::new(false);
+    let menu = move || {
+        let mut menu = Menu::new().on_close(move || up.set(false));
+        if let Some(ask) = ask.clone() {
+            menu = menu.item("Ask About This", |item| {
+                item.icon(SidebarIcon::Thread).action(move || ask())
+            });
+        }
+        if !url.is_empty() {
+            let (copy, open) = (url.clone(), url.clone());
+            menu = menu
+                .item("Copy Link", |item| {
+                    item.icon(SidebarIcon::Link)
+                        .action(move || copy_to_clipboard(copy.clone()))
+                })
+                .item("Open on GitHub", |item| {
+                    item.icon(SidebarIcon::External)
+                        .action(move || open_in_browser(&open))
+                });
+        }
+        menu = menu.separator();
+        if let Some(edit) = edit.as_ref().filter(|_| may_edit.get_untracked()) {
+            let edit = edit.action.clone();
+            menu = menu.item("Edit", |item| {
+                item.icon(SidebarIcon::Pencil).action(move || edit())
+            });
+        }
+        menu = menu.separator();
+        if let Some(delete) = delete.as_ref().filter(|_| may_delete.get_untracked()) {
+            let delete = delete.action.clone();
+            // It asks first, under the comment.
+            menu = menu.item("Delete\u{2026}", |item| {
+                item.icon(SidebarIcon::Trash)
+                    .tint(theme::closed)
+                    .icon_tint(theme::closed)
+                    .action(move || delete())
+            });
+        }
+        up.set(!menu.is_empty());
+        menu
+    };
+    tip(
+        Container::new(
+            sidebar_glyph(SidebarIcon::Ellipsis, theme::fg_muted)
+                .style(|s| s.size(14.0, 14.0).pointer_events_none()),
+        )
+        .dropdown(menu)
+        .debug_name("comment-more")
+        .style(move |s| {
+            let up = up.get();
+            clickable(s)
+                .size(24.0, 24.0)
+                .items_center()
+                .justify_center()
+                .border_radius(12.0)
+                .hover(|s| s.background(theme::badge_bg()))
+                .apply_if(up, |s| s.background(theme::badge_bg()))
+                .apply_if(!any.get() || (!hovered.get() && !up), |s| s.hide())
+        }),
+        "More".to_string(),
+    )
+}
+
+/// A glyph that does `action`, named by its tip, "Reply" or "Copy",
+/// drawn only while the card is under the pointer. Hidden rather
 /// than absent, so the byline keeps its shape.
 pub(crate) fn hover_action(
     hovered: RwSignal<bool>,
@@ -376,81 +454,112 @@ pub(crate) fn quote_action(
     )
 }
 
-/// Delete under the pointer, for a comment on GitHub, while `may` says
-/// GitHub lets the reader delete it; absent otherwise, as Quote reply is
-/// where it has nowhere to go. It asks first, under the comment.
+/// Delete in the `⋯` menu, for a comment on GitHub, while `may` says
+/// GitHub lets the reader delete it. It asks first, under the comment.
 pub(crate) fn delete_action(
     state: ReviewState,
-    hovered: RwSignal<bool>,
     node_id: String,
     may: impl Fn() -> bool + 'static,
-) -> floem::AnyView {
-    let delete = Rc::new(move || state.confirm_comment.set(Some(node_id.clone())));
-    offered_action(
-        hovered,
-        may,
-        SidebarIcon::Trash,
-        "Delete",
-        "delete-comment",
-        delete,
-    )
-}
-
-/// Edit under the pointer, for a comment on GitHub, while `may` says
-/// GitHub lets the reader edit it; absent otherwise. `edit` opens the
-/// composer in the comment's place with its text.
-pub(crate) fn edit_action(
-    hovered: RwSignal<bool>,
-    may: impl Fn() -> bool + 'static,
-    edit: Rc<dyn Fn()>,
-) -> floem::AnyView {
-    offered_action(
-        hovered,
-        may,
-        SidebarIcon::Pencil,
-        "Edit",
-        "edit-comment",
-        edit,
-    )
-}
-
-/// A hover action that is there only while `may` says so.
-fn offered_action(
-    hovered: RwSignal<bool>,
-    may: impl Fn() -> bool + 'static,
-    icon: SidebarIcon,
-    label: &'static str,
-    name: &'static str,
-    action: Rc<dyn Fn()>,
-) -> floem::AnyView {
-    let offered = Memo::new(move |_| may());
-    dyn_container(
-        move || offered.get(),
-        move |offered| {
-            if !offered {
-                return Empty::new().into_any();
-            }
-            hover_action(hovered, icon, label, name, action.clone()).into_any()
-        },
-    )
-    .into_any()
-}
-
-/// What a card puts first among its [`actions`], in a row: Quote reply or
-/// a thread's Reply where there is one, Edit, then Delete where the card
-/// offers it.
-pub(crate) fn leading_actions(
-    first: Option<floem::AnyView>,
-    edit: floem::AnyView,
-    delete: Option<floem::AnyView>,
-) -> floem::AnyView {
-    let first = first.unwrap_or_else(|| Empty::new().into_any());
-    match delete {
-        Some(delete) => Stack::horizontal((first, edit, delete)),
-        None => Stack::horizontal((first, edit)),
+) -> Offered {
+    Offered {
+        may: Rc::new(may),
+        action: Rc::new(move || state.confirm_comment.set(Some(node_id.clone()))),
     }
-    .style(|s| s.items_center().gap(4.0))
-    .into_any()
+}
+
+/// Edit in the `⋯` menu, for a comment on GitHub, while `may` says
+/// GitHub lets the reader edit it. `edit` opens the composer in the
+/// comment's place with its text.
+pub(crate) fn edit_action(may: impl Fn() -> bool + 'static, edit: Rc<dyn Fn()>) -> Offered {
+    Offered {
+        may: Rc::new(may),
+        action: edit,
+    }
+}
+
+/// An entry's `⋯` menu, as tests reach it.
+#[cfg(test)]
+pub(crate) mod more {
+    use floem::headless::HeadlessHarness;
+    use floem::ViewId;
+
+    fn find(id: ViewId, name: &str) -> Option<ViewId> {
+        if id.debug_name().contains(name) {
+            return Some(id);
+        }
+        id.children().into_iter().find_map(|c| find(c, name))
+    }
+
+    fn settle(harness: &mut HeadlessHarness) {
+        for _ in 0..3 {
+            harness.rebuild();
+            harness.paint();
+        }
+    }
+
+    /// Bring `card` into view, hover its byline and press its `⋯`;
+    /// whether a menu came up.
+    fn open(harness: &mut HeadlessHarness, card: ViewId) -> bool {
+        crate::ui::menu::close();
+        card.scroll_to(None);
+        settle(harness);
+        let Some(button) = find(card, "comment-more") else {
+            return false;
+        };
+        // The button has no size until its card is hovered; what holds
+        // it does.
+        let mut held = button;
+        while held.get_visual_rect_no_clip().area() == 0.0 {
+            let Some(parent) = held.parent() else {
+                return false;
+            };
+            held = parent;
+        }
+        let c = held.get_visual_rect_no_clip().center();
+        harness.pointer_move(c.x, c.y);
+        settle(harness);
+        if harness.get_layout_rect(button).height() == 0.0 {
+            return false;
+        }
+        let c = button.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        settle(harness);
+        crate::ui::menu::is_open()
+    }
+
+    /// The names of the rows of `card`'s `⋯` menu, in order; none where
+    /// it has no menu.
+    pub(crate) fn rows(harness: &mut HeadlessHarness, card: ViewId) -> Vec<String> {
+        fn collect(id: ViewId, out: &mut Vec<String>) {
+            if let Some((_, label)) = id.debug_name().split_once("menu-row:") {
+                // A view's name ends with what kind of view it is.
+                let label = label.split(" - ").next().unwrap_or_default();
+                if !label.is_empty() {
+                    out.push(label.to_string());
+                }
+            }
+            for child in id.children() {
+                collect(child, out);
+            }
+        }
+        let mut rows = Vec::new();
+        if open(harness, card) {
+            collect(harness.root_id(), &mut rows);
+            crate::ui::menu::close();
+            settle(harness);
+        }
+        rows
+    }
+
+    /// Pick the row named `label` from `card`'s `⋯` menu.
+    pub(crate) fn pick(harness: &mut HeadlessHarness, card: ViewId, label: &str) {
+        assert!(open(harness, card), "the entry has a \u{22ef} menu");
+        let row = find(harness.root_id(), &format!("menu-row:{label}"))
+            .unwrap_or_else(|| panic!("the menu offers {label}"));
+        let c = row.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        settle(harness);
+    }
 }
 
 /// "Delete this comment?" with Delete and Cancel, under the comment that
@@ -508,7 +617,8 @@ pub(crate) fn delete_comment_confirmation(
     .style(move |s| s.width_full().apply_if(!asking.get(), |s| s.hide()))
 }
 
-/// Follow the pointer in and out of a card, for Ask about this.
+/// Follow the pointer in and out of a card, for the actions it shows
+/// only under the pointer.
 ///
 /// Whether the pointer is over the view is read from floem's hover path
 /// when either event arrives, rather than taken from which one it was.
@@ -1320,8 +1430,15 @@ pub fn description_card(
     let scope = description.id();
     let quote =
         (!body.trim().is_empty()).then(|| quote_reply_button(state, hovered, body.clone(), scope));
-    let edit = edit_in_card_action(state, hovered, node_id.clone(), body.clone(), editable);
-    let leading = leading_actions(quote, edit, None);
+    let more = More {
+        edit: Some(edit_in_card_action(
+            state,
+            node_id.clone(),
+            body.clone(),
+            editable,
+        )),
+        ..More::default()
+    };
     let react = reactable(&node_id);
     let reactions = reactions_under(app, state, backend.clone(), &react);
     let shown = Stack::vertical((clamped(state, description, whole), reactions))
@@ -1338,15 +1455,7 @@ pub fn description_card(
                             .color(theme::fg())
                     }),
                     Empty::new().style(|s| s.flex_grow(1.0_f32)),
-                    actions(
-                        state,
-                        backend,
-                        hovered,
-                        Some(leading),
-                        None,
-                        react,
-                        String::new(),
-                    ),
+                    actions(state, backend, hovered, quote, react, more),
                 ))
                 .style(|s| s.items_center().width_full().min_width(0.0)),
             ),
@@ -1550,15 +1659,19 @@ pub fn comment_card(
     let text = markdown::render_linked(&comment.body, state).into_any();
     let quote = quote_reply_button(state, hovered, comment.body.clone(), text.id());
     let deletable = comment.viewer_can_delete && !comment.node_id.is_empty();
-    let delete = delete_action(state, hovered, comment.node_id.clone(), move || deletable);
-    let edit = edit_in_card_action(
-        state,
-        hovered,
-        comment.node_id.clone(),
-        comment.body.clone(),
-        comment.viewer_can_update,
-    );
-    let leading = leading_actions(Some(quote), edit, Some(delete));
+    let more = More {
+        ask: Some(ask),
+        url: comment.html_url.clone(),
+        edit: Some(edit_in_card_action(
+            state,
+            comment.node_id.clone(),
+            comment.body.clone(),
+            comment.viewer_can_update,
+        )),
+        delete: Some(delete_action(state, comment.node_id.clone(), move || {
+            deletable
+        })),
+    };
     let confirm = delete_comment_confirmation(app, state, backend.clone(), comment.node_id.clone());
     let react = reactable(&comment.node_id);
     let reactions = reactions_under(app, state, backend.clone(), &react);
@@ -1571,15 +1684,7 @@ pub fn comment_card(
             byline_strip(byline(
                 app,
                 who,
-                actions(
-                    state,
-                    backend,
-                    hovered,
-                    Some(leading),
-                    Some(ask),
-                    react,
-                    comment.html_url.clone(),
-                ),
+                actions(state, backend, hovered, Some(quote), react, more),
             )),
             Some(body),
         ),
@@ -1587,19 +1692,12 @@ pub fn comment_card(
     )
 }
 
-/// Edit under the pointer for what has `node_id` on GitHub, while `may`
+/// Edit in the `⋯` menu for what has `node_id` on GitHub, while `may`
 /// says GitHub lets the reader edit it: it opens the composer in the
 /// card with `body`, its words as written.
-fn edit_in_card_action(
-    state: ReviewState,
-    hovered: RwSignal<bool>,
-    node_id: String,
-    body: String,
-    may: bool,
-) -> floem::AnyView {
+fn edit_in_card_action(state: ReviewState, node_id: String, body: String, may: bool) -> Offered {
     let may = may && !node_id.is_empty();
     edit_action(
-        hovered,
         move || may,
         Rc::new(move || {
             state.open_composer_with(
@@ -1697,20 +1795,18 @@ pub fn review_card(
         .map(|body| markdown::render_linked(body, state).into_any());
     // A summary is quoted and edited where it is; a review with none has
     // nothing to quote or edit here.
-    let leading = summary
+    let quote = summary
         .clone()
         .zip(text.as_ref().map(|text| text.id()))
-        .map(|(body, scope)| {
-            let quote = quote_reply_button(state, hovered, body.clone(), scope);
-            let edit = edit_in_card_action(
-                state,
-                hovered,
-                review.node_id.clone(),
-                body,
-                review.viewer_can_update,
-            );
-            leading_actions(Some(quote), edit, None)
-        });
+        .map(|(body, scope)| quote_reply_button(state, hovered, body, scope));
+    let edit = summary.clone().map(|body| {
+        edit_in_card_action(
+            state,
+            review.node_id.clone(),
+            body,
+            review.viewer_can_update,
+        )
+    });
     // A review with no summary has nothing to react to; GitHub allows it,
     // but there would be nothing to draw the pills under.
     let react = summary.as_ref().and_then(|_| reactable(&review.node_id));
@@ -1722,7 +1818,13 @@ pub fn review_card(
         edited_in_card(app, state, backend.clone(), review.node_id.clone(), shown)
     });
 
-    let trailing = actions(state, backend, hovered, leading, ask, react, url);
+    let more = More {
+        ask,
+        url,
+        edit,
+        delete: None,
+    };
+    let trailing = actions(state, backend, hovered, quote, react, more);
     track_hover(
         card(byline_strip(byline(app, who, trailing)), body),
         hovered,

@@ -3133,8 +3133,8 @@ fn foot_button(label: &'static str, face: ThreadFace, action: impl Fn() + 'stati
 /// One message, laid out as github.com lays out a comment: a face, a
 /// byline with the name, when it was said and its labels, and what was
 /// said under it. A comment on GitHub, the reader's or anyone's, has
-/// Reply, Ask about this, the reaction picker and its link at the end of
-/// its byline under the pointer, and the reactions on it under its text. A draft has the
+/// Reply, the reaction picker and a `⋯` menu at the end of its byline
+/// under the pointer, and the reactions on it under its text. A draft has the
 /// Draft mark, and edit and delete. The reader's question to an agent
 /// and the agent's answer are Perch's alone; in a thread that has
 /// something on GitHub each is labelled Perch only, so the reader never
@@ -3765,8 +3765,9 @@ fn reply_and_ask(
 }
 
 /// A comment from GitHub in a thread, under its author's face and
-/// byline, with the reactions on it under its text, and Reply, Ask about
-/// this, the reaction picker and its link on hover.
+/// byline, with the reactions on it under its text, and Reply, the
+/// reaction picker and a `⋯` menu on hover: Ask about this, its link, and
+/// Edit and Delete where GitHub lets the reader.
 #[allow(clippy::too_many_arguments)]
 fn github_message_view(
     app: AppState,
@@ -3783,19 +3784,22 @@ fn github_message_view(
     let (reply_button, ask) = reply_and_ask(app, state, thread, text.id(), hovered);
     let node_id = message.node_id.clone().unwrap_or_default();
     let may = node_id.clone();
-    let delete = cards::delete_action(state, hovered, node_id.clone(), move || {
+    let delete = cards::delete_action(state, node_id.clone(), move || {
         !may.is_empty() && state.may_delete_line_comment(&may)
     });
     let may = node_id.clone();
     let edit = cards::edit_action(
-        hovered,
         move || !may.is_empty() && state.may_update_line_comment(&may),
         edit_in_row(state, thread, message),
     );
-    let leading = cards::leading_actions(Some(reply_button), edit, Some(delete));
     let confirm = cards::delete_comment_confirmation(app, state, backend.clone(), node_id);
     let react = message.node_id.as_deref().and_then(cards::reactable);
-    let url = message.html_url.clone().unwrap_or_default();
+    let more = cards::More {
+        ask: Some(ask),
+        url: message.html_url.clone().unwrap_or_default(),
+        edit: Some(edit),
+        delete: Some(delete),
+    };
     let reactions = cards::reactions_under(app, state, backend.clone(), &react);
     let name = login.clone();
     let author = login.clone();
@@ -3813,10 +3817,9 @@ fn github_message_view(
             state,
             backend.clone(),
             hovered,
-            Some(leading),
-            Some(ask),
+            Some(reply_button),
             react,
-            url,
+            more,
         ),
     );
     let avatar = crate::ui::widgets::avatar(
@@ -3888,10 +3891,10 @@ fn draft_message_view(
 }
 
 /// A comment of the reader's that is on GitHub, under their face and
-/// name with the comment's time, Reply, Ask about this, the reaction
-/// picker and its link on hover, as anyone's comment has, and the
-/// reactions on it under its text, Edit, which opens the composer in its
-/// row, and Delete, which asks first. No Draft mark.
+/// name with the comment's time, Reply, the reaction picker and the `⋯`
+/// menu on hover, as anyone's comment has, and the reactions on it under
+/// its text. The menu's Edit opens the composer in its row, and its
+/// Delete asks first. No Draft mark.
 fn posted_message_view(
     app: AppState,
     state: ReviewState,
@@ -3907,16 +3910,16 @@ fn posted_message_view(
     // The reader wrote it, so GitHub lets them edit and delete it.
     let node_id = message.node_id.clone().unwrap_or_default();
     let deletable = !node_id.is_empty();
-    let delete = cards::delete_action(state, hovered, node_id.clone(), move || deletable);
-    let edit = cards::edit_action(
-        hovered,
-        move || deletable,
-        edit_in_row(state, thread, message),
-    );
-    let leading = cards::leading_actions(Some(reply_button), edit, Some(delete));
+    let delete = cards::delete_action(state, node_id.clone(), move || deletable);
+    let edit = cards::edit_action(move || deletable, edit_in_row(state, thread, message));
     let confirm = cards::delete_comment_confirmation(app, state, backend.clone(), node_id);
     let react = message.node_id.as_deref().and_then(cards::reactable);
-    let url = message.html_url.clone().unwrap_or_default();
+    let more = cards::More {
+        ask: Some(ask),
+        url: message.html_url.clone().unwrap_or_default(),
+        edit: Some(edit),
+        delete: Some(delete),
+    };
     let reactions = cards::reactions_under(app, state, backend.clone(), &react);
     let byline = byline_row(
         name_label(
@@ -3932,10 +3935,9 @@ fn posted_message_view(
             state,
             backend.clone(),
             hovered,
-            Some(leading),
-            Some(ask),
+            Some(reply_button),
             react,
-            url,
+            more,
         ),
     );
     let body = Stack::vertical((text, reactions, confirm))
@@ -6845,8 +6847,9 @@ mod tests {
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
         harness.rebuild();
         harness.paint();
+        let root_id = harness.root_id();
         assert!(
-            find(harness.root_id(), "edit-comment").is_none(),
+            !cards::more::rows(&mut harness, root_id).contains(&"Edit".to_string()),
             "not without GitHub's say so"
         );
 
@@ -6854,17 +6857,8 @@ mod tests {
         harness.rebuild();
         harness.paint();
         let root_id = harness.root_id();
-        let edit = find(root_id, "edit-comment").expect("GitHub says the reader may");
-        let at = find(root_id, "RichText")
-            .expect("the text")
-            .get_visual_rect_no_clip()
-            .center();
-        harness.pointer_move(at.x, at.y);
-        harness.rebuild();
-        harness.paint();
-        assert_eq!(harness.get_layout_rect(edit).width(), 24.0);
-        let c = edit.get_visual_rect_no_clip().center();
-        harness.click(c.x, c.y);
+        // GitHub says the reader may.
+        cards::more::pick(&mut harness, root_id, "Edit");
         let composer = state.composer.get().expect("Edit opened the composer");
         assert_eq!(composer.editing.as_deref(), Some("gh-31"));
         assert_eq!(state.composer_draft.get(), "epoch");
@@ -6920,8 +6914,8 @@ mod tests {
     /// the link and the reactions, and no Draft mark, edit or delete,
     /// whether it opened its thread or answered someone's; the thread it
     /// opened has no byline of its own over it. Under the pointer it has
-    /// Reply, Ask about this, the picker and the link, as anyone's
-    /// comment has, and none of them otherwise.
+    /// Reply, the picker and the menu with Ask about this and its link,
+    /// as anyone's comment has, and none of them otherwise.
     #[test]
     fn a_posted_comment_of_the_readers_keeps_its_byline_link_and_reactions() {
         let root = TestRoot::new();
@@ -6969,7 +6963,7 @@ mod tests {
                 find(card, "posted-when").is_some(),
                 "{name}: the comment's time"
             );
-            assert!(find(card, "github-link").is_some(), "{name}: its link");
+            assert!(find(card, "comment-more").is_some(), "{name}: its menu");
             assert!(find(card, "reactions").is_some(), "{name}: its reactions");
             assert!(
                 find(card, "draft-pill").is_none(),
@@ -6998,7 +6992,7 @@ mod tests {
         );
 
         let ours = find(harness.root_id(), "ours").unwrap();
-        let actions = ["reply-github", "ask-about", "react-button", "github-link"];
+        let actions = ["reply-github", "react-button", "comment-more"];
         let drawn = |harness: &HeadlessHarness| -> Vec<bool> {
             actions
                 .iter()
@@ -7010,7 +7004,7 @@ mod tests {
         };
         assert_eq!(
             drawn(&harness),
-            [false; 4],
+            [false; 3],
             "nothing until the pointer is on it"
         );
         let at = find(ours, "posted-when")
@@ -7020,7 +7014,37 @@ mod tests {
         harness.pointer_move(at.x, at.y);
         harness.rebuild();
         harness.paint();
-        assert_eq!(drawn(&harness), [true; 4], "all four under the pointer");
+        assert_eq!(drawn(&harness), [true; 3], "all three under the pointer");
+        assert_eq!(
+            cards::more::rows(&mut harness, ours),
+            [
+                "Ask About This",
+                "Copy Link",
+                "Open on GitHub",
+                "Edit",
+                "Delete\u{2026}"
+            ]
+        );
+        // The pointer leaves the comment for the menu, and the button
+        // the menu hangs from stays until the menu goes.
+        let more = find(ours, "comment-more").unwrap();
+        let c = more.get_visual_rect_no_clip().center();
+        harness.click(c.x, c.y);
+        harness.pointer_move(700.0, 850.0);
+        harness.rebuild();
+        harness.paint();
+        assert!(crate::ui::menu::is_open());
+        assert_eq!(drawn(&harness), [false, false, true], "its menu is up");
+        crate::ui::menu::close();
+        harness.rebuild();
+        harness.paint();
+        assert_eq!(drawn(&harness), [false; 3], "the menu went");
+
+        cards::more::pick(&mut harness, ours, "Copy Link");
+        assert_eq!(
+            crate::ui::widgets::copied(),
+            ["https://github.com/acme/repo/pull/42#discussion_r88"]
+        );
     }
 
     /// With words of a comment selected, its Reply quotes them into the
@@ -7221,13 +7245,8 @@ mod tests {
         let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 600.0);
         harness.rebuild();
         harness.paint();
-        let ask = find(harness.root_id(), "ask-about").expect("Ask about this");
-        let at = harness.get_layout_rect(harness.root_id()).center();
-        harness.pointer_move(at.x, at.y);
-        harness.rebuild();
-        harness.paint();
-        let c = ask.get_visual_rect_no_clip().center();
-        harness.click(c.x, c.y);
+        let root_id = harness.root_id();
+        cards::more::pick(&mut harness, root_id, "Ask About This");
         let composer = state
             .composer
             .get()
@@ -7791,7 +7810,7 @@ mod tests {
                 "{face:?}: the draft is last"
             );
             assert!(
-                find(rows[0], "ask-about").is_some(),
+                find(rows[0], "comment-more").is_some(),
                 "{face:?}: rohan's comment"
             );
 

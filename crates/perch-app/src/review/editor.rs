@@ -6340,11 +6340,8 @@ mod window {
         harness.pointer_move(inside.0, inside.1);
         harness.rebuild();
         harness.paint();
-        let ask = find(harness.root_id(), "ask-about").expect("the comment offers Ask about this");
-        let c = ask.get_visual_rect_no_clip().center();
-        harness.click(c.x, c.y);
-        harness.rebuild();
-        harness.paint();
+        let root_id = harness.root_id();
+        crate::review::cards::more::pick(&mut harness, root_id, "Ask About This");
         let composer = state.composer.get().expect("the composer opened");
         assert_eq!(composer.thread_id.as_deref(), Some("gh-100"));
         assert_eq!(
