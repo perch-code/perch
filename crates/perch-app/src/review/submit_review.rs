@@ -386,7 +386,8 @@ fn drafts_list(state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
 /// commit when that is not the head and the draft opens a thread there
 /// (a reply carries no commit), the start of its text, and a delete while
 /// the pointer is over it. Where it goes is a link: it shuts the popover
-/// and opens Code on the draft's first line.
+/// and opens Code on the draft's first line, or Conversation on its card
+/// when the thread is outdated and so has none in the code.
 fn draft_row(
     state: ReviewState,
     backend: Rc<Backend>,
@@ -404,6 +405,7 @@ fn draft_row(
         .map(|a| (a.path.clone(), a.start_line.min(a.line) as usize));
     let linked = lines.is_some();
     let message_id = draft.message_id.clone();
+    let thread_id = draft.thread_id.clone();
     let delete = move || {
         if state.submit_review_pending.with_untracked(Option::is_some) {
             return;
@@ -432,8 +434,21 @@ fn draft_row(
                 .debug_name("draft-reply-glyph"),
             Label::derived(move || location.clone())
                 .on_event_stop(el::Click, move |_, _| {
-                    if let Some((path, line)) = &lines {
-                        review_menu::close(state, false);
+                    let Some((path, line)) = &lines else { return };
+                    review_menu::close(state, false);
+                    // An outdated thread has no card in the code, and its
+                    // line numbers are an older commit's: its card on
+                    // Conversation is where the draft is. Read at the
+                    // click, since a thread turns outdated under a row.
+                    let outdated = state.comment_threads.with_untracked(|threads| {
+                        threads.iter().any(|t| t.id == thread_id && t.outdated)
+                    });
+                    if outdated {
+                        crate::review::notified::go_to(
+                            state,
+                            crate::review::doc::CardId::Thread(thread_id.clone()),
+                        );
+                    } else {
                         state.go_to_file(path, Some((line.saturating_sub(1), 0)));
                     }
                 })
@@ -1339,6 +1354,32 @@ mod tests {
         assert!(!state.review_open.get());
         assert_eq!(state.tab.get(), crate::review::model::ItemTab::Code);
         assert_eq!(state.pending_jump.get(), Some(("src/x.rs".into(), 40, 0)));
+    }
+
+    /// An outdated draft's lines are an older commit's, and it has no card
+    /// in the code: its row goes to the card on Conversation.
+    #[test]
+    fn an_outdated_drafts_location_goes_to_its_card_on_conversation() {
+        let root = TestRoot::new();
+        let state = review_state();
+        state.tab.set(crate::review::model::ItemTab::Code);
+        let mut thread = draft_thread("t1", "0ld5ha1", None, "one");
+        thread.outdated = true;
+        state.comment_threads.set(Arc::new(vec![thread]));
+        open(state, None);
+        let view = control(AppState::new(), state, Rc::new(Backend::detached()));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 760.0, 800.0);
+        harness.rebuild();
+        harness.paint();
+
+        click(&mut harness, "draft-location");
+        assert!(!state.review_open.get());
+        assert_eq!(state.tab.get(), crate::review::model::ItemTab::Conversation);
+        assert_eq!(
+            state.pending_focus_card.get(),
+            Some(crate::review::doc::CardId::Thread("t1".into()))
+        );
+        assert_eq!(state.pending_jump.get(), None);
     }
 
     #[test]
