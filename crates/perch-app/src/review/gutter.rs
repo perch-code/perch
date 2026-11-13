@@ -710,7 +710,7 @@ fn anchor_slot(
             (_, true) => {
                 let plus_file = plus_file.clone();
                 Container::new(
-                    sidebar_glyph(SidebarIcon::Plus, theme::canvas).style(|s| s.size(11.0, 11.0)),
+                    sidebar_glyph(SidebarIcon::Plus, theme::canvas).style(|s| s.size(12.0, 12.0)),
                 )
                 .debug_name("gutter-plus")
                 .on_event_stop(el::Click, move |_, _| {
