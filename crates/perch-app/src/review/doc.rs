@@ -46,12 +46,11 @@ pub const REVEAL_STEP: usize = 20;
 pub const COLLAPSED_ROWS: usize = 2;
 
 /// How many rows the composer's card is given before it has been laid
-/// out: its first row, Write and Preview with the text styles, the box
-/// at the height it opens at, the pickers and Send, and the room around
-/// them, which is a little over twelve rows, so thirteen. The card's
+/// out: its bar, Write and Preview with the text styles, the box at the height it opens at, the pickers and Send, and
+/// the room around them, which is a little over ten rows, so eleven. The card's
 /// laid-out height corrects it, and grows it as the question is typed
 /// or the box dragged taller.
-pub const COMPOSER_ROWS: usize = 13;
+pub const COMPOSER_ROWS: usize = 11;
 
 /// The column a message body is taken to wrap at for the estimate. The
 /// card is wider or narrower than this, and the estimate only has to be

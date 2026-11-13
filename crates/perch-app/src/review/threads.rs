@@ -360,13 +360,6 @@ pub fn composer_view(
     use floem::views::editor::core::selection::Selection;
 
     let footer_backend = backend.clone();
-    let anchor_label = match &composer.anchor {
-        Some(a) => a.label(),
-        None => state
-            .item
-            .with(|i| i.as_ref().and_then(|i| i.branch().map(str::to_string)))
-            .unwrap_or_else(|| "Worktree".to_string()),
-    };
     let outdated = composer
         .thread_id
         .as_ref()
@@ -800,44 +793,35 @@ pub fn composer_view(
             }
         });
 
+    // The close shares the bar with Write and Preview: a row of its own
+    // over it made two headers of one. What the box is on goes unsaid,
+    // as it sits on the page or under the lines it is about.
+    let title = outdated_pill(outdated);
+    // Put the box away. Nothing typed into it is kept. The button is the
+    // size of the thread's `...` and sits where it sits, since the
+    // thread's card takes the composer's place. While the comment goes
+    // there is no putting it away.
+    let close = icon_button(
+        || SidebarIcon::Close,
+        theme::fg_subtle,
+        move || {
+            if !posting_here_now() {
+                state.close_composer();
+            }
+        },
+    )
+    .debug_name("composer-close")
+    .style(move |s| {
+        s.size(theme::THREAD_MENU, theme::THREAD_MENU)
+            .apply_if(posting_here(), |s| s.hide())
+    });
     let whole_box = Stack::vertical((
-        Stack::horizontal((
-            sidebar_glyph(SidebarIcon::Thread, theme::accent)
-                .style(|s| s.size(13.0, 13.0).margin_right(6.0)),
-            Label::derived(move || anchor_label.clone()).style(|s| {
-                s.font_size(theme::TEXT_BADGE)
-                    .font_family(theme::CODE_FONT_STACK.to_string())
-                    .color(theme::fg_muted())
-                    .text_ellipsis()
-                    .min_width(0.0)
-                    .selectable(false)
-            }),
-            outdated_pill(outdated),
-            Empty::new().style(|s| s.flex_grow(1.0_f32)),
-            // Put the box away. Nothing typed into it is kept. The button
-            // is the size of the thread's `...` and sits where it sits,
-            // since the thread's card takes the composer's place. While
-            // the comment goes there is no putting it away.
-            icon_button(
-                || SidebarIcon::Close,
-                theme::fg_subtle,
-                move || {
-                    if !posting_here_now() {
-                        state.close_composer();
-                    }
-                },
-            )
-            .debug_name("composer-close")
-            .style(move |s| {
-                s.size(theme::THREAD_MENU, theme::THREAD_MENU)
-                    .apply_if(posting_here(), |s| s.hide())
-            }),
-        ))
-        .style(|s| s.items_center().width_full().margin_bottom(8.0)),
-        tabs.view(
+        tabs.view_titled(
             state,
             resizable_editor_box(Grip::composer(state), editor, face == ThreadFace::Inline),
             theme::COMPOSER_MAX_HEIGHT,
+            title,
+            close,
         ),
         composer_error_line(state),
         composer_footer(

@@ -528,6 +528,20 @@ impl Tabs {
         write: impl IntoView + 'static,
         tallest: f64,
     ) -> impl IntoView {
+        self.view_titled(state, write, tallest, Empty::new(), Empty::new())
+    }
+
+    /// As `view`, with a box's own header in the bar rather than on a
+    /// row over it: `title` after the tabs, giving way to the styles
+    /// where the two do not fit, and `end` after the styles, a close.
+    pub fn view_titled(
+        &self,
+        state: ReviewState,
+        write: impl IntoView + 'static,
+        tallest: f64,
+        title: impl IntoView + 'static,
+        end: impl IntoView + 'static,
+    ) -> impl IntoView {
         let previewing = self.previewing;
         let refocus = self.refocus.clone();
         let inner = self.editor.editor_view_id;
@@ -544,7 +558,13 @@ impl Tabs {
         let editor = self.editor.clone();
         let original = self.original.clone();
         Stack::vertical((
-            bar(self.editor.clone(), previewing, self.original.clone()),
+            bar(
+                self.editor.clone(),
+                previewing,
+                self.original.clone(),
+                title,
+                end,
+            ),
             write,
             preview(
                 state,
@@ -565,11 +585,13 @@ impl Tabs {
 
 /// Write and Preview on the left, and while writing, the styles on the
 /// right, in two groups as GitHub has them, after Suggest where the box
-/// has it.
+/// has it. `title` sits after the tabs and `end` after the styles.
 fn bar(
     editor: Editor,
     previewing: RwSignal<bool>,
     original: Option<Rc<dyn Fn() -> Option<Original>>>,
+    title: impl IntoView + 'static,
+    end: impl IntoView + 'static,
 ) -> impl IntoView {
     let tab_editor = editor.clone();
     let suggest_editor = editor.clone();
@@ -664,6 +686,8 @@ fn bar(
                     .border_color(theme::border())
                     .border_radius(8.0)
             }),
+        // The title is cut short before the styles wrap.
+        Container::new(title).style(|s| s.min_width(0.0).flex_shrink(8.0_f32)),
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
         Stack::horizontal((
             suggest_button,
@@ -688,6 +712,7 @@ fn bar(
                 .justify_end()
                 .apply_if(previewing.get(), |s| s.hide())
         }),
+        Container::new(end).style(|s| s.flex_shrink(0.0_f32)),
     ))
     .style(|s| s.items_center().width_full().gap(8.0).margin_bottom(8.0))
 }
