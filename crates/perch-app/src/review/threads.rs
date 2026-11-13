@@ -851,10 +851,16 @@ pub fn composer_view(
         };
         // Under a thread it is the thread's reply form, as GitHub's is:
         // white, in the thread's rule, with a box's corners.
-        base.apply_if(follow_up, |s| {
+        let base = base.apply_if(follow_up, |s| {
             s.background(theme::canvas())
                 .border_color(theme::border())
                 .border_radius(theme::RADIUS)
+        });
+        // In the code the thread's card is already around it and the
+        // editor has a border of its own: a third box between the two
+        // is one too many.
+        base.apply_if(follow_up && face == ThreadFace::Inline, |s| {
+            s.padding(0.0).border(0.0)
         })
     });
     whole_set.set(Some(floem::View::id(&whole_box)));
