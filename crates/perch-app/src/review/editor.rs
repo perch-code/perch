@@ -5390,8 +5390,8 @@ mod window {
         click(&mut harness, "You");
         assert_eq!(opened(), Vec::<String>::new(), "You led somewhere");
         assert!(
-            state.is_collapsed(&card),
-            "the click on You opened the card"
+            !state.is_collapsed(&card),
+            "You is no link, so the click is one on the row, which opens the card"
         );
     }
 

@@ -2123,7 +2123,9 @@ fn open_inline_card(
 /// chevron that collapses the card, the lines the thread is on,
 /// Outdated, Local on one of the reader's own, Hide resolved on one that
 /// is resolved, and the `...` menu. The chevron sits where the collapsed
-/// row has it, so it does not move out from under the pointer.
+/// row has it, so it does not move out from under the pointer. A click
+/// anywhere on the header that is not on one of its controls collapses
+/// the card, as the chevron does.
 fn inline_header(
     app: AppState,
     state: ReviewState,
@@ -2132,6 +2134,7 @@ fn inline_header(
 ) -> impl IntoView {
     let card_id = CardId::Thread(thread.id.clone());
     let toggle_id = card_id.clone();
+    let header_id = card_id.clone();
     Stack::horizontal((
         chevron(state, card_id, true),
         lines_heading(app, state, thread),
@@ -2148,9 +2151,11 @@ fn inline_header(
         ),
         menu,
     ))
+    .on_event_stop(el::Click, move |_, _| state.toggle_card(&header_id))
     .debug_name("thread-header")
     .style(|s| {
-        s.items_center()
+        clickable(s)
+            .items_center()
             .width_full()
             .height(theme::INLINE_THREAD_HEADER)
             .padding_horiz(theme::COLLAPSED_CARD_PADDING)
@@ -2293,11 +2298,13 @@ pub(crate) fn resolved_toggle(
 /// the chevron, the lines it is on, Outdated, Local on one of the
 /// reader's own, and Show resolved and the `...` menu at the end. It is
 /// the open card's header with the chevron pointing right, so nothing
-/// moves when Show resolved opens it.
+/// moves when Show resolved opens it. A click anywhere else on the row
+/// opens it too.
 fn resolved_row(app: AppState, state: ReviewState, thread: CommentThread) -> impl IntoView {
     let card_id = CardId::Thread(thread.id.clone());
     let toggle_id = card_id.clone();
     let open_id = card_id.clone();
+    let row_id = card_id.clone();
     Stack::horizontal((
         chevron(state, card_id, false),
         lines_heading(app, state, &thread),
@@ -2316,9 +2323,11 @@ fn resolved_row(app: AppState, state: ReviewState, thread: CommentThread) -> imp
         })
         .style(|s| s.margin_left(theme::COLLAPSED_CARD_PILL_GAP)),
     ))
+    .on_event_stop(el::Click, move |_, _| state.toggle_card(&row_id))
     .debug_name("resolved-row")
     .style(|s| {
-        s.items_center()
+        clickable(s)
+            .items_center()
             .width_full()
             .height_full()
             .padding_horiz(theme::COLLAPSED_CARD_PADDING)
@@ -2388,7 +2397,8 @@ fn collapsed_row(app: AppState, state: ReviewState, thread: CommentThread) -> im
 /// and name of the `author`, the first `line` of the first message, how
 /// many `more` messages follow, Outdated, and at the end whatever the
 /// card puts there. The author is read each time it is drawn, since who
-/// the reader is can land after the card is built.
+/// the reader is can land after the card is built. A click anywhere on
+/// the row that is not on one of its controls opens the card.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn collapsed_card_row(
     state: ReviewState,
@@ -2400,6 +2410,7 @@ pub(crate) fn collapsed_card_row(
     outdated: bool,
     trailing: floem::AnyView,
 ) -> impl IntoView {
+    let row_id = card_id.clone();
     Stack::horizontal((
         chevron(state, card_id, false),
         avatar.style(|s| s.margin_left(6.0).flex_shrink(0.0_f32)),
@@ -2424,8 +2435,11 @@ pub(crate) fn collapsed_card_row(
         outdated_pill(outdated),
         trailing,
     ))
+    .on_event_stop(el::Click, move |_, _| state.toggle_card(&row_id))
+    .debug_name("collapsed-row")
     .style(|s| {
-        s.items_center()
+        clickable(s)
+            .items_center()
             .width_full()
             .height_full()
             .padding_horiz(theme::COLLAPSED_CARD_PADDING)
@@ -2693,6 +2707,9 @@ pub fn thread_menu(
             })
         })
     })
+    // The press opened the menu: the click that ends it is not one on
+    // the header behind, which would collapse the card.
+    .on_event_stop(el::Click, |_, _| {})
     .debug_name("thread-menu")
     .style(move |s| {
         clickable(s)
@@ -8514,6 +8531,47 @@ mod tests {
             state.is_folded("gh-31"),
             "opening it in the code leaves Conversation folded"
         );
+    }
+
+    /// The whole header of a thread in the code collapses it, not the
+    /// chevron alone, and the whole of its one row opens it again. The
+    /// `...` menu is its own control: a click on it leaves the card open.
+    #[test]
+    fn a_click_anywhere_on_a_card_in_the_codes_header_toggles_it() {
+        let root = TestRoot::new();
+        let app = AppState::new();
+        let state = state_with_pull_request();
+        let mut thread = resolvable_thread(false);
+        thread.id = "t1".into();
+        thread.origin = ThreadOrigin::Local;
+        thread.github_id = None;
+        for message in &mut thread.messages {
+            message.thread_id = "t1".into();
+            message.origin = ThreadOrigin::Local;
+            message.author = Author::User;
+            message.github_id = None;
+        }
+        state.comment_threads.set(Arc::new(vec![thread.clone()]));
+        let (backend, _commands) = crate::backend::Backend::recording();
+        let view = thread_card(app, state, Rc::new(backend), thread).style(|s| s.width(600.0));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 800.0, 900.0);
+        harness.rebuild();
+        harness.paint();
+        let card = CardId::Thread("t1".into());
+        assert!(!state.is_collapsed(&card));
+
+        // The words, well clear of the chevron.
+        click(&mut harness, "lines-heading");
+        assert!(state.is_collapsed(&card));
+        assert!(find(harness.root_id(), "thread-header").is_none());
+
+        click(&mut harness, "collapsed-row");
+        assert!(!state.is_collapsed(&card));
+        assert!(find(harness.root_id(), "thread-header").is_some());
+
+        // Last, since the menu it opens takes the next click.
+        click(&mut harness, "thread-menu");
+        assert!(!state.is_collapsed(&card), "the menu is not the header");
     }
 
     /// A comment by whoever opened the pull request says Author in its
