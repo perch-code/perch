@@ -1408,8 +1408,8 @@ fn quote_reply(state: ReviewState, body: &str) {
 // ---------------------------------------------------------------------
 
 /// The pull request's or issue's own text, with the reactions on it under.
-/// Its strip is its title and the picker; who opened it and when is the
-/// summary's Author row.
+/// Its strip is the summary's line, what the item is and who opened it,
+/// with the card's actions before the line's status glyphs.
 pub fn description_card(
     app: AppState,
     state: ReviewState,
@@ -1447,17 +1447,11 @@ pub fn description_card(
     let shown = edited_in_card(app, state, backend.clone(), node_id, shown);
     track_hover(
         card(
-            byline_strip(
-                Stack::horizontal((
-                    Label::derived(|| "Description".to_string()).style(|s| {
-                        s.font_size(theme::TEXT_META)
-                            .font_weight(theme::weight_emphasis())
-                            .color(theme::fg())
-                    }),
-                    Empty::new().style(|s| s.flex_grow(1.0_f32)),
-                    actions(state, backend, hovered, quote, react, more),
-                ))
-                .style(|s| s.items_center().width_full().min_width(0.0)),
+            crate::review::summary::card_line(
+                app,
+                state,
+                backend.clone(),
+                actions(state, backend, hovered, quote, react, more),
             ),
             Some(shown),
         ),

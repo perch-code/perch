@@ -1757,8 +1757,8 @@ mod tests {
         found
     }
 
-    /// The page from its top: the summary, the description, the
-    /// composer, and the timeline under them, the newest card first and
+    /// The page from its top: the description, with the summary's line
+    /// as its strip, the composer, and the timeline under them, the newest card first and
     /// the oldest last. The title is the window bar's alone, and
     /// the item's runs, even with one there, are the bar's Agents
     /// dropdown's.
@@ -1797,7 +1797,12 @@ mod tests {
                 found.iter().map(|id| id.debug_name()).collect::<Vec<_>>()
             );
         }
-        let order = ["item summary", "card:description", "composer", "timeline"];
+        let (line, description) = (at("summary line"), at("card:description"));
+        assert!(
+            description.contains(line.origin()) && line.y1 <= description.y1,
+            "the line at {line:?} is not in the description {description:?}"
+        );
+        let order = ["card:description", "composer", "timeline"];
         for pair in order.windows(2) {
             let (above, below) = (at(pair[0]), at(pair[1]));
             assert!(
@@ -4185,9 +4190,10 @@ mod tests {
     #[test]
     fn the_composer_opened_at_the_foot_of_the_window_is_all_on_screen() {
         let (mut harness, _, state) = app_harness();
-        // The window cut to just under the ask box.
+        // The window cut under the ask box, with the room the composer
+        // needs to fit once the page has followed it.
         let foot = find(harness.root_id(), "composer").unwrap();
-        harness.set_size(1400.0, foot.get_visual_rect_no_clip().y1 + 2.0);
+        harness.set_size(1400.0, foot.get_visual_rect_no_clip().y1 + 100.0);
         harness.rebuild();
         harness.paint();
         let scroll = find(harness.root_id(), "conversation").unwrap();
@@ -4201,7 +4207,7 @@ mod tests {
             .unwrap()
             .get_visual_rect_no_clip();
         assert!(
-            composer.y0 >= viewport.y0 && composer.y1 <= viewport.y1,
+            composer.y0 >= viewport.y0 && composer.y1 <= viewport.y1 + 0.01,
             "the composer at {composer:?} is not all in the page {viewport:?}"
         );
     }
@@ -4246,7 +4252,7 @@ mod tests {
     fn the_page_keys_scroll_by_a_page() {
         let (mut harness, _, state) = app_harness();
         // Short enough that the page is over two pages long.
-        harness.set_size(1400.0, 300.0);
+        harness.set_size(1400.0, 240.0);
         harness.rebuild();
         harness.paint();
         let scroll = find(harness.root_id(), "conversation").unwrap();
@@ -4254,7 +4260,8 @@ mod tests {
             scroll.get_content_rect_local().height() - crate::theme::code_line_height() as f64;
         let column = find(harness.root_id(), "conversation column").unwrap();
         let top = column.get_visual_rect_no_clip().y0;
-        harness.click(700.0, 200.0);
+        // On the page beside the column, where a click opens nothing.
+        harness.click(460.0, 200.0);
         harness.rebuild();
 
         harness.dispatch_event(page_key(Paging::Down));
@@ -4366,7 +4373,7 @@ mod tests {
             discussion(),
             move |state| crate::review::notified::follow(state, &thread),
         );
-        harness.set_size(1400.0, 380.0);
+        harness.set_size(1400.0, 320.0);
         harness.rebuild();
         harness.paint();
         (harness, app, state)

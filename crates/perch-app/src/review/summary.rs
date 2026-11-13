@@ -39,32 +39,72 @@ use crate::ui::widgets::{
     worktree_menu, Name,
 };
 
-/// The block at the top of the page: the notices, then the line. Hidden
-/// rather than empty when there is nothing to say, so what follows it
-/// starts at the top.
+/// Whether the line is the description card's strip rather than the
+/// summary's: a pull request and an issue have a description, and a
+/// worktree of the reader's own has none.
+fn line_in_card(state: ReviewState) -> bool {
+    state.pull_request.with(Option::is_some) || state.issue.with(Option::is_some)
+}
+
+/// The block at the top of the page: the notices, then the line, unless
+/// the description card has it. Hidden rather than empty when there is
+/// nothing to say, so what follows it starts at the top.
 pub fn summary(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     let author = Memo::new(move |_| github_data(app, state).author);
+    let in_card = Memo::new(move |_| line_in_card(state));
     let shown = Memo::new(move |_| {
-        subject_state(state).is_some()
-            || !repo_of(state).is_empty()
-            || churn_of(state).is_some()
-            || author.with(Option::is_some)
-            || state.historical_review.with(Option::is_some)
+        state.historical_review.with(Option::is_some)
             || notice_text(state).is_some()
+            || (!in_card.get()
+                && (subject_state(state).is_some()
+                    || !repo_of(state).is_empty()
+                    || churn_of(state).is_some()
+                    || author.with(Option::is_some)))
     });
     // Asked as the item opens, so the details have them when they open.
     ask(app, state, &backend);
+    let line_backend = backend.clone();
     Stack::vertical((
-        notices(app, state, backend.clone()),
-        line(app, state, backend, author),
+        notices(app, state, backend),
+        dyn_container(
+            move || in_card.get(),
+            move |in_card| {
+                if in_card {
+                    Empty::new().into_any()
+                } else {
+                    line(app, state, line_backend.clone(), author, None).into_any()
+                }
+            },
+        )
+        .style(move |s| s.width_full().apply_if(in_card.get(), |s| s.hide())),
     ))
     .debug_name("item summary")
     .style(move |s| {
+        // Over a card, a notice is a card's gap from it; the line alone
+        // heads the page, and keeps a title's room under it.
+        let under = if in_card.get() {
+            theme::CARD_GAP
+        } else {
+            theme::CONVERSATION_TITLE_GAP
+        };
         s.flex_col()
             .width_full()
-            .padding_bottom(theme::CONVERSATION_TITLE_GAP)
+            .padding_bottom(under)
             .apply_if(!shown.get(), |s| s.hide())
     })
+}
+
+/// The line as the description card's strip, in place of a heading: the
+/// card's `actions`, drawn under the pointer, come before the status
+/// glyphs, which then stay where they are at the line's end.
+pub fn card_line(
+    app: AppState,
+    state: ReviewState,
+    backend: Rc<Backend>,
+    actions: floem::AnyView,
+) -> impl IntoView {
+    let author = Memo::new(move |_| github_data(app, state).author);
+    line(app, state, backend, author, Some(actions))
 }
 
 /// What the details ask the backend for as an item opens.
@@ -384,6 +424,7 @@ fn line(
     state: ReviewState,
     backend: Rc<Backend>,
     author: Memo<Option<(String, String, Option<jiff::Timestamp>)>>,
+    actions: Option<floem::AnyView>,
 ) -> impl IntoView {
     let present = move || {
         subject_state(state).is_some()
@@ -423,6 +464,7 @@ fn line(
         churn(state),
         // What is left of the line, so the glyphs end it.
         Empty::new().style(|s| s.flex_grow(1.0_f32)),
+        actions.unwrap_or_else(|| Empty::new().into_any()),
         status_glyphs(state),
     ))
     .debug_name("summary line")
@@ -2508,13 +2550,16 @@ pub(crate) mod tests {
     #[test]
     fn the_summary_tops_the_page_in_a_line_and_only_on_conversation() {
         let (mut harness, _, state) = pull_request_harness();
+        // With no notice over it, the description heads the page, and
+        // the line is its strip.
         let column = rect(&harness, "conversation column");
-        let summary = rect(&harness, "item summary");
+        let summary = rect(&harness, "card:description");
         assert_eq!(
             (summary.x0, summary.y0),
             (column.x0, column.y0),
-            "the summary at {summary:?} is not at the top of the page {column:?}"
+            "the description at {summary:?} is not at the top of the page {column:?}"
         );
+        assert_eq!(rect(&harness, "item summary").height(), 0.0);
         // A pull request with a checkout and passing checks: the pill,
         // the number, who opened it, the churn and the checks, on one
         // line. The rest is in the bar's details.
