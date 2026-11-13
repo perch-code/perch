@@ -1365,14 +1365,22 @@ mod tests {
             "the pane's control is up while the drawer covers the lights"
         );
 
-        // Nearly shut, the pane's control is up, where it rests.
+        // Nearly shut, the pane's control is up, where it rests. Off macOS
+        // there are no lights and no lane past the bar's padding, so the
+        // control waits for the drawer to be gone.
         state.sidebar_slide.set(Some(10.0 / theme::SIDEBAR_WIDTH));
         harness.rebuild();
         let toggle = named(harness.root_id(), "empty bar")
             .and_then(|bar| named(bar, "drawer toggle"))
             .unwrap();
         assert!((pane().x0 - 10.0).abs() < 1e-6);
-        assert!((toggle.get_visual_rect_no_clip().x0 - theme::ACTIVITY_RAIL_WIDTH).abs() < 1e-6);
+        if theme::ACTIVITY_RAIL_WIDTH - theme::REVIEW_HEADER_PADDING >= 10.0 {
+            assert!(
+                (toggle.get_visual_rect_no_clip().x0 - theme::ACTIVITY_RAIL_WIDTH).abs() < 1e-6
+            );
+        } else {
+            assert!(toggle.get_visual_rect_no_clip().is_zero_area());
+        }
 
         // There: the drawer is gone.
         state.sidebar_slide.set(None);
