@@ -837,7 +837,12 @@ pub fn composer_view(
     ))
     .debug_name("composer-box")
     .style(move |s| {
-        let base = s.flex_col().padding(12.0).border(1.0).border_radius(14.0);
+        let base = s
+            .flex_col()
+            .padding_horiz(12.0)
+            .padding_vert(theme::COMPOSER_GAP)
+            .border(1.0)
+            .border_radius(14.0);
         let base = match face {
             ThreadFace::Card => base
                 .width_full()
@@ -1106,7 +1111,12 @@ fn composer_footer(
             send_button(move || save.to_string(), send).debug_name("composer-send"),
         ))
         .debug_name("composer-edit-footer")
-        .style(|s| s.items_center().width_full().gap(6.0).margin_top(8.0))
+        .style(|s| {
+            s.items_center()
+                .width_full()
+                .gap(6.0)
+                .margin_top(theme::COMPOSER_GAP)
+        })
         .into_any();
     }
     // A steer goes to the agent at work, whatever the pickers say, so it
@@ -1126,7 +1136,12 @@ fn composer_footer(
             send_button(|| "Send".to_string(), send).debug_name("composer-send"),
         ))
         .debug_name("composer-steer-footer")
-        .style(|s| s.items_center().width_full().gap(6.0).margin_top(8.0))
+        .style(|s| {
+            s.items_center()
+                .width_full()
+                .gap(6.0)
+                .margin_top(theme::COMPOSER_GAP)
+        })
         .into_any();
     }
     let mode = move || {
@@ -1154,7 +1169,7 @@ fn composer_footer(
                 .gap(6.0)
                 .flex_wrap(floem::taffy::FlexWrap::Wrap)
                 .justify_end()
-                .margin_top(8.0)
+                .margin_top(theme::COMPOSER_GAP)
         })
         .into_any(),
         FooterMode::Confirming => Stack::horizontal((
@@ -1222,7 +1237,12 @@ fn composer_footer(
             )
             .debug_name("composer-post"),
         ))
-        .style(|s| s.items_center().width_full().gap(6.0).margin_top(8.0))
+        .style(|s| {
+            s.items_center()
+                .width_full()
+                .gap(6.0)
+                .margin_top(theme::COMPOSER_GAP)
+        })
         .into_any(),
         FooterMode::Posting => Stack::horizontal((
             Label::derived(move || {
@@ -1246,7 +1266,12 @@ fn composer_footer(
             .debug_name("composer-posting"),
             Empty::new().style(|s| s.flex_grow(1.0_f32)),
         ))
-        .style(|s| s.items_center().width_full().height(30.0).margin_top(8.0))
+        .style(|s| {
+            s.items_center()
+                .width_full()
+                .height(30.0)
+                .margin_top(theme::COMPOSER_GAP)
+        })
         .into_any(),
     })
     .into_any()
@@ -1588,7 +1613,7 @@ pub(crate) fn agent_face(
     effort: impl Fn() -> String + 'static,
 ) -> impl IntoView {
     let face = |s: floem::style::Style| {
-        s.font_size(theme::TEXT_BADGE)
+        s.font_size(theme::TEXT_META)
             .selectable(false)
             .pointer_events_none()
     };
@@ -1947,20 +1972,33 @@ fn approvals_note(approvals: perch_github::Approvals, agent: Option<&AgentChoice
     .to_string()
 }
 
-/// A pop-up button as Claude's app draws them under its box: its face
-/// with no border or chevron, on grey under the pointer.
+/// A pop-up button under the composer's box: its face and a chevron in
+/// a bordered white pill as tall as Send, so it reads as a control on
+/// the card's grey and on a thread's white alike.
 fn quiet_menu_button(
     face: impl IntoView + 'static,
     menu: impl Fn() -> crate::ui::menu::Menu + 'static,
 ) -> impl IntoView {
-    Container::new(face).dropdown(menu).style(|s| {
+    Stack::horizontal((
+        face,
+        sidebar_glyph(SidebarIcon::ChevronDown, theme::fg_subtle)
+            .style(|s| s.size(11.0, 11.0).pointer_events_none()),
+    ))
+    .dropdown(menu)
+    .style(|s| {
         s.items_center()
-            .height(26.0)
-            .padding_horiz(7.0)
-            .border_radius(theme::RADIUS)
+            .flex_shrink(0.0_f32)
+            .gap(6.0)
+            .height(30.0)
+            .padding_left(10.0)
+            .padding_right(8.0)
+            .background(theme::canvas())
+            .border(1.0)
+            .border_color(theme::border())
+            .border_radius(9.0)
             .selectable(false)
             .hover(|s| {
-                s.background(theme::canvas_subtle())
+                s.background(theme::canvas_hover())
                     .cursor(CursorStyle::Pointer)
             })
     })
@@ -1974,7 +2012,7 @@ fn tinted_menu_button(
 ) -> impl IntoView {
     quiet_menu_button(
         Label::derived(label).style(move |s| {
-            s.font_size(theme::TEXT_BADGE)
+            s.font_size(theme::TEXT_META)
                 .color(color())
                 .selectable(false)
                 .pointer_events_none()
@@ -6692,7 +6730,11 @@ mod tests {
         assert_eq!(boxed.y0 - row.y0, theme::THREAD_COMMENT_SPACE);
         assert_eq!(row.y1 - boxed.y1, theme::THREAD_INSET);
         let first = composer_box.children()[0].get_visual_rect_no_clip();
-        assert_eq!(first.y0 - boxed.y0, 13.0, "border and padding");
+        assert_eq!(
+            first.y0 - boxed.y0,
+            1.0 + theme::COMPOSER_GAP,
+            "border and padding"
+        );
 
         // Escape, with the text still in the box, gives the row back: the
         // words are safe in the cache.

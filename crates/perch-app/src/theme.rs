@@ -1029,6 +1029,11 @@ pub const PULL_BODY_MAX_HEIGHT: f64 = 900.0;
 /// happens in, which is the room under the last line, and the grip
 /// drawn in the middle of it.
 pub const COMPOSER_GRIP: f64 = EDITOR_BOX_PADDING;
+/// The room over and under the composer's rows: between the card's edge
+/// and the bar, the bar and the box, the box and the footer, and the
+/// footer and the card's edge, so each row sits in the middle of its
+/// band of grey.
+pub const COMPOSER_GAP: f64 = 10.0;
 pub const COMPOSER_GRIP_WIDTH: f64 = 28.0;
 pub const COMPOSER_GRIP_MARK: f64 = 3.0;
 

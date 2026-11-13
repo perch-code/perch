@@ -528,7 +528,7 @@ impl Tabs {
         write: impl IntoView + 'static,
         tallest: f64,
     ) -> impl IntoView {
-        self.view_titled(state, write, tallest, Empty::new(), Empty::new())
+        self.build(state, write, tallest, Empty::new(), Empty::new(), 8.0)
     }
 
     /// As `view`, with a box's own header in the bar rather than on a
@@ -541,6 +541,19 @@ impl Tabs {
         tallest: f64,
         title: impl IntoView + 'static,
         end: impl IntoView + 'static,
+    ) -> impl IntoView {
+        self.build(state, write, tallest, title, end, theme::COMPOSER_GAP)
+    }
+
+    /// The bar, `gap` over the box or the preview in its place.
+    fn build(
+        &self,
+        state: ReviewState,
+        write: impl IntoView + 'static,
+        tallest: f64,
+        title: impl IntoView + 'static,
+        end: impl IntoView + 'static,
+        gap: f64,
     ) -> impl IntoView {
         let previewing = self.previewing;
         let refocus = self.refocus.clone();
@@ -564,6 +577,7 @@ impl Tabs {
                 self.original.clone(),
                 title,
                 end,
+                gap,
             ),
             write,
             preview(
@@ -592,6 +606,7 @@ fn bar(
     original: Option<Rc<dyn Fn() -> Option<Original>>>,
     title: impl IntoView + 'static,
     end: impl IntoView + 'static,
+    gap: f64,
 ) -> impl IntoView {
     let tab_editor = editor.clone();
     let suggest_editor = editor.clone();
@@ -714,7 +729,7 @@ fn bar(
         }),
         Container::new(end).style(|s| s.flex_shrink(0.0_f32)),
     ))
-    .style(|s| s.items_center().width_full().gap(8.0).margin_bottom(8.0))
+    .style(move |s| s.items_center().width_full().gap(8.0).margin_bottom(gap))
 }
 
 /// The text as it will read, in a box the size the editor's was, or
