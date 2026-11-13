@@ -1484,6 +1484,8 @@ pub struct ReviewState {
     /// to give the keyboard back to when it shuts.
     pub review_open: RwSignal<bool>,
     pub review_opener: RwSignal<Option<floem::ViewId>>,
+    /// The button and popover together, so a press anywhere else shuts it.
+    pub review_anchor: RwSignal<Option<floem::ViewId>>,
     /// Whether the popover shows the agents' settings. On a pull request
     /// they fold to one line under the reader's review; a branch has
     /// nothing else to show, and always shows them.
@@ -1659,6 +1661,8 @@ pub struct ReviewState {
     pub merge_error: RwSignal<Option<String>>,
     /// Whether the merge box hangs open under the bar's Merge.
     pub merge_open: RwSignal<bool>,
+    /// The button and box together, so a press anywhere else shuts it.
+    pub merge_anchor: RwSignal<Option<floem::ViewId>>,
     /// Latest merge mutation observed for the displayed checkout. Every event
     /// also carries the item and pull-request identity, so checkout resets can
     /// clear this without letting a different subject settle the new view.
@@ -2110,6 +2114,7 @@ impl ReviewState {
             files_pending: RwSignal::new(None),
             files_reload: RwSignal::new(Vec::new()),
             review_open: RwSignal::new(false),
+            review_anchor: RwSignal::new(None),
             review_opener: RwSignal::new(None),
             review_agents_expanded: RwSignal::new(false),
             review_expanded: RwSignal::new(None),
@@ -2172,6 +2177,7 @@ impl ReviewState {
             merge_pending: RwSignal::new(false),
             merge_error: RwSignal::new(None),
             merge_open: RwSignal::new(false),
+            merge_anchor: RwSignal::new(None),
             merge_attempt_id: RwSignal::new(None),
             pull_readiness: RwSignal::new(None),
             pull_bases: RwSignal::new(None),

@@ -416,7 +416,7 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         .on_event_cont(el::WindowLostFocus, move |_, _| {
             blur_backend.set_window_key(false)
         })
-        // A press outside the Agents dropdown or the usage popover shuts
+        // A press outside one of the bar's popovers shuts
         // it, and goes on to whatever it landed on. Caught on the way down,
         // as most controls stop their presses.
         .on_event_with_config(
@@ -1102,8 +1102,8 @@ fn close_item_or_window(
     }
 }
 
-/// Shut the Agents dropdown and the usage popover when a press with
-/// `hit_path` lands outside the button each hangs from.
+/// Shut the bar's popovers (Agents, usage, feedback, Review, Merge) when a
+/// press with `hit_path` lands outside the button each hangs from.
 fn dismiss_popovers(review: ReviewState, hit_path: Option<&[floem::ElementId]>) {
     // A menu opened from a popover is not under it in the tree: a press
     // on one of its rows, or the press that puts it away, leaves the
@@ -1127,6 +1127,23 @@ fn dismiss_popovers(review: ReviewState, hit_path: Option<&[floem::ElementId]>) 
     }
     if review.feedback_open.get_untracked() && !inside(review.feedback_anchor.get_untracked()) {
         feedback::close(review, false);
+    }
+    // The Review popover stays under the sheet a reviewer's output is read
+    // in, and while a review is on its way to GitHub. Its draft is kept.
+    if review.review_open.get_untracked()
+        && review.agent_output.with_untracked(Option::is_none)
+        && !inside(review.review_anchor.get_untracked())
+    {
+        crate::review::review_menu::cancel(review, false);
+    }
+    // The merge box stays while it says why a merge failed: shutting it
+    // forgets the error, and it may have come up while the reader was busy
+    // elsewhere.
+    if review.merge_open.get_untracked()
+        && review.merge_error.with_untracked(Option::is_none)
+        && !inside(review.merge_anchor.get_untracked())
+    {
+        crate::review::merge_button::close(review);
     }
 }
 

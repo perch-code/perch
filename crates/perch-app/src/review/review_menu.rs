@@ -145,7 +145,7 @@ pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
         })
         .debug_name("review-control");
 
-    Stack::new((
+    let stack = Stack::new((
         button,
         dyn_container(
             move || state.review_open.get(),
@@ -163,17 +163,28 @@ pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                 .inset_right(0.0)
                 .z_index(100)
         }),
-    ))
-    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if key.code == Code::Escape && key.modifiers.is_empty() && state.review_open.get_untracked()
-        {
-            cancel(state, true);
-            EventPropagation::Stop
-        } else {
-            EventPropagation::Continue
+    ));
+    // A press outside the button and its popover shuts it: see
+    // `ui::dismiss_popovers`.
+    let anchor = stack.view_id();
+    Effect::new(move |_| {
+        if state.review_open.get() {
+            state.review_anchor.set(Some(anchor));
         }
-    })
-    .style(|s| s.position(Position::Relative).flex_shrink(0.0_f32))
+    });
+    stack
+        .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+            if key.code == Code::Escape
+                && key.modifiers.is_empty()
+                && state.review_open.get_untracked()
+            {
+                cancel(state, true);
+                EventPropagation::Stop
+            } else {
+                EventPropagation::Continue
+            }
+        })
+        .style(|s| s.position(Position::Relative).flex_shrink(0.0_f32))
 }
 
 /// Open the popover over whatever else hangs from the bar.

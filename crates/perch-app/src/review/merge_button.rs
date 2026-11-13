@@ -124,7 +124,7 @@ pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
     // On a Memo: the signal notifies on every write, and each rebuild
     // would be a fresh popover taking the keyboard again.
     let shown = Memo::new(move |_| state.merge_open.get());
-    Stack::new((
+    let stack = Stack::new((
         button,
         dyn_container(
             move || shown.get(),
@@ -143,28 +143,39 @@ pub fn control(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
                 .inset_right(0.0)
                 .z_index(100)
         }),
-    ))
-    .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-        if key.code == Code::Escape && key.modifiers.is_empty() && state.merge_open.get_untracked()
-        {
-            close(state);
-            if let Some(id) = main_id.get_untracked() {
-                id.request_focus();
-            }
-            EventPropagation::Stop
-        } else {
-            EventPropagation::Continue
+    ));
+    // A press outside the button and its box shuts it: see
+    // `ui::dismiss_popovers`.
+    let anchor = stack.view_id();
+    Effect::new(move |_| {
+        if state.merge_open.get() {
+            state.merge_anchor.set(Some(anchor));
         }
-    })
-    .debug_name("merge-control")
-    .style(move |s| {
-        // A control in the bar, which lets the pointer through elsewhere
-        // so a press beside the controls drags the window.
-        s.position(Position::Relative)
-            .flex_shrink(0.0_f32)
-            .pointer_events_auto()
-            .apply_if(kind.get() == Kind::None, |s| s.hide())
-    })
+    });
+    stack
+        .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+            if key.code == Code::Escape
+                && key.modifiers.is_empty()
+                && state.merge_open.get_untracked()
+            {
+                close(state);
+                if let Some(id) = main_id.get_untracked() {
+                    id.request_focus();
+                }
+                EventPropagation::Stop
+            } else {
+                EventPropagation::Continue
+            }
+        })
+        .debug_name("merge-control")
+        .style(move |s| {
+            // A control in the bar, which lets the pointer through elsewhere
+            // so a press beside the controls drags the window.
+            s.position(Position::Relative)
+                .flex_shrink(0.0_f32)
+                .pointer_events_auto()
+                .apply_if(kind.get() == Kind::None, |s| s.hide())
+        })
 }
 
 /// Open the merge box over whatever else hangs from the bar, as the bar's
@@ -541,6 +552,53 @@ mod tests {
             repeat: false,
             is_composing: false,
         })
+    }
+
+    /// A press on the page shuts the merge box and the Review popover; a
+    /// press in either leaves it, and so does a merge's error.
+    #[test]
+    fn a_press_outside_shuts_the_box_and_the_review_popover() {
+        let (mut harness, _app, state) = window(pull_request(812), Some(overview()));
+        let page = rect(&harness, "main-pane");
+        let outside = |harness: &mut HeadlessHarness| {
+            harness.click(page.x0 + 40.0, page.y1 - 40.0);
+            settle(harness);
+        };
+
+        click(&mut harness, "merge-button");
+        assert!(state.merge_open.get_untracked());
+        click(&mut harness, "merge-popover");
+        assert!(state.merge_open.get_untracked(), "a press in it shut it");
+        outside(&mut harness);
+        assert!(
+            !state.merge_open.get_untracked(),
+            "a press outside left it up"
+        );
+
+        click(&mut harness, "merge-button");
+        state.merge_error.set(Some("Not mergeable".into()));
+        settle(&mut harness);
+        outside(&mut harness);
+        assert!(
+            state.merge_open.get_untracked(),
+            "a press outside put the error away"
+        );
+        click(&mut harness, "merge-close");
+        assert!(!state.merge_open.get_untracked());
+
+        click(&mut harness, "review-control");
+        assert!(state.review_open.get_untracked());
+        state.submit_review_draft.set("Looks good".into());
+        let inside = rect(&harness, "review-popover");
+        harness.click(inside.x0 + 6.0, inside.y0 + 6.0);
+        settle(&mut harness);
+        assert!(state.review_open.get_untracked(), "a press in it shut it");
+        outside(&mut harness);
+        assert!(
+            !state.review_open.get_untracked(),
+            "a press outside left it up"
+        );
+        assert_eq!(state.submit_review_draft.get_untracked(), "Looks good");
     }
 
     /// On an open pull request GitHub would merge, the bar has a green
