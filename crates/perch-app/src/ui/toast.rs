@@ -10,30 +10,47 @@ use std::rc::Rc;
 
 use floem::peniko::Color;
 use floem::prelude::*;
-use floem::style::Position;
+use floem::reactive::Memo;
+use floem::style::{Opacity, Position, Transition};
 use floem::views::{dyn_container, Container, Decorators, Empty, Label, Stack};
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
 use crate::review::model::ReviewState;
-use crate::state::{AppState, Checked, ServerOffer, ToastKind, ToastOpen, Tone, TrustAsk};
+use crate::state::{
+    AppState, Checked, ServerOffer, ToastKind, ToastOpen, Tone, TrustAsk, TOAST_FADE,
+};
 use crate::theme;
 use crate::ui::{agents, widgets};
 
 pub fn toast(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl IntoView {
+    // The toast on show, with its run: the one fading out, or else the
+    // front of the queue. A memo, so the card a dismissal starts fading
+    // is not rebuilt at full strength by the write that took it down.
+    let shown = Memo::new(move |_| {
+        let toast = state
+            .toast_leaving
+            .get()
+            .or_else(|| state.current_toast())?;
+        // A run's toast waits for the run's summary.
+        let run = match &toast.kind {
+            ToastKind::AgentRun(id) => Some(state.agent_run(id)?),
+            ToastKind::Message { .. } | ToastKind::Server(_) => None,
+        };
+        Some((toast, run))
+    });
     dyn_container(
-        move || {
-            // A run's toast waits for the run's summary.
-            state.current_toast().filter(|toast| match &toast.kind {
-                ToastKind::AgentRun(id) => state.agent_run(id).is_some(),
-                ToastKind::Message { .. } | ToastKind::Server(_) => true,
-            })
-        },
-        move |toast| {
-            let Some(toast) = toast else {
+        move || shown.get(),
+        move |shown| {
+            let Some((toast, run)) = shown else {
                 return Empty::new().into_any();
             };
             let token = toast.token;
+            let leaving = move || {
+                state
+                    .toast_leaving
+                    .with(|leaving| leaving.as_ref().is_some_and(|l| l.token == token))
+            };
             // An offer to trust says more, and its Always trust boxes name
             // the repository, so its card is wider.
             let width = match &toast.kind {
@@ -43,7 +60,7 @@ pub fn toast(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
             // What clicking anywhere on the card does, for a toast that
             // goes somewhere. Its own close button stops the click.
             let (body, open) = match toast.kind {
-                ToastKind::AgentRun(id) => match state.agent_run(&id) {
+                ToastKind::AgentRun(_) => match run {
                     Some(run) => {
                         let (body, open) =
                             agents::completion_toast(state, review, backend.clone(), token, run);
@@ -83,13 +100,20 @@ pub fn toast(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
                     .border_radius(8.0)
                     .box_shadow_blur(18.0)
                     .box_shadow_v_offset(5.0)
-                    .box_shadow_color(theme::shadow());
+                    .box_shadow_color(theme::shadow())
+                    // Fading out, it is gone as far as the pointer goes.
+                    .opacity(if leaving() { 0.0_f32 } else { 1.0 })
+                    .apply_if(leaving(), |s| s.pointer_events_none())
+                    .apply_if(!TOAST_FADE.is_zero(), |s| {
+                        s.transition(Opacity, Transition::ease_in_out(TOAST_FADE))
+                    });
                 if clickable {
                     widgets::clickable(s).hover(|s| s.background(theme::canvas_subtle()))
                 } else {
                     s
                 }
             })
+            .debug_name("toast card")
             .into_any()
         },
     )
@@ -411,6 +435,42 @@ mod tests {
         harness.paint();
         assert!(app.current_toast().is_none());
         assert!(named(harness.root_id(), "Could not archive").is_none());
+    }
+
+    /// A toast taken down stays up, fading and out of the pointer's way,
+    /// with the next one waiting behind it until the fade ends.
+    #[test]
+    fn a_toast_taken_down_fades_before_the_next_shows() {
+        use floem::prelude::*;
+        use floem::style::{Opacity, PointerEvents, PointerEventsProp};
+        let (mut harness, app, _) = pull_request_harness();
+        app.complain("Could not archive the worktree");
+        harness.rebuild();
+        let toast = named(harness.root_id(), "toast").expect("no toast");
+        let card = named(toast, "toast card").expect("no card");
+        assert_eq!(harness.get_computed_style(card).get(Opacity), 1.0);
+
+        // As a dismissal leaves it outside a test, where the fade has a
+        // length: in `toast_leaving`, then off the queue.
+        let leaving = app.current_toast().unwrap();
+        app.toast_leaving.set(Some(leaving.clone()));
+        app.dismiss_toast(leaving.token);
+        app.complain("Could not fetch");
+        harness.rebuild();
+        assert_eq!(
+            named(harness.root_id(), "toast card"),
+            Some(card),
+            "the same card, not a new one at full strength"
+        );
+        let style = harness.get_computed_style(card);
+        assert_eq!(style.get(Opacity), 0.0);
+        assert_eq!(style.get(PointerEventsProp), Some(PointerEvents::None));
+        assert!(named(harness.root_id(), "Could not fetch").is_none());
+
+        app.toast_leaving.set(None);
+        harness.rebuild();
+        assert!(named(harness.root_id(), "Could not archive").is_none());
+        assert!(named(harness.root_id(), "Could not fetch").is_some());
     }
 
     /// An offer shows its line and Install. Pressing it says the install is

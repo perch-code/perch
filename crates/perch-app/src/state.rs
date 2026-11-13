@@ -360,6 +360,9 @@ pub struct AppState {
     /// Toasts are queued so simultaneous ones do not erase one another
     /// before the reader can see them.
     pub toasts: RwSignal<VecDeque<Toast>>,
+    /// The toast just taken down, while its card fades out. The next one
+    /// waits behind it.
+    pub toast_leaving: RwSignal<Option<Toast>>,
     pub toast_token: RwSignal<u64>,
     /// The language servers being installed, from any window.
     pub installing_servers: RwSignal<HashSet<perch_lsp::ServerKind>>,
@@ -507,6 +510,7 @@ impl AppState {
             start_work_draft: RwSignal::new(None),
             agent_archived_owner: RwSignal::new(None),
             toasts: RwSignal::new(VecDeque::new()),
+            toast_leaving: RwSignal::new(None),
             toast_token: RwSignal::new(0),
             installing_servers: RwSignal::new(HashSet::new()),
             declined_offers: RwSignal::new(HashSet::new()),
@@ -1155,6 +1159,12 @@ impl AppState {
 
     pub fn dismiss_toast(&self, token: u64) {
         let mut next = None;
+        // Before it leaves the queue, so its card is never off show
+        // between the two writes.
+        let shown = self.toasts.with_untracked(|toasts| toasts.front().cloned());
+        if let Some(shown) = shown.filter(|toast| toast.token == token) {
+            self.fade_toast(shown);
+        }
         self.toasts.update(|toasts| {
             let Some(index) = toasts.iter().position(|toast| toast.token == token) else {
                 return;
@@ -1170,6 +1180,25 @@ impl AppState {
         }
     }
 
+    /// Keep a toast that was up on show while its card fades out.
+    fn fade_toast(&self, toast: Toast) {
+        // One at a time: a toast dropped while another fades was never up.
+        if TOAST_FADE.is_zero() || self.toast_leaving.with_untracked(Option::is_some) {
+            return;
+        }
+        let token = toast.token;
+        self.toast_leaving.set(Some(toast));
+        let state = *self;
+        floem::action::exec_after(TOAST_FADE, move |_| {
+            if state
+                .toast_leaving
+                .with_untracked(|leaving| leaving.as_ref().is_some_and(|l| l.token == token))
+            {
+                state.toast_leaving.set(None);
+            }
+        });
+    }
+
     /// Take down every toast `drop` picks, and start the clock on the one
     /// that comes to the front for it.
     fn drop_toasts(&self, drop: impl Fn(&ToastKind) -> bool) {
@@ -1180,7 +1209,11 @@ impl AppState {
             return;
         }
         let front = |toasts: &VecDeque<Toast>| toasts.front().map(|toast| toast.token);
-        let before = self.toasts.with_untracked(front);
+        let shown = self.toasts.with_untracked(|toasts| toasts.front().cloned());
+        let before = shown.as_ref().map(|toast| toast.token);
+        if let Some(shown) = shown.filter(|toast| drop(&toast.kind)) {
+            self.fade_toast(shown);
+        }
         self.toasts
             .update(|toasts| toasts.retain(|toast| !drop(&toast.kind)));
         let next = self.toasts.with_untracked(front);
@@ -4053,6 +4086,10 @@ fn by_item(
         .map(|a| (a.item_id.clone(), a))
         .collect()
 }
+
+/// How long a toast takes to fade out once it is taken down. Zero under
+/// test, where no timer runs to end the fade.
+pub(crate) const TOAST_FADE: Duration = Duration::from_millis(if cfg!(test) { 0 } else { 180 });
 
 /// How long a drawer takes to slide all the way open or shut. The
 /// headless harness never runs a timer, so under test it moves at once.
