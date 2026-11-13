@@ -180,6 +180,48 @@ impl Default for Pane {
     }
 }
 
+/// How many items' pages are kept.
+const KEPT_PAGES: usize = 8;
+
+/// An item as it was showing when it was left: what its open brought,
+/// kept so that going back to it paints at once. The open that follows
+/// reads everything again and lands over it. Its pane is `Pane`'s to
+/// keep.
+struct Page {
+    phase: Phase,
+    item: Arc<Item>,
+    pull_request: Option<Arc<PullRequest>>,
+    issue: Option<Arc<Issue>>,
+    issue_comments: Arc<Vec<IssueComment>>,
+    issue_events: Arc<Vec<perch_github::PullEvent>>,
+    issue_closable: Option<bool>,
+    issue_reopenable: Option<bool>,
+    home: Option<Arc<crate::backend::HomeCode>>,
+    stale_head: Option<String>,
+    offline: bool,
+    scope: Scope,
+    scope_gen: Option<u64>,
+    commits: Arc<Vec<Commit>>,
+    dirty: Dirt,
+    since_head: Option<String>,
+    last_run: crate::backend::LastRun,
+    discussion: Option<Arc<Discussion>>,
+    reactions: HashMap<String, Reactions>,
+    submitted_reviews: Arc<Vec<Review>>,
+    checks: Option<Arc<Checks>>,
+    pull_request_overview: Option<Arc<PullRequestOverview>>,
+    viewed: Arc<std::collections::HashSet<(String, String)>>,
+    reveals: HashMap<(String, String), Reveals>,
+    changed_files: Arc<Vec<ChangedFile>>,
+    tree: Arc<Vec<TreeEntry>>,
+    changed_only: bool,
+    expanded: std::collections::HashSet<String>,
+    files: HashMap<String, Arc<LoadedFile>>,
+    comment_threads: Arc<Vec<CommentThread>>,
+    symbols: HashMap<String, Arc<Outline>>,
+    names: HashMap<String, Named>,
+}
+
 /// Where the reader was in a file: the view's scroll, and the caret.
 ///
 /// The scroll is held as a line and how far the view's top is from it, so
@@ -1565,6 +1607,11 @@ pub struct ReviewState {
     /// Each item's pane as it was last left, by item, for the life of the
     /// app.
     pub panes: RwSignal<HashMap<String, Pane>>,
+    /// The items last left, as they were showing, the latest last.
+    pages: RwSignal<Vec<(String, std::rc::Rc<Page>)>>,
+    /// Whether what shows is a kept page whose open is still on its way:
+    /// the open's progress stays off it.
+    pub refreshing: RwSignal<bool>,
     /// Whether the open item has been on Code, so the tree opens for it
     /// the first time only.
     pub code_seen: RwSignal<bool>,
@@ -2148,6 +2195,8 @@ impl ReviewState {
             historical_review_rollback: RwSignal::new(None),
             tab: RwSignal::new(ItemTab::Conversation),
             panes: RwSignal::new(HashMap::new()),
+            pages: RwSignal::new(Vec::new()),
+            refreshing: RwSignal::new(false),
             code_seen: RwSignal::new(false),
             tree_wanted: RwSignal::new(false),
             pending_run_reveal: RwSignal::new(None),
@@ -2355,6 +2404,8 @@ impl ReviewState {
     fn reset_checkout(&self) {
         self.remember_here();
         self.remember_pane();
+        self.keep_page();
+        self.refreshing.set(false);
         self.files_pending.set(None);
         self.files_reload.set(Vec::new());
         self.pull_request.set(None);
@@ -2516,6 +2567,7 @@ impl ReviewState {
     /// keeps the prior owner visible while its new owner is resolving, so a
     /// cross-item result must clear that owner's checkout at commit time.
     pub(crate) fn prepare_ready_for(&self, item_id: &str) {
+        self.refreshing.set(false);
         if self
             .item
             .with_untracked(|item| item.as_ref().is_some_and(|item| item.id != item_id))
@@ -2699,6 +2751,173 @@ impl ReviewState {
             self.go_to_spot(place.spot);
         }
         paths
+    }
+
+    /// Whether what shows is an item in full: not a pull request still
+    /// waiting on its files, nor a retained review read in place of the
+    /// live one.
+    fn is_whole(&self) -> bool {
+        self.ready.get_untracked()
+            && matches!(self.phase.get_untracked(), Phase::Ready | Phase::Issue)
+            && self.files_pending.with_untracked(Option::is_none)
+            && self.historical_review.with_untracked(Option::is_none)
+    }
+
+    /// Keep the open item's page, if it is whole, for the next time it
+    /// opens.
+    fn keep_page(&self) {
+        if !self.is_whole() {
+            return;
+        }
+        let phase = self.phase.get_untracked();
+        let Some(item) = self.item.get_untracked() else {
+            return;
+        };
+        let id = item.id.clone();
+        let page = Page {
+            phase,
+            item,
+            pull_request: self.pull_request.get_untracked(),
+            issue: self.issue.get_untracked(),
+            issue_comments: self.issue_comments.get_untracked(),
+            issue_events: self.issue_events.get_untracked(),
+            issue_closable: self.issue_closable.get_untracked(),
+            issue_reopenable: self.issue_reopenable.get_untracked(),
+            home: self.home.get_untracked(),
+            stale_head: self.stale_head.get_untracked(),
+            offline: self.offline.get_untracked(),
+            scope: self.scope.get_untracked(),
+            scope_gen: self.scope_gen.get_untracked(),
+            commits: self.commits.get_untracked(),
+            dirty: self.dirty.get_untracked(),
+            since_head: self.since_head.get_untracked(),
+            last_run: self.last_run.get_untracked(),
+            discussion: self.discussion.get_untracked(),
+            reactions: self.reactions.get_untracked(),
+            submitted_reviews: self.submitted_reviews.get_untracked(),
+            checks: self.checks.get_untracked(),
+            pull_request_overview: self.pull_request_overview.get_untracked(),
+            viewed: self.viewed.get_untracked(),
+            reveals: self.reveals.get_untracked(),
+            changed_files: self.changed_files.get_untracked(),
+            tree: self.tree.get_untracked(),
+            changed_only: self.changed_only.get_untracked(),
+            expanded: self.expanded.get_untracked(),
+            files: self.files.get_untracked(),
+            comment_threads: self.comment_threads.get_untracked(),
+            symbols: self.symbols.get_untracked(),
+            names: self.names.get_untracked(),
+        };
+        self.pages.update(|pages| {
+            pages.retain(|(kept, _)| *kept != id);
+            pages.push((id, std::rc::Rc::new(page)));
+            if pages.len() > KEPT_PAGES {
+                pages.remove(0);
+            }
+        });
+    }
+
+    /// Drop an item's kept page: it is archived, say, and its checkout
+    /// has to be made again before anything of it can show.
+    pub fn forget_page(&self, item_id: &str) {
+        if self
+            .pages
+            .with_untracked(|pages| pages.iter().any(|(kept, _)| kept == item_id))
+        {
+            self.pages
+                .update(|pages| pages.retain(|(kept, _)| kept != item_id));
+        }
+    }
+
+    /// Start opening a known item. One whose page is kept shows it at
+    /// once, on its pane, in place of the progress card, and what the
+    /// backend answers lands over it as it does on an item opened again
+    /// while it shows. Any other gets the card, as `begin` puts it up,
+    /// and so does the one showing.
+    pub fn begin_item(&self, item_id: &str, message: &str) {
+        // The item showing, asked for again, is read again under the
+        // card: Check again has to be seen to do something.
+        let showing = self
+            .item
+            .with_untracked(|i| i.as_ref().is_some_and(|i| i.id == item_id));
+        let kept = self
+            .pages
+            .with_untracked(|pages| pages.iter().any(|(kept, _)| kept == item_id));
+        if showing || !kept {
+            self.begin(message);
+            return;
+        }
+        if !self.quiet.get_untracked() {
+            self.arrival.set(None);
+        }
+        self.reset_checkout();
+        let page = self
+            .pages
+            .try_update(|pages| {
+                let at = pages.iter().position(|(kept, _)| kept == item_id)?;
+                Some(pages.remove(at).1)
+            })
+            .flatten();
+        let Some(page) = page else {
+            self.item.set(None);
+            self.preparing.set(Preparing::Working {
+                message: message.into(),
+                percent: None,
+            });
+            self.opening.set(true);
+            self.set_phase(Phase::Preparing);
+            return;
+        };
+        floem::reactive::Effect::batch(|| {
+            self.item.set(Some(page.item.clone()));
+            self.pull_request.set(page.pull_request.clone());
+            self.issue.set(page.issue.clone());
+            self.issue_comments.set(page.issue_comments.clone());
+            self.issue_events.set(page.issue_events.clone());
+            self.issue_closable.set(page.issue_closable);
+            self.issue_reopenable.set(page.issue_reopenable);
+            self.home.set(page.home.clone());
+            self.stale_head.set(page.stale_head.clone());
+            self.offline.set(page.offline);
+            self.scope.set(page.scope.clone());
+            self.scope_gen.set(page.scope_gen);
+            self.commits.set(page.commits.clone());
+            self.dirty.set(page.dirty);
+            self.since_head.set(page.since_head.clone());
+            self.last_run.set(page.last_run.clone());
+            self.reactions.set(page.reactions.clone());
+            self.submitted_reviews.set(page.submitted_reviews.clone());
+            self.discussion.set(page.discussion.clone());
+            self.checks.set(page.checks.clone());
+            self.pull_request_overview
+                .set(page.pull_request_overview.clone());
+            self.viewed.set(page.viewed.clone());
+            self.reveals.set(page.reveals.clone());
+            self.expanded.set(page.expanded.clone());
+            self.changed_files.set(page.changed_files.clone());
+            self.tree.set(page.tree.clone());
+            self.changed_only.set(page.changed_only);
+            self.files.set(page.files.clone());
+            self.comment_threads.set(page.comment_threads.clone());
+            self.symbols.set(page.symbols.clone());
+            self.names.set(page.names.clone());
+            // The tabs whose files were never read wait for the open, which
+            // asks for them; the rest show as they were.
+            let unread: Vec<String> = self
+                .restore_pane()
+                .into_iter()
+                .filter(|path| !page.files.contains_key(path))
+                .collect();
+            self.loading.set(unread.iter().cloned().collect());
+            self.files_reload.set(unread);
+            self.preparing.set(Preparing::Idle);
+            self.opening.set(true);
+            self.refreshing.set(true);
+            self.ready.set(true);
+            // Written even when it is the phase already: the pane is built
+            // on this write, and the item it was built for is another.
+            self.phase.set(page.phase);
+        });
     }
 
     /// Whether the open item is this one.

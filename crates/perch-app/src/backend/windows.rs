@@ -117,6 +117,7 @@ impl CommandSender {
 pub(super) struct View {
     pub(super) window: WindowId,
     pub(super) slot: Arc<std::sync::Mutex<Option<ReviewContext>>>,
+    pub(super) kept_contexts: super::KeptContexts,
     pub(super) language_servers: Servers,
     pub(super) navigation_requests: Arc<NavigationRequests>,
     pub(super) scope_requests: Arc<ScopeRequests>,
@@ -133,6 +134,7 @@ impl View {
         Self {
             window,
             slot: Default::default(),
+            kept_contexts: Default::default(),
             language_servers: Default::default(),
             navigation_requests,
             scope_requests,

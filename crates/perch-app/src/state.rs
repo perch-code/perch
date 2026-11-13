@@ -1626,6 +1626,10 @@ impl AppState {
                 if !self.accepts_navigation(navigation_id) {
                     return;
                 }
+                // A kept page is showing while its item opens behind it.
+                if review.refreshing.get_untracked() {
+                    return;
+                }
                 // A pull request already showing: the progress is its
                 // files', in Code, and the conversation stays up.
                 if review.files_pending.with_untracked(Option::is_some) {
@@ -1720,8 +1724,10 @@ impl AppState {
                 review.issue_comments.set(Arc::new(Vec::new()));
                 review.issue_events.set(Arc::new(Vec::new()));
                 // The threads follow on their own event; whatever is here
-                // is the last item's.
-                review.comment_threads.set(Arc::new(Vec::new()));
+                // is the last item's, unless this one was showing.
+                if fresh {
+                    review.comment_threads.set(Arc::new(Vec::new()));
+                }
                 if fresh {
                     for path in review.restore_pane() {
                         self.reload.update(|reload| reload.push(path));
@@ -1792,7 +1798,9 @@ impl AppState {
                 review.issue.set(None);
                 review.issue_comments.set(Arc::new(Vec::new()));
                 review.issue_events.set(Arc::new(Vec::new()));
-                review.comment_threads.set(Arc::new(Vec::new()));
+                if fresh {
+                    review.comment_threads.set(Arc::new(Vec::new()));
+                }
                 // The tabs open last time come back now, and load once
                 // there is a checkout to load them from.
                 if fresh {
@@ -1839,7 +1847,9 @@ impl AppState {
                 review.issue.set(Some(issue));
                 review.issue_comments.set(comments);
                 review.issue_events.set(events);
-                review.comment_threads.set(Arc::new(Vec::new()));
+                if fresh {
+                    review.comment_threads.set(Arc::new(Vec::new()));
+                }
                 // The tabs open last time come back now, and load once the
                 // default branch they read is here.
                 if fresh {
@@ -1874,7 +1884,11 @@ impl AppState {
                         .try_update(std::mem::take)
                         .unwrap_or_default(),
                     Some(true) => review.reload_all(),
-                    Some(false) => Vec::new(),
+                    // A kept page's tabs that were never read.
+                    Some(false) => review
+                        .files_reload
+                        .try_update(std::mem::take)
+                        .unwrap_or_default(),
                 };
                 if !paths.is_empty() {
                     self.reload.update(|reload| reload.extend(paths));
@@ -2260,6 +2274,7 @@ impl AppState {
                         .set(Some(Preparing::Failed { message }));
                     return;
                 }
+                review.refreshing.set(false);
                 review.preparing.set(Preparing::Failed { message });
                 review.set_phase(Phase::Failed);
             }
@@ -3582,7 +3597,7 @@ impl AppState {
             .set(OpenExpectation::Item(item_id.to_string()));
         self.open_item.set(Some(item_id.to_string()));
         self.new_work.open.set(false);
-        review.begin(message);
+        review.begin_item(item_id, message);
     }
 
     /// The progress card, over the open review or the empty main area, for
@@ -4981,6 +4996,98 @@ mod tests {
         assert_eq!(review.tabs.with(Vec::len), 2);
         assert_eq!(review.active.get().as_deref(), Some("src/y.rs"));
         assert_eq!(app.reload.get(), ["src/y.rs", "src/x.rs"]);
+    }
+
+    /// An item left a moment ago comes back as it was, at once: no
+    /// progress card, its pane and what it held on show while the open
+    /// reads it again, and that open's answer landing over it.
+    #[test]
+    fn an_item_left_shows_at_once_when_opened_again() {
+        use crate::review::model::{ItemTab, Phase};
+        let app = AppState::new();
+        let review = ReviewState::new();
+
+        app.begin_item_review(review, "Open", "a", 71);
+        assert_eq!(review.phase.get(), Phase::Preparing, "never seen: the card");
+        app.apply_with_review(review_ready("a", 71), review);
+        review.open_tab("src/x.rs");
+        review.show_tab(ItemTab::Code);
+        review
+            .comment_threads
+            .set(Arc::new(vec![github_thread(false)]));
+
+        app.begin_item_review(review, "Open", "b", 72);
+        app.apply_with_review(review_ready("b", 72), review);
+        assert!(review.comment_threads.with(|t| t.is_empty()));
+
+        app.begin_item_review(review, "Open", "a", 73);
+        assert!(review.is_item("a"));
+        assert!(review.is_open());
+        assert_eq!(review.phase.get(), Phase::Ready);
+        assert_eq!(review.tab.get(), ItemTab::Code);
+        assert_eq!(review.active.get().as_deref(), Some("src/x.rs"));
+        assert_eq!(review.comment_threads.with(|t| t.len()), 1);
+        assert!(review.refreshing.get());
+
+        // The open's progress stays off the page.
+        app.apply_with_review(
+            Event::ReviewProgress {
+                navigation_id: 73,
+                message: "Computing the diff".into(),
+                percent: None,
+            },
+            review,
+        );
+        assert_eq!(review.phase.get(), Phase::Ready);
+
+        // Its answer lands over it: the threads stay until theirs come,
+        // and the tab's file is asked for.
+        app.apply_with_review(review_ready("a", 73), review);
+        assert!(!review.refreshing.get());
+        assert_eq!(review.comment_threads.with(|t| t.len()), 1);
+        assert_eq!(review.tab.get(), ItemTab::Code);
+        assert_eq!(app.reload.get(), ["src/x.rs"]);
+
+        // b was kept as a was shown, and a failed open says so.
+        app.begin_item_review(review, "Open", "b", 74);
+        assert!(review.is_item("b"));
+        assert_eq!(review.phase.get(), Phase::Ready);
+        app.apply_with_review(
+            Event::ReviewFailed {
+                navigation_id: 74,
+                message: "gone".into(),
+            },
+            review,
+        );
+        assert_eq!(review.phase.get(), Phase::Failed);
+        app.begin_item_review(review, "Open", "b", 75);
+        assert_eq!(
+            review.phase.get(),
+            Phase::Preparing,
+            "a failure is not kept"
+        );
+    }
+
+    /// Only the last few items are kept; one left longer ago opens under
+    /// the progress card, as one never seen does.
+    #[test]
+    fn only_the_last_few_items_are_kept() {
+        use crate::review::model::Phase;
+        let app = AppState::new();
+        let review = ReviewState::new();
+        for (n, id) in ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
+            .into_iter()
+            .enumerate()
+        {
+            app.begin_item_review(review, "Open", id, 100 + n as u64);
+            app.apply_with_review(review_ready(id, 100 + n as u64), review);
+        }
+        app.begin_item_review(review, "Open", "a", 200);
+        assert_eq!(review.phase.get(), Phase::Preparing);
+        app.apply_with_review(review_ready("a", 200), review);
+        app.begin_item_review(review, "Open", "i", 201);
+        assert_eq!(review.phase.get(), Phase::Ready);
+        assert!(review.is_item("i"));
     }
 
     /// Back and Forward walk across items: leaving one is a step, Back

@@ -61,6 +61,8 @@ pub(crate) fn open_item(
         None => "Reading the worktree",
     };
     let navigation_id = if item.is_archived() {
+        // Its checkout is made again first: nothing of it shows till then.
+        review.forget_page(&item.id);
         backend.restore_item(&item.id)
     } else {
         backend.open_item(&item.id)
@@ -123,7 +125,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         let backend = backend.clone();
         floem::reactive::Effect::new(move |_| {
             let asks = review.pending_names.get();
-            if asks.is_empty() {
+            // Under a kept page the backend still holds the item just
+            // left, whose worktree would answer: asked once this one's
+            // open lands.
+            if asks.is_empty() || review.refreshing.get() {
                 return;
             }
             review.pending_names.set(Vec::new());

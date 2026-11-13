@@ -4268,6 +4268,7 @@ async fn run(
         cache: cache.clone(),
         config: Arc::new(std::sync::RwLock::new(config.clone())),
         slot: checkout.clone(),
+        kept_contexts: Default::default(),
         language_servers: language_servers.clone(),
         kept_servers: Default::default(),
         starting_servers: Default::default(),
@@ -4892,6 +4893,9 @@ async fn run(
                 // Restoring is opening: the archived flag clears on the way
                 // through and an owned checkout is put back by `prepare`.
                 ctx.clear_notice();
+                // Here and not on the task: whatever the reader sends next
+                // is taken after this, and finds the item it is about.
+                ctx.install_kept_context(&id, navigation_id);
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     if open_item(&ctx, &id, navigation_id).await {
@@ -5853,6 +5857,7 @@ async fn run(
                         .navigation_requests
                         .with_current(navigation_id, || {
                             if let Ok(mut guard) = ctx.slot.lock() {
+                                keep_context(&ctx.kept_contexts, guard.as_ref());
                                 *guard = None;
                                 true
                             } else {
@@ -6159,6 +6164,8 @@ struct Ctx {
     /// the `[[repo]]` list; nothing else in it changes while Perch runs.
     config: Arc<std::sync::RwLock<Arc<Config>>>,
     slot: Arc<std::sync::Mutex<Option<ReviewContext>>>,
+    /// The contexts of the items this window last left.
+    kept_contexts: KeptContexts,
     language_servers: Servers,
     /// Language servers no window shows, kept a while for a return.
     kept_servers: kept_servers::KeptServers,
@@ -7286,6 +7293,7 @@ impl Ctx {
     fn in_view(&self, view: &View) -> Ctx {
         Ctx {
             slot: view.slot.clone(),
+            kept_contexts: view.kept_contexts.clone(),
             language_servers: view.language_servers.clone(),
             navigation_requests: view.navigation_requests.clone(),
             scope_requests: view.scope_requests.clone(),
@@ -7338,6 +7346,43 @@ impl Ctx {
             Some(view) => self.in_view(&view),
             None => self.clone(),
         }
+    }
+
+    /// An item left a moment ago is opening again, and the window shows
+    /// its page as it was kept, ahead of the open. Its context goes back
+    /// in the slot as it was left, under the new navigation, so that what
+    /// the reader does on the page meanwhile is about this item and not
+    /// the one before it. The checkout is the one last read: its head may
+    /// be about to move, and the open that follows puts in the one it
+    /// reads. Nothing is done for an item with no context kept, or whose
+    /// checkout has left the disk since, an archived one's say.
+    fn install_kept_context(&self, item_id: &str, navigation_id: u64) {
+        let Some(mut context) = self.kept_contexts.lock().ok().and_then(|kept| {
+            kept.iter()
+                .find(|context| context.item_id == item_id)
+                .cloned()
+        }) else {
+            return;
+        };
+        if self.item(item_id).is_none_or(|item| item.is_archived())
+            || (context.issue.is_none() && !context.checkout.worktree.join(".git").exists())
+        {
+            return;
+        }
+        context.navigation_id = navigation_id;
+        let _ = self
+            .navigation_requests
+            .with_current_item(item_id, navigation_id, || {
+                if let Ok(mut slot) = self.slot.lock() {
+                    // The one showing is asked for again under the card,
+                    // and keeps the context it has.
+                    if slot.as_ref().is_some_and(|open| open.item_id == item_id) {
+                        return;
+                    }
+                    keep_context(&self.kept_contexts, slot.as_ref());
+                    *slot = Some(context);
+                }
+            });
     }
 
     /// Whether this window's open review is this item.
@@ -8748,6 +8793,7 @@ fn show_retained_review_owner(ctx: &Ctx, item: Item, navigation_id: u64) -> bool
             let Ok(mut slot) = ctx.slot.lock() else {
                 return false;
             };
+            keep_context(&ctx.kept_contexts, slot.as_ref());
             *slot = Some(ReviewContext {
                 checkout,
                 files: Arc::new(Vec::new()),
@@ -9124,6 +9170,7 @@ async fn finish_open(
                 .as_ref()
                 .filter(|open| shown_early && open.item_id == item.id)
                 .and_then(|open| open.body.clone());
+            keep_context(&ctx.kept_contexts, guard.as_ref());
             *guard = Some(ReviewContext {
                 checkout,
                 files: files.clone(),
@@ -9319,6 +9366,7 @@ fn show_pull_request_early(
             let Ok(mut guard) = ctx.slot.lock() else {
                 return false;
             };
+            keep_context(&ctx.kept_contexts, guard.as_ref());
             *guard = Some(ReviewContext {
                 checkout,
                 files: Arc::new(Vec::new()),
@@ -13503,7 +13551,34 @@ async fn start_work_on_pull(ctx: &Ctx, id: &str, navigation_id: u64) -> Result<S
 /// A file larger than this opens as a notice rather than as text.
 const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
 
+/// How many items' contexts a window keeps, as the view keeps their pages.
+const KEPT_CONTEXTS: usize = 8;
+
+/// The contexts of the items a window last left, the latest last. See
+/// `Ctx::install_kept_context`.
+type KeptContexts = Arc<std::sync::Mutex<Vec<ReviewContext>>>;
+
+/// Keep the context about to leave the slot, if it is a live item's in
+/// full: not a retained review read in its place, nor a pull request
+/// still waiting on its checkout.
+fn keep_context(kept: &KeptContexts, leaving: Option<&ReviewContext>) {
+    let Some(leaving) = leaving else { return };
+    if leaving.review_snapshot_id.is_some()
+        || leaving.review_group_id.is_some()
+        || (leaving.issue.is_none() && leaving.checkout.head_sha.is_empty())
+    {
+        return;
+    }
+    let Ok(mut kept) = kept.lock() else { return };
+    kept.retain(|context| context.item_id != leaving.item_id);
+    kept.push(leaving.clone());
+    if kept.len() > KEPT_CONTEXTS {
+        kept.remove(0);
+    }
+}
+
 /// What an open review needs in order to read and diff its files.
+#[derive(Clone)]
 struct ReviewContext {
     checkout: perch_git::Checkout,
     /// The changed list under `scope`.
@@ -15236,6 +15311,7 @@ async fn open_issue(ctx: &Ctx, repo_full_name: String, number: u64, navigation_i
             let Ok(mut guard) = ctx.slot.lock() else {
                 return false;
             };
+            keep_context(&ctx.kept_contexts, guard.as_ref());
             *guard = Some(ReviewContext {
                 checkout,
                 files: Arc::new(Vec::new()),
@@ -21008,6 +21084,7 @@ mod tests {
             cache,
             config: Arc::new(std::sync::RwLock::new(Arc::new(config))),
             slot: Arc::new(std::sync::Mutex::new(None)),
+            kept_contexts: Default::default(),
             language_servers: Default::default(),
             kept_servers: Default::default(),
             starting_servers: Default::default(),
@@ -23421,6 +23498,54 @@ mod tests {
             review_group_id: None,
             review_request_id: None,
         });
+    }
+
+    /// An item left a moment ago and opened again has its context back in
+    /// the slot as its open starts, under the new navigation, so what is
+    /// done on its kept page is about it. The item it takes the slot from
+    /// is kept in turn. One whose checkout has left the disk is not put
+    /// back.
+    #[tokio::test]
+    async fn an_item_left_has_its_context_back_as_it_opens_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _) = ctx(dir.path(), &nowhere(), &[]);
+        let (a, b) = (store_pull(&ctx, 7), store_pull(&ctx, 8));
+        let open = |item: &Item, worktree: &str| {
+            let worktree = dir.path().join(worktree);
+            std::fs::create_dir_all(worktree.join(".git")).unwrap();
+            open_in_slot(&ctx, item);
+            let mut slot = ctx.slot.lock().unwrap();
+            slot.as_mut().unwrap().checkout.worktree = worktree;
+        };
+        let open_now = || {
+            let slot = ctx.slot.lock().unwrap();
+            let open = slot.as_ref().unwrap();
+            (open.item_id.clone(), open.navigation_id)
+        };
+
+        // a, then b in its place as an open's end puts it.
+        open(&a, "a");
+        keep_context(&ctx.kept_contexts, ctx.slot.lock().unwrap().as_ref());
+        open(&b, "b");
+
+        // Back to a: there at once, and b kept for the way forward.
+        let back = ctx.navigation_requests.begin_item(&a.id);
+        ctx.install_kept_context(&a.id, back);
+        assert_eq!(open_now(), (a.id.clone(), back));
+        assert!(ctx.is_open(&a.id));
+        let forward = ctx.navigation_requests.begin_item(&b.id);
+        ctx.install_kept_context(&b.id, forward);
+        assert_eq!(open_now(), (b.id.clone(), forward));
+
+        // A navigation since left installs nothing.
+        ctx.install_kept_context(&a.id, back);
+        assert_eq!(open_now(), (b.id.clone(), forward));
+
+        // Nor does one for a checkout no longer on disk.
+        std::fs::remove_dir_all(dir.path().join("a")).unwrap();
+        let again = ctx.navigation_requests.begin_item(&a.id);
+        ctx.install_kept_context(&a.id, again);
+        assert_eq!(open_now(), (b.id.clone(), forward));
     }
 
     /// A language server that answers a hover with its own name, and a
