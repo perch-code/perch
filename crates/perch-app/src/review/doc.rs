@@ -255,6 +255,18 @@ impl Doc {
         Some(first..first + count)
     }
 
+    /// The row whose colour is behind `row`: the row itself, or for one of
+    /// a card's the line the card is under, past any card stacked over
+    /// it. A changed line's tint then carries on behind its cards, and
+    /// they do not cut a band of the plain background across the change.
+    pub fn behind(&self, row: usize) -> &DocRow {
+        self.rows[..=row]
+            .iter()
+            .rev()
+            .find(|r| !matches!(r, DocRow::Spacer { .. }))
+            .unwrap_or(&self.rows[row])
+    }
+
     /// The text of one row, without its newline.
     pub fn line(&self, row: usize) -> &str {
         let start = self.offset_of_row(row);
@@ -1701,6 +1713,24 @@ mod tests {
         assert_eq!(doc.card_span(&card.id), Some(3..6));
         assert_eq!(doc.first_spacer_row(&CardId::Thread("t2".into())), None);
         assert_eq!(doc.card_span(&CardId::Thread("t2".into())), None);
+    }
+
+    #[test]
+    fn a_cards_rows_have_the_line_they_are_under_behind_them() {
+        let b = buffer("a\nc\n", "a\nb\nc\n");
+        let card = |id: &str, rows| Card {
+            id: CardId::Thread(id.into()),
+            after_display_line: 1,
+            rows,
+            side: Side::Right,
+        };
+        let doc = build(&b, &[], &[card("t1", 2), card("t2", 1)], None);
+        assert_eq!(doc.rows[1], line(1, Tint::Added));
+        for row in 1..5 {
+            assert_eq!(doc.behind(row), &line(1, Tint::Added), "row {row}");
+        }
+        assert_eq!(doc.behind(0), &line(0, Tint::Plain));
+        assert_eq!(doc.behind(5), &line(2, Tint::Plain));
     }
 
     #[test]

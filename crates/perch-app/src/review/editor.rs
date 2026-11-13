@@ -826,8 +826,9 @@ fn shift_cursor(cursor: &mut Cursor, start: usize, delta: isize) {
 
 /// The colour behind a row: a line's diff tint, on every row of a
 /// wrapped one, grey for a split's filler, github.com's hunk row blue for
-/// a divider. A plain line has none, and a spacer none, since the card is
-/// drawn over its rows.
+/// a divider. A plain line has none. A spacer has none of its own: the
+/// tint layer gives it the row `Doc::behind` it, the line its card is
+/// under.
 pub(crate) fn row_tint(row: &DocRow) -> Option<Color> {
     match row {
         DocRow::Line { tint, .. } | DocRow::Wrap { tint, .. } => match tint {
@@ -856,7 +857,7 @@ fn tint_layer(doc: RwSignal<Arc<Doc>>, viewport: RwSignal<Rect>) -> impl IntoVie
         doc.with(|d| {
             visible_lines(vp.y0, vp.height(), line_height, d.len())
                 .into_iter()
-                .map(|row| (row, d.rows[row].clone()))
+                .map(|row| (row, d.behind(row).clone()))
                 .collect::<Vec<_>>()
         })
     };
