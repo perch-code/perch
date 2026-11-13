@@ -5,7 +5,7 @@
 //! stand in for while the pointer is over it. The second is the byline:
 //! a small stack of faces, the repository, then the number when the row
 //! has one, each cut short with an ellipsis as the drawer narrows, then a
-//! pull request's chips, and at its right end the churn: "+658 -0" on a pull
+//! pull request's status glyphs, and at its right end the churn: "+658 -0" on a pull
 //! request or a branch.
 //!
 //! Item rows and notification rows share these pieces so the three
@@ -19,6 +19,7 @@ use jiff::Timestamp;
 use perch_github::{CheckStatus, ReviewDecision};
 
 use crate::icons::SidebarIcon;
+use crate::review::cards::tip;
 use crate::state::AppState;
 use crate::theme;
 use crate::timefmt;
@@ -321,52 +322,54 @@ pub fn reference(number: Option<u64>) -> String {
         .unwrap_or_default()
 }
 
-/// The CI chip and the review pill after a pull request's reference.
+/// A status glyph's side in the byline.
+const CHIP_GLYPH: f64 = 12.0;
+
+/// How a pull request stands, after its reference, as the glyphs its own
+/// status line draws: the checks, then an eye for the review. Green is
+/// well, yellow is waiting, red blocks; the words are under the pointer.
 /// Nothing on a row with neither.
 pub fn chips(checks: Option<CheckStatus>, review: Option<ReviewDecision>) -> impl IntoView {
     if checks.is_none() && review.is_none() {
         return Empty::new().into_any();
     }
+    let glyph = |icon: SidebarIcon, ink: fn() -> Color, says: &str| {
+        tip(
+            sidebar_glyph(icon, ink)
+                .debug_name(says.to_string())
+                .style(|s| s.size(CHIP_GLYPH, CHIP_GLYPH).flex_shrink(0.0_f32)),
+            says.to_string(),
+        )
+        .into_any()
+    };
     Stack::horizontal((
         match checks {
-            Some(CheckStatus::Success) => sidebar_glyph(SidebarIcon::Check, theme::open)
-                .style(|s| s.size(11.0, 11.0))
-                .into_any(),
-            Some(CheckStatus::Failure) => sidebar_glyph(SidebarIcon::Close, theme::closed)
-                .style(|s| s.size(11.0, 11.0))
-                .into_any(),
-            Some(CheckStatus::Pending) => Empty::new()
-                .style(|s| {
-                    s.size(7.0, 7.0)
-                        .border_radius(4.0)
-                        .background(theme::draft_yellow())
-                })
-                .into_any(),
+            Some(CheckStatus::Success) => glyph(SidebarIcon::Check, theme::open, "checks passed"),
+            Some(CheckStatus::Failure) => glyph(SidebarIcon::Close, theme::closed, "checks failed"),
+            Some(CheckStatus::Pending) => {
+                glyph(SidebarIcon::Refresh, theme::draft_yellow, "checks running")
+            }
             None => Empty::new().into_any(),
         },
         match review {
-            Some(r) => Label::derived(move || r.label().to_string())
-                .style(move |s| {
-                    let color = match r {
-                        ReviewDecision::Approved => theme::open(),
-                        ReviewDecision::ChangesRequested => theme::closed(),
-                        ReviewDecision::ReviewRequested => theme::fg_muted(),
-                    };
-                    s.font_size(theme::TEXT_SECTION)
-                        .color(color)
-                        .border(1.0)
-                        .border_color(color.with_alpha(0.4))
-                        // A pill, at the radius the review's chips use.
-                        .border_radius(theme::CHIP_HEIGHT / 2.0)
-                        .padding_horiz(5.0)
-                        .margin_left(5.0)
-                        .selectable(false)
-                })
-                .into_any(),
+            Some(r) => glyph(
+                SidebarIcon::Unread,
+                match r {
+                    ReviewDecision::Approved => theme::open,
+                    ReviewDecision::ChangesRequested => theme::closed,
+                    ReviewDecision::ReviewRequested => theme::draft_yellow,
+                },
+                r.label(),
+            ),
             None => Empty::new().into_any(),
         },
     ))
-    .style(|s| s.items_center().margin_left(6.0).flex_shrink(0.0_f32))
+    .style(|s| {
+        s.items_center()
+            .gap(5.0)
+            .margin_left(8.0)
+            .flex_shrink(0.0_f32)
+    })
     .into_any()
 }
 

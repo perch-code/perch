@@ -2169,7 +2169,7 @@ mod tests {
         assert!(find(thread, "#11").is_some(), "the number");
         assert!(
             find(thread, "review requested").is_some(),
-            "then the review pill"
+            "then the review's eye"
         );
         assert!(
             find(thread, "+3").is_some() && find(thread, "-1").is_some(),
