@@ -43,6 +43,9 @@
 //! centred. GitHub's `` $`…`$ `` is the same as `$…$`. A formula that
 //! cannot be set is its TeX, as code.
 //!
+//! A fence named `mermaid` is drawn as its diagram (see
+//! [`crate::review::diagram`]); one that cannot be laid out is its code.
+//!
 //! What GitHub does that this does not: a picture in a table cell or a
 //! heading, or at an address relative to the repository, is shown by its
 //! alt text or file name, other raw HTML by its text, code in a fence is
@@ -2263,6 +2266,10 @@ fn block_view(block: Block, ctx: Ctx) -> AnyView {
             blocks,
         } => alert_view(alert, blocks, ctx),
         Block::List { start, items, .. } => list_view(start, items, ctx),
+        Block::Code {
+            lang: Some(lang),
+            text,
+        } if is_mermaid(&lang) => diagram_view(text, lang, ctx),
         Block::Code { lang, text } => code_view(text, lang, ctx),
         Block::Suggestion { text, original } => suggestion_view(text, original, ctx.foot),
         Block::Table { align, head, rows } => table_view(align, head, rows, ctx),
@@ -2636,6 +2643,32 @@ fn code_view(text: String, lang: Option<String>, ctx: Ctx) -> AnyView {
         Stack::new((run, copy)).style(move |s| code_box(s).flex_col()),
         hovered,
     )
+    .into_any()
+}
+
+/// Whether a fence's language is Mermaid's, which GitHub draws as a
+/// diagram.
+fn is_mermaid(lang: &str) -> bool {
+    lang.eq_ignore_ascii_case("mermaid")
+}
+
+/// A fence named `mermaid`, drawn as the diagram it describes. One that
+/// can't be laid out is its code, under why, as GitHub leaves one.
+fn diagram_view(text: String, lang: String, ctx: Ctx) -> AnyView {
+    let source = text.clone();
+    crate::review::diagram::view(source, move |why| {
+        let note = Label::new(format!("The diagram couldn't be drawn: {why}")).style(|s| {
+            s.font_size(theme::TEXT_META)
+                .color(theme::fg_muted())
+                .text_wrap()
+                .width_full()
+                .margin_bottom(4.0)
+        });
+        Stack::vertical((note, code_view(text.clone(), Some(lang.clone()), ctx)))
+            .debug_name("diagram:broken")
+            .style(|s| s.flex_col().width_full())
+            .into_any()
+    })
     .into_any()
 }
 
@@ -4484,6 +4517,32 @@ mod tests {
             let at = pictures[1].center();
             h.click(at.x, at.y);
             assert_eq!(crate::ui::widgets::opened(), vec![small.to_string()]);
+        }
+
+        /// A fence named `mermaid` is drawn as its diagram, between the
+        /// text around it; one that isn't Mermaid is its code, under why.
+        #[test]
+        fn a_mermaid_fence_is_its_diagram_and_a_broken_one_its_code() {
+            let h = harness(
+                "Before\n\n```mermaid\nflowchart LR\n  A[Flush] --> B[(Manifest)]\n```\n\n\
+                 ```Mermaid\nflowchart LR\n  A[open -->\n```\n\nAfter",
+            );
+            let figures = rects(&h, "diagram-figure");
+            assert_eq!(figures.len(), 1, "only the good fence draws");
+            let figure = figures[0];
+            assert!(
+                figure.width() > 100.0 && figure.height() > 20.0,
+                "{figure:?}"
+            );
+            assert!(figure.y0 > rect(&h, "Before").y1);
+            let broken = rect(&h, "diagram:broken");
+            assert!(broken.y0 > figure.y1);
+            let mut code = Vec::new();
+            find_all(h.root_id(), "diagram:broken", &mut code);
+            let mut copy = Vec::new();
+            find_all(code[0], "copy-code", &mut copy);
+            assert_eq!(copy.len(), 1, "the broken fence is a code block");
+            assert!(rect(&h, "After").y0 > broken.y1);
         }
 
         #[test]

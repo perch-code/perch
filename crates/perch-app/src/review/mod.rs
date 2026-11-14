@@ -8,6 +8,7 @@ pub mod code_refs;
 pub mod composer_styling;
 pub mod conversation;
 pub mod conversation_find;
+pub mod diagram;
 pub mod doc;
 pub mod editor;
 pub mod emoji;
