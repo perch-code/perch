@@ -320,6 +320,9 @@ impl Quote {
 pub(crate) struct Offered {
     may: Rc<dyn Fn() -> bool>,
     action: Rc<dyn Fn()>,
+    /// Whether it asks before it does anything, as a comment's Delete
+    /// does and a draft's does not; its row ends in `…` if so.
+    asks: bool,
 }
 
 /// The right end of a GitHub byline, drawn only while the card is
@@ -464,9 +467,13 @@ pub(crate) fn more_button(hovered: RwSignal<bool>, more: More) -> impl IntoView 
         }
         menu = menu.separator();
         if let Some(delete) = delete.as_ref().filter(|_| may_delete.get_untracked()) {
+            let label = if delete.asks {
+                "Delete\u{2026}"
+            } else {
+                "Delete"
+            };
             let delete = delete.action.clone();
-            // It asks first, under the comment.
-            menu = menu.item("Delete\u{2026}", |item| {
+            menu = menu.item(label, |item| {
                 item.icon(SidebarIcon::Trash)
                     .tint(theme::closed)
                     .icon_tint(theme::closed)
@@ -545,6 +552,17 @@ pub(crate) fn delete_action(
     Offered {
         may: Rc::new(may),
         action: Rc::new(move || state.confirm_comment.set(Some(node_id.clone()))),
+        asks: true,
+    }
+}
+
+/// Delete in the `⋯` menu that deletes at once, for a draft, which is
+/// Perch's alone until the review goes.
+pub(crate) fn delete_now(delete: Rc<dyn Fn()>) -> Offered {
+    Offered {
+        may: Rc::new(|| true),
+        action: delete,
+        asks: false,
     }
 }
 
@@ -555,6 +573,7 @@ pub(crate) fn edit_action(may: impl Fn() -> bool + 'static, edit: Rc<dyn Fn()>) 
     Offered {
         may: Rc::new(may),
         action: edit,
+        asks: false,
     }
 }
 

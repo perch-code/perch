@@ -3863,9 +3863,9 @@ fn github_message_view(
 
 /// The reader's message on its way to GitHub, under their face and name
 /// with the Draft mark after it and no time, since it has not gone
-/// anywhere yet; edit and delete on hover, and the text. Edit opens the
-/// composer in this row with the text; delete asks nothing, a draft being
-/// Perch's alone.
+/// anywhere yet; a `⋯` on hover with Edit and Delete, and the text. Edit
+/// opens the composer in this row with the text; Delete asks nothing, a
+/// draft being Perch's alone.
 fn draft_message_view(
     app: AppState,
     state: ReviewState,
@@ -3887,18 +3887,14 @@ fn draft_message_view(
         };
         backend.delete_draft(&item_id, &delete_id);
     });
-    let actions = Stack::horizontal((
-        cards::hover_action(hovered, SidebarIcon::Pencil, "Edit", "edit-draft", edit),
-        cards::hover_action(
-            hovered,
-            SidebarIcon::Trash,
-            "Delete",
-            "delete-draft",
-            delete,
-        ),
-    ))
-    .style(|s| s.items_center().gap(4.0).flex_shrink(0.0_f32))
-    .into_any();
+    let more = cards::More {
+        edit: Some(cards::edit_action(|| true, edit)),
+        delete: Some(cards::delete_now(delete)),
+        ..cards::More::default()
+    };
+    let actions = cards::more_button(hovered, more)
+        .style(|s| s.margin_right(-4.0).flex_shrink(0.0_f32))
+        .into_any();
     let byline = byline_row(
         name_label(
             move || author_name(app, &Author::User, None),
@@ -3913,7 +3909,8 @@ fn draft_message_view(
     );
     let body = message_body(state, thread, &message.body, None);
     let avatar = viewer_avatar(app, face.avatar()).into_any();
-    cards::track_hover(comment_frame(face, place, avatar, byline, body), hovered).into_any()
+    let frame = comment_frame(face, place, avatar, byline, body).debug_name("draft-message");
+    cards::track_hover(frame, hovered).into_any()
 }
 
 /// A comment of the reader's that is on GitHub, under their face and
@@ -6623,16 +6620,8 @@ mod tests {
         assert_eq!(shown, 1, "only the draft came after the review");
         assert!(find(root_id, "Label: \"After Review #1\"").is_some());
 
-        let pill = find(root_id, "draft-pill")
-            .unwrap()
-            .get_visual_rect_no_clip()
-            .center();
-        harness.pointer_move(pill.x, pill.y);
-        harness.rebuild();
-        harness.paint();
-        let edit = find(root_id, "edit-draft").expect("edit");
-        let c = edit.get_visual_rect_no_clip().center();
-        harness.click(c.x, c.y);
+        let draft = find(root_id, "draft-message").expect("the draft");
+        cards::more::pick(&mut harness, draft, "Edit");
         assert_eq!(state.composer_draft.get(), "I will fix it");
 
         // Back on the live item, the mark goes.
@@ -6647,11 +6636,11 @@ mod tests {
     }
 
     /// A draft under GitHub's thread: the reader's byline with the Draft
-    /// mark, edit and delete under the pointer and no Ask about this;
-    /// delete asks the backend straight away, edit opens the composer in
+    /// mark, and a `⋯` under the pointer holding only Edit and Delete;
+    /// Delete asks the backend straight away, Edit opens the composer in
     /// its row with the text, bound for GitHub.
     #[test]
-    fn a_draft_draws_with_the_draft_mark_and_edit_and_delete_under_the_pointer() {
+    fn a_draft_draws_with_the_draft_mark_and_a_menu_under_the_pointer() {
         let root = TestRoot::new();
         let app = AppState::new();
         let state = state_with_item();
@@ -6679,26 +6668,16 @@ mod tests {
         let root_id = harness.root_id();
         let pill = find(root_id, "draft-pill").expect("the Draft mark");
         assert!(harness.get_layout_rect(pill).width() > 0.0);
-        let edit = find(root_id, "edit-draft").expect("edit");
-        let delete = find(root_id, "delete-draft").expect("delete");
+        let draft = find(root_id, "draft-message").expect("the draft");
+        let more = find(draft, "comment-more").expect("its menu");
         assert_eq!(
-            harness.get_layout_rect(edit).width(),
+            harness.get_layout_rect(more).width(),
             0.0,
             "hidden until hovered"
         );
+        assert_eq!(cards::more::rows(&mut harness, draft), ["Edit", "Delete"]);
 
-        // Under the pointer, the actions show.
-        let body = find(root_id, "draft-pill")
-            .unwrap()
-            .get_visual_rect_no_clip();
-        harness.pointer_move(body.center().x, body.center().y);
-        harness.rebuild();
-        harness.paint();
-        assert_eq!(harness.get_layout_rect(edit).width(), 24.0);
-        assert_eq!(harness.get_layout_rect(delete).width(), 24.0);
-
-        let c = delete.get_visual_rect_no_clip().center();
-        harness.click(c.x, c.y);
+        cards::more::pick(&mut harness, draft, "Delete");
         match commands.try_recv() {
             Ok(Command::DeleteDraft {
                 item_id,
@@ -6710,8 +6689,7 @@ mod tests {
             other => panic!("delete did not ask for the draft: {other:?}"),
         }
 
-        let c = edit.get_visual_rect_no_clip().center();
-        harness.click(c.x, c.y);
+        cards::more::pick(&mut harness, draft, "Edit");
         let composer = state.composer.get().expect("edit opened the composer");
         assert_eq!(composer.editing.as_deref(), Some("d1"));
         assert_eq!(composer.destination, Destination::GitHub);
@@ -6760,17 +6738,8 @@ mod tests {
         // Edited and sent: the backend is asked to rewrite that draft, in
         // its thread, and the composer closes. Nothing is remembered for
         // the face; an edit is GitHub's by nature, not by choice.
-        let root_id = harness.root_id();
-        let pill = find(root_id, "draft-pill")
-            .unwrap()
-            .get_visual_rect_no_clip()
-            .center();
-        harness.pointer_move(pill.x, pill.y);
-        harness.rebuild();
-        harness.paint();
-        let edit = find(root_id, "edit-draft").expect("edit, on the draft's row again");
-        let c = edit.get_visual_rect_no_clip().center();
-        harness.click(c.x, c.y);
+        let draft = find(harness.root_id(), "draft-message").expect("the draft's row again");
+        cards::more::pick(&mut harness, draft, "Edit");
         harness.rebuild();
         harness.paint();
         let text_box = state.composer_box.get().expect("the box registered itself");
@@ -6995,12 +6964,8 @@ mod tests {
                 "{name}: not a draft any more"
             );
             assert!(
-                find(card, "edit-draft").is_none(),
-                "{name}: not edited here"
-            );
-            assert!(
-                find(card, "delete-draft").is_none(),
-                "{name}: not deleted here"
+                find(card, "draft-message").is_none(),
+                "{name}: not a draft's row"
             );
             assert!(
                 find(card, "Label: \"You\"").is_some(),
