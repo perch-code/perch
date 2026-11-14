@@ -13,6 +13,8 @@ use crate::state::Tone;
 
 /// Where every report goes.
 pub const REPO: &str = "perch-code/perch";
+/// Perch's page on GitHub.
+pub const REPO_URL: &str = "https://github.com/perch-code/perch";
 
 /// GitHub refuses an issue body past this many characters.
 pub const BODY_LIMIT: usize = 65_536;

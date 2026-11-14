@@ -134,6 +134,7 @@ pub fn start(backend: Backend, events: std::sync::mpsc::Receiver<(WindowId, Even
                 }
             });
         });
+        floem::action::exec_after(STAR_ASK_AFTER, |_| star_due());
         APP.set(Some(Rc::new(App {
             backend,
             model,
@@ -381,6 +382,36 @@ pub fn check_for_update() {
             open(None);
         }
     }
+}
+
+/// How long Perch is up before it asks for a star: long enough to have
+/// read something, and well past the busy start.
+const STAR_ASK_AFTER: Duration = Duration::from_secs(3 * 60);
+
+/// Perch has been up a while: have the backend ask for a star, in the
+/// focused window, if it never has. With no window open it waits for one.
+fn star_due() {
+    let Some(app) = app() else {
+        return;
+    };
+    let focused = app.focused.get();
+    let window = {
+        let windows = app.windows.borrow();
+        windows
+            .iter()
+            .find(|w| Some(w.id) == focused)
+            .or(windows.first())
+            .cloned()
+    };
+    match window {
+        Some(window) => window.backend.star_due(),
+        None => _ = floem::action::exec_after(Duration::from_secs(60), |_| star_due()),
+    }
+}
+
+/// Star Perch on GitHub, from the Perch menu: its page, in the browser.
+pub fn star_on_github() {
+    crate::ui::widgets::open_in_browser(crate::feedback::REPO_URL);
 }
 
 /// Each screen's size and backing scale, and the key window's size, for

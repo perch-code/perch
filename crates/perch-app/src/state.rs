@@ -84,6 +84,17 @@ pub enum ToastKind {
     /// the button that starts it. It stays until it's closed or the
     /// install ends; other news shows over it meanwhile.
     Server(ServerOffer),
+    /// The one ask for a star on GitHub, with the button that stars. It
+    /// stays until it's answered, as an offer does.
+    Star,
+}
+
+impl ToastKind {
+    /// Whether the toast stays up until it is answered. News shows over
+    /// one that does.
+    fn waits(&self) -> bool {
+        matches!(self, ToastKind::Server(_) | ToastKind::Star)
+    }
 }
 
 /// A toast's offer to install or update a language server, to start the
@@ -917,6 +928,22 @@ impl AppState {
         }
     }
 
+    /// Ask for a star on GitHub. The backend says to once.
+    fn ask_for_star(&self) {
+        self.drop_toasts(|kind| matches!(kind, ToastKind::Star));
+        self.show_toast(ToastKind::Star);
+    }
+
+    /// The star the reader asked for was added, or couldn't be, in which
+    /// case Perch's page opens for them to star it there.
+    fn apply_starred(&self, added: bool) {
+        if added {
+            self.notify("Starred Perch on GitHub. Thank you!", Tone::Success);
+        } else {
+            crate::ui::widgets::open_in_browser(crate::feedback::REPO_URL);
+        }
+    }
+
     fn show_agent_completion(&self, run_id: String) {
         self.show_toast(ToastKind::AgentRun(run_id));
     }
@@ -978,7 +1005,7 @@ impl AppState {
         self.toasts.with(|toasts| {
             toasts.iter().find_map(|toast| match &toast.kind {
                 ToastKind::Message { text, .. } => Some(text.clone()),
-                ToastKind::AgentRun(_) | ToastKind::Server(_) => None,
+                ToastKind::AgentRun(_) | ToastKind::Server(_) | ToastKind::Star => None,
             })
         })
     }
@@ -989,12 +1016,10 @@ impl AppState {
         let was_empty = self.toasts.with_untracked(VecDeque::is_empty);
         // News goes in front of an offer that is waiting to be answered,
         // which comes back once the news has gone.
-        let over_offer = !matches!(kind, ToastKind::Server(_))
-            && self.toasts.with_untracked(|toasts| {
-                toasts
-                    .front()
-                    .is_some_and(|toast| matches!(toast.kind, ToastKind::Server(_)))
-            });
+        let over_offer = !kind.waits()
+            && self
+                .toasts
+                .with_untracked(|toasts| toasts.front().is_some_and(|toast| toast.kind.waits()));
         self.toasts.update(|toasts| {
             if over_offer {
                 toasts.push_front(Toast { kind, token });
@@ -1228,7 +1253,7 @@ impl AppState {
         let offer = self.toasts.with_untracked(|toasts| {
             toasts
                 .iter()
-                .any(|toast| toast.token == token && matches!(toast.kind, ToastKind::Server(_)))
+                .any(|toast| toast.token == token && toast.kind.waits())
         });
         if offer {
             return;
@@ -3465,6 +3490,8 @@ impl AppState {
             Event::Usage(board) => self.usage.set(board),
             Event::Update(status) => self.apply_update(status),
             Event::UpdateChecked(found) => self.apply_update_checked(found),
+            Event::StarAsk => self.ask_for_star(),
+            Event::Starred { added } => self.apply_starred(added),
             Event::UpdateInstalled => floem::quit_app(),
             Event::CommentThreads { .. }
             | Event::AgentStep { .. }

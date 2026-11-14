@@ -1623,6 +1623,41 @@ impl GitHub {
         })
     }
 
+    /// A repository's node id, and whether the reader has starred it.
+    pub async fn fetch_star(&self, repo_full_name: &str) -> Result<(String, bool), Error> {
+        let (owner, name) = repo_parts(repo_full_name)?;
+        let payload = serde_json::json!({
+            "query": "query($owner: String!, $name: String!) { \
+                      repository(owner: $owner, name: $name) { id viewerHasStarred } }",
+            "variables": { "owner": owner, "name": name },
+        });
+        let data: serde_json::Value = self.graphql(&payload, "read a star").await?;
+        let repository = &data["repository"];
+        match (
+            repository["id"].as_str(),
+            repository["viewerHasStarred"].as_bool(),
+        ) {
+            (Some(id), Some(starred)) => Ok((id.to_string(), starred)),
+            _ => Err(Error::Decode(format!(
+                "GitHub answered without {repo_full_name}'s star"
+            ))),
+        }
+    }
+
+    /// Star the repository `node_id` names, as the reader.
+    pub async fn add_star(&self, node_id: &str) -> Result<(), Error> {
+        let payload = serde_json::json!({
+            "query": "mutation($id: ID!) { addStar(input: {starrableId: $id}) { \
+                      starrable { viewerHasStarred } } }",
+            "variables": { "id": node_id },
+        });
+        let data: serde_json::Value = self.graphql(&payload, "star").await?;
+        match data["addStar"]["starrable"]["viewerHasStarred"].as_bool() {
+            Some(true) => Ok(()),
+            _ => Err(Error::Decode("GitHub did not add the star".into())),
+        }
+    }
+
     /// When the rate limit GitHub last named lifts, as seconds since the
     /// epoch, while it's still in force.
     pub fn rate_limited_until(&self) -> Option<i64> {

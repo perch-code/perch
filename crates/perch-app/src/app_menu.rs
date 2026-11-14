@@ -1,4 +1,5 @@
-//! Check for Updates…, New Window, Open… and Send Feedback… in the Perch menu. The menu is
+//! Check for Updates…, New Window, Open…, Send Feedback… and Star Perch on
+//! GitHub in the Perch menu. The menu is
 //! winit's; the items' target is Perch's own, not a window's, so they
 //! still work with no window left.
 
@@ -38,6 +39,11 @@ mod mac {
             fn send_feedback(&self, _sender: Option<&AnyObject>) {
                 crate::windows::show_feedback();
             }
+
+            #[unsafe(method(starOnGithub:))]
+            fn star_on_github(&self, _sender: Option<&AnyObject>) {
+                crate::windows::star_on_github();
+            }
         }
     );
 
@@ -47,7 +53,8 @@ mod mac {
         };
         let app = NSApplication::sharedApplication(mtm);
         // About and Check for Updates…, a separator, then New Window,
-        // Open…, Send Feedback… and a separator of their own.
+        // Open…, Send Feedback…, Star Perch on GitHub and a separator of
+        // their own.
         let Some(menu) = app
             .mainMenu()
             .and_then(|bar| bar.itemAtIndex(0))
@@ -87,6 +94,15 @@ mod mac {
             )
         };
         unsafe { feedback.setTarget(Some(&target)) };
+        let star = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                mtm.alloc(),
+                ns_string!("Star Perch on GitHub"),
+                Some(sel!(starOnGithub:)),
+                ns_string!(""),
+            )
+        };
+        unsafe { star.setTarget(Some(&target)) };
         let updates = unsafe {
             NSMenuItem::initWithTitle_action_keyEquivalent(
                 mtm.alloc(),
@@ -101,7 +117,8 @@ mod mac {
         menu.insertItem_atIndex(&item, at);
         menu.insertItem_atIndex(&open, at + 1);
         menu.insertItem_atIndex(&feedback, at + 2);
-        menu.insertItem_atIndex(&NSMenuItem::separatorItem(mtm), at + 3);
+        menu.insertItem_atIndex(&star, at + 3);
+        menu.insertItem_atIndex(&NSMenuItem::separatorItem(mtm), at + 4);
         // A menu item holds its target weakly, and this one is for the
         // app's life.
         std::mem::forget(target);

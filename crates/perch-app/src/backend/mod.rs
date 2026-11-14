@@ -38,6 +38,7 @@ mod kept_servers;
 pub(crate) mod open_pull;
 pub(crate) mod reviews;
 pub(crate) mod runs;
+mod star;
 mod update;
 mod windows;
 
@@ -835,6 +836,11 @@ pub enum Command {
     /// Check for Updates…: look for a newer release now. `UpdateChecked`
     /// answers, in the window that asked.
     CheckForUpdate,
+    /// Perch has been up a while: ask for a star if it never has and the
+    /// reader hasn't starred. `StarAsk` answers, in the window that asked.
+    StarDue,
+    /// Star Perch on GitHub as the reader. `Starred` answers.
+    Star,
 }
 
 /// How the reader answered a request.
@@ -1619,6 +1625,12 @@ pub enum Event {
     Update(crate::update::UpdateStatus),
     /// What Check for Updates… found, for the window that asked.
     UpdateChecked(crate::update::Checked),
+    /// Ask for a star on GitHub, the once.
+    StarAsk,
+    /// Whether the star the reader asked for was added.
+    Starred {
+        added: bool,
+    },
     /// The new app is in place and opens once this one is gone: quit.
     UpdateInstalled,
     /// The commits over the base and whether the checkout has work in it,
@@ -1776,6 +1788,8 @@ impl Event {
                 | Event::HistoricalReviewReady { .. }
                 | Event::HistoricalReviewFailed { .. }
                 | Event::UpdateChecked(_)
+                | Event::StarAsk
+                | Event::Starred { .. }
                 | Event::LspStatus { .. }
                 | Event::LspWarning { .. }
                 | Event::LspUpdateAvailable { .. }
@@ -3067,6 +3081,14 @@ impl Backend {
 
     pub fn check_for_update(&self) {
         let _ = self.commands.send(Command::CheckForUpdate);
+    }
+
+    pub fn star_due(&self) {
+        let _ = self.commands.send(Command::StarDue);
+    }
+
+    pub fn star(&self) {
+        let _ = self.commands.send(Command::Star);
     }
 
     pub fn plus_one_feedback(&self, number: u64, node_id: &str, react: bool) {
@@ -5414,6 +5436,14 @@ async fn run(
             Command::CheckForUpdate => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move { update::check_now(&ctx).await });
+            }
+            Command::StarDue => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { star::due(&ctx).await });
+            }
+            Command::Star => {
+                let ctx = ctx.clone();
+                tokio::spawn(async move { star::add(&ctx).await });
             }
             Command::OpenFile {
                 path,

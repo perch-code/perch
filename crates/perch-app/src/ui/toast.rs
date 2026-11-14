@@ -1,8 +1,9 @@
 //! The popup at the window's bottom right: an agent run that finished, a
 //! line the reader should see, such as something that could not be done
 //! or a poll that failed, or an offer to install or start a language
-//! server or to trust the code one would run. One at a time, each up for
-//! a few seconds but the offer, which waits. An error or a warning has
+//! server or to trust the code one would run, or the one ask for a star
+//! on GitHub. One at a time, each up for a few seconds but an offer or
+//! the ask, which wait. An error or a warning has
 //! Report, which starts a bug report about it; a line that names somewhere
 //! to go, such as a filed issue, goes there when clicked.
 
@@ -35,7 +36,7 @@ pub fn toast(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
         // A run's toast waits for the run's summary.
         let run = match &toast.kind {
             ToastKind::AgentRun(id) => Some(state.agent_run(id)?),
-            ToastKind::Message { .. } | ToastKind::Server(_) => None,
+            ToastKind::Message { .. } | ToastKind::Server(_) | ToastKind::Star => None,
         };
         Some((toast, run))
     });
@@ -81,6 +82,7 @@ pub fn toast(state: AppState, review: ReviewState, backend: Rc<Backend>) -> impl
                     server_offer(state, review, backend.clone(), token, offer).into_any(),
                     None,
                 ),
+                ToastKind::Star => (star_ask(state, backend.clone(), token).into_any(), None),
             };
             let clickable = open.is_some();
             let mut card = Container::new(body);
@@ -307,6 +309,35 @@ fn server_offer(
             .into_any(),
     }
 }
+
+/// The ask for a star: its line, Star, which stars Perch as the reader
+/// without leaving for a browser, and the close. Either takes it down
+/// for good; Star Perch on GitHub in the Perch menu is there after.
+fn star_ask(state: AppState, backend: Rc<Backend>, token: u64) -> impl IntoView {
+    let line = Label::new(STAR_ASK).style(|s| {
+        s.font_size(theme::TEXT_BODY)
+            .color(theme::fg())
+            .text_wrap()
+            .min_width(0.0)
+            .flex_grow(1.0_f32)
+            .flex_basis(0.0)
+    });
+    let star = offer_button("Star", move || {
+        state.dismiss_toast(token);
+        backend.star();
+    });
+    let close = widgets::icon_action(
+        SidebarIcon::Close,
+        "Dismiss message",
+        || true,
+        move || state.dismiss_toast(token),
+    );
+    Stack::horizontal((dot(theme::draft), line, star, close))
+        .style(|s| s.items_center().width_full().gap(9.0))
+}
+
+/// What the ask for a star says.
+pub(crate) const STAR_ASK: &str = "Enjoying Perch? A star on GitHub helps others find it.";
 
 /// The height of a line of body text, which a close at the top of a
 /// wrapped line centres on.
@@ -610,6 +641,61 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(started, [rust]);
+    }
+
+    /// The ask for a star waits behind news, and Star takes it down and
+    /// has the backend star. Added, it says thanks; not, Perch's page
+    /// opens in the browser.
+    #[test]
+    fn the_ask_for_a_star_stars_from_its_button() {
+        use std::rc::Rc;
+
+        use floem::headless::{HeadlessHarness, TestRoot};
+        use floem::prelude::*;
+
+        use crate::backend::{Backend, Command, Event};
+        use crate::review::model::ReviewState;
+        use crate::state::{AppState, ToastKind};
+
+        let state = AppState::new();
+        let review = ReviewState::new();
+        state.review.set(Some(review));
+        let (backend, mut commands) = Backend::recording();
+        let root = TestRoot::new();
+        let view = crate::ui::app_view(state, review, Rc::new(backend));
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        state.apply(Event::StarAsk);
+        state.complain("Could not fetch");
+        assert!(
+            matches!(
+                state.current_toast().unwrap().kind,
+                ToastKind::Message { .. }
+            ),
+            "news shows over the ask"
+        );
+        state.dismiss_toast(state.current_toast().unwrap().token);
+        harness.rebuild();
+        harness.paint();
+        let toast = named(harness.root_id(), "toast").expect("no toast");
+        assert!(named(toast, super::STAR_ASK).is_some());
+        let button = named(toast, "Star").expect("no Star");
+        let at = button.get_visual_rect_no_clip().center();
+        harness.click(at.x, at.y);
+        harness.rebuild();
+        assert!(state.current_toast().is_none(), "the toast goes");
+        let starred = std::iter::from_fn(|| commands.try_recv().ok())
+            .filter(|command| matches!(command, Command::Star))
+            .count();
+        assert_eq!(starred, 1);
+
+        state.apply(Event::Starred { added: true });
+        assert_eq!(
+            state.notice().as_deref(),
+            Some("Starred Perch on GitHub. Thank you!")
+        );
+        assert!(crate::ui::widgets::opened().is_empty());
+        state.apply(Event::Starred { added: false });
+        assert_eq!(crate::ui::widgets::opened(), [crate::feedback::REPO_URL]);
     }
 
     /// Under the line, an Always trust box for each server held, the box
