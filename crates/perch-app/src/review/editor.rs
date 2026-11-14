@@ -6051,6 +6051,41 @@ mod window {
         assert_eq!(count(harness.root_id(), "Follow up…"), 0);
     }
 
+    /// A reply in the code has no fill of its own: its bar and pickers
+    /// sit on the thread's card, grey on one only Perch has, and only the
+    /// box the words go in is white.
+    #[test]
+    fn a_follow_up_in_the_code_sits_on_its_threads_grey() {
+        let (mut harness, state) = harness();
+        let thread = thread_with("t1", 5, 7, &["why?", "because"]);
+        state.set_comment_threads(Arc::new(vec![thread.clone()]));
+        harness.rebuild();
+        harness.paint();
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
+        state.open_composer(
+            Some("t1".into()),
+            thread.anchor.clone(),
+            String::new(),
+            choice,
+        );
+        harness.rebuild();
+        harness.paint();
+        let fill = |id| match harness.get_computed_style(id).get(floem::style::Background) {
+            Some(Brush::Solid(color)) if color.components[3] > 0.0 => Some(color),
+            _ => None,
+        };
+        let card = find(harness.root_id(), "inline-card:t1").expect("the card is in the layer");
+        assert_eq!(fill(card), Some(crate::theme::perch_bg()), "a local thread");
+        let composer = find(card, "composer-box").expect("the reply is in the card");
+        assert_eq!(fill(composer), None, "the card's grey shows through");
+        let words = find(composer, "editor-box").expect("the box the words go in");
+        assert_eq!(fill(words), Some(crate::theme::canvas()));
+    }
+
     #[test]
     fn a_run_folded_again_keeps_the_composers_lines_and_its_card_in_view() {
         use crate::review::doc::CardId;

@@ -863,9 +863,13 @@ pub fn composer_view(
         });
         // In the code the thread's card is already around it and the
         // editor has a border of its own: a third box between the two
-        // is one too many.
+        // is one too many. With no border it takes no fill either, so the
+        // bar and the pickers sit on the card's own: white on GitHub's,
+        // grey on a thread only Perch has, where white was a slab.
         base.apply_if(follow_up && face == ThreadFace::Inline, |s| {
-            s.padding(0.0).border(0.0)
+            s.padding(0.0)
+                .border(0.0)
+                .background(floem::peniko::Color::TRANSPARENT)
         })
     });
     whole_set.set(Some(floem::View::id(&whole_box)));
