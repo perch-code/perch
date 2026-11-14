@@ -191,6 +191,7 @@ mod tests {
             unread,
             local_unread: false,
             local_read: false,
+            restored_at: None,
             reason: Reason::Comment,
             updated_at: "2026-09-18T09:00:20Z".parse().unwrap(),
             last_read_at: None,

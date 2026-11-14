@@ -30,6 +30,15 @@ pub struct Thread {
     /// with newer activity or Mark Unread.
     #[serde(default)]
     pub local_read: bool,
+    /// When the reader moved the thread back to the inbox, if they did.
+    /// The automatic Done of a closed subject's notification leaves alone
+    /// a close from before then: the reader had it in front of them and
+    /// wanted the row, and a poll later it would be gone again. A close
+    /// after it is marked Done as any other. Kept by thread, not by
+    /// revision: GitHub moves `updated_at` some twenty seconds after the
+    /// reader's own merge, which is no news.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "ts_opt")]
+    pub restored_at: Option<Timestamp>,
     pub reason: Reason,
     #[serde(with = "ts")]
     pub updated_at: Timestamp,
@@ -705,6 +714,7 @@ mod tests {
         }"#;
         let t: Thread = serde_json::from_str(json).unwrap();
         assert!(!t.local_unread);
+        assert_eq!(t.restored_at, None);
         assert_eq!(t.reason, Reason::Mention);
         assert_eq!(t.subject.kind, SubjectKind::PullRequest);
         assert_eq!(t.number_hint(), Some(2091));
@@ -713,11 +723,16 @@ mod tests {
             "https://avatars.githubusercontent.com/u/1"
         );
 
+        // What Perch keeps of its own on a thread comes back from the
+        // cache with it.
         let mut cached = t;
         cached.local_unread = true;
+        let restored_at: Timestamp = "2026-09-17T19:00:00Z".parse().unwrap();
+        cached.restored_at = Some(restored_at);
         let round_tripped: Thread =
             serde_json::from_str(&serde_json::to_string(&cached).unwrap()).unwrap();
         assert!(round_tripped.local_unread);
+        assert_eq!(round_tripped.restored_at, Some(restored_at));
     }
 
     #[test]
@@ -769,6 +784,7 @@ mod tests {
             unread: true,
             local_unread: false,
             local_read: false,
+            restored_at: None,
             reason: Reason::Subscribed,
             updated_at: "2026-09-17T18:00:00Z".parse().unwrap(),
             last_read_at: None,

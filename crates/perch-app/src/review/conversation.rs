@@ -4639,6 +4639,7 @@ mod tests {
             unread,
             local_unread: false,
             local_read: false,
+            restored_at: None,
             reason: Reason::Comment,
             updated_at: at(updated_at),
             last_read_at: Some(at("2026-09-16T00:00:00Z")),

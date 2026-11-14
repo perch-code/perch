@@ -461,6 +461,7 @@ mod tests {
             unread: false,
             local_unread: false,
             local_read: false,
+            restored_at: None,
             reason: Reason::Mention,
             updated_at: "2026-09-19T12:00:00Z".parse().unwrap(),
             last_read_at: None,

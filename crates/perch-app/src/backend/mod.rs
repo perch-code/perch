@@ -6990,6 +6990,10 @@ impl Ctx {
         // otherwise put the bold back on a row the reader has opened.
         // Carried past the revision it would hide what came next, which
         // arrives unread too.
+        // When the reader moved a thread back to the inbox is carried
+        // whatever the revision, so the automatic Done goes on leaving
+        // the row alone: GitHub's late stamp for the reader's own merge is
+        // a new revision, and would otherwise shed it.
         // What a look found of the subject is carried whatever the
         // revision: the face is the same, and a state gone stale is looked
         // at again, which the snapshot's own timestamp says. The run a
@@ -7001,7 +7005,7 @@ impl Ctx {
             .with_cache(|c| c.load_done_threads())
             .and_then(Result::ok)
             .unwrap_or_default();
-        let (local_unread, local_read, snapshots, runs) = {
+        let (local_unread, local_read, restored, snapshots, runs) = {
             let carried = || current.iter().chain(&done);
             (
                 current
@@ -7013,6 +7017,10 @@ impl Ctx {
                     .iter()
                     .filter(|thread| thread.local_read)
                     .map(|thread| ((thread.id.clone(), thread.updated_at), thread.last_read_at))
+                    .collect::<std::collections::HashMap<_, _>>(),
+                current
+                    .iter()
+                    .filter_map(|thread| Some((thread.id.clone(), thread.restored_at?)))
                     .collect::<std::collections::HashMap<_, _>>(),
                 carried()
                     .filter_map(|thread| {
@@ -7041,6 +7049,9 @@ impl Ctx {
                 thread.unread = false;
                 thread.local_read = true;
                 thread.last_read_at = thread.last_read_at.or(*read_at);
+            }
+            if thread.restored_at.is_none() {
+                thread.restored_at = restored.get(&thread.id).copied();
             }
             if thread.subject_snapshot.is_none() {
                 thread.subject_snapshot = snapshots.get(&thread.id).cloned();
@@ -7260,8 +7271,10 @@ impl Ctx {
     }
 
     /// Take the Done mark back and put the thread where GitHub's newest-
-    /// first order has it. GitHub keeps it as Done: there is no public way
-    /// back, and its list returns Done threads under `all=true` anyway.
+    /// first order has it, stamped as the reader's to keep: the automatic
+    /// Done of a closed subject would otherwise take it away again a poll
+    /// later. GitHub keeps it as Done: there is no public way back, and
+    /// its list returns Done threads under `all=true` anyway.
     fn restore_notification(&self, thread_id: &str) {
         let restored = match self.with_cache(|cache| cache.restore_notification(thread_id)) {
             Some(Ok(thread)) => thread,
@@ -7274,7 +7287,8 @@ impl Ctx {
             }
             None => None,
         };
-        if let Some(thread) = restored {
+        if let Some(mut thread) = restored {
+            thread.restored_at = Some(Timestamp::now());
             self.edit_notifications(|threads| insert_by_activity(threads, thread));
         }
         self.send_marked_notifications();
@@ -13906,7 +13920,7 @@ async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     look_at_subjects(&ctx).await;
-                    done_closed_notifications(&ctx).await;
+                    done_closed_notifications(&ctx, Timestamp::now()).await;
                     look_for_runs(&ctx).await;
                 });
             }
@@ -15092,28 +15106,51 @@ async fn done_notifications(ctx: &Ctx, github: &GitHub, held: Vec<(String, Optio
 }
 
 /// How long after a merge or a close GitHub may still stamp the thread
-/// for it: the notification comes a moment after the event itself.
+/// for it: the notification comes some twenty seconds after the event
+/// itself, unread when someone else closed it.
 const CLOSE_NOTICE_SLACK: jiff::SignedDuration = jiff::SignedDuration::from_secs(60);
 
 /// Whether a look found the thread's pull request merged or closed, or
-/// its issue closed, with nothing on the thread since: the close is the
-/// last word, and the thread is done with. A comment after the close
-/// moves the thread past it and keeps it.
-fn closed_and_quiet(thread: &Thread) -> bool {
+/// its issue closed, with nothing on the thread since, and the close's
+/// own notice has had its time to come by `now`: the close is the last
+/// word, and the thread is done with. A comment after the close moves the
+/// thread past it and keeps it.
+///
+/// Marked Done any sooner, someone else's close sent its notice after
+/// the Done, unread: the row came back for a poll and was marked again.
+fn closed_and_quiet(thread: &Thread, now: Timestamp) -> bool {
     crate::inbox::closed(thread)
         && thread
             .subject_snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.closed_at)
-            .is_some_and(|closed_at| thread.updated_at <= closed_at + CLOSE_NOTICE_SLACK)
+            .is_some_and(|closed_at| {
+                let settled = closed_at + CLOSE_NOTICE_SLACK;
+                thread.updated_at <= settled && settled <= now
+            })
+}
+
+/// Whether the reader moved the thread back to the inbox with this close
+/// already on it. A later merge or close is not theirs to keep.
+fn kept_since_closing(thread: &Thread) -> bool {
+    let closed_at = thread
+        .subject_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.closed_at);
+    matches!(
+        (thread.restored_at, closed_at),
+        (Some(restored), Some(closed)) if closed <= restored
+    )
 }
 
 /// Mark Done on GitHub each notification whose pull request or issue was
 /// merged or closed with nothing after, so it leaves github.com's inbox as
-/// it leaves Perch's. One GitHub refuses is not tried again until the
-/// thread moves on; once GitHub is out of reach or out of requests the
-/// rest wait for the next poll.
-async fn done_closed_notifications(ctx: &Ctx) {
+/// it leaves Perch's. Not until the close's notice has had time to come,
+/// so the one request takes it too, and not a row the reader has put back
+/// in the inbox since the close. One GitHub refuses is not tried again
+/// until the thread moves on; once GitHub is out of reach or out of
+/// requests the rest wait for the next poll.
+async fn done_closed_notifications(ctx: &Ctx, now: Timestamp) {
     let Some(github) = ctx.github() else {
         return;
     };
@@ -15128,7 +15165,7 @@ async fn done_closed_notifications(ctx: &Ctx) {
         .map(|threads| {
             threads
                 .iter()
-                .filter(|thread| closed_and_quiet(thread))
+                .filter(|thread| closed_and_quiet(thread, now) && !kept_since_closing(thread))
                 .map(|thread| (thread.id.clone(), thread.updated_at))
                 .filter(|key| !refused.contains(key))
                 .collect()
@@ -21066,6 +21103,7 @@ mod tests {
             unread: true,
             local_unread: false,
             local_read: false,
+            restored_at: None,
             reason: Reason::Subscribed,
             updated_at: "2026-09-17T18:00:00Z".parse().unwrap(),
             last_read_at: None,
@@ -21825,7 +21863,17 @@ mod tests {
         assert_eq!(done(), vec![dismissed.clone()]);
 
         ctx.restore_notification(&dismissed.id);
-        let inbox = vec![newest, dismissed, oldest];
+        // Back with when the reader asked for it, which is the wall clock.
+        let restored_at = ctx.notifications.lock().unwrap()[1].restored_at;
+        assert!(restored_at.is_some());
+        let inbox = vec![
+            newest.clone(),
+            Thread {
+                restored_at,
+                ..dismissed.clone()
+            },
+            oldest.clone(),
+        ];
         assert_eq!(
             *ctx.notifications.lock().unwrap(),
             inbox,
@@ -21833,8 +21881,9 @@ mod tests {
         );
         assert!(done().is_empty());
 
-        // GitHub still lists it, now with no mark to hide it.
-        let visible = ctx.replace_notifications(inbox.clone(), Some("second"));
+        // GitHub still lists it, now with no mark to hide it, and knows
+        // nothing of the move back: that is carried.
+        let visible = ctx.replace_notifications(vec![newest, dismissed, oldest], Some("second"));
         assert_eq!(visible, inbox);
     }
 
@@ -29415,7 +29464,7 @@ read eof || true
         );
 
         look_at_subjects(&ctx).await;
-        done_closed_notifications(&ctx).await;
+        done_closed_notifications(&ctx, Timestamp::now()).await;
 
         let ids = || -> Vec<String> {
             ctx.notifications
@@ -29446,8 +29495,171 @@ read eof || true
         assert_eq!(done, ["6", "7", "8"]);
 
         // 9 isn't asked again while it stands.
-        done_closed_notifications(&ctx).await;
+        done_closed_notifications(&ctx, Timestamp::now()).await;
         assert_eq!(paths.lock().unwrap().len(), 5);
+    }
+
+    /// A merged pull request's snapshot, for a thread set down already
+    /// looked at.
+    fn merged(closed_at: Timestamp) -> perch_github::SubjectSnapshot {
+        perch_github::SubjectSnapshot {
+            author_login: "someone".into(),
+            author_avatar_url: String::new(),
+            state: perch_github::SubjectState::PrMerged,
+            churn: Some((1, 1)),
+            review_requested: false,
+            participants: Some(vec![]),
+            closed_at: Some(closed_at),
+            at: closed_at,
+        }
+    }
+
+    /// A GitHub that takes every Done and answers nothing else, and the
+    /// paths it was asked for.
+    fn takes_done() -> (String, impl Fn() -> Vec<String>) {
+        let (base, paths) = serve_by_method(|method, _, _| match method {
+            "DELETE" => ("204 No Content", String::new()),
+            _ => ("404 Not Found", "{}".to_string()),
+        });
+        (base, move || paths.lock().unwrap().clone())
+    }
+
+    /// GitHub stamps a thread for a merge or a close some twenty seconds
+    /// after it, unread when someone else did it. A Done sent before the
+    /// stamp left the notice to bring the row back for a poll and be
+    /// marked a second time, so the Done waits out the slack and one
+    /// request takes both.
+    #[tokio::test]
+    async fn a_closed_subject_is_marked_done_once_its_notice_has_had_time_to_come() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, sent) = takes_done();
+        let (ctx, _received) = ctx(dir.path(), &base, &[]);
+        let closed_at: Timestamp = "2026-09-17T18:00:00Z".parse().unwrap();
+        let after = |secs: i64| closed_at + jiff::SignedDuration::from_secs(secs);
+        let ids = || -> Vec<String> {
+            ctx.notifications
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|t| t.id.clone())
+                .collect()
+        };
+
+        // Read, last moved an hour before the merge a look has now found.
+        let mut seven = thread("7", "seven");
+        seven.unread = false;
+        seven.updated_at = after(-3_600);
+        seven.subject_snapshot = Some(merged(closed_at));
+        ctx.replace_notifications(vec![seven.clone()], Some("first"));
+        done_closed_notifications(&ctx, after(8)).await;
+        assert!(sent().is_empty(), "the notice has not come yet");
+        assert_eq!(ids(), ["7"]);
+
+        // The notice, as GitHub lists it.
+        let mut notice = thread("7", "seven");
+        notice.updated_at = after(22);
+        ctx.replace_notifications(vec![notice.clone()], Some("second"));
+        done_closed_notifications(&ctx, after(59)).await;
+        assert!(sent().is_empty(), "nor has its time run out");
+        done_closed_notifications(&ctx, after(60)).await;
+        assert_eq!(sent(), ["/notifications/threads/7"]);
+        assert!(ids().is_empty());
+
+        // The Done took the notice with it: GitHub lists it read, and it
+        // stays away.
+        notice.unread = false;
+        assert!(ctx
+            .replace_notifications(vec![notice.clone()], Some("third"))
+            .is_empty());
+        done_closed_notifications(&ctx, after(120)).await;
+        assert_eq!(sent().len(), 1);
+
+        // A comment an hour on returns the row, and it stays.
+        let mut comment = thread("7", "seven");
+        comment.updated_at = after(3_600);
+        ctx.replace_notifications(vec![comment], Some("fourth"));
+        done_closed_notifications(&ctx, after(3_700)).await;
+        assert_eq!(sent().len(), 1);
+        assert_eq!(ids(), ["7"]);
+    }
+
+    /// Move to Inbox on a thread the automatic Done took was undone a
+    /// poll later: the close was still the last word. The reader's own
+    /// merge is the hard case, since GitHub then moves the thread on some
+    /// twenty seconds after it and leaves it read, so the row a poll lists
+    /// is not the revision that was moved back.
+    #[tokio::test]
+    async fn a_closed_notification_moved_back_stays_through_the_readers_own_late_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, sent) = takes_done();
+        let (ctx, _received) = ctx(dir.path(), &base, &[]);
+        let closed_at: Timestamp = "2026-09-17T18:00:00Z".parse().unwrap();
+        let after = |secs: i64| closed_at + jiff::SignedDuration::from_secs(secs);
+        let listed = || ctx.notifications.lock().unwrap().clone();
+
+        // The polls since the merge were unchanged, so the row is still
+        // the one from before it.
+        let mut seven = thread("7", "seven");
+        seven.unread = false;
+        seven.updated_at = after(-3_600);
+        seven.subject_snapshot = Some(merged(closed_at));
+        ctx.replace_notifications(vec![seven], Some("first"));
+        done_closed_notifications(&ctx, after(90)).await;
+        assert_eq!(sent(), ["/notifications/threads/7"]);
+        assert!(listed().is_empty());
+
+        ctx.restore_notification("7");
+        assert!(listed()[0].restored_at.is_some());
+        done_closed_notifications(&ctx, after(600)).await;
+        assert_eq!(sent().len(), 1, "the reader wanted it back");
+
+        // GitHub's late stamp for the merge, read, knowing nothing of the
+        // move back.
+        let mut stamped = thread("7", "seven");
+        stamped.unread = false;
+        stamped.updated_at = after(20);
+        let visible = ctx.replace_notifications(vec![stamped], Some("second"));
+        assert!(visible[0].restored_at.is_some());
+        assert_eq!(visible[0].restored_at, listed()[0].restored_at);
+        assert_eq!(
+            ctx.with_cache(|cache| cache.load_threads().unwrap())
+                .unwrap(),
+            visible,
+            "across a restart too"
+        );
+        done_closed_notifications(&ctx, after(600)).await;
+        assert_eq!(sent().len(), 1);
+        assert_eq!(listed(), visible);
+
+        // Done by hand still takes it.
+        ctx.dismiss_notification("7");
+        assert!(listed().is_empty());
+    }
+
+    /// Moving a thread back keeps it through the close it had then, not
+    /// through every close after: reopened and merged again, or moved back
+    /// while still open, it is marked Done as any other.
+    #[tokio::test]
+    async fn a_notification_moved_back_is_marked_done_when_it_closes_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, sent) = takes_done();
+        let (ctx, _received) = ctx(dir.path(), &base, &[]);
+        let mut seven = thread("7", "seven");
+        seven.unread = false;
+        ctx.replace_notifications(vec![seven.clone()], Some("first"));
+        ctx.dismiss_notification("7");
+        ctx.restore_notification("7");
+        let restored_at = ctx.notifications.lock().unwrap()[0].restored_at.unwrap();
+
+        // Merged an hour after the move back, and stamped for it.
+        let closed_at = restored_at + jiff::SignedDuration::from_hours(1);
+        seven.updated_at = closed_at + jiff::SignedDuration::from_secs(20);
+        seven.subject_snapshot = Some(merged(closed_at));
+        let visible = ctx.replace_notifications(vec![seven], Some("second"));
+        assert_eq!(visible[0].restored_at, Some(restored_at));
+        done_closed_notifications(&ctx, closed_at + jiff::SignedDuration::from_mins(2)).await;
+        assert_eq!(sent(), ["/notifications/threads/7"]);
+        assert!(ctx.notifications.lock().unwrap().is_empty());
     }
 
     /// A closed snapshot from before the look asked when is taken again,
@@ -29471,11 +29683,18 @@ read eof || true
                 closed_at: None,
                 at: closed.updated_at,
             });
+            let closed_at = closed.updated_at;
+            let settled = closed_at + CLOSE_NOTICE_SLACK;
             assert!(closed.wants_snapshot(), "{state:?}");
-            assert!(!closed_and_quiet(&closed), "{state:?}");
-            closed.subject_snapshot.as_mut().unwrap().closed_at = Some(closed.updated_at);
+            assert!(!closed_and_quiet(&closed, settled), "{state:?}");
+            assert!(!closed_and_quiet(&closed, Timestamp::MAX), "{state:?}");
+            closed.subject_snapshot.as_mut().unwrap().closed_at = Some(closed_at);
             assert!(!closed.wants_snapshot(), "{state:?}");
-            assert!(closed_and_quiet(&closed), "{state:?}");
+            // Its time is the close's, and the close's notice needs its
+            // own before the thread is done with.
+            let just_short = settled - jiff::SignedDuration::from_secs(1);
+            assert!(!closed_and_quiet(&closed, just_short), "{state:?}");
+            assert!(closed_and_quiet(&closed, settled), "{state:?}");
         }
     }
 

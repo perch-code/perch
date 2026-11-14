@@ -61,10 +61,18 @@ still GitHub's.
   thread too, and so does activity you have already read on github.com.
 - **Unsubscribe** ignores future activity on the thread, marks its current
   notification done, and remembers it the same way.
+- A thread whose pull request was merged or closed, or whose issue was
+  closed, with nothing on it since, is marked Done on its own, on GitHub
+  too. Perch waits a minute after the close first: GitHub sends the close's
+  own notification some twenty seconds late, and a Done before it would see
+  the thread come back. A comment after the close keeps the thread, or
+  returns it.
 - **View › Done**, in the Inbox's filter menu, lists the threads marked Done
   in Perch that GitHub still lists. **Move to Inbox**, on the row or its menu,
   drops the local mark and puts the thread back. GitHub's public API has no
-  way to undo Done, so github.com keeps it under Done.
+  way to undo Done, so github.com keeps it under Done. A closed thread you
+  move back to the inbox stays; only a later merge or close, with nothing
+  after it, marks it Done again.
 - **Snooze**, the clock on a row or the Snooze submenu in its menu, hides the
   thread until later today (6 PM), tomorrow, later this week, this weekend or
   next week (8 AM), as Gmail offers them. It comes back sooner if newer
