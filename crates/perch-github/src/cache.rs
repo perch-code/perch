@@ -50,7 +50,9 @@ mod review_store;
 /// discarded.
 pub const SCHEMA_VERSION: u32 = 38;
 
-/// Metadata key holding the validator for the cached notifications snapshot.
+/// The meta key for what the notification poll asks with. It holds the
+/// first page's ETag; the name is from the Last-Modified date it held
+/// until GitHub stopped answering If-Modified-Since for this list.
 pub const NOTIFICATIONS_LAST_MODIFIED_KEY: &str = "notifications_last_modified";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2755,7 +2757,7 @@ impl Cache {
     /// The API result is a snapshot, so rows missing from `threads` must be
     /// removed rather than accumulated. Keeping the validator in the same
     /// transaction prevents a crash from pairing an older list with a newer
-    /// `Last-Modified` value (or the reverse).
+    /// validator (or the reverse).
     pub fn store_threads(
         &self,
         threads: &[Thread],

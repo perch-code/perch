@@ -6949,46 +6949,8 @@ impl Ctx {
     /// retain GitHub's response order.
     fn replace_notifications(
         &self,
-        threads: Vec<Thread>,
-        last_modified: Option<&str>,
-    ) -> Vec<Thread> {
-        self.publish_notifications(threads, last_modified, true)
-    }
-
-    /// Fit the threads GitHub says changed into the visible list, newest
-    /// first, in place of what was there of them. The Done list stays as
-    /// the last full read left it: a merge cannot say what left GitHub's
-    /// list. Returns the changed threads that are visible.
-    fn merge_notifications(
-        &self,
-        changed: Vec<Thread>,
-        last_modified: Option<&str>,
-    ) -> Vec<Thread> {
-        let ids: std::collections::HashSet<String> =
-            changed.iter().map(|thread| thread.id.clone()).collect();
-        let rest = self
-            .notifications
-            .lock()
-            .map(|current| {
-                current
-                    .iter()
-                    .filter(|thread| !ids.contains(&thread.id))
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let mut threads = changed;
-        threads.extend(rest);
-        let mut visible = self.publish_notifications(threads, last_modified, false);
-        visible.retain(|thread| ids.contains(&thread.id));
-        visible
-    }
-
-    fn publish_notifications(
-        &self,
         mut threads: Vec<Thread>,
         last_modified: Option<&str>,
-        snapshot: bool,
     ) -> Vec<Thread> {
         // A local mark-unread reminder belongs to this exact notification
         // revision. Carry it across a full GitHub snapshot, but let newer
@@ -7060,13 +7022,9 @@ impl Ctx {
                 thread.run_snapshot = runs.get(&thread.id).cloned();
             }
         }
-        if let Some(result) = self.with_cache(|c| {
-            if snapshot {
-                c.store_notification_snapshot(&threads, last_modified)
-            } else {
-                c.store_threads(&threads, last_modified)
-            }
-        }) {
+        if let Some(result) =
+            self.with_cache(|c| c.store_notification_snapshot(&threads, last_modified))
+        {
             match result {
                 Ok(visible) => threads = visible,
                 Err(e) => tracing::warn!(error = %e, "could not cache notifications"),
@@ -13872,7 +13830,7 @@ async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
         .flatten();
     let mut result = session
         .github
-        .list_threads_since(last_modified.as_deref())
+        .list_threads_if_changed(last_modified.as_deref())
         .await;
     // A token GitHub refuses may have been rotated under the app: another
     // `gh auth login`, an expired token replaced. Whatever resolves now
@@ -13882,7 +13840,7 @@ async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
         if let Some(fresh) = adopt_new_token(ctx).await {
             result = fresh
                 .github
-                .list_threads_since(last_modified.as_deref())
+                .list_threads_if_changed(last_modified.as_deref())
                 .await;
             session = fresh;
         }
@@ -13895,13 +13853,10 @@ async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
             if result.unchanged {
                 tracing::info!("notifications unchanged");
             } else {
-                let visible = if result.changed_only {
-                    tracing::info!(count = result.threads.len(), "notifications changed");
-                    ctx.merge_notifications(result.threads, result.last_modified.as_deref())
-                } else {
-                    tracing::info!(count = result.threads.len(), "notifications polled");
-                    ctx.replace_notifications(result.threads, result.last_modified.as_deref())
-                };
+                // A 200 is GitHub's list as it stands, never a part of it,
+                // so it replaces the inbox and refreshes the Done list.
+                tracing::info!(count = result.threads.len(), "notifications polled");
+                let visible = ctx.replace_notifications(result.threads, result.etag.as_deref());
                 attend(ctx, &visible).await;
             }
             // Off the poll, which the command loop waits on: the rows
@@ -21492,65 +21447,6 @@ mod tests {
         assert_eq!(opened.last_read_at, Some(last_read_at));
     }
 
-    /// A poll that found a few threads changed fits them in at the top in
-    /// place of what was there, and leaves the rest and the Done list as
-    /// the last full read had them. A Done revision among them stays Done.
-    #[tokio::test]
-    async fn changed_threads_are_merged_into_the_inbox() {
-        let dir = tempfile::tempdir().unwrap();
-        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
-        let mut older = thread("7", "seven");
-        older.subject_snapshot = Some(perch_github::SubjectSnapshot {
-            author_login: "someone".into(),
-            author_avatar_url: String::new(),
-            state: perch_github::SubjectState::PrOpen,
-            churn: None,
-            review_requested: false,
-            participants: None,
-            closed_at: None,
-            at: older.updated_at,
-        });
-        ctx.replace_notifications(
-            vec![thread("8", "eight"), older.clone(), thread("9", "nine")],
-            Some("first"),
-        );
-        ctx.dismiss_notification("9");
-
-        let mut moved = thread("8", "eight, again");
-        moved.updated_at = "2026-09-18T09:00:00Z".parse().unwrap();
-        let mut new = thread("10", "ten");
-        new.updated_at = "2026-09-18T10:00:00Z".parse().unwrap();
-        let changed = ctx.merge_notifications(
-            vec![new.clone(), moved.clone(), thread("9", "nine")],
-            Some("second"),
-        );
-
-        let ids = |threads: &[Thread]| threads.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
-        assert_eq!(
-            ids(&changed),
-            ["10", "8"],
-            "the changed threads, Done aside"
-        );
-        let threads = ctx.notifications.lock().unwrap().clone();
-        assert_eq!(ids(&threads), ["10", "8", "7"]);
-        assert_eq!(threads[1].subject.title, "eight, again");
-        assert_eq!(
-            threads[2], older,
-            "an unchanged thread keeps what was found of it"
-        );
-        assert_eq!(
-            ctx.with_cache(|cache| cache.load_threads().unwrap())
-                .unwrap(),
-            threads,
-            "the merge survives a restart"
-        );
-        assert_eq!(ctx.notifications_last_modified().as_deref(), Some("second"));
-        let done = ctx
-            .with_cache(|cache| cache.load_done_threads().unwrap())
-            .unwrap();
-        assert_eq!(ids(&done), ["9"]);
-    }
-
     /// Opening a pull request from All or Authored reads the notification
     /// about it, as opening it from Notifications does: GitHub is asked
     /// once for a thread it has unread, a Perch-only reminder is cleared
@@ -28757,25 +28653,188 @@ read eof || true
         let incoming = thread("8", "current");
         let body = serde_json::to_string(&vec![incoming.clone()]).unwrap();
         let (base, _paths) = serve_by_request(move |_path, headers| {
-            let conditional = headers.iter().any(|header| {
-                header
-                    .split_once(':')
-                    .is_some_and(|(name, _)| name.eq_ignore_ascii_case("if-modified-since"))
-            });
-            if conditional {
+            if if_none_match(headers).is_some() {
                 ("304 Not Modified", String::new())
             } else {
                 ("200 OK", body.clone())
             }
         });
         let (ctx, _received) = ctx(dir.path(), &base, &[]);
-        ctx.replace_notifications(vec![old.clone()], Some("Sat, 19 Sep 2026 12:00:00 GMT"));
+        ctx.replace_notifications(vec![old.clone()], Some("\"first\""));
 
         refresh(&ctx, NotificationPollMode::Conditional).await;
         assert_eq!(*ctx.notifications.lock().unwrap(), vec![old]);
 
         refresh(&ctx, NotificationPollMode::Reconcile).await;
         assert_eq!(*ctx.notifications.lock().unwrap(), vec![incoming]);
+    }
+
+    /// What a request sent as `If-None-Match`, if anything.
+    fn if_none_match(headers: &[String]) -> Option<String> {
+        headers.iter().find_map(|header| {
+            let (name, value) = header.split_once(':')?;
+            name.eq_ignore_ascii_case("if-none-match")
+                .then(|| value.trim().to_string())
+        })
+    }
+
+    /// The requests for the notification list among those a mock was sent.
+    /// A poll also starts looks that ask GitHub other things, off the poll,
+    /// and whether one has run yet is not what these tests are about.
+    fn list_requests(paths: &Mutex<Vec<String>>) -> Vec<String> {
+        paths
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|path| path.starts_with("/notifications"))
+            .cloned()
+            .collect()
+    }
+
+    const LIST_PAGE_ONE: &str = "/notifications?all=true&participating=false&per_page=50&page=1";
+    const LIST_PAGE_TWO: &str = "/notifications?all=true&participating=false&per_page=50&page=2";
+
+    /// A 200 that carries `ETag: "second"`. The mock writes the status
+    /// straight into the status line, so the header rides in behind it.
+    const OK_TAGGED_SECOND: &str = "200 OK\r\nETag: \"second\"";
+
+    /// Between reconciliations the poll asks with the first page's tag. An
+    /// inbox GitHub says is the same is one request, and nothing is stored
+    /// or sent to the sidebar for it.
+    #[tokio::test]
+    async fn an_unchanged_inbox_costs_one_request_and_publishes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, paths) = serve_by_request(|path, headers| {
+            if !path.starts_with("/notifications") {
+                ("404 Not Found", "{}".to_string())
+            } else if if_none_match(headers).as_deref() == Some("\"first\"") {
+                ("304 Not Modified", String::new())
+            } else {
+                ("200 OK", "[]".to_string())
+            }
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let kept = thread("7", "seven");
+        ctx.replace_notifications(vec![kept.clone()], Some("\"first\""));
+        let _ = received.try_iter().count();
+
+        refresh(&ctx, NotificationPollMode::Conditional).await;
+
+        assert!(
+            !received
+                .try_iter()
+                .any(|e| matches!(e, Event::NotificationsPolled(_))),
+            "the sidebar is told nothing"
+        );
+        assert_eq!(list_requests(&paths), [LIST_PAGE_ONE]);
+        assert_eq!(*ctx.notifications.lock().unwrap(), vec![kept]);
+        assert_eq!(
+            ctx.notifications_last_modified().as_deref(),
+            Some("\"first\"")
+        );
+    }
+
+    /// A 200 to the probe is the first page, so the poll goes on from the
+    /// second and keeps the first page's tag for the next probe.
+    #[tokio::test]
+    async fn a_changed_first_page_is_read_once_and_the_rest_follows() {
+        let dir = tempfile::tempdir().unwrap();
+        let page = |ids: std::ops::RangeInclusive<u32>| {
+            let threads: Vec<Thread> = ids.map(|id| thread(&id.to_string(), "listed")).collect();
+            serde_json::to_string(&threads).unwrap()
+        };
+        let (first, second) = (page(1..=50), page(51..=52));
+        let tags = Arc::new(Mutex::new(Vec::new()));
+        let sent = tags.clone();
+        let (base, paths) = serve_by_request(move |path, headers| {
+            if !path.starts_with("/notifications") {
+                return ("404 Not Found", "{}".to_string());
+            }
+            sent.lock().unwrap().push(if_none_match(headers));
+            if path.ends_with("&page=1") {
+                (OK_TAGGED_SECOND, first.clone())
+            } else {
+                ("200 OK", second.clone())
+            }
+        });
+        let (ctx, _received) = ctx(dir.path(), &base, &[]);
+        ctx.replace_notifications(vec![thread("7", "seven")], Some("\"first\""));
+
+        refresh(&ctx, NotificationPollMode::Conditional).await;
+
+        assert_eq!(list_requests(&paths), [LIST_PAGE_ONE, LIST_PAGE_TWO]);
+        assert_eq!(
+            *tags.lock().unwrap(),
+            [Some("\"first\"".to_string()), None],
+            "only the first page is asked for with the tag"
+        );
+        let ids: Vec<String> = ctx
+            .notifications
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|thread| thread.id.clone())
+            .collect();
+        assert_eq!(
+            ids,
+            (1..=52).map(|id| id.to_string()).collect::<Vec<_>>(),
+            "both pages, in GitHub's order"
+        );
+        assert_eq!(
+            ctx.notifications_last_modified().as_deref(),
+            Some("\"second\"")
+        );
+    }
+
+    /// A 200 is GitHub's list and not the threads that changed, even when
+    /// it is short of a page: a thread that left the list leaves the inbox,
+    /// and one that was Done leaves the Done list.
+    #[tokio::test]
+    async fn a_changed_poll_short_of_a_page_replaces_the_inbox_and_the_done_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = serde_json::to_string(&vec![thread("10", "ten"), thread("8", "eight")]).unwrap();
+        let (base, paths) = serve_by_path(move |path| {
+            if path.starts_with("/notifications") {
+                (OK_TAGGED_SECOND, body.clone())
+            } else {
+                ("404 Not Found", "{}".to_string())
+            }
+        });
+        let (ctx, _received) = ctx(dir.path(), &base, &[]);
+        ctx.replace_notifications(
+            vec![
+                thread("8", "eight"),
+                thread("7", "seven"),
+                thread("9", "nine"),
+            ],
+            Some("\"first\""),
+        );
+        ctx.dismiss_notification("9");
+        let done = |ctx: &Ctx| -> Vec<String> {
+            ctx.with_cache(|cache| cache.load_done_threads().unwrap())
+                .unwrap()
+                .into_iter()
+                .map(|thread| thread.id)
+                .collect()
+        };
+        assert_eq!(done(&ctx), ["9"]);
+
+        refresh(&ctx, NotificationPollMode::Conditional).await;
+
+        assert_eq!(list_requests(&paths), [LIST_PAGE_ONE]);
+        let ids: Vec<String> = ctx
+            .notifications
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|thread| thread.id.clone())
+            .collect();
+        assert_eq!(ids, ["10", "8"], "7 is no longer in GitHub's list");
+        assert!(done(&ctx).is_empty(), "nor is 9");
+        assert_eq!(
+            ctx.notifications_last_modified().as_deref(),
+            Some("\"second\"")
+        );
     }
 
     /// Items and search hits are asked after in one query for who acted

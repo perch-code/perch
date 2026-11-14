@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use perch_github::{Error, GitHub};
 
-const OLD_LAST_MODIFIED: &str = "Thu, 17 Sep 2026 20:03:33 GMT";
-const NEW_LAST_MODIFIED: &str = "Sat, 19 Sep 2026 17:12:00 GMT";
+const OLD_ETAG: &str = "W/\"old\"";
+const NEW_ETAG: &str = "W/\"new\"";
 const API_VERSION: &str = "2022-11-28";
 
 fn thread_json(id: u32) -> String {
@@ -167,7 +167,7 @@ fn spawn(responses: Vec<Response>) -> (String, Arc<Mutex<Vec<Request>>>) {
 async fn an_unconditional_poll_fetches_every_page_and_pins_the_api_version() {
     let responses = vec![
         Response::new("200 OK", list_json(1..=50))
-            .header("Last-Modified", NEW_LAST_MODIFIED)
+            .header("ETag", NEW_ETAG)
             .header("X-Poll-Interval", "75"),
         Response::new("200 OK", list_json(51..=52)).header("X-Poll-Interval", "120"),
     ];
@@ -180,7 +180,7 @@ async fn an_unconditional_poll_fetches_every_page_and_pins_the_api_version() {
     assert_eq!(result.threads.len(), 52);
     assert_eq!(result.threads[0].id, "1");
     assert_eq!(result.threads[51].id, "52");
-    assert_eq!(result.last_modified.as_deref(), Some(NEW_LAST_MODIFIED));
+    assert_eq!(result.etag.as_deref(), Some(NEW_ETAG));
     assert_eq!(result.poll_interval, std::time::Duration::from_secs(120));
 
     let requests = requests.lock().unwrap();
@@ -199,54 +199,53 @@ async fn an_unconditional_poll_fetches_every_page_and_pins_the_api_version() {
             request.header_values("x-github-api-version"),
             vec![API_VERSION]
         );
+        assert_eq!(request.header("if-none-match"), None);
         assert_eq!(request.header("if-modified-since"), None);
     }
 }
 
+/// GitHub sends a weak tag back strong on a 304. The next poll asks with
+/// the one this poll asked with, which is known to match.
 #[tokio::test]
-async fn a_304_probe_keeps_the_cached_list_and_validator() {
-    let responses = vec![Response::new("304 Not Modified", "").header("X-Poll-Interval", "81")];
+async fn a_304_probe_keeps_the_cached_list_and_the_tag_it_asked_with() {
+    let responses = vec![Response::new("304 Not Modified", "")
+        .header("ETag", "\"old\"")
+        .header("X-Poll-Interval", "81")];
     let (base, requests) = spawn(responses);
     let gh = GitHub::with_base_uri("token", &base).expect("client");
 
     let result = gh
-        .list_threads_since(Some(OLD_LAST_MODIFIED))
+        .list_threads_if_changed(Some(OLD_ETAG))
         .await
         .expect("list threads");
 
     assert!(result.unchanged);
     assert!(result.threads.is_empty());
-    assert_eq!(result.last_modified.as_deref(), Some(OLD_LAST_MODIFIED));
+    assert_eq!(result.etag.as_deref(), Some(OLD_ETAG));
     assert_eq!(result.poll_interval, std::time::Duration::from_secs(81));
 
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
-    assert_eq!(
-        requests[0].header("if-modified-since"),
-        Some(OLD_LAST_MODIFIED)
-    );
+    assert_eq!(requests[0].header("if-none-match"), Some(OLD_ETAG));
+    assert_eq!(requests[0].header("if-modified-since"), None);
 }
 
+/// A 200 to the probe is the first page as it stands, not the threads
+/// that changed. Short of a page, it is the whole list.
 #[tokio::test]
-async fn a_changed_conditional_response_is_the_changed_threads() {
-    // GitHub answers a changed conditional request with only the threads
-    // updated since If-Modified-Since, not the inbox.
+async fn a_changed_probe_short_of_a_page_is_the_whole_list() {
     let responses = vec![Response::new("200 OK", list_json([3]))
-        .header("Last-Modified", NEW_LAST_MODIFIED)
+        .header("ETag", NEW_ETAG)
         .header("X-Poll-Interval", "90")];
     let (base, requests) = spawn(responses);
     let gh = GitHub::with_base_uri("token", &base).expect("client");
 
     let result = gh
-        .list_threads_since(Some(OLD_LAST_MODIFIED))
+        .list_threads_if_changed(Some(OLD_ETAG))
         .await
         .expect("list threads");
 
     assert!(!result.unchanged);
-    assert!(
-        result.changed_only,
-        "to be merged, not to replace the inbox"
-    );
     assert_eq!(
         result
             .threads
@@ -255,45 +254,49 @@ async fn a_changed_conditional_response_is_the_changed_threads() {
             .collect::<Vec<_>>(),
         vec!["3"]
     );
-    assert_eq!(result.last_modified.as_deref(), Some(NEW_LAST_MODIFIED));
+    assert_eq!(result.etag.as_deref(), Some(NEW_ETAG));
     assert_eq!(result.poll_interval, std::time::Duration::from_secs(90));
 
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 1, "the probe's answer is the change");
-    assert_eq!(
-        requests[0].header("if-modified-since"),
-        Some(OLD_LAST_MODIFIED)
-    );
+    assert_eq!(requests.len(), 1, "the probe's answer is the list");
+    assert_eq!(requests[0].header("if-none-match"), Some(OLD_ETAG));
 }
 
+/// The script holds two responses and the listener closes after them, so
+/// asking for the first page a second time fails the call.
 #[tokio::test]
-async fn a_full_page_of_changes_refetches_the_whole_inbox() {
-    // A page of changed threads may not be all of them.
+async fn a_changed_probe_is_the_first_page_and_only_the_rest_is_fetched() {
     let responses = vec![
         Response::new("200 OK", list_json(1..=50))
-            .header("Last-Modified", NEW_LAST_MODIFIED)
+            .header("ETag", NEW_ETAG)
             .header("X-Poll-Interval", "90"),
-        Response::new("200 OK", list_json(1..=50))
-            .header("Last-Modified", NEW_LAST_MODIFIED)
+        Response::new("200 OK", list_json(51..=53))
+            .header("ETag", "W/\"page-two\"")
             .header("X-Poll-Interval", "60"),
-        Response::new("200 OK", list_json(51..=53)).header("X-Poll-Interval", "60"),
     ];
     let (base, requests) = spawn(responses);
     let gh = GitHub::with_base_uri("token", &base).expect("client");
 
     let result = gh
-        .list_threads_since(Some(OLD_LAST_MODIFIED))
+        .list_threads_if_changed(Some(OLD_ETAG))
         .await
         .expect("list threads");
 
     assert!(!result.unchanged);
-    assert!(!result.changed_only);
     assert_eq!(
-        result.threads.len(),
-        53,
-        "the whole inbox replaces the cached one"
+        result
+            .threads
+            .iter()
+            .map(|thread| thread.id.clone())
+            .collect::<Vec<_>>(),
+        (1..=53).map(|id| id.to_string()).collect::<Vec<_>>(),
+        "the whole inbox, in GitHub's order"
     );
-    assert_eq!(result.last_modified.as_deref(), Some(NEW_LAST_MODIFIED));
+    assert_eq!(
+        result.etag.as_deref(),
+        Some(NEW_ETAG),
+        "the first page's tag, which is the one the next probe asks with"
+    );
     assert_eq!(
         result.poll_interval,
         std::time::Duration::from_secs(90),
@@ -301,16 +304,17 @@ async fn a_full_page_of_changes_refetches_the_whole_inbox() {
     );
 
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 2);
     assert_eq!(
-        requests[0].header("if-modified-since"),
-        Some(OLD_LAST_MODIFIED)
-    );
-    assert_eq!(requests[1].header("if-modified-since"), None);
-    assert_eq!(
-        requests[1].path,
+        requests[0].path,
         "/notifications?all=true&participating=false&per_page=50&page=1"
     );
+    assert_eq!(requests[0].header("if-none-match"), Some(OLD_ETAG));
+    assert_eq!(
+        requests[1].path,
+        "/notifications?all=true&participating=false&per_page=50&page=2"
+    );
+    assert_eq!(requests[1].header("if-none-match"), None);
 }
 
 #[tokio::test]

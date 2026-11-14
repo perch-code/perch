@@ -13,11 +13,12 @@ visible alongside unread ones.
 
 Polling runs in the background, respects GitHub's `X-Poll-Interval`, and
 paginates the full response. Perch performs an unconditional reconciliation at
-startup and on the first scheduled poll after 15 minutes; polls between
-reconciliations use `Last-Modified`. The full fetch repairs the sidebar when
-GitHub's validator does not change with the notification list. Without a
-token, each poll looks for one again, so a `gh auth login` after launch is
-picked up.
+startup and on the first scheduled poll after 15 minutes. Polls between
+reconciliations ask for the first page only if its `ETag` has changed, and read
+the whole list again when it has. New activity always changes the first page; a
+thread past the first fifty that was read or marked Done on github.com does
+not, and the reconciliation picks that up. Without a token, each poll looks for
+one again, so a `gh auth login` after launch is picked up.
 
 A poll never moves what is on screen. When it would add, remove, or reorder
 the rows the sidebar shows, the rows stay as they are and a pill over the list

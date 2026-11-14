@@ -1,9 +1,8 @@
 //! GitHub REST client: notification history and targeted item lookups.
 //!
 //! Uses octocrab's raw `_get_with_headers` rather than its typed builders,
-//! because polling needs `X-Poll-Interval` and `Last-Modified`, every
-//! other read asks with the `ETag` it last saw, and rate-limit headers
-//! classify failures.
+//! because polling needs `X-Poll-Interval`, reads ask with the `ETag`
+//! they last saw, and rate-limit headers classify failures.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -12,9 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use http::header::{
-    HeaderMap, HeaderValue, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, LINK, LOCATION,
-};
+use http::header::{HeaderMap, HeaderValue, ETAG, IF_NONE_MATCH, LINK, LOCATION};
 use http::StatusCode;
 use http_body_util::combinators::BoxBody;
 use http_body_util::BodyExt;
@@ -158,25 +155,19 @@ pub struct EditedComment {
 /// Outcome of a notifications poll.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListResult {
-    /// The complete API result when `unchanged` and `changed_only` are
-    /// false. Empty when the conditional probe returned 304 and the cached
-    /// result still stands.
+    /// GitHub's whole list, in its order. Empty when the conditional probe
+    /// returned 304 and the cached result still stands.
     pub threads: Vec<Thread>,
     pub unchanged: bool,
-    /// `threads` holds only the threads updated since the validator, in
-    /// GitHub's order, to be merged into the cached result. A thread that
-    /// left the list, or was read on github.com without new activity, is
-    /// not among them; the next full read finds it.
-    pub changed_only: bool,
-    /// The validator to use for the next poll.
-    pub last_modified: Option<String>,
+    /// The first page's ETag, to ask with at the next poll.
+    pub etag: Option<String>,
     pub poll_interval: Duration,
 }
 
 /// One raw `/notifications` page response, before its body is decoded.
 struct NotificationPage {
     status: StatusCode,
-    last_modified: Option<String>,
+    etag: Option<String>,
     poll_interval: Duration,
     body: String,
 }
@@ -280,70 +271,48 @@ impl GitHub {
     /// Fetch the complete notifications result unconditionally.
     ///
     /// This wrapper is useful for callers without a cached validator. Polling
-    /// callers should use [`Self::list_threads_since`].
+    /// callers should use [`Self::list_threads_if_changed`].
     pub async fn list_threads(&self) -> Result<ListResult, Error> {
-        self.list_threads_since(None).await
+        self.list_threads_if_changed(None).await
     }
 
     /// Fetch the authenticated user's GitHub notifications list.
     ///
     /// `all=true` keeps read rows alongside unread ones, but can also include
     /// Done history because the payload has no Inbox/Done membership field.
-    /// `last_modified` is used only for a conditional request. A 304 keeps the
-    /// cached result. A 200 is not the inbox: GitHub answers it with only the
-    /// threads updated since `If-Modified-Since`. Short of a page, those are
-    /// the result, with `changed_only` set; a full page may not be all of
-    /// them, so the list is fetched again without the validator.
-    pub async fn list_threads_since(
-        &self,
-        last_modified: Option<&str>,
-    ) -> Result<ListResult, Error> {
-        let mut probe_interval = None;
-        if let Some(last_modified) = last_modified {
-            let probe = self.fetch_notification_page(1, Some(last_modified)).await?;
-            if probe.status == StatusCode::NOT_MODIFIED {
-                return Ok(ListResult {
-                    threads: Vec::new(),
-                    unchanged: true,
-                    changed_only: false,
-                    last_modified: probe
-                        .last_modified
-                        .or_else(|| Some(last_modified.to_string())),
-                    poll_interval: probe.poll_interval,
-                });
-            }
-            let changed: Vec<Thread> =
-                serde_json::from_str(&probe.body).map_err(|e| Error::Decode(e.to_string()))?;
-            if changed.len() < PER_PAGE {
-                return Ok(ListResult {
-                    threads: changed,
-                    unchanged: false,
-                    changed_only: true,
-                    last_modified: probe
-                        .last_modified
-                        .or_else(|| Some(last_modified.to_string())),
-                    poll_interval: probe.poll_interval,
-                });
-            }
-            probe_interval = Some(probe.poll_interval);
+    /// `etag` is the first page's from the last read, and asks for that page
+    /// only if it has changed. A 304 keeps the cached result. A 200 is the
+    /// first page as it now stands, whole, so it is not asked for again and
+    /// only the pages after it are fetched.
+    ///
+    /// The tag is the first page's alone. GitHub lists newest first, so new
+    /// activity always changes that page; a thread further down that was read
+    /// or marked Done on github.com does not, and waits for the next
+    /// unconditional read.
+    ///
+    /// `If-Modified-Since` is not sent. Measured 2026-11-14, GitHub answers
+    /// it on this list with a 200 and the whole page whatever the date; it
+    /// answered 304 as late as 2026-11-09.
+    pub async fn list_threads_if_changed(&self, etag: Option<&str>) -> Result<ListResult, Error> {
+        let first = self.fetch_notification_page(1, etag).await?;
+        if etag.is_some() && first.status == StatusCode::NOT_MODIFIED {
+            return Ok(ListResult {
+                threads: Vec::new(),
+                unchanged: true,
+                // The tag asked with, not the 304's: GitHub sends a weak tag
+                // back strong, and takes either.
+                etag: etag.map(str::to_string),
+                poll_interval: first.poll_interval,
+            });
         }
 
+        let etag = first.etag.clone();
+        let mut poll_interval = first.poll_interval;
         let mut threads = Vec::new();
+        let mut response = first;
         let mut page = 1usize;
-        let mut response_last_modified = None;
-        let mut poll_interval = Duration::from_secs(DEFAULT_POLL_SECS);
-
         loop {
-            let response = self.fetch_notification_page(page, None).await?;
-            if page == 1 {
-                response_last_modified = response.last_modified.clone();
-                poll_interval = probe_interval.map_or(response.poll_interval, |probe| {
-                    probe.max(response.poll_interval)
-                });
-            } else {
-                poll_interval = poll_interval.max(response.poll_interval);
-            }
-
+            poll_interval = poll_interval.max(response.poll_interval);
             let page_threads: Vec<Thread> =
                 serde_json::from_str(&response.body).map_err(|e| Error::Decode(e.to_string()))?;
             let is_last_page = page_threads.len() < PER_PAGE;
@@ -354,13 +323,13 @@ impl GitHub {
             page = page
                 .checked_add(1)
                 .ok_or_else(|| Error::Decode("notification page number overflowed".into()))?;
+            response = self.fetch_notification_page(page, None).await?;
         }
 
         Ok(ListResult {
             threads,
             unchanged: false,
-            changed_only: false,
-            last_modified: response_last_modified,
+            etag,
             poll_interval,
         })
     }
@@ -411,16 +380,17 @@ impl GitHub {
     }
 
     /// One page of `/notifications`, including the headers that pace and
-    /// validate polling.
+    /// validate polling. With `etag`, GitHub answers 304 while the page is
+    /// still the one the tag came with.
     async fn fetch_notification_page(
         &self,
         page: usize,
-        last_modified: Option<&str>,
+        etag: Option<&str>,
     ) -> Result<NotificationPage, Error> {
         let uri =
             format!("/notifications?all=true&participating=false&per_page={PER_PAGE}&page={page}");
-        let fetched = self.get(&uri, modified_since(last_modified)).await?;
-        let last_modified = header_str(&fetched.headers, LAST_MODIFIED.as_str());
+        let fetched = self.get(&uri, conditional(etag)).await?;
+        let etag = header_str(&fetched.headers, ETAG.as_str());
         let poll_interval = header_str(&fetched.headers, "x-poll-interval")
             .and_then(|v| v.parse::<u64>().ok())
             .map(|seconds| Duration::from_secs(seconds.max(1)))
@@ -428,7 +398,7 @@ impl GitHub {
 
         Ok(NotificationPage {
             status: fetched.status,
-            last_modified,
+            etag,
             poll_interval,
             body: fetched.body,
         })
@@ -2983,14 +2953,6 @@ fn last_page(link: &str) -> Option<usize> {
 /// the first is read.
 fn newest_pages_from(last: Option<usize>, newest: usize) -> usize {
     last.map_or(2, |last| (last + 1).saturating_sub(newest).max(2))
-}
-
-/// The conditional header for a notifications probe.
-fn modified_since(last_modified: Option<&str>) -> Option<HeaderMap> {
-    let value = last_modified.and_then(|value| HeaderValue::from_str(value).ok())?;
-    let mut headers = HeaderMap::new();
-    headers.insert(IF_MODIFIED_SINCE, value);
-    Some(headers)
 }
 
 /// Build a notification endpoint from the numeric ID GitHub supplied.
