@@ -3,14 +3,14 @@
 //! one quiet reading column. Under the summary comes what Perch is doing
 //! about the item, its agents and the forms the menus unfold; then the
 //! description, the composer, and the timeline, newest first, its older
-//! cards folded under a row that shows them.
+//! cards built as the reader scrolls down to them.
 //!
 //! The order is `review::timeline`'s, oldest first, which the page turns
 //! round as it draws it. The cards are in `review::cards`, and a thread's
 //! card shares its views with the inline card on Code.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use floem::prelude::*;
@@ -25,7 +25,7 @@ use floem::ViewId;
 use crate::backend::Backend;
 use crate::review::cards;
 use crate::review::doc::CardId;
-use crate::review::model::{Paging, ReviewFindingFilter, ReviewState};
+use crate::review::model::{Paging, ReviewState};
 use crate::review::threads::{self, ThreadFace};
 use crate::review::timeline::{timeline, Card};
 use crate::review::OpenFile;
@@ -33,33 +33,56 @@ use crate::review::{conversation_find, find};
 use crate::state::AppState;
 use crate::theme;
 
-/// How many of the newest cards the timeline shows before the rest fold
-/// under Show older: enough to catch up on what happened lately, few
-/// enough that a long history does not push the page's end out of reach.
-const NEWEST_SHOWN: usize = 8;
+/// How many cards the timeline builds at a time: the newest when the page
+/// opens, enough to catch up on what happened lately, and as many more
+/// each time the reader comes near the end of what is built. A long
+/// history is not built all at once for a reader who only wants the top.
+const BATCH: usize = 10;
 
-/// What the reader unfolded on the page: the timeline's older cards, and
-/// the whole of a long description.
+/// What the reader unfolded on the page: how far down the timeline is
+/// built, and the whole of a long description.
 #[derive(Clone, Copy)]
 struct Unfolded {
-    older: RwSignal<bool>,
+    /// How many of the oldest cards are not built yet. Counted from the
+    /// oldest end, so a card landing at the top is built along with
+    /// everything the reader had already scrolled through. `usize::MAX`
+    /// until the reader scrolls, asks for an older card or opens Cmd-F,
+    /// while what is built is counted from the newest end instead.
+    left: RwSignal<usize>,
+    /// How many of the newest cards are built while `left` is
+    /// `usize::MAX`: the first batch, and more while they leave the window
+    /// short. Counted from the newest end, so GitHub's cards, which can
+    /// come in under the agents' threads after them, are not all built at
+    /// once.
+    newest: RwSignal<usize>,
     description: RwSignal<bool>,
 }
 
 thread_local! {
     /// Each window's unfolding, by its review state, with the item it is
     /// for. The page is built again whenever Conversation comes back from
-    /// Code, and the scroll it is put back to was taken with these open,
-    /// so they outlast the page; another item folds them again.
-    static UNFOLDED: RefCell<HashMap<ReactiveId, (String, bool, bool)>> =
+    /// Code, and the scroll it is put back to was taken with these cards
+    /// built and open, so they outlast the page; another item starts
+    /// again from the first batch.
+    static UNFOLDED: RefCell<HashMap<ReactiveId, (String, usize, bool)>> =
         RefCell::new(HashMap::new());
+}
+
+impl Unfolded {
+    /// How many of the newest cards are built, as `built` says, with the
+    /// depth as it is now. Untracked.
+    fn built_untracked(&self, cards: &[Card], held: Option<&Held>) -> usize {
+        let (left, newest) = (self.left.get_untracked(), self.newest.get_untracked());
+        built(cards, left, newest, held)
+    }
 }
 
 /// The page's unfolding, as the last page for this item left it.
 fn unfolded(state: ReviewState) -> Unfolded {
     let window = state.item.id();
     let unfolded = Unfolded {
-        older: RwSignal::new(false),
+        left: RwSignal::new(usize::MAX),
+        newest: RwSignal::new(BATCH),
         description: RwSignal::new(false),
     };
     let item = Memo::new(move |_| {
@@ -69,28 +92,28 @@ fn unfolded(state: ReviewState) -> Unfolded {
     });
     Effect::new(move |_| {
         let item = item.get();
-        let (older, description) =
-            UNFOLDED.with(|kept| match (kept.borrow().get(&window), &item) {
-                (Some((was, older, description)), Some(item)) if was == item => {
-                    (*older, *description)
-                }
-                _ => (false, false),
-            });
-        if unfolded.older.get_untracked() != older {
-            unfolded.older.set(older);
+        let (left, description) = UNFOLDED.with(|kept| match (kept.borrow().get(&window), &item) {
+            (Some((was, left, description)), Some(item)) if was == item => (*left, *description),
+            _ => (usize::MAX, false),
+        });
+        if unfolded.left.get_untracked() != left {
+            unfolded.left.set(left);
+        }
+        if unfolded.newest.get_untracked() != BATCH {
+            unfolded.newest.set(BATCH);
         }
         if unfolded.description.get_untracked() != description {
             unfolded.description.set(description);
         }
     });
     Effect::new(move |_| {
-        let (older, description) = (unfolded.older.get(), unfolded.description.get());
+        let (left, description) = (unfolded.left.get(), unfolded.description.get());
         let item = item.get_untracked();
         UNFOLDED.with(|kept| {
             let mut kept = kept.borrow_mut();
             match item {
-                Some(item) if older || description => {
-                    kept.insert(window, (item, older, description));
+                Some(item) if left != usize::MAX || description => {
+                    kept.insert(window, (item, left, description));
                 }
                 _ => {
                     kept.remove(&window);
@@ -110,11 +133,9 @@ fn newest_first(cards: &[Card]) -> impl Iterator<Item = &Card> {
         .filter(|card| !matches!(card, Card::Description { .. }))
 }
 
-/// Whether the card `id` is one that Show older would show.
-fn folded_away(cards: &[Card], id: &CardId) -> bool {
-    newest_first(cards)
-        .skip(NEWEST_SHOWN)
-        .any(|card| cards::card_id(card) == *id)
+/// Where the card `id` is in the timeline, the newest at 0.
+fn position(cards: &[Card], id: &CardId) -> Option<usize> {
+    newest_first(cards).position(|card| cards::card_id(card) == *id)
 }
 
 /// The card a composer is open in: a thread with its follow-up box open
@@ -151,17 +172,50 @@ impl Held {
     }
 }
 
-/// Whether the timeline shows every card: the reader unfolded them, or
-/// newer cards have pushed the one a composer is open in past the
-/// newest. That card is not folded away under the reader as they type
-/// in it, which would take the box and the keyboard with it.
-fn shows_all(cards: &[Card], older: bool, held: Option<&Held>) -> bool {
-    older
-        || held.is_some_and(|held| {
-            newest_first(cards)
-                .skip(NEWEST_SHOWN)
-                .any(|card| held.is(card))
-        })
+/// How many of the newest cards the timeline builds, with `left` of the
+/// oldest not built yet, or `newest` of the newest built while `left` is
+/// `usize::MAX`: never fewer than the first batch, and always down to
+/// the card a composer is open in, however far newer cards have pushed
+/// it. That card is not taken away under the reader as they type in it,
+/// which would take the box and the keyboard with it.
+fn built(cards: &[Card], left: usize, newest: usize, held: Option<&Held>) -> usize {
+    let count = newest_first(cards).count();
+    let built = if left == usize::MAX {
+        newest.min(count)
+    } else {
+        count.saturating_sub(left)
+    };
+    let built = built.max(BATCH.min(count));
+    match held.and_then(|held| newest_first(cards).position(|card| held.is(card))) {
+        Some(at) => built.max(at + 1),
+        None => built,
+    }
+}
+
+/// The cards the timeline builds, `built` of the newest, each key once:
+/// the stack under it keeps one view a key, and two event lines can share
+/// one, as two of a reviewer's reviews dismissed in the same second do.
+fn built_cards(cards: &[Card], built: usize) -> impl Iterator<Item = &Card> {
+    let mut keys = HashSet::new();
+    newest_first(cards)
+        .take(built)
+        .filter(move |card| keys.insert(cards::key(card)))
+}
+
+/// Builds the timeline down to the card at `at`, the newest at 0, and
+/// keeps it built.
+fn build_to(unfolded: Unfolded, cards: &[Card], at: usize) {
+    let left = newest_first(cards).count().saturating_sub(at + 1);
+    if unfolded.left.get_untracked() > left {
+        unfolded.left.set(left);
+    }
+}
+
+/// Whether the reader's view, `height` tall and scrolled to `offset`,
+/// is within a window's height of the column's end, where the next
+/// cards should be ready before they scroll into it.
+fn near_end(column: ViewId, offset: f64, height: f64) -> bool {
+    height > 0.0 && offset + 2.0 * height >= column.get_layout_rect().y1
 }
 
 /// The room above each timeline card, by its key: cards sit the standard
@@ -255,62 +309,74 @@ impl Place {
     }
 }
 
-/// Shows the older cards whenever something asks for one of them: a
-/// question's run from the Agents dropdown or a notification's open, which name
-/// the card to bring into view, and Cmd-F, which looks through every
-/// card on the page. And keeps them shown once newer cards have pushed
-/// the one a composer is open in among them, so it does not fold away
-/// when the composer closes either.
+/// Builds the timeline down to a card whenever something asks for one
+/// not built yet: a question's run from the Agents dropdown or a
+/// notification's open, which name the card to bring into view; and
+/// builds all of it for Cmd-F, which looks through every card on the
+/// page. And keeps it built down to the card a composer is open in once
+/// newer cards have pushed that card past the rest, so it is not taken
+/// away when the composer closes either.
 fn unfold_when_asked(
     state: ReviewState,
     all: Memo<Vec<Card>>,
     held: Memo<Option<Held>>,
     unfolded: Unfolded,
 ) {
-    let unfold = move || {
-        if !unfolded.older.get_untracked() {
-            unfolded.older.set(true);
-        }
+    // Where the card `id` is when it is not built yet.
+    let unbuilt = move |cards: &[Card], id: &CardId| {
+        position(cards, id).filter(|at| *at >= unfolded.built_untracked(cards, None))
     };
-    // A card asked for once it is laid out, which a folded card never is.
-    // Watched as the cards change too, since one asked for before it
-    // landed may land among the older.
+    // A card asked for once it is laid out, which one not built never
+    // is. Watched as the cards change too, since one asked for before it
+    // landed may land past what is built.
     Effect::new(move |_| {
-        let asked = state.pending_focus_card.get();
-        let folded = asked.is_some_and(|id| {
-            !unfolded.older.get_untracked() && all.with(|cards| folded_away(cards, &id))
+        let Some(id) = state.pending_focus_card.get() else {
+            return;
+        };
+        all.with(|cards| {
+            if let Some(at) = unbuilt(cards, &id) {
+                build_to(unfolded, cards, at);
+            }
         });
-        if folded {
-            unfold();
-        }
     });
     // A card asked for at once, which scrolls itself into view only if it
-    // was there to hear it: the folded one is asked again once it is
-    // built. The first run only subscribes, as the cards' own do, so a
-    // card focused on Code does not move the page as it comes up.
+    // was there to hear it: one not built is asked again once it is. The
+    // first run only subscribes, as the cards' own do, so a card focused
+    // on Code does not move the page as it comes up.
     Effect::new(move |first: Option<()>| {
         let asked = state.focus_card.get();
-        if first.is_none() || unfolded.older.get_untracked() {
+        if first.is_none() {
             return;
         }
         let Some(id) = asked else {
             return;
         };
-        if all.with_untracked(|cards| folded_away(cards, &id)) {
-            unfold();
+        let built = all.with_untracked(|cards| {
+            let at = unbuilt(cards, &id)?;
+            build_to(unfolded, cards, at);
+            Some(at)
+        });
+        if built.is_some() {
             state.pending_focus_card.set(Some(id));
         }
     });
     Effect::new(move |_| {
-        if state.conversation_find_open.get() {
-            unfold();
+        if state.conversation_find_open.get() && unfolded.left.get_untracked() != 0 {
+            unfolded.left.set(0);
         }
     });
     Effect::new(move |_| {
         let held = held.get();
-        if all.with(|cards| shows_all(cards, false, held.as_ref())) {
-            unfold();
-        }
+        all.with(|cards| {
+            let at = held.as_ref().and_then(|held| {
+                newest_first(cards)
+                    .position(|card| held.is(card))
+                    .filter(|at| *at >= unfolded.built_untracked(cards, None))
+            });
+            if let Some(at) = at {
+                build_to(unfolded, cards, at);
+            }
+        });
     });
 }
 
@@ -332,36 +398,6 @@ fn sections(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
             .width_full()
             .margin_top(-theme::CONVERSATION_ENTRY_PADDING)
             .padding_bottom(theme::CONVERSATION_ENTRY_PADDING)
-    })
-}
-
-/// Under the newest cards, the way to the rest: a quiet button between
-/// two rules, there while any are folded away.
-fn older_row(hidden: Memo<usize>, older: RwSignal<bool>) -> impl IntoView {
-    let rule = || {
-        Empty::new().style(|s| {
-            s.height(1.0)
-                .flex_grow(1.0_f32)
-                .flex_basis(0.0)
-                .background(theme::border_muted())
-        })
-    };
-    Stack::horizontal((
-        rule(),
-        cards::text_action(
-            move || format!("Show {} older", hidden.get()),
-            "show-older",
-            move || older.set(true),
-        ),
-        rule(),
-    ))
-    .debug_name("older cards")
-    .style(move |s| {
-        s.items_center()
-            .width_full()
-            .gap(8.0)
-            .margin_top(theme::CARD_GAP)
-            .apply_if(hidden.get() == 0, |s| s.hide())
     })
 }
 
@@ -393,33 +429,52 @@ pub fn view(
                 .collect::<Vec<_>>()
         })
     };
-    // Whether a card holding a composer has been pushed among the older
-    // is worked out here, from the cards and the composer as they are
-    // now, rather than left to the effect that unfolds them: run first,
-    // this would drop that card and build it again.
+    // How far down the timeline is built is worked out here, from the
+    // cards, the composer and the depth as they are now, rather than in a
+    // memo of its own or left to the effect that keeps a held card
+    // built: run after this, either would have it drop a card at the
+    // bottom for a moment and build it again.
     let rows = move || {
-        let older = unfolded.older.get();
+        let (left, newest) = (unfolded.left.get(), unfolded.newest.get());
         let held = held.get();
         all.with(|cards| {
-            let shown = if shows_all(cards, older, held.as_ref()) {
-                usize::MAX
-            } else {
-                NEWEST_SHOWN
-            };
-            newest_first(cards).take(shown).cloned().collect::<Vec<_>>()
+            let built = built(cards, left, newest, held.as_ref());
+            built_cards(cards, built).cloned().collect::<Vec<_>>()
         })
     };
-    let hidden = Memo::new(move |_| {
-        let older = unfolded.older.get();
-        let held = held.get();
-        all.with(|cards| {
-            if shows_all(cards, older, held.as_ref()) {
-                0
-            } else {
-                newest_first(cards).count().saturating_sub(NEWEST_SHOWN)
+    // Once the reader scrolls, the cards built so far are theirs as much
+    // as any they scroll down to later: a card landing at the top no
+    // longer takes the oldest of them away.
+    let keep = move || {
+        if unfolded.left.get_untracked() == usize::MAX {
+            let held = held.get_untracked();
+            all.with_untracked(|cards| {
+                let built = unfolded.built_untracked(cards, held.as_ref());
+                unfolded
+                    .left
+                    .set(newest_first(cards).count().saturating_sub(built));
+            });
+        }
+    };
+    // The next batch of older cards, when there are any left. Not while
+    // the timeline has yet to build the last batch asked for, which the
+    // layout asking now has not seen. Counted from the newest end until
+    // the reader scrolls, so a page filling the window before GitHub's
+    // cards have come does not build every one of them when they do.
+    let more = move |timeline: ViewId| {
+        let held = held.get_untracked();
+        all.with_untracked(|cards| {
+            let count = newest_first(cards).count();
+            let built = unfolded.built_untracked(cards, held.as_ref());
+            if built < count && timeline.children().len() >= built_cards(cards, built).count() {
+                if unfolded.left.get_untracked() == usize::MAX {
+                    unfolded.newest.set(built + BATCH);
+                } else {
+                    unfolded.left.set(count - (built + BATCH).min(count));
+                }
             }
-        })
-    });
+        });
+    };
     let empty = move || {
         // Only a bare branch has nothing: a pull request or an issue has a
         // description whatever else it has.
@@ -473,8 +528,6 @@ pub fn view(
                 .padding_bottom(theme::CARD_GAP)
         }),
         timeline,
-        older_row(hidden, unfolded.older),
-        resolved_row(app, state, unfolded.older),
         Label::derived(|| "Nothing here yet. Ask about the worktree above.".to_string()).style(
             move |s| {
                 // Hidden rather than absent, so it takes no share of the
@@ -556,11 +609,15 @@ pub fn view(
             move |_, event: &ScrollChanged| {
                 state.conversation_scroll.set(event.offset.y);
                 if let Some(page) = state.conversation_page.get_untracked() {
-                    seen.see(
-                        &Place::rows(column_id, timeline_id),
-                        event.offset.y,
-                        page.get_content_rect_local().height(),
-                    );
+                    let height = page.get_content_rect_local().height();
+                    seen.see(&Place::rows(column_id, timeline_id), event.offset.y, height);
+                    if event.offset.y > 0.0 {
+                        keep();
+                    }
+                    // Scrolled near the end of what is built.
+                    if near_end(column_id, event.offset.y, height) {
+                        more(timeline_id);
+                    }
                 }
             },
         )
@@ -613,7 +670,14 @@ pub fn view(
                 }
                 None => offset,
             };
-            place.see(&rows, offset, page_id.get_content_rect_local().height());
+            let height = page_id.get_content_rect_local().height();
+            place.see(&rows, offset, height);
+            // A page whose cards do not reach far enough past the window
+            // builds the next batch, and the layout that brings looks
+            // again, until they do or none are left; one batch a layout.
+            if near_end(column_id, offset, height) {
+                more(timeline_id);
+            }
             if !asked.replace(true)
                 && state.composer.with_untracked(Option::is_none)
                 && !state.find_focused.get_untracked()
@@ -658,101 +722,10 @@ pub(crate) fn cards(state: ReviewState) -> Vec<Card> {
                 .as_deref()
                 .map(|i| (i, comments.as_slice(), issue_events.as_slice())),
             &commits,
-            threads.iter().filter(|thread| state.thread_visible(thread)),
+            // Every thread with something in it, a fixed or dismissed
+            // finding's too, which its card folds to its header.
+            threads.iter().filter(|thread| !thread.messages.is_empty()),
         )
-    })
-}
-
-/// The threads of fixed and dismissed findings, which the timeline leaves
-/// out, as one row under it that shows them, and once they are shown,
-/// hides them again. Gone when there are none, and on a past review,
-/// which shows every finding it had.
-fn resolved_row(app: AppState, state: ReviewState, older: RwSignal<bool>) -> impl IntoView {
-    // How many of the item's threads are left out now, and how many the
-    // row would leave out: read off the threads themselves, not the
-    // filter, so the row says what the page shows. A thread with nothing
-    // in it is never shown, and one with a draft always is, so neither
-    // is counted.
-    let counts = Memo::new(move |_| {
-        if state.historical_review.with(Option::is_some) {
-            return (0, 0);
-        }
-        let Some(item_id) = state
-            .item
-            .with(|item| item.as_ref().map(|item| item.id.clone()))
-        else {
-            return (0, 0);
-        };
-        let resolved = app
-            .review_findings_for(&item_id)
-            .iter()
-            .filter(|finding| !finding.is_actionable())
-            .map(|finding| finding.finding.thread_id.clone())
-            .collect::<std::collections::HashSet<_>>();
-        state.hidden_review_threads.with(|hidden| {
-            state.comment_threads.with(|threads| {
-                let movable = threads.iter().filter(|thread| {
-                    !thread.messages.is_empty() && !thread.messages.iter().any(|m| m.is_draft())
-                });
-                let (mut out, mut settled) = (0, 0);
-                for thread in movable {
-                    out += usize::from(hidden.contains(&thread.id));
-                    settled += usize::from(resolved.contains(&thread.id));
-                }
-                (out, settled)
-            })
-        })
-    });
-    let rule = || {
-        Empty::new().style(|s| {
-            s.height(1.0)
-                .flex_grow(1.0_f32)
-                .flex_basis(0.0)
-                .background(theme::border_muted())
-        })
-    };
-    Stack::horizontal((
-        rule(),
-        cards::text_action(
-            move || {
-                let (out, settled) = counts.get();
-                let (verb, n) = if out > 0 {
-                    ("Show", out)
-                } else {
-                    ("Hide", settled)
-                };
-                let noun = if n == 1 { "finding" } else { "findings" };
-                format!("{verb} {n} resolved {noun}")
-            },
-            "show-resolved",
-            move || {
-                let Some(item_id) = state
-                    .item
-                    .with_untracked(|item| item.as_ref().map(|item| item.id.clone()))
-                else {
-                    return;
-                };
-                let findings = app.review_findings_for(&item_id);
-                if counts.get_untracked().0 > 0 {
-                    state.apply_review_finding_filter(ReviewFindingFilter::All, &findings);
-                    // A resolved thread is often an old one, which would
-                    // come back among the folded cards and show nothing.
-                    older.set(true);
-                } else {
-                    state.apply_review_finding_filter(ReviewFindingFilter::Open, &findings);
-                }
-            },
-        ),
-        rule(),
-    ))
-    .debug_name("resolved findings")
-    .style(move |s| {
-        let (out, settled) = counts.get();
-        s.items_center()
-            .width_full()
-            .gap(8.0)
-            .margin_top(theme::CARD_GAP)
-            .apply_if(out == 0 && settled == 0, |s| s.hide())
     })
 }
 
@@ -823,9 +796,9 @@ fn card_view(
     });
     let flashing = RwSignal::new(false);
     threads::wire_flash(state, card_id.clone(), flashing);
-    // Built for the asking, as a finding's thread the filter hid is, or
-    // asked for before it was laid out, it takes the focus once it has
-    // somewhere to scroll to.
+    // Built for the asking, as an old card a notification or the Agents
+    // dropdown goes to is, or asked for before it was laid out, it takes
+    // the focus once it has somewhere to scroll to.
     let view = view
         .on_event_cont(el::UpdatePhaseLayout, move |_, _| {
             if state
@@ -1127,6 +1100,29 @@ mod tests {
         discussion: Discussion,
         prepare: impl FnOnce(ReviewState),
     ) -> (HeadlessHarness, AppState, ReviewState) {
+        app_harness_sized(backend, discussion, prepare, 900.0)
+    }
+
+    /// The window with this discussion, `height` tall from its first
+    /// layout, so a short one has built only what fits it.
+    fn short_harness(
+        discussion: Discussion,
+        height: f64,
+    ) -> (HeadlessHarness, AppState, ReviewState) {
+        app_harness_sized(
+            crate::backend::Backend::detached(),
+            discussion,
+            |_| {},
+            height,
+        )
+    }
+
+    fn app_harness_sized(
+        backend: crate::backend::Backend,
+        discussion: Discussion,
+        prepare: impl FnOnce(ReviewState),
+        height: f64,
+    ) -> (HeadlessHarness, AppState, ReviewState) {
         let root = TestRoot::new();
         let app = AppState::new();
         let state = ReviewState::new();
@@ -1158,7 +1154,7 @@ mod tests {
         state.composer_autofocus.set(false);
         prepare(state);
         let view = crate::ui::app_view(app, state, Rc::new(backend));
-        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, 900.0);
+        let mut harness = HeadlessHarness::new_with_size(root, view, 1400.0, height);
         harness.rebuild();
         harness.paint();
         (harness, app, state)
@@ -1349,11 +1345,24 @@ mod tests {
         }
     }
 
-    /// Show older, pressed.
-    fn show_older(harness: &mut HeadlessHarness) {
-        let button = find(harness.root_id(), "show-older").expect("nothing is folded");
-        to_top(harness, button);
-        click_on(harness, button);
+    /// The page scrolled down to its end, again and again as the end
+    /// brings more cards, until it brings none.
+    fn to_end(harness: &mut HeadlessHarness) {
+        let c = find(harness.root_id(), "conversation")
+            .unwrap()
+            .get_visual_rect_no_clip()
+            .center();
+        let mut built = timeline_cards(harness);
+        for _ in 0..20 {
+            harness.scroll_down(c.x, c.y, 100_000.0);
+            settle(harness);
+            let now = timeline_cards(harness);
+            if now == built {
+                return;
+            }
+            built = now;
+        }
+        panic!("the page kept building");
     }
 
     fn click_on(harness: &mut HeadlessHarness, id: floem::ViewId) {
@@ -1843,7 +1852,6 @@ mod tests {
             !text.contains("\"Fence the manifest\""),
             "the page repeats the title"
         );
-        assert!(!shown(&harness, "older cards"), "nothing is folded away");
     }
 
     /// Close as issue's form, which a menu unfolds, sits over the
@@ -1921,137 +1929,195 @@ mod tests {
         }
     }
 
-    /// A dismissed finding's thread is left out of the timeline, with one
-    /// row under it that shows it and then hides it again; with nothing
-    /// resolved, there is no row.
+    /// The window hears that the thread `t1` is a finding's, as it now
+    /// stands.
+    fn report(
+        app: AppState,
+        state: ReviewState,
+        disposition: perch_github::FindingDisposition,
+        verification: perch_github::FindingVerification,
+    ) {
+        let at: jiff::Timestamp = "2026-09-18T09:59:00Z".parse().unwrap();
+        let summary = crate::review::model::ReviewFindingSummary {
+            finding: perch_github::Finding {
+                id: "f-1".into(),
+                item_id: "wt".into(),
+                stable_key: "fence".into(),
+                thread_id: "t1".into(),
+                created_group_id: None,
+                disposition,
+                verification,
+                dismissal_reason: None,
+                possible_duplicate_of: None,
+                duplicate_of: None,
+                last_verified_snapshot_id: None,
+                last_verified_head_sha: None,
+                last_checked_snapshot_id: None,
+                last_checked_head_sha: None,
+                created_at: at,
+                updated_at: at,
+            },
+            severity: perch_github::FindingSeverity::Low,
+            attributions: Vec::new(),
+            seen_in_reviews: Vec::new(),
+            backend: None,
+            model: None,
+            original_review_number: None,
+            title: "The fence is not needed.".into(),
+        };
+        app.apply_with_review(
+            crate::backend::Event::ReviewFindingUpdated {
+                item_id: "wt".into(),
+                summary,
+            },
+            state,
+        );
+    }
+
+    /// A dismissed finding's thread stays in the timeline where it was,
+    /// folded to its header with Show resolved, as a thread resolved on
+    /// GitHub is; Show resolved opens it and Hide resolved folds it again.
+    /// It is not resolved on GitHub for that, and the code leaves it out.
     #[test]
-    fn resolved_findings_fold_into_one_row() {
+    fn a_dismissed_finding_folds_in_place_with_show_resolved() {
+        use perch_github::{FindingDisposition, FindingVerification};
         let (mut harness, app, state) = app_harness();
+        report(
+            app,
+            state,
+            FindingDisposition::Open,
+            FindingVerification::Unverified,
+        );
+        settle(&mut harness);
+        assert!(shown(&harness, "thread-messages"), "an open finding folded");
+        assert!(!shown(&harness, "resolved-toggle"));
+
+        report(
+            app,
+            state,
+            FindingDisposition::Dismissed,
+            FindingVerification::Unverified,
+        );
+        settle(&mut harness);
+        assert!(shown(&harness, "card:thread"), "the thread left the page");
+        assert!(
+            !shown(&harness, "thread-messages"),
+            "the dismissed thread is open"
+        );
+        assert!(shown(&harness, "Label: \"Show resolved\""));
+        assert!(!state.is_resolved("t1"), "dismissed is not resolved");
+        let in_code = state.comment_threads.get_untracked()[0].clone();
+        assert!(!state.thread_visible(&in_code), "the code shows it");
+
+        let toggle = find(harness.root_id(), "resolved-toggle").unwrap();
+        to_top(&mut harness, toggle);
+        click_on(&mut harness, toggle);
         settle(&mut harness);
         assert!(
-            !shown(&harness, "resolved findings"),
-            "a row with nothing resolved"
+            shown(&harness, "thread-messages"),
+            "Show resolved did not open it"
         );
-        assert!(shown(&harness, "card:thread"));
+        assert!(shown(&harness, "Label: \"Hide resolved\""));
 
-        let at: jiff::Timestamp = "2026-09-18T09:59:00Z".parse().unwrap();
-        app.update_review_finding(
-            "wt".into(),
-            crate::review::model::ReviewFindingSummary {
-                finding: perch_github::Finding {
-                    id: "f-1".into(),
-                    item_id: "wt".into(),
-                    stable_key: "fence".into(),
-                    thread_id: "t1".into(),
-                    created_group_id: None,
-                    disposition: perch_github::FindingDisposition::Dismissed,
-                    verification: perch_github::FindingVerification::Unverified,
-                    dismissal_reason: None,
-                    possible_duplicate_of: None,
-                    duplicate_of: None,
-                    last_verified_snapshot_id: None,
-                    last_verified_head_sha: None,
-                    last_checked_snapshot_id: None,
-                    last_checked_head_sha: None,
-                    created_at: at,
-                    updated_at: at,
-                },
-                severity: perch_github::FindingSeverity::Low,
-                attributions: Vec::new(),
-                seen_in_reviews: Vec::new(),
-                backend: None,
-                model: None,
-                original_review_number: None,
-                title: "The fence is not needed.".into(),
-            },
-        );
-        // As the window does when a finding changes.
-        state.apply_review_finding_filter(
-            state.review_finding_filter.get_untracked(),
-            &app.review_findings_for("wt"),
-        );
+        let toggle = find(harness.root_id(), "resolved-toggle").unwrap();
+        click_on(&mut harness, toggle);
         settle(&mut harness);
         assert!(
-            !shown(&harness, "card:thread"),
-            "the dismissed thread is shown"
+            !shown(&harness, "thread-messages"),
+            "Hide resolved left it open"
         );
-        assert!(shown(&harness, "\"Show 1 resolved finding\""));
-
-        let row = find(harness.root_id(), "show-resolved").unwrap();
-        to_top(&mut harness, row);
-        click_on(&mut harness, row);
-        settle(&mut harness);
-        assert!(
-            shown(&harness, "card:thread"),
-            "the thread did not come back"
-        );
-        assert!(shown(&harness, "\"Hide 1 resolved finding\""));
-
-        let row = find(harness.root_id(), "show-resolved").unwrap();
-        to_top(&mut harness, row);
-        click_on(&mut harness, row);
-        settle(&mut harness);
-        assert!(!shown(&harness, "card:thread"), "the thread stayed");
     }
 
-    /// Shown, a resolved finding's thread older than the cards the
-    /// timeline keeps unfolded comes back unfolded, rather than among the
-    /// folded cards where the click would seem to do nothing.
+    /// A finding fixed while the reader has its thread open folds, even
+    /// one they had shown when it was dismissed before and then reopened.
     #[test]
-    fn an_old_resolved_finding_comes_back_unfolded() {
-        let (mut harness, app, state) =
-            app_harness_on(crate::backend::Backend::detached(), long_discussion());
-        let at: jiff::Timestamp = "2026-09-18T09:59:00Z".parse().unwrap();
-        app.update_review_finding(
-            "wt".into(),
-            crate::review::model::ReviewFindingSummary {
-                finding: perch_github::Finding {
-                    id: "f-1".into(),
-                    item_id: "wt".into(),
-                    stable_key: "fence".into(),
-                    thread_id: "t1".into(),
-                    created_group_id: None,
-                    disposition: perch_github::FindingDisposition::Dismissed,
-                    verification: perch_github::FindingVerification::Unverified,
-                    dismissal_reason: None,
-                    possible_duplicate_of: None,
-                    duplicate_of: None,
-                    last_verified_snapshot_id: None,
-                    last_verified_head_sha: None,
-                    last_checked_snapshot_id: None,
-                    last_checked_head_sha: None,
-                    created_at: at,
-                    updated_at: at,
-                },
-                severity: perch_github::FindingSeverity::Low,
-                attributions: Vec::new(),
-                seen_in_reviews: Vec::new(),
-                backend: None,
-                model: None,
-                original_review_number: None,
-                title: "The fence is not needed.".into(),
-            },
-        );
-        state.apply_review_finding_filter(
-            state.review_finding_filter.get_untracked(),
-            &app.review_findings_for("wt"),
+    fn a_finding_fixed_folds_its_thread() {
+        use perch_github::{FindingDisposition, FindingVerification};
+        let (mut harness, app, state) = app_harness();
+        report(
+            app,
+            state,
+            FindingDisposition::Dismissed,
+            FindingVerification::Unverified,
         );
         settle(&mut harness);
-        assert!(shown(&harness, "older cards"), "nothing is folded");
+        state.toggle_fold("t1");
+        settle(&mut harness);
+        assert!(shown(&harness, "thread-messages"));
 
-        let row = find(harness.root_id(), "show-resolved").unwrap();
-        to_top(&mut harness, row);
-        click_on(&mut harness, row);
+        report(
+            app,
+            state,
+            FindingDisposition::Open,
+            FindingVerification::Unverified,
+        );
         settle(&mut harness);
-        assert!(shown(&harness, "card:thread"), "the thread is folded away");
+        assert!(shown(&harness, "thread-messages"), "reopened, it folded");
+        assert!(!shown(&harness, "resolved-toggle"));
+
+        report(
+            app,
+            state,
+            FindingDisposition::Open,
+            FindingVerification::Fixed,
+        );
+        settle(&mut harness);
+        assert!(!shown(&harness, "thread-messages"), "fixed, it stayed open");
+        assert!(shown(&harness, "Label: \"Show resolved\""));
     }
 
-    /// A discussion with seven more comments, between the review and the
-    /// merge, so the timeline has twelve cards: the newest eight are the
-    /// merge and these.
+    /// Going to a dismissed finding's thread from the Agents dropdown or
+    /// the Review popover builds the timeline down to it, however old it
+    /// is, and opens it in view.
+    #[test]
+    fn going_to_a_dismissed_finding_builds_and_opens_it() {
+        use perch_github::{FindingDisposition, FindingVerification};
+        let (mut harness, app, state) = short_harness(long_discussion(), 300.0);
+        report(
+            app,
+            state,
+            FindingDisposition::Dismissed,
+            FindingVerification::Unverified,
+        );
+        settle(&mut harness);
+        assert_eq!(timeline_cards(&harness), super::BATCH);
+        assert!(find(harness.root_id(), "card:thread").is_none());
+
+        crate::ui::agents::show_thread(state, "t1");
+        settle(&mut harness);
+        settle(&mut harness);
+        assert!(!state.is_folded("t1"));
+        assert_eq!(
+            state.focus_card.get_untracked(),
+            Some(crate::review::doc::CardId::Thread("t1".into()))
+        );
+        assert!(shown(&harness, "thread-messages"), "the thread is folded");
+        let card = find(harness.root_id(), "card:thread")
+            .expect("the thread is not built")
+            .get_visual_rect_no_clip();
+        let viewport = find(harness.root_id(), "conversation")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        assert!(
+            card.y0 < viewport.y1 && card.y1 > viewport.y0,
+            "the thread at {card:?} is not in view in {viewport:?}"
+        );
+    }
+
+    /// How many comments `long_discussion` adds.
+    const LONG: usize = 30;
+
+    /// A discussion with thirty more comments, between the review and the
+    /// merge, so the timeline has thirty-five cards: the merge, these,
+    /// newest first, and the five of the fixture's that came before them.
     fn long_discussion() -> Discussion {
+        long_discussion_of(LONG)
+    }
+
+    /// The same with `n` more comments.
+    fn long_discussion_of(n: usize) -> Discussion {
         let mut discussion = discussion();
-        for i in 0..7 {
+        for i in 0..n as u64 {
             discussion.comments.push(IssueComment {
                 node_id: String::new(),
                 reactions: Default::default(),
@@ -2059,7 +2125,7 @@ mod tests {
                 user: "rohan".into(),
                 user_avatar_url: String::new(),
                 body: format!("Comment {i}."),
-                created_at: at(&format!("2026-09-17T0{i}:00:00Z")),
+                created_at: at(&format!("2026-09-17T{:02}:{:02}:00Z", i / 60, i % 60)),
                 updated_at: None,
                 html_url: format!("https://github.com/criccomini/perch/pull/57#issuecomment-{i}"),
                 viewer_can_delete: false,
@@ -2077,161 +2143,154 @@ mod tests {
             .count()
     }
 
-    /// Twelve cards are the newest eight and Show 4 older, which shows the
-    /// rest. They stay shown when Conversation comes back from Code, and
-    /// fold again when another item opens.
+    /// The comment `long_discussion` puts at `at` in the timeline, the
+    /// newest card at 0 being the merge.
+    fn long_comment_at(at: usize) -> u64 {
+        assert!((1..=LONG).contains(&at));
+        100 + (LONG - at) as u64
+    }
+
+    /// The page opens on the newest cards alone, and builds more each time
+    /// the reader scrolls near the end of what is built, by the keys or the
+    /// wheel, down to the oldest. They stay built when Conversation comes
+    /// back from Code, with the page where it was left, and another item
+    /// starts again from the newest.
     #[test]
-    fn the_timeline_folds_its_older_cards_until_asked() {
-        let (mut harness, _, state) =
-            app_harness_on(crate::backend::Backend::detached(), long_discussion());
-        assert_eq!(timeline_cards(&harness), super::NEWEST_SHOWN);
-        assert!(shown(&harness, "older cards"));
-        assert!(find(harness.root_id(), "Show 4 older").is_some());
+    fn the_timeline_builds_its_older_cards_as_the_reader_scrolls_down() {
+        let (mut harness, _, state) = short_harness(long_discussion(), 300.0);
+        settle(&mut harness);
+        assert_eq!(timeline_cards(&harness), super::BATCH);
+        assert!(
+            find(harness.root_id(), "show-older").is_none(),
+            "a row for them"
+        );
         let cards = cards_in_order(&harness);
         assert_eq!(cards[1], "card:event", "the merge is not first");
         assert!(cards[2..].iter().all(|card| card == "card:comment"));
 
-        show_older(&mut harness);
-        assert_eq!(timeline_cards(&harness), 12);
-        assert!(!shown(&harness, "older cards"));
+        // Cmd-Down to the end of what is built brings the next batch.
+        harness.click(460.0, 200.0);
+        harness.rebuild();
+        harness.dispatch_event(page_key(Paging::End));
+        settle(&mut harness);
+        let built = timeline_cards(&harness);
+        assert!(built > super::BATCH, "Cmd-Down built nothing more");
+        assert!(built < LONG + 5, "the end built everything at once");
+
+        // And so does the wheel, down to the opening.
+        to_end(&mut harness);
+        assert_eq!(timeline_cards(&harness), LONG + 5);
         assert_eq!(
             cards_in_order(&harness).last().map(String::as_str),
             Some("card:event"),
             "the opening is not last"
         );
 
+        // Back up the page a way, from where Code takes it and gives it back.
+        let c = find(harness.root_id(), "conversation")
+            .unwrap()
+            .get_visual_rect_no_clip()
+            .center();
+        harness.scroll_up(c.x, c.y, 600.0);
+        settle(&mut harness);
+        let scrolled = state.conversation_scroll.get_untracked();
+        let root = harness.root_id();
+        let column = move || find(root, "conversation column").unwrap();
+        let top = column().get_visual_rect_no_clip().y0;
         state.show_tab(crate::review::model::ItemTab::Code);
-        harness.rebuild();
-        harness.paint();
+        settle(&mut harness);
         state.show_tab(crate::review::model::ItemTab::Conversation);
-        harness.rebuild();
-        harness.paint();
-        assert_eq!(timeline_cards(&harness), 12, "Code folded them again");
+        settle(&mut harness);
+        assert_eq!(
+            timeline_cards(&harness),
+            LONG + 5,
+            "Code took the older cards away"
+        );
+        assert_eq!(state.conversation_scroll.get_untracked(), scrolled);
+        assert_eq!(
+            column().get_visual_rect_no_clip().y0,
+            top,
+            "the page opened somewhere else"
+        );
 
         state.item.update(|item| {
             if let Some(item) = item {
                 Arc::make_mut(item).id = "wt2".into();
             }
         });
-        harness.rebuild();
-        harness.paint();
-        assert_eq!(
-            timeline_cards(&harness),
-            super::NEWEST_SHOWN,
-            "another item kept them shown"
-        );
-        assert!(shown(&harness, "older cards"));
-    }
-
-    /// A card asked for that is folded away, as a question's run asks for
-    /// its thread, shows the older cards and comes into view; and Cmd-F's
-    /// bar shows them all, so it looks through every card.
-    #[test]
-    fn a_card_asked_for_or_find_shows_the_older_cards() {
-        let (mut harness, _, state) =
-            app_harness_on(crate::backend::Backend::detached(), long_discussion());
-        harness.set_size(1400.0, 500.0);
-        harness.rebuild();
-        harness.paint();
-        assert_eq!(timeline_cards(&harness), super::NEWEST_SHOWN);
-
-        state
-            .focus_card
-            .set(Some(crate::review::doc::CardId::Entry("comment:1".into())));
+        state.conversation_scroll.set(0.0);
+        state.show_tab(crate::review::model::ItemTab::Code);
         settle(&mut harness);
-        assert_eq!(timeline_cards(&harness), 12);
-        assert!(
-            card_shown(&harness, "card:comment", false),
-            "the oldest comment is not in view"
-        );
-
-        let (mut harness, _, state) =
-            app_harness_on(crate::backend::Backend::detached(), long_discussion());
-        assert_eq!(timeline_cards(&harness), super::NEWEST_SHOWN);
-        state.conversation_find_open.set(true);
-        settle(&mut harness);
-        assert_eq!(timeline_cards(&harness), 12, "find sees only the newest");
-    }
-
-    /// A notification's open, or a question's run whose thread the filter
-    /// hid, asks for its card to be focused once it is laid out: a card
-    /// folded away shows the older cards and comes into view, and so does
-    /// one asked for before the cards it lands among have come.
-    #[test]
-    fn a_card_asked_for_ahead_of_its_layout_shows_the_older_cards() {
-        let comment = || Some(crate::review::doc::CardId::Entry("comment:1".into()));
-        let (mut harness, _, state) =
-            app_harness_on(crate::backend::Backend::detached(), long_discussion());
-        harness.set_size(1400.0, 500.0);
-        settle(&mut harness);
-        assert_eq!(timeline_cards(&harness), super::NEWEST_SHOWN);
-        state.pending_focus_card.set(comment());
-        settle(&mut harness);
-        assert_eq!(timeline_cards(&harness), 12);
-        assert_eq!(state.focus_card.get_untracked(), comment());
-        assert!(
-            card_shown(&harness, "card:comment", false),
-            "the oldest comment is not in view"
-        );
-
-        // Asked for before the discussion with it has landed.
-        let mut early = discussion();
-        early.comments.clear();
-        let (mut harness, app, state) = app_harness_on(crate::backend::Backend::detached(), early);
-        harness.set_size(1400.0, 500.0);
-        settle(&mut harness);
-        state.pending_focus_card.set(comment());
-        settle(&mut harness);
-        assert_eq!(state.pending_focus_card.get_untracked(), comment());
-        deliver(app, state, long_discussion());
+        state.show_tab(crate::review::model::ItemTab::Conversation);
         settle(&mut harness);
         assert_eq!(
             timeline_cards(&harness),
-            12,
-            "the older cards stayed folded"
-        );
-        assert_eq!(state.focus_card.get_untracked(), comment());
-        assert!(
-            card_shown(&harness, "card:comment", false),
-            "the oldest comment is not in view"
+            super::BATCH,
+            "another item kept them built"
         );
     }
 
-    /// A card with a composer open in it stays on the page when newer
-    /// cards push it past the newest: the older cards unfold rather than
-    /// take it away, and its box and the keyboard with it. They stay
-    /// unfolded once the composer closes.
+    /// A page whose first cards leave room in the window builds more until
+    /// they reach a window past its foot, or none are left.
     #[test]
-    fn a_card_being_edited_is_not_folded_away_by_newer_ones() {
-        use crate::review::model::Destination;
-        let mut discussion = long_discussion();
-        // The oldest of the seven, the eighth newest card.
-        let edited = discussion
-            .comments
-            .iter_mut()
-            .find(|c| c.id == 100)
-            .unwrap();
-        edited.node_id = "IC_100".into();
-        edited.viewer_can_update = true;
-        let (mut harness, app, state) =
-            app_harness_on(crate::backend::Backend::detached(), discussion.clone());
-        assert_eq!(timeline_cards(&harness), super::NEWEST_SHOWN);
-        state.open_composer_with(
-            None,
-            None,
-            "Comment 0, edited.".into(),
-            Destination::GitHub,
-            Some("IC_100".into()),
-        );
+    fn a_short_page_builds_until_it_fills_the_window() {
+        let (mut harness, _, _) = short_harness(long_discussion(), 900.0);
         settle(&mut harness);
-        let editor = find(harness.root_id(), "comment-editor").unwrap();
-        let typing = find(editor, "composer-box").expect("the card holds the editor");
-        let editing = state.composer_box.get_untracked();
+        let built = timeline_cards(&harness);
+        assert!(built > super::BATCH, "the window is left half empty");
+        assert!(built < LONG + 5, "the page built everything");
+        let viewport = find(harness.root_id(), "conversation")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        let column = find(harness.root_id(), "conversation column")
+            .unwrap()
+            .get_visual_rect_no_clip();
         assert!(
-            editing.is_some(),
-            "the editor's box is not where `a` finds it"
+            column.y1 >= viewport.y0 + 2.0 * viewport.height(),
+            "the column at {column:?} stops short of a window past {viewport:?}"
         );
 
+        // Too few to fill it: all of them, and then the page is still.
+        let (mut harness, _, _) = short_harness(long_discussion_of(12), 900.0);
+        settle(&mut harness);
+        assert_eq!(timeline_cards(&harness), 12 + 5);
+    }
+
+    /// A card that lands at the top of the timeline, as a poll's comment
+    /// does, joins the cards the reader has scrolled through without taking
+    /// the oldest of them away, and the oldest of them is not built again.
+    #[test]
+    fn a_card_landing_at_the_top_keeps_the_cards_the_reader_scrolled_to() {
+        let (mut harness, app, state) = short_harness(long_discussion(), 300.0);
+        settle(&mut harness);
+        harness.click(460.0, 200.0);
+        harness.rebuild();
+        harness.dispatch_event(page_key(Paging::End));
+        settle(&mut harness);
+        let built = timeline_cards(&harness);
+        assert!(built > super::BATCH);
+        let oldest = *card_views(&harness).last().unwrap();
+        // The reader a little way up from the end, out of its reach.
+        let c = find(harness.root_id(), "conversation")
+            .unwrap()
+            .get_visual_rect_no_clip()
+            .center();
+        harness.scroll_up(c.x, c.y, 900.0);
+        settle(&mut harness);
+        assert_eq!(timeline_cards(&harness), built);
+
+        deliver(app, state, one_more(long_discussion()));
+        settle(&mut harness);
+        assert_eq!(timeline_cards(&harness), built + 1, "a card was taken away");
+        assert_eq!(
+            *card_views(&harness).last().unwrap(),
+            oldest,
+            "the oldest built card was built again"
+        );
+    }
+
+    /// The discussion with a comment newer than all of it.
+    fn one_more(mut discussion: Discussion) -> Discussion {
         discussion.comments.push(IssueComment {
             id: 2,
             node_id: String::new(),
@@ -2245,9 +2304,264 @@ mod tests {
             viewer_can_delete: false,
             viewer_can_update: false,
         });
+        discussion
+    }
+
+    /// A reader who has scrolled a little way into the first cards, not
+    /// near their end, keeps them all when a card lands at the top: it
+    /// joins them, and the oldest of them is not taken away.
+    #[test]
+    fn a_card_landing_after_a_short_scroll_keeps_the_first_cards() {
+        let mut discussion = long_discussion();
+        // Long comments, so the first batch runs well past the window and
+        // a short scroll builds no more.
+        for comment in &mut discussion.comments {
+            comment.body = "A paragraph of the comment.\n\n".repeat(6);
+        }
+        let (mut harness, app, state) = short_harness(discussion.clone(), 600.0);
+        settle(&mut harness);
+        assert_eq!(timeline_cards(&harness), super::BATCH);
+        let oldest = *card_views(&harness).last().unwrap();
+        let c = find(harness.root_id(), "conversation")
+            .unwrap()
+            .get_visual_rect_no_clip()
+            .center();
+        harness.scroll_down(c.x, c.y, 200.0);
+        settle(&mut harness);
+        assert!(state.conversation_scroll.get_untracked() > 0.0);
+        assert_eq!(
+            timeline_cards(&harness),
+            super::BATCH,
+            "a short scroll built more"
+        );
+
+        deliver(app, state, one_more(discussion));
+        settle(&mut harness);
+        assert_eq!(
+            timeline_cards(&harness),
+            super::BATCH + 1,
+            "the oldest card was taken away"
+        );
+        assert_eq!(
+            *card_views(&harness).last().unwrap(),
+            oldest,
+            "the oldest card was built again"
+        );
+    }
+
+    /// A page that fills the window with the agents' threads before
+    /// GitHub's cards have come builds as many of the newest as it would
+    /// have anyway once they do, not every one of them.
+    #[test]
+    fn a_page_filled_before_github_answers_builds_only_the_newest_after() {
+        let threads = (0..15)
+            .map(|i| {
+                let mut thread = thread();
+                thread.id = format!("t{i}");
+                // Resolved, so each is folded to its header and the page
+                // stays short.
+                thread.resolved = true;
+                for message in &mut thread.messages {
+                    message.thread_id = thread.id.clone();
+                }
+                thread
+            })
+            .collect::<Vec<_>>();
+        let (mut harness, app, state) = app_harness_sized(
+            crate::backend::Backend::detached(),
+            long_discussion(),
+            move |state| {
+                state.discussion.set(None);
+                state.comment_threads.set(Arc::new(threads));
+            },
+            600.0,
+        );
+        settle(&mut harness);
+        assert_eq!(timeline_cards(&harness), 15, "the threads did not fill it");
+
+        deliver(app, state, long_discussion());
+        settle(&mut harness);
+        let built = timeline_cards(&harness);
+        assert!(built >= 2 * super::BATCH, "the threads were taken away");
+        assert_ne!(
+            cards_in_order(&harness).last().map(String::as_str),
+            Some("card:event"),
+            "GitHub's cards were all built, down to the opening"
+        );
+    }
+
+    /// Two event lines alike, as two of a reviewer's reviews dismissed in
+    /// the same second are, are one card, and the cards under them still
+    /// build as the reader scrolls down.
+    #[test]
+    fn two_events_alike_do_not_stop_the_older_cards_building() {
+        let mut discussion = long_discussion();
+        // Under the ninth comment from the top, among the second batch.
+        for _ in 0..2 {
+            discussion.events.push(PullEvent::new(
+                PullEventKind::HeadDeleted,
+                at("2026-09-17T00:20:30Z"),
+                "rohan",
+            ));
+        }
+        let (mut harness, _, _) = short_harness(discussion, 300.0);
+        settle(&mut harness);
+        assert_eq!(timeline_cards(&harness), super::BATCH);
+        to_end(&mut harness);
+        assert_eq!(timeline_cards(&harness), LONG + 5 + 1);
+        assert_eq!(
+            cards_in_order(&harness).last().map(String::as_str),
+            Some("card:event"),
+            "the opening is not last"
+        );
+    }
+
+    /// A card asked for that is not built yet, as a question's run asks for
+    /// its thread, is built along with every card over it and comes into
+    /// view; and Cmd-F's bar builds them all, so it looks through every
+    /// card.
+    #[test]
+    fn a_card_asked_for_or_find_builds_the_older_cards() {
+        let (mut harness, _, state) = short_harness(long_discussion(), 500.0);
+        settle(&mut harness);
+        assert_eq!(timeline_cards(&harness), super::BATCH);
+
+        state
+            .focus_card
+            .set(Some(crate::review::doc::CardId::Entry("comment:1".into())));
+        settle(&mut harness);
+        assert!(timeline_cards(&harness) >= LONG + 4);
+        assert!(
+            card_shown(&harness, "card:comment", false),
+            "the oldest comment is not in view"
+        );
+
+        let (mut harness, _, state) = short_harness(long_discussion(), 500.0);
+        settle(&mut harness);
+        assert_eq!(timeline_cards(&harness), super::BATCH);
+        state.conversation_find_open.set(true);
+        settle(&mut harness);
+        assert_eq!(
+            timeline_cards(&harness),
+            LONG + 5,
+            "find sees only the newest"
+        );
+    }
+
+    /// A notification's open, or a question's run from the Agents
+    /// dropdown, asks for its card to be focused once it is laid out: a
+    /// card not built yet is built and comes into view, and so is one
+    /// asked for before the cards it lands among have come.
+    #[test]
+    fn a_card_asked_for_ahead_of_its_layout_is_built() {
+        let wanted = long_comment_at(super::BATCH + 5);
+        let comment = move || {
+            Some(crate::review::doc::CardId::Entry(format!(
+                "comment:{wanted}"
+            )))
+        };
+        let (mut harness, _, state) = short_harness(long_discussion(), 300.0);
+        settle(&mut harness);
+        assert_eq!(timeline_cards(&harness), super::BATCH);
+        state.pending_focus_card.set(comment());
+        settle(&mut harness);
+        assert!(timeline_cards(&harness) > super::BATCH + 5);
+        assert_eq!(state.focus_card.get_untracked(), comment());
+        let card = card_views(&harness)[super::BATCH + 6].get_visual_rect_no_clip();
+        let viewport = find(harness.root_id(), "conversation")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        assert!(
+            card.y0 < viewport.y1 && card.y1 > viewport.y0,
+            "the comment at {card:?} is not in view in {viewport:?}"
+        );
+
+        // Asked for before the discussion with it has landed.
+        let mut early = discussion();
+        early.comments.clear();
+        let (mut harness, app, state) = short_harness(early, 300.0);
+        settle(&mut harness);
+        let oldest = || Some(crate::review::doc::CardId::Entry("comment:1".into()));
+        state.pending_focus_card.set(oldest());
+        settle(&mut harness);
+        assert_eq!(state.pending_focus_card.get_untracked(), oldest());
+        deliver(app, state, long_discussion());
+        settle(&mut harness);
+        assert!(
+            timeline_cards(&harness) >= LONG + 4,
+            "the older cards were not built"
+        );
+        assert_eq!(state.focus_card.get_untracked(), oldest());
+        assert!(
+            card_shown(&harness, "card:comment", false),
+            "the oldest comment is not in view"
+        );
+    }
+
+    /// A card with a composer open in it stays on the page when newer
+    /// cards push it past the first batch: the timeline builds down to it
+    /// rather than take it away, and its box and the keyboard with it. It
+    /// stays built once the composer closes.
+    #[test]
+    fn a_card_being_edited_is_not_taken_away_by_newer_ones() {
+        use crate::review::model::Destination;
+        let mut discussion = long_discussion();
+        // Long comments, so the first batch runs well past the window and
+        // builds no more, and the newest comment, the one edited, is in
+        // the window from the start.
+        for comment in &mut discussion.comments {
+            comment.body = "A paragraph of the comment.\n\n".repeat(6);
+        }
+        let id = long_comment_at(1);
+        let edited = discussion.comments.iter_mut().find(|c| c.id == id).unwrap();
+        edited.node_id = "IC_EDIT".into();
+        edited.viewer_can_update = true;
+        let (mut harness, app, state) = short_harness(discussion.clone(), 600.0);
+        settle(&mut harness);
+        assert_eq!(timeline_cards(&harness), super::BATCH);
+        state.open_composer_with(
+            None,
+            None,
+            "Edited.".into(),
+            Destination::GitHub,
+            Some("IC_EDIT".into()),
+        );
+        settle(&mut harness);
+        let editor = find(harness.root_id(), "comment-editor").unwrap();
+        let typing = find(editor, "composer-box").expect("the card holds the editor");
+        let editing = state.composer_box.get_untracked();
+        assert!(
+            editing.is_some(),
+            "the editor's box is not where `a` finds it"
+        );
+
+        // A batch's worth of newer comments at once, past which the first
+        // batch alone would not reach.
+        for i in 0..super::BATCH as u64 {
+            discussion.comments.push(IssueComment {
+                id: 200 + i,
+                node_id: String::new(),
+                user: "rohan".into(),
+                user_avatar_url: String::new(),
+                body: "One more thing.".into(),
+                created_at: at(&format!("2026-09-18T09:{i:02}:00Z")),
+                updated_at: None,
+                html_url: format!("https://github.com/criccomini/perch/pull/57#issuecomment-{i}"),
+                reactions: Default::default(),
+                viewer_can_delete: false,
+                viewer_can_update: false,
+            });
+        }
         deliver(app, state, discussion);
         settle(&mut harness);
-        assert_eq!(timeline_cards(&harness), 13, "the edited card folded away");
+        let held = super::Held::Edit("IC_EDIT".into());
+        assert_eq!(
+            super::built(&super::cards(state), usize::MAX, super::BATCH, Some(&held)),
+            super::BATCH + 2,
+            "the first batch does not reach down to the edited card"
+        );
+        let built = timeline_cards(&harness);
+        assert!(built >= super::BATCH + 2, "the edited card was taken away");
         let editor = find(harness.root_id(), "comment-editor").unwrap();
         assert_eq!(
             find(editor, "composer-box"),
@@ -2258,7 +2572,11 @@ mod tests {
 
         state.close_composer();
         settle(&mut harness);
-        assert_eq!(timeline_cards(&harness), 13, "closing it folded them");
+        assert_eq!(
+            timeline_cards(&harness),
+            built,
+            "closing it took the card away"
+        );
     }
 
     /// A long description is cut to a few hundred pixels, with Show more
@@ -2485,8 +2803,6 @@ mod tests {
             ),
         ]);
         let (mut harness, _, _) = app_harness_on(crate::backend::Backend::detached(), discussion);
-        // Nine cards: the opening is folded away.
-        show_older(&mut harness);
 
         let mut all = Vec::new();
         names(harness.root_id(), &mut all);

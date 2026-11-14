@@ -25,7 +25,7 @@ use floem::views::{Container, Decorators, Empty, Label, Stack};
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
 use crate::review::doc::CardId;
-use crate::review::model::{ReviewFindingFilter, ReviewState};
+use crate::review::model::ReviewState;
 use crate::state::AppState;
 use crate::theme;
 use crate::ui::widgets::{clickable, icon_action};
@@ -111,7 +111,7 @@ pub(crate) fn reveal(app: AppState, review: ReviewState, backend: &Backend, run:
         return;
     }
     match (&run.item_id, &run.thread_id) {
-        (Some(item_id), Some(thread_id)) => show_thread(app, review, item_id, thread_id),
+        (Some(_), Some(thread_id)) => show_thread(review, thread_id),
         _ => show_output(app, review, backend, &run.id),
     }
 }
@@ -125,19 +125,9 @@ pub(crate) fn open_review(review: ReviewState, key: String) {
     });
 }
 
-/// Bring a thread into view on Conversation, flashing. One the findings'
-/// Open filter hides, as it does a dismissed or fixed finding's, turns the
-/// filter to All first.
-pub(crate) fn show_thread(app: AppState, review: ReviewState, item_id: &str, thread_id: &str) {
-    if review
-        .hidden_review_threads
-        .with_untracked(|hidden| hidden.contains(thread_id))
-    {
-        review.apply_review_finding_filter(
-            ReviewFindingFilter::All,
-            &app.review_findings_for(item_id),
-        );
-    }
+/// Bring a thread into view on Conversation, open and flashing, even a
+/// dismissed or fixed finding's, which is folded there.
+pub(crate) fn show_thread(review: ReviewState, thread_id: &str) {
     crate::review::notified::go_to(review, CardId::Thread(thread_id.to_string()));
 }
 

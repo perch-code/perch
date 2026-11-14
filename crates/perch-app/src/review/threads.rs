@@ -2302,8 +2302,8 @@ pub(crate) fn local_chip(shown: bool) -> floem::AnyView {
 
 /// Show resolved on a resolved thread that is `folded` away, and Hide
 /// resolved on one the reader opened, as github.com offers either at
-/// the end of a resolved thread's header. Hidden on a thread that is not
-/// resolved.
+/// the end of a resolved thread's header. A fixed or dismissed finding's
+/// thread has it too. Hidden on any other thread.
 pub(crate) fn resolved_toggle(
     state: ReviewState,
     thread_id: String,
@@ -2311,7 +2311,7 @@ pub(crate) fn resolved_toggle(
     face: ThreadFace,
     toggle: impl Fn() + 'static,
 ) -> impl IntoView {
-    let resolved = Memo::new(move |_| state.is_resolved(&thread_id));
+    let resolved = Memo::new(move |_| state.is_settled(&thread_id));
     let (height, size) = match face {
         ThreadFace::Card => (theme::THREAD_HEADER_BUTTON, theme::TEXT_META),
         ThreadFace::Inline => (theme::COLLAPSED_CARD_MENU, theme::TEXT_META),

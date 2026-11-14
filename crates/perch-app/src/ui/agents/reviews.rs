@@ -626,7 +626,6 @@ struct FindingRow {
 fn findings(app: AppState, review: ReviewState, summary: ReviewGroupSummary) -> impl IntoView {
     let group_id = summary.group.id.clone();
     let item_id = summary.group.item_id.clone();
-    let row_item_id = item_id.clone();
     let done = !summary.group.status.is_active();
     let rows = Memo::new(move |_| {
         let mut found: Vec<ReviewFindingSummary> = app
@@ -677,12 +676,11 @@ fn findings(app: AppState, review: ReviewState, summary: ReviewGroupSummary) -> 
                 })
                 .into_any();
             }
-            let item_id = row_item_id.clone();
             Container::new(
                 Stack::vertical_from_iter(
                     rows.into_iter()
                         .enumerate()
-                        .map(|(i, row)| finding_row(app, review, &item_id, row, i == 0).into_any()),
+                        .map(|(i, row)| finding_row(review, row, i == 0).into_any()),
                 )
                 .style(|s| s.flex_col().width_full().max_width_full()),
             )
@@ -709,14 +707,10 @@ fn findings(app: AppState, review: ReviewState, summary: ReviewGroupSummary) -> 
 
 /// A finding: its severity, its first line and where it is. A press goes
 /// to its line in Code and shuts the popover; one with no line, as on a
-/// thread about the whole change, goes to its thread on Conversation.
-fn finding_row(
-    app: AppState,
-    review: ReviewState,
-    item_id: &str,
-    row: FindingRow,
-    first: bool,
-) -> impl IntoView {
+/// thread about the whole change, goes to its thread on Conversation. So
+/// does a fixed or dismissed one, whose thread Code leaves out, and which
+/// opens on Conversation, where it is folded.
+fn finding_row(review: ReviewState, row: FindingRow, first: bool) -> impl IntoView {
     let (ink, fill) = severity_inks(row.severity);
     let severity = finding_severity_label(row.severity);
     let FindingRow {
@@ -728,16 +722,25 @@ fn finding_row(
         shown,
         ..
     } = row;
-    let item_id = item_id.to_string();
     let faded = settled.is_some();
     let linked = at.is_some() || shown;
     let go = move || {
-        if let Some((path, line)) = &at {
+        let folded_away = shown
+            && review.comment_threads.with_untracked(|threads| {
+                threads
+                    .iter()
+                    .find(|t| t.id == thread_id)
+                    .is_some_and(|t| !review.thread_visible(t))
+            });
+        if folded_away {
+            review_menu::close(review, false);
+            super::show_thread(review, &thread_id);
+        } else if let Some((path, line)) = &at {
             review_menu::close(review, false);
             review.go_to_file(path, Some((line.saturating_sub(1), 0)));
         } else if shown {
             review_menu::close(review, false);
-            super::show_thread(app, review, &item_id, &thread_id);
+            super::show_thread(review, &thread_id);
         }
     };
     // Where it is, and whether it is settled, under its line, which has
@@ -1159,6 +1162,34 @@ mod tests {
             state.pending_jump.get(),
             Some(("src/a.rs".to_string(), 6, 0)),
             "not at the finding's line"
+        );
+    }
+
+    /// A dismissed finding's row goes to its thread on Conversation and
+    /// opens it there, not to its line, where Code leaves the thread out.
+    #[test]
+    fn a_dismissed_finding_goes_to_its_thread() {
+        let (mut harness, _app, state) = popover();
+        state
+            .settled_findings
+            .set(std::iter::once("t-high".to_string()).collect());
+        state.review_expanded.set(Some("group-3".into()));
+        settle(&mut harness);
+        assert!(state.is_folded("t-high"));
+        let findings = named(harness.root_id(), "agent-review-findings").unwrap();
+        let high = named(findings, "\"The lock is held across an await.\"")
+            .unwrap()
+            .get_visual_rect_no_clip();
+        harness.click(high.center().x, high.center().y);
+        settle(&mut harness);
+        assert!(!state.review_open.get(), "the popover stayed");
+        assert_eq!(state.tab.get(), ItemTab::Conversation);
+        assert_eq!(state.pending_jump.get(), None, "it went to the line");
+        assert!(!state.is_folded("t-high"), "the thread is still folded");
+        assert!(
+            [state.pending_focus_card.get(), state.focus_card.get()]
+                .contains(&Some(crate::review::doc::CardId::Thread("t-high".into()))),
+            "the thread was not asked for"
         );
     }
 

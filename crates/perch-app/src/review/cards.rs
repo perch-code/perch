@@ -2697,7 +2697,8 @@ fn open_commit(state: ReviewState, sha: &str) {
 /// and Show resolved or Hide resolved on one that is resolved; under the
 /// header the lines it is on, its comments, the Follow up bar and the
 /// foot with Resolve conversation. A resolved thread is folded to its
-/// header, as it arrives on github.com, and Resolve folds one. One of
+/// header, as it arrives on github.com, and Resolve folds one; so is a
+/// fixed or dismissed finding's, with Show resolved to open it. One of
 /// Perch's own is marked Local in its header and has a dashed border, so
 /// it is never taken for one of GitHub's.
 pub fn thread_card(
@@ -2770,8 +2771,8 @@ pub fn thread_card(
 
 /// The header across a thread on Conversation: the chevron that folds
 /// the thread, the file it is on, Outdated, Perch only on one of Perch's
-/// own, then Show resolved or Hide resolved on one that is resolved, and
-/// the thread's `...` menu. A thread about the item as a whole says so
+/// own, then Show resolved or Hide resolved on one that is resolved, or
+/// whose finding is fixed or dismissed, and the thread's `...` menu. A thread about the item as a whole says so
 /// where a file would be. It is on the box's own colour, with a hairline
 /// under it while the thread is open: a grey strip would read as Perch's
 /// on a GitHub thread.

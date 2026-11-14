@@ -998,6 +998,11 @@ pub fn default_destination(
     }
 }
 
+/// Whether a thread holds a draft, which posts with the review.
+fn holds_draft(thread: &CommentThread) -> bool {
+    thread.messages.iter().any(|m| m.is_draft())
+}
+
 /// The drafts among `threads`, each with its thread's anchor and root
 /// comment on GitHub.
 pub fn drafts_of(threads: &[CommentThread]) -> Vec<Draft> {
@@ -1224,13 +1229,6 @@ impl ReviewFindingSummary {
             && self.finding.verification != perch_github::FindingVerification::Fixed
             && self.finding.duplicate_of.is_none()
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ReviewFindingFilter {
-    #[default]
-    Open,
-    All,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1836,10 +1834,11 @@ pub struct ReviewState {
 
     /// Every thread in the open worktree, with messages and runs.
     pub comment_threads: RwSignal<Arc<Vec<CommentThread>>>,
-    /// Finding threads hidden from ordinary Conversation/Files rendering.
-    /// Their durable threads remain loaded and are revealed by the All filter.
-    pub hidden_review_threads: RwSignal<HashSet<String>>,
-    pub review_finding_filter: RwSignal<ReviewFindingFilter>,
+    /// The threads of the item's findings that are fixed or dismissed.
+    /// Code leaves them out, and Conversation folds them to their header
+    /// as it does a resolved thread. Empty on a past review, which shows
+    /// every finding it had.
+    pub settled_findings: RwSignal<HashSet<String>>,
     /// An open composer, and where it is anchored.
     pub composer: RwSignal<Option<Composer>>,
     /// How many composers have been opened, for `Composer::opening`.
@@ -1862,10 +1861,10 @@ pub struct ReviewState {
     /// marker is still a second flash, while a card built after the click
     /// ignores what it finds here.
     pub focus_card: RwSignal<Option<CardId>>,
-    /// A card to focus once Conversation has built and laid it out: a
-    /// finding's thread that the findings filter hid until Show asked
-    /// for it. The card takes it into `focus_card` then, since one built
-    /// after `focus_card` was set ignores it.
+    /// A card to focus once Conversation has built and laid it out, as
+    /// one a notification or the Agents dropdown goes to. The card takes
+    /// it into `focus_card` then, since one built after `focus_card` was
+    /// set ignores it.
     pub pending_focus_card: RwSignal<Option<CardId>>,
     /// An unread notification being opened: Conversation goes to the
     /// card it is about once the discussion has it. See
@@ -2281,8 +2280,7 @@ impl ReviewState {
             editor_epoch: RwSignal::new(0),
             docs: RwSignal::new(None),
             comment_threads: RwSignal::new(Arc::new(Vec::new())),
-            hidden_review_threads: RwSignal::new(HashSet::new()),
-            review_finding_filter: RwSignal::new(ReviewFindingFilter::Open),
+            settled_findings: RwSignal::new(HashSet::new()),
             composer: RwSignal::new(None),
             composer_opened: RwSignal::new(0),
             sent_composer: RwSignal::new(None),
@@ -2514,8 +2512,7 @@ impl ReviewState {
         self.changed_only.set(true);
         self.lsp_status.set(ServerStatuses::default());
         self.comment_threads.set(Arc::new(Vec::new()));
-        self.hidden_review_threads.set(HashSet::new());
-        self.review_finding_filter.set(ReviewFindingFilter::Open);
+        self.settled_findings.set(HashSet::new());
         self.composer.set(None);
         self.sent_composer.set(None);
         self.selection.set(None);
@@ -4707,6 +4704,34 @@ impl ReviewState {
             .with(|threads| threads.iter().any(|t| t.id == thread_id && t.resolved))
     }
 
+    /// Whether a thread is folded away on Conversation until the reader
+    /// shows it: one resolved, and a fixed or dismissed finding's, unless
+    /// it holds a draft, which nothing posts from out of sight. A
+    /// finding's thread is not resolved on GitHub for being settled here,
+    /// so Resolve and Unresolve go by `is_resolved`. Tracked.
+    pub fn is_settled(&self, thread_id: &str) -> bool {
+        if self.is_resolved(thread_id) {
+            return true;
+        }
+        self.settled_findings.with(|s| s.contains(thread_id))
+            && self
+                .comment_threads
+                .with(|threads| threads.iter().any(|t| t.id == thread_id && !holds_draft(t)))
+    }
+
+    /// A finding was fixed or dismissed: its thread folds on Conversation,
+    /// as one the reader resolves does, whatever they showed of it before.
+    pub fn fold_settled(&self, thread_id: &str) {
+        if self
+            .shown_resolved
+            .with_untracked(|s| s.contains(thread_id))
+        {
+            self.shown_resolved.update(|s| {
+                s.remove(thread_id);
+            });
+        }
+    }
+
     /// Whether a resolve or unresolve of the thread is not yet answered.
     /// Tracked.
     pub fn is_resolving(&self, thread_id: &str) -> bool {
@@ -4804,10 +4829,11 @@ impl ReviewState {
     }
 
     /// Whether a thread on Conversation is folded to its header. A
-    /// resolved thread's is, unless the reader showed it; any other's is
-    /// when the reader folded it. Tracked.
+    /// resolved thread's is, or a fixed or dismissed finding's, unless the
+    /// reader showed it; any other's is when the reader folded it.
+    /// Tracked.
     pub fn is_folded(&self, thread_id: &str) -> bool {
-        if self.is_resolved(thread_id) {
+        if self.is_settled(thread_id) {
             return !self.shown_resolved.with(|s| s.contains(thread_id));
         }
         self.folded_threads.with(|f| f.contains(thread_id))
@@ -4818,7 +4844,7 @@ impl ReviewState {
     /// resolved thread shown is no longer one the reader folded, so it
     /// stays open if it is unresolved.
     pub fn toggle_fold(&self, thread_id: &str) {
-        if self.is_resolved(thread_id) {
+        if self.is_settled(thread_id) {
             let showing = self
                 .shown_resolved
                 .with_untracked(|s| !s.contains(thread_id));
@@ -5742,35 +5768,30 @@ impl ReviewState {
         })
     }
 
-    /// Whether a thread is drawn. One holding a draft always is: the draft
-    /// posts with the review, and nothing posts from out of sight. One with
-    /// nothing in it never is, as a finding's is once its draft is deleted.
-    /// Otherwise the findings filter says.
+    /// Whether a thread is drawn in the code. One holding a draft always
+    /// is: the draft posts with the review, and nothing posts from out of
+    /// sight. One with nothing in it never is, as a finding's is once its
+    /// draft is deleted, and neither is a fixed or dismissed finding's.
     pub fn thread_visible(&self, thread: &CommentThread) -> bool {
-        if thread.messages.iter().any(|m| m.is_draft()) {
+        if holds_draft(thread) {
             return true;
         }
         !thread.messages.is_empty()
             && !self
-                .hidden_review_threads
-                .with(|hidden| hidden.contains(&thread.id))
+                .settled_findings
+                .with(|settled| settled.contains(&thread.id))
     }
 
-    pub fn apply_review_finding_filter(
-        &self,
-        filter: ReviewFindingFilter,
-        findings: &[ReviewFindingSummary],
-    ) {
-        let hidden = match filter {
-            ReviewFindingFilter::Open => findings
-                .iter()
-                .filter(|summary| !summary.is_actionable())
-                .map(|summary| summary.finding.thread_id.clone())
-                .collect(),
-            ReviewFindingFilter::All => HashSet::new(),
-        };
-        self.review_finding_filter.set(filter);
-        self.hidden_review_threads.set(hidden);
+    /// Takes note of which of the item's findings are fixed or dismissed.
+    pub fn settle_findings(&self, findings: &[ReviewFindingSummary]) {
+        let settled: HashSet<String> = findings
+            .iter()
+            .filter(|summary| !summary.is_actionable())
+            .map(|summary| summary.finding.thread_id.clone())
+            .collect();
+        if self.settled_findings.with_untracked(|was| *was != settled) {
+            self.settled_findings.set(settled);
+        }
     }
 
     pub fn status_of(&self, path: &str) -> Option<ChangeStatus> {
@@ -6253,10 +6274,12 @@ mod tests {
         assert_eq!(state.anchors_in("src/y.rs"), vec![(0, 2), (8, 8)]);
     }
 
-    /// The findings filter hides a finding's thread, but never one with a
-    /// draft in it, which would post from out of sight; and a thread with
-    /// nothing in it, as a finding's is once its draft is deleted, is
-    /// never drawn, whatever the filter.
+    /// The code leaves out a fixed or dismissed finding's thread, but
+    /// never one with a draft in it, which would post from out of sight;
+    /// and a thread with nothing in it, as a finding's is once its draft
+    /// is deleted, is never drawn. Conversation folds the settled one to
+    /// its header, though GitHub has not resolved it, and not the one
+    /// with a draft.
     #[test]
     fn a_draft_is_never_hidden_and_an_empty_thread_never_drawn() {
         use perch_github::ThreadOrigin;
@@ -6270,17 +6293,26 @@ mod tests {
         empty.messages.clear();
 
         let state = ReviewState::new();
+        state.comment_threads.set(Arc::new(vec![
+            finding.clone(),
+            drafted.clone(),
+            empty.clone(),
+        ]));
         state
-            .hidden_review_threads
+            .settled_findings
             .set(["t1", "t2", "t3"].map(String::from).into_iter().collect());
         assert!(!state.thread_visible(&finding));
         assert!(state.thread_visible(&drafted));
         assert!(!state.thread_visible(&empty));
+        assert!(state.is_folded("t1"));
+        assert!(!state.is_resolved("t1"));
+        assert!(!state.is_folded("t2"));
 
-        state.hidden_review_threads.set(HashSet::new());
+        state.settled_findings.set(HashSet::new());
         assert!(state.thread_visible(&finding));
         assert!(state.thread_visible(&drafted));
         assert!(!state.thread_visible(&empty));
+        assert!(!state.is_folded("t1"));
     }
 
     /// A thread of the reader's own anchored on head lines `start` to

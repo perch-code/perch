@@ -2146,25 +2146,29 @@ impl AppState {
                 if review.is_item(&item_id)
                     && review.historical_review.with_untracked(Option::is_none)
                 {
-                    review.apply_review_finding_filter(
-                        review.review_finding_filter.get_untracked(),
-                        &findings,
-                    );
+                    review.settle_findings(&findings);
                 }
             }
             Event::ReviewGroupUpdated { item_id, summary } => {
                 self.update_review_group(item_id, summary)
             }
             Event::ReviewFindingUpdated { item_id, summary } => {
+                let was_open = self
+                    .review_findings_for(&item_id)
+                    .iter()
+                    .find(|f| f.finding.id == summary.finding.id)
+                    .is_none_or(|f| f.is_actionable());
+                let settled = (was_open && !summary.is_actionable())
+                    .then(|| summary.finding.thread_id.clone());
                 self.update_review_finding(item_id.clone(), summary);
                 if review.is_item(&item_id)
                     && review.historical_review.with_untracked(Option::is_none)
                 {
                     let findings = self.review_findings_for(&item_id);
-                    review.apply_review_finding_filter(
-                        review.review_finding_filter.get_untracked(),
-                        &findings,
-                    );
+                    review.settle_findings(&findings);
+                    if let Some(thread_id) = settled {
+                        review.fold_settled(&thread_id);
+                    }
                 }
             }
             Event::ReviewLaunchFailed { item_id, message } => {
@@ -2193,9 +2197,9 @@ impl AppState {
                         .set(crate::review::model::ServerStatuses::default());
                     // Historical membership is fixed by the selected
                     // group's observations, not by each finding's current
-                    // disposition. Do not let today's Open filter hide a
-                    // finding that was present in this review.
-                    review.hidden_review_threads.set(HashSet::new());
+                    // disposition. Do not let today's dispositions hide or
+                    // fold a finding that was present in this review.
+                    review.settled_findings.set(HashSet::new());
                     review.finish_historical_review(findings);
                     // The backend has already switched its file context to
                     // this retained snapshot. Forget current-snapshot file
@@ -7210,14 +7214,14 @@ mod tests {
             .set(Some(historical_summary("selected")));
         app.apply_with_review(update(), review);
         assert!(
-            review.hidden_review_threads.with(HashSet::is_empty),
+            review.settled_findings.with(HashSet::is_empty),
             "the past review lost a finding"
         );
 
         review.historical_review.set(None);
         app.apply_with_review(update(), review);
         assert!(review
-            .hidden_review_threads
+            .settled_findings
             .with(|hidden| hidden.contains("finding-1")));
     }
 
