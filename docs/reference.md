@@ -48,9 +48,11 @@ still GitHub's.
   unread reminder in Perch for the current update. Viewing it clears the
   reminder; later GitHub state takes precedence. GitHub's public API has no
   mark-unread operation, so this does not change github.com.
-- **Done** marks the thread done on GitHub and remembers that exact update in
-  Perch, so GitHub's `all=true` history cannot put it back. Newer activity
-  clears the local mark and lets the thread return.
+- **Done** marks the thread done on GitHub and remembers that update in
+  Perch, so GitHub's `all=true` history cannot put it back. Newer unread
+  activity clears the local mark and lets the thread return. A later update
+  GitHub reports read does not: your own comment, review or merge moves the
+  thread too, and so does activity you have already read on github.com.
 - **Unsubscribe** ignores future activity on the thread, marks its current
   notification done, and remembers it the same way.
 - **View › Done**, in the Inbox's filter menu, lists the threads marked Done

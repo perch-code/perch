@@ -1069,8 +1069,8 @@ pub enum Event {
     /// drawer may hold these back until asked.
     ItemActivityPolled(Vec<perch_github::ItemActivity>),
     /// Perch's visible notification list, in GitHub response order. Read
-    /// threads remain; revisions marked Done in Perch stay hidden until newer
-    /// activity arrives.
+    /// threads remain; threads marked Done in Perch stay hidden until
+    /// newer unread activity arrives.
     Notifications(Vec<Thread>),
     /// The notification list again, from a poll or a look at its subjects
     /// rather than something the reader did.
@@ -7136,8 +7136,9 @@ impl Ctx {
 
     /// GitHub just said what state a pull request or an issue is in: a
     /// notification about it draws that state. The reader's own merge or
-    /// close moves no thread, so the look that set the row's state would
-    /// not be taken again until someone else acts there. A row it finds
+    /// close brings no new notification, and a poll may not see the thread
+    /// move for it, so the look that set the row's state would not be
+    /// taken again until someone else acts there. A row it finds
     /// closed is looked at again, for when it closed, which
     /// [`done_closed_notifications`] goes by.
     fn settle_notification_state(
@@ -7204,9 +7205,9 @@ impl Ctx {
         });
     }
 
-    /// Hide the exact revision marked Done. GitHub's list endpoint can
-    /// return Done history again under `all=true`, so the local watermark
-    /// is what keeps the row out until newer activity arrives.
+    /// Hide the revision marked Done. GitHub's list endpoint can return
+    /// Done history again under `all=true`, so the local watermark is what
+    /// keeps the row out until newer unread activity arrives.
     fn dismiss_notification(&self, thread_id: &str) {
         self.dismiss_notifications(&[thread_id.to_string()]);
     }
@@ -7282,7 +7283,8 @@ impl Ctx {
         self.send_marked_notifications();
     }
 
-    /// Hide the thread until `until`, as Done would until newer activity.
+    /// Hide the thread until `until`, as Done would until newer unread
+    /// activity.
     /// Nothing goes to GitHub, which has no snooze, so the mark lives only
     /// in Perch's database, and without one there is no snoozing.
     fn snooze_notification(&self, thread_id: &str, until: Timestamp) {
@@ -21736,7 +21738,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn done_stays_hidden_until_newer_activity_arrives() {
+    async fn done_stays_hidden_until_newer_unread_activity_arrives() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
         let dismissed = thread("7", "seven");
@@ -21755,6 +21757,14 @@ mod tests {
             vec![dismissed.clone(), other.clone()],
             Some("same-revision"),
         );
+        assert_eq!(visible, vec![other.clone()]);
+        assert_eq!(*ctx.notifications.lock().unwrap(), vec![other.clone()]);
+
+        // The reader's own comment moves the thread and leaves it read.
+        let mut own = dismissed.clone();
+        own.updated_at = "2026-09-18T17:00:00Z".parse().unwrap();
+        own.unread = false;
+        let visible = ctx.replace_notifications(vec![own, other.clone()], Some("own-revision"));
         assert_eq!(visible, vec![other.clone()]);
         assert_eq!(*ctx.notifications.lock().unwrap(), vec![other.clone()]);
 

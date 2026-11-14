@@ -193,8 +193,8 @@ pub struct Cache {
     avatar_dir: Option<PathBuf>,
 }
 
-/// A Done mark or a snooze: the revision of a thread it hides, and for a
-/// snooze when it lapses.
+/// A Done mark or a snooze: the revision of a thread it was taken on, and
+/// for a snooze when it lapses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct NotificationMark {
     updated_at: Timestamp,
@@ -202,15 +202,20 @@ struct NotificationMark {
 }
 
 impl NotificationMark {
-    /// Whether the mark keeps `thread` out of the inbox at `now`. Done
-    /// holds until newer activity. A snooze holds until its time, or until
-    /// newer activity GitHub reports unread: a read revision is likely the
-    /// reader's own doing elsewhere.
+    /// Whether the mark keeps `thread` out of the inbox at `now`. Either
+    /// holds until newer activity GitHub reports unread, and a snooze
+    /// until its time at the latest. A newer revision that is read is
+    /// nearly always the reader's own doing: GitHub moves a thread's
+    /// `updated_at` some twenty seconds after their own comment, review or
+    /// merge and leaves it read, where anyone else's activity arrives
+    /// unread. A Done taken inside those seconds would otherwise be lifted
+    /// by the next poll. The cost is someone else's activity that is read
+    /// by the time Perch sees it, which stays hidden too: read on
+    /// github.com, or landed since the last poll and read by Done's own
+    /// request.
     fn hides(&self, thread: &Thread, now: Timestamp) -> bool {
-        match self.snoozed_until {
-            None => thread.updated_at <= self.updated_at,
-            Some(until) => now < until && (thread.updated_at <= self.updated_at || !thread.unread),
-        }
+        let quiet = thread.updated_at <= self.updated_at || !thread.unread;
+        quiet && self.snoozed_until.is_none_or(|until| now < until)
     }
 }
 
@@ -2743,8 +2748,9 @@ impl Cache {
     // -----------------------------------------------------------------
 
     /// Atomically replace the cached notification list and its polling
-    /// validator, retaining local Done marks for the exact revisions they
-    /// dismissed. Newer activity clears the mark and lets the row return.
+    /// validator, retaining local Done marks for the revisions they
+    /// dismissed and any read ones after. Newer unread activity clears the
+    /// mark and lets the row return.
     ///
     /// The API result is a snapshot, so rows missing from `threads` must be
     /// removed rather than accumulated. Keeping the validator in the same
@@ -2793,7 +2799,16 @@ impl Cache {
                         )?;
                     }
                 }
-                Some(_) => {
+                Some(mark) => {
+                    // Nothing else records a row coming back on its own.
+                    tracing::info!(
+                        thread = %thread.id,
+                        marked_at = %mark.updated_at,
+                        updated_at = %thread.updated_at,
+                        unread = thread.unread,
+                        snoozed = mark.snoozed_until.is_some(),
+                        "a notification returned to the inbox"
+                    );
                     tx.execute(
                         "DELETE FROM notification_dismissals WHERE thread_id=?1",
                         params![thread.id],
@@ -2835,9 +2850,9 @@ impl Cache {
         Ok(visible)
     }
 
-    /// Remember that this exact notification revision was marked Done in
-    /// Perch, and the thread, for the Done list. The mark deliberately
-    /// outlives the replaceable thread snapshot.
+    /// Remember that this notification revision was marked Done in Perch,
+    /// and the thread, for the Done list. The mark deliberately outlives
+    /// the replaceable thread snapshot.
     pub fn dismiss_notification(&self, thread: &Thread) -> Result<(), CacheError> {
         self.mark_notification(thread, None)
     }
@@ -8966,8 +8981,80 @@ mod tests {
         assert!(c.notification_dismissals().unwrap().is_empty());
     }
 
+    /// GitHub moves a thread for the reader's own comment too, a while
+    /// after it is posted, and leaves it read: a Done clicked in between
+    /// marks the revision before it.
     #[test]
-    fn a_stale_done_cannot_hide_newer_activity_or_regress_the_watermark() {
+    fn the_reader_s_own_activity_leaves_a_thread_done() {
+        let c = Cache::open_in_memory().unwrap();
+        let dismissed = notification_thread("1", "2026-09-19T12:00:00Z");
+        c.dismiss_notification(&dismissed).unwrap();
+
+        let mut own = notification_thread("1", "2026-09-19T12:00:20Z");
+        own.unread = false;
+        // A changed-only poll hides it and leaves the Done list alone.
+        let visible = c.store_threads(std::slice::from_ref(&own), None).unwrap();
+        assert!(visible.is_empty());
+        assert!(c.load_threads().unwrap().is_empty());
+        assert_eq!(c.load_done_threads().unwrap(), vec![dismissed.clone()]);
+        // A whole list shows the thread under Done as GitHub now has it.
+        let visible = c
+            .store_notification_snapshot(std::slice::from_ref(&own), None)
+            .unwrap();
+        assert!(visible.is_empty());
+        assert_eq!(c.load_done_threads().unwrap(), vec![own.clone()]);
+
+        // Anyone else's arrives unread and brings it back.
+        let theirs = notification_thread("1", "2026-09-19T13:00:00Z");
+        let visible = c
+            .store_notification_snapshot(std::slice::from_ref(&theirs), None)
+            .unwrap();
+        assert_eq!(visible, vec![theirs.clone()]);
+        assert_eq!(c.load_threads().unwrap(), vec![theirs]);
+        assert!(c.load_done_threads().unwrap().is_empty());
+        assert!(c.notification_dismissals().unwrap().is_empty());
+    }
+
+    /// The mark stays at the revision marked Done, so a later read one it
+    /// hid returns if GitHub comes to report it unread, as Mark as unread
+    /// on github.com does.
+    #[test]
+    fn a_read_revision_hidden_by_done_returns_once_unread() {
+        let c = Cache::open_in_memory().unwrap();
+        c.dismiss_notification(&notification_thread("1", "2026-09-19T12:00:00Z"))
+            .unwrap();
+
+        let unread = notification_thread("1", "2026-09-19T12:00:20Z");
+        let mut read = unread.clone();
+        read.unread = false;
+        let visible = c
+            .store_notification_snapshot(std::slice::from_ref(&read), None)
+            .unwrap();
+        assert!(visible.is_empty());
+
+        let visible = c
+            .store_notification_snapshot(std::slice::from_ref(&unread), None)
+            .unwrap();
+        assert_eq!(visible, vec![unread]);
+        assert!(c.notification_dismissals().unwrap().is_empty());
+    }
+
+    /// A row the cache still holds at a later read revision than the one
+    /// marked, as after a crash between the mark and the rewrite.
+    #[test]
+    fn a_cached_read_revision_past_a_done_mark_stays_hidden_at_launch() {
+        let c = Cache::open_in_memory().unwrap();
+        let mut own = notification_thread("1", "2026-09-19T12:00:20Z");
+        own.unread = false;
+        c.store_threads(std::slice::from_ref(&own), None).unwrap();
+
+        c.dismiss_notification(&notification_thread("1", "2026-09-19T12:00:00Z"))
+            .unwrap();
+        assert!(c.load_threads().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_stale_done_cannot_hide_newer_unread_activity_or_regress_the_watermark() {
         let c = Cache::open_in_memory().unwrap();
         let dismissed = notification_thread("1", "2026-09-19T12:00:00Z");
         c.dismiss_notification(&dismissed).unwrap();
