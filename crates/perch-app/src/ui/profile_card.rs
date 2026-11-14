@@ -8,6 +8,9 @@
 //!
 //! Who a login is is asked once and kept for every window. Only one card
 //! is open at a time.
+//!
+//! A card can also hold what Perch knows already, as an agent's does
+//! ([`with_card`]): it opens on the same rest, with nothing to wait on.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -18,7 +21,7 @@ use floem::action::{add_overlay, remove_overlay};
 use floem::prelude::*;
 use floem::reactive::Scope;
 use floem::views::{Container, Decorators, Empty, Label, Stack};
-use floem::ViewId;
+use floem::{AnyView, ViewId};
 use perch_github::Profile;
 
 use crate::backend::ProfileAnswer;
@@ -88,22 +91,31 @@ pub fn arrived(login: String, answer: ProfileAnswer) {
     let waiting = RESTED.with(|rested| rested.borrow().clone());
     if let (true, Known::Found(profile), Some(hover)) = (first, known, waiting) {
         if hover.rested.borrow().as_deref() == Some(login.as_str()) {
-            hover.show(profile);
+            hover.show_profile(profile);
         }
     }
+}
+
+/// What a card is of.
+enum Subject {
+    /// A login, whose card waits on GitHub.
+    Login(Box<dyn Fn() -> Option<String>>),
+    /// Something Perch knows already: what goes in its card.
+    Local(Box<dyn Fn() -> AnyView>),
 }
 
 /// One login or face, and its card.
 struct Hover {
     /// What the pointer rests on, which the card hangs under.
     trigger: ViewId,
-    login: Box<dyn Fn() -> Option<String>>,
+    subject: Subject,
     over_trigger: Cell<bool>,
     over_card: Cell<bool>,
     /// Counts the pointer's comings and goings: a wait started before the
     /// last of them does nothing.
     moves: Cell<u64>,
-    /// The login the pointer rested on, until the card closes.
+    /// The login the pointer rested on, until the card closes; empty
+    /// for a [`Subject::Local`].
     rested: RefCell<Option<String>>,
     /// The card, and the scope its views were built in.
     open: Cell<Option<(ViewId, Scope)>>,
@@ -134,22 +146,36 @@ impl Hover {
     /// The pointer has rested on the login: ask who it is, and show the
     /// card if GitHub has already said.
     fn rest(self: &Rc<Self>) {
-        let Some(login) = (self.login)().filter(|login| carded(login)) else {
-            return;
+        let login = match &self.subject {
+            Subject::Login(login) => match login().filter(|login| carded(login)) {
+                Some(login) => login,
+                None => return,
+            },
+            Subject::Local(_) => String::new(),
         };
         let last = RESTED.with(|rested| rested.borrow_mut().replace(self.clone()));
         if let Some(last) = last.filter(|last| !Rc::ptr_eq(last, self)) {
             last.close();
         }
         *self.rested.borrow_mut() = Some(login.clone());
+        if let Subject::Local(body) = &self.subject {
+            self.show("hover-card", body);
+            return;
+        }
         match PROFILES.with(|profiles| profiles.borrow().get(&login).cloned()) {
-            Some(Known::Found(profile)) => self.show(profile),
+            Some(Known::Found(profile)) => self.show_profile(profile),
             Some(Known::NoAccount) => {}
             None => want(&login),
         }
     }
 
-    fn show(self: &Rc<Self>, profile: Rc<Profile>) {
+    fn show_profile(self: &Rc<Self>, profile: Rc<Profile>) {
+        self.show("profile-card", move || profile_body(&profile));
+    }
+
+    /// Open the card, `name`d for tests, with `body` in it, unless it is
+    /// open.
+    fn show(self: &Rc<Self>, name: &'static str, body: impl FnOnce() -> AnyView) {
         let open = self.open.take();
         if open.is_some() {
             self.open.set(open);
@@ -160,7 +186,7 @@ impl Hover {
         let scope = Scope::new();
         let overlay = scope.enter(move || {
             add_overlay(
-                within_window(card(&profile, hover))
+                within_window(frame(name, body(), hover))
                     .style(move |s| s.inset_left(under.x0).inset_top(under.y1 + GAP)),
             )
         });
@@ -206,11 +232,24 @@ pub fn with_profile_card<V: IntoView + 'static>(
     view: V,
     login: impl Fn() -> Option<String> + 'static,
 ) -> impl IntoView {
+    hovered(view, Subject::Login(Box::new(login)))
+}
+
+/// `view` with a card of what Perch already knows, built by `body` each
+/// time it opens. It opens and closes as a login's does.
+pub fn with_card<V: IntoView + 'static>(
+    view: V,
+    body: impl Fn() -> AnyView + 'static,
+) -> impl IntoView {
+    hovered(view, Subject::Local(Box::new(body)))
+}
+
+fn hovered<V: IntoView + 'static>(view: V, subject: Subject) -> impl IntoView {
     let view = view.into_intermediate();
     let id = view.view_id();
     let hover = Rc::new(Hover {
         trigger: id,
-        login: Box::new(login),
+        subject,
         over_trigger: Cell::new(false),
         over_card: Cell::new(false),
         moves: Cell::new(0),
@@ -237,9 +276,53 @@ pub fn with_profile_card<V: IntoView + 'static>(
         .on_cleanup(move || gone.close())
 }
 
-/// The card: the face, the name beside the login, then a line each for
-/// where they work and where they are, when they say.
-fn card(profile: &Profile, hover: Rc<Hover>) -> impl IntoView {
+/// A line of a card's text: `strong` for a name, muted otherwise. Read
+/// live, so a card can follow what changes while it is open.
+pub fn card_text(text: impl Fn() -> String + 'static, strong: bool) -> impl IntoView {
+    Label::derived(text).style(move |s| {
+        let s = s.font_size(theme::TEXT_META).text_ellipsis().min_width(0.0);
+        if strong {
+            s.font_weight(theme::weight_emphasis())
+                .color(theme::fg())
+                .flex_shrink(0.0_f32)
+                .max_width_full()
+        } else {
+            s.color(theme::fg_muted())
+        }
+    })
+}
+
+/// The face's name, then a second, muted name beside it, as a card's
+/// first line under the face has them.
+pub fn card_names(name: Option<String>, beside: String) -> AnyView {
+    let fixed = |text: String| move || text.clone();
+    match name {
+        Some(name) => Stack::horizontal((
+            card_text(fixed(name), true),
+            card_text(fixed(beside), false),
+        ))
+        .into_any(),
+        None => card_text(fixed(beside), true).into_any(),
+    }
+    .style(|s| s.gap(5.0).margin_top(10.0).max_width_full().min_width(0.0))
+    .into_any()
+}
+
+/// A line of a card under the names: `icon`, then `said`, `name`d for
+/// tests.
+pub fn card_line(icon: SidebarIcon, said: impl IntoView + 'static, name: &'static str) -> AnyView {
+    Stack::horizontal((
+        sidebar_glyph(icon, theme::fg_muted).style(|s| s.size(14.0, 14.0).flex_shrink(0.0_f32)),
+        said,
+    ))
+    .debug_name(name)
+    .style(|s| s.items_center().gap(6.0).margin_top(6.0).max_width_full())
+    .into_any()
+}
+
+/// A login's card: the face, the name beside the login, then a line each
+/// for where they work and where they are, when they say.
+fn profile_body(profile: &Profile) -> AnyView {
     let face = {
         let (url, seed) = (profile.avatar_url.clone(), profile.login.clone());
         match crate::windows::focused_state() {
@@ -247,38 +330,16 @@ fn card(profile: &Profile, hover: Rc<Hover>) -> impl IntoView {
             None => Empty::new().into_any(),
         }
     };
-    let text = |text: &str, strong: bool| {
-        let text = text.to_string();
-        Label::derived(move || text.clone()).style(move |s| {
-            let s = s.font_size(theme::TEXT_META).text_ellipsis().min_width(0.0);
-            if strong {
-                s.font_weight(theme::weight_emphasis())
-                    .color(theme::fg())
-                    .flex_shrink(0.0_f32)
-                    .max_width_full()
-            } else {
-                s.color(theme::fg_muted())
-            }
-        })
-    };
-    let names = match profile.name() {
-        Some(name) => Stack::horizontal((text(name, true), text(&profile.login, false))).into_any(),
-        None => text(&profile.login, true).into_any(),
-    }
-    .style(|s| s.gap(5.0).margin_top(10.0).max_width_full().min_width(0.0));
     let line = |icon: SidebarIcon, said: Option<&str>, name: &'static str| match said {
-        Some(said) => Stack::horizontal((
-            sidebar_glyph(icon, theme::fg_muted).style(|s| s.size(14.0, 14.0).flex_shrink(0.0_f32)),
-            text(said, false),
-        ))
-        .debug_name(name)
-        .style(|s| s.items_center().gap(6.0).margin_top(6.0).max_width_full())
-        .into_any(),
+        Some(said) => {
+            let said = said.to_string();
+            card_line(icon, card_text(move || said.clone(), false), name)
+        }
         None => Empty::new().into_any(),
     };
-    let card = Container::new(Stack::vertical((
+    Stack::vertical((
         face,
-        names,
+        card_names(profile.name().map(str::to_string), profile.login.clone()),
         line(
             SidebarIcon::Organization,
             profile.company(),
@@ -289,16 +350,23 @@ fn card(profile: &Profile, hover: Rc<Hover>) -> impl IntoView {
             profile.location(),
             "profile-location",
         ),
-    )))
-    .debug_name("profile-card")
-    .style(|s| {
-        crate::ui::menu::panel_surface(s)
-            .padding(14.0)
-            .min_width(200.0)
-            .max_width(320.0)
-            .pointer_events_auto()
-    })
-    .into_intermediate();
+    ))
+    .into_any()
+}
+
+/// The card around `body`, `name`d for tests, which keeps itself open
+/// while the pointer is over it.
+fn frame(name: &'static str, body: AnyView, hover: Rc<Hover>) -> impl IntoView {
+    let card = Container::new(body)
+        .debug_name(name)
+        .style(|s| {
+            crate::ui::menu::panel_surface(s)
+                .padding(14.0)
+                .min_width(200.0)
+                .max_width(320.0)
+                .pointer_events_auto()
+        })
+        .into_intermediate();
     let id = card.view_id();
     let follow = move |cx: &mut floem::event::EventCx| {
         let over = cx.window_state.is_hovered(id);
@@ -447,6 +515,37 @@ mod tests {
         wait(&mut harness);
         assert_eq!(wanted(), Vec::<String>::new());
         assert_eq!(rect(&harness, "profile-card"), None);
+    }
+
+    #[test]
+    fn a_card_of_what_perch_knows_opens_on_the_rest_and_asks_nothing() {
+        let root = TestRoot::new();
+        let name = with_card(
+            Empty::new()
+                .debug_name("agent")
+                .style(|s| s.size(60.0, 16.0)),
+            || card_text(|| "Codex Astra 6".into(), true).into_any(),
+        );
+        let page =
+            Container::new(name).style(|s| s.size_full().padding_left(40.0).padding_top(30.0));
+        let mut harness = HeadlessHarness::new_with_size(root, page, 600.0, 400.0);
+        settle(&mut harness);
+        harness.pointer_move(50.0, 38.0);
+        settle(&mut harness);
+        assert_eq!(
+            rect(&harness, "hover-card"),
+            None,
+            "not before it has rested"
+        );
+        wait(&mut harness);
+        assert_eq!(wanted(), Vec::<String>::new());
+        let agent = rect(&harness, "agent").unwrap();
+        let card = rect(&harness, "hover-card").expect("the card is open");
+        assert_eq!((card.x0, card.y0), (agent.x0, agent.y1 + GAP));
+
+        harness.pointer_move(500.0, 350.0);
+        wait(&mut harness);
+        assert_eq!(rect(&harness, "hover-card"), None);
     }
 
     #[test]

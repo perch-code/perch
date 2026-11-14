@@ -25,6 +25,7 @@ use perch_github::{
 
 use crate::backend::Backend;
 use crate::icons::SidebarIcon;
+use crate::review::agent_card::with_agent_card;
 use crate::review::cards;
 use crate::review::doc::CardId;
 use crate::review::model::{AgentChoice, Composer, Destination, ReviewState};
@@ -2558,7 +2559,7 @@ fn viewer_login(app: AppState) -> Option<String> {
 }
 
 /// An agent's mark in place of a face: its glyph on a grey disc.
-fn agent_avatar(size: f64) -> impl IntoView {
+pub(crate) fn agent_avatar(size: f64) -> impl IntoView {
     Container::new(
         sidebar_glyph(SidebarIcon::Agents, theme::fg_muted)
             .style(move |s| s.size(size * 0.6, size * 0.6)),
@@ -3380,16 +3381,7 @@ pub(crate) fn perch_only_label() -> impl IntoView {
 /// its name: Allow all in the approvals picker's red. Nothing for a Work
 /// run from before runs kept their approvals.
 fn permission_label(app: AppState, state: ReviewState, run: Memo<RunRecord>) -> impl IntoView {
-    let permission = Memo::new(move |_| {
-        let pick = state.item.with(|item| {
-            let item = item.as_ref()?;
-            Some(
-                app.work_approvals
-                    .with(|a| a.for_item(&item.id, &item.repo_full_name)),
-            )
-        });
-        run.with(|run| run_permission(run, pick))
-    });
+    let permission = live_permission(app, state, run);
     let allow_all =
         move || permission.get() == Some(RunPermission::Work(perch_github::Approvals::Never));
     cards::tip_with(
@@ -3421,6 +3413,25 @@ fn permission_label(app: AppState, state: ReviewState, run: Memo<RunRecord>) -> 
             None => String::new(),
         },
     )
+}
+
+/// The [`run_permission`] of `run` as it changes, under the approvals the
+/// reader has picked for the item.
+pub(crate) fn live_permission(
+    app: AppState,
+    state: ReviewState,
+    run: Memo<RunRecord>,
+) -> Memo<Option<RunPermission>> {
+    Memo::new(move |_| {
+        let pick = state.item.with(|item| {
+            let item = item.as_ref()?;
+            Some(
+                app.work_approvals
+                    .with(|a| a.for_item(&item.id, &item.repo_full_name)),
+            )
+        });
+        run.with(|run| run_permission(run, pick))
+    })
 }
 
 /// After Review #N, in the byline of a message said after the past review
@@ -3525,23 +3536,33 @@ fn local_message_view(
     };
     let author = message.author.clone();
     let author_run = message.run.clone();
+    // The run that wrote an agent's message, as it goes.
+    let agent_run = match (&author, &author_run) {
+        (Author::Agent { .. }, Some(run)) => Some(live_run(state, run.clone())),
+        _ => None,
+    };
     let mut after = vec![when_label(app, message.created_at, face, "comment-when").into_any()];
-    if let (Author::Agent { .. }, Some(run)) = (&author, &author_run) {
-        after.push(permission_label(app, state, live_run(state, run.clone())).into_any());
+    if let Some(run) = agent_run {
+        after.push(permission_label(app, state, run).into_any());
     }
     if private {
         after.push(perch_only_label().into_any());
     }
     after.push(after_review_label(state, message.created_at).into_any());
     let avatar = author_avatar(app, state, &author, face.avatar());
-    let byline = byline_row(
-        name_label(
-            move || author_name(app, &author, author_run.as_ref()),
-            move |s| name_style(s, face),
+    let name = name_label(
+        move || author_name(app, &author, author_run.as_ref()),
+        move |s| name_style(s, face),
+    )
+    .into_any();
+    let (avatar, name) = match agent_run {
+        Some(run) => (
+            with_agent_card(avatar, app, state, run).into_any(),
+            with_agent_card(name, app, state, run).into_any(),
         ),
-        after,
-        actions,
-    );
+        None => (avatar, name),
+    };
+    let byline = byline_row(name, after, actions);
     let Some(run) = pending else {
         return cards::track_hover(comment_frame(face, place, avatar, byline, content), hovered)
             .into_any();
@@ -3585,14 +3606,20 @@ fn pending_answer_view(
         after.push(perch_only_label().into_any());
     }
     let byline = byline_row(
-        name_label(model, move |s| name_style(s, face)),
+        with_agent_card(
+            name_label(model, move |s| name_style(s, face)),
+            app,
+            state,
+            live,
+        )
+        .into_any(),
         after,
         Empty::new().into_any(),
     );
     comment_frame(
         face,
         place,
-        agent_avatar(face.avatar()).into_any(),
+        with_agent_card(agent_avatar(face.avatar()), app, state, live).into_any(),
         byline,
         run_block(app, state, backend, run).into_any(),
     )
@@ -4100,7 +4127,7 @@ pub fn run_block(
 
 /// A run as the thread list has it now, or as it was handed over when
 /// the list no longer has it.
-fn live_run(state: ReviewState, initial: RunRecord) -> Memo<RunRecord> {
+pub(crate) fn live_run(state: ReviewState, initial: RunRecord) -> Memo<RunRecord> {
     Memo::new(move |_| {
         state
             .comment_threads

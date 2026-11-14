@@ -540,6 +540,16 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
                      fill="none" stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
                <circle cx="8" cy="6.4" r="1.6" fill="none" stroke="{c}" stroke-width="1.3"/>"#
         ),
+        SidebarIcon::Shield => format!(
+            r#"<path d="M8 1.8 L13 3.7 V7.6 C13 10.7 10.9 13 8 14.2 C5.1 13 3 10.7 3 7.6 V3.7 Z"
+                     fill="none" stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>"#
+        ),
+        SidebarIcon::Coins => format!(
+            r#"<ellipse cx="8" cy="4.3" rx="5" ry="2" fill="none" stroke="{c}" stroke-width="1.3"/>
+               <path d="M3 4.3 V11.7 C3 12.8 5.2 13.7 8 13.7 S13 12.8 13 11.7 V4.3
+                        M3 8 C3 9.1 5.2 10 8 10 S13 9.1 13 8" fill="none" stroke="{c}"
+                     stroke-width="1.3"/>"#
+        ),
         SidebarIcon::Tag => format!(
             r#"<path d="M2.2 2.2 H7.6 L13.8 8.4 L8.4 13.8 L2.2 7.6 Z" fill="none" stroke="{c}"
                      stroke-width="1.4" stroke-linejoin="round"/>
@@ -657,6 +667,10 @@ pub enum SidebarIcon {
     Organization,
     /// A map's pin: where someone is.
     Location,
+    /// A shield: what an agent run may do.
+    Shield,
+    /// A stack of coins: what an agent run used.
+    Coins,
     /// The pull request glyph in the caller's colour, for a row's name
     /// rather than a state.
     PullRequest,
@@ -732,8 +746,10 @@ impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 77] = [
+    pub const ALL: [SidebarIcon; 79] = [
         SidebarIcon::View,
+        SidebarIcon::Shield,
+        SidebarIcon::Coins,
         SidebarIcon::Merge,
         SidebarIcon::Organization,
         SidebarIcon::Location,
