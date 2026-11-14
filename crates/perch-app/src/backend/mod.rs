@@ -6367,6 +6367,15 @@ struct Ctx {
     /// GitHub's inbox as the last successful poll saw it. This is distinct
     /// from durable items and remains usable when the SQLite cache cannot
     /// be opened.
+    ///
+    /// A change holds this lock from the edit through the cache write to
+    /// the event that tells the UI: tasks edit beside the command loop, and
+    /// one that sent a copy it took earlier would put back a row that has
+    /// since left. The cache is locked inside it and never the other way
+    /// round, so nothing that holds the cache may take this lock. It is
+    /// never held across an await: a change holds it only inside
+    /// `edit_notifications_as` and `replace_notifications`, which are not
+    /// async.
     notifications: Arc<std::sync::Mutex<Vec<Thread>>>,
     /// Notifications whose subject GitHub has been asked about, by id and
     /// time, so one it could not resolve is not asked about again at
@@ -6944,14 +6953,23 @@ impl Ctx {
         }
     }
 
-    /// Replace the visible notification snapshot, apply local Done watermarks,
-    /// persist it when possible, and publish it whole so the remaining rows
-    /// retain GitHub's response order.
+    /// Replace the visible notification snapshot, leave out what a Done
+    /// mark or a snooze hides, persist it when possible, and publish it
+    /// whole so the remaining rows retain GitHub's response order.
+    ///
+    /// The list's lock is held from reading what is carried over to
+    /// sending the result, so an edit a task makes beside the poll lands
+    /// wholly before it or wholly after.
     fn replace_notifications(
         &self,
         mut threads: Vec<Thread>,
         last_modified: Option<&str>,
     ) -> Vec<Thread> {
+        // A list a panic left behind is still the list.
+        let mut current = self
+            .notifications
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // A local mark-unread reminder belongs to this exact notification
         // revision. Carry it across a full GitHub snapshot, but let newer
         // activity (a changed updated_at) replace it with GitHub's state.
@@ -6970,41 +6988,37 @@ impl Ctx {
             .with_cache(|c| c.load_done_threads())
             .and_then(Result::ok)
             .unwrap_or_default();
-        let (local_unread, local_read, snapshots, runs) = self
-            .notifications
-            .lock()
-            .map(|current| {
-                let carried = || current.iter().chain(&done);
-                (
-                    current
-                        .iter()
-                        .filter(|thread| thread.local_unread)
-                        .map(|thread| (thread.id.clone(), thread.updated_at))
-                        .collect::<std::collections::HashSet<_>>(),
-                    current
-                        .iter()
-                        .filter(|thread| thread.local_read)
-                        .map(|thread| ((thread.id.clone(), thread.updated_at), thread.last_read_at))
-                        .collect::<std::collections::HashMap<_, _>>(),
-                    carried()
-                        .filter_map(|thread| {
-                            thread
-                                .subject_snapshot
-                                .clone()
-                                .map(|snapshot| (thread.id.clone(), snapshot))
-                        })
-                        .collect::<std::collections::HashMap<_, _>>(),
-                    carried()
-                        .filter_map(|thread| {
-                            thread
-                                .run_snapshot
-                                .clone()
-                                .map(|run| (thread.id.clone(), run))
-                        })
-                        .collect::<std::collections::HashMap<_, _>>(),
-                )
-            })
-            .unwrap_or_default();
+        let (local_unread, local_read, snapshots, runs) = {
+            let carried = || current.iter().chain(&done);
+            (
+                current
+                    .iter()
+                    .filter(|thread| thread.local_unread)
+                    .map(|thread| (thread.id.clone(), thread.updated_at))
+                    .collect::<std::collections::HashSet<_>>(),
+                current
+                    .iter()
+                    .filter(|thread| thread.local_read)
+                    .map(|thread| ((thread.id.clone(), thread.updated_at), thread.last_read_at))
+                    .collect::<std::collections::HashMap<_, _>>(),
+                carried()
+                    .filter_map(|thread| {
+                        thread
+                            .subject_snapshot
+                            .clone()
+                            .map(|snapshot| (thread.id.clone(), snapshot))
+                    })
+                    .collect::<std::collections::HashMap<_, _>>(),
+                carried()
+                    .filter_map(|thread| {
+                        thread
+                            .run_snapshot
+                            .clone()
+                            .map(|run| (thread.id.clone(), run))
+                    })
+                    .collect::<std::collections::HashMap<_, _>>(),
+            )
+        };
         for thread in &mut threads {
             if !thread.unread && local_unread.contains(&(thread.id.clone(), thread.updated_at)) {
                 thread.unread = true;
@@ -7022,15 +7036,31 @@ impl Ctx {
                 thread.run_snapshot = runs.get(&thread.id).cloned();
             }
         }
-        if let Some(result) =
-            self.with_cache(|c| c.store_notification_snapshot(&threads, last_modified))
-        {
-            match result {
-                Ok(visible) => threads = visible,
-                Err(e) => tracing::warn!(error = %e, "could not cache notifications"),
-            }
+        let kept = self.with_cache(|c| {
+            // A write that fails changes no mark, and the marks still say
+            // what is hidden: GitHub's list has the Done threads in it.
+            c.store_notification_snapshot(&threads, last_modified)
+                .or_else(|e| {
+                    tracing::warn!(error = %e, "could not cache notifications");
+                    c.visible_threads(&threads)
+                })
+        });
+        match kept {
+            Some(Ok(visible)) => threads = visible,
+            // Nothing says what is hidden, so the list is GitHub's.
+            Some(Err(e)) => tracing::warn!(error = %e, "could not read the notification marks"),
+            // No database, so no marks.
+            None => {}
         }
         self.send_marked_notifications();
+        *current = threads.clone();
+        let _ = self
+            .events
+            .send(Event::NotificationsPolled(threads.clone()));
+        drop(current);
+
+        // None of these is ordered with the list, so the list's lock is
+        // let go first and only ever has the cache inside it.
         let current_keys: std::collections::HashSet<(String, Timestamp)> = threads
             .iter()
             .map(|thread| (thread.id.clone(), thread.updated_at))
@@ -7050,13 +7080,7 @@ impl Ctx {
         if let Ok(mut refused) = self.closed_done_refused.lock() {
             refused.retain(|key| current_keys.contains(key));
         }
-        if let Ok(mut current) = self.notifications.lock() {
-            *current = threads.clone();
-        }
         self.want_avatars(notification_avatars(&threads));
-        let _ = self
-            .events
-            .send(Event::NotificationsPolled(threads.clone()));
         threads
     }
 
@@ -7071,25 +7095,27 @@ impl Ctx {
         self.edit_notifications_as(edit, Event::NotificationsPolled);
     }
 
+    /// The list's lock is held until the event has left, so edits made by
+    /// different tasks reach the cache and the UI in the order they
+    /// changed the list. `edit` must not take the list itself.
     fn edit_notifications_as(
         &self,
         edit: impl FnOnce(&mut Vec<Thread>),
         event: fn(Vec<Thread>) -> Event,
     ) {
-        let threads = match self.notifications.lock() {
-            Ok(mut current) => {
-                edit(&mut current);
-                current.clone()
-            }
-            Err(_) => return,
-        };
+        // A list a panic left behind is still the list, as for a poll.
+        let mut current = self
+            .notifications
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        edit(&mut current);
         let last_modified = self.notifications_last_modified();
         if let Some(Err(e)) =
-            self.with_cache(|c| c.store_threads(&threads, last_modified.as_deref()))
+            self.with_cache(|c| c.store_threads(&current, last_modified.as_deref()))
         {
             tracing::warn!(error = %e, "could not cache changed notifications");
         }
-        let _ = self.events.send(event(threads));
+        let _ = self.events.send(event(current.clone()));
     }
 
     /// GitHub just said what state a pull request or an issue is in: a
@@ -21801,6 +21827,238 @@ mod tests {
         // The next poll of the same revision keeps it listed.
         let visible = ctx.replace_notifications(inbox.clone(), Some("third"));
         assert_eq!(visible, inbox);
+    }
+
+    /// The test holds the cache, so a change stops at its first cache
+    /// call. It must have the list by then and keep it until it is let
+    /// through: a change that let go of the list before the cache had its
+    /// write, or read the cache before taking the list, is one another
+    /// task's edit could land inside.
+    #[tokio::test]
+    async fn a_change_holds_the_list_until_it_is_cached_and_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        ctx.replace_notifications(vec![thread("7", "seven")], Some("first"));
+        received.try_iter().for_each(drop);
+
+        let edit: fn(&Ctx) = |ctx| ctx.notification_read("7");
+        let poll: fn(&Ctx) = |ctx| {
+            ctx.replace_notifications(vec![thread("7", "seven")], Some("second"));
+        };
+        for (name, change) in [("an edit", edit), ("a poll", poll)] {
+            let cache = ctx.cache.clone().unwrap();
+            let held = cache.lock().unwrap();
+            let (done, completed) = std::sync::mpsc::channel();
+            let worker = ctx.clone();
+            std::thread::spawn(move || {
+                change(&worker);
+                let _ = done.send(());
+            });
+            let taken = || {
+                matches!(
+                    ctx.notifications.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                )
+            };
+            let started = std::time::Instant::now();
+            while !taken() {
+                assert!(
+                    started.elapsed() < Duration::from_secs(2),
+                    "{name} never took the list"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(taken(), "{name} let go of the list before the cache");
+            assert!(
+                received.try_iter().next().is_none(),
+                "{name} told the UI before the cache"
+            );
+
+            drop(held);
+            // A change that took the list twice would hang here.
+            completed
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap_or_else(|_| panic!("{name} never finished"));
+            assert!(
+                received.try_iter().any(|event| matches!(
+                    event,
+                    Event::Notifications(_) | Event::NotificationsPolled(_)
+                )),
+                "{name} sent its list"
+            );
+        }
+    }
+
+    /// Edits come from tasks beside the command loop: a look's answer, a
+    /// read GitHub took. One that sent a copy of the list it took before a
+    /// Done would show the row again until the next poll.
+    #[tokio::test]
+    async fn a_done_beside_other_edits_never_returns_to_the_sidebar() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let inbox: Vec<Thread> = (0..40).map(|n| thread(&n.to_string(), "0")).collect();
+        ctx.replace_notifications(inbox, Some("first"));
+        received.try_iter().for_each(drop);
+
+        // Each edit stamps every title with its round, so a list says how
+        // old it is.
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let (editor, go) = (ctx.clone(), start.clone());
+        let edits = std::thread::spawn(move || {
+            go.wait();
+            for round in 1..=200u32 {
+                editor.edit_polled_notifications(|threads| {
+                    for thread in threads.iter_mut() {
+                        thread.subject.title = round.to_string();
+                    }
+                });
+            }
+        });
+        start.wait();
+        for id in (0..40).step_by(2) {
+            ctx.dismiss_notification(&id.to_string());
+        }
+        edits.join().unwrap();
+
+        let (mut listed, mut round) = (40, 0);
+        let mut last = Vec::new();
+        for event in received.try_iter() {
+            let (Event::Notifications(threads) | Event::NotificationsPolled(threads)) = event
+            else {
+                continue;
+            };
+            assert!(threads.len() <= listed, "a Done row came back");
+            let stamped: u32 = threads[0].subject.title.parse().unwrap();
+            assert!(stamped >= round, "an older list followed a newer one");
+            (listed, round) = (threads.len(), stamped);
+            last = threads;
+        }
+        assert_eq!(last.len(), 20);
+        assert_eq!(*ctx.notifications.lock().unwrap(), last);
+        assert_eq!(
+            ctx.with_cache(|cache| cache.load_threads().unwrap())
+                .unwrap(),
+            last
+        );
+    }
+
+    /// A subject is looked at once per revision, so an answer a poll wrote
+    /// over would not be asked for again: the row would stay without its
+    /// state until the thread moved.
+    #[tokio::test]
+    async fn a_look_answering_beside_a_poll_keeps_its_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let inbox: Vec<Thread> = (0..20).map(|n| thread(&n.to_string(), "t")).collect();
+        ctx.replace_notifications(inbox.clone(), Some("first"));
+
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let (poller, go, polled) = (ctx.clone(), start.clone(), inbox.clone());
+        let polls = std::thread::spawn(move || {
+            go.wait();
+            for _ in 0..100 {
+                poller.replace_notifications(polled.clone(), Some("again"));
+            }
+        });
+        start.wait();
+        for found in &inbox {
+            ctx.edit_polled_notifications(|threads| {
+                let Some(thread) = threads.iter_mut().find(|thread| thread.id == found.id) else {
+                    return;
+                };
+                // No faces: fetching one needs the runtime, and the poll
+                // is on a plain thread.
+                thread.subject_snapshot = Some(perch_github::SubjectSnapshot {
+                    closed_at: None,
+                    author_login: "someone".into(),
+                    author_avatar_url: String::new(),
+                    state: perch_github::SubjectState::PrOpen,
+                    churn: None,
+                    review_requested: false,
+                    participants: None,
+                    at: thread.updated_at,
+                });
+            });
+        }
+        polls.join().unwrap();
+
+        let listed = ctx.replace_notifications(inbox, Some("last"));
+        assert_eq!(listed.len(), 20);
+        assert!(listed
+            .iter()
+            .all(|thread| thread.subject_snapshot.is_some()));
+    }
+
+    /// GitHub's list has the Done and snoozed threads in it, so a list the
+    /// cache would not store is still read against the marks. The repeated
+    /// thread is only what makes the table refuse the write here: the
+    /// client drops a repeat before a poll gets this far.
+    #[tokio::test]
+    async fn a_poll_the_cache_refuses_still_hides_done_and_snoozed_threads() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let kept = thread("6", "six");
+        let done = thread("7", "seven");
+        let snoozed = thread("8", "eight");
+        let inbox = vec![kept.clone(), done.clone(), snoozed.clone()];
+        ctx.replace_notifications(inbox.clone(), Some("first"));
+        ctx.dismiss_notification(&done.id);
+        ctx.snooze_notification(
+            &snoozed.id,
+            Timestamp::now() + jiff::SignedDuration::from_hours(3),
+        );
+        received.try_iter().for_each(drop);
+        let ids = |threads: &[Thread]| {
+            threads
+                .iter()
+                .map(|thread| thread.id.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        let marked = |load: fn(&Cache) -> Result<Vec<Thread>, perch_github::CacheError>| {
+            ids(&ctx.with_cache(|cache| load(cache).unwrap()).unwrap())
+        };
+
+        let mut refused = inbox.clone();
+        refused.push(kept.clone());
+        let visible = ctx.replace_notifications(refused, Some("second"));
+        assert_eq!(ids(&visible), ["6"]);
+        assert_eq!(*ctx.notifications.lock().unwrap(), visible);
+        let sent = received
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::NotificationsPolled(threads) => Some(threads),
+                _ => None,
+            })
+            .last();
+        assert_eq!(sent, Some(visible));
+        assert_eq!(
+            ctx.notifications_last_modified().as_deref(),
+            Some("first"),
+            "the write did fail"
+        );
+        assert_eq!(marked(Cache::load_done_threads), ["7"]);
+        assert_eq!(marked(Cache::load_snoozed_threads), ["8"]);
+
+        // Newer unread activity shows through its mark all the same.
+        let mut newer = done.clone();
+        newer.updated_at = "2026-09-18T18:00:00Z".parse().unwrap();
+        let visible = ctx.replace_notifications(
+            vec![newer.clone(), kept.clone(), snoozed.clone(), kept.clone()],
+            Some("third"),
+        );
+        assert_eq!(ids(&visible), ["6", "7"]);
+        assert_eq!(marked(Cache::load_done_threads), ["7"], "nothing written");
+
+        // The first list the cache takes lifts the mark.
+        let visible =
+            ctx.replace_notifications(vec![newer.clone(), kept.clone(), snoozed], Some("fourth"));
+        assert_eq!(visible, vec![newer, kept]);
+        assert!(marked(Cache::load_done_threads).is_empty());
+        assert_eq!(marked(Cache::load_snoozed_threads), ["8"]);
+        assert_eq!(ctx.notifications_last_modified().as_deref(), Some("fourth"));
     }
 
     fn pull_request(number: u64) -> PullRequest {

@@ -325,6 +325,10 @@ impl GitHub {
                 .ok_or_else(|| Error::Decode("notification page number overflowed".into()))?;
             response = self.fetch_notification_page(page, None).await?;
         }
+        // A thread that moves down a place between two page reads comes
+        // on both: the first is the one kept.
+        let mut listed = std::collections::HashSet::new();
+        threads.retain(|thread| listed.insert(thread.id.clone()));
 
         Ok(ListResult {
             threads,

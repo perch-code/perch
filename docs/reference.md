@@ -9,7 +9,9 @@ human/agent conversations in a compact Rust application built with Floem.
 Perch builds its inbox from GitHub's REST notifications list. It preserves the
 API's order and unread state, and caches the latest response locally so the
 sidebar can paint immediately. Perch requests `all=true` so read threads remain
-visible alongside unread ones.
+visible alongside unread ones. If the list cannot be written to the local
+database, the sidebar still shows it, leaving out what is Done or snoozed as
+the marks on disk say.
 
 Polling runs in the background, respects GitHub's `X-Poll-Interval`, and
 paginates the full response. Perch performs an unconditional reconciliation at

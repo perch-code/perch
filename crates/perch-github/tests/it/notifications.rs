@@ -317,6 +317,31 @@ async fn a_changed_probe_is_the_first_page_and_only_the_rest_is_fetched() {
     assert_eq!(requests[1].header("if-none-match"), None);
 }
 
+/// New activity between the two page reads pushes the last thread of page
+/// one onto page two. Listed twice it would draw twice, and the cache,
+/// which keys its rows by thread, would refuse the whole list.
+#[tokio::test]
+async fn a_thread_listed_on_two_pages_is_kept_once() {
+    let responses = vec![
+        Response::new("200 OK", list_json(1..=50)).header("ETag", NEW_ETAG),
+        Response::new("200 OK", list_json([50, 51])),
+    ];
+    let (base, _requests) = spawn(responses);
+    let gh = GitHub::with_base_uri("token", &base).expect("client");
+
+    let result = gh.list_threads().await.expect("list threads");
+
+    assert_eq!(
+        result
+            .threads
+            .iter()
+            .map(|thread| thread.id.clone())
+            .collect::<Vec<_>>(),
+        (1..=51).map(|id| id.to_string()).collect::<Vec<_>>(),
+        "each thread once, in GitHub's order"
+    );
+}
+
 #[tokio::test]
 async fn notification_actions_use_githubs_exact_methods_paths_and_body() {
     let responses = vec![

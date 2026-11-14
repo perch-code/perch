@@ -2757,7 +2757,8 @@ impl Cache {
     /// The API result is a snapshot, so rows missing from `threads` must be
     /// removed rather than accumulated. Keeping the validator in the same
     /// transaction prevents a crash from pairing an older list with a newer
-    /// validator (or the reverse).
+    /// validator (or the reverse). [`Self::visible_threads`] goes by the
+    /// same rule and writes nothing.
     pub fn store_threads(
         &self,
         threads: &[Thread],
@@ -2948,6 +2949,24 @@ impl Cache {
                 .is_none_or(|mark| !mark.hides(thread, now))
         });
         Ok(threads)
+    }
+
+    /// The threads among `threads` that no Done mark or snooze hides, by
+    /// the rule [`Self::store_threads`] goes by, writing nothing: what a
+    /// list shows when it could not be stored. A mark that newer unread
+    /// activity lifts is left for the next store that takes.
+    pub fn visible_threads(&self, threads: &[Thread]) -> Result<Vec<Thread>, CacheError> {
+        let marks = self.notification_dismissals()?;
+        let now = Timestamp::now();
+        Ok(threads
+            .iter()
+            .filter(|thread| {
+                marks
+                    .get(&thread.id)
+                    .is_none_or(|mark| !mark.hides(thread, now))
+            })
+            .cloned()
+            .collect())
     }
 
     /// The threads marked Done that GitHub still lists, newest first, as
@@ -9261,6 +9280,77 @@ mod tests {
             c.notifications_last_modified().unwrap().as_deref(),
             Some("Thu, 17 Sep 2026 18:00:00 GMT")
         );
+    }
+
+    #[test]
+    fn visible_threads_hides_what_a_store_would_and_writes_nothing() {
+        let c = Cache::open_in_memory().unwrap();
+        let done = notification_thread("1", "2026-09-19T12:00:00Z");
+        let mut snoozed = notification_thread("2", "2026-09-19T11:00:00Z");
+        snoozed.unread = false;
+        let plain = notification_thread("3", "2026-09-19T10:00:00Z");
+        let listed = [done.clone(), snoozed.clone(), plain.clone()];
+        c.store_threads(&listed, Some("first")).unwrap();
+        c.dismiss_notification(&done).unwrap();
+        c.snooze_notification(
+            &snoozed,
+            Timestamp::now() + jiff::SignedDuration::from_hours(3),
+        )
+        .unwrap();
+
+        assert_eq!(c.visible_threads(&listed).unwrap(), vec![plain.clone()]);
+
+        // Newer unread activity shows through its mark, and the mark is
+        // left for the store that takes.
+        let newer = notification_thread("1", "2026-09-20T09:00:00Z");
+        assert_eq!(
+            c.visible_threads(&[newer.clone(), snoozed.clone(), plain.clone()])
+                .unwrap(),
+            vec![newer, plain.clone()]
+        );
+        assert!(c.notification_dismissals().unwrap().contains_key(&done.id));
+        assert_eq!(c.load_done_threads().unwrap(), vec![done]);
+        assert_eq!(c.load_threads().unwrap(), vec![plain.clone()]);
+        assert_eq!(
+            c.notifications_last_modified().unwrap().as_deref(),
+            Some("first")
+        );
+
+        // A snooze past its time hides nothing.
+        c.snooze_notification(
+            &snoozed,
+            Timestamp::now() - jiff::SignedDuration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(
+            c.visible_threads(&[snoozed.clone(), plain.clone()])
+                .unwrap(),
+            vec![snoozed, plain]
+        );
+    }
+
+    /// The one way the marks cannot be read while the database is open,
+    /// and it fails a store as well: the list then has nothing to go by.
+    #[test]
+    fn visible_threads_fails_on_a_mark_it_cannot_read() {
+        let c = Cache::open_in_memory().unwrap();
+        let thread = notification_thread("1", "2026-09-19T12:00:00Z");
+        c.conn
+            .execute(
+                "INSERT INTO notification_dismissals (thread_id, updated_at)
+                 VALUES ('1', 'nonsense')",
+                [],
+            )
+            .unwrap();
+
+        assert!(matches!(
+            c.visible_threads(std::slice::from_ref(&thread)),
+            Err(CacheError::Corrupt(_))
+        ));
+        assert!(matches!(
+            c.store_threads(std::slice::from_ref(&thread), None),
+            Err(CacheError::Corrupt(_))
+        ));
     }
 
     #[test]
