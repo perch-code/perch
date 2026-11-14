@@ -55,6 +55,7 @@ use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::rc::Rc;
 
+use floem::context::LayoutChanged;
 use floem::peniko::Color;
 use floem::prelude::*;
 use floem::reactive::Memo;
@@ -2292,6 +2293,12 @@ fn block_view(block: Block, ctx: Ctx) -> AnyView {
 fn image_view(image: Image, ctx: Ctx) -> AnyView {
     images::want(&image.src);
     let shown = images::watch(image.src.clone());
+    // The column's width, as it was last laid out. The picture is sized
+    // from it here rather than by a max width and a ratio: taffy gives
+    // a flex item the height its ratio makes of its width before a max
+    // width narrows it, so a picture narrowed to the column kept the
+    // height of its own width, a gap under it.
+    let column = RwSignal::new(0.0_f64);
     dyn_container(
         move || shown.get(),
         move |decoded| match decoded {
@@ -2301,10 +2308,10 @@ fn image_view(image: Image, ctx: Ctx) -> AnyView {
                 images::Shown::new(decoded)
                     .on_event_stop(el::Click, move |_, _| follow_link(&target))
                     .style(move |s| {
+                        let width = width.min(column.get()).max(0.0);
                         clickable(s)
                             .width(width)
-                            .max_width_full()
-                            .aspect_ratio(ratio as f32)
+                            .height(width / ratio)
                             .flex_shrink(0.0_f32)
                     })
                     .into_any()
@@ -2321,6 +2328,18 @@ fn image_view(image: Image, ctx: Ctx) -> AnyView {
                 prose_leading(),
                 ctx.refs,
             ),
+        },
+    )
+    .on_event_stop(
+        LayoutChanged::listener(),
+        move |_,
+              LayoutChanged {
+                  new_content_box, ..
+              }| {
+            let width = new_content_box.size().width;
+            if column.get_untracked() != width {
+                column.set(width);
+            }
         },
     )
     .style(|s| s.flex_col().width_full())
@@ -4485,21 +4504,26 @@ mod tests {
             images::asked();
             let wide = "https://x/layout-wide.png";
             let small = "https://x/layout-small.png";
+            let tagged = "https://x/layout-tagged.png";
             let mut h = harness(&format!(
-                "Before\n\n![wide]({wide})\n\n<img alt=small src=\"{small}\">\n\nAfter"
+                "Before\n\n![wide]({wide})\n\n<img alt=small src=\"{small}\">\n\n\
+                 <img width=\"2400\" height=\"1200\" alt=tagged src=\"{tagged}\" />\n\nAfter"
             ));
-            assert_eq!(images::asked(), vec![wide.to_string(), small.to_string()]);
+            assert_eq!(
+                images::asked(),
+                vec![wide.to_string(), small.to_string(), tagged.to_string()]
+            );
             assert!(rects(&h, "comment picture").is_empty());
             let waiting = rect(&h, "Before").y1;
 
-            for (url, size) in [(wide, (1200, 600)), (small, (100, 50))] {
+            for (url, size) in [(wide, (1200, 600)), (small, (100, 50)), (tagged, (40, 40))] {
                 let decoded = images::decode(&images::tests::png(size.0, size.1), url).unwrap();
                 images::arrived(url.into(), Some(Arc::new(decoded)));
             }
             h.rebuild();
             h.paint();
             let pictures = rects(&h, "comment picture");
-            assert_eq!(pictures.len(), 2);
+            assert_eq!(pictures.len(), 3);
             assert_eq!(
                 (pictures[0].width(), pictures[0].height()),
                 (WIDTH, WIDTH / 2.0),
@@ -4510,8 +4534,20 @@ mod tests {
                 (100.0, 50.0),
                 "a point a pixel"
             );
-            assert!(pictures[0].y0 >= waiting && pictures[1].y0 > pictures[0].y1);
-            assert!(rect(&h, "After").y0 >= pictures[1].y1);
+            assert_eq!(
+                (pictures[2].width(), pictures[2].height()),
+                (WIDTH, WIDTH / 2.0),
+                "the size its tag asks for, narrowed"
+            );
+            assert!(pictures[0].y0 >= waiting);
+            // Each takes only the room it draws in: the space between
+            // blocks is the same under every picture, and no more under
+            // one narrowed from the size it asked for.
+            let after = rect(&h, "After").y0;
+            let gap = pictures[1].y0 - pictures[0].y1;
+            assert!(gap > 0.0 && gap < 40.0, "{gap}");
+            assert_eq!(pictures[2].y0 - pictures[1].y1, gap);
+            assert_eq!(after - pictures[2].y1, gap);
 
             crate::ui::widgets::opened();
             let at = pictures[1].center();
