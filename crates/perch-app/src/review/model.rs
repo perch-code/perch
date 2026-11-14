@@ -5654,10 +5654,12 @@ impl ReviewState {
         self.comment_threads.with(|threads| drafts_of(threads))
     }
 
-    /// The thread whose anchor starts on a display line of the open file.
-    /// A left-side anchor starts on its base row: an exact ghost when the
-    /// line was changed or removed, otherwise the head row paired with it.
-    pub fn thread_starting_at(
+    /// The thread whose anchor ends on a display line of the open file,
+    /// where its marker goes: on the last line, beside the card under it,
+    /// as github.com puts a range's thread under its last line. A left-side
+    /// anchor ends on its base row: an exact ghost when the line was
+    /// changed or removed, otherwise the head row paired with it.
+    pub fn thread_ending_at(
         &self,
         file: &LoadedFile,
         display_line: usize,
@@ -5668,7 +5670,7 @@ impl ReviewState {
                 .find(|t| {
                     t.anchor.as_ref().is_some_and(|a| {
                         a.path == file.path
-                            && display_line_of_anchor_line(file, a.side, a.start_line)
+                            && display_line_of_anchor_line(file, a.side, a.start_line.max(a.line))
                                 == Some(display_line)
                     })
                 })
@@ -5676,10 +5678,10 @@ impl ReviewState {
         })
     }
 
-    /// The current thread whose anchor starts on a zero-based line of one
+    /// The current thread whose anchor ends on a zero-based line of one
     /// particular side. Split gutters use this so a paired row does not show
     /// a left-side marker in the head gutter, or vice versa.
-    pub fn thread_starting_on(
+    pub fn thread_ending_on(
         &self,
         file: &LoadedFile,
         side: perch_github::Side,
@@ -5691,10 +5693,10 @@ impl ReviewState {
                 .filter(|thread| !thread.outdated && self.thread_visible(thread))
                 .find(|thread| {
                     thread.anchor.as_ref().is_some_and(|anchor| {
+                        let last = anchor.start_line.max(anchor.line);
                         anchor.path == file.path
                             && anchor.side == side
-                            && anchor.start_line.checked_sub(1).map(|line| line as usize)
-                                == Some(line)
+                            && last.checked_sub(1).map(|line| line as usize) == Some(line)
                     })
                 })
                 .cloned()
@@ -6444,7 +6446,7 @@ mod tests {
         state.comment_threads.set(Arc::new(threads));
         let id_at = |display| {
             state
-                .thread_starting_at(&file, display)
+                .thread_ending_at(&file, display)
                 .map(|thread| thread.id)
         };
         assert_eq!(id_at(1).as_deref(), Some("left-rewrite"));
@@ -6454,16 +6456,45 @@ mod tests {
         assert_eq!(id_at(8).as_deref(), Some("left-shifted"));
         assert_eq!(
             state
-                .thread_starting_on(&file, Side::Left, 1)
+                .thread_ending_on(&file, Side::Left, 1)
                 .map(|thread| thread.id),
             Some("left-rewrite".into())
         );
         assert_eq!(
             state
-                .thread_starting_on(&file, Side::Right, 1)
+                .thread_ending_on(&file, Side::Right, 1)
                 .map(|thread| thread.id),
             Some("right-rewrite".into())
         );
+    }
+
+    #[test]
+    fn a_range_is_marked_on_its_last_line_beside_its_card() {
+        use perch_github::Side;
+
+        // base a b c d e f g; head a B c e F g. Head c..e is display 3..5,
+        // base b..d display 1..4.
+        let file = spliced_file();
+        let mut on_base = anchored("left", 2, 4, "2026-09-18T08:00:00Z", false);
+        on_base.anchor.as_mut().unwrap().side = Side::Left;
+        let threads = vec![
+            anchored("right", 3, 4, "2026-09-18T09:00:00Z", false),
+            on_base,
+        ];
+        let state = ReviewState::new();
+        state.comment_threads.set(Arc::new(threads));
+
+        let id_at = |display| state.thread_ending_at(&file, display).map(|t| t.id);
+        assert_eq!(id_at(5).as_deref(), Some("right"));
+        assert_eq!(id_at(4).as_deref(), Some("left"));
+        assert_eq!(id_at(3), None, "nothing on the right range's first line");
+        assert_eq!(id_at(1), None, "nothing on the left range's first line");
+
+        let id_on = |side, line| state.thread_ending_on(&file, side, line).map(|t| t.id);
+        assert_eq!(id_on(Side::Right, 3).as_deref(), Some("right"));
+        assert_eq!(id_on(Side::Right, 2), None);
+        assert_eq!(id_on(Side::Left, 3).as_deref(), Some("left"));
+        assert_eq!(id_on(Side::Left, 1), None);
     }
 
     #[test]
@@ -6512,9 +6543,9 @@ mod tests {
         state.comment_threads.set(Arc::new(threads));
         let active = state.active_file().unwrap();
 
-        assert!(state.thread_starting_at(&active, 0).is_none());
+        assert!(state.thread_ending_at(&active, 0).is_none());
         assert_eq!(
-            state.thread_starting_at(&active, 3).map(|thread| thread.id),
+            state.thread_ending_at(&active, 3).map(|thread| thread.id),
             Some("current".into())
         );
         let card_ids: Vec<CardId> = state

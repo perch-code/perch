@@ -582,7 +582,7 @@ fn row_view(
     };
 
     let row = Stack::horizontal((
-        // The left slot: a marker where a thread starts, a `+` under the
+        // The left slot: a marker where a thread ends, a `+` under the
         // pointer, nothing otherwise. Fixed width, so numbers never shift.
         slot_view.style(|s| {
             s.size(theme::GUTTER_SLOT, theme::GUTTER_SLOT)
@@ -651,7 +651,7 @@ pub(crate) fn thread_mark(
 /// The `+` that starts a thread while the pointer is on a row that offers
 /// it: any line of the stacked layout, ghosts too, any head row, and a base
 /// row the change removed. A ghost's or a base row's question is on the
-/// base's lines. Otherwise the marker for a thread starting on the row, if
+/// base's lines. Otherwise the marker for a thread ending on the row, if
 /// there is one. The `+` stands in for the marker under the pointer, as
 /// github.com offers it on a line that already has comments, so a line can
 /// take a second thread, whose card stacks under the first's.
@@ -670,12 +670,12 @@ fn anchor_slot(
     dyn_container(
         move || {
             let thread = match anchor {
-                AnchorRow::Stacked(display) => state.thread_starting_at(&marker_file, display),
+                AnchorRow::Stacked(display) => state.thread_ending_at(&marker_file, display),
                 AnchorRow::Base { base, .. } => {
-                    state.thread_starting_on(&marker_file, AnchorSide::Left, base)
+                    state.thread_ending_on(&marker_file, AnchorSide::Left, base)
                 }
                 AnchorRow::Head { head, .. } => {
-                    state.thread_starting_on(&marker_file, AnchorSide::Right, head)
+                    state.thread_ending_on(&marker_file, AnchorSide::Right, head)
                 }
             }
             .map(|t| {
