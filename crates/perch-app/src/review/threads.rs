@@ -815,10 +815,15 @@ pub fn composer_view(
         s.size(theme::THREAD_MENU, theme::THREAD_MENU)
             .apply_if(posting_here(), |s| s.hide())
     });
+    let unboxed = follow_up && (!editing || face == ThreadFace::Inline);
     let whole_box = Stack::vertical((
         tabs.view_titled(
             state,
-            resizable_editor_box(Grip::composer(state), editor, face == ThreadFace::Inline),
+            resizable_editor_box(
+                Grip::composer(state),
+                editor,
+                unboxed || face == ThreadFace::Inline,
+            ),
             theme::COMPOSER_MAX_HEIGHT,
             title,
             close,
@@ -854,19 +859,19 @@ pub fn composer_view(
                 .background(theme::canvas())
                 .border_color(theme::accent_ring()),
         };
-        // Under a thread it is the thread's reply form, as GitHub's is:
-        // white, in the thread's rule, with a box's corners.
-        let base = base.apply_if(follow_up, |s| {
+        // A message edited in place among the comments on Conversation
+        // has no bar rules around its row, so the form keeps its own box.
+        let base = base.apply_if(follow_up && !unboxed, |s| {
             s.background(theme::canvas())
                 .border_color(theme::border())
                 .border_radius(theme::RADIUS)
         });
-        // In the code the thread's card is already around it and the
-        // editor has a border of its own: a third box between the two
-        // is one too many. With no border it takes no fill either, so the
-        // bar and the pickers sit on the card's own: white on GitHub's,
+        // Under a thread, its reply bar is framed by rules above and below
+        // and the editor has a border of its own: a container between the
+        // two is one too many. With no border it takes no fill either, so
+        // the bar and the pickers sit on the card's own: white on GitHub's,
         // grey on a thread only Perch has, where white was a slab.
-        base.apply_if(follow_up && face == ThreadFace::Inline, |s| {
+        base.apply_if(unboxed, |s| {
             s.padding(0.0)
                 .border(0.0)
                 .background(floem::peniko::Color::TRANSPARENT)
@@ -3036,31 +3041,17 @@ pub fn follow_up(
                 .apply_if(empty.get(), |s| s.hide())
         })
         .into_any(),
-        // A white message's room under its text is room over the box; a
-        // grey band's is inside the grey, so under one the box takes the
-        // inset it has at its sides and foot, or it meets the band's edge.
-        ThreadFace::Inline => {
-            let band_thread = thread_id.clone();
-            let after_band = Memo::new(move |_| {
-                state.comment_threads.with(|t| {
-                    t.iter()
-                        .find(|t| t.id == band_thread)
-                        .is_some_and(|t| Lane::of(t).last().is_some_and(|l| *l != Lane::Flush))
-                })
-            });
-            Container::new(reply)
-                .debug_name("reply-bar")
-                .style(move |s| {
-                    s.width_full()
-                        .padding_horiz(theme::INLINE_THREAD_INSET)
-                        .padding_bottom(theme::INLINE_THREAD_INSET)
-                        .apply_if(after_band.get(), |s| {
-                            s.padding_top(theme::INLINE_THREAD_INSET)
-                        })
-                        .apply_if(empty.get(), |s| s.hide())
-                })
-                .into_any()
-        }
+        ThreadFace::Inline => Container::new(reply)
+            .debug_name("reply-bar")
+            .style(move |s| {
+                s.width_full()
+                    .padding_vert(theme::THREAD_CONTROL_SPACE)
+                    .padding_horiz(theme::INLINE_THREAD_INSET)
+                    .border_top(1.0)
+                    .border_color(theme::border())
+                    .apply_if(empty.get(), |s| s.hide())
+            })
+            .into_any(),
     };
     Stack::vertical((
         bar,
@@ -7789,12 +7780,11 @@ mod tests {
         }
     }
 
-    /// In the code, under a thread that ends on a grey band, the Follow up
-    /// box is set off from the band by the inset it has at its sides; under
-    /// a white message the message's own room is enough.
+    /// In the code, as on Conversation, the reply bar is set off from the
+    /// comments above it by a rule across the card and even room above and
+    /// below, whether the thread ends on a grey band or a white message.
     #[test]
-    fn the_inline_follow_up_box_stands_off_a_grey_band_above_it() {
-        let mut offsets = Vec::new();
+    fn the_inline_reply_bar_is_set_off_by_a_top_rule() {
         for ends_private in [true, false] {
             let root = TestRoot::new();
             let app = AppState::new();
@@ -7822,13 +7812,17 @@ mod tests {
             let line = find(harness.root_id(), "Follow up")
                 .unwrap()
                 .get_visual_rect_no_clip();
-            offsets.push(line.y0 - bar.y0);
+            assert_eq!(
+                line.y0 - bar.y0,
+                1.0 + theme::THREAD_CONTROL_SPACE,
+                "ends_private={ends_private}: 1px top rule and control space"
+            );
+            assert_eq!(
+                bar.y1 - line.y1,
+                theme::THREAD_CONTROL_SPACE,
+                "ends_private={ends_private}: symmetric control space below"
+            );
         }
-        assert_eq!(
-            offsets[0] - offsets[1],
-            theme::INLINE_THREAD_INSET,
-            "{offsets:?}"
-        );
     }
 
     /// Folded, a GitHub thread that holds the reader's asks says how many,
@@ -8256,6 +8250,23 @@ mod tests {
             harness.get_layout_rect(composer).width(),
             600.0 - 2.0 * theme::THREAD_INSET,
             "and has the bar to itself, the face gone"
+        );
+        let boxed = composer.get_visual_rect_no_clip();
+        let first = composer.children()[0].get_visual_rect_no_clip();
+        assert_eq!(first.y0, boxed.y0, "no outer container around the composer");
+        assert_eq!(
+            harness
+                .get_computed_style(composer)
+                .get(floem::style::Background),
+            Some(floem::peniko::Color::TRANSPARENT.into()),
+            "the card's surface shows through"
+        );
+        let words = find(composer, "editor-box").expect("the box the words go in");
+        let words_style = harness.get_computed_style(words);
+        assert_eq!(
+            words_style.get(floem::style::BorderTop).width,
+            1.0,
+            "the input box itself is framed"
         );
         state.close_composer();
         harness.rebuild();
