@@ -382,6 +382,41 @@ async fn notification_actions_use_githubs_exact_methods_paths_and_body() {
     }
 }
 
+/// Done reads the thread to learn what it is about to put away, so the
+/// answer has to be GitHub's of that moment: a second read is a second
+/// request, with nothing for GitHub to answer 304 to.
+#[tokio::test]
+async fn a_thread_is_read_with_a_plain_get_and_no_validator() {
+    let responses = vec![
+        Response::new("200 OK", thread_json(42)).header("ETag", OLD_ETAG),
+        Response::new("200 OK", thread_json(42)).header("ETag", OLD_ETAG),
+    ];
+    let (base, requests) = spawn(responses);
+    let gh = GitHub::with_base_uri("token", &base).expect("client");
+
+    for _ in 0..2 {
+        let thread = gh.fetch_thread("42").await.expect("read thread");
+        assert_eq!(thread.id, "42");
+        assert!(thread.unread);
+        assert_eq!(
+            thread.updated_at,
+            "2026-09-17T18:00:00Z".parse::<jiff::Timestamp>().unwrap()
+        );
+        assert_eq!(thread.last_read_at, None);
+    }
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    for request in requests.iter() {
+        assert_eq!(
+            (request.method.as_str(), request.path.as_str()),
+            ("GET", "/notifications/threads/42")
+        );
+        assert_eq!(request.header("if-none-match"), None);
+        assert_eq!(request.header("if-modified-since"), None);
+    }
+}
+
 #[tokio::test]
 async fn idempotent_304_action_responses_are_successful() {
     let responses = vec![
@@ -448,6 +483,10 @@ async fn a_non_numeric_thread_id_is_rejected_before_a_request() {
     let gh = GitHub::new("token").expect("client");
     assert!(matches!(
         gh.mark_thread_done("41/../../notifications").await,
+        Err(Error::Decode(message)) if message.contains("not numeric")
+    ));
+    assert!(matches!(
+        gh.fetch_thread("41/../../notifications").await,
         Err(Error::Decode(message)) if message.contains("not numeric")
     ));
 }

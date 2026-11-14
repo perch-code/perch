@@ -125,14 +125,18 @@ pub enum Command {
     MarkNotificationUnread {
         thread_id: String,
     },
-    /// Remove a notification from GitHub's inbox.
+    /// Remove a notification from GitHub's inbox. `shown_at` is the
+    /// revision the reader's row held: the drawer may be holding back a
+    /// poll that brought a newer one, and Done does not put away what
+    /// the reader has not seen.
     DoneNotification {
         thread_id: String,
+        shown_at: Timestamp,
     },
     /// Mark N Done: remove each of them, one after another, and say once
-    /// how many could not be.
+    /// how many could not be. Each with the revision its row held.
     DoneNotifications {
-        thread_ids: Vec<String>,
+        shown: Vec<(String, Timestamp)>,
     },
     /// Take a Done back: the thread returns to Perch's inbox. GitHub's
     /// public API has no way back, so github.com still files it as Done.
@@ -2863,19 +2867,25 @@ impl Backend {
         navigation_id
     }
 
-    pub fn done_notification(&self, thread_id: &str) {
+    /// Done on the thread as the reader's row shows it. The thread, not
+    /// its id, so no Done is sent without the revision it is for.
+    pub fn done_notification(&self, thread: &Thread) {
         let _ = self.commands.send(Command::DoneNotification {
-            thread_id: thread_id.to_string(),
+            thread_id: thread.id.clone(),
+            shown_at: thread.updated_at,
         });
     }
 
-    pub fn done_notifications(&self, thread_ids: Vec<String>) {
-        if thread_ids.is_empty() {
+    /// Mark N Done, each thread at the revision its row shows.
+    pub fn done_notifications(&self, threads: &[&Thread]) {
+        if threads.is_empty() {
             return;
         }
-        let _ = self
-            .commands
-            .send(Command::DoneNotifications { thread_ids });
+        let shown = threads
+            .iter()
+            .map(|thread| (thread.id.clone(), thread.updated_at))
+            .collect();
+        let _ = self.commands.send(Command::DoneNotifications { shown });
     }
 
     pub fn restore_notification(&self, thread_id: &str) {
@@ -4709,27 +4719,30 @@ async fn run(
                 }
                 close_window(ctx);
             }
-            Command::DoneNotification { thread_id } => {
+            Command::DoneNotification {
+                thread_id,
+                shown_at,
+            } => {
                 ctx.clear_notice();
                 if let Some(github) = ctx.github() {
                     // The row leaves now, and the request runs beside the
                     // loop: waiting on GitHub, behind whatever else is in
                     // flight, left the row sitting there after the click.
-                    let held = ctx.dismiss_notifications(&[thread_id]);
+                    let held = ctx.dismiss_shown(&[(thread_id, shown_at)]);
                     let ctx = ctx.clone();
                     tokio::spawn(async move { done_notifications(&ctx, &github, held).await });
                 } else {
                     ctx.notice("A GitHub token is required to change notifications");
                 }
             }
-            Command::DoneNotifications { thread_ids } => {
+            Command::DoneNotifications { shown } => {
                 ctx.clear_notice();
                 if let Some(github) = ctx.github() {
                     // Beside the loop, not in it: a few dozen requests
                     // would hold up every command behind them. A rate
                     // limit they run into gates the next poll through the
                     // client.
-                    let held = ctx.dismiss_notifications(&thread_ids);
+                    let held = ctx.dismiss_shown(&shown);
                     let ctx = ctx.clone();
                     tokio::spawn(async move { done_notifications(&ctx, &github, held).await });
                 } else {
@@ -7252,6 +7265,40 @@ impl Ctx {
         held
     }
 
+    /// Done on the rows the reader clicked, each at the revision its row
+    /// showed. The drawer may have been holding a poll back, so the list
+    /// here can be ahead of the screen: a thread it holds newer and unread
+    /// is left, since Done would put away activity the reader has not
+    /// seen. The list goes up as the reader's either way, which shows what
+    /// arrived, and a notice says why the row is still there. Hands back
+    /// what was hidden, as [`Ctx::dismiss_notifications`] does.
+    fn dismiss_shown(&self, shown: &[(String, Timestamp)]) -> Vec<(String, Option<Thread>)> {
+        let mut seen = Vec::new();
+        let mut unseen = Vec::new();
+        {
+            let threads = self.notifications.lock().ok();
+            for (id, shown_at) in shown {
+                let moved_on = threads.as_ref().is_some_and(|threads| {
+                    threads
+                        .iter()
+                        .any(|thread| &thread.id == id && unseen_since(thread, *shown_at))
+                });
+                if moved_on {
+                    unseen.push(id.clone());
+                } else {
+                    seen.push(id.clone());
+                }
+            }
+        }
+        // With nothing to hide this still sends the list as the reader's.
+        let held = self.dismiss_notifications(&seen);
+        if !unseen.is_empty() {
+            tracing::info!(threads = ?unseen, "not marked done: newer unread activity than the row showed");
+            self.notice(new_activity_notice(unseen.len()));
+        }
+        held
+    }
+
     /// Put back the rows GitHub would not take as Done, each in its place.
     fn undo_dismissal(&self, held: &[(String, Option<Thread>)]) {
         for (thread_id, _) in held {
@@ -7265,6 +7312,26 @@ impl Ctx {
                 if let Some(thread) = thread {
                     insert_by_activity(threads, thread.clone());
                 }
+            }
+        });
+        self.send_marked_notifications();
+    }
+
+    /// Take the Done mark back from threads GitHub holds newer and unread,
+    /// and list each as GitHub has it. As a poll would have brought it, not
+    /// as the reader's doing: the row left a moment ago and the reader may
+    /// be on the next one, so the list is held still under the pointer.
+    fn return_unseen(&self, threads: Vec<Thread>) {
+        for thread in &threads {
+            if let Some(Err(error)) =
+                self.with_cache(|cache| cache.restore_notification(&thread.id))
+            {
+                tracing::warn!(thread = %thread.id, error = %error, "could not take back a notification dismissal");
+            }
+        }
+        self.edit_polled_notifications(|listed| {
+            for thread in threads {
+                insert_by_activity(listed, thread);
             }
         });
         self.send_marked_notifications();
@@ -13797,6 +13864,37 @@ fn insert_by_activity(threads: &mut Vec<Thread>, thread: Thread) {
     threads.insert(at, thread);
 }
 
+/// Whether `thread` has activity a reader who saw it at `seen_at` has
+/// not seen: a newer revision GitHub reports unread. A newer one it
+/// reports read is nearly always the reader's own comment, review or
+/// merge, which moves the thread some twenty seconds later and leaves it
+/// read; Done goes through that. Perch's own Mark Unread says nothing of
+/// what GitHub holds, so it does not count.
+fn unseen_since(thread: &Thread, seen_at: Timestamp) -> bool {
+    thread.updated_at > seen_at && thread.unread && !thread.local_unread
+}
+
+/// What the reader is told when Done left rows in the inbox for what
+/// arrived on them.
+fn new_activity_notice(count: usize) -> String {
+    match count {
+        1 => "The notification has new activity, so it was not marked Done".into(),
+        n => format!("{n} notifications have new activity, so they were not marked Done"),
+    }
+}
+
+/// GitHub's newer revision of a thread, with what Perch holds of the one
+/// it replaces: the subject's face and state, the run, when the reader
+/// moved it back to the inbox, and when it was last read, which GitHub's
+/// single-thread endpoint never says.
+fn revised(mut now: Thread, held: &Thread) -> Thread {
+    now.last_read_at = now.last_read_at.or(held.last_read_at);
+    now.restored_at = held.restored_at;
+    now.subject_snapshot = held.subject_snapshot.clone();
+    now.run_snapshot = held.run_snapshot.clone();
+    now
+}
+
 /// When the next poll comes after one at `last`, `secs` apart, but never
 /// before `floor`.
 fn next_poll(
@@ -15077,31 +15175,68 @@ async fn browse(ctx: &Ctx, query: &str, page: u32) -> Result<perch_github::Searc
 /// already; one GitHub refuses comes back. Once GitHub is out of reach or
 /// out of requests the rest would fail the same way, so they are not
 /// tried, and come back too.
+///
+/// Each is read first. GitHub's Done takes no revision: it puts away
+/// whatever the thread holds by then, read, and a Done mark holds through
+/// a read revision, so someone's comment since the last poll would go
+/// with it unseen. A thread GitHub holds newer and unread is not marked:
+/// its row comes back as GitHub has it, as a poll would bring it. A read
+/// that fails counts as the Done failing, which leaves the row in the
+/// inbox rather than risk that. A comment landing between the read and
+/// the Done is still lost; GitHub offers nothing to close that.
 async fn done_notifications(ctx: &Ctx, github: &GitHub, held: Vec<(String, Option<Thread>)>) {
     let mut failure = None;
     let mut refused = Vec::new();
+    let mut unseen = Vec::new();
     let mut rest = held.into_iter();
-    while let Some(entry) = rest.next() {
-        let Err(e) = github.mark_thread_done(&entry.0).await else {
+    while let Some((thread_id, marked)) = rest.next() {
+        let result = match &marked {
+            // Perch held no revision of it, so there is none to compare.
+            None => github.mark_thread_done(&thread_id).await,
+            Some(was) => match github.fetch_thread(&thread_id).await {
+                Ok(now) if unseen_since(&now, was.updated_at) => {
+                    tracing::info!(
+                        thread = %thread_id,
+                        marked_at = %was.updated_at,
+                        updated_at = %now.updated_at,
+                        "not marked done: GitHub has newer unread activity"
+                    );
+                    unseen.push(revised(now, was));
+                    continue;
+                }
+                Ok(_) => github.mark_thread_done(&thread_id).await,
+                Err(e) => Err(e),
+            },
+        };
+        let Err(e) = result else {
             continue;
         };
-        tracing::warn!(thread = %entry.0, error = %e, "could not mark notification done");
+        tracing::warn!(thread = %thread_id, error = %e, "could not mark notification done");
         let stop = matches!(
             e,
             perch_github::Error::RateLimited { .. } | perch_github::Error::Network(_)
         );
         failure = Some(e);
-        refused.push(entry);
+        refused.push((thread_id, marked));
         if stop {
             refused.extend(rest.by_ref());
         }
     }
-    if let Some(e) = failure {
+    if !refused.is_empty() {
         ctx.undo_dismissal(&refused);
-        ctx.notice(match refused.len() {
-            1 => format!("Could not mark the notification done: {e}"),
-            left => format!("Could not mark {left} notifications done: {e}"),
-        });
+    }
+    let news = (!unseen.is_empty()).then(|| new_activity_notice(unseen.len()));
+    if !unseen.is_empty() {
+        ctx.return_unseen(unseen);
+    }
+    let failed = failure.map(|e| match refused.len() {
+        1 => format!("Could not mark the notification done: {e}"),
+        left => format!("Could not mark {left} notifications done: {e}"),
+    });
+    match (failed, news) {
+        (Some(failed), Some(news)) => ctx.notice(format!("{failed}. {news}")),
+        (Some(line), None) | (None, Some(line)) => ctx.notice(line),
+        (None, None) => {}
     }
 }
 
@@ -15147,9 +15282,10 @@ fn kept_since_closing(thread: &Thread) -> bool {
 /// merged or closed with nothing after, so it leaves github.com's inbox as
 /// it leaves Perch's. Not until the close's notice has had time to come,
 /// so the one request takes it too, and not a row the reader has put back
-/// in the inbox since the close. One GitHub refuses is not tried again
-/// until the thread moves on; once GitHub is out of reach or out of
-/// requests the rest wait for the next poll.
+/// in the inbox since the close. Each is read first, and one with newer
+/// unread activity than the poll listed is left for the next. One GitHub
+/// refuses is not tried again until the thread moves on; once GitHub is
+/// out of reach or out of requests the rest wait for the next poll.
 async fn done_closed_notifications(ctx: &Ctx, now: Timestamp) {
     let Some(github) = ctx.github() else {
         return;
@@ -15172,7 +15308,18 @@ async fn done_closed_notifications(ctx: &Ctx, now: Timestamp) {
         })
         .unwrap_or_default();
     for (thread_id, updated_at) in due {
-        match github.mark_thread_done(&thread_id).await {
+        // Read first: the poll that judged the thread quiet is seconds
+        // old, and Done would put away whatever has landed since, read.
+        // One with newer unread activity waits for the poll that brings it.
+        let result = match github.fetch_thread(&thread_id).await {
+            Ok(now) if unseen_since(&now, updated_at) => {
+                tracing::info!(thread = %thread_id, "a closed subject's notification has newer unread activity; left for the next poll");
+                continue;
+            }
+            Ok(_) => github.mark_thread_done(&thread_id).await,
+            Err(e) => Err(e),
+        };
+        match result {
             Ok(()) => {
                 tracing::info!(thread = %thread_id, "marked a closed subject's notification done");
                 ctx.dismiss_notification(&thread_id);
@@ -21927,6 +22074,365 @@ mod tests {
             ctx.replace_notifications(inbox.clone(), Some("third")),
             inbox
         );
+    }
+
+    /// A GitHub that answers a read of a thread with what `read` says of
+    /// its id and takes every Done, and writes down each request as
+    /// "METHOD path".
+    fn serve_threads(
+        read: impl Fn(&str) -> (&'static str, String) + Send + 'static,
+    ) -> (String, impl Fn() -> Vec<String>) {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let seen = asked.clone();
+        let (base, _paths) = serve_by_method(move |method, path, _| {
+            seen.lock().unwrap().push(format!("{method} {path}"));
+            match (method, path.strip_prefix("/notifications/threads/")) {
+                ("GET", Some(id)) => read(id),
+                ("DELETE", Some(_)) => ("204 No Content", String::new()),
+                _ => ("404 Not Found", "{}".to_string()),
+            }
+        });
+        (base, move || asked.lock().unwrap().clone())
+    }
+
+    /// A thread as GitHub's single-thread endpoint answers it.
+    fn answering(thread: &Thread) -> (&'static str, String) {
+        ("200 OK", serde_json::to_string(thread).unwrap())
+    }
+
+    const NEW_ACTIVITY: &str = "The notification has new activity, so it was not marked Done";
+
+    /// The drawer holds a poll back behind its pill, so the row the
+    /// reader clicks Done on can be a revision behind the backend's list.
+    /// Done is for what the row showed: the thread with a newer unread
+    /// revision stays, and what arrived on it goes up with the list.
+    #[tokio::test]
+    async fn done_leaves_a_thread_that_moved_on_unread_since_its_row_was_drawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, asked) = serve_threads(|id| answering(&thread(id, "as listed")));
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let seven = thread("7", "seven");
+        let eight = thread("8", "eight");
+        ctx.replace_notifications(vec![seven.clone(), eight.clone()], Some("first"));
+        let mut newer = seven.clone();
+        newer.updated_at = "2026-09-18T18:00:00Z".parse().unwrap();
+        ctx.replace_notifications(vec![newer.clone(), eight.clone()], Some("second"));
+        received.try_iter().for_each(drop);
+
+        let held = ctx.dismiss_shown(&[
+            ("7".to_string(), seven.updated_at),
+            ("8".to_string(), eight.updated_at),
+        ]);
+        assert_eq!(held, vec![("8".to_string(), Some(eight.clone()))]);
+        assert_eq!(*ctx.notifications.lock().unwrap(), vec![newer.clone()]);
+        assert_eq!(
+            ctx.with_cache(|cache| cache.load_done_threads().unwrap())
+                .unwrap(),
+            vec![eight]
+        );
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            events.iter().any(
+                |event| matches!(event, Event::Notifications(listed) if *listed == [newer.clone()])
+            ),
+            "as the reader's event, so the held poll goes up"
+        );
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Event::NotificationsPolled(_))));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, Event::Notice(notice) if notice == NEW_ACTIVITY)));
+
+        // Nothing is asked of GitHub about the one that stayed.
+        let github = ctx.github().unwrap();
+        done_notifications(&ctx, &github, held).await;
+        assert_eq!(
+            asked(),
+            [
+                "GET /notifications/threads/8",
+                "DELETE /notifications/threads/8"
+            ]
+        );
+        assert_eq!(*ctx.notifications.lock().unwrap(), vec![newer]);
+    }
+
+    /// GitHub moves a thread some twenty seconds after the reader's own
+    /// comment and leaves it read. A row from before that is still all
+    /// there is to see, so Done takes it, and marks the revision the
+    /// backend holds: the same revision reported unread stays hidden.
+    #[tokio::test]
+    async fn done_goes_through_the_readers_own_later_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let seven = thread("7", "seven");
+        ctx.replace_notifications(vec![seven.clone()], Some("first"));
+        let mut own = seven.clone();
+        own.updated_at = "2026-09-18T18:00:00Z".parse().unwrap();
+        own.unread = false;
+        ctx.replace_notifications(vec![own.clone()], Some("second"));
+        received.try_iter().for_each(drop);
+
+        let held = ctx.dismiss_shown(&[("7".to_string(), seven.updated_at)]);
+        assert_eq!(held, vec![("7".to_string(), Some(own.clone()))]);
+        assert!(ctx.notifications.lock().unwrap().is_empty());
+        assert!(!received
+            .try_iter()
+            .any(|event| matches!(event, Event::Notice(_))));
+
+        // The mark sits at the later revision, not the row's: unread at
+        // that revision is still hidden, and only one after it returns.
+        let mut unread = own;
+        unread.unread = true;
+        assert!(ctx
+            .replace_notifications(vec![unread.clone()], Some("third"))
+            .is_empty());
+        let mut later = unread;
+        later.updated_at = "2026-09-18T19:00:00Z".parse().unwrap();
+        assert_eq!(
+            ctx.replace_notifications(vec![later.clone()], Some("fourth")),
+            vec![later]
+        );
+    }
+
+    /// Mark Unread is Perch's own reminder on a thread GitHub reports
+    /// read, so it is no sign of anything the reader has not seen.
+    #[tokio::test]
+    async fn a_mark_unread_in_perch_does_not_hold_done_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let seven = thread("7", "seven");
+        ctx.replace_notifications(vec![seven.clone()], Some("first"));
+        let mut own = seven.clone();
+        own.updated_at = "2026-09-18T18:00:00Z".parse().unwrap();
+        own.unread = false;
+        ctx.replace_notifications(vec![own], Some("second"));
+        ctx.mark_notification_unread("7");
+        let reminded = ctx.notifications.lock().unwrap()[0].clone();
+        assert!(reminded.unread && reminded.local_unread);
+        received.try_iter().for_each(drop);
+
+        let held = ctx.dismiss_shown(&[("7".to_string(), seven.updated_at)]);
+        assert_eq!(held, vec![("7".to_string(), Some(reminded))]);
+        assert!(ctx.notifications.lock().unwrap().is_empty());
+        assert!(!received
+            .try_iter()
+            .any(|event| matches!(event, Event::Notice(_))));
+    }
+
+    /// GitHub's Done takes no revision: it puts away whatever the thread
+    /// holds by then and reads it, and a Done mark holds through a read
+    /// revision. So a comment landing after the last poll went with the
+    /// Done, never shown. The thread is read first, and one GitHub holds
+    /// newer and unread is not marked: its row returns as GitHub has it,
+    /// behind the pill, since the reader has moved on from where it was.
+    #[tokio::test]
+    async fn done_reads_the_thread_first_and_returns_one_with_newer_unread_activity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut marked = thread("7", "seven");
+        marked.unread = false;
+        marked.last_read_at = Some("2026-09-17T18:30:00Z".parse().unwrap());
+        marked.subject_snapshot = Some(merged("2026-09-17T17:00:00Z".parse().unwrap()));
+        // What the single-thread endpoint says: no snapshot, which is
+        // Perch's, and no last read time, which it never gives.
+        let mut newer = thread("7", "seven");
+        newer.updated_at = "2026-09-18T18:00:00Z".parse().unwrap();
+        let github_has = newer.clone();
+        let (base, asked) = serve_threads(move |_| answering(&github_has));
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let mut eight = thread("8", "eight");
+        eight.updated_at = "2026-09-17T12:00:00Z".parse().unwrap();
+        ctx.replace_notifications(vec![marked.clone(), eight.clone()], Some("first"));
+
+        let held = ctx.dismiss_shown(&[("7".to_string(), marked.updated_at)]);
+        assert_eq!(
+            *ctx.notifications.lock().unwrap(),
+            vec![eight.clone()],
+            "gone at once"
+        );
+        received.try_iter().for_each(drop);
+
+        let github = ctx.github().unwrap();
+        done_notifications(&ctx, &github, held).await;
+        assert_eq!(asked(), ["GET /notifications/threads/7"], "and no Done");
+        newer.last_read_at = marked.last_read_at;
+        newer.subject_snapshot = marked.subject_snapshot.clone();
+        let inbox = vec![newer.clone(), eight.clone()];
+        assert_eq!(*ctx.notifications.lock().unwrap(), inbox);
+        assert!(ctx
+            .with_cache(|cache| cache.load_done_threads().unwrap())
+            .unwrap()
+            .is_empty());
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            events.iter().any(
+                |event| matches!(event, Event::NotificationsPolled(listed) if *listed == inbox)
+            ),
+            "as a poll would bring it"
+        );
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Event::Notifications(_))));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, Event::Notice(notice) if notice == NEW_ACTIVITY)));
+
+        // No mark is left to hide it from the poll that lists it.
+        let mut listed = thread("7", "seven");
+        listed.updated_at = newer.updated_at;
+        let visible = ctx.replace_notifications(vec![listed, eight], Some("second"));
+        assert_eq!(
+            visible.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["7", "8"]
+        );
+    }
+
+    /// A newer revision GitHub reports read is the reader's own comment,
+    /// or one they read on github.com: nothing unseen, so Done goes on.
+    #[tokio::test]
+    async fn done_goes_through_a_newer_revision_github_reports_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let marked = thread("7", "seven");
+        let mut own = marked.clone();
+        own.updated_at = "2026-09-18T18:00:00Z".parse().unwrap();
+        own.unread = false;
+        let github_has = own.clone();
+        let (base, asked) = serve_threads(move |_| answering(&github_has));
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        ctx.replace_notifications(vec![marked.clone()], Some("first"));
+
+        let held = ctx.dismiss_shown(&[("7".to_string(), marked.updated_at)]);
+        let github = ctx.github().unwrap();
+        done_notifications(&ctx, &github, held).await;
+        assert_eq!(
+            asked(),
+            [
+                "GET /notifications/threads/7",
+                "DELETE /notifications/threads/7"
+            ]
+        );
+        assert!(ctx.notifications.lock().unwrap().is_empty());
+        assert_eq!(
+            ctx.with_cache(|cache| cache.load_done_threads().unwrap())
+                .unwrap(),
+            vec![marked]
+        );
+        assert!(!received
+            .try_iter()
+            .any(|event| matches!(event, Event::Notice(_))));
+        assert!(ctx
+            .replace_notifications(vec![own], Some("second"))
+            .is_empty());
+    }
+
+    /// Without the read there is no telling what the Done would put away,
+    /// so a read GitHub refuses is the Done failing: the row comes back.
+    #[tokio::test]
+    async fn done_is_not_sent_when_the_thread_cannot_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, asked) = serve_threads(|_| ("403 Forbidden", "{}".to_string()));
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let mut newest = thread("6", "six");
+        newest.updated_at = "2026-09-18T12:00:00Z".parse().unwrap();
+        let mut marked = thread("7", "seven");
+        marked.updated_at = "2026-09-18T11:00:00Z".parse().unwrap();
+        let mut oldest = thread("8", "eight");
+        oldest.updated_at = "2026-09-18T10:00:00Z".parse().unwrap();
+        let inbox = vec![newest, marked.clone(), oldest];
+        ctx.replace_notifications(inbox.clone(), Some("first"));
+
+        let held = ctx.dismiss_shown(&[("7".to_string(), marked.updated_at)]);
+        assert_eq!(ctx.notifications.lock().unwrap().len(), 2);
+        received.try_iter().for_each(drop);
+        let github = ctx.github().unwrap();
+        done_notifications(&ctx, &github, held).await;
+
+        assert_eq!(asked(), ["GET /notifications/threads/7"]);
+        assert_eq!(*ctx.notifications.lock().unwrap(), inbox, "back in place");
+        assert!(ctx
+            .with_cache(|cache| cache.load_done_threads().unwrap())
+            .unwrap()
+            .is_empty());
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::Notice(notice) if notice.starts_with("Could not mark the notification done:")
+        )));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::Notifications(listed) if *listed == inbox)),
+            "a refusal is the answer to the click, so the row returns at once"
+        );
+    }
+
+    /// Mark N Done reads each thread before its own Done, and the ones
+    /// with nothing new go through whatever the others hold.
+    #[tokio::test]
+    async fn mark_n_done_returns_only_the_threads_with_newer_unread_activity() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, asked) = serve_threads(|id| {
+            let mut now = thread(id, "as listed");
+            if id == "8" {
+                now.updated_at = "2026-09-18T18:00:00Z".parse().unwrap();
+            }
+            answering(&now)
+        });
+        let (ctx, received) = ctx(dir.path(), &base, &[]);
+        let shown: Vec<(String, Timestamp)> = ["7", "8", "9"]
+            .iter()
+            .map(|id| (id.to_string(), thread(id, "as listed").updated_at))
+            .collect();
+        ctx.replace_notifications(
+            shown
+                .iter()
+                .map(|(id, _)| thread(id, "as listed"))
+                .collect(),
+            Some("first"),
+        );
+
+        let held = ctx.dismiss_shown(&shown);
+        assert_eq!(held.len(), 3);
+        assert!(ctx.notifications.lock().unwrap().is_empty());
+        received.try_iter().for_each(drop);
+        let github = ctx.github().unwrap();
+        done_notifications(&ctx, &github, held).await;
+
+        assert_eq!(
+            asked(),
+            [
+                "GET /notifications/threads/7",
+                "DELETE /notifications/threads/7",
+                "GET /notifications/threads/8",
+                "GET /notifications/threads/9",
+                "DELETE /notifications/threads/9",
+            ]
+        );
+        let listed = ctx.notifications.lock().unwrap().clone();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "8");
+        assert_eq!(
+            listed[0].updated_at,
+            "2026-09-18T18:00:00Z".parse::<Timestamp>().unwrap()
+        );
+        let mut done: Vec<String> = ctx
+            .with_cache(|cache| cache.load_done_threads().unwrap())
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        done.sort();
+        assert_eq!(done, ["7", "9"]);
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(events.iter().any(
+            |event| matches!(event, Event::NotificationsPolled(threads) if *threads == listed)
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Event::Notifications(_))));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, Event::Notice(notice) if notice == NEW_ACTIVITY)));
     }
 
     #[tokio::test]
@@ -29441,11 +29947,15 @@ read eof || true
             pull("MERGED", r#""2026-09-17T17:00:00Z""#),
             pull("OPEN", "null"),
         );
-        let (base, paths) = serve_by_method(move |method, path, _| match (method, path) {
-            ("POST", "/graphql") => ("200 OK", answer.clone()),
-            ("DELETE", "/notifications/threads/9") => ("403 Forbidden", "{}".to_string()),
-            ("DELETE", _) => ("204 No Content", String::new()),
-            _ => ("404 Not Found", "{}".to_string()),
+        // Each is read before its Done, and GitHub holds it as listed.
+        let (base, paths) = serve_by_method(move |method, path, _| {
+            match (method, path.strip_prefix("/notifications/threads/")) {
+                ("POST", _) if path == "/graphql" => ("200 OK", answer.clone()),
+                ("GET", Some(id)) => answering(&thread(id, "as listed")),
+                ("DELETE", Some("9")) => ("403 Forbidden", "{}".to_string()),
+                ("DELETE", Some(_)) => ("204 No Content", String::new()),
+                _ => ("404 Not Found", "{}".to_string()),
+            }
         });
         let (ctx, _received) = ctx(dir.path(), &base, &[]);
         let mut eight = thread("8", "eight");
@@ -29480,8 +29990,12 @@ read eof || true
             [
                 "/graphql",
                 "/notifications/threads/6",
+                "/notifications/threads/6",
+                "/notifications/threads/7",
                 "/notifications/threads/7",
                 "/notifications/threads/8",
+                "/notifications/threads/8",
+                "/notifications/threads/9",
                 "/notifications/threads/9",
             ]
         );
@@ -29496,7 +30010,7 @@ read eof || true
 
         // 9 isn't asked again while it stands.
         done_closed_notifications(&ctx, Timestamp::now()).await;
-        assert_eq!(paths.lock().unwrap().len(), 5);
+        assert_eq!(paths.lock().unwrap().len(), 9);
     }
 
     /// A merged pull request's snapshot, for a thread set down already
@@ -29514,14 +30028,67 @@ read eof || true
         }
     }
 
-    /// A GitHub that takes every Done and answers nothing else, and the
-    /// paths it was asked for.
+    /// A GitHub that takes every Done and holds every thread read, so
+    /// the read before a Done finds nothing unseen, and the paths it was
+    /// sent a Done for.
     fn takes_done() -> (String, impl Fn() -> Vec<String>) {
-        let (base, paths) = serve_by_method(|method, _, _| match method {
-            "DELETE" => ("204 No Content", String::new()),
-            _ => ("404 Not Found", "{}".to_string()),
+        let (base, asked) = serve_threads(|id| {
+            let mut read = thread(id, "read");
+            read.unread = false;
+            answering(&read)
         });
-        (base, move || paths.lock().unwrap().clone())
+        (base, move || {
+            asked()
+                .iter()
+                .filter_map(|request| request.strip_prefix("DELETE "))
+                .map(str::to_string)
+                .collect()
+        })
+    }
+
+    /// The poll that found a closed thread quiet is seconds old by the
+    /// time its Done is sent, and nobody is looking: a comment landed in
+    /// between would be put away unseen. The thread is read first, and one
+    /// with newer unread activity waits for the poll that lists it. A
+    /// newer revision GitHub reports read is the reader's own merge being
+    /// stamped, and goes.
+    #[tokio::test]
+    async fn a_closed_subject_with_newer_unread_activity_is_left_for_the_next_poll() {
+        let dir = tempfile::tempdir().unwrap();
+        let closed_at: Timestamp = "2026-09-17T18:00:00Z".parse().unwrap();
+        let after = |secs: i64| closed_at + jiff::SignedDuration::from_secs(secs);
+        let mut now = thread("7", "seven");
+        now.updated_at = after(45);
+        let github_has = Arc::new(Mutex::new(now.clone()));
+        let answers = github_has.clone();
+        let (base, asked) = serve_threads(move |_| answering(&answers.lock().unwrap()));
+        let (ctx, _received) = ctx(dir.path(), &base, &[]);
+        let mut seven = thread("7", "seven");
+        seven.unread = false;
+        seven.updated_at = after(-3_600);
+        seven.subject_snapshot = Some(merged(closed_at));
+        ctx.replace_notifications(vec![seven.clone()], Some("first"));
+
+        done_closed_notifications(&ctx, after(90)).await;
+        assert_eq!(asked(), ["GET /notifications/threads/7"]);
+        assert_eq!(*ctx.notifications.lock().unwrap(), vec![seven]);
+        assert!(
+            ctx.closed_done_refused.lock().unwrap().is_empty(),
+            "not a refusal: it is judged again next poll"
+        );
+
+        // The reader's own merge, stamped late and left read.
+        now.unread = false;
+        *github_has.lock().unwrap() = now;
+        done_closed_notifications(&ctx, after(90)).await;
+        assert_eq!(
+            asked()[1..],
+            [
+                "GET /notifications/threads/7",
+                "DELETE /notifications/threads/7"
+            ]
+        );
+        assert!(ctx.notifications.lock().unwrap().is_empty());
     }
 
     /// GitHub stamps a thread for a merge or a close some twenty seconds

@@ -367,6 +367,17 @@ impl GitHub {
         .await
     }
 
+    /// One notification thread as GitHub holds it now: what Done is about
+    /// to put away. Asked without a tag, so the answer is never a kept
+    /// body. `unread` and `updated_at` agree with the list;
+    /// `last_read_at` does not, since this endpoint gives null where the
+    /// list gives a date.
+    pub async fn fetch_thread(&self, thread_id: &str) -> Result<Thread, Error> {
+        let path = notification_thread_path(thread_id, "")?;
+        let fetched = self.get(&path, None).await?;
+        serde_json::from_str(&fetched.body).map_err(|e| Error::Decode(e.to_string()))
+    }
+
     /// Ignore future activity on a notification thread, including when the
     /// user watches its repository.
     pub async fn ignore_thread(&self, thread_id: &str) -> Result<(), Error> {

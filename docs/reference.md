@@ -59,14 +59,23 @@ still GitHub's.
   activity clears the local mark and lets the thread return. A later update
   GitHub reports read does not: your own comment, review or merge moves the
   thread too, and so does activity you have already read on github.com.
+  Done is for the update the row shows. Perch reads the thread from GitHub
+  just before marking it, one extra request per thread, and a thread with
+  newer unread activity is not marked Done. One the pill over the list was
+  holding back stays, with what arrived, and so does the pane showing it; one
+  that arrived since the last poll comes back behind the pill. A notice says
+  so either way. A comment that lands between that read and the Done still
+  goes with it: GitHub's Done takes whatever the thread holds.
 - **Unsubscribe** ignores future activity on the thread, marks its current
-  notification done, and remembers it the same way.
+  notification done, and remembers it the same way. Whatever has arrived on
+  the thread goes with it.
 - A thread whose pull request was merged or closed, or whose issue was
   closed, with nothing on it since, is marked Done on its own, on GitHub
   too. Perch waits a minute after the close first: GitHub sends the close's
   own notification some twenty seconds late, and a Done before it would see
   the thread come back. A comment after the close keeps the thread, or
-  returns it.
+  returns it. The thread is read first here too, and one with newer unread
+  activity waits for the poll that brings it.
 - **View › Done**, in the Inbox's filter menu, lists the threads marked Done
   in Perch that GitHub still lists. **Move to Inbox**, on the row or its menu,
   drops the local mark and puts the thread back. GitHub's public API has no
@@ -86,7 +95,8 @@ still GitHub's.
   whose subject Perch has not looked up yet counts as open, and so do kinds
   with no state, such as releases and CI runs.
 - **Mark N Done**, at the foot of the filter menu, marks every thread the
-  inbox is showing Done, one GitHub request after another, and reports any
+  inbox is showing Done, one GitHub request after another, each read first,
+  so a thread with new unread activity is left in the inbox, and reports any
   failures in a single notice. Filtering to State › Merged or Closed first
   clears the finished pull requests in one go. On View › Done and View ›
   Snoozed the same item reads **Move N to Inbox**.

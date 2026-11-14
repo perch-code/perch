@@ -518,12 +518,18 @@ fn snoozed_until_label(state: AppState, until: jiff::Timestamp) -> impl IntoView
     .style(|s| s.items_center().flex_shrink(0.0_f32))
 }
 
-/// Mark the thread Done. The reader is finished with it, so if the main
-/// pane has its pull request or issue open, that closes, as going back
-/// to the sidebar would.
+/// Mark the thread Done, as its row shows it. The reader is finished
+/// with it, so if the main pane has its pull request or issue open, that
+/// closes, as going back to the sidebar would. Not when the pill is
+/// holding back newer unread activity on it: the backend will leave the
+/// row for that, and the pane is where it shows.
 fn done(state: AppState, backend: &Backend, thread: &Thread) {
-    backend.done_notification(&thread.id);
-    close_if_viewing(state, backend, thread);
+    // Asked before the command goes, whose answer clears what is held.
+    let stays = state.held_back_unseen(thread);
+    backend.done_notification(thread);
+    if !stays {
+        close_if_viewing(state, backend, thread);
+    }
 }
 
 /// Mark N Done: every row given, as each row's Done would, the threads in
@@ -535,11 +541,13 @@ pub(crate) fn done_all(state: AppState, backend: &Backend, rows: &[InboxRow]) {
             backend.done_item_activity(&item.id);
         }
     }
-    backend.done_notifications(threads.iter().map(|thread| thread.id.clone()).collect());
-    if let Some(viewing) = threads
+    // Asked before the command goes, as in `done`.
+    let viewing = threads
         .iter()
         .find(|thread| state.is_viewing_thread(thread))
-    {
+        .filter(|thread| !state.held_back_unseen(thread));
+    backend.done_notifications(&threads);
+    if let Some(viewing) = viewing {
         close_if_viewing(state, backend, viewing);
     }
 }
@@ -735,6 +743,92 @@ mod tests {
             run_snapshot: None,
             snoozed_until: None,
         }
+    }
+
+    /// The Done commands sent, and whether the pane was closed after.
+    fn done_and_close(
+        commands: &mut tokio::sync::mpsc::UnboundedReceiver<crate::backend::Command>,
+    ) -> (Vec<(String, Timestamp)>, bool) {
+        use crate::backend::Command;
+        let (mut done, mut closed) = (Vec::new(), false);
+        while let Ok(command) = commands.try_recv() {
+            match command {
+                Command::DoneNotification {
+                    thread_id,
+                    shown_at,
+                } => done.push((thread_id, shown_at)),
+                Command::DoneNotifications { shown } => done.extend(shown),
+                Command::CloseReview { .. } => closed = true,
+                _ => {}
+            }
+        }
+        (done, closed)
+    }
+
+    /// Done closes the pane showing the thread: the reader is finished
+    /// with it. Not when the pill is holding newer unread activity on it.
+    /// The backend leaves that row and says there is something new, and
+    /// closing the pane that would show it took the reader away from it.
+    #[test]
+    fn done_keeps_the_pane_open_for_activity_the_pill_is_holding_back() {
+        let state = AppState::new();
+        let (backend, mut commands) = Backend::recording();
+        let shown = thread(
+            "7",
+            "org/repo",
+            "Issue",
+            SubjectKind::Issue,
+            Reason::Mention,
+            true,
+        );
+        let mut item = Item::new("org/repo", shown.updated_at);
+        item.subject = Some(perch_github::ItemSubject::Issue(perch_github::Issue {
+            viewer_can_update: false,
+            node_id: String::new(),
+            reactions: Default::default(),
+            number: 7,
+            title: "Issue".into(),
+            body: String::new(),
+            state: "open".into(),
+            state_reason: None,
+            author_login: "u".into(),
+            author_avatar_url: String::new(),
+            labels: vec![],
+            assignees: vec![],
+            repo_full_name: "org/repo".into(),
+            comments: 0,
+            created_at: Some(shown.updated_at),
+            updated_at: shown.updated_at,
+        }));
+        let item = Arc::new(item);
+        let view = || {
+            let review = crate::review::model::ReviewState::new();
+            review.item.set(Some(item.clone()));
+            state.review.set(Some(review));
+            assert!(state.is_viewing_thread(&shown));
+        };
+        let mut newer = shown.clone();
+        newer.updated_at = "2026-09-19T13:00:00Z".parse().unwrap();
+        let sent = vec![("7".to_string(), shown.updated_at)];
+        let rows = [InboxRow::Thread(shown.clone())];
+
+        // The row's Done and Mark N Done both send the row's revision.
+        view();
+        state.pending_notifications.set(Some(vec![newer.clone()]));
+        done(state, &backend, &shown);
+        assert_eq!(done_and_close(&mut commands), (sent.clone(), false));
+        done_all(state, &backend, &rows);
+        assert_eq!(done_and_close(&mut commands), (sent.clone(), false));
+
+        // Nothing held back, or the reader's own late stamp: it closes.
+        newer.unread = false;
+        state.pending_notifications.set(Some(vec![newer]));
+        done(state, &backend, &shown);
+        assert_eq!(done_and_close(&mut commands), (sent.clone(), true));
+        view();
+        state.pending_notifications.set(None);
+        done_all(state, &backend, &rows);
+        assert_eq!(done_and_close(&mut commands), (sent, true));
     }
 
     /// Start Work is on a pull request's or an issue's row, and greyed

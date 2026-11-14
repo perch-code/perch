@@ -213,8 +213,10 @@ impl NotificationMark {
     /// unread. A Done taken inside those seconds would otherwise be lifted
     /// by the next poll. The cost is someone else's activity that is read
     /// by the time Perch sees it, which stays hidden too: read on
-    /// github.com, or landed since the last poll and read by Done's own
-    /// request.
+    /// github.com, or landed in the moment between Done's read of the
+    /// thread and its request. Done reads the thread first and leaves one
+    /// with newer unread activity; Unsubscribe does not, and takes what
+    /// has arrived with it.
     fn hides(&self, thread: &Thread, now: Timestamp) -> bool {
         let quiet = thread.updated_at <= self.updated_at || !thread.unread;
         quiet && self.snoozed_until.is_none_or(|until| now < until)

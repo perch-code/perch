@@ -3781,6 +3781,23 @@ impl AppState {
         })
     }
 
+    /// Whether the poll held behind the pill has a revision of `thread`
+    /// newer than its row and unread: Done will be refused for it, so the
+    /// pane showing it stays open. The backend's own check is the one
+    /// that decides; this only keeps the pane.
+    pub fn held_back_unseen(&self, thread: &Thread) -> bool {
+        self.pending_notifications.with_untracked(|held| {
+            held.as_ref().is_some_and(|held| {
+                held.iter().any(|now| {
+                    now.id == thread.id
+                        && now.updated_at > thread.updated_at
+                        && now.unread
+                        && !now.local_unread
+                })
+            })
+        })
+    }
+
     /// Whether the drawer is showing local items: either of Worktrees'
     /// views.
     fn shows_items(&self) -> bool {
@@ -4750,6 +4767,42 @@ mod tests {
         review.item.set(Some(issue("org/repo", 7)));
         review.begin("Reading the notification");
         assert!(!app.is_viewing_thread(&thread));
+    }
+
+    /// Done on a row the pill holds newer unread activity for is refused
+    /// by the backend, and the pane showing the thread should stay for
+    /// what arrived. A held revision that is read, or unread only by
+    /// Perch's own reminder, is nothing new.
+    #[test]
+    fn a_held_back_poll_says_which_rows_done_will_leave() {
+        let app = AppState::new();
+        showing_notifications(&app);
+        let shown = vec![notification("1", true), notification("2", true)];
+        app.apply(Event::NotificationsPolled(shown.clone()));
+        assert!(!app.held_back_unseen(&shown[1]));
+
+        let mut moved = shown[1].clone();
+        moved.updated_at = "2026-09-19T13:00:00Z".parse().unwrap();
+        let held = |moved: &Thread| vec![moved.clone(), notification("1", true)];
+        app.apply(Event::NotificationsPolled(held(&moved)));
+        assert!(app.held_back_news().is_some(), "held behind the pill");
+        assert!(app.held_back_unseen(&shown[1]));
+        assert!(!app.held_back_unseen(&shown[0]));
+
+        moved.unread = false;
+        app.apply(Event::NotificationsPolled(held(&moved)));
+        assert!(!app.held_back_unseen(&shown[1]), "the reader's own");
+        moved.unread = true;
+        moved.local_unread = true;
+        app.apply(Event::NotificationsPolled(held(&moved)));
+        assert!(!app.held_back_unseen(&shown[1]), "Perch's reminder");
+
+        // Once it is on screen the row is the newer revision.
+        moved.local_unread = false;
+        app.apply(Event::NotificationsPolled(held(&moved)));
+        assert!(app.held_back_unseen(&shown[1]));
+        app.show_held_back();
+        assert!(!app.held_back_unseen(&app.notifications.get()[0]));
     }
 
     /// A pull request shown before its checkout: the review is up with its

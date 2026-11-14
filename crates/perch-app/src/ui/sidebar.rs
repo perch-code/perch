@@ -1771,15 +1771,24 @@ mod tests {
         assert!(state.item_filters.get().narrowed());
         assert_eq!(state.item_filters.get().inbox.state, StateFilter::Closed);
 
+        // A poll held behind the pill has moved 11 on. The menu sends
+        // the revision on screen, for the backend to compare with its own.
+        let shown_at: jiff::Timestamp = "2026-09-19T12:00:00Z".parse().unwrap();
+        let mut held = state.notifications.get_untracked();
+        let moved = held.iter_mut().find(|thread| thread.id == "11").unwrap();
+        assert_eq!(moved.updated_at, shown_at);
+        moved.updated_at = "2026-09-19T13:00:00Z".parse().unwrap();
+        state.pending_notifications.set(Some(held));
+
         while commands.try_recv().is_ok() {}
         inbox_menu(state, backend.clone()).choose("Mark 1 Done");
         let mut done = Vec::new();
         while let Ok(command) = commands.try_recv() {
-            if let crate::backend::Command::DoneNotifications { thread_ids } = command {
-                done.push(thread_ids);
+            if let crate::backend::Command::DoneNotifications { shown } = command {
+                done.push(shown);
             }
         }
-        assert_eq!(done, [vec!["11".to_string()]]);
+        assert_eq!(done, [vec![("11".to_string(), shown_at)]]);
 
         // On Done, the same place moves them back instead.
         state.done_notifications.set(vec![notification(
