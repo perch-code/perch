@@ -2956,7 +2956,9 @@ impl Cache {
     /// The threads among `threads` that no Done mark or snooze hides, by
     /// the rule [`Self::store_threads`] goes by, writing nothing: what a
     /// list shows when it could not be stored. A mark that newer unread
-    /// activity lifts is left for the next store that takes.
+    /// activity lifts is left for the next store that takes. If the reader
+    /// opens that thread first, the mark still on disk hides it again once
+    /// it is read: the cost of showing it with nothing written.
     pub fn visible_threads(&self, threads: &[Thread]) -> Result<Vec<Thread>, CacheError> {
         let marks = self.notification_dismissals()?;
         let now = Timestamp::now();

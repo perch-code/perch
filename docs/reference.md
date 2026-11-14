@@ -17,9 +17,10 @@ Polling runs in the background, respects GitHub's `X-Poll-Interval`, and
 paginates the full response. Perch performs an unconditional reconciliation at
 startup and on the first scheduled poll after 15 minutes. Polls between
 reconciliations ask for the first page only if its `ETag` has changed, and read
-the whole list again when it has. New activity always changes the first page; a
-thread past the first fifty that was read or marked Done on github.com does
-not, and the reconciliation picks that up. Without a token, each poll looks for
+the whole list again when it has. New activity always changes the first page. A
+thread past the first fifty does not when it is read or marked Done on
+github.com, or when only its time moves (your own comment or review, a label),
+and the reconciliation picks that up. Without a token, each poll looks for
 one again, so a `gh auth login` after launch is picked up.
 
 A poll never moves what is on screen. When it would add, remove, or reorder
@@ -73,8 +74,9 @@ still GitHub's.
   closed, with nothing on it since, is marked Done on its own, on GitHub
   too. Perch waits a minute after the close first: GitHub sends the close's
   own notification some twenty seconds late, and a Done before it would see
-  the thread come back. A comment after the close keeps the thread, or
-  returns it. The thread is read first here too, and one with newer unread
+  the thread come back. A comment more than a minute after the close keeps
+  the thread, or returns it; one inside that minute is taken for the close's
+  own notification. The thread is read first here too, and one with newer unread
   activity waits for the poll that brings it.
 - **View › Done**, in the Inbox's filter menu, lists the threads marked Done
   in Perch that GitHub still lists. **Move to Inbox**, on the row or its menu,

@@ -3781,21 +3781,24 @@ impl AppState {
         })
     }
 
-    /// Whether the poll held behind the pill has a revision of `thread`
-    /// newer than its row and unread: Done will be refused for it, so the
-    /// pane showing it stays open. The backend's own check is the one
-    /// that decides; this only keeps the pane.
+    /// Whether there is a revision of `thread` newer than the row the
+    /// reader acted on and unread: Done will be refused for it, so the
+    /// pane showing it stays open. It is in the poll held behind the pill,
+    /// or already in the list when the row is one a menu kept from before
+    /// a poll. The backend's own check is the one that decides; this only
+    /// keeps the pane.
     pub fn held_back_unseen(&self, thread: &Thread) -> bool {
-        self.pending_notifications.with_untracked(|held| {
-            held.as_ref().is_some_and(|held| {
-                held.iter().any(|now| {
-                    now.id == thread.id
-                        && now.updated_at > thread.updated_at
-                        && now.unread
-                        && !now.local_unread
-                })
-            })
-        })
+        let newer = |now: &Thread| {
+            now.id == thread.id
+                && now.updated_at > thread.updated_at
+                && now.unread
+                && !now.local_unread
+        };
+        self.pending_notifications
+            .with_untracked(|held| held.as_ref().is_some_and(|held| held.iter().any(newer)))
+            || self
+                .notifications
+                .with_untracked(|shown| shown.iter().any(newer))
     }
 
     /// Whether the drawer is showing local items: either of Worktrees'
@@ -4803,6 +4806,8 @@ mod tests {
         assert!(app.held_back_unseen(&shown[1]));
         app.show_held_back();
         assert!(!app.held_back_unseen(&app.notifications.get()[0]));
+        // A menu opened before then still holds the old row.
+        assert!(app.held_back_unseen(&shown[1]));
     }
 
     /// A pull request shown before its checkout: the review is up with its

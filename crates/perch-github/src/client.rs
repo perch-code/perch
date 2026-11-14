@@ -286,9 +286,10 @@ impl GitHub {
     /// only the pages after it are fetched.
     ///
     /// The tag is the first page's alone. GitHub lists newest first, so new
-    /// activity always changes that page; a thread further down that was read
-    /// or marked Done on github.com does not, and waits for the next
-    /// unconditional read.
+    /// activity always changes that page. A thread further down does not
+    /// when it is read or marked Done on github.com, or when only its
+    /// `updated_at` moves (the reader's own comment or review, a label),
+    /// and waits for the next unconditional read.
     ///
     /// `If-Modified-Since` is not sent. Measured 2026-11-14, GitHub answers
     /// it on this list with a 200 and the whole page whatever the date; it
