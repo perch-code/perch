@@ -37,6 +37,8 @@ struct App {
     feedback_on_open: Cell<bool>,
     /// Check for Updates… was, the same way: the next window asks.
     check_update_on_open: Cell<bool>,
+    /// Settings… was, the same way: the next window opens on Settings.
+    settings_on_open: Cell<bool>,
 }
 
 #[derive(Clone)]
@@ -143,6 +145,7 @@ pub fn start(backend: Backend, events: std::sync::mpsc::Receiver<(WindowId, Even
             open_box_on_open: Cell::new(false),
             feedback_on_open: Cell::new(false),
             check_update_on_open: Cell::new(false),
+            settings_on_open: Cell::new(false),
         })));
     });
 }
@@ -176,6 +179,13 @@ fn deliver(window: WindowId, event: Event) {
     let Some(app) = app() else {
         return;
     };
+    // `[ui] appearance` is the whole app's, so it is taken up once here
+    // rather than by each window's state.
+    if let Event::Settings(file) = &event {
+        if let Some(config) = &file.config {
+            crate::theme::choose(config.ui.appearance);
+        }
+    }
     // A copy, so a window closing while the event is applied does not find
     // the list borrowed.
     let windows = app.windows.borrow().clone();
@@ -207,6 +217,9 @@ pub fn window(settings: Option<AppState>) -> Option<(AppState, ReviewState, Rc<B
     let review = state.review.get_untracked()?;
     if app.open_box_on_open.replace(false) {
         crate::ui::open_box::show(state, None);
+    }
+    if app.settings_on_open.replace(false) {
+        crate::ui::settings::show(state, None);
     }
     if app.feedback_on_open.replace(false) {
         crate::ui::feedback::open(state, review, crate::feedback::FeedbackKind::Idea, None);
@@ -468,6 +481,21 @@ pub fn show_open_box() {
         Some(window) => crate::ui::open_box::show(window.state, None),
         None => {
             app.open_box_on_open.set(true);
+            open(None);
+        }
+    }
+}
+
+/// Settings…, from the Perch menu: Settings over the window that last
+/// had the keyboard, or a new window on Settings when none is open.
+pub fn show_settings() {
+    let Some(app) = app() else {
+        return;
+    };
+    match focused_state() {
+        Some(state) => crate::ui::settings::show(state, None),
+        None => {
+            app.settings_on_open.set(true);
             open(None);
         }
     }

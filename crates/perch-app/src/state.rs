@@ -249,8 +249,15 @@ pub struct AppState {
     pub repos_known: RwSignal<bool>,
     /// The hosts a pull request's or an issue's URL is read on.
     pub github_hosts: RwSignal<Vec<String>>,
+    /// config.toml as the backend last read it, for the Settings page.
+    /// `None` until the backend says, or when there is no place for it.
+    /// While the file doesn't parse, its `config` is the one read last,
+    /// which is what Perch goes on with.
+    pub settings_file: RwSignal<Option<crate::backend::SettingsFile>>,
     /// Open…'s box.
     pub open_box: crate::ui::open_box::OpenBox,
+    /// The Settings page over the window.
+    pub settings: crate::ui::settings::SettingsState,
     /// What Browse's GitHub views have found, by search, until Perch
     /// quits.
     pub browse: RwSignal<HashMap<String, BrowsePage>>,
@@ -482,7 +489,9 @@ impl AppState {
             repos: RwSignal::new(Vec::new()),
             repos_known: RwSignal::new(false),
             github_hosts: RwSignal::new(vec!["github.com".to_string()]),
+            settings_file: RwSignal::new(None),
             open_box: crate::ui::open_box::OpenBox::new(),
+            settings: crate::ui::settings::SettingsState::new(),
             browse: RwSignal::new(HashMap::new()),
             polls: RwSignal::new(0),
             items: RwSignal::new(Vec::new()),
@@ -576,6 +585,7 @@ impl AppState {
         copy(self.repos, data.repos);
         copy(self.trusted_servers, data.trusted_servers);
         copy(self.github_hosts, data.github_hosts);
+        copy(self.settings_file, data.settings_file);
         copy(self.browse, data.browse);
         copy(self.items, data.items);
         copy(self.notifications, data.notifications);
@@ -3367,6 +3377,16 @@ impl AppState {
             }
             Event::TrustedServers(trusted) => self.trusted_servers.set(trusted),
             Event::GithubHosts(hosts) => self.github_hosts.set(hosts),
+            Event::Settings(mut file) => {
+                // A file that doesn't parse leaves Perch on the settings
+                // it read last, so the page keeps showing those.
+                if file.config.is_none() {
+                    file.config = self
+                        .settings_file
+                        .with_untracked(|last| last.as_ref().and_then(|last| last.config.clone()));
+                }
+                self.settings_file.set(Some(file));
+            }
             Event::OpenReferenceResolved {
                 navigation_id,
                 kind,

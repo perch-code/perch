@@ -25,6 +25,9 @@ pub(crate) struct RunManager {
 
 struct Inner {
     limit: Arc<Semaphore>,
+    /// The limit `set_limit` last asked for, and the permits in use that
+    /// are to be kept rather than given back.
+    target: Arc<Mutex<Target>>,
     /// One Gemini run at a time, in the order they came, so Perch never
     /// runs `agy` in parallel on the reader's account. Taken after a Work
     /// run's worktree lock and before a slot, so a waiting Gemini run
@@ -81,6 +84,16 @@ struct PendingTerminal {
     message: String,
 }
 
+/// The limit `set_limit` last asked for. A lower limit takes the free
+/// permits at once; the ones in use at the time are `owed`, and a lease
+/// that ends while any are owed keeps its permit out of the semaphore
+/// rather than giving it back.
+#[derive(Debug)]
+struct Target {
+    limit: usize,
+    owed: usize,
+}
+
 /// A request waiting for the shared execution limit.
 pub(crate) struct Admission {
     entry: Arc<Entry>,
@@ -90,9 +103,37 @@ pub(crate) struct Admission {
 /// process's terminal event and committed it.
 pub(crate) struct RunLease {
     entry: Arc<Entry>,
-    _permit: OwnedSemaphorePermit,
+    _slot: Slot,
     _gemini: Option<OwnedMutexGuard<()>>,
     _worktree: Option<OwnedMutexGuard<()>>,
+}
+
+/// One permit from the shared limit, from the moment `start` acquires it.
+/// Whether it goes into a lease or is let go because the run was cancelled
+/// first, it ends here, so a debt `set_limit` left is always repaid.
+struct Slot {
+    /// Always `Some` until the slot drops.
+    permit: Option<OwnedSemaphorePermit>,
+    target: Arc<Mutex<Target>>,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        // Under the lock, so `set_limit` either sees the permit back in
+        // the semaphore or counts it as owed, never neither.
+        let mut target = self
+            .target
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(permit) = self.permit.take() {
+            if target.owed > 0 {
+                target.owed -= 1;
+                permit.forget();
+            } else {
+                drop(permit);
+            }
+        }
+    }
 }
 
 /// Prevents a new run for an owner while its durable records are being
@@ -107,6 +148,10 @@ impl RunManager {
         Self {
             inner: Arc::new(Inner {
                 limit: Arc::new(Semaphore::new(limit.max(1))),
+                target: Arc::new(Mutex::new(Target {
+                    limit: limit.max(1),
+                    owed: 0,
+                })),
                 gemini: Arc::new(tokio::sync::Mutex::new(())),
                 worktrees: Mutex::new(HashMap::new()),
                 admission: Mutex::new(AdmissionGate::default()),
@@ -115,6 +160,36 @@ impl RunManager {
                 events,
             }),
         }
+    }
+
+    /// Let `limit` runs go at once from now on, at least one. A higher
+    /// limit starts waiting runs straight away. A lower one stops nothing
+    /// that is running: it takes the free slots now and the rest as the
+    /// runs holding them end.
+    pub(crate) fn set_limit(&self, limit: usize) {
+        let limit = limit.max(1);
+        let mut target = self
+            .inner
+            .target
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if limit > target.limit {
+            let more = limit - target.limit;
+            let repaid = more.min(target.owed);
+            target.owed -= repaid;
+            self.inner.limit.add_permits(more - repaid);
+        } else if limit < target.limit {
+            let fewer = target.limit - limit;
+            let taken = self.inner.limit.forget_permits(fewer);
+            target.owed += fewer - taken;
+        }
+        target.limit = limit;
+    }
+
+    /// How many runs could start now.
+    #[cfg(test)]
+    pub(crate) fn free_slots(&self) -> usize {
+        self.inner.limit.available_permits()
     }
 
     /// Persist a queued run and expose it to the app before returning.  A
@@ -311,14 +386,17 @@ impl RunManager {
         };
         let acquire = self.inner.limit.clone().acquire_owned();
         tokio::pin!(acquire);
-        let permit = tokio::select! {
+        let slot = tokio::select! {
             biased;
             _ = entry.cancel.notified() => {
                 self.finish_cancelled_queue(&entry);
                 return None;
             }
             permit = &mut acquire => match permit {
-                Ok(permit) => permit,
+                Ok(permit) => Slot {
+                    permit: Some(permit),
+                    target: self.inner.target.clone(),
+                },
                 Err(_) => {
                     self.complete_entry(
                         &entry,
@@ -358,7 +436,7 @@ impl RunManager {
         }
         Some(RunLease {
             entry,
-            _permit: permit,
+            _slot: slot,
             _gemini: gemini,
             _worktree: worktree,
         })
@@ -1001,6 +1079,101 @@ mod tests {
         );
         assert_eq!(manager.load("two").unwrap().status, RunStatus::Stopped);
         manager.finish(first);
+    }
+
+    fn end(manager: &RunManager, lease: RunLease) {
+        manager.transition(
+            &lease.entry.id,
+            RunStatus::Failed,
+            Some(TerminalReason::Other),
+            Some("fixture complete".into()),
+        );
+        manager.finish(lease);
+    }
+
+    #[tokio::test]
+    async fn a_higher_limit_frees_slots_at_once_and_a_lower_one_as_runs_end() {
+        let manager = manager(1);
+        let free = |manager: &RunManager| manager.inner.limit.available_permits();
+        assert_eq!(free(&manager), 1);
+
+        manager.set_limit(3);
+        assert_eq!(free(&manager), 3);
+        manager.set_limit(0);
+        assert_eq!(free(&manager), 1, "never below one");
+        manager.set_limit(2);
+        assert_eq!(free(&manager), 2);
+
+        // Both slots in use, then the limit drops to one: nothing stops,
+        // and the first run to end keeps its slot out.
+        let one = manager
+            .start(admit(&manager, run("one", "thread-one", "request-one")))
+            .await
+            .unwrap();
+        let two = manager
+            .start(admit(&manager, run("two", "thread-two", "request-two")))
+            .await
+            .unwrap();
+        manager.set_limit(1);
+        assert_eq!(free(&manager), 0);
+        let three = admit(&manager, run("three", "thread-three", "request-three"));
+        let waiter = {
+            let manager = manager.clone();
+            tokio::spawn(async move { manager.start(three).await.unwrap() })
+        };
+        tokio::task::yield_now().await;
+        end(&manager, one);
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished(), "two still holds the one slot");
+        end(&manager, two);
+        let three = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("the slot two gave back went to the waiting run")
+            .unwrap();
+        assert_eq!(free(&manager), 0);
+        end(&manager, three);
+        assert_eq!(free(&manager), 1);
+
+        // Raised again while a slot is still owed: the debt is forgiven
+        // before any permit is added.
+        let four = manager
+            .start(admit(&manager, run("four", "thread-four", "request-four")))
+            .await
+            .unwrap();
+        manager.set_limit(3);
+        let five = manager
+            .start(admit(&manager, run("five", "thread-five", "request-five")))
+            .await
+            .unwrap();
+        manager.set_limit(1);
+        assert_eq!(free(&manager), 0);
+        manager.set_limit(2);
+        assert_eq!(free(&manager), 0, "two runs hold the two slots");
+        end(&manager, four);
+        end(&manager, five);
+        assert_eq!(free(&manager), 2);
+    }
+
+    #[tokio::test]
+    async fn a_slot_let_go_before_its_lease_is_made_still_repays_a_lower_limit() {
+        let manager = manager(2);
+        let free = |manager: &RunManager| manager.inner.limit.available_permits();
+        let one = manager
+            .start(admit(&manager, run("one", "thread-one", "request-one")))
+            .await
+            .unwrap();
+        // What `start` holds between acquiring and building the lease,
+        // when a cancel makes it let go there.
+        let slot = Slot {
+            permit: Some(manager.inner.limit.clone().try_acquire_owned().unwrap()),
+            target: manager.inner.target.clone(),
+        };
+        manager.set_limit(1);
+        assert_eq!(free(&manager), 0);
+        drop(slot);
+        assert_eq!(free(&manager), 0, "one still holds the one slot");
+        end(&manager, one);
+        assert_eq!(free(&manager), 1);
     }
 
     #[tokio::test]

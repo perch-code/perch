@@ -442,7 +442,10 @@ code_font = "Fira Code"        # off macOS only
 
 Perch is light or dark as the system is unless `appearance` says otherwise.
 On Linux under X11 the system's setting doesn't reach Perch, so there it is
-light. On macOS code is set in SF Mono. Elsewhere it is `code_font`, else
+light. A new `appearance` applies at once, but going back to `"system"`
+from light or dark takes the system's appearance as it is then, and Perch
+follows the system's later switches only after a restart. On macOS code is
+set in SF Mono. Elsewhere it is `code_font`, read when Perch starts, else
 the first installed of JetBrains Mono, DejaVu Sans Mono, Noto Sans Mono,
 Liberation Mono, Adwaita Mono and Droid Sans Mono.
 
@@ -489,6 +492,34 @@ Schema upgrades use preserving, transactional migrations: local discussions,
 agent attempts, session IDs, and activity history survive. Perch refuses an
 unsupported or newer schema without deleting it, and a failed migration leaves
 the original database in place.
+
+## Settings
+
+`Cmd-,` (`Ctrl-,` off macOS), **Settings…** in the Perch menu, or the gear
+at the foot of the sidebar opens Settings over the window: General,
+Appearance, Agents, Work, Repositories and Language servers. The search box
+finds a setting in any section. `Escape` clears the search, then closes
+Settings, as do `Cmd-[` and `Cmd-W`.
+
+Settings is a view of `config.toml`, which stays the one place settings
+live. Each control writes its own key and leaves the rest of the file as it
+was, comments included. The arrow beside a setting's title shows the file
+sets it; clicking it takes the key out, back to the default. A text field
+writes on `Enter` or when you leave it, and `Escape` puts back what the file
+has. Repositories has a card for each `[[repo]]`, with **Remove
+repository** and, at the end, **Add repository…**.
+
+Perch looks at the file every two seconds, so an edit you make by hand is
+taken up while it runs. A file that doesn't parse changes nothing: Settings
+says why and turns its controls off, and Perch goes on with what it read
+last until the file is fixed. **Open in editor** opens it.
+
+Most settings apply at once. A new executable or models list makes Perch
+look for the agents again. Lowering **Runs at once** lets the runs going
+finish and holds new ones until there is room. Turning off **Start language
+servers without asking** sends servers on code no longer trusted back to
+asking. Zoom, code font size and the code font apply after a restart;
+Settings marks the ones waiting and offers to restart Perch.
 
 ## Starting work
 

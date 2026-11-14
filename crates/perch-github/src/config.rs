@@ -28,7 +28,8 @@ pub struct Config {
     /// `[lsp]`: the language servers Perch runs.
     #[serde(default)]
     pub lsp: LspConfig,
-    /// `[display]`: how big Perch draws. Read at startup.
+    /// `[display]`: how big Perch draws. Read when Perch starts; a change
+    /// made while it runs waits for a restart.
     #[serde(default)]
     pub display: DisplayConfig,
     /// `[ui]`: how the window looks.
@@ -98,7 +99,7 @@ pub struct CodexConfig {
     #[serde(default)]
     pub models: Vec<String>,
     /// The effort names each model takes, from the catalog, keyed by
-    /// model. Filled by discovery at startup, never by the file. A model
+    /// model. Filled by discovery, never by the file. A model
     /// not listed here is assumed to take every level.
     #[serde(skip)]
     pub efforts: BTreeMap<String, Vec<String>>,
@@ -309,6 +310,19 @@ pub enum Appearance {
     System,
     Light,
     Dark,
+}
+
+impl Appearance {
+    pub const ALL: [Appearance; 3] = [Appearance::System, Appearance::Light, Appearance::Dark];
+
+    /// As config.toml spells it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
 }
 
 /// `[lsp]`: the language servers Perch runs.
@@ -969,13 +983,32 @@ impl Config {
         }
     }
 
+    /// The config in `path`, or why it can't be had: the file can't be
+    /// read, or doesn't parse. Unlike `load_from` it never falls back to
+    /// the defaults over a broken file, so a caller can say what is wrong
+    /// and keep what it had. A missing file is the defaults, as it is at
+    /// startup.
+    pub fn read(path: &Path) -> Result<Self, String> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => Self::parse_text(&text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::fallback()),
+            Err(e) => Err(format!("can't read {}: {e}", path.display())),
+        }
+    }
+
+    /// The text of a config file as a config, or one line saying where and
+    /// why it doesn't parse.
+    pub fn parse_text(text: &str) -> Result<Self, String> {
+        Self::parse(text).map_err(|e| toml_error_line(text, e.span(), e.message()))
+    }
+
     /// The file's text as a config. A file that still declares its
     /// repositories under `[[project]]` is not loaded at all: the fallback
     /// comes back with one warning naming the new key. Taking everything but
     /// that table would look like a config with no repositories, which is
     /// harder to notice than one with none of the reader's settings and a
     /// line saying why.
-    fn parse(text: &str) -> Result<Self, toml::de::Error> {
+    pub(crate) fn parse(text: &str) -> Result<Self, toml::de::Error> {
         let mut c = toml::from_str::<Config>(text)?;
         if !c.project.is_empty() {
             let mut refused = Self::fallback();
@@ -1118,6 +1151,29 @@ impl Config {
             project: Vec::new(),
             warnings: Vec::new(),
         }
+    }
+}
+
+/// A TOML error as one line, `line 3: expected ...`, for a notice or a
+/// banner. Both toml and toml_edit render a multi-line snippet, which reads
+/// badly anywhere but a terminal.
+pub(crate) fn toml_error_line(
+    text: &str,
+    span: Option<std::ops::Range<usize>>,
+    message: &str,
+) -> String {
+    let message = message.trim();
+    match span {
+        Some(span) => {
+            let at = span.start.min(text.len());
+            let line = text.as_bytes()[..at]
+                .iter()
+                .filter(|&&b| b == b'\n')
+                .count()
+                + 1;
+            format!("line {line}: {message}")
+        }
+        None => message.to_string(),
     }
 }
 

@@ -53,7 +53,7 @@ pub(super) async fn load_dashboard(ctx: &Ctx, item_id: &str) {
         Ok((base_refs, preferences, groups, findings)) => {
             let _ = ctx.events.send(Event::ReviewDashboard {
                 item_id: item_id.to_string(),
-                capabilities: ctx.review_capabilities.as_ref().clone(),
+                capabilities: ctx.review_capabilities().as_ref().clone(),
                 preferences,
                 base_refs,
                 groups,
@@ -1671,8 +1671,8 @@ fn validate_launch(ctx: &Ctx, request: &ReviewLaunchRequest) -> Result<(), Strin
                 reviewer.backend.name()
             ));
         }
-        let capability = ctx
-            .review_capabilities
+        let capabilities = ctx.review_capabilities();
+        let capability = capabilities
             .iter()
             .find(|capability| capability.backend == reviewer.backend)
             .ok_or_else(|| format!("{} review support was not checked", reviewer.backend.name()))?;
@@ -1743,8 +1743,8 @@ fn new_attempt(
     run_id: Option<String>,
     created_at: Timestamp,
 ) -> NewReviewerAttempt {
-    let capability = ctx
-        .review_capabilities
+    let capabilities = ctx.review_capabilities();
+    let capability = capabilities
         .iter()
         .find(|capability| capability.backend == choice.backend);
     NewReviewerAttempt {

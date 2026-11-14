@@ -12,6 +12,7 @@ pub mod new_work;
 pub mod notifications;
 pub mod open_box;
 pub mod profile_card;
+pub mod settings;
 pub mod sidebar;
 pub mod titlebar;
 pub mod toast;
@@ -378,6 +379,8 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         crate::review::go_to::palette(state, review, backend.clone()),
         // Open…'s box, as modal as the palette.
         open_box::overlay(state),
+        // Settings, over the whole window but its toasts.
+        settings::overlay(state, backend.clone()),
         // Start work's confirmation, as modal.
         crate::review::start_work::overlay(state, backend.clone()),
         // A run's raw output, over the Review popover it was opened from.
@@ -438,7 +441,15 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     Some(PointerButton::X2) => Some(false),
                     _ => None,
                 } {
-                    history::travel(state, review, &pointer_backend, back);
+                    // Settings covers the window: back shuts it, as Cmd-[
+                    // does, rather than moving what is under it unseen.
+                    if state.settings.open.get_untracked() {
+                        if back {
+                            settings::close(state, true);
+                        }
+                    } else {
+                        history::travel(state, review, &pointer_backend, back);
+                    }
                     return EventPropagation::Stop;
                 }
                 dismiss_popovers(review, cx.hit_path.as_deref());
@@ -470,6 +481,11 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                 if state.start_work_confirm.with(Option::is_some) {
                     return crate::review::start_work::key(state, key_backend, key);
                 }
+                // Settings covers the window: none of the window's keys
+                // reach what is under it.
+                if state.settings.open.get() {
+                    return settings::key(state, cx, key);
+                }
                 // Escape puts a run's raw output away, from wherever the
                 // keyboard is, before it reaches a popover under it.
                 if key.code == Code::Escape
@@ -484,8 +500,9 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     new_work::open(state, key_backend);
                     return EventPropagation::Stop;
                 }
-                // New Window and Open… are the Perch menu's on macOS. Off
-                // it there is no menu to hold them, so their keys are here.
+                // New Window, Open… and Settings… are the Perch menu's on
+                // macOS. Off it there is no menu to hold them, so their
+                // keys are here.
                 if !cfg!(target_os = "macos") {
                     if key.code == Code::KeyN && key.modifiers == OS_MOD | Modifiers::SHIFT {
                         crate::windows::open_new();
@@ -493,6 +510,10 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                     }
                     if key.code == Code::KeyO && key.modifiers == OS_MOD {
                         open_box::show(state, focused_descendant(cx, root_id));
+                        return EventPropagation::Stop;
+                    }
+                    if key.code == Code::Comma && key.modifiers == OS_MOD {
+                        settings::show(state, focused_descendant(cx, root_id));
                         return EventPropagation::Stop;
                     }
                 }
@@ -913,11 +934,12 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
         // Window-level shortcuts. Key events bubble from whatever has focus, so
         // a handler on the root view catches them wherever the reader is.
         .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
-            // None of these while Cmd-P's palette, Open… or Start work's
-            // confirmation is up: they are modal.
+            // None of these while Cmd-P's palette, Open…, Start work's
+            // confirmation or Settings is up: they are modal.
             if review.go_to.open.get()
                 || state.open_box.open.get()
                 || state.start_work_confirm.with(Option::is_some)
+                || state.settings.open.get()
             {
                 return EventPropagation::Continue;
             }

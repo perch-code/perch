@@ -45,12 +45,80 @@ pub fn prefer(appearance: Option<Appearance>) {
     }
 }
 
+thread_local! {
+    /// The appearance a window last said the system is in, heard while
+    /// `[ui] appearance` named none, for going back to the system's.
+    static SYSTEM: std::cell::Cell<Option<Appearance>> = const { std::cell::Cell::new(None) };
+}
+
 /// The appearance a window says the system is in. Taken unless `[ui]
 /// appearance` names one.
+///
+/// It is remembered only while nothing is preferred. With a preference
+/// set, floem keeps the windows in it and says so with this same event,
+/// so what arrives then is the preference over again, not the system.
 pub fn system_appearance(to: Appearance) {
     if PREFERRED.get().is_none() {
+        SYSTEM.set(Some(to));
         set_appearance(to);
     }
+}
+
+/// `[ui] appearance` as config.toml now has it, from Settings or an edit
+/// while Perch runs: the colours and floem's windows go over to it. A
+/// no-op when it is what they already follow.
+///
+/// Going back to the system's takes the system's appearance as macOS
+/// says it now, else as a window last said it. floem has no way to let
+/// go of an appearance it was told to keep, so the windows are kept in
+/// the system's present one, and a switch of the system's later isn't
+/// followed until Perch starts again.
+pub fn choose(choice: perch_github::config::Appearance) {
+    let chosen = Appearance::chosen(choice);
+    if chosen == PREFERRED.get() {
+        return;
+    }
+    prefer(chosen);
+    let shown = match chosen {
+        Some(appearance) => appearance,
+        None => {
+            let system = system_now().or(SYSTEM.get()).unwrap_or_else(appearance);
+            SYSTEM.set(Some(system));
+            set_appearance(system);
+            system
+        }
+    };
+    floem::action::set_global_theme(shown.into());
+}
+
+/// Light or dark as macOS has it set now, whatever any window was told.
+#[cfg(target_os = "macos")]
+fn system_now() -> Option<Appearance> {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    use objc2_foundation::NSString;
+
+    let key = NSString::from_str("AppleInterfaceStyle");
+    // SAFETY: `standardUserDefaults` and `stringForKey:` are NSUserDefaults
+    // methods, the first returning the shared instance and the second an
+    // NSString or nil.
+    let style: Option<Retained<NSString>> = unsafe {
+        let defaults: Option<Retained<AnyObject>> =
+            msg_send![class!(NSUserDefaults), standardUserDefaults];
+        let defaults = defaults?;
+        msg_send![&*defaults, stringForKey: &*key]
+    };
+    // The key is there only in dark mode.
+    Some(match style {
+        Some(style) if style.to_string().eq_ignore_ascii_case("dark") => Appearance::Dark,
+        _ => Appearance::Light,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_now() -> Option<Appearance> {
+    None
 }
 
 /// Switches every colour, from the window's theme. A no-op when nothing
@@ -655,6 +723,22 @@ fn display() -> perch_github::config::DisplayConfig {
     DISPLAY.get().cloned().unwrap_or_default()
 }
 
+/// `[display]` as Perch started with it. Zoom and the code font size
+/// don't change while Perch runs, so a file that says otherwise waits
+/// for a restart.
+pub fn started_display() -> perch_github::config::DisplayConfig {
+    display()
+}
+
+/// `[ui] code_font` as Perch started with it, set once at startup.
+static CODE_FONT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// The code font Perch started with, which a new `[ui] code_font` waits
+/// for a restart to replace.
+pub fn started_code_font() -> Option<String> {
+    CODE_FONT.get().cloned().flatten()
+}
+
 /// What every window is scaled by.
 pub fn zoom() -> f64 {
     display().zoom
@@ -746,6 +830,8 @@ pub fn install_code_font(_wanted: Option<&str>) {
     use floem::peniko::Blob;
     use floem::text::FontStyle;
 
+    let _ = CODE_FONT.set(_wanted.map(str::to_string));
+
     let faces = [
         ("SFNSMono.ttf", FontStyle::Normal),
         ("SFNSMonoItalic.ttf", FontStyle::Italic),
@@ -778,6 +864,8 @@ pub fn install_code_font(_wanted: Option<&str>) {
 #[cfg(not(target_os = "macos"))]
 pub fn install_code_font(wanted: Option<&str>) {
     use fontique::GenericFamily;
+
+    let _ = CODE_FONT.set(wanted.map(str::to_string));
 
     let mut guard = FONT_CONTEXT.lock();
     let fonts = &mut *guard;

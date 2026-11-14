@@ -3,9 +3,16 @@
 Perch reads `~/.perch/config.toml`, or `$PERCH_HOME/config.toml` when
 `PERCH_HOME` is set. Every setting is optional.
 
+Settings (`Cmd-,`, or the gear at the foot of the sidebar) edits this file.
+It changes only the keys you touch, so your comments and layout stay. Edits
+you make by hand while Perch runs are taken up within a couple of seconds.
+Everything applies at once except `[display]` and `[ui] code_font`, which
+wait for a restart. Settings has no control for `token`, or for a
+repository's `github` and `root`.
+
 | Key | Default | What it does |
 |---|---|---|
-| `token` | none | GitHub token, used only when the env vars and `gh` have none |
+| `token` | none | GitHub token, used only when the env vars and `gh` have none; looked for again only when Perch has no token or GitHub refuses it |
 | `poll_interval_secs` | `60` | Shortest time between inbox polls; GitHub can ask for longer |
 | `github_host` | none | A GitHub Enterprise host whose remotes count as GitHub |
 | `[agent] binary` | `"claude"` | Claude Code executable, a name on `PATH` or a path |
@@ -20,9 +27,9 @@ Perch reads `~/.perch/config.toml`, or `$PERCH_HOME/config.toml` when
 | `[work] branch_prefix` | `""` | Put before branch names Perch fills in, such as `"chris/"` |
 | `[work] approvals` | `"auto"` | Who answers a Work run's requests outside its sandbox: `"auto"` (the CLI's auto-reviewer, then you) or `"ask"` (you) |
 | `[ui] appearance` | `"system"` | `"light"`, `"dark"` or `"system"` |
-| `[ui] code_font` | none | Code font off macOS; on macOS code is always SF Mono |
-| `[display] zoom` | `1.0` | Scales the whole window, `0.75` to `2.0`; read at startup |
-| `[display] code_font_size` | `12` | Code font size before zoom, `8` to `32`; read at startup |
+| `[ui] code_font` | none | Code font off macOS; on macOS code is always SF Mono; applies after a restart |
+| `[display] zoom` | `1.0` | Scales the whole window, `0.75` to `2.0`; applies after a restart |
+| `[display] code_font_size` | `12` | Code font size before zoom, `8` to `32`; applies after a restart |
 | `[lsp] max_memory_mb` | `8192` | Memory all language servers may use before idle ones are stopped |
 | `[[repo]] github` | none | The repository's `owner/repo` on GitHub; leave out for a local-only repository |
 | `[[repo]] name` | the repo's name | Name shown in the sidebar |

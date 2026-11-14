@@ -28,6 +28,7 @@ tracing-appender = "0.2"
 jiff = { version = "0.2", features = ["serde"] }
 directories = "6"
 toml = "0.9"
+toml_edit = { version = "0.25", features = ["parse", "display"] }
 
 # macOS's default `split-debuginfo = "unpacked"` leaves debug info in each
 # codegen unit's `.o` in target/debug/deps, and cargo never deletes the ones

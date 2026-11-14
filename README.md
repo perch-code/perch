@@ -41,8 +41,9 @@ upgrade when one is detected.
 
 ## Setup
 
-Configure Perch with `~/.perch/config.toml`. See
-[docs/configuration.md](docs/configuration.md) for all settings.
+Configure Perch in Settings (`Cmd-,`) or by editing `~/.perch/config.toml`.
+Settings writes that file, and Perch takes up edits you make by hand while
+it runs. See [docs/configuration.md](docs/configuration.md) for all settings.
 
 ### GitHub
 

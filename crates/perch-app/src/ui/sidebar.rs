@@ -177,8 +177,9 @@ fn footer(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             crate::ui::feedback::button(state, review, backend.clone()),
             crate::ui::usage::button(state, review, backend.clone()),
         ))
+        .style(|s| s.items_center().gap(4.0))
         .into_any(),
-        None => Empty::new().into_any(),
+        None => Empty::new().style(|s| s.hide()).into_any(),
     };
     // An update waiting for a restart takes the login's place.
     let updating =
@@ -213,7 +214,8 @@ fn footer(state: AppState, backend: Rc<Backend>) -> impl IntoView {
     Stack::horizontal((
         face,
         middle,
-        controls.style(|s| s.items_center().gap(4.0).flex_shrink(0.0_f32)),
+        Stack::horizontal((controls, settings_button(state)))
+            .style(|s| s.items_center().gap(4.0).flex_shrink(0.0_f32)),
     ))
     .debug_name("drawer footer")
     .style(|s| {
@@ -225,6 +227,30 @@ fn footer(state: AppState, backend: Rc<Backend>) -> impl IntoView {
             .border_top(1.0)
             .border_color(theme::nav_divider())
     })
+}
+
+/// The gear at the footer's end: Settings, as the Perch menu's
+/// Settings… and Cmd-, open it.
+fn settings_button(state: AppState) -> impl IntoView {
+    let button = Container::new(
+        sidebar_glyph(SidebarIcon::Gear, theme::nav_muted).style(|s| s.pointer_events_none()),
+    );
+    let id = button.view_id();
+    let button = button
+        .on_event_stop(el::Click, move |_, _| {
+            crate::ui::settings::show(state, Some(id))
+        })
+        .on_event(el::KeyDown, move |_, key: &KeyboardEvent| {
+            if matches!(key.code, Code::Enter | Code::Space) {
+                crate::ui::settings::show(state, Some(id));
+                EventPropagation::Stop
+            } else {
+                EventPropagation::Continue
+            }
+        })
+        .style(move |s| footer_button(s, state.settings.open.get()))
+        .debug_name("settings-button");
+    crate::review::cards::tip(button, "Settings".to_string())
 }
 
 const FOOTER_BUTTON: f64 = 26.0;

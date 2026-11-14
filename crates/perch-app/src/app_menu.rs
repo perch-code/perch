@@ -1,5 +1,5 @@
-//! Check for Updates…, New Window, Open…, Send Feedback… and Star Perch on
-//! GitHub in the Perch menu. The menu is
+//! Check for Updates…, Settings…, New Window, Open…, Send Feedback… and
+//! Star Perch on GitHub in the Perch menu. The menu is
 //! winit's; the items' target is Perch's own, not a window's, so they
 //! still work with no window left.
 
@@ -35,6 +35,11 @@ mod mac {
                 crate::windows::check_for_update();
             }
 
+            #[unsafe(method(openSettings:))]
+            fn open_settings(&self, _sender: Option<&AnyObject>) {
+                crate::windows::show_settings();
+            }
+
             #[unsafe(method(sendFeedback:))]
             fn send_feedback(&self, _sender: Option<&AnyObject>) {
                 crate::windows::show_feedback();
@@ -52,9 +57,9 @@ mod mac {
             return;
         };
         let app = NSApplication::sharedApplication(mtm);
-        // About and Check for Updates…, a separator, then New Window,
-        // Open…, Send Feedback…, Star Perch on GitHub and a separator of
-        // their own.
+        // About and Check for Updates…, a separator, Settings… and a
+        // separator, as macOS apps have it, then New Window, Open…, Send
+        // Feedback…, Star Perch on GitHub and a separator of their own.
         let Some(menu) = app
             .mainMenu()
             .and_then(|bar| bar.itemAtIndex(0))
@@ -112,8 +117,21 @@ mod mac {
             )
         };
         unsafe { updates.setTarget(Some(&target)) };
+        let settings = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                mtm.alloc(),
+                ns_string!("Settings…"),
+                Some(sel!(openSettings:)),
+                ns_string!(","),
+            )
+        };
+        settings.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+        unsafe { settings.setTarget(Some(&target)) };
         menu.insertItem_atIndex(&updates, menu.numberOfItems().min(1));
         let at = menu.numberOfItems().min(3);
+        menu.insertItem_atIndex(&settings, at);
+        menu.insertItem_atIndex(&NSMenuItem::separatorItem(mtm), at + 1);
+        let at = at + 2;
         menu.insertItem_atIndex(&item, at);
         menu.insertItem_atIndex(&open, at + 1);
         menu.insertItem_atIndex(&feedback, at + 2);

@@ -122,6 +122,8 @@ pub fn toggle(app: AppState, review: ReviewState, opener: Option<floem::ViewId>)
 /// there is, or a new one of `kind`. It hangs from the drawer's footer, so
 /// a shut drawer opens with it.
 pub fn open(app: AppState, review: ReviewState, kind: FeedbackKind, opener: Option<floem::ViewId>) {
+    // It hangs from the drawer, under Settings, where it couldn't be seen.
+    crate::ui::settings::close(app, false);
     app.show_sidebar(true);
     crate::review::review_menu::close(review, false);
     crate::ui::agents::dropdown::close(review, false);
@@ -1463,9 +1465,15 @@ mod tests {
             "{bug:?} {gauge:?}"
         );
         assert!(footer.contains(bug.center()) && footer.contains(gauge.center()));
+        // Settings' gear comes last, on the gutter.
+        let gear = rect(&harness, "settings-button");
         assert!(
-            (footer.x1 - theme::NAV_GUTTER - gauge.x1).abs() < 1.0,
-            "on the gutter: {footer:?} {gauge:?}"
+            gauge.x1 <= gear.x0 && gear.x0 - gauge.x1 < 16.0,
+            "{gauge:?} {gear:?}"
+        );
+        assert!(
+            (footer.x1 - theme::NAV_GUTTER - gear.x1).abs() < 1.0,
+            "on the gutter: {footer:?} {gear:?}"
         );
 
         let (harness, _app, _review) = pull_request_harness();

@@ -249,6 +249,35 @@ pub fn sidebar_icon(name: SidebarIcon, color: Color) -> String {
             r#"<path d="M4.5 11.5 L11.5 4.5 M5.8 4.5 H11.5 V10.2" fill="none" stroke="{c}"
                      stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>"#
         ),
+        // A cog: a ring with eight teeth round a hub. Settings.
+        SidebarIcon::Gear => format!(
+            r#"<circle cx="8" cy="8" r="4.3" fill="none" stroke="{c}" stroke-width="1.4"/>
+               <circle cx="8" cy="8" r="1.6" fill="none" stroke="{c}" stroke-width="1.4"/>
+               <path d="M8 1.6 V3.4 M8 12.6 V14.4 M1.6 8 H3.4 M12.6 8 H14.4
+                       M3.5 3.5 L4.8 4.8 M11.2 11.2 L12.5 12.5 M3.5 12.5 L4.8 11.2
+                       M11.2 4.8 L12.5 3.5" fill="none" stroke="{c}" stroke-width="1.9"
+                     stroke-linecap="round"/>"#
+        ),
+        // A painter's palette with its thumb notch and three dabs of paint:
+        // how Perch looks.
+        SidebarIcon::Palette => format!(
+            r#"<path d="M8 2 A6 6 0 1 0 8 14 C9.1 14 9.5 13.2 9.1 12.4 C8.6 11.4 9.2 10.4 10.4 10.4
+                       H11.8 A2.2 2.2 0 0 0 14 8.2 C14 4.7 11.3 2 8 2 Z" fill="none"
+                     stroke="{c}" stroke-width="1.4" stroke-linejoin="round"/>
+               <circle cx="5" cy="7.6" r="1" fill="{c}"/>
+               <circle cx="7.2" cy="4.9" r="1" fill="{c}"/>
+               <circle cx="10.4" cy="5.4" r="1" fill="{c}"/>"#
+        ),
+        // Two rack units, a light on each: a server, as a language
+        // server is.
+        SidebarIcon::Server => format!(
+            r#"<rect x="2.3" y="2.5" width="11.4" height="4.7" rx="1.3" fill="none" stroke="{c}"
+                     stroke-width="1.4"/>
+               <rect x="2.3" y="8.8" width="11.4" height="4.7" rx="1.3" fill="none" stroke="{c}"
+                     stroke-width="1.4"/>
+               <circle cx="5" cy="4.85" r="0.9" fill="{c}"/>
+               <circle cx="5" cy="11.15" r="0.9" fill="{c}"/>"#
+        ),
         // Two rules, a knob on each: the settings of a view.
         SidebarIcon::View => format!(
             r#"<path d="M2.5 5 H7.6 M12 5 H13.5 M2.5 11 H4 M8.4 11 H13.5" stroke="{c}"
@@ -740,13 +769,22 @@ pub enum SidebarIcon {
     Feedback,
     /// A branch joining a line: whether a pull request merges cleanly.
     Merge,
+    /// A cog: Settings, and its General section.
+    Gear,
+    /// A painter's palette: Settings' Appearance section.
+    Palette,
+    /// Two rack units: Settings' Language servers section.
+    Server,
 }
 
 impl SidebarIcon {
     /// Every glyph, so a test can check them all and a new one cannot be
     /// added without being drawn.
     #[cfg(test)]
-    pub const ALL: [SidebarIcon; 79] = [
+    pub const ALL: [SidebarIcon; 82] = [
+        SidebarIcon::Gear,
+        SidebarIcon::Palette,
+        SidebarIcon::Server,
         SidebarIcon::View,
         SidebarIcon::Shield,
         SidebarIcon::Coins,

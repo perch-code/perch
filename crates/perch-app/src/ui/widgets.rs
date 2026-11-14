@@ -198,6 +198,25 @@ pub fn reveal_in_file_manager(path: &std::path::Path) {
     }
 }
 
+/// Open a text file in the reader's editor: on macOS the app set for plain
+/// text (`open -t`), since a `.toml` may belong to nothing; elsewhere the
+/// desktop's choice for the file.
+pub fn open_in_editor(path: &std::path::Path) {
+    let mut command = std::process::Command::new(OPENER);
+    if cfg!(target_os = "macos") {
+        command.arg("-t");
+    }
+    #[cfg(test)]
+    {
+        let _ = command;
+        OPENED.with(|opened| opened.borrow_mut().push(path.display().to_string()));
+    }
+    #[cfg(not(test))]
+    if let Err(e) = command.arg(path).spawn() {
+        tracing::warn!(path = %path.display(), error = %e, "could not open in an editor");
+    }
+}
+
 /// Open a terminal window in a directory: Terminal on macOS. Elsewhere
 /// `$TERMINAL`, as the reader set it, then the common ones in turn; each
 /// starts in the directory it is spawned in.

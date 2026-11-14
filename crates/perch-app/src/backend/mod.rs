@@ -27,6 +27,7 @@ use tokio::sync::Semaphore;
 
 pub(crate) use issue_draft::with_found_in;
 pub use open_pull::{DescriptionOutcome, OpenStep, PullRequestReadiness};
+pub use settings::SettingsFile;
 use windows::{CommandSender, View, Views};
 pub use windows::{EventSender, WindowId, NO_WINDOW};
 
@@ -38,6 +39,7 @@ mod kept_servers;
 pub(crate) mod open_pull;
 pub(crate) mod reviews;
 pub(crate) mod runs;
+mod settings;
 mod star;
 mod update;
 mod windows;
@@ -534,6 +536,9 @@ pub enum Command {
     RemoveRepository {
         identity: String,
     },
+    /// Change keys in config.toml, from the Settings page, and take the
+    /// file up.
+    WriteSettings(Vec<perch_github::Setting>),
     /// The reader's answer to a Work run's request.
     AnswerApproval {
         run_id: String,
@@ -1003,8 +1008,8 @@ pub enum Event {
     /// number: the faces on item and Browse rows.
     Participants(Vec<((String, u64), Vec<perch_github::Participant>)>),
     /// Declared repository identities and display names for filters and
-    /// item context. Sent at startup, and again when Add repository adds
-    /// one.
+    /// item context. Sent at startup, and again whenever config.toml is
+    /// taken up.
     Repos(Vec<perch_github::DeclaredRepo>),
     /// The servers the reader trusts on everything in a repository, as
     /// `(repository, server)`: sent at startup and after each change.
@@ -1104,8 +1109,12 @@ pub enum Event {
     /// Something the reader asked for that went through, for a line in
     /// the popup that does not read as a complaint.
     Done(String),
-    /// What config.toml says about the agent, for the pickers.
+    /// The agents config.toml names, as discovery found them, for the
+    /// pickers: at startup and whenever either changes.
     AgentConfig(perch_github::AgentConfig),
+    /// config.toml as written, for the Settings page: at startup, after
+    /// each write, and when an edit made outside Perch is noticed.
+    Settings(SettingsFile),
     /// Who decides Work requests, whenever config or a pick changes it.
     WorkApprovals(WorkApprovals),
     /// How much of each CLI's plan limits is used, whenever that changes.
@@ -3481,6 +3490,13 @@ impl Backend {
         });
     }
 
+    /// Write `changes` to config.toml. Every window hears the file as it
+    /// then is in `Event::Settings`, or this one a notice when the write
+    /// is refused.
+    pub fn write_settings(&self, changes: Vec<perch_github::Setting>) {
+        let _ = self.commands.send(Command::WriteSettings(changes));
+    }
+
     pub fn answer_approval(&self, run_id: &str, approval_id: &str, answer: ApprovalAnswer) {
         let _ = self.commands.send(Command::AnswerApproval {
             run_id: run_id.to_string(),
@@ -4023,6 +4039,27 @@ fn watch_usage(agent: &perch_github::AgentConfig, data_root: &Path, events: &Eve
     });
 }
 
+/// What each agent's CLI says it can do as a native reviewer.
+async fn detect_review_capabilities(
+    agent: &perch_github::AgentConfig,
+) -> Vec<perch_agent::ReviewCapability> {
+    let (claude, codex, gemini) = tokio::join!(
+        perch_agent::detect_review_capability(
+            perch_agent::Backend::ClaudeCode,
+            Path::new(&agent.binary),
+        ),
+        perch_agent::detect_review_capability(
+            perch_agent::Backend::Codex,
+            Path::new(&agent.codex.binary),
+        ),
+        perch_agent::detect_review_capability(
+            perch_agent::Backend::Gemini,
+            Path::new(&agent.gemini.binary),
+        ),
+    );
+    vec![claude, codex, gemini]
+}
+
 /// Start the worker thread. Returns a handle windows are opened from, and
 /// the events, each with the window whose view sent it.
 pub fn spawn() -> (Backend, std::sync::mpsc::Receiver<(WindowId, Event)>) {
@@ -4091,13 +4128,34 @@ async fn run(
     pull_request_review_attempts: Arc<PullRequestReviewAttempts>,
 ) {
     tracing::info!("backend started");
-    let mut config = Config::load();
+    // The file is read once, for the running config and the Settings page
+    // both. Stamped first, so an edit landing during the read is looked
+    // at again.
+    let config_file = perch_github::config::config_path();
+    let config_stamp = config_file.as_deref().and_then(settings::stamp);
+    let (mut config, config_text, config_error) = match config_file.as_deref().map(settings::read) {
+        Some(Ok((text, config))) => (config, Some(text), None),
+        // The defaults, with the reason on the Settings page.
+        Some(Err(error)) => (Config::load(), None, Some(error)),
+        None => (Config::load(), None, None),
+    };
     // A `[[repo]]` with a root and no `github` is whatever its root
     // is, which takes a look at the directory before anything reads the
     // declared list. No token is needed: the scan reads the root's own
     // config and fetches nothing.
     crate::repos::resolve(&mut config, &perch_git::cmd::Git::new(None)).await;
     tracing::info!(poll = config.poll_interval_secs, repos = ?config.declared(), "config loaded");
+    let settings_file = match (&config_file, config_text, config_error) {
+        (Some(path), Some(text), _) => Some(SettingsFile::read(path, &text, &config)),
+        (Some(path), _, Some(error)) => Some(SettingsFile::broken(path, error)),
+        _ => None,
+    };
+    let settings = Arc::new(settings::Held::new(
+        config_stamp,
+        config.agent.clone(),
+        &config.warnings,
+        settings_file.clone(),
+    ));
 
     // Which agents are installed, asked alongside the GitHub setup rather
     // than before it: Codex's catalog can take a few seconds on a cold
@@ -4143,6 +4201,9 @@ async fn run(
     }));
     let _ = events.send(Event::WorkDefaults(config.work.clone()));
     let _ = events.send(Event::GithubHosts(config.github_hosts()));
+    if let Some(file) = settings_file {
+        let _ = events.send(Event::Settings(file));
+    }
     send_trusted_servers(&cache, &events);
     let mut initial_notifications = Vec::new();
     let mut initial_faces = RowFaces::default();
@@ -4251,21 +4312,9 @@ async fn run(
         config.agent = agent;
     }
     watch_usage(&config.agent, &data_root, &events);
-    let (claude_review, codex_review, gemini_review) = tokio::join!(
-        perch_agent::detect_review_capability(
-            perch_agent::Backend::ClaudeCode,
-            Path::new(&config.agent.binary),
-        ),
-        perch_agent::detect_review_capability(
-            perch_agent::Backend::Codex,
-            Path::new(&config.agent.codex.binary),
-        ),
-        perch_agent::detect_review_capability(
-            perch_agent::Backend::Gemini,
-            Path::new(&config.agent.gemini.binary),
-        ),
-    );
-    let review_capabilities = Arc::new(vec![claude_review, codex_review, gemini_review]);
+    let review_capabilities = Arc::new(std::sync::RwLock::new(Arc::new(
+        detect_review_capabilities(&config.agent).await,
+    )));
     let review_snapshots = Arc::new(ReviewSnapshotStore::new(data_root.clone()));
     let knowledge = match perch_knowledge::Knowledge::open(data_root.join("knowledge")) {
         Ok(knowledge) => Some(Arc::new(knowledge)),
@@ -4289,6 +4338,7 @@ async fn run(
         preparer: preparer.clone(),
         cache: cache.clone(),
         config: Arc::new(std::sync::RwLock::new(config.clone())),
+        settings,
         slot: checkout.clone(),
         kept_contexts: Default::default(),
         language_servers: language_servers.clone(),
@@ -4335,6 +4385,10 @@ async fn run(
     send_agent_runs(&ctx, 50);
     reviews::recover(&ctx).await;
     update::spawn(ctx.clone());
+    // Edits made to config.toml outside Perch, taken up as they land.
+    if let Some(path) = config_file {
+        settings::watch(ctx.clone(), path);
+    }
     // A language server grows as it loads, so whether the kept ones fit
     // beside the ones on show is looked at again every little while, not
     // only when one is set aside.
@@ -4427,6 +4481,12 @@ async fn run(
     // the clock still runs, so a `gh auth login` since launch is found
     // without the reader asking.
     let mut next_auto_poll = tokio::time::Instant::now();
+    // When the last poll was, and how soon after it the next may come
+    // whatever the interval: GitHub's own poll interval, or a rate limit's
+    // backoff. A new interval in config.toml moves the scheduled poll, but
+    // never in front of this.
+    let mut last_poll: Option<tokio::time::Instant> = None;
+    let mut poll_floor = next_auto_poll;
     let mut next_notification_reconcile = next_auto_poll;
     let mut pending_notification_reconcile = false;
     // Snoozes lapse on the wall clock, which a sleeping Mac keeps and a
@@ -4440,6 +4500,12 @@ async fn run(
         let (window, command) = tokio::select! {
             _ = tokio::time::sleep_until(next_auto_poll) => (NO_WINDOW, Command::Refresh),
             _ = snooze_clock.tick() => (NO_WINDOW, Command::WakeSnoozed),
+            () = base.settings.poll_interval_changed() => {
+                if let Some(last) = last_poll {
+                    next_auto_poll = next_poll(last, poll_floor, base.config().poll_interval_secs);
+                }
+                continue;
+            }
             cmd = commands.recv() => match cmd {
                 Some(cmd) => cmd,
                 // The UI is gone.
@@ -4475,6 +4541,8 @@ async fn run(
                 let poll_after = refresh(&ctx, mode).await;
                 let now = tokio::time::Instant::now();
                 next_auto_poll = now + poll_after.wait;
+                last_poll = Some(now);
+                poll_floor = now + poll_after.floor;
                 if mode == NotificationPollMode::Reconcile {
                     if poll_after.completed {
                         pending_notification_reconcile = false;
@@ -4678,7 +4746,8 @@ async fn run(
                     match result {
                         Ok(()) => ctx.dismiss_notification(&thread_id),
                         Err(e) => {
-                            defer_polls_for_error(&e, &mut next_auto_poll);
+                            defer_polls_for_error(&e, &mut poll_floor);
+                            next_auto_poll = next_auto_poll.max(poll_floor);
                             tracing::warn!(thread = %thread_id, error = %e, "could not unsubscribe from notification");
                             ctx.notice(format!("Could not unsubscribe from the notification: {e}"));
                         }
@@ -5056,6 +5125,17 @@ async fn run(
                         ctx.send_work_approvals();
                         let _ = ctx.events.send(Event::Notice(message));
                     }
+                });
+            }
+            Command::WriteSettings(changes) => {
+                ctx.clear_notice();
+                let ctx = ctx.clone();
+                tokio::spawn(async move {
+                    let Some(path) = perch_github::config::config_path() else {
+                        ctx.notice("There is no place for config.toml");
+                        return;
+                    };
+                    settings::write(&ctx, &path, changes).await;
                 });
             }
             Command::AnswerApproval {
@@ -6190,9 +6270,13 @@ struct Ctx {
     credentials: Arc<Credentials>,
     preparer: Arc<Preparer>,
     cache: SharedCache,
-    /// Read through `config()`. Swapped whole when Add repository changes
-    /// the `[[repo]]` list; nothing else in it changes while Perch runs.
+    /// Read through `config()`. Swapped whole whenever config.toml is
+    /// taken up again: after a write from Settings or Add repository, and
+    /// after an edit made outside Perch. Its `agent` is what discovery
+    /// found, not the file's words.
     config: Arc<std::sync::RwLock<Arc<Config>>>,
+    /// What the backend keeps of config.toml between reads.
+    settings: Arc<settings::Held>,
     slot: Arc<std::sync::Mutex<Option<ReviewContext>>>,
     /// The contexts of the items this window last left.
     kept_contexts: KeptContexts,
@@ -6210,8 +6294,9 @@ struct Ctx {
     events: EventSender<Event>,
     /// Durable admission, the shared execution limit, and live children.
     runs: runs::RunManager,
-    /// Installed native-review contracts, captured once after CLI discovery.
-    review_capabilities: Arc<Vec<perch_agent::ReviewCapability>>,
+    /// Installed native-review contracts, captured after each CLI
+    /// discovery. Read through `review_capabilities()`.
+    review_capabilities: Arc<std::sync::RwLock<Arc<Vec<perch_agent::ReviewCapability>>>>,
     /// Perch-owned immutable source/object storage.
     review_snapshots: Arc<ReviewSnapshotStore>,
     /// Latest view navigation, shared with the synchronous UI command handle
@@ -6371,15 +6456,39 @@ impl Ctx {
             .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
     }
 
-    /// Put a new `[[repo]]` list in place, keeping everything else.
-    fn replace_repos(&self, repos: Vec<perch_github::RepoConfig>) {
+    /// Put a whole new config in place.
+    fn replace_config(&self, config: Config) {
+        let mut guard = self
+            .config
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Arc::new(config);
+    }
+
+    /// Put what discovery found about the agents in place, keeping
+    /// everything else.
+    fn replace_agent(&self, agent: perch_github::AgentConfig) {
         let mut guard = self
             .config
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut config = (**guard).clone();
-        config.repo = repos;
+        config.agent = agent;
         *guard = Arc::new(config);
+    }
+
+    fn review_capabilities(&self) -> Arc<Vec<perch_agent::ReviewCapability>> {
+        self.review_capabilities
+            .read()
+            .map(|capabilities| capabilities.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone())
+    }
+
+    fn set_review_capabilities(&self, capabilities: Vec<perch_agent::ReviewCapability>) {
+        *self
+            .review_capabilities
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Arc::new(capabilities);
     }
 
     /// The GitHub client, when there is a token.
@@ -13056,18 +13165,18 @@ async fn remove_repository(ctx: &Ctx, identity: &str, path: &Path) -> Result<(),
     Ok(())
 }
 
-/// Read the `[[repo]]` entries again and resolve them as at startup, and
-/// tell the sidebar. The rest of the file waits for a restart. A server
-/// held for an item in a repository now in the config may start.
+/// Take the whole file up again after Add or Remove repository changed
+/// its `[[repo]]` list (see `settings::take_up_whole_config`). A file that
+/// doesn't parse leaves the running config, its one warning saying why.
 async fn take_up_config(ctx: &Ctx, path: &Path) -> Config {
-    let mut reloaded = Config::load_from(path);
-    crate::repos::resolve(&mut reloaded, &perch_git::cmd::Git::new(None)).await;
-    ctx.replace_repos(reloaded.repo.clone());
-    let _ = ctx.events.send(Event::Repos(ctx.config().declared_repos()));
-    ctx.send_work_approvals();
-    let held = ctx.clone();
-    tokio::spawn(async move { start_held_servers_everywhere(&held).await });
-    reloaded
+    match settings::take_up_whole_config(ctx, path).await {
+        Ok(config) => config,
+        Err(error) => {
+            let mut config = (*ctx.config()).clone();
+            config.warnings = vec![format!("{} doesn't parse: {error}", path.display())];
+            config
+        }
+    }
 }
 
 /// The `base` setting of a repository's `[[repo]]` entry.
@@ -13648,6 +13757,9 @@ struct ReviewContext {
 /// interval, whichever is longer.
 struct PollAfter {
     wait: Duration,
+    /// The part of `wait` a shorter poll interval can't cut: what GitHub
+    /// asked for, or a rate limit's backoff.
+    floor: Duration,
     /// Whether GitHub returned a usable response. A requested full
     /// reconciliation remains pending after an error.
     completed: bool,
@@ -13670,6 +13782,16 @@ fn insert_by_activity(threads: &mut Vec<Thread>, thread: Thread) {
         .position(|shown| shown.updated_at < thread.updated_at)
         .unwrap_or(threads.len());
     threads.insert(at, thread);
+}
+
+/// When the next poll comes after one at `last`, `secs` apart, but never
+/// before `floor`.
+fn next_poll(
+    last: tokio::time::Instant,
+    floor: tokio::time::Instant,
+    secs: u64,
+) -> tokio::time::Instant {
+    (last + Duration::from_secs(secs.max(1))).max(floor)
 }
 
 fn defer_polls_for_error(error: &perch_github::Error, next_auto_poll: &mut tokio::time::Instant) {
@@ -13726,6 +13848,7 @@ async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
     let wait = Duration::from_secs(config.poll_interval_secs.max(30));
     let no_poll = PollAfter {
         wait,
+        floor: Duration::from_secs(30),
         completed: false,
     };
     // A launch without a token is not the last word: a `gh auth login`
@@ -13799,24 +13922,27 @@ async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
             }));
             PollAfter {
                 wait,
+                floor: result.poll_interval,
                 completed: true,
             }
         }
         Err(e) => {
             tracing::warn!(error = %e, "list_threads failed");
             let status = describe_error(&e);
-            let wait = if let perch_github::Error::RateLimited {
+            let (wait, floor) = if let perch_github::Error::RateLimited {
                 reset_epoch,
                 retry_after_secs,
             } = &e
             {
-                backoff_until(*reset_epoch, *retry_after_secs)
+                let backoff = backoff_until(*reset_epoch, *retry_after_secs);
+                (backoff, backoff)
             } else {
-                wait
+                (wait, Duration::from_secs(30))
             };
             let _ = events.send(Event::Status(status));
             PollAfter {
                 wait,
+                floor,
                 completed: false,
             }
         }
@@ -21113,6 +21239,7 @@ mod tests {
             preparer: Arc::new(Preparer::new(Store::new(dir.join("store")), None)),
             cache,
             config: Arc::new(std::sync::RwLock::new(Arc::new(config))),
+            settings: Default::default(),
             slot: Arc::new(std::sync::Mutex::new(None)),
             kept_contexts: Default::default(),
             language_servers: Default::default(),
@@ -21122,7 +21249,7 @@ mod tests {
             installing_servers: Default::default(),
             events,
             runs,
-            review_capabilities: Arc::new(Vec::new()),
+            review_capabilities: Default::default(),
             review_snapshots: Arc::new(ReviewSnapshotStore::new(dir.join("store"))),
             navigation_requests: Arc::default(),
             scope_requests: Arc::default(),
@@ -30514,6 +30641,266 @@ read eof || true
             elsewhere.contains("is not in a git repository"),
             "{elsewhere}"
         );
+    }
+
+    /// The Settings the backend sent, oldest first.
+    fn settings_sent(events: &[Event]) -> Vec<SettingsFile> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Settings(file) => Some(file.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_settings_write_changes_the_file_and_the_running_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx_declaring(dir.path(), &nowhere(), Vec::new());
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "# mine\npoll_interval_secs = 30\n").unwrap();
+
+        settings::write(
+            &ctx,
+            &config,
+            vec![
+                perch_github::Setting::PollIntervalSecs(Some(120)),
+                perch_github::Setting::WorkBranchPrefix(Some("cr/".into())),
+                perch_github::Setting::LspMaxMemoryMb(Some(4096)),
+            ],
+        )
+        .await;
+
+        let text = std::fs::read_to_string(&config).unwrap();
+        assert!(
+            text.starts_with("# mine\npoll_interval_secs = 120\n"),
+            "{text}"
+        );
+        let running = ctx.config();
+        assert_eq!(running.poll_interval_secs, 120);
+        assert_eq!(running.work.branch_prefix, "cr/");
+        assert_eq!(running.lsp.max_memory_mb, 4096);
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, Event::WorkDefaults(work) if work.branch_prefix == "cr/")));
+        assert!(events.iter().any(|e| matches!(e, Event::WorkApprovals(_))));
+        assert!(events.iter().any(|e| matches!(e, Event::GithubHosts(_))));
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::AgentConfig(_))),
+            "the agents didn't change"
+        );
+        let sent = settings_sent(&events);
+        let file = sent.last().expect("the page heard the file");
+        assert_eq!(file.path, config);
+        assert!(file.error.is_none());
+        assert_eq!(file.config.as_ref().unwrap().poll_interval_secs, 120);
+        assert!(file.present.contains("poll_interval_secs"));
+        assert!(file.present.contains("work.branch_prefix"));
+        assert!(!file.present.contains("display.zoom"));
+
+        // The poll doesn't take Perch's own write up again.
+        assert!(!settings::look_again(&ctx, &config).await);
+    }
+
+    #[tokio::test]
+    async fn a_new_model_keeps_what_discovery_found_and_a_new_limit_takes_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx_declaring(dir.path(), &nowhere(), Vec::new());
+        let mut discovered = (*ctx.config()).clone();
+        discovered.agent.binary = "/opt/claude/bin/claude".into();
+        discovered.agent.binary_version = Some("2.1.0".into());
+        discovered.agent.codex.binary = "/opt/codex/bin/codex".into();
+        discovered.agent.codex.models = vec!["gpt-6.1-sol".into()];
+        ctx.replace_config(discovered);
+        let config = dir.path().join("config.toml");
+
+        settings::write(
+            &ctx,
+            &config,
+            vec![
+                perch_github::Setting::AgentModel(Some("sonnet".into())),
+                perch_github::Setting::AgentEffort(Some("max".into())),
+                perch_github::Setting::AgentMaxConcurrentRuns(Some(2)),
+            ],
+        )
+        .await;
+
+        let agent = ctx.config().agent.clone();
+        assert_eq!(agent.model, "sonnet");
+        assert_eq!(agent.effort, "max");
+        assert_eq!(agent.max_concurrent_runs, 2);
+        assert_eq!(agent.binary, "/opt/claude/bin/claude");
+        assert_eq!(agent.binary_version.as_deref(), Some("2.1.0"));
+        assert_eq!(agent.codex.models, ["gpt-6.1-sol"]);
+        assert_eq!(ctx.runs.free_slots(), 2);
+        let events: Vec<Event> = received.try_iter().collect();
+        let told = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::AgentConfig(agent) => Some(agent.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].binary, "/opt/claude/bin/claude");
+        // The page sees the file's words, not discovery's.
+        let file = settings_sent(&events).pop().unwrap();
+        let written = file.config.unwrap();
+        assert_eq!(written.agent.binary, "claude");
+        assert_eq!(written.agent.model, "sonnet");
+    }
+
+    #[tokio::test]
+    async fn an_edit_made_outside_perch_is_taken_up_and_only_new_warnings_are_said() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx_declaring(dir.path(), &nowhere(), Vec::new());
+        let config = dir.path().join("config.toml");
+        assert!(
+            !settings::look_again(&ctx, &config).await,
+            "no file is no change"
+        );
+
+        std::fs::write(&config, "poll_interval_secs = 90\n[display]\nzoom = 3.0\n").unwrap();
+        assert!(settings::look_again(&ctx, &config).await);
+        assert_eq!(ctx.config().poll_interval_secs, 90);
+        assert_eq!(ctx.config().display.zoom, 2.0);
+        let said = notices(&received);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("zoom"), "{said:?}");
+        assert!(!settings::look_again(&ctx, &config).await, "nothing moved");
+
+        // Edited again, the zoom left as it was: its warning isn't new.
+        std::fs::write(&config, "poll_interval_secs = 300\n[display]\nzoom = 3.0\n").unwrap();
+        assert!(settings::look_again(&ctx, &config).await);
+        assert_eq!(ctx.config().poll_interval_secs, 300);
+        assert!(notices(&received).is_empty());
+
+        // A file that goes away is left alone.
+        std::fs::remove_file(&config).unwrap();
+        assert!(!settings::look_again(&ctx, &config).await);
+        assert_eq!(ctx.config().poll_interval_secs, 300);
+    }
+
+    #[tokio::test]
+    async fn a_new_poll_interval_moves_the_scheduled_poll() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx_declaring(dir.path(), &nowhere(), Vec::new());
+        let config = dir.path().join("config.toml");
+        let told = |ctx: &Ctx| {
+            let ctx = ctx.clone();
+            async move {
+                tokio::time::timeout(
+                    Duration::from_millis(50),
+                    ctx.settings.poll_interval_changed(),
+                )
+                .await
+                .is_ok()
+            }
+        };
+        std::fs::write(
+            &config,
+            "poll_interval_secs = 600
+",
+        )
+        .unwrap();
+        assert!(settings::look_again(&ctx, &config).await);
+        assert!(told(&ctx).await);
+        std::fs::write(
+            &config,
+            "poll_interval_secs = 600
+[agent]
+model = \"opus\"\n",
+        )
+        .unwrap();
+        assert!(settings::look_again(&ctx, &config).await);
+        assert!(!told(&ctx).await, "the interval didn't change");
+
+        // Pulled in to the new interval after the last poll, but never
+        // before what GitHub or a rate limit asked for.
+        let last = tokio::time::Instant::now();
+        let github = last + Duration::from_secs(60);
+        assert_eq!(
+            next_poll(last, github, 600),
+            last + Duration::from_secs(600)
+        );
+        assert_eq!(next_poll(last, github, 30), github);
+        assert_eq!(next_poll(last, last, 30), last + Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn a_repository_added_by_hand_is_scanned_without_waiting_for_a_poll() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx_declaring(dir.path(), &nowhere(), Vec::new());
+        let notes = dir.path().join("notes");
+        root_with_branch(&notes, "feature");
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!("[[repo]]\nroot = {:?}\n", notes.display().to_string()),
+        )
+        .unwrap();
+
+        assert!(settings::look_again(&ctx, &config).await);
+        assert_eq!(ctx.config().declared(), ["local/notes"]);
+        let scanned = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let items = ctx.with_cache(|c| c.load_items().unwrap()).unwrap();
+                if !items.is_empty() {
+                    return items;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the new root was scanned");
+        assert_eq!(scanned.len(), 1, "{scanned:?}");
+    }
+
+    #[tokio::test]
+    async fn a_file_that_doesn_t_parse_is_said_and_the_running_config_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx_declaring(dir.path(), &nowhere(), Vec::new());
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "poll_interval_secs = 45\n").unwrap();
+        assert!(settings::look_again(&ctx, &config).await);
+        received.try_iter().for_each(drop);
+
+        std::fs::write(&config, "poll_interval_secs = 45\nzoom = = 1\n").unwrap();
+        assert!(settings::look_again(&ctx, &config).await);
+
+        assert_eq!(ctx.config().poll_interval_secs, 45);
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::Repos(_))),
+            "nothing was taken up"
+        );
+        let file = settings_sent(&events).pop().unwrap();
+        assert!(file.config.is_none());
+        let error = file.error.unwrap();
+        assert!(error.contains("line 2"), "{error}");
+        assert!(!settings::look_again(&ctx, &config).await, "said once");
+
+        // A write over it is refused, said, and the page hears the file
+        // as it is.
+        settings::write(
+            &ctx,
+            &config,
+            vec![perch_github::Setting::PollIntervalSecs(Some(60))],
+        )
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "poll_interval_secs = 45\nzoom = = 1\n"
+        );
+        let events: Vec<Event> = received.try_iter().collect();
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, Event::Notice(m) if m.contains("doesn't parse"))));
+        let again = settings_sent(&events).pop().unwrap();
+        assert!(again.error.is_some());
+        assert_eq!(ctx.config().poll_interval_secs, 45);
     }
 
     #[tokio::test]

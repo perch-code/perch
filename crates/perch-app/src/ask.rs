@@ -235,8 +235,9 @@ pub fn backend_for(agent: &perch_github::AgentConfig, model: &str) -> perch_agen
     perch_agent::Backend::parse(agent.backend_of(model)).unwrap_or(perch_agent::Backend::ClaudeCode)
 }
 
-/// What is installed, worked out once at startup and written back into
-/// the agent config the window and the runs share.
+/// What is installed, worked out at startup, and again when config.toml
+/// names other binaries or models, then written back into the agent config
+/// the window and the runs share.
 ///
 /// Each binary is looked for and, when found, its path replaces the name,
 /// so a spawn works even where `PATH` would not have found it. An agent
@@ -249,6 +250,15 @@ pub fn backend_for(agent: &perch_github::AgentConfig, model: &str) -> perch_agen
 /// wrong, for the log; a missing Codex is not wrong, so it is not reported.
 pub async fn discover(agent: &mut perch_github::AgentConfig) -> Vec<String> {
     let problems = find_agents(agent).await;
+    settle_model(agent);
+    problems
+}
+
+/// The model the picker starts on, given what discovery found: the file's,
+/// unless Claude Code is missing, when GPT-6.1-Sol stands in if Codex
+/// offers it, or with only agy, agy's first model. For a new `[agent]
+/// model` on an agent already discovered.
+pub fn settle_model(agent: &mut perch_github::AgentConfig) {
     if agent.models.is_empty()
         && !agent.codex.models.contains(&agent.model)
         && agent
@@ -265,7 +275,6 @@ pub async fn discover(agent: &mut perch_github::AgentConfig) -> Vec<String> {
             agent.model = first.clone();
         }
     }
-    problems
 }
 
 async fn find_agents(agent: &mut perch_github::AgentConfig) -> Vec<String> {

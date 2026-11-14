@@ -156,7 +156,7 @@ pub fn choose_repo(state: AppState, backend: &Backend, repo: &str) {
 /// Take a repository out of the config. The list loses it now rather
 /// than when the backend says, so taking out several in a row chooses
 /// from what is left; when it was the one chosen, the first left is.
-fn remove_repo(state: AppState, backend: &Backend, identity: &str) {
+pub(crate) fn remove_repo(state: AppState, backend: &Backend, identity: &str) {
     backend.remove_repository(identity);
     state
         .repos
