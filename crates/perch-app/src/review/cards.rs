@@ -3380,20 +3380,35 @@ fn anchor_block(
 
 /// A row that opens the composer when nothing is in it: the box the
 /// question will go in, with its placeholder, before it is a box.
+/// What the ask box says: what it asks about, or, while a composer is
+/// open in the code, where that is, since a click goes back to it.
+fn ask_box_label(state: ReviewState) -> String {
+    if state.composer_in_code() {
+        let lines = state.composer.with(|c| {
+            c.as_ref()
+                .and_then(|c| c.anchor.as_ref())
+                .map(|a| a.label())
+        });
+        return match lines {
+            Some(lines) => format!("Your comment on {lines} is open in Code…"),
+            None => "Your comment is open in Code…".to_string(),
+        };
+    }
+    format!("Ask about this {}…", threads::subject_word(state))
+}
+
 pub fn ask_box(app: AppState, state: ReviewState) -> impl IntoView {
     Stack::horizontal((
         sidebar_glyph(SidebarIcon::Thread, theme::fg_subtle)
             .style(|s| s.size(13.0, 13.0).margin_right(8.0)),
-        Label::derived(move || format!("Ask about this {}…", threads::subject_word(state))).style(
-            |s| {
-                s.font_size(theme::TEXT_BODY)
-                    .color(theme::fg_subtle())
-                    .selectable(false)
-            },
-        ),
+        Label::derived(move || ask_box_label(state)).style(|s| {
+            s.font_size(theme::TEXT_BODY)
+                .color(theme::fg_subtle())
+                .selectable(false)
+        }),
     ))
     .on_event_stop(el::Click, move |_, _| {
-        state.open_composer(None, None, String::new(), threads::defaults(app));
+        state.ask_on_page(threads::defaults(app));
     })
     .style(|s| {
         s.items_center()

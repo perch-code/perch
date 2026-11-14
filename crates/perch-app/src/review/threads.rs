@@ -1544,6 +1544,16 @@ fn send_button(label: impl Fn() -> String + 'static, on_click: Rc<dyn Fn()>) -> 
 
 /// What the item is, for a placeholder: "pull request", "issue" or
 /// "worktree".
+/// Whether the open composer is drawn on `face`: in the code when it is
+/// drawn there, else on Conversation. It is drawn in one place, since two
+/// boxes would type the same draft. Tracked.
+pub fn composer_on(state: ReviewState, face: ThreadFace) -> bool {
+    match face {
+        ThreadFace::Inline => state.composer_in_code(),
+        ThreadFace::Card => !state.composer_in_code(),
+    }
+}
+
 pub fn subject_word(state: ReviewState) -> &'static str {
     if state.pull_request.with(Option::is_some) {
         "pull request"
@@ -2788,6 +2798,9 @@ pub fn messages_view(
     // holds the composer instead of the message. On the opening as well,
     // so an edit opened again after Escape gets a fresh box.
     let editing = Memo::new(move |_| {
+        if !composer_on(state, face) {
+            return None;
+        }
         state.composer.with(|c| {
             c.as_ref()
                 .and_then(|c| c.editing.clone().map(|id| (id, c.opening)))
@@ -2975,11 +2988,11 @@ pub fn follow_up(
                 .filter(|c| c.thread_id.as_deref() == Some(composer_thread.as_str()))
                 .map(|c| (c.anchor.clone(), c.opening, c.editing.clone()))
         });
-        let drawn_here = match face {
-            ThreadFace::Inline => state.follow_up_is_inline(&composer_thread),
-            ThreadFace::Card => true,
-        };
-        composer.filter(|_| drawn_here)
+        // A draft being edited up among the messages keeps the bar hidden
+        // on either face: Follow up… would only reopen the box that is
+        // open.
+        let drawn_here = composer_on(state, face);
+        composer.filter(|(_, _, editing)| drawn_here || editing.is_some())
     });
     // The composer's box takes the foot; a draft edited up among the
     // messages leaves the box here, and Resolve under it.
@@ -4490,7 +4503,10 @@ pub fn reply_line(
                 c.as_ref()
                     .is_some_and(|c| c.thread_id.as_deref() == Some(id.as_str()))
             });
-            if !already {
+            if already {
+                // Open under this thread on the other tab: brought here.
+                state.move_composer(face == ThreadFace::Card);
+            } else {
                 state.open_composer(
                     Some(id.clone()),
                     anchor.clone(),

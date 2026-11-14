@@ -7443,6 +7443,8 @@ mod tests {
             m.insert("src/x.rs".into(), Arc::new(file));
         });
         review.active.set(Some("src/x.rs".into()));
+        // Lines are picked on Code.
+        review.show_tab(crate::review::model::ItemTab::Code);
         let anchor = perch_github::Anchor {
             path: "src/x.rs".into(),
             start_line: 3,

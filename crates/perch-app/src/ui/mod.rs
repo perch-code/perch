@@ -800,12 +800,11 @@ pub fn app_view(state: AppState, review: ReviewState, backend: Rc<Backend>) -> i
                                         id.scroll_to(None);
                                         id.request_focus();
                                     }
-                                    None => review.open_composer(
-                                        None,
-                                        None,
-                                        String::new(),
-                                        crate::review::threads::defaults(state),
-                                    ),
+                                    // A composer open in the code is gone back
+                                    // to rather than replaced.
+                                    None => {
+                                        review.ask_on_page(crate::review::threads::defaults(state))
+                                    }
                                 }
                                 return EventPropagation::Stop;
                             }

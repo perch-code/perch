@@ -128,6 +128,9 @@ enum Held {
 impl Held {
     /// What the open composer is in, when it is in a card.
     fn of(state: ReviewState) -> Option<Held> {
+        if state.composer_in_code() {
+            return None;
+        }
         state.composer.with(|c| {
             let c = c.as_ref()?;
             match (&c.thread_id, &c.editing) {
@@ -846,7 +849,8 @@ fn card_view(
 /// The composer for asking about the item as a whole, in place under the
 /// description and over the timeline, where what it starts will land; or
 /// the box that opens it. A follow-up's composer is under its thread
-/// instead, and one editing a comment is in its card.
+/// instead, and one editing a comment is in its card. One drawn in the
+/// code, a new thread on lines of the open file, is left to the code.
 fn composer(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl IntoView {
     // Keyed on whether one is open, what it is about and which opening it
     // is, not on the composer itself: picking a model writes the composer,
@@ -855,6 +859,9 @@ fn composer(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Int
     // opens a composer about the same thing with another quote, gets a
     // fresh box rather than the first one's text.
     let open = floem::reactive::Memo::new(move |_| {
+        if state.composer_in_code() {
+            return None;
+        }
         state.composer.with(|c| {
             c.as_ref()
                 .filter(|c| c.thread_id.is_none() && c.editing.is_none())

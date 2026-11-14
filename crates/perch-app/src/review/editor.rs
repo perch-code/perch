@@ -1286,7 +1286,9 @@ fn card_layer(
         let composer = state.composer.with(|c| {
             c.as_ref()
                 .filter(|c| {
-                    c.thread_id.is_none() && c.anchor.as_ref().is_some_and(|a| a.path == path)
+                    c.thread_id.is_none()
+                        && !c.on_page
+                        && c.anchor.as_ref().is_some_and(|a| a.path == path)
                 })
                 .cloned()
         });
@@ -6049,6 +6051,141 @@ mod window {
         assert!(find(harness.root_id(), "inline-card:").is_none());
         assert_eq!(count(harness.root_id(), "composer-box"), 1);
         assert_eq!(count(harness.root_id(), "Follow up…"), 0);
+    }
+
+    /// A composer is drawn in one place. Opened in the code, a comment on
+    /// lines or a follow-up stays there, and Conversation does not draw a
+    /// second box typing the same draft; opened on Conversation, it stays
+    /// there, and the code keeps its line and its Follow up box.
+    #[test]
+    fn a_composer_is_drawn_where_it_was_opened_and_nowhere_else() {
+        let (mut harness, state) = harness();
+        let thread = thread_with("t1", 5, 7, &["why?", "because"]);
+        state.set_comment_threads(Arc::new(vec![thread.clone()]));
+        harness.rebuild();
+        harness.paint();
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
+        let anchor = perch_github::Anchor {
+            path: "src/x.rs".into(),
+            start_line: 20,
+            line: 20,
+            side: perch_github::Side::Right,
+            commit_sha: "h".into(),
+        };
+        let boxes = |harness: &mut HeadlessHarness, tab: ItemTab| {
+            state.show_tab(tab);
+            harness.rebuild();
+            harness.paint();
+            count(harness.root_id(), "composer-box")
+        };
+
+        // A new thread on lines, opened on Code.
+        state.open_composer(None, Some(anchor.clone()), "draft".into(), choice.clone());
+        assert_eq!(boxes(&mut harness, ItemTab::Code), 1);
+        assert_eq!(
+            boxes(&mut harness, ItemTab::Conversation),
+            0,
+            "not on Conversation too"
+        );
+        assert!(state.composer_in_code());
+        assert_eq!(
+            boxes(&mut harness, ItemTab::Code),
+            1,
+            "and back in the code"
+        );
+
+        // A follow-up opened in the code.
+        state.open_composer(
+            Some("t1".into()),
+            thread.anchor.clone(),
+            String::new(),
+            choice.clone(),
+        );
+        assert_eq!(boxes(&mut harness, ItemTab::Code), 1);
+        assert_eq!(
+            boxes(&mut harness, ItemTab::Conversation),
+            0,
+            "not on Conversation too"
+        );
+
+        // The same two opened on Conversation stay there.
+        for thread_id in [None, Some("t1".to_string())] {
+            state.show_tab(ItemTab::Conversation);
+            let lines = match thread_id {
+                Some(_) => thread.anchor.clone(),
+                None => Some(anchor.clone()),
+            };
+            state.open_composer(thread_id.clone(), lines, String::new(), choice.clone());
+            assert_eq!(state.tab.get(), ItemTab::Conversation);
+            assert!(!state.composer_in_code(), "{thread_id:?}");
+            assert_eq!(
+                boxes(&mut harness, ItemTab::Conversation),
+                1,
+                "{thread_id:?}"
+            );
+            assert_eq!(
+                boxes(&mut harness, ItemTab::Code),
+                0,
+                "{thread_id:?}: not in the code too"
+            );
+            assert_eq!(count(harness.root_id(), "Follow up…"), 1, "{thread_id:?}");
+        }
+
+        // Follow up… under the thread on the tab that does not hold its
+        // follow-up brings the follow-up there, draft and all.
+        let click = |harness: &mut HeadlessHarness, text: &str| {
+            let id = find(harness.root_id(), text).unwrap_or_else(|| panic!("no {text}"));
+            id.scroll_to(None);
+            harness.rebuild();
+            harness.paint();
+            let c = id.get_visual_rect_no_clip().center();
+            harness.click(c.x, c.y);
+            harness.rebuild();
+            harness.paint();
+        };
+        state.composer_draft.set("typed".into());
+        click(&mut harness, "Follow up…");
+        assert!(state.composer_in_code(), "brought to the code");
+        assert_eq!(boxes(&mut harness, ItemTab::Code), 1);
+        assert_eq!(boxes(&mut harness, ItemTab::Conversation), 0);
+        click(&mut harness, "Follow up…");
+        assert!(!state.composer_in_code(), "taken to Conversation");
+        assert_eq!(boxes(&mut harness, ItemTab::Conversation), 1);
+        assert_eq!(state.composer_draft.get(), "typed");
+
+        // A message edited in place in the code is in its row there alone,
+        // and Conversation's card has no Follow up… that would only open
+        // it again.
+        state.show_tab(ItemTab::Code);
+        state.open_composer_with(
+            Some("t1".into()),
+            thread.anchor.clone(),
+            "why?".into(),
+            crate::review::model::Destination::GitHub,
+            Some("t1-m0".into()),
+        );
+        assert_eq!(boxes(&mut harness, ItemTab::Code), 1);
+        assert_eq!(boxes(&mut harness, ItemTab::Conversation), 0);
+        assert_eq!(count(harness.root_id(), "Follow up…"), 0);
+
+        // With a comment open in the code, Conversation's ask box says
+        // where, and goes back to it rather than replacing it.
+        state.show_tab(ItemTab::Code);
+        state.open_composer(None, Some(anchor.clone()), "draft".into(), choice.clone());
+        assert_eq!(boxes(&mut harness, ItemTab::Conversation), 0);
+        assert!(find(
+            harness.root_id(),
+            "Your comment on src/x.rs:20 is open in Code…"
+        )
+        .is_some());
+        state.ask_on_page(choice.clone());
+        assert_eq!(state.tab.get(), ItemTab::Code);
+        assert_eq!(state.composer_draft.get(), "draft");
+        assert_eq!(state.composer.get().and_then(|c| c.anchor), Some(anchor));
     }
 
     /// A reply in the code has no fill of its own: its bar and pickers

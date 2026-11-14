@@ -1266,6 +1266,11 @@ pub struct Composer {
     /// Where a new thread's lines were picked, when that was a diff GitHub
     /// does not number them by; see `Picked`.
     pub picked: Option<Picked>,
+    /// Opened on Conversation, so drawn there and not in the code, even
+    /// where the code has a place for it. One opened on Code is drawn in
+    /// the code alone, and on Conversation only while the code cannot
+    /// show it; see `composer_in_code`.
+    pub on_page: bool,
 }
 
 /// The head file a unified buffer shows, without the removed lines
@@ -4587,13 +4592,14 @@ impl ReviewState {
 
     /// The anchor the composer's card in a file sits under, if it has
     /// one there: the open composer's, when it starts a thread on lines
-    /// of the file, or else the one a sent question's card keeps until
-    /// its thread arrives. Tracked on both.
+    /// of the file and was not opened on Conversation, or else the one a
+    /// sent question's card keeps until its thread arrives. Tracked on
+    /// both.
     pub fn composer_card_anchor(&self, path: &str) -> Option<Anchor> {
         self.composer
             .with(|c| {
                 c.as_ref()
-                    .filter(|c| c.thread_id.is_none())
+                    .filter(|c| c.thread_id.is_none() && !c.on_page)
                     .and_then(|c| c.anchor.clone())
             })
             .or_else(|| self.sent_composer.get())
@@ -4602,14 +4608,15 @@ impl ReviewState {
 
     /// Whether the open composer is drawn as a card in the code: it starts
     /// a thread on lines of the active file, which is loaded and has the
-    /// lines. Tracked.
+    /// lines, and was not opened on Conversation. A file drawn as a
+    /// picture or a preview has no cards. Tracked.
     pub fn composer_is_inline(&self) -> bool {
-        let Some(file) = self.active_file() else {
+        let Some(file) = self.active_file().filter(|_| !self.drawn()) else {
             return false;
         };
         let anchor = self.composer.with(|c| {
             c.as_ref()
-                .filter(|c| c.thread_id.is_none())
+                .filter(|c| c.thread_id.is_none() && !c.on_page)
                 .and_then(|c| c.anchor.clone())
         });
         anchor.is_some_and(|anchor| anchor.path == file.path && card_line(&file, &anchor).is_some())
@@ -4617,9 +4624,9 @@ impl ReviewState {
 
     /// Whether a follow-up on a thread is drawn inside the thread's card
     /// in the code: the thread has a card in the active file, which is
-    /// loaded and has its lines. Tracked.
+    /// loaded, drawn as its text and has its lines. Tracked.
     pub fn follow_up_is_inline(&self, thread_id: &str) -> bool {
-        let Some(file) = self.active_file() else {
+        let Some(file) = self.active_file().filter(|_| !self.drawn()) else {
             return false;
         };
         self.comment_threads.with(|threads| {
@@ -4632,14 +4639,17 @@ impl ReviewState {
     }
 
     /// Whether the open composer is drawn in the code: a new thread's as a
-    /// card under its lines, a follow-up's inside its thread's card. Tracked.
+    /// card under its lines, a follow-up's inside its thread's card. It is
+    /// drawn in one place, so Conversation leaves out one drawn here, and
+    /// one opened on Conversation is never drawn here. Tracked.
     pub fn composer_in_code(&self) -> bool {
         match self
             .composer
-            .with(|c| c.as_ref().map(|c| c.thread_id.clone()))
+            .with(|c| c.as_ref().map(|c| (c.thread_id.clone(), c.on_page)))
         {
-            Some(Some(thread_id)) => self.follow_up_is_inline(&thread_id),
-            Some(None) => self.composer_is_inline(),
+            Some((_, true)) => false,
+            Some((Some(thread_id), false)) => self.follow_up_is_inline(&thread_id),
+            Some((None, false)) => self.composer_is_inline(),
             None => false,
         }
     }
@@ -5302,6 +5312,7 @@ impl ReviewState {
                 (None, Some(anchor)) => self.picked_for(anchor),
                 _ => None,
             };
+            let on_page = self.tab.get_untracked() == ItemTab::Conversation;
             self.composer.set(Some(Composer {
                 thread_id,
                 anchor,
@@ -5311,6 +5322,7 @@ impl ReviewState {
                 editing,
                 mode,
                 picked,
+                on_page,
             }));
         });
         let in_code = self.composer_in_code_untracked();
@@ -5362,6 +5374,33 @@ impl ReviewState {
             base_path,
             source,
         })
+    }
+
+    /// Move the open composer to Conversation, `on_page`, or to the code,
+    /// draft and all: Follow up… was clicked under its thread on the tab
+    /// that does not hold it.
+    pub fn move_composer(&self, on_page: bool) {
+        let moves = self
+            .composer
+            .with_untracked(|c| c.as_ref().is_some_and(|c| c.on_page != on_page));
+        if moves {
+            self.composer.update(|c| {
+                if let Some(c) = c {
+                    c.on_page = on_page;
+                }
+            });
+        }
+    }
+
+    /// Ask about the item as a whole, from Conversation; or, while a
+    /// composer is open in the code, go back to it there rather than throw
+    /// its draft away for a new one.
+    pub fn ask_on_page(&self, defaults: AgentChoice) {
+        if self.composer_in_code_untracked() {
+            self.show_tab(ItemTab::Code);
+            return;
+        }
+        self.open_composer(None, None, String::new(), defaults);
     }
 
     /// Close the composer and forget its draft. A composer card's rows go
@@ -7107,6 +7146,8 @@ mod tests {
             m.insert("src/x.rs".into(), Arc::new(spliced_file()));
         });
         state.active.set(Some("src/x.rs".into()));
+        // Lines are picked on Code.
+        state.show_tab(ItemTab::Code);
         let anchor = Anchor {
             path: "src/x.rs".into(),
             start_line: 2,
@@ -7157,6 +7198,47 @@ mod tests {
         assert_eq!(state.anchors_in("src/x.rs"), vec![(1, 2)]);
     }
 
+    /// A file drawn as its preview has no cards, so a comment opened on
+    /// its lines in the code is on Conversation while the preview shows,
+    /// and back in the code with the source.
+    #[test]
+    fn a_composer_in_a_previewed_file_is_on_conversation() {
+        let state = ReviewState::new();
+        let file = crate::backend::build_loaded_file(
+            "README.md".into(),
+            "# a\nB\nc\n".into(),
+            "# a\nb\nc\n".into(),
+            Some(perch_git::ChangeStatus::Modified),
+            false,
+            perch_git::Scope::Branch,
+            String::new(),
+        );
+        state.files.update(|m| {
+            m.insert("README.md".into(), Arc::new(file));
+        });
+        state.active.set(Some("README.md".into()));
+        state.show_tab(ItemTab::Code);
+        let anchor = Anchor {
+            path: "README.md".into(),
+            start_line: 2,
+            line: 2,
+            side: perch_github::Side::Right,
+            commit_sha: "h".into(),
+        };
+        let choice = (
+            perch_agent::Backend::ClaudeCode,
+            "sonnet".to_string(),
+            perch_agent::Effort::Medium,
+        );
+        state.open_composer(None, Some(anchor), "draft".into(), choice);
+        assert!(state.composer_in_code());
+        state.toggle_preview();
+        assert!(state.drawn());
+        assert!(!state.composer_in_code(), "the preview has no cards");
+        state.toggle_preview();
+        assert!(state.composer_in_code());
+    }
+
     #[test]
     fn a_composer_replacing_an_open_one_starts_on_the_estimate() {
         use perch_github::Side;
@@ -7165,6 +7247,8 @@ mod tests {
             m.insert("src/x.rs".into(), Arc::new(spliced_file()));
         });
         state.active.set(Some("src/x.rs".into()));
+        // Lines are picked on Code.
+        state.show_tab(ItemTab::Code);
         let choice = (
             perch_agent::Backend::ClaudeCode,
             "sonnet".to_string(),
@@ -7532,6 +7616,8 @@ mod tests {
             m.insert("src/x.rs".into(), Arc::new(spliced_file()));
         });
         state.active.set(Some("src/x.rs".into()));
+        // Lines are picked on Code.
+        state.show_tab(ItemTab::Code);
         let anchor = Anchor {
             path: "src/x.rs".into(),
             start_line: 3,
@@ -7573,6 +7659,8 @@ mod tests {
             m.insert("src/x.rs".into(), Arc::new(spliced_file()));
         });
         state.active.set(Some("src/x.rs".into()));
+        // Lines are picked on Code.
+        state.show_tab(ItemTab::Code);
         let anchor = Anchor {
             path: "src/x.rs".into(),
             start_line: 3,
@@ -7645,6 +7733,7 @@ mod tests {
         state.open_composer(None, None, String::new(), choice.clone());
         state.composer_sent();
         assert_eq!(state.sent_composer.get(), None);
+        state.show_tab(ItemTab::Code);
 
         // A new composer opened before the thread lands takes the
         // placeholder's place: there is one composer card at a time.
