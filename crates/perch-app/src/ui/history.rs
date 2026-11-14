@@ -85,6 +85,9 @@ fn arrow(state: AppState, review: ReviewState, backend: Rc<Backend>, back: bool)
             s.selectable(false)
         }
     });
+    // The tip takes the pointer as the button does: the arrows sit in a
+    // bar that lets the pointer through, floem passes pointer events by
+    // a view that inherits that, and a deaf tip never opens.
     crate::review::cards::tip(
         button,
         if back {
@@ -93,4 +96,6 @@ fn arrow(state: AppState, review: ReviewState, backend: Rc<Backend>, back: bool)
             "Go Forward (⌃⇧-)".to_string()
         },
     )
+    .debug_name(if back { "back tip" } else { "forward tip" })
+    .style(|s| s.pointer_events_auto())
 }

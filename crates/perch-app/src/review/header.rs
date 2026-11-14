@@ -99,6 +99,12 @@ fn leading(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl Into
 /// The title, cut short with an ellipsis when the bar has no room for all
 /// of it, and then the whole of it is a tip on hover. It takes the pointer
 /// only while it is cut short, and a press on it still drags the window.
+///
+/// The tip, not just the label, takes the pointer then. floem passes over
+/// a view whose `pointer_events` is none, in capture as well as at the
+/// target, and the setting is inherited: the tip sits in a side of the bar
+/// that lets the pointer through, so it never heard the pointer rest and
+/// never opened. The label inherits the tip's setting.
 fn item_title(state: ReviewState) -> impl IntoView {
     let cut_short = RwSignal::new(false);
     let label = Label::derived(move || title(state))
@@ -115,9 +121,13 @@ fn item_title(state: ReviewState) -> impl IntoView {
                 .color(theme::fg())
                 .text_ellipsis()
                 .min_width(0.0)
-                .apply_if(cut_short.get(), |s| s.pointer_events_auto())
         });
-    tip_with(part_of_bar(label), move || title(state)).style(|s| s.min_width(0.0))
+    tip_with(part_of_bar(label), move || title(state))
+        .debug_name("title tip")
+        .style(move |s| {
+            s.min_width(0.0)
+                .apply_if(cut_short.get(), |s| s.pointer_events_auto())
+        })
 }
 
 /// The pull request's or the issue's title. A worktree of the reader's own
@@ -597,6 +607,42 @@ pub(crate) mod tests {
             named(harness.root_id(), "item title").unwrap(),
             "a title cut short let the pointer through"
         );
+    }
+
+    /// floem hands a pointer event to no view whose `pointer_events` is
+    /// none, the tip's capture included, so a tip that inherits the bar's
+    /// none never hears the pointer rest. Headless runs fire no timers, so
+    /// the tip's opening cannot be watched; what it hears can.
+    #[test]
+    fn the_tip_of_a_title_cut_short_hears_the_pointer() {
+        let (harness, _, _) = pull_request_harness();
+        let tip = named(harness.root_id(), "title tip").unwrap();
+        assert!(
+            tip.pointer_events_none(),
+            "a title that fits took the pointer"
+        );
+
+        let mut pull = pull_request(812);
+        pull.title = "Add tracing spans to every read path, ".repeat(8);
+        let (mut harness, _, _) = pull_request_harness_with(pull);
+        harness.rebuild();
+        harness.paint();
+        let tip = named(harness.root_id(), "title tip").unwrap();
+        assert!(
+            !tip.pointer_events_none(),
+            "the tip of a title cut short is deaf to the pointer"
+        );
+    }
+
+    /// Back and Forward sit in the side of the bar that lets the pointer
+    /// through. Their tips take it back, or they never hear it rest.
+    #[test]
+    fn the_arrows_tips_hear_the_pointer() {
+        let (harness, _, _) = pull_request_harness();
+        for name in ["back tip", "forward tip"] {
+            let tip = named(harness.root_id(), name).unwrap();
+            assert!(!tip.pointer_events_none(), "the {name} is deaf");
+        }
     }
 
     /// Whether `id` is `ancestor` or under it.

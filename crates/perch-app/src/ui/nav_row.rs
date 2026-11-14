@@ -340,6 +340,12 @@ pub fn chips(checks: Option<CheckStatus>, review: Option<ReviewDecision>) -> imp
                 .style(|s| s.size(CHIP_GLYPH, CHIP_GLYPH).flex_shrink(0.0_f32)),
             says.to_string(),
         )
+        // A row's content lets the pointer through to the row, and floem
+        // passes pointer events by a view that inherits that: the tip
+        // takes the pointer back, or it never hears it rest. A click on
+        // a chip still reaches the row.
+        .debug_name(format!("{says} tip"))
+        .style(|s| s.pointer_events_auto())
         .into_any()
     };
     Stack::horizontal((
@@ -459,5 +465,47 @@ mod tests {
         assert_eq!(thousands(658), "658");
         assert_eq!(thousands(1192), "1,192");
         assert_eq!(thousands(1_000_000), "1,000,000");
+    }
+
+    fn named(id: floem::ViewId, name: &str) -> Option<floem::ViewId> {
+        if id.debug_name().contains(name) {
+            return Some(id);
+        }
+        id.children()
+            .into_iter()
+            .find_map(|child| named(child, name))
+    }
+
+    /// A row's content lets the pointer through to the row. floem hands a
+    /// pointer event to no view that inherits that, the tip's capture
+    /// included, so a chip's tip has to take the pointer back or it never
+    /// hears the pointer rest. Headless runs fire no timers, so the tip's
+    /// opening cannot be watched; what it hears can.
+    #[test]
+    fn a_chip_in_a_row_hears_the_pointer() {
+        use floem::headless::{HeadlessHarness, TestRoot};
+
+        let root = TestRoot::new();
+        let row = Container::new(
+            Stack::horizontal((chips(
+                Some(CheckStatus::Success),
+                Some(ReviewDecision::Approved),
+            ),))
+            .style(|s| s.pointer_events_none()),
+        )
+        .debug_name("row")
+        .style(|s| s.size_full().padding(20.0));
+        let mut harness = HeadlessHarness::new_with_size(root, row, 300.0, 100.0);
+        harness.rebuild();
+        harness.paint();
+        for says in ["checks passed", "approved"] {
+            let tip = named(harness.root_id(), &format!("{says} tip"))
+                .unwrap_or_else(|| panic!("no chip says {says}"));
+            assert!(!tip.pointer_events_none(), "the {says} tip is deaf");
+            let chip = tip.children()[0];
+            let at = chip.get_visual_rect_no_clip().center();
+            let hit = harness.element_id_at(at.x, at.y).unwrap().owning_id();
+            assert_eq!(hit, chip, "the pointer went past the {says} chip");
+        }
     }
 }
