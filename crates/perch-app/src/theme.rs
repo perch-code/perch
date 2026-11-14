@@ -466,6 +466,8 @@ pub fn avatar_tints() -> [Color; 6] {
 /// display.
 pub const TEXT_TITLE: f32 = 14.0;
 pub const TEXT_SECTION_TITLE: f32 = 16.0;
+/// The item's title at the head of its description, the page's heading.
+pub const TEXT_ITEM_TITLE: f32 = 20.0;
 pub const TEXT_BODY: f32 = 14.0;
 pub const TEXT_META: f32 = 13.0;
 pub const TEXT_BADGE: f32 = 12.0;

@@ -6,6 +6,8 @@
 //! checks, the review, and whether it merges cleanly. Each is green,
 //! yellow or red, and says the rest under the pointer. The checks' glyph
 //! lists every check in its menu, and the bar's Merge has the rest.
+//! On a pull request or an issue the line is the description card's
+//! strip, under the item's title.
 //! The notices, and the way back from a retained snapshot, sit over the
 //! line; on Code the notice is in the tab bar and the way back in the
 //! rail, since the summary is Conversation's alone.
@@ -94,9 +96,10 @@ pub fn summary(app: AppState, state: ReviewState, backend: Rc<Backend>) -> impl 
     })
 }
 
-/// The line as the description card's strip, in place of a heading: the
-/// card's `actions`, drawn under the pointer, come before the status
-/// glyphs, which then stay where they are at the line's end.
+/// The description card's head: the item's title, then the line as the
+/// card's strip. The card's `actions`, drawn under the pointer, come
+/// before the status glyphs, which then stay where they are at the
+/// line's end.
 pub fn card_line(
     app: AppState,
     state: ReviewState,
@@ -104,7 +107,36 @@ pub fn card_line(
     actions: floem::AnyView,
 ) -> impl IntoView {
     let author = Memo::new(move |_| github_data(app, state).author);
-    line(app, state, backend, author, Some(actions))
+    Stack::vertical((
+        item_title(state),
+        line(app, state, backend, author, Some(actions)),
+    ))
+    .style(|s| s.flex_col().width_full().min_width(0.0))
+}
+
+/// The pull request's or the issue's title, whole, wrapped over as many
+/// lines as it takes.
+fn item_title(state: ReviewState) -> impl IntoView {
+    let title = move || {
+        state
+            .pull_request
+            .with(|p| p.as_ref().map(|p| p.title.clone()))
+            .or_else(|| state.issue.with(|i| i.as_ref().map(|i| i.title.clone())))
+            .unwrap_or_default()
+    };
+    Label::derived(title)
+        .debug_name("item heading")
+        .style(move |s| {
+            s.font_size(theme::TEXT_ITEM_TITLE)
+                .font_weight(theme::weight_emphasis())
+                .line_height(1.3)
+                .color(theme::fg())
+                .text_wrap()
+                .width_full()
+                .min_width(0.0)
+                .padding_top(6.0)
+                .apply_if(title().is_empty(), |s| s.hide())
+        })
 }
 
 /// What the details ask the backend for as an item opens.

@@ -1495,8 +1495,9 @@ fn quote_reply(state: ReviewState, body: &str) {
 // ---------------------------------------------------------------------
 
 /// The pull request's or issue's own text, with the reactions on it under.
-/// Its strip is the summary's line, what the item is and who opened it,
-/// with the card's actions before the line's status glyphs.
+/// It is headed by the item's title, then the summary's line as its
+/// strip, what the item is and who opened it, with the card's actions
+/// before the line's status glyphs.
 pub fn description_card(
     app: AppState,
     state: ReviewState,

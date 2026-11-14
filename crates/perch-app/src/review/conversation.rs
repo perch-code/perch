@@ -1773,11 +1773,10 @@ mod tests {
         found
     }
 
-    /// The page from its top: the description, with the summary's line
-    /// as its strip, the composer, and the timeline under them, the newest card first and
-    /// the oldest last. The title is the window bar's alone, and
-    /// the item's runs, even with one there, are the bar's Agents
-    /// dropdown's.
+    /// The page from its top: the description, headed by the title and
+    /// the summary's line, the composer, and the timeline under them,
+    /// the newest card first and the oldest last. The item's runs, even
+    /// with one there, are the bar's Agents dropdown's.
     #[test]
     fn the_page_runs_from_the_summary_down_to_the_oldest_card() {
         let (mut harness, app, _) = app_harness();
@@ -1813,7 +1812,15 @@ mod tests {
                 found.iter().map(|id| id.debug_name()).collect::<Vec<_>>()
             );
         }
-        let (line, description) = (at("summary line"), at("card:description"));
+        let (heading, line, description) = (
+            at("item heading"),
+            at("summary line"),
+            at("card:description"),
+        );
+        assert!(
+            description.contains(heading.origin()) && heading.y1 <= line.y0,
+            "the title at {heading:?} does not head the description {description:?} over {line:?}"
+        );
         assert!(
             description.contains(line.origin()) && line.y1 <= description.y1,
             "the line at {line:?} is not in the description {description:?}"
@@ -1843,14 +1850,6 @@ mod tests {
         assert!(
             events[0].get_visual_rect_no_clip().y0 < events[1].get_visual_rect_no_clip().y0,
             "the merge is not over the opening"
-        );
-
-        let mut all = Vec::new();
-        names(column, &mut all);
-        let text = all.join("\n");
-        assert!(
-            !text.contains("\"Fence the manifest\""),
-            "the page repeats the title"
         );
     }
 
