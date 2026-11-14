@@ -6970,13 +6970,26 @@ impl Ctx {
             .notifications
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // A local mark-unread reminder belongs to this exact notification
-        // revision. Carry it across a full GitHub snapshot, but let newer
-        // activity (a changed updated_at) replace it with GitHub's state.
-        // A read Perch made of the revision is carried the same way, with
+        // A local mark-unread reminder belongs to the thread, and is
+        // carried for as long as GitHub reports the thread read, whatever
+        // revision that is. A newer revision that is read is nearly always
+        // the reader's own doing: GitHub moves a thread's `updated_at`
+        // some twenty seconds after their own comment or review and
+        // leaves it read, and nothing new happened for them. A Done mark
+        // holds through one for the same reason (`NotificationMark::hides`
+        // in the cache). Activity GitHub reports unread takes the
+        // reminder's place: the row is unread either way, and opening it
+        // reads the thread. The cost is someone else's activity already
+        // read on github.com, which leaves the reminder up until the
+        // thread is viewed here.
+        // A merge or a close still takes the thread to Done, reminder or
+        // not: `closed_and_quiet` never looks at read state.
+        // A read Perch made is carried for its exact revision only, with
         // when it was made: GitHub's list can still say unread for a
         // while after taking the request, and a snapshot from then would
         // otherwise put the bold back on a row the reader has opened.
+        // Carried past the revision it would hide what came next, which
+        // arrives unread too.
         // What a look found of the subject is carried whatever the
         // revision: the face is the same, and a state gone stale is looked
         // at again, which the snapshot's own timestamp says. The run a
@@ -6994,7 +7007,7 @@ impl Ctx {
                 current
                     .iter()
                     .filter(|thread| thread.local_unread)
-                    .map(|thread| (thread.id.clone(), thread.updated_at))
+                    .map(|thread| thread.id.clone())
                     .collect::<std::collections::HashSet<_>>(),
                 current
                     .iter()
@@ -7020,7 +7033,7 @@ impl Ctx {
             )
         };
         for thread in &mut threads {
-            if !thread.unread && local_unread.contains(&(thread.id.clone(), thread.updated_at)) {
+            if !thread.unread && local_unread.contains(&thread.id) {
                 thread.unread = true;
                 thread.local_unread = true;
             }
@@ -13936,7 +13949,10 @@ async fn refresh(ctx: &Ctx, mode: NotificationPollMode) -> PollAfter {
 /// Inbox membership and read state belong to `Thread`, never to `Item`.
 async fn attend(ctx: &Ctx, threads: &[Thread]) {
     for thread in threads {
-        if !thread.unread {
+        // Unread by GitHub's word. A row unread only by Perch's reminder
+        // has nothing new on it: the reader's own comment moves the
+        // thread and leaves the reminder standing.
+        if !thread.unread || thread.local_unread {
             continue;
         }
         // A CI notification for the open pull request's branch is the one
@@ -21623,8 +21639,11 @@ mod tests {
         assert!(moved_on.unread && !moved_on.local_read);
     }
 
+    /// Activity GitHub reports unread takes the reminder's place: the row
+    /// is unread by GitHub's word, opening it asks GitHub, and the
+    /// reminder does not come back once the thread is read.
     #[tokio::test]
-    async fn new_activity_replaces_a_local_unread_reminder() {
+    async fn unread_activity_replaces_a_local_unread_reminder() {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
         let mut read = thread("7", "seven");
@@ -21632,12 +21651,93 @@ mod tests {
         ctx.replace_notifications(vec![read.clone()], Some("first"));
         ctx.mark_notification_unread("7");
 
-        read.updated_at = "2026-09-18T18:00:00Z".parse().unwrap();
-        ctx.replace_notifications(vec![read], Some("second"));
+        let mut newer = read;
+        newer.updated_at = "2026-09-18T18:00:00Z".parse().unwrap();
+        newer.unread = true;
+        ctx.replace_notifications(vec![newer.clone()], Some("second"));
 
-        let newer = ctx.notifications.lock().unwrap()[0].clone();
-        assert!(!newer.unread);
-        assert!(!newer.local_unread);
+        let replaced = ctx.notifications.lock().unwrap()[0].clone();
+        assert!(replaced.unread);
+        assert!(!replaced.local_unread);
+        assert!(
+            ctx.prepare_notification_open(&newer),
+            "GitHub has it unread, so GitHub is asked"
+        );
+
+        newer.unread = false;
+        ctx.replace_notifications(vec![newer], Some("third"));
+        let read = ctx.notifications.lock().unwrap()[0].clone();
+        assert!(!read.unread && !read.local_unread);
+    }
+
+    /// GitHub moves a thread some twenty seconds after the reader's own
+    /// comment or review and leaves it read. Nothing new happened for
+    /// them, so the reminder they asked for stays, on the new revision.
+    #[tokio::test]
+    async fn a_local_unread_reminder_survives_the_readers_own_activity() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let mut read = thread("7", "seven");
+        read.unread = false;
+        read.last_read_at = Some("2026-09-17T17:00:00Z".parse().unwrap());
+        ctx.replace_notifications(vec![read.clone()], Some("first"));
+        ctx.mark_notification_unread("7");
+
+        let mut own = read;
+        own.updated_at = "2026-09-18T18:00:00Z".parse().unwrap();
+        let visible = ctx.replace_notifications(vec![own.clone()], Some("second"));
+
+        let kept = ctx.notifications.lock().unwrap()[0].clone();
+        assert!(kept.unread && kept.local_unread);
+        assert_eq!(kept.updated_at, own.updated_at);
+        assert_eq!(kept.last_read_at, own.last_read_at);
+        assert_eq!(visible, vec![kept.clone()], "as the poll hands it on");
+        assert_eq!(
+            ctx.with_cache(|cache| cache.load_threads().unwrap())
+                .unwrap(),
+            vec![kept],
+            "across a restart too"
+        );
+
+        assert!(
+            !ctx.prepare_notification_open(&own),
+            "GitHub already has it read"
+        );
+        let opened = ctx.notifications.lock().unwrap()[0].clone();
+        assert!(!opened.unread && !opened.local_unread);
+
+        // Viewed, the reminder is gone for good.
+        let mut later = own;
+        later.updated_at = "2026-09-19T18:00:00Z".parse().unwrap();
+        ctx.replace_notifications(vec![later], Some("third"));
+        let after = ctx.notifications.lock().unwrap()[0].clone();
+        assert!(!after.unread && !after.local_unread);
+    }
+
+    /// The reminder is carried from the visible inbox only, so a thread
+    /// put away as Done has none to be made unread by, and a later read
+    /// revision leaves it Done.
+    #[tokio::test]
+    async fn a_reminder_does_not_bring_a_done_thread_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, _received) = ctx(dir.path(), &nowhere(), &[]);
+        let mut read = thread("7", "seven");
+        read.unread = false;
+        ctx.replace_notifications(vec![read.clone()], Some("first"));
+        ctx.mark_notification_unread("7");
+        ctx.dismiss_notification("7");
+
+        let mut own = read;
+        own.updated_at = "2026-09-18T18:00:00Z".parse().unwrap();
+        let visible = ctx.replace_notifications(vec![own], Some("second"));
+
+        assert!(visible.is_empty());
+        assert!(ctx.notifications.lock().unwrap().is_empty());
+        let done = ctx
+            .with_cache(|cache| cache.load_done_threads().unwrap())
+            .unwrap();
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].id, "7");
     }
 
     #[tokio::test]
@@ -30109,6 +30209,24 @@ read eof || true
             paths.lock().unwrap().is_empty(),
             "nothing is fetched until the reader asks"
         );
+    }
+
+    /// A row unread only by Perch's reminder has nothing new on it.
+    #[tokio::test]
+    async fn a_local_unread_reminder_is_not_news_about_the_open_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, received) = ctx(dir.path(), &nowhere(), &[]);
+        let item = store_pull(&ctx, 7);
+        open_in_slot(&ctx, &item);
+        let mut reminded = thread("7", "seven");
+        reminded.local_unread = true;
+
+        attend(&ctx, &[reminded]).await;
+        tokio::task::yield_now().await;
+
+        assert!(!received
+            .try_iter()
+            .any(|event| matches!(event, Event::OpenItemChanged { .. })));
     }
 
     const FAILING_RUN: &str = r#"{

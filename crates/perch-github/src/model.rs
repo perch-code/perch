@@ -17,7 +17,10 @@ pub struct Thread {
     pub unread: bool,
     /// A Perch-only unread reminder. GitHub's public API can mark a thread
     /// read, but has no inverse operation. Cached threads retain this bit so
-    /// the reminder survives restarts and unrelated inbox refreshes.
+    /// the reminder survives restarts and inbox refreshes. It holds while
+    /// GitHub reports the thread read, through later revisions too, and
+    /// goes when the thread is viewed in Perch, GitHub reports it unread,
+    /// or it is put away as Done.
     #[serde(default)]
     pub local_unread: bool,
     /// Perch marked this revision of the thread read, and GitHub took the

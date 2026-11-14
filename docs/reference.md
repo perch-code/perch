@@ -47,10 +47,13 @@ still GitHub's.
   few seconds for GitHub's answer to bring the new activity, then settles
   for the newest card it has. Scrolling first leaves the page where it
   is, and a read notification opens where the page was left.
-- **Mark Unread**, on the notification's row or the item's, restores the
-  unread reminder in Perch for the current update. Viewing it clears the
-  reminder; later GitHub state takes precedence. GitHub's public API has no
-  mark-unread operation, so this does not change github.com.
+- **Mark Unread**, on the notification's row or the item's, puts an unread
+  reminder on the thread in Perch. Viewing it in Perch clears the reminder,
+  and newer activity GitHub reports unread takes its place. A later update
+  GitHub reports read leaves it: your own comment or review moves the thread
+  too, and so does activity you have already read on github.com. GitHub's
+  public API has no mark-unread operation, so this does not change
+  github.com.
 - **Done** marks the thread done on GitHub and remembers that update in
   Perch, so GitHub's `all=true` history cannot put it back. Newer unread
   activity clears the local mark and lets the thread return. A later update
