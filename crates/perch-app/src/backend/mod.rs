@@ -8372,97 +8372,159 @@ async fn removable(ctx: &Ctx, item: &Item) -> Result<bool, String> {
     Ok(commits == 0)
 }
 
-/// Ask GitHub again after the pull request of each worktree Perch made
-/// whose pull request was open when last seen, so one merged or closed
-/// without Perch looking is seen by the sweep. Their states are asked in
-/// one GraphQL query, fifty to a request, and only one no longer open is
-/// fetched whole, for when it ended and who merged it. Only the state is
-/// taken: the checks and the review on the row are the open item's to
-/// refresh.
-async fn refresh_checkout_pulls(ctx: &Ctx) {
+/// The items whose pull request or issue the sweep asks after: those the
+/// reader sees without opening them. That is a worktree on disk, an item
+/// the inbox lists for a run or a review that ended there, a pin, and the
+/// rows Worktrees › Recent lists. A pull request is asked after while it
+/// was open when last seen, to see it end; an issue either way, since
+/// issues are reopened. Anything else would be drawn as it was until it
+/// was opened again.
+fn shown_subjects(items: Vec<Item>, activity: &[perch_github::ItemActivity]) -> Vec<Item> {
+    let in_inbox: std::collections::HashSet<&str> = activity
+        .iter()
+        .filter(|a| a.is_visible())
+        .map(|a| a.item_id.as_str())
+        .collect();
+    let mut recent: Vec<&Item> = items
+        .iter()
+        .filter(|item| crate::items::opened(item) && !item.is_pinned())
+        .collect();
+    recent.sort_by(|a, b| {
+        b.last_opened_at
+            .cmp(&a.last_opened_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let recent: std::collections::HashSet<String> = recent
+        .into_iter()
+        .take(crate::items::RECENT_LIMIT)
+        .map(|item| item.id.clone())
+        .collect();
+    items
+        .into_iter()
+        .filter(|item| {
+            let asked = match &item.subject {
+                Some(ItemSubject::PullRequest(pr)) => pr.is_open(),
+                Some(ItemSubject::Issue(_)) => true,
+                None => false,
+            };
+            let worktree = item.checkout.as_ref().is_some_and(|c| c.on_disk) && !item.is_archived();
+            asked
+                && (worktree
+                    || item.is_pinned()
+                    || in_inbox.contains(item.id.as_str())
+                    || recent.contains(&item.id))
+        })
+        .collect()
+}
+
+/// Ask GitHub again after each pull request and issue the reader sees in
+/// the sidebar or the inbox, so one merged, closed or reopened without
+/// Perch looking is drawn so, and the sweep sees a worktree's pull
+/// request has ended. Their states are asked in one GraphQL query, fifty
+/// to a request. One whose state has moved is fetched whole, for when a
+/// pull request ended and who merged it, and why an issue closed. Only
+/// the state is taken: the checks and the review on the row are the open
+/// item's to refresh, and an item open in a window is its view's.
+async fn refresh_item_states(ctx: &Ctx) {
     let Some(github) = ctx.github() else {
         return;
     };
-    let items: Vec<Item> = ctx
+    let items = ctx
         .with_cache(|c| c.load_items().ok())
         .flatten()
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let activity = match ctx.with_cache(Cache::load_item_activity) {
+        Some(Ok(activity)) => activity,
+        _ => Vec::new(),
+    };
+    let items: Vec<Item> = shown_subjects(items, &activity)
         .into_iter()
-        .filter(|item| {
-            let owned = item.checkout.as_ref().is_some_and(|c| c.owned && c.on_disk);
-            owned
-                && item.pull_request().is_some_and(|pr| pr.is_open())
-                && !item.is_archived()
-                && !ctx.is_open_anywhere(&item.id)
-        })
+        .filter(|item| !ctx.is_open_anywhere(&item.id))
         .collect();
     let asked: Vec<(String, u64)> = items
         .iter()
-        .filter_map(|item| item.pull_request())
-        .map(|pr| (pr.repo_full_name.clone(), pr.number))
+        .filter_map(|item| item.subject.as_ref())
+        .map(|subject| (subject.repo_full_name().to_string(), subject.number()))
         .collect();
-    let mut ended = std::collections::HashSet::new();
+    let mut found = std::collections::HashMap::new();
     for batch in asked.chunks(SUBJECTS_PER_LOOK) {
         match github.look_at_states(batch).await {
-            Ok(states) => ended.extend(
-                states
-                    .into_iter()
-                    .filter(|(_, state)| {
-                        matches!(
-                            state,
-                            perch_github::SubjectState::PrMerged
-                                | perch_github::SubjectState::PrClosed
-                        )
-                    })
-                    .map(|(subject, _)| subject),
-            ),
+            Ok(states) => found.extend(states),
             Err(e) => {
-                tracing::debug!(error = %e, "could not ask after the checkouts' pull requests");
-                return;
+                // What the batches before found still stands.
+                tracing::debug!(error = %e, "could not ask after the items' states");
+                break;
             }
         }
     }
     let mut changed = false;
     for item in items {
-        let Some(pr) = item.pull_request() else {
+        let Some(subject) = item.subject.clone() else {
             continue;
         };
-        if !ended.contains(&(pr.repo_full_name.clone(), pr.number)) {
+        let (repo, number) = (subject.repo_full_name().to_string(), subject.number());
+        let Some(&state) = found.get(&(repo.clone(), number)) else {
             continue;
-        }
-        let fresh = match github
-            .fetch_pull_request(&pr.repo_full_name, pr.number)
-            .await
-        {
-            Ok(fresh) => fresh,
-            Err(e) => {
-                tracing::debug!(id = %item.id, error = %e, "could not ask after a checkout's pull request");
-                if matches!(e, perch_github::Error::RateLimited { .. }) {
-                    break;
+        };
+        let fresh = match &subject {
+            // Only an end is news: a draft's turn is the open item's.
+            ItemSubject::PullRequest(_) if state.is_closed() => {
+                match github.fetch_pull_request(&repo, number).await {
+                    Ok(fresh) if !fresh.is_open() => ItemSubject::PullRequest(fresh),
+                    Ok(_) => continue,
+                    Err(e) => {
+                        tracing::debug!(id = %item.id, error = %e, "could not ask after an item's pull request");
+                        if matches!(e, perch_github::Error::RateLimited { .. }) {
+                            break;
+                        }
+                        continue;
+                    }
                 }
-                continue;
             }
+            ItemSubject::Issue(stored) if state != stored.subject_state() => {
+                match github.fetch_issue(&repo, number).await {
+                    Ok(fresh) if fresh.subject_state() != stored.subject_state() => {
+                        ItemSubject::Issue(fresh)
+                    }
+                    Ok(_) => continue,
+                    Err(e) => {
+                        tracing::debug!(id = %item.id, error = %e, "could not ask after an item's issue");
+                        if matches!(e, perch_github::Error::RateLimited { .. }) {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+            }
+            _ => continue,
         };
-        if fresh.is_open() {
+        ctx.settle_notification_state(&repo, subject.kind(), number, fresh.subject_state());
+        let _lifecycle = ctx.lock_item(&item.id).await;
+        // Opened, or written by someone else, while the sweep was asking:
+        // what is stored now is as new as what the sweep found, or newer.
+        if ctx.is_open_anywhere(&item.id) {
             continue;
         }
-        ctx.settle_notification_state(
-            &pr.repo_full_name,
-            ItemKind::PullRequest,
-            pr.number,
-            fresh.subject_state(),
-        );
-        let _lifecycle = ctx.lock_item(&item.id).await;
         let Some(mut item) = ctx.item(&item.id) else {
             continue;
         };
-        if let Some(ItemSubject::PullRequest(pr)) = item.subject.as_mut() {
-            pr.state = fresh.state.clone();
-            pr.merged = fresh.merged;
-            pr.merged_at = fresh.merged_at;
-            pr.merged_by = fresh.merged_by.clone();
-            pr.closed_at = fresh.closed_at;
-            pr.updated_at = fresh.updated_at.or(pr.updated_at);
+        if item.subject.as_ref() != Some(&subject) {
+            continue;
+        }
+        match (item.subject.as_mut(), &fresh) {
+            (Some(ItemSubject::PullRequest(pr)), ItemSubject::PullRequest(fresh)) => {
+                pr.state = fresh.state.clone();
+                pr.merged = fresh.merged;
+                pr.merged_at = fresh.merged_at;
+                pr.merged_by = fresh.merged_by.clone();
+                pr.closed_at = fresh.closed_at;
+                pr.updated_at = fresh.updated_at.or(pr.updated_at);
+            }
+            (Some(ItemSubject::Issue(issue)), ItemSubject::Issue(fresh)) => {
+                issue.state = fresh.state.clone();
+                issue.state_reason = fresh.state_reason.clone();
+            }
+            _ => continue,
         }
         if ctx.with_cache(|c| c.update_item(&item)).is_some() {
             changed = true;
@@ -8473,39 +8535,50 @@ async fn refresh_checkout_pulls(ctx: &Ctx) {
     }
 }
 
-/// Ask GitHub again after the open pull request in each window, at every
-/// sweep. The reader's own merge or close moves no notification thread,
-/// and the checkouts' sweep leaves open items to their views, so without
-/// this the review kept offering a merge that had happened. Conditional,
-/// so one that hasn't moved costs a 304. One found merged or closed is
-/// fetched again whole, so the header, the timeline and the merge box all
-/// say so.
-async fn recheck_open_pulls(ctx: &Ctx) {
+/// Ask GitHub again after the pull request or the issue open in each
+/// window, at every sweep. The reader's own merge or close moves no
+/// notification thread, and the states' sweep leaves open items to their
+/// views, so without this the review kept offering a merge that had
+/// happened, and an issue closed elsewhere stayed open on screen.
+/// Conditional, so one that hasn't moved costs a 304. A pull request
+/// found merged or closed, or an issue whose state moved, is fetched again
+/// whole, so the header, the timeline and the merge box all say so.
+async fn recheck_open_subjects(ctx: &Ctx) {
     let Some(github) = ctx.github() else {
         return;
     };
     for view in ctx.views() {
         let open = view.slot.lock().ok().and_then(|slot| {
             slot.as_ref().and_then(|open| {
-                open.pull_request
-                    .clone()
-                    .filter(|pr| pr.is_open())
-                    .map(|pr| (open.item_id.clone(), pr))
+                let pr = open.pull_request.clone().filter(|pr| pr.is_open());
+                (pr.is_some() || open.issue.is_some())
+                    .then(|| (open.item_id.clone(), pr, open.issue.clone()))
             })
         });
-        let Some((item_id, pr)) = open else {
+        let Some((item_id, pr, issue)) = open else {
             continue;
         };
-        match github
-            .fetch_pull_request(&pr.repo_full_name, pr.number)
-            .await
-        {
-            Ok(fresh) if !fresh.is_open() => {
+        let moved = if let Some(pr) = pr {
+            github
+                .fetch_pull_request(&pr.repo_full_name, pr.number)
+                .await
+                .map(|fresh| !fresh.is_open())
+        } else if let Some(issue) = issue {
+            let (issue, _) = &*issue;
+            github
+                .fetch_issue(&issue.repo_full_name, issue.number)
+                .await
+                .map(|fresh| fresh.state != issue.state || fresh.state_reason != issue.state_reason)
+        } else {
+            continue;
+        };
+        match moved {
+            Ok(true) => {
                 refresh_open_item(&view, &item_id).await;
             }
-            Ok(_) => {}
+            Ok(false) => {}
             Err(e) => {
-                tracing::debug!(item = %item_id, error = %e, "could not ask after the open pull request");
+                tracing::debug!(item = %item_id, error = %e, "could not ask after the open subject");
                 if matches!(e, perch_github::Error::RateLimited { .. }) {
                     break;
                 }
@@ -8514,13 +8587,14 @@ async fn recheck_open_pulls(ctx: &Ctx) {
     }
 }
 
-/// How often the sweep asks after the checkouts' pull requests. Each is
-/// a request, even a 304, and they queue behind the reader's own.
-const CHECKOUT_PULL_REFRESH: Duration = Duration::from_secs(5 * 60);
+/// How often the sweep asks after the items' states: a GraphQL request
+/// for every fifty, and a fetch of each pull request found ended, all
+/// queued behind the reader's own.
+const STATE_REFRESH: Duration = Duration::from_secs(5 * 60);
 
 /// The sweep after a poll, one at a time: a slow one is not stacked on by
-/// the next poll. The pull requests are asked after first, at most every
-/// `CHECKOUT_PULL_REFRESH`.
+/// the next poll. The items' states are asked after first, at most every
+/// `STATE_REFRESH`.
 fn spawn_sweep(ctx: &Ctx) {
     static SWEEPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     static REFRESHED: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
@@ -8528,7 +8602,7 @@ fn spawn_sweep(ctx: &Ctx) {
         return;
     }
     let refresh = REFRESHED.lock().is_ok_and(|mut at| {
-        let due = at.is_none_or(|at| at.elapsed() >= CHECKOUT_PULL_REFRESH);
+        let due = at.is_none_or(|at| at.elapsed() >= STATE_REFRESH);
         if due {
             *at = Some(std::time::Instant::now());
         }
@@ -8536,9 +8610,9 @@ fn spawn_sweep(ctx: &Ctx) {
     });
     let ctx = ctx.clone();
     tokio::spawn(async move {
-        recheck_open_pulls(&ctx).await;
+        recheck_open_subjects(&ctx).await;
         if refresh {
-            refresh_checkout_pulls(&ctx).await;
+            refresh_item_states(&ctx).await;
         }
         sweep_items(&ctx).await;
         SWEEPING.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -34955,10 +35029,14 @@ model = \"opus\"\n",
         };
         let item = checked_out(7);
         let still_open = checked_out(9);
-        // Viewed, never checked out: not the sweep's.
-        store_pull(&ctx, 8);
+        // Closed when last seen: not asked after again.
+        let mut closed = store_pull(&ctx, 8);
+        if let Some(ItemSubject::PullRequest(pr)) = closed.subject.as_mut() {
+            pr.state = "closed".into();
+        }
+        ctx.with_cache(|c| c.update_item(&closed)).unwrap().unwrap();
 
-        refresh_checkout_pulls(&ctx).await;
+        refresh_item_states(&ctx).await;
 
         assert!(ctx.item(&item.id).unwrap().is_closed());
         assert!(!ctx.item(&still_open.id).unwrap().is_closed());
@@ -34971,7 +35049,7 @@ model = \"opus\"\n",
         assert!(query.contains("n7:") && query.contains("n9:"), "{query}");
         assert!(
             !query.contains("n8:"),
-            "only the checkouts' pull requests are asked after"
+            "only what was open when last seen is asked after"
         );
         assert!(sweep_due(
             &ctx.item(&item.id).unwrap(),
@@ -34979,7 +35057,269 @@ model = \"opus\"\n",
         ));
     }
 
-    /// Merging on github.com moves no thread and the checkouts' sweep
+    /// An issue closed or reopened on github.com moves no thread when the
+    /// reader isn't subscribed, so the item the inbox and Recent list kept
+    /// drawing it as it was until it was opened again. The sweep asks
+    /// after issues either way, and fetches whole only one whose state
+    /// moved, for why it closed: a duplicate draws grey.
+    #[tokio::test]
+    async fn an_issue_closed_or_reopened_elsewhere_is_seen() {
+        let dir = tempfile::tempdir().unwrap();
+        let issue = |number: u64, state: &str, reason: Option<&str>| {
+            serde_json::json!({
+                "number": number,
+                "title": "t",
+                "state": state,
+                "state_reason": reason,
+                "user": { "login": "rohan" },
+                "updated_at": "2026-09-17T00:00:00Z",
+            })
+            .to_string()
+        };
+        let duplicate = issue(5, "closed", Some("duplicate"));
+        let reopened = issue(7, "open", Some("reopened"));
+        let (base, paths) = serve_by_body(move |_method, path, _headers, _sent| {
+            match path {
+                "/graphql" => (
+                    "200 OK",
+                    r#"{"data":{"r0":{
+                        "n5":{"__typename":"Issue","issue_state":"CLOSED","state_reason":"DUPLICATE"},
+                        "n6":{"__typename":"Issue","issue_state":"OPEN"},
+                        "n7":{"__typename":"Issue","issue_state":"OPEN","state_reason":"REOPENED"}}}}"#
+                        .to_string(),
+                ),
+                "/repos/a/b/issues/5" => ("200 OK", duplicate.clone()),
+                "/repos/a/b/issues/7" => ("200 OK", reopened.clone()),
+                _ => ("404 Not Found", r#"{"message":"Not Found"}"#.into()),
+            }
+        });
+        let (ctx, _received) = ctx(dir.path(), &base, &["a/b"]);
+        let closed = store_issue(&ctx, 5);
+        let open = store_issue(&ctx, 6);
+        let mut was_closed = store_issue(&ctx, 7);
+        if let Some(ItemSubject::Issue(issue)) = was_closed.subject.as_mut() {
+            issue.state = "closed".into();
+            issue.state_reason = Some("completed".into());
+        }
+        ctx.with_cache(|c| c.update_item(&was_closed))
+            .unwrap()
+            .unwrap();
+
+        refresh_item_states(&ctx).await;
+
+        let closed = ctx.item(&closed.id).unwrap();
+        assert_eq!(
+            crate::ui::items::state_of(&closed),
+            Some(perch_github::SubjectState::IssueNotPlanned)
+        );
+        assert_eq!(
+            closed.issue().unwrap().state_reason.as_deref(),
+            Some("duplicate")
+        );
+        assert_eq!(
+            closed.issue().unwrap().title,
+            "t",
+            "only the state is taken"
+        );
+        assert!(!ctx.item(&open.id).unwrap().is_closed());
+        assert!(!ctx.item(&was_closed.id).unwrap().is_closed());
+        let mut asked = paths.lock().unwrap().clone();
+        asked.sort();
+        assert_eq!(
+            asked,
+            ["/graphql", "/repos/a/b/issues/5", "/repos/a/b/issues/7"],
+            "the one that hasn't moved is not fetched"
+        );
+    }
+
+    /// What the sweep found is not written over an item opened while it
+    /// was asking: the open item's own fetch is as new, or newer.
+    #[tokio::test]
+    async fn the_sweep_leaves_an_item_opened_while_it_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let closed = serde_json::json!({
+            "number": 5,
+            "title": "t",
+            "state": "closed",
+            "state_reason": "completed",
+            "user": { "login": "rohan" },
+            "updated_at": "2026-09-17T00:00:00Z",
+        })
+        .to_string();
+        let opened = Arc::new(Mutex::new(None::<(Ctx, Item)>));
+        let opens = opened.clone();
+        let (base, _paths) = serve_by_body(move |_method, path, _headers, _sent| match path {
+            "/graphql" => (
+                "200 OK",
+                r#"{"data":{"r0":{"n5":{"__typename":"Issue","issue_state":"CLOSED"}}}}"#
+                    .to_string(),
+            ),
+            "/repos/a/b/issues/5" => {
+                // The reader opens it as the sweep fetches it.
+                if let Some((ctx, item)) = opens.lock().unwrap().as_ref() {
+                    open_issue_in_slot(ctx, item);
+                }
+                ("200 OK", closed.clone())
+            }
+            _ => ("404 Not Found", r#"{"message":"Not Found"}"#.into()),
+        });
+        let (ctx, _received) = ctx(dir.path(), &base, &["a/b"]);
+        let item = store_issue(&ctx, 5);
+        *opened.lock().unwrap() = Some((ctx.clone(), item.clone()));
+
+        refresh_item_states(&ctx).await;
+
+        assert!(!ctx.item(&item.id).unwrap().is_closed());
+    }
+
+    /// An issue open in a window is its view's, which the sweep leaves
+    /// alone, so the issue on screen is asked after as an open pull
+    /// request is: one closed elsewhere is read again whole.
+    #[tokio::test]
+    async fn the_open_issue_closed_elsewhere_reaches_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let closed = serde_json::json!({
+            "number": 9,
+            "title": "t",
+            "state": "closed",
+            "state_reason": "completed",
+            "user": { "login": "rohan" },
+            "updated_at": "2026-09-17T00:00:00Z",
+        })
+        .to_string();
+        let (base, paths) = serve_by_path(move |path| {
+            if path == "/repos/a/b/issues/9" {
+                ("200 OK", closed.clone())
+            } else if path.starts_with("/repos/a/b/issues/9/") {
+                ("200 OK", "[]".into())
+            } else {
+                ("404 Not Found", r#"{"message":"Not Found"}"#.into())
+            }
+        });
+        let (ctx, _received) = ctx(dir.path(), &base, &["a/b"]);
+        let item = store_issue(&ctx, 9);
+        open_issue_in_slot(&ctx, &item);
+
+        recheck_open_subjects(&ctx).await;
+
+        assert!(
+            ctx.item(&item.id).unwrap().is_closed(),
+            "{:?}",
+            paths.lock().unwrap()
+        );
+    }
+
+    /// The sweep asks after what the reader sees without opening it: a
+    /// worktree, a pin, an inbox row, and Recent's rows, of which there
+    /// are `RECENT_LIMIT`. An issue either way; a pull request no longer
+    /// open, never.
+    #[test]
+    fn the_sweep_asks_after_the_subjects_the_reader_sees() {
+        let at = |minutes: i64| {
+            "2026-09-10T00:00:00Z".parse::<Timestamp>().unwrap()
+                + jiff::SignedDuration::from_mins(minutes)
+        };
+        let issue = |number: u64, opened: i64| {
+            let mut item = Item::new("a/b", at(0));
+            item.id = format!("i{number}");
+            item.last_opened_at = at(opened);
+            item.subject = Some(ItemSubject::Issue(perch_github::Issue {
+                viewer_can_update: false,
+                node_id: String::new(),
+                reactions: Default::default(),
+                number,
+                title: "t".into(),
+                body: String::new(),
+                state: "open".into(),
+                state_reason: None,
+                author_login: String::new(),
+                author_avatar_url: String::new(),
+                labels: vec![],
+                assignees: vec![],
+                comments: 0,
+                created_at: None,
+                updated_at: at(0),
+                repo_full_name: "a/b".into(),
+            }));
+            item
+        };
+        let limit = crate::items::RECENT_LIMIT as u64;
+        // Opened 1000.. minutes in: the most recent, and Recent's.
+        let mut items: Vec<Item> = (1..=limit)
+            .map(|n| issue(1000 + n, 1000 + n as i64))
+            .collect();
+        // Opened long before: past Recent's end.
+        let stale = issue(1, 1);
+        let mut pinned = issue(2, 2);
+        pinned.pinned_at = Some(at(2));
+        let mut worktree = issue(3, 3);
+        worktree.checkout = Some(ItemCheckout {
+            branch: "perch/issue-3".into(),
+            base_ref: "main".into(),
+            head_sha: "h".into(),
+            path: "/wt3".into(),
+            owned: true,
+            on_disk: true,
+            churn: None,
+            last_seen_head: None,
+            divergence: None,
+            source: None,
+        });
+        let in_inbox = issue(4, 4);
+        let done = issue(5, 5);
+        // Closed, in the inbox: asked after, as it may be reopened.
+        let mut closed = issue(6, 6);
+        if let Some(ItemSubject::Issue(issue)) = closed.subject.as_mut() {
+            issue.state = "closed".into();
+        }
+        // A merged pull request, in the inbox: nothing more to see.
+        let mut merged = issue(7, 7);
+        let mut pull = pull_request(7);
+        pull.state = "closed".into();
+        pull.merged = true;
+        merged.subject = Some(ItemSubject::PullRequest(pull));
+        // The reader's own checkout, which Worktrees lists too.
+        let mut theirs = issue(8, 8);
+        theirs.checkout = worktree.checkout.clone();
+        if let Some(checkout) = theirs.checkout.as_mut() {
+            checkout.owned = false;
+        }
+        items.extend([
+            stale, pinned, worktree, in_inbox, done, closed, merged, theirs,
+        ]);
+        let ran = |id: &str, done_at: Option<Timestamp>| perch_github::ItemActivity {
+            item_id: id.into(),
+            at: at(10),
+            event: perch_github::ActivityEvent::Run {
+                run_id: "r".into(),
+                backend: "claude-code".into(),
+                mode: RunMode::Ask,
+                outcome: perch_github::ActivityOutcome::Completed,
+                files: None,
+            },
+            read_at: None,
+            done_at,
+            local_unread: false,
+        };
+        let activity = [
+            ran("i4", None),
+            ran("i5", Some(at(10))),
+            ran("i6", None),
+            ran("i7", None),
+        ];
+
+        let mut asked: Vec<u64> = shown_subjects(items, &activity)
+            .iter()
+            .filter_map(|item| item.subject.as_ref().map(|s| s.number()))
+            .collect();
+        asked.sort_unstable();
+
+        let mut want: Vec<u64> = vec![2, 3, 4, 6, 8];
+        want.extend((1..=limit).map(|n| 1000 + n));
+        assert_eq!(asked, want);
+    }
+
+    /// Merging on github.com moves no thread and the states' sweep
     /// leaves the open item alone, so the sweep asks after the pull
     /// request on screen, and one found merged reaches the window.
     #[tokio::test]
@@ -35001,7 +35341,7 @@ model = \"opus\"\n",
         let item = store_pull(&ctx, 7);
         open_in_slot(&ctx, &item);
 
-        recheck_open_pulls(&ctx).await;
+        recheck_open_subjects(&ctx).await;
 
         let events: Vec<Event> = received.try_iter().collect();
         assert!(

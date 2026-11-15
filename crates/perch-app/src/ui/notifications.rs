@@ -80,12 +80,13 @@ pub fn notification_list(
                     // The face and the state arrive after the row does.
                     thread.subject_snapshot.clone(),
                 ),
-                // A new run, a read, or a rename redraws it.
+                // A new run, a read, a rename, or a close redraws it.
                 InboxRow::Local { activity, item } => RowKey::Local(
                     item.id.clone(),
                     activity.at.to_string(),
                     activity.is_unread(),
                     item.title().to_string(),
+                    crate::ui::items::state_of(item),
                 ),
             },
             move |(row, away, at)| {
@@ -171,7 +172,7 @@ enum RowKey {
         Option<Timestamp>,
         Option<perch_github::SubjectSnapshot>,
     ),
-    Local(String, String, bool, String),
+    Local(String, String, bool, String, Option<SubjectState>),
 }
 
 /// The rows visible under the shared sidebar controls. Item-only settings

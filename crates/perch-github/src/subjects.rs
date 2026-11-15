@@ -423,13 +423,19 @@ fn participants(node: &SubjectNode) -> Vec<Participant> {
 }
 
 /// The state a node is in, read the way an item's snapshot reads GitHub's
-/// REST shape: a closed issue is not planned only when GitHub says so,
-/// and a draft is a state of its own only while the pull request is open.
+/// REST shape: a closed issue is not planned only when GitHub says so, or
+/// says it is a duplicate, which draws grey the same; and a draft is a
+/// state of its own only while the pull request is open.
 fn state_of(node: &SubjectNode) -> Option<SubjectState> {
     match node.typename.as_str() {
         "Issue" => match node.issue_state.as_deref()? {
             "OPEN" => Some(SubjectState::IssueOpen),
-            "CLOSED" if node.state_reason.as_deref() == Some("NOT_PLANNED") => {
+            "CLOSED"
+                if matches!(
+                    node.state_reason.as_deref(),
+                    Some("NOT_PLANNED" | "DUPLICATE")
+                ) =>
+            {
                 Some(SubjectState::IssueNotPlanned)
             }
             "CLOSED" => Some(SubjectState::IssueClosed),
@@ -763,7 +769,7 @@ mod tests {
             state_of(&node(
                 r#"{"__typename":"Issue","issue_state":"CLOSED","state_reason":"DUPLICATE"}"#
             )),
-            Some(SubjectState::IssueClosed)
+            Some(SubjectState::IssueNotPlanned)
         );
         assert_eq!(
             state_of(&node(

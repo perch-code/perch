@@ -888,7 +888,7 @@ pub const RECENT_LIMIT: usize = 50;
 /// scan found is a checkout of the reader's own that Perch only noticed,
 /// until it is opened, which moves `last_opened_at` past when it was
 /// found.
-fn opened(item: &Item) -> bool {
+pub(crate) fn opened(item: &Item) -> bool {
     item.checkout.as_ref().is_none_or(|c| c.owned) || item.last_opened_at > item.created_at
 }
 
